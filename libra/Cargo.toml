@@ -10,7 +10,6 @@ p2p = ["gemini"]
 [dependencies]
 mercury = { workspace = true }
 neptune = { workspace = true }
-common = { workspace = true }
 gemini = { workspace = true, optional = true }
 
 http = { workspace = true }

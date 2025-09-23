@@ -15,8 +15,6 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use callisto::sea_orm_active_enums::StorageTypeEnum;
 
-use crate::utils;
-
 /// Retrieves the base directory path for Mega
 ///
 /// The directory is determined in the following priority order:
@@ -167,12 +165,7 @@ impl Default for Config {
         let base_dir = mega_base();
         std::fs::create_dir_all(&base_dir).unwrap();
 
-        let bin_name = utils::get_current_bin_name();
-        let default_config = match bin_name.as_str() {
-            "mono" => include_str!("../../config/config.toml"),
-            "mega" => include_str!("../../mega/config.toml"),
-            _ => include_str!("../../mega/config.toml"),
-        };
+        let default_config = include_str!("../../config.toml");
         let default_config = default_config
             .lines()
             .map(|line| {
