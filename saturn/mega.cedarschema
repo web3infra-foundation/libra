@@ -1,0 +1,37 @@
+entity UserGroup in [UserGroup];
+entity User in [UserGroup];
+
+entity Repository = {
+    "is_private": Bool,
+    "admins": UserGroup,
+    "maintainers": UserGroup,
+    "readers": UserGroup,
+};
+
+entity MergeRequest = {
+    "repo": Repository,
+};
+
+entity Issue = {
+    "repo": Repository,
+};
+
+action "deleteRepo", "viewRepo", "forkRepo", "pullRepo", "pushRepo" appliesTo {
+    principal: [User],
+    resource: [Repository],
+};
+
+action "createMergeRequest", "editMergeRequest", "deleteMergeRequest", "approveMergeRequest" appliesTo {
+    principal: [User],
+    resource: [Repository],
+};
+
+action "openIssue", "assignIssue", "deleteIssue", "editIssue" appliesTo {
+    principal: [User],
+    resource: [Repository],
+};
+
+action "addMaintainer", "addAdmin" appliesTo {
+    principal: [User],
+    resource: [Repository],
+};
