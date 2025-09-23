@@ -20,7 +20,7 @@ use std::str::FromStr;
 
 use crate::utils::object_ext::TreeExt;
 use crate::utils::util;
-use common::utils::parse_commit_msg;
+use crate::utils::util::parse_commit_msg;
 #[derive(Parser, Debug)]
 pub struct LogArgs {
     /// Limit the number of output
