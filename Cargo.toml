@@ -6,11 +6,34 @@ edition = "2024"
 resolver = "2"
 members = [
     "libra",
+    "ceres",
     "mercury",
+    "mercury/delta",
+    "mercury/zstdelta",
+    "gemini",
+    "jupiter",
+    "jupiter/callisto",
+    "neptune",
+    "common",
+    "vault",
+    "bellatrix",
+    "saturn",
 ]
 
 [workspace.dependencies]
+common = { path = "common" }
 mercury = { path = "mercury" }
+ceres = { path = "ceres" }
+gemini = { path = "gemini" }
+neptune = { path = "neptune" }
+jupiter = { path = "jupiter" }
+callisto = { path = "jupiter/callisto" }
+vault = { path = "vault" }
+delta = { path = "mercury/delta" }
+sapling-zstdelta = { path = "mercury/zstdelta" }
+bellatrix = { path = "bellatrix" }
+saturn = { path = "saturn" }
+
 
 ahash = "0.8"
 anyhow = "1.0"
@@ -71,8 +94,25 @@ wax = "0.6"
 zstd-sys = "2.0.15+zstd.1.5.7"
 idgenerator = "2.0"
 diffs = "0.5"
-
-ceres = { git = "https://github.com/web3infra-foundation/mega.git", tag = "v0.0.7" }
-common = { git = "https://github.com/web3infra-foundation/mega.git", tag = "v0.0.7" }
-gemini = { git = "https://github.com/web3infra-foundation/mega.git", tag = "v0.0.7" }
-neptune = { git = "https://github.com/web3infra-foundation/mega.git", tag = "v0.0.7" }
+async-trait = "0.1"
+aws-config = "1.0"
+aws-sdk-s3 = "1.0"
+base64 = "0.22"
+bs58 = "0.5"
+config = "0.14"
+directories = "5.0"
+envsubst = "0.2"
+indexmap = "2.0"
+infer = "0.16"
+openssl = "0.10"
+pgp = "0.13"
+quinn = "0.11"
+rcgen = "0.13"
+sea-orm-migration = "1.1.16"
+secp256k1 = "0.29"
+smallvec = "1.13"
+sysinfo = "0.32"
+tokio-stream = "0.1"
+cedar-policy = "4.0"
+itertools = "0.13"
+utoipa = "5.1"
