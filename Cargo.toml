@@ -7,7 +7,6 @@ resolver = "2"
 members = [
     "libra",
     "ceres",
-    "gemini",
     "jupiter",
     "jupiter/callisto",
     "neptune",
@@ -24,7 +23,6 @@ default-members = [
 [workspace.dependencies]
 common = { path = "common" }
 ceres = { path = "ceres" }
-gemini = { path = "gemini" }
 neptune = { path = "neptune" }
 jupiter = { path = "jupiter" }
 callisto = { path = "jupiter/callisto" }
