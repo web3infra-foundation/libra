@@ -2,11 +2,11 @@ use crate::command::{load_object, save_object};
 use crate::internal::branch::Branch;
 use crate::internal::head::Head;
 use crate::internal::reflog::{with_reflog, ReflogAction, ReflogContext};
+use crate::utils::util::format_commit_msg;
 use crate::utils::object_ext::BlobExt;
 use crate::utils::object_ext::TreeExt;
 use crate::utils::{path, util};
 use clap::Parser;
-use common::utils::format_commit_msg;
 use mercury::hash::SHA1;
 use mercury::internal::index::{Index, IndexEntry};
 use mercury::internal::object::commit::Commit;
@@ -400,7 +400,7 @@ fn reset_workdir_to_index(index: &Index) -> Result<(), String> {
 /// This function uses the utility function to convert various commit references
 /// into their corresponding SHA1 hashes. It supports:
 /// - Full SHA1 hashes
-/// - Abbreviated SHA1 hashes  
+/// - Abbreviated SHA1 hashes
 /// - Branch names
 /// - Special references like "HEAD"
 async fn resolve_commit(reference: &str) -> Result<SHA1, String> {

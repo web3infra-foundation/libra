@@ -164,7 +164,7 @@ async fn test_log_oneline() {
         assert_eq!(short_hash.len(), 7);
 
         // Test that commit message parsing works
-        let (msg, _) = common::utils::parse_commit_msg(&commit.message);
+        let (msg, _) = libra::utils::util::parse_commit_msg(&commit.message);
         assert!(!msg.is_empty());
 
         // For our test commits, verify the expected format
