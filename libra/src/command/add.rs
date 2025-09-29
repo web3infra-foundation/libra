@@ -1,8 +1,8 @@
 use crate::command::status;
 use crate::utils::object_ext::BlobExt;
 use clap::Parser;
-use mercury::internal::index::{Index, IndexEntry};
-use mercury::internal::object::blob::Blob;
+use git_internal::internal::index::{Index, IndexEntry};
+use git_internal::internal::object::blob::Blob;
 use std::path::{Path, PathBuf};
 
 use crate::utils::{lfs, path, util};

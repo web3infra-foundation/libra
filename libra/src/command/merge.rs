@@ -1,5 +1,5 @@
 use clap::Parser;
-use mercury::internal::object::commit::Commit;
+use git_internal::internal::object::commit::Commit;
 
 use super::{
     get_target_commit, load_object, log,

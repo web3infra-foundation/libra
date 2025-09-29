@@ -2,16 +2,16 @@ use std::{
     collections::HashSet,
     pin::Pin,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
 };
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::{future::join_all, Stream};
+use futures::{Stream, future::join_all};
 use sysinfo::System;
-use tokio::sync::{mpsc::UnboundedReceiver, Semaphore};
+use tokio::sync::{Semaphore, mpsc::UnboundedReceiver};
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::protocol::import_refs::{RefCommand, Refs};
@@ -21,11 +21,14 @@ use common::{
     errors::{MegaError, ProtocolError},
     utils::ZERO_ID,
 };
-use mercury::internal::pack::Pack;
-use mercury::{
+use git_internal::internal::pack::Pack;
+use git_internal::{
     errors::GitError,
     internal::{
-        object::tree::{Tree, TreeItemMode},
+        object::{
+            blob::Blob,
+            tree::{Tree, TreeItemMode},
+        },
         pack::entry::Entry,
     },
 };
@@ -225,8 +228,9 @@ pub trait RepoHandler: Send + Sync + 'static {
         if let Some(sender) = sender {
             let blobs = self.get_blobs_by_hashes(search_blob_ids).await.unwrap();
             for b in blobs {
-                let blob = jupiter::adapter::raw_blob_to_blob(b);
-                sender.send(Entry::from(blob)).await.unwrap();
+                let data = b.data.unwrap_or_default();
+                let blob: Blob = Blob::from_content_bytes(data);
+                sender.send(blob.into()).await.unwrap();
             }
         }
 
@@ -236,7 +240,7 @@ pub trait RepoHandler: Send + Sync + 'static {
         }
 
         if let Some(sender) = sender {
-            sender.send(Entry::from(tree)).await.unwrap();
+            sender.send(tree.into()).await.unwrap();
         }
     }
 }

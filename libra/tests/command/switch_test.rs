@@ -1,6 +1,6 @@
+use git_internal::internal::index::Index;
 use libra::utils::client_storage::ClientStorage;
 use libra::utils::path;
-use mercury::internal::index::Index;
 
 use super::*;
 

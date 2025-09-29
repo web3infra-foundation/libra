@@ -1,7 +1,7 @@
 use std::ops::Deref;
 use std::sync::Arc;
 
-use futures::{stream, Stream, StreamExt};
+use futures::{Stream, StreamExt, stream};
 use sea_orm::sea_query::Expr;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DbBackend, DbErr, EntityTrait, IntoActiveModel, QueryFilter,
@@ -10,10 +10,11 @@ use sea_orm::{
 use sea_orm::{PaginatorTrait, QueryOrder};
 use tokio::sync::Mutex;
 
+use crate::utils::converter::{GitObjectModel, process_entry};
 use callisto::{git_blob, git_commit, git_repo, git_tag, git_tree, import_refs, raw_blob};
 use common::errors::MegaError;
-use mercury::internal::object::GitObjectModel;
-use mercury::internal::pack::entry::Entry;
+use common::model::Pagination;
+use git_internal::internal::pack::entry::Entry;
 
 use crate::storage::base_storage::{BaseStorage, StorageConnector};
 
@@ -126,32 +127,27 @@ impl GitDbStorage {
                 let git_objects = git_objects.clone();
 
                 async move {
-                    let raw_obj = entry.process_entry();
+                    let raw_obj = process_entry(entry);
                     let model = raw_obj.convert_to_git_model();
                     let mut git_objects = git_objects.lock().await;
 
                     match model {
                         GitObjectModel::Commit(mut commit) => {
-                            commit.repo_id = repo_id as i32;
-                            let c = callisto::git_commit::Model::from(commit);
-                            git_objects.commits.push(c.into_active_model())
+                            commit.repo_id = repo_id;
+                            git_objects.commits.push(commit.into_active_model())
                         }
                         GitObjectModel::Tree(mut tree) => {
-                            tree.repo_id = repo_id as i32;
-                            let t = callisto::git_tree::Model::from(tree.clone());
-                            git_objects.trees.push(t.into_active_model());
+                            tree.repo_id = repo_id;
+                            git_objects.trees.push(tree.clone().into_active_model());
                         }
                         GitObjectModel::Blob(mut blob, raw) => {
-                            blob.repo_id = repo_id as i32;
-                            let b = callisto::git_blob::Model::from(blob.clone());
-                            git_objects.blobs.push(b.into_active_model());
-                            let r = callisto::raw_blob::Model::from(raw);
-                            git_objects.raw_blobs.push(r.into_active_model());
+                            blob.repo_id = repo_id;
+                            git_objects.blobs.push(blob.clone().into_active_model());
+                            git_objects.raw_blobs.push(raw.into_active_model());
                         }
                         GitObjectModel::Tag(mut tag) => {
-                            tag.repo_id = repo_id as i32;
-                            let tg = callisto::git_tag::Model::from(tag);
-                            git_objects.tags.push(tg.into_active_model())
+                            tag.repo_id = repo_id;
+                            git_objects.tags.push(tag.into_active_model())
                         }
                     }
                 }
@@ -341,6 +337,64 @@ impl GitDbStorage {
             .all(self.get_connection())
             .await
             .unwrap())
+    }
+
+    /// Paginated annotated tags for a given import repo id.
+    pub async fn list_tags_by_repo_with_page(
+        &self,
+        repo_id: i64,
+        page: Pagination,
+    ) -> Result<(Vec<git_tag::Model>, u64), MegaError> {
+        let paginator = git_tag::Entity::find()
+            .filter(git_tag::Column::RepoId.eq(repo_id))
+            .order_by_asc(git_tag::Column::TagName)
+            .paginate(self.get_connection(), page.per_page);
+        let num_items = paginator.num_items().await?;
+        Ok(paginator
+            .fetch_page(page.page.saturating_sub(1))
+            .await
+            .map(|m| (m, num_items))?)
+    }
+
+    /// Find single tag by repo id and tag name
+    pub async fn get_tag_by_repo_and_name(
+        &self,
+        repo_id: i64,
+        name: &str,
+    ) -> Result<Option<git_tag::Model>, MegaError> {
+        let res = git_tag::Entity::find()
+            .filter(git_tag::Column::RepoId.eq(repo_id))
+            .filter(git_tag::Column::TagName.eq(name.to_string()))
+            .one(self.get_connection())
+            .await?;
+        Ok(res)
+    }
+
+    /// Insert a single tag model
+    pub async fn insert_tag(&self, tag: git_tag::Model) -> Result<git_tag::Model, MegaError> {
+        let am: git_tag::ActiveModel = tag.clone().into();
+        git_tag::Entity::insert(am)
+            .exec(self.get_connection())
+            .await?;
+        // load saved model back by tag_id
+        let model = git_tag::Entity::find()
+            .filter(git_tag::Column::TagId.eq(tag.tag_id.clone()))
+            .one(self.get_connection())
+            .await?;
+        match model {
+            Some(m) => Ok(m),
+            None => Err(MegaError::with_message("Failed to load inserted tag")),
+        }
+    }
+
+    /// Delete a tag by repo id and name
+    pub async fn delete_tag(&self, repo_id: i64, name: &str) -> Result<(), MegaError> {
+        git_tag::Entity::delete_many()
+            .filter(git_tag::Column::RepoId.eq(repo_id))
+            .filter(git_tag::Column::TagName.eq(name.to_string()))
+            .exec(self.get_connection())
+            .await?;
+        Ok(())
     }
 
     pub async fn get_obj_count_by_repo_id(&self, repo_id: i64) -> usize {

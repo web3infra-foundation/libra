@@ -3,7 +3,7 @@ use crate::internal::db::get_db_conn_instance;
 use crate::internal::head::Head;
 use crate::internal::model::reflog;
 use crate::internal::model::reflog::{ActiveModel, Model};
-use mercury::hash::SHA1;
+use git_internal::hash::SHA1;
 use sea_orm::{
     ActiveModelTrait, DatabaseTransaction, EntityTrait, QueryFilter, QueryOrder, Set,
     TransactionTrait,

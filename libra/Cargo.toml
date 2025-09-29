@@ -8,7 +8,7 @@ default = []
 p2p = ["gemini"]
 
 [dependencies]
-mercury = { workspace = true }
+git-internal = { workspace = true }
 neptune = { workspace = true }
 gemini = { workspace = true, optional = true }
 

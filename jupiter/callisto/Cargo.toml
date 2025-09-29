@@ -1,7 +1,7 @@
 [package]
 name = "callisto"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 publish = false
 
 [lib]
@@ -10,10 +10,8 @@ path = "src/mod.rs"
 
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
 sea-orm = { workspace = true, features = ["sqlx-postgres", "sqlx-mysql", "sqlx-sqlite"] }
 utoipa = { workspace = true, features = ["axum_extras"] }
 chrono = { workspace = true }
 idgenerator = { workspace = true }
 rand = { workspace = true }
-mercury = { workspace = true }

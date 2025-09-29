@@ -6,10 +6,10 @@ use crate::internal::reflog::{with_reflog, ReflogAction, ReflogContext};
 use crate::utils::object_ext::{BlobExt, TreeExt};
 use crate::utils::{path, util};
 use clap::Parser;
-use mercury::hash::SHA1;
-use mercury::internal::index::{Index, IndexEntry};
-use mercury::internal::object::commit::Commit;
-use mercury::internal::object::tree::Tree;
+use git_internal::hash::SHA1;
+use git_internal::internal::index::{Index, IndexEntry};
+use git_internal::internal::object::commit::Commit;
+use git_internal::internal::object::tree::Tree;
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
@@ -138,7 +138,8 @@ async fn reset_pathspecs(pathspecs: &[String], target: &str) {
 
         match find_tree_item(&tree, path_str) {
             Some(item) => {
-                let blob: mercury::internal::object::blob::Blob = load_object(&item.id).unwrap();
+                let blob: git_internal::internal::object::blob::Blob =
+                    load_object(&item.id).unwrap();
                 let entry = IndexEntry::new_from_blob(
                     path_str.to_string(),
                     item.id,
@@ -350,7 +351,7 @@ pub(crate) fn rebuild_index_from_tree(
         };
 
         match item.mode {
-            mercury::internal::object::tree::TreeItemMode::Tree => {
+            git_internal::internal::object::tree::TreeItemMode::Tree => {
                 let subtree: Tree =
                     load_object(&item.id).map_err(|e| format!("failed to load subtree: {e}"))?;
                 rebuild_index_from_tree(&subtree, index, &full_path)?;
@@ -359,7 +360,7 @@ pub(crate) fn rebuild_index_from_tree(
                 // Add file to index - but don't modify working directory files
                 // Use the blob hash from the tree, not from working directory
                 // Get blob size for IndexEntry
-                let blob = mercury::internal::object::blob::Blob::load(&item.id);
+                let blob = git_internal::internal::object::blob::Blob::load(&item.id);
 
                 // Create IndexEntry with the tree's blob hash
                 let entry = IndexEntry::new_from_blob(full_path, item.id, blob.data.len() as u32);
@@ -387,7 +388,7 @@ pub(crate) fn restore_working_directory_from_tree(
         let file_path = workdir.join(&full_path);
 
         match item.mode {
-            mercury::internal::object::tree::TreeItemMode::Tree => {
+            git_internal::internal::object::tree::TreeItemMode::Tree => {
                 // Create directory
                 fs::create_dir_all(&file_path).map_err(|e| {
                     format!("failed to create directory {}: {}", file_path.display(), e)
@@ -399,7 +400,7 @@ pub(crate) fn restore_working_directory_from_tree(
             }
             _ => {
                 // Restore file
-                let blob = load_object::<mercury::internal::object::blob::Blob>(&item.id)
+                let blob = load_object::<git_internal::internal::object::blob::Blob>(&item.id)
                     .map_err(|e| format!("failed to load blob: {e}"))?;
 
                 // Create parent directory if needed
@@ -519,7 +520,10 @@ fn get_commit_summary(commit_id: &SHA1) -> Result<String, String> {
 
 /// Find a specific file or directory in a tree by path.
 /// Returns the tree item if found, None otherwise.
-fn find_tree_item(tree: &Tree, path: &str) -> Option<mercury::internal::object::tree::TreeItem> {
+fn find_tree_item(
+    tree: &Tree,
+    path: &str,
+) -> Option<git_internal::internal::object::tree::TreeItem> {
     let parts: Vec<&str> = path.split('/').collect();
     find_tree_item_recursive(tree, &parts, 0)
 }
@@ -530,7 +534,7 @@ fn find_tree_item_recursive(
     tree: &Tree,
     parts: &[&str],
     index: usize,
-) -> Option<mercury::internal::object::tree::TreeItem> {
+) -> Option<git_internal::internal::object::tree::TreeItem> {
     if index >= parts.len() {
         return None;
     }
@@ -540,7 +544,7 @@ fn find_tree_item_recursive(
             if index == parts.len() - 1 {
                 // Found the target
                 return Some(item.clone());
-            } else if item.mode == mercury::internal::object::tree::TreeItemMode::Tree {
+            } else if item.mode == git_internal::internal::object::tree::TreeItemMode::Tree {
                 // Continue searching in subtree
                 if let Ok(subtree) = load_object::<Tree>(&item.id) {
                     if let Some(result) = find_tree_item_recursive(&subtree, parts, index + 1) {

@@ -5,7 +5,7 @@
 use crate::command;
 use crate::utils;
 use clap::{Parser, Subcommand};
-use mercury::errors::GitError;
+use git_internal::errors::GitError;
 
 // The Cli struct represents the root of the command line interface.
 #[derive(Parser, Debug)]
