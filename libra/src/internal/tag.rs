@@ -10,13 +10,13 @@ use crate::utils::client_storage::ClientStorage;
 use crate::utils::path;
 use git_internal::errors::GitError;
 use git_internal::hash::SHA1;
+use git_internal::internal::object::ObjectTrait;
 use git_internal::internal::object::blob::Blob;
 use git_internal::internal::object::commit::Commit;
 use git_internal::internal::object::signature::{Signature, SignatureType};
 use git_internal::internal::object::tag::Tag as git_internalTag;
 use git_internal::internal::object::tree::Tree;
 use git_internal::internal::object::types::ObjectType;
-use git_internal::internal::object::ObjectTrait;
 
 // Constants for tag references
 const TAG_REF_PREFIX: &str = "refs/tags/";

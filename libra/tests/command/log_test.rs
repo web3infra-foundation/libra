@@ -164,7 +164,7 @@ async fn test_log_oneline() {
         assert_eq!(short_hash.len(), 7);
 
         // Test that commit message parsing works
-        let (msg, _) = libra::utils::util::parse_commit_msg(&commit.message);
+        let (msg, _) = common::utils::parse_commit_msg(&commit.message);
         assert!(!msg.is_empty());
 
         // For our test commits, verify the expected format
@@ -256,13 +256,17 @@ async fn test_log_patch_no_pathspec() {
         // Set PATH and run
         let old_path = std::env::var("PATH").unwrap_or_default();
         let new_path = format!("{}:{}", bin_dir.display(), old_path);
-        std::env::set_var("PATH", &new_path);
+        unsafe {
+            std::env::set_var("PATH", &new_path);
+        }
 
         let args = LogArgs::try_parse_from(["libra", "--number", "2", "-p"]).unwrap();
         libra::command::log::execute(args).await;
 
-        // Restore PATH
-        std::env::set_var("PATH", old_path);
+        unsafe {
+            // Restore PATH
+            std::env::set_var("PATH", old_path);
+        }
 
         let combined_out = std::fs::read_to_string(&out_file).unwrap_or_default();
         assert!(
@@ -340,12 +344,16 @@ async fn test_log_patch_with_pathspec() {
 
         let old_path = std::env::var("PATH").unwrap_or_default();
         let new_path = format!("{}:{}", bin_dir.display(), old_path);
-        std::env::set_var("PATH", &new_path);
+        unsafe {
+            std::env::set_var("PATH", &new_path);
+        }
 
         let args = LogArgs::try_parse_from(["libra", "-p", "A.txt"]).unwrap();
         libra::command::log::execute(args).await;
 
-        std::env::set_var("PATH", old_path);
+        unsafe {
+            std::env::set_var("PATH", old_path);
+        }
 
         let out = std::fs::read_to_string(out_file).unwrap_or_default();
         assert!(

@@ -113,13 +113,13 @@ pub async fn get_target_commit(branch_or_commit: &str) -> Result<SHA1, Box<dyn s
 
 #[cfg(test)]
 mod tests {
+    use common::utils::{format_commit_msg, parse_commit_msg};
     use git_internal::internal::object::commit::Commit;
     use serial_test::serial;
     use tempfile::tempdir;
 
     use super::*;
     use crate::utils::test;
-    use crate::utils::util::{format_commit_msg, parse_commit_msg};
     #[tokio::test]
     #[serial]
     /// Test objects can be correctly saved to and loaded from storage.
@@ -161,8 +161,7 @@ mod tests {
 
         {
             let msg = "commit message";
-            let gpg_sig =
-                "gpgsig -----BEGIN PGP SIGNATURE-----\ncontent\n-----END PGP SIGNATURE-----\n \n \n";
+            let gpg_sig = "gpgsig -----BEGIN PGP SIGNATURE-----\ncontent\n-----END PGP SIGNATURE-----\n \n \n";
             let msg_gpg = format_commit_msg(msg, Some(gpg_sig));
             let (msg_, _) = parse_commit_msg(&msg_gpg);
             assert_eq!(msg, msg_);
