@@ -112,7 +112,7 @@ pub async fn mega_bootstrap_servers(mapping_port: u16) -> (ContainerAsync<Generi
 async fn test_push_object_and_download() {
     let (_container, mega_server_url) = mega_bootstrap_servers(12000).await;
     println!("container: {mega_server_url}");
-    let file_map = mercury::test_utils::setup_lfs_file().await;
+    let file_map = git_internal::test_utils::setup_lfs_file().await;
     let file = file_map
         .get("git-2d187177923cd618a75da6c6db45bb89d92bd504.pack")
         .unwrap();
@@ -129,7 +129,7 @@ async fn test_push_object_and_download() {
 
 #[cfg(feature = "p2p")]
 async fn test_download_chunk_mega(mega_server_url: &str) {
-    let file_map = mercury::test_utils::setup_lfs_file().await;
+    let file_map = git_internal::test_utils::setup_lfs_file().await;
     let file = file_map
         .get("git-2d187177923cd618a75da6c6db45bb89d92bd504.pack")
         .unwrap();

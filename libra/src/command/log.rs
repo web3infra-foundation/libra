@@ -12,8 +12,8 @@ use std::io::Write;
 #[cfg(unix)]
 use std::process::{Command, Stdio};
 
-use mercury::hash::SHA1;
-use mercury::internal::object::{blob::Blob, commit::Commit, tree::Tree};
+use git_internal::hash::SHA1;
+use git_internal::internal::object::{blob::Blob, commit::Commit, tree::Tree};
 use neptune::Diff;
 use std::collections::VecDeque;
 use std::str::FromStr;

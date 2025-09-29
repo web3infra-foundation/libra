@@ -16,7 +16,7 @@ callisto = { workspace = true }
 vault = { workspace = true }
 jupiter = { workspace = true }
 ceres = { workspace = true }
-mercury = { workspace = true }
+git-internal = { workspace = true }
 
 axum = { workspace = true }
 serde = { workspace = true }

@@ -2,13 +2,13 @@ use crate::command::{load_object, save_object};
 use crate::internal::branch::Branch;
 use crate::internal::head::Head;
 use crate::utils::object_ext::{BlobExt, TreeExt};
-use crate::utils::{path, util};
 use crate::utils::util::format_commit_msg;
+use crate::utils::{path, util};
 use clap::Parser;
-use mercury::hash::SHA1;
-use mercury::internal::index::{Index, IndexEntry};
-use mercury::internal::object::commit::Commit;
-use mercury::internal::object::tree::{Tree, TreeItemMode};
+use git_internal::hash::SHA1;
+use git_internal::internal::index::{Index, IndexEntry};
+use git_internal::internal::object::commit::Commit;
+use git_internal::internal::object::tree::{Tree, TreeItemMode};
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
@@ -188,8 +188,8 @@ async fn build_tree_from_map(
             if let Ok(relative_path) = path.strip_prefix(current_dir) {
                 if relative_path.components().count() == 1 {
                     // File directly in the current directory
-                    tree_items.push(mercury::internal::object::tree::TreeItem {
-                        mode: mercury::internal::object::tree::TreeItemMode::Blob,
+                    tree_items.push(git_internal::internal::object::tree::TreeItem {
+                        mode: git_internal::internal::object::tree::TreeItemMode::Blob,
                         name: relative_path.to_str().unwrap().to_string(),
                         id: *hash,
                     });
@@ -205,8 +205,8 @@ async fn build_tree_from_map(
         }
         for (subdir, subdir_files) in subdirs {
             let subdir_tree = build_subtree(&subdir_files.into_iter().collect(), &subdir)?;
-            tree_items.push(mercury::internal::object::tree::TreeItem {
-                mode: mercury::internal::object::tree::TreeItemMode::Tree,
+            tree_items.push(git_internal::internal::object::tree::TreeItem {
+                mode: git_internal::internal::object::tree::TreeItemMode::Tree,
                 name: subdir.file_name().unwrap().to_str().unwrap().to_string(),
                 id: subdir_tree.id,
             });
@@ -263,7 +263,7 @@ fn rebuild_index_from_tree(tree: &Tree, index: &mut Index, prefix: &str) -> Resu
                 .ok_or_else(|| format!("failed to convert path to UTF-8: {full_path:?}"))?;
             rebuild_index_from_tree(&subtree, index, full_path_str)?;
         } else {
-            let blob = mercury::internal::object::blob::Blob::load(&item.id);
+            let blob = git_internal::internal::object::blob::Blob::load(&item.id);
             let entry = IndexEntry::new_from_blob(
                 full_path
                     .to_str()
@@ -299,7 +299,7 @@ fn reset_workdir_safely(current_index: &Index, new_index: &Index) -> Result<(), 
     for path_buf in new_index.tracked_files() {
         let path_str = path_buf.to_str().unwrap();
         if let Some(entry) = new_index.get(path_str, 0) {
-            let blob = mercury::internal::object::blob::Blob::load(&entry.hash);
+            let blob = git_internal::internal::object::blob::Blob::load(&entry.hash);
             let target_path = workdir.join(path_str);
 
             // Create parent directories if they don't exist

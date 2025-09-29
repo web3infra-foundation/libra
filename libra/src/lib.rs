@@ -1,4 +1,4 @@
-use mercury::errors::GitError;
+use git_internal::errors::GitError;
 
 pub mod cli;
 pub mod command;

@@ -3,33 +3,34 @@ use std::{
     path::PathBuf,
     str::FromStr,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
 };
 
 use async_trait::async_trait;
 use futures::StreamExt;
 use tokio::sync::{
-    mpsc::{self},
     Mutex,
+    mpsc::{self},
 };
 use tokio_stream::wrappers::ReceiverStream;
 
 use callisto::{mega_tree, raw_blob, sea_orm_active_enums::RefTypeEnum};
 use common::errors::MegaError;
-use jupiter::storage::{base_storage::StorageConnector, Storage};
-use mercury::{
+use jupiter::storage::{Storage, base_storage::StorageConnector};
+use jupiter::utils::converter::{FromGitModel, IntoMegaModel};
+use git_internal::{
     errors::GitError,
     internal::{
-        object::{commit::Commit, tag::Tag, tree::Tree},
+        object::{blob::Blob, commit::Commit, tag::Tag, tree::Tree},
         pack::entry::Entry,
     },
 };
-use mercury::{hash::SHA1, internal::pack::encode::PackEncoder};
+use git_internal::{hash::SHA1, internal::pack::encode::PackEncoder};
 
 use crate::{
-    api_service::{mono_api_service::MonoApiService, ApiHandler},
+    api_service::{ApiHandler, mono_api_service::MonoApiService},
     pack::RepoHandler,
     protocol::{
         import_refs::{CommandType, RefCommand, Refs},
@@ -94,7 +95,7 @@ impl RepoHandler for ImportRepo {
             while let Some(model) = commit_stream.next().await {
                 match model {
                     Ok(m) => {
-                        let c: Commit = jupiter::adapter::git_commit_to_commit(m);
+                        let c: Commit = Commit::from_git_model(m);
                         let entry = c.into();
                         entry_tx.send(entry).await.unwrap();
                     }
@@ -107,7 +108,7 @@ impl RepoHandler for ImportRepo {
             while let Some(model) = tree_stream.next().await {
                 match model {
                     Ok(m) => {
-                        let t = jupiter::adapter::git_tree_to_tree(m);
+                        let t: Tree = Tree::from_git_model(m);
                         let entry = t.into();
                         entry_tx.send(entry).await.unwrap();
                     }
@@ -136,7 +137,8 @@ impl RepoHandler for ImportRepo {
                     match model {
                         Ok(m) => {
                             // TODO handle storage type
-                            let b = jupiter::adapter::raw_blob_to_blob(m);
+                            let data = m.data.unwrap_or_default();
+                            let b: Blob = Blob::from_content_bytes(data);
                             let entry: Entry = b.into();
                             sender_clone.send(entry).await.unwrap();
                         }
@@ -151,7 +153,7 @@ impl RepoHandler for ImportRepo {
 
             let tags = storage.get_tags_by_repo_id(repo_id).await.unwrap();
             for m in tags.into_iter() {
-                let c: Tag = jupiter::adapter::git_tag_to_tag(m);
+                let c: Tag = Tag::from_git_model(m);
                 let entry: Entry = c.into();
                 entry_tx.send(entry).await.unwrap();
             }
@@ -179,7 +181,7 @@ impl RepoHandler for ImportRepo {
             .await
             .unwrap()
             .into_iter()
-            .map(jupiter::adapter::git_commit_to_commit)
+            .map(Commit::from_git_model)
             .collect();
         let mut traversal_list: Vec<Commit> = want_commits.clone();
 
@@ -189,12 +191,13 @@ impl RepoHandler for ImportRepo {
                 let p_commit_id = p_commit_id.to_string();
 
                 if !have.contains(&p_commit_id) && !want_clone.contains(&p_commit_id) {
-                    let parent_model = storage
-                        .get_commit_by_hash(self.repo.repo_id, &p_commit_id)
-                        .await
-                        .unwrap()
-                        .unwrap();
-                    let parent = jupiter::adapter::git_commit_to_commit(parent_model);
+                    let parent: Commit = Commit::from_git_model(
+                        storage
+                            .get_commit_by_hash(self.repo.repo_id, &p_commit_id)
+                            .await
+                            .unwrap()
+                            .unwrap(),
+                    );
                     want_commits.push(parent.clone());
                     want_clone.push(p_commit_id);
                     traversal_list.push(parent);
@@ -208,12 +211,7 @@ impl RepoHandler for ImportRepo {
             .await
             .unwrap()
             .into_iter()
-            .map(|m| {
-                (
-                    SHA1::from_str(&m.tree_id).unwrap(),
-                    jupiter::adapter::git_tree_to_tree(m),
-                )
-            })
+            .map(|m| (SHA1::from_str(&m.tree_id).unwrap(), Tree::from_git_model(m)))
             .collect();
 
         obj_num.fetch_add(want_commits.len(), Ordering::SeqCst);
@@ -231,12 +229,8 @@ impl RepoHandler for ImportRepo {
             .unwrap();
         // traverse to get exist_objs
         for have_tree in have_trees {
-            self.traverse(
-                jupiter::adapter::git_tree_to_tree(have_tree),
-                &mut exist_objs,
-                None,
-            )
-            .await;
+            self.traverse(Tree::from_git_model(have_tree), &mut exist_objs, None)
+                .await;
         }
 
         let mut counted_obj = HashSet::new();
@@ -277,7 +271,7 @@ impl RepoHandler for ImportRepo {
             .await
             .unwrap()
             .into_iter()
-            .map(jupiter::adapter::git_tree_to_tree)
+            .map(Tree::from_git_model)
             .collect())
     }
 
@@ -360,7 +354,7 @@ impl ImportRepo {
             .ok_or_else(|| MegaError::with_message("root ref not found"))?;
 
         // 4. get latest commit
-        let latest_commit: Commit = jupiter::adapter::git_commit_to_commit(
+        let latest_commit: Commit = Commit::from_git_model(
             self.storage
                 .git_db_storage()
                 .get_commit_by_hash(self.repo.repo_id, &commit_id)
@@ -385,7 +379,8 @@ impl ImportRepo {
         let save_trees: Vec<mega_tree::ActiveModel> = save_trees
             .into_iter()
             .map(|tree| {
-                let model = jupiter::adapter::tree_to_mega_tree(tree, &new_commit.id.to_string());
+                let mut model: mega_tree::Model = tree.into_mega_model();
+                model.commit_id = new_commit.id.to_string();
                 model.into()
             })
             .collect();

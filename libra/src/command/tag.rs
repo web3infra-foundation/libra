@@ -1,6 +1,6 @@
 use crate::internal::tag;
 use clap::Parser;
-use mercury::internal::object::types::ObjectType;
+use git_internal::internal::object::types::ObjectType;
 use sea_orm::sqlx::types::chrono;
 
 #[derive(Parser, Debug)]
@@ -100,7 +100,7 @@ mod tests {
     use super::*;
     use crate::cli::parse_async;
     use crate::internal::tag;
-    use mercury::internal::object::types::ObjectType;
+    use git_internal::internal::object::types::ObjectType;
     use serial_test::serial;
     use std::fs;
     use tempfile::tempdir;

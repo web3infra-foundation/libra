@@ -3,13 +3,13 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
-use mercury::internal::object::{
+use git_internal::internal::object::{
     commit::Commit,
     tree::{TreeItem, TreeItemMode},
 };
 
 #[derive(PartialEq, Eq, Debug, Clone, Deserialize, ToSchema)]
-pub struct CreateFileInfo {
+pub struct CreateEntryInfo {
     /// can be a file or directory
     pub is_directory: bool,
     pub name: String,
@@ -19,7 +19,7 @@ pub struct CreateFileInfo {
     pub content: Option<String>,
 }
 
-impl CreateFileInfo {
+impl CreateEntryInfo {
     pub fn commit_msg(&self) -> String {
         if self.is_directory {
             format!("\n create new directory {}", self.name)

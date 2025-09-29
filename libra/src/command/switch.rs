@@ -1,5 +1,5 @@
 use clap::Parser;
-use mercury::hash::SHA1;
+use git_internal::hash::SHA1;
 
 use super::{
     restore::{self, RestoreArgs},

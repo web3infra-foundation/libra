@@ -1,7 +1,7 @@
 //! This is the main entry point for the Libra.
 
+use git_internal::errors::GitError;
 use libra::cli;
-use mercury::errors::GitError;
 
 fn main() {
     #[cfg(debug_assertions)]

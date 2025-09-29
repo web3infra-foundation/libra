@@ -3,28 +3,28 @@ use std::{
     path::{Component, Path, PathBuf},
     str::FromStr,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
     vec,
 };
 
 use async_trait::async_trait;
 use tokio::sync::{
-    mpsc::{self},
     RwLock,
+    mpsc::{self},
 };
 use tokio_stream::wrappers::ReceiverStream;
 
-use bellatrix::{orion_client::OrionBuildRequest, Bellatrix};
+use bellatrix::{Bellatrix, orion_client::OrionBuildRequest};
 use callisto::{entity_ext::generate_link, mega_mr, raw_blob, sea_orm_active_enums::ConvTypeEnum};
 use common::{
     errors::MegaError,
     utils::{self, MEGA_BRANCH_NAME},
 };
 use jupiter::storage::Storage;
-use mercury::internal::{object::ObjectTrait, pack::encode::PackEncoder};
-use mercury::{
+use git_internal::internal::{object::ObjectTrait, pack::encode::PackEncoder};
+use git_internal::{
     errors::GitError,
     hash::SHA1,
     internal::{
@@ -34,12 +34,13 @@ use mercury::{
 };
 
 use crate::{
-    api_service::{mono_api_service::MonoApiService, ApiHandler},
+    api_service::{ApiHandler, mono_api_service::MonoApiService},
     merge_checker::CheckerRegistry,
     model::mr::BuckFile,
     pack::RepoHandler,
     protocol::import_refs::{RefCommand, Refs},
 };
+use jupiter::utils::converter::FromMegaModel;
 
 pub struct MonoRepo {
     pub storage: Storage,
@@ -77,11 +78,10 @@ impl RepoHandler for MonoRepo {
             let refs = storage.get_ref("/").await.unwrap().unwrap();
             let tree_hash = refs.ref_tree_hash.clone();
 
-            let mut tree: Tree = jupiter::adapter::mega_tree_to_tree(
-                storage.get_tree_by_hash(&tree_hash).await.unwrap().unwrap(),
-            );
+            let mut tree: Tree =
+                Tree::from_mega_model(storage.get_tree_by_hash(&tree_hash).await.unwrap().unwrap());
 
-            let commit: Commit = jupiter::adapter::mega_commit_to_commit(
+            let commit: Commit = Commit::from_mega_model(
                 storage
                     .get_commit_by_hash(&refs.ref_commit_hash)
                     .await
@@ -98,7 +98,7 @@ impl RepoHandler for MonoRepo {
                         .find(|x| x.name == path_name)
                         .map(|x| x.id);
                     if let Some(sha1) = sha1 {
-                        tree = jupiter::adapter::mega_tree_to_tree(
+                        tree = Tree::from_mega_model(
                             storage
                                 .get_trees_by_hashes(vec![sha1.to_string()])
                                 .await
@@ -196,7 +196,7 @@ impl RepoHandler for MonoRepo {
             .await
             .unwrap()
             .into_iter()
-            .map(jupiter::adapter::mega_commit_to_commit)
+            .map(Commit::from_mega_model)
             .collect();
         let mut traversal_list: Vec<Commit> = want_commits.clone();
 
@@ -206,12 +206,13 @@ impl RepoHandler for MonoRepo {
                 let p_commit_id = p_commit_id.to_string();
 
                 if !have.contains(&p_commit_id) && !want_clone.contains(&p_commit_id) {
-                    let parent_model = storage
-                        .get_commit_by_hash(&p_commit_id)
-                        .await
-                        .unwrap()
-                        .unwrap();
-                    let parent: Commit = jupiter::adapter::mega_commit_to_commit(parent_model);
+                    let parent: Commit = Commit::from_mega_model(
+                        storage
+                            .get_commit_by_hash(&p_commit_id)
+                            .await
+                            .unwrap()
+                            .unwrap(),
+                    );
                     want_commits.push(parent.clone());
                     want_clone.push(p_commit_id);
                     traversal_list.push(parent);
@@ -228,7 +229,7 @@ impl RepoHandler for MonoRepo {
             .map(|m| {
                 (
                     SHA1::from_str(&m.tree_id).unwrap(),
-                    jupiter::adapter::mega_tree_to_tree(m),
+                    Tree::from_mega_model(m),
                 )
             })
             .collect();
@@ -241,12 +242,8 @@ impl RepoHandler for MonoRepo {
             .await
             .unwrap();
         for have_tree in have_trees {
-            self.traverse(
-                jupiter::adapter::mega_tree_to_tree(have_tree),
-                &mut exist_objs,
-                None,
-            )
-            .await;
+            self.traverse(Tree::from_mega_model(have_tree), &mut exist_objs, None)
+                .await;
         }
 
         let mut counted_obj = HashSet::new();
@@ -287,7 +284,7 @@ impl RepoHandler for MonoRepo {
             .await
             .unwrap()
             .into_iter()
-            .map(jupiter::adapter::mega_tree_to_tree)
+            .map(Tree::from_mega_model)
             .collect())
     }
 
@@ -420,7 +417,7 @@ impl MonoRepo {
                 }
                 (Some(sha1), _) => {
                     let tree = mono_stg.get_tree_by_hash(&sha1.to_string()).await?.unwrap();
-                    search_trees.push((path, jupiter::adapter::mega_tree_to_tree(tree)));
+                    search_trees.push((path, Tree::from_mega_model(tree)));
                 }
             }
         }
@@ -435,14 +432,13 @@ impl MonoRepo {
         if res.is_empty() {
             let mut path = Some(mr_path);
             while let Some(p) = path {
-                if p.parent().is_some() {
-                    if let Some(tree) = mono_api_service.search_tree_by_path(p).await.ok().flatten()
-                    {
-                        if let Some(buck) = self.try_extract_buck(tree, mr_path) {
-                            return Ok(vec![buck]);
-                        }
-                    };
-                }
+                if p.parent().is_some()
+                    && let Some(tree) = mono_api_service.search_tree_by_path(p).await.ok().flatten()
+                    && let Some(buck) = self.try_extract_buck(tree, mr_path)
+                {
+                    return Ok(vec![buck]);
+                };
+
                 path = p.parent();
             }
         }
@@ -475,13 +471,11 @@ impl MonoRepo {
     ) -> Result<Vec<(PathBuf, Option<SHA1>, Option<SHA1>)>, MegaError> {
         let mono_stg = self.storage.mono_storage();
         let from_c = mono_stg.get_commit_by_hash(&self.from_hash).await?.unwrap();
-        let from_tree: Tree = jupiter::adapter::mega_tree_to_tree(
-            mono_stg.get_tree_by_hash(&from_c.tree).await?.unwrap(),
-        );
+        let from_tree: Tree =
+            Tree::from_mega_model(mono_stg.get_tree_by_hash(&from_c.tree).await?.unwrap());
         let to_c = mono_stg.get_commit_by_hash(&self.to_hash).await?.unwrap();
-        let to_tree: Tree = jupiter::adapter::mega_tree_to_tree(
-            mono_stg.get_tree_by_hash(&to_c.tree).await?.unwrap(),
-        );
+        let to_tree: Tree =
+            Tree::from_mega_model(mono_stg.get_tree_by_hash(&to_c.tree).await?.unwrap());
         diff_trees(&to_tree, &from_tree)
     }
 

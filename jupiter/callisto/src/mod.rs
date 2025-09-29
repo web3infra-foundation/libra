@@ -32,7 +32,6 @@ pub mod mega_mr_reviewer;
 pub mod mega_refs;
 pub mod mega_tag;
 pub mod mega_tree;
-pub mod mercury_adapters;
 pub mod mq_storage;
 pub mod notes;
 pub mod path_check_configs;
@@ -49,7 +48,3 @@ pub mod ssh_keys;
 pub mod tasks;
 pub mod user;
 pub mod vault;
-
-// Tests for mercury adapters
-#[cfg(test)]
-mod mercury_adapters_test;

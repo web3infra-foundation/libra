@@ -4,11 +4,11 @@ use std::path::PathBuf;
 use clap::Parser;
 use colored::Colorize;
 
-use mercury::errors::GitError;
+use git_internal::errors::GitError;
 
 use crate::utils::path_ext::PathExt;
 use crate::utils::{path, util};
-use mercury::internal::index::Index;
+use git_internal::internal::index::Index;
 
 #[derive(Parser, Debug)]
 pub struct RemoveArgs {

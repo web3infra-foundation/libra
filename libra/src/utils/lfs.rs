@@ -1,8 +1,8 @@
 use crate::utils::path_ext::PathExt;
 use crate::utils::{path, util};
+use git_internal::internal::index::Index;
 use ignore::{gitignore::GitignoreBuilder, Match};
 use lazy_static::lazy_static;
-use mercury::internal::index::Index;
 use regex::Regex;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, CONTENT_TYPE};
 use ring::digest::{Context, SHA256};
@@ -280,7 +280,7 @@ mod tests {
     #[ignore]
     async fn test_generate_pointer_file() {
         test::reset_working_dir();
-        let file_map = mercury::test_utils::setup_lfs_file().await;
+        let file_map = git_internal::test_utils::setup_lfs_file().await;
         let path = file_map
             .get("git-2d187177923cd618a75da6c6db45bb89d92bd504.pack")
             .unwrap();

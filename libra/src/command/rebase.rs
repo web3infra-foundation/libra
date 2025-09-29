@@ -7,9 +7,9 @@ use crate::internal::reflog::{with_reflog, ReflogAction, ReflogContext, ReflogEr
 use crate::utils::object_ext::{BlobExt, TreeExt};
 use crate::utils::{path, util};
 use clap::Parser;
-use mercury::hash::SHA1;
-use mercury::internal::object::commit::Commit;
-use mercury::internal::object::tree::Tree;
+use git_internal::hash::SHA1;
+use git_internal::internal::object::commit::Commit;
+use git_internal::internal::object::tree::Tree;
 use sea_orm::TransactionTrait;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -216,7 +216,7 @@ pub async fn execute(args: RebaseArgs) {
     let final_tree: Tree = load_object(&final_commit.tree_id).unwrap();
 
     let index_file = path::index();
-    let mut index = mercury::internal::index::Index::new();
+    let mut index = git_internal::internal::index::Index::new();
     rebuild_index_from_tree(&final_tree, &mut index, "").unwrap();
     index.save(&index_file).unwrap();
     reset_workdir_to_index(&index).unwrap();
@@ -412,11 +412,11 @@ fn diff_trees(theirs: &Tree, base: &Tree) -> Vec<(PathBuf, Option<SHA1>, Option<
 /// Returns the SHA1 hash of the root tree object.
 fn create_tree_from_items_map(items: &HashMap<PathBuf, SHA1>) -> Result<SHA1, String> {
     // Group files by their parent directories
-    let mut entries_map: HashMap<PathBuf, Vec<mercury::internal::object::tree::TreeItem>> =
+    let mut entries_map: HashMap<PathBuf, Vec<git_internal::internal::object::tree::TreeItem>> =
         HashMap::new();
     for (path, hash) in items {
-        let item = mercury::internal::object::tree::TreeItem {
-            mode: mercury::internal::object::tree::TreeItemMode::Blob,
+        let item = git_internal::internal::object::tree::TreeItem {
+            mode: git_internal::internal::object::tree::TreeItemMode::Blob,
             name: path.file_name().unwrap().to_str().unwrap().to_string(),
             id: *hash,
         };
@@ -439,7 +439,7 @@ fn create_tree_from_items_map(items: &HashMap<PathBuf, SHA1>) -> Result<SHA1, St
 /// combining them into parent trees.
 fn build_tree_recursively(
     current_path: &Path,
-    entries_map: &mut HashMap<PathBuf, Vec<mercury::internal::object::tree::TreeItem>>,
+    entries_map: &mut HashMap<PathBuf, Vec<git_internal::internal::object::tree::TreeItem>>,
 ) -> Result<SHA1, String> {
     // Get all files/items in the current directory
     let mut current_items = entries_map.remove(current_path).unwrap_or_default();
@@ -463,8 +463,8 @@ fn build_tree_recursively(
         let subtree_hash = build_tree_recursively(&subdir_path, entries_map)?;
 
         // Add the subdirectory as a tree item
-        current_items.push(mercury::internal::object::tree::TreeItem {
-            mode: mercury::internal::object::tree::TreeItemMode::Tree,
+        current_items.push(git_internal::internal::object::tree::TreeItem {
+            mode: git_internal::internal::object::tree::TreeItemMode::Tree,
             name: subdir_name,
             id: subtree_hash,
         });
@@ -484,7 +484,7 @@ fn build_tree_recursively(
 /// 3. Creating necessary parent directories as needed
 ///
 /// This ensures the working directory reflects the final rebased state.
-fn reset_workdir_to_index(index: &mercury::internal::index::Index) -> Result<(), String> {
+fn reset_workdir_to_index(index: &git_internal::internal::index::Index) -> Result<(), String> {
     let workdir = util::working_dir();
     let tracked_paths = index.tracked_files();
     let index_files_set: HashSet<_> = tracked_paths.iter().collect();
@@ -506,7 +506,7 @@ fn reset_workdir_to_index(index: &mercury::internal::index::Index) -> Result<(),
     for path_buf in &tracked_paths {
         let path_str = path_buf.to_string_lossy();
         if let Some(entry) = index.get(&path_str, 0) {
-            let blob = mercury::internal::object::blob::Blob::load(&entry.hash);
+            let blob = git_internal::internal::object::blob::Blob::load(&entry.hash);
             let target_path = workdir.join(&*path_str);
 
             // Create parent directories if needed
@@ -531,7 +531,7 @@ fn reset_workdir_to_index(index: &mercury::internal::index::Index) -> Result<(),
 /// The prefix parameter tracks the current directory path during recursion.
 fn rebuild_index_from_tree(
     tree: &Tree,
-    index: &mut mercury::internal::index::Index,
+    index: &mut git_internal::internal::index::Index,
     prefix: &str,
 ) -> Result<(), String> {
     for item in &tree.tree_items {
@@ -541,14 +541,14 @@ fn rebuild_index_from_tree(
             format!("{}/{}", prefix, item.name)
         };
 
-        if let mercury::internal::object::tree::TreeItemMode::Tree = item.mode {
+        if let git_internal::internal::object::tree::TreeItemMode::Tree = item.mode {
             // Recursively process subdirectory
             let subtree: Tree = load_object(&item.id).map_err(|e| e.to_string())?;
             rebuild_index_from_tree(&subtree, index, &full_path)?;
         } else {
             // Add file to index
-            let blob = mercury::internal::object::blob::Blob::load(&item.id);
-            let entry = mercury::internal::index::IndexEntry::new_from_blob(
+            let blob = git_internal::internal::object::blob::Blob::load(&item.id);
+            let entry = git_internal::internal::index::IndexEntry::new_from_blob(
                 full_path,
                 item.id,
                 blob.data.len() as u32,
