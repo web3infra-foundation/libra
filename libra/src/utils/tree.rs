@@ -3,8 +3,8 @@ use std::path::Path;
 
 use git_internal::errors::GitError;
 use git_internal::internal::index::Index;
-use git_internal::internal::object::tree::{Tree, TreeItem, TreeItemMode};
 use git_internal::internal::object::ObjectTrait;
+use git_internal::internal::object::tree::{Tree, TreeItem, TreeItemMode};
 
 use crate::utils::object;
 

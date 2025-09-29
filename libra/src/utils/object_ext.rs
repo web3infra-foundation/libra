@@ -1,9 +1,9 @@
 use colored::Colorize;
 use git_internal::hash::SHA1;
+use git_internal::internal::object::ObjectTrait;
 use git_internal::internal::object::blob::Blob;
 use git_internal::internal::object::commit::Commit;
 use git_internal::internal::object::tree::{Tree, TreeItemMode};
-use git_internal::internal::object::ObjectTrait;
 use std::fs;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
