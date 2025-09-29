@@ -24,7 +24,7 @@
 //! ## Dependencies
 //!
 //! This module relies on several core components:
-//! - `mercury`: Git object handling and version control primitives
+//! - `git_internal`: Git object handling and version control primitives
 //! - `jupiter`: Storage layer abstraction and data persistence
 //! - `callisto`: Database models and ORM functionality
 //! - `libra`: External Git-compatible command-line tool for diff operations
@@ -41,23 +41,29 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use crate::api_service::ApiHandler;
-use crate::model::git::CreateFileInfo;
+use crate::model::blame::{BlameQuery, BlameResult};
+use crate::model::git::CreateEntryInfo;
 use crate::model::mr::MrDiffFile;
 use async_trait::async_trait;
-use callisto::sea_orm_active_enums::ConvTypeEnum;
-use callisto::{mega_mr, mega_tree};
-use common::errors::MegaError;
-use common::model::Pagination;
-use jupiter::storage::base_storage::StorageConnector;
-use jupiter::storage::Storage;
-use jupiter::utils::converter::generate_git_keep_with_timestamp;
-use mercury::errors::GitError;
-use mercury::hash::SHA1;
-use mercury::internal::object::blob::Blob;
-use mercury::internal::object::commit::Commit;
-use mercury::internal::object::tree::{Tree, TreeItem, TreeItemMode};
+use git_internal::errors::GitError;
+use git_internal::hash::SHA1;
+use git_internal::internal::object::blob::Blob;
+use git_internal::internal::object::commit::Commit;
+use git_internal::internal::object::tree::{Tree, TreeItem, TreeItemMode};
 use neptune::model::diff_model::DiffItem;
 use neptune::neptune_engine::Diff;
+use regex::Regex;
+
+use callisto::sea_orm_active_enums::ConvTypeEnum;
+use callisto::{mega_mr, mega_tag, mega_tree};
+use common::errors::MegaError;
+use common::model::{Pagination, TagInfo};
+use jupiter::utils::converter::{FromMegaModel, IntoMegaModel};
+
+use jupiter::service::blame_service::BlameService;
+use jupiter::storage::Storage;
+use jupiter::storage::base_storage::StorageConnector;
+use jupiter::utils::converter::generate_git_keep_with_timestamp;
 
 #[derive(Clone)]
 pub struct MonoApiService {
@@ -84,79 +90,261 @@ impl ApiHandler for MonoApiService {
     ///
     /// # Arguments
     ///
-    /// * `file_info` - Information about the file or directory to create.
+    /// * `entry_info` - Information about the file or directory to create.
     ///
     /// # Returns
     ///
     /// Returns `Ok(())` on success, or a `GitError` on failure.
-    async fn create_monorepo_file(&self, file_info: CreateFileInfo) -> Result<(), GitError> {
+    async fn create_monorepo_entry(&self, entry_info: CreateEntryInfo) -> Result<(), GitError> {
         let storage = self.storage.mono_storage();
-        let path = PathBuf::from(&file_info.path);
+        let path = PathBuf::from(&entry_info.path);
         let mut save_trees = vec![];
 
-        let mut update_chain = self.search_tree_for_update(&path).await?;
-        let mut target_items = update_chain.pop().unwrap().tree_items.clone();
+        // Try to get the update chain for the given path.
+        // If the path exists, return an empty missing_parts and prefix.
+        // If part of the path does not exist, extract the missing segments (missing_parts),
+        // determine the valid existing prefix, and rebuild the update_chain from that prefix.
+        let (missing_parts, prefix, mut update_chain) =
+            match self.search_tree_for_update(&path).await {
+                Ok(chain) => (Vec::new(), "", chain),
+                Err(err) => {
+                    // If search_tree_for_update failed, try to extract the
+                    // portion of the path that does not exist from the
+                    // error message. The error message is expected to
+                    // contain a substring like: Path '.../missing' not exist
+                    // We capture that substring to determine which segments
+                    // need to be created.
+                    let re: Regex = Regex::new(r"Path '([^']+)' not exist").unwrap();
+                    let extracted = re
+                        .captures(&err.to_string())
+                        .map(|caps| caps[1].to_string())
+                        .unwrap_or(err.to_string());
 
-        // Create a new tree item based on whether it's a directory or file
-        let (new_item, blob) = if file_info.is_directory {
+                    // missing_parts: the trailing path segments after the
+                    // first occurrence of the extracted non-existent path.
+                    // Example: entry_info.path = "a/b/c/d" and extracted = "c/d"
+                    // Then missing_parts = ["c", "d"]
+                    let missing_parts = entry_info
+                        .path
+                        .find(&extracted)
+                        .map(|pos| &entry_info.path[pos..])
+                        .map(|sub| sub.split('/').collect::<Vec<_>>())
+                        .unwrap_or_default();
+
+                    // prefix: the valid existing path before the missing parts.
+                    // Using the same example above, prefix = "a/b/"
+                    let prefix = entry_info
+                        .path
+                        .find(&extracted)
+                        .map(|pos| &entry_info.path[..pos])
+                        .unwrap_or("");
+
+                    // Rebuild the update chain starting from the valid prefix
+                    // so subsequent operations only update from that known
+                    // existing tree downward.
+                    let chain = self.search_tree_for_update(Path::new(prefix)).await?;
+                    (missing_parts, prefix, chain)
+                }
+            };
+
+        let target_items = update_chain.pop().unwrap().tree_items.clone();
+
+        // If there are no missing parts, we are inserting directly into an
+        // existing tree. This branch handles both creating a new file or
+        // creating a new directory in the target tree.
+        if missing_parts.is_empty() {
+            let mut target_items = target_items;
+
+            // Check for duplicate
+            let is_tree_mode = if entry_info.is_directory {
+                TreeItemMode::Tree
+            } else {
+                TreeItemMode::Blob
+            };
             if target_items
                 .iter()
-                .any(|x| x.mode == TreeItemMode::Tree && x.name == file_info.name)
+                .any(|x| x.mode == is_tree_mode && x.name == entry_info.name)
             {
                 return Err(GitError::CustomError("Duplicate name".to_string()));
             }
-            let blob = generate_git_keep_with_timestamp();
-            let tree_item = TreeItem {
-                mode: TreeItemMode::Blob,
-                id: blob.id,
-                name: String::from(".gitkeep"),
-            };
-            let new_dir_tree = Tree::from_tree_items(vec![tree_item]).unwrap();
-            save_trees.push(new_dir_tree.clone());
-            (
-                TreeItem {
-                    mode: TreeItemMode::Tree,
-                    id: new_dir_tree.id,
-                    name: file_info.name.clone(),
-                },
-                blob,
-            )
-        } else {
-            let blob = Blob::from_content(&file_info.content.clone().unwrap());
-            (
-                TreeItem {
+
+            // Create a new tree item based on whether it's a directory or file
+            let (new_item, blob) = if entry_info.is_directory {
+                // For a new directory, create a .gitkeep blob so the
+                // directory can be represented as a tree with at least
+                // one blob entry. The blob contains a timestamp so it's
+                // unique.
+                let blob = generate_git_keep_with_timestamp();
+                let tree_item = TreeItem {
                     mode: TreeItemMode::Blob,
                     id: blob.id,
-                    name: file_info.name.clone(),
+                    name: String::from(".gitkeep"),
+                };
+                let new_dir_tree = Tree::from_tree_items(vec![tree_item]).unwrap();
+                save_trees.push(new_dir_tree.clone());
+                (
+                    TreeItem {
+                        mode: TreeItemMode::Tree,
+                        id: new_dir_tree.id,
+                        name: entry_info.name.clone(),
+                    },
+                    blob,
+                )
+            } else {
+                let blob = Blob::from_content(&entry_info.content.clone().unwrap());
+                (
+                    TreeItem {
+                        mode: TreeItemMode::Blob,
+                        id: blob.id,
+                        name: entry_info.name.clone(),
+                    },
+                    blob,
+                )
+            };
+
+            target_items.push(new_item);
+            target_items.sort_by(|a, b| a.name.cmp(&b.name));
+            let target_tree = Tree::from_tree_items(target_items).unwrap();
+            save_trees.push(target_tree.clone());
+
+            // Build update instructions for parent trees and refs.
+            // build_result_by_chain walks the update_chain (parent trees)
+            // and prepares the list of updated trees and ref updates
+            // that must be applied to persist the change.
+            let update_result = self.build_result_by_chain(
+                if prefix.is_empty() {
+                    path.clone()
+                } else {
+                    PathBuf::from(&prefix)
                 },
-                blob,
-            )
-        };
+                update_chain,
+                target_tree.id,
+            )?;
+            let new_commit_id = self
+                .apply_update_result(&update_result, &entry_info.commit_msg())
+                .await?;
 
-        // Add the new item to the tree items and create a new tree
-        target_items.push(new_item);
-        let target_tree = Tree::from_tree_items(target_items).unwrap();
+            storage.save_mega_blobs(vec![&blob], &new_commit_id).await?;
 
-        // Update the parent tree with the new commit
-        let update_result = self.build_result_by_chain(path, update_chain, target_tree.id)?;
-        save_trees.push(target_tree);
+            let save_trees: Vec<mega_tree::ActiveModel> = save_trees
+                .into_iter()
+                .map(|save_t| {
+                    let mut tree_model: mega_tree::Model = save_t.into_mega_model();
+                    tree_model.commit_id.clone_from(&new_commit_id);
+                    tree_model.into()
+                })
+                .collect();
+            storage.batch_save_model(save_trees).await?;
+        } else {
+            // If missing_parts is not empty, we must create intermediate
+            // directories (trees) for each missing segment. This branch
+            // constructs the leaf tree first and then wraps it with
+            // additional trees for each missing path component up to the
+            // existing prefix.
+            // Create a new tree item based on whether it's a directory or file
+            let (leaf_item, blob) = if entry_info.is_directory {
+                // Create .gitkeep blob and an initial tree for the new
+                // directory leaf. This represents the directory's own
+                // tree object which will be nested under new parent trees.
+                let blob = generate_git_keep_with_timestamp();
+                let tree_item = TreeItem {
+                    mode: TreeItemMode::Blob,
+                    id: blob.id,
+                    name: String::from(".gitkeep"),
+                };
+                let new_dir_tree = Tree::from_tree_items(vec![tree_item]).unwrap();
+                save_trees.push(new_dir_tree.clone());
+                (
+                    TreeItem {
+                        mode: TreeItemMode::Tree,
+                        id: new_dir_tree.id,
+                        name: entry_info.name.clone(),
+                    },
+                    blob,
+                )
+            } else {
+                let blob = Blob::from_content(&entry_info.content.clone().unwrap());
+                (
+                    TreeItem {
+                        mode: TreeItemMode::Blob,
+                        id: blob.id,
+                        name: entry_info.name.clone(),
+                    },
+                    blob,
+                )
+            };
 
-        let new_commit_id = self
-            .apply_update_result(&update_result, &file_info.commit_msg())
-            .await?;
+            let mut current_tree = Tree::from_tree_items(vec![leaf_item]).unwrap();
+            save_trees.push(current_tree.clone());
 
-        storage.save_mega_blobs(vec![&blob], &new_commit_id).await?;
+            // Wrap the leaf tree with trees for each missing parent segment.
+            // We iterate the missing parts in reverse (from leaf's parent up
+            // to the topmost missing segment) and create a tree object for
+            // each level that points to the previously built child tree.
+            let missing_len = missing_parts.len();
+            for part in missing_parts.iter().rev().take(missing_len - 1) {
+                let sub_item = TreeItem {
+                    mode: TreeItemMode::Tree,
+                    id: current_tree.id,
+                    name: part.to_string(),
+                };
 
-        let save_trees: Vec<mega_tree::ActiveModel> = save_trees
-            .into_iter()
-            .map(|save_t| {
-                let commit_id = new_commit_id.clone();
-                let tree_model: mega_tree::Model =
-                    jupiter::adapter::tree_to_mega_tree(save_t, &commit_id);
-                tree_model.into()
-            })
-            .collect();
-        storage.batch_save_model(save_trees).await?;
+                current_tree = Tree::from_tree_items(vec![sub_item]).unwrap();
+                save_trees.push(current_tree.clone());
+            }
+
+            // top_part is the highest-level missing segment (closest to the
+            // existing prefix). We'll insert this as a child into the
+            // existing target_items collected from the update chain.
+            let top_part = missing_parts.first().unwrap().to_string();
+            let top_item = TreeItem {
+                mode: TreeItemMode::Tree,
+                id: current_tree.id,
+                name: top_part.clone(),
+            };
+
+            let mut target_items = target_items;
+
+            // Check for duplicate
+            if target_items
+                .iter()
+                .any(|x| x.mode == TreeItemMode::Tree && x.name == top_part)
+            {
+                return Err(GitError::CustomError("Duplicate name".to_string()));
+            }
+
+            target_items.push(top_item);
+            target_items.sort_by(|a, b| a.name.cmp(&b.name));
+            let target_tree = Tree::from_tree_items(target_items).unwrap();
+            save_trees.push(target_tree.clone());
+
+            // After constructing the nested trees, build update instructions
+            // and apply them to update the parent trees and refs so the
+            // new nested directory/file is persisted in the repository.
+            let update_result =
+                self.build_result_by_chain(PathBuf::from(prefix), update_chain, target_tree.id)?;
+            let new_commit_id = self
+                .apply_update_result(&update_result, &entry_info.commit_msg())
+                .await?;
+
+            storage
+                .save_mega_blobs(vec![&blob], &new_commit_id)
+                .await
+                .map_err(|e| GitError::CustomError(e.to_string()))?;
+
+            let save_trees: Vec<mega_tree::ActiveModel> = save_trees
+                .into_iter()
+                .map(|save_t| {
+                    let mut tree_model: mega_tree::Model = save_t.into_mega_model();
+                    tree_model.commit_id.clone_from(&new_commit_id);
+                    tree_model.into()
+                })
+                .collect();
+            storage
+                .batch_save_model(save_trees)
+                .await
+                .map_err(|e| GitError::CustomError(e.to_string()))?;
+        }
 
         Ok(())
     }
@@ -169,7 +357,7 @@ impl ApiHandler for MonoApiService {
         let storage = self.storage.mono_storage();
         let refs = storage.get_ref("/").await.unwrap().unwrap();
 
-        jupiter::adapter::mega_tree_to_tree(
+        Tree::from_mega_model(
             storage
                 .get_tree_by_hash(&refs.ref_tree_hash)
                 .await
@@ -179,7 +367,7 @@ impl ApiHandler for MonoApiService {
     }
 
     async fn get_tree_by_hash(&self, hash: &str) -> Tree {
-        jupiter::adapter::mega_tree_to_tree(
+        Tree::from_mega_model(
             self.storage
                 .mono_storage()
                 .get_tree_by_hash(hash)
@@ -191,7 +379,7 @@ impl ApiHandler for MonoApiService {
 
     async fn get_commit_by_hash(&self, hash: &str) -> Option<Commit> {
         match self.storage.mono_storage().get_commit_by_hash(hash).await {
-            Ok(Some(commit)) => Some(jupiter::adapter::mega_commit_to_commit(commit)),
+            Ok(Some(commit)) => Some(Commit::from_mega_model(commit)),
             _ => None,
         }
     }
@@ -203,7 +391,7 @@ impl ApiHandler for MonoApiService {
             .await
             .unwrap()
             .unwrap();
-        Ok(jupiter::adapter::mega_commit_to_commit(
+        Ok(Commit::from_mega_model(
             storage
                 .get_commit_by_hash(&tree_info.commit_id)
                 .await
@@ -219,10 +407,7 @@ impl ApiHandler for MonoApiService {
             .get_commits_by_hashes(&c_hashes)
             .await
             .unwrap();
-        Ok(commits
-            .into_iter()
-            .map(jupiter::adapter::mega_commit_to_commit)
-            .collect())
+        Ok(commits.into_iter().map(Commit::from_mega_model).collect())
     }
 
     async fn item_to_commit_map(
@@ -281,15 +466,498 @@ impl ApiHandler for MonoApiService {
             None => Ok(HashMap::new()),
         }
     }
+    // helper to convert mega_tag model into TagInfo (defined on MonoApiService below)
+
+    async fn create_tag(
+        &self,
+        repo_path: Option<String>,
+        name: String,
+        target: Option<String>,
+        tagger_name: Option<String>,
+        tagger_email: Option<String>,
+        message: Option<String>,
+    ) -> Result<TagInfo, GitError> {
+        let mono_storage = self.storage.mono_storage();
+
+        let is_annotated = message.as_ref().map(|s| !s.is_empty()).unwrap_or(false);
+        let tagger_info = match (tagger_name, tagger_email) {
+            (Some(n), Some(e)) => format!("{} <{}>", n, e),
+            (Some(n), None) => n,
+            (None, Some(e)) => e,
+            (None, None) => "unknown".to_string(),
+        };
+
+        // validate target commit presence
+        self.validate_target_commit_mono(target.as_ref()).await?;
+
+        let full_ref = format!("refs/tags/{}", name.clone());
+
+        // Prevent duplicate tag/ref creation
+        match mono_storage.get_tag_by_name(&name).await {
+            Ok(Some(_)) => {
+                return Err(GitError::CustomError(format!(
+                    "[code:400] Tag '{}' already exists",
+                    name
+                )));
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::error!("DB error while checking tag existence: {}", e);
+                return Err(GitError::CustomError("[code:500] DB error".to_string()));
+            }
+        }
+
+        if let Ok(Some(_)) = mono_storage.get_ref_by_name(&full_ref).await {
+            return Err(GitError::CustomError(format!(
+                "[code:400] Tag '{}' already exists",
+                name
+            )));
+        }
+
+        if is_annotated {
+            return self
+                .create_annotated_tag_mono(
+                    repo_path.clone(),
+                    name.clone(),
+                    target.clone(),
+                    tagger_info.clone(),
+                    message.clone(),
+                    full_ref.clone(),
+                )
+                .await;
+        }
+
+        // lightweight
+        self.create_lightweight_tag_mono(
+            repo_path.clone(),
+            name.clone(),
+            target.clone(),
+            tagger_info.clone(),
+            full_ref.clone(),
+        )
+        .await
+    }
+
+    async fn list_tags(
+        &self,
+        repo_path: Option<String>,
+        pagination: Pagination,
+    ) -> Result<(Vec<TagInfo>, u64), GitError> {
+        let mono_storage = self.storage.mono_storage();
+        // annotated tags from DB (paged)
+        let (annotated_page, annotated_total) =
+            match mono_storage.get_tags_by_page(pagination.clone()).await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!("DB error while listing tags: {}", e);
+                    return Err(GitError::CustomError("[code:500] DB error".to_string()));
+                }
+            };
+
+        let mut result: Vec<TagInfo> = annotated_page
+            .into_iter()
+            .map(|t| self.tag_model_to_info(t))
+            .collect();
+
+        // lightweight refs from refs table under path
+        let repo_path = repo_path.as_deref().unwrap_or("/");
+        let mut lightweight_refs: Vec<TagInfo> = vec![];
+        if let Ok(refs) = mono_storage.get_refs(repo_path).await {
+            for r in refs {
+                if r.ref_name.starts_with("refs/tags/") {
+                    let tag_name = r.ref_name.trim_start_matches("refs/tags/").to_string();
+                    if result.iter().any(|t| t.name == tag_name) {
+                        continue;
+                    }
+                    lightweight_refs.push(TagInfo {
+                        name: tag_name.clone(),
+                        tag_id: r.ref_commit_hash.clone(),
+                        object_id: r.ref_commit_hash.clone(),
+                        object_type: "commit".to_string(),
+                        tagger: "".to_string(),
+                        message: "".to_string(),
+                        created_at: chrono::Utc::now().to_rfc3339(),
+                    });
+                }
+            }
+        }
+
+        let total = annotated_total + lightweight_refs.len() as u64;
+        let per_page = if pagination.per_page == 0 {
+            20
+        } else {
+            pagination.per_page
+        } as usize;
+        if result.len() < per_page {
+            let need = per_page - result.len();
+            for r in lightweight_refs.into_iter().take(need) {
+                result.push(r);
+            }
+        }
+
+        Ok((result, total))
+    }
+
+    async fn get_tag(
+        &self,
+        repo_path: Option<String>,
+        name: String,
+    ) -> Result<Option<TagInfo>, GitError> {
+        let mono_storage = self.storage.mono_storage();
+        // check annotated DB first
+        match mono_storage.get_tag_by_name(&name).await {
+            Ok(Some(tag)) => return Ok(Some(self.tag_model_to_info(tag))),
+            Ok(None) => {}
+            Err(e) => {
+                tracing::error!("DB error while getting tag: {}", e);
+                return Err(GitError::CustomError("[code:500] DB error".to_string()));
+            }
+        }
+        // check refs for lightweight tag
+        let _repo_path = repo_path.unwrap_or_else(|| "/".to_string());
+        let full_ref = format!("refs/tags/{}", name.clone());
+        if let Ok(Some(r)) = mono_storage.get_ref_by_name(&full_ref).await {
+            return Ok(Some(TagInfo {
+                name: name.clone(),
+                tag_id: r.ref_commit_hash.clone(),
+                object_id: r.ref_commit_hash.clone(),
+                object_type: "commit".to_string(),
+                tagger: "".to_string(),
+                message: "".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            }));
+        }
+        Ok(None)
+    }
+
+    async fn delete_tag(&self, repo_path: Option<String>, name: String) -> Result<(), GitError> {
+        let mono_storage = self.storage.mono_storage();
+        // check annotated in DB first
+        match mono_storage.get_tag_by_name(&name).await {
+            Ok(Some(_tag)) => {
+                // remove ref if exists
+                let full_ref = format!("refs/tags/{}", name.clone());
+                if let Ok(Some(r)) = mono_storage.get_ref_by_name(&full_ref).await {
+                    mono_storage.remove_ref(r).await.map_err(|e| {
+                        tracing::error!("Failed to remove ref while deleting annotated tag: {}", e);
+                        GitError::CustomError("[code:500] Failed to remove ref".to_string())
+                    })?;
+                }
+                mono_storage.delete_tag_by_name(&name).await.map_err(|e| {
+                    tracing::error!("DB delete error when deleting annotated tag: {}", e);
+                    GitError::CustomError("[code:500] DB delete error".to_string())
+                })?;
+                Ok(())
+            }
+            Ok(None) => {
+                // try delete lightweight ref
+                let _repo_path = repo_path.unwrap_or_else(|| "/".to_string());
+                let full_ref = format!("refs/tags/{}", name.clone());
+                // find ref by name and remove
+                if let Ok(Some(r)) = mono_storage.get_ref_by_name(&full_ref).await {
+                    mono_storage.remove_ref(r).await.map_err(|e| {
+                        tracing::error!(
+                            "Failed to remove ref while deleting lightweight tag: {}",
+                            e
+                        );
+                        GitError::CustomError("[code:500] Failed to remove ref".to_string())
+                    })?;
+                    Ok(())
+                } else {
+                    Err(GitError::CustomError(
+                        "[code:404] Tag not found".to_string(),
+                    ))
+                }
+            }
+            Err(e) => {
+                tracing::error!("DB error while deleting tag: {}", e);
+                Err(GitError::CustomError("[code:500] DB error".to_string()))
+            }
+        }
+    }
+
+    /// Get blame information for a file
+    async fn get_file_blame(
+        &self,
+        file_path: &str,
+        ref_name: Option<&str>,
+        query: BlameQuery,
+    ) -> Result<BlameResult, GitError> {
+        tracing::info!(
+            "Getting blame for file: {} at ref: {:?}",
+            file_path,
+            ref_name
+        );
+
+        // Validate input parameters
+        if file_path.is_empty() {
+            return Err(GitError::CustomError(
+                "File path cannot be empty".to_string(),
+            ));
+        }
+
+        // Use refs parameter if provided, otherwise use "main" as default
+        let ref_name = if let Some(ref_name) = ref_name {
+            if ref_name.is_empty() {
+                "main"
+            } else {
+                ref_name
+            }
+        } else {
+            "main"
+        };
+
+        // Use Jupiter's blame service
+        let blame_service = BlameService::new(Arc::new(self.storage.clone()));
+
+        // Convert API query to DTO query
+        let dto_query: jupiter::model::blame_dto::BlameQuery = query.into();
+
+        // 🔍 Step 1: Check if it is a large file
+        let is_large_file = match blame_service
+            .check_if_large_file(file_path, Some(ref_name))
+            .await
+        {
+            Ok(is_large) => is_large,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to check file size for {}: {}, using normal processing",
+                    file_path,
+                    e
+                );
+                false
+            }
+        };
+
+        tracing::info!(
+            "File {} is {} file, using {} processing",
+            file_path,
+            if is_large_file { "large" } else { "normal" },
+            if is_large_file {
+                "streaming"
+            } else {
+                "standard"
+            }
+        );
+
+        // 🚀 Step 2: Select the processing method based on file size
+        let blame_result = if is_large_file {
+            // Large file: Use streaming processing
+            tracing::info!("Using streaming processing for large file: {}", file_path);
+            blame_service
+                .get_file_blame_streaming_auto(file_path, Some(ref_name), dto_query)
+                .await
+        } else {
+            // Normal file: Use standard processing
+            tracing::info!("Using standard processing for normal file: {}", file_path);
+            blame_service
+                .get_file_blame(file_path, Some(ref_name), Some(dto_query))
+                .await
+        };
+
+        match blame_result {
+            Ok(result_from_service) => {
+                // Convert DTO result to API result
+                Ok(result_from_service.into())
+            }
+            Err(e) => {
+                tracing::error!("Blame operation failed for {}: {}", file_path, e);
+                Err(e)
+            }
+        }
+    }
 }
 
 impl MonoApiService {
+    // helper to convert mega_tag model into TagInfo
+    fn tag_model_to_info(&self, tag: mega_tag::Model) -> TagInfo {
+        TagInfo {
+            name: tag.tag_name,
+            tag_id: tag.tag_id,
+            object_id: tag.object_id,
+            object_type: tag.object_type,
+            tagger: tag.tagger,
+            message: tag.message,
+            created_at: tag.created_at.and_utc().to_rfc3339(),
+        }
+    }
+
+    async fn create_annotated_tag_mono(
+        &self,
+        repo_path: Option<String>,
+        name: String,
+        target: Option<String>,
+        tagger_info: String,
+        message: Option<String>,
+        full_ref: String,
+    ) -> Result<TagInfo, GitError> {
+        let mono_storage = self.storage.mono_storage();
+
+        // build git_internal/mega tag models
+        let (tag_id_hex, object_id) = self.build_git_internal_tag_mono(
+            name.clone(),
+            target.clone(),
+            tagger_info.clone(),
+            message.clone(),
+        )?;
+        let tag_model = self.build_mega_tag_model(
+            tag_id_hex.clone(),
+            object_id.clone(),
+            name.clone(),
+            tagger_info.clone(),
+            message.clone(),
+        );
+
+        match mono_storage.insert_tag(tag_model).await {
+            Ok(saved_tag) => {
+                // try to write ref; if ref write fails, rollback DB insert
+                let path_str = repo_path.unwrap_or_else(|| "/".to_string());
+                let tree_hash = common::utils::ZERO_ID.to_string();
+                if let Err(e) = mono_storage
+                    .save_ref(
+                        &path_str,
+                        Some(full_ref.clone()),
+                        &object_id,
+                        &tree_hash,
+                        false,
+                    )
+                    .await
+                {
+                    // attempt to remove DB record
+                    if let Err(del_e) = mono_storage.delete_tag_by_name(&name).await {
+                        tracing::error!(
+                            "Failed to rollback tag DB record after ref write failure: {}",
+                            del_e
+                        );
+                    }
+                    tracing::error!("Failed to write ref after DB insert: {}", e);
+                    return Err(GitError::CustomError(
+                        "[code:500] Failed to write ref".to_string(),
+                    ));
+                }
+                Ok(self.tag_model_to_info(saved_tag))
+            }
+            Err(e) => {
+                tracing::error!("DB insert error when creating annotated tag: {}", e);
+                Err(GitError::CustomError(
+                    "[code:500] DB insert error".to_string(),
+                ))
+            }
+        }
+    }
+
+    async fn create_lightweight_tag_mono(
+        &self,
+        repo_path: Option<String>,
+        name: String,
+        target: Option<String>,
+        tagger_info: String,
+        full_ref: String,
+    ) -> Result<TagInfo, GitError> {
+        let mono_storage = self.storage.mono_storage();
+
+        let path_str = repo_path.unwrap_or_else(|| "/".to_string());
+        let object_id = target.clone().unwrap_or_default();
+        let tree_hash = common::utils::ZERO_ID.to_string();
+        mono_storage
+            .save_ref(
+                &path_str,
+                Some(full_ref.clone()),
+                &object_id,
+                &tree_hash,
+                false,
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to write lightweight tag ref: {}", e);
+                GitError::CustomError("[code:500] Failed to write lightweight tag ref".to_string())
+            })?;
+
+        Ok(TagInfo {
+            name: name.clone(),
+            tag_id: object_id.clone(),
+            object_id: object_id.clone(),
+            object_type: "commit".to_string(),
+            tagger: tagger_info.clone(),
+            message: String::new(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        })
+    }
+    async fn validate_target_commit_mono(&self, target: Option<&String>) -> Result<(), GitError> {
+        let mono_storage = self.storage.mono_storage();
+        if let Some(ref t) = target {
+            match mono_storage.get_commit_by_hash(t).await {
+                Ok(commit_opt) => {
+                    if commit_opt.is_none() {
+                        return Err(GitError::CustomError(format!(
+                            "[code:404] Target commit '{}' not found",
+                            t
+                        )));
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("DB error while fetching commit by hash: {}", e);
+                    return Err(GitError::CustomError("[code:500] DB error".to_string()));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn build_git_internal_tag_mono(
+        &self,
+        name: String,
+        target: Option<String>,
+        tagger_info: String,
+        message: Option<String>,
+    ) -> Result<(String, String), GitError> {
+        let tag_target = target
+            .as_ref()
+            .ok_or(GitError::InvalidCommitObject)
+            .and_then(|t| SHA1::from_str(t).map_err(|_| GitError::InvalidCommitObject))?;
+        let tagger_sig = git_internal::internal::object::signature::Signature::new(
+            git_internal::internal::object::signature::SignatureType::Tagger,
+            tagger_info.clone(),
+            String::new(),
+        );
+        let git_internal_tag = git_internal::internal::object::tag::Tag::new(
+            tag_target,
+            git_internal::internal::object::types::ObjectType::Commit,
+            name.clone(),
+            tagger_sig,
+            message.clone().unwrap_or_default(),
+        );
+        Ok((
+            git_internal_tag.id.to_string(),
+            target.unwrap_or_else(|| "HEAD".to_string()),
+        ))
+    }
+
+    fn build_mega_tag_model(
+        &self,
+        tag_id_hex: String,
+        object_id: String,
+        name: String,
+        tagger_info: String,
+        message: Option<String>,
+    ) -> mega_tag::Model {
+        mega_tag::Model {
+            id: common::utils::generate_id(),
+            tag_id: tag_id_hex,
+            object_id,
+            object_type: "commit".to_string(),
+            tag_name: name,
+            tagger: tagger_info,
+            message: message.unwrap_or_default(),
+            created_at: chrono::Utc::now().naive_utc(),
+        }
+    }
     pub async fn merge_mr(&self, username: &str, mr: mega_mr::Model) -> Result<(), GitError> {
         let storage = self.storage.mono_storage();
         let refs = storage.get_ref(&mr.path).await.unwrap().unwrap();
 
         if mr.from_hash == refs.ref_commit_hash {
-            let commit: Commit = jupiter::adapter::mega_commit_to_commit(
+            let commit: Commit = Commit::from_mega_model(
                 storage
                     .get_commit_by_hash(&mr.to_hash)
                     .await
@@ -378,7 +1046,11 @@ impl MonoApiService {
             match update {
                 RefUpdate::Update { path, tree_id } => {
                     // update can only be root path
-                    if let Some(mut p_ref) = storage.get_ref(path).await? {
+                    if let Some(mut p_ref) = storage
+                        .get_ref(path)
+                        .await
+                        .map_err(|e| GitError::CustomError(e.to_string()))?
+                    {
                         let commit = Commit::from_tree_id(
                             *tree_id,
                             vec![SHA1::from_str(&p_ref.ref_commit_hash).unwrap()],
@@ -387,13 +1059,26 @@ impl MonoApiService {
                         new_commit_id = commit.id.to_string();
                         p_ref.ref_commit_hash = new_commit_id.clone();
                         p_ref.ref_tree_hash = tree_id.to_string();
-                        storage.update_ref(p_ref).await?;
-                        storage.save_mega_commits(vec![commit]).await?;
+                        storage
+                            .update_ref(p_ref)
+                            .await
+                            .map_err(|e| GitError::CustomError(e.to_string()))?;
+                        storage
+                            .save_mega_commits(vec![commit])
+                            .await
+                            .map_err(|e| GitError::CustomError(e.to_string()))?;
                     }
                 }
                 RefUpdate::Delete { path } => {
-                    if let Some(p_ref) = storage.get_ref(path).await? {
-                        storage.remove_ref(p_ref).await?;
+                    if let Some(p_ref) = storage
+                        .get_ref(path)
+                        .await
+                        .map_err(|e| GitError::CustomError(e.to_string()))?
+                    {
+                        storage
+                            .remove_ref(p_ref)
+                            .await
+                            .map_err(|e| GitError::CustomError(e.to_string()))?;
                     }
                 }
             }
@@ -404,13 +1089,15 @@ impl MonoApiService {
             .clone()
             .into_iter()
             .map(|save_t| {
-                let commit_id = new_commit_id.clone();
-                let tree_model: mega_tree::Model =
-                    jupiter::adapter::tree_to_mega_tree(save_t, &commit_id);
+                let mut tree_model: mega_tree::Model = save_t.into_mega_model();
+                tree_model.commit_id.clone_from(&new_commit_id);
                 tree_model.into()
             })
             .collect();
-        storage.batch_save_model(save_trees).await?;
+        storage
+            .batch_save_model(save_trees)
+            .await
+            .map_err(|e| GitError::CustomError(e.to_string()))?;
 
         Ok(new_commit_id)
     }
@@ -464,7 +1151,8 @@ impl MonoApiService {
         // calculate pages
         let sorted_changed_files = self
             .mr_files_list(old_blobs.clone(), new_blobs.clone())
-            .await?;
+            .await
+            .map_err(|e| GitError::CustomError(e.to_string()))?;
 
         // ensure page_id is within bounds
         let start = (page_id.saturating_sub(1)) * per_page;
@@ -667,7 +1355,7 @@ impl MonoApiService {
         if let Some(commit) = commit {
             let tree = mono_storage.get_tree_by_hash(&commit.tree).await?;
             if let Some(tree) = tree {
-                let tree = jupiter::adapter::mega_tree_to_tree(tree);
+                let tree: Tree = Tree::from_mega_model(tree);
                 res = self.traverse_tree(tree).await?;
             }
         }
@@ -688,7 +1376,7 @@ impl MonoApiService {
                         .get_tree_by_hash(&item.id.to_string())
                         .await?
                         .unwrap();
-                    stack.push((path.clone(), jupiter::adapter::mega_tree_to_tree(child)));
+                    stack.push((path.clone(), Tree::from_mega_model(child)));
                 } else {
                     result.push((path, item.id));
                 }
@@ -702,7 +1390,7 @@ impl MonoApiService {
 mod test {
     use super::*;
     use crate::model::mr::MrDiffFile;
-    use mercury::hash::SHA1;
+    use git_internal::hash::SHA1;
     use std::path::PathBuf;
     use std::str::FromStr;
 
@@ -1090,7 +1778,7 @@ mod test {
 
     #[tokio::test]
     async fn test_content_diff_functionality() {
-        use mercury::internal::object::blob::Blob;
+        use git_internal::internal::object::blob::Blob;
         use std::collections::HashMap;
 
         // Test basic diff generation with sample data

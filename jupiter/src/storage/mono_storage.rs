@@ -1,19 +1,21 @@
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
-use futures::{stream, StreamExt};
+use futures::{StreamExt, stream};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder,
-    QuerySelect,
+    ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, PaginatorTrait, QueryFilter,
+    QueryOrder, QuerySelect,
 };
 
+use crate::utils::converter::{IntoMegaModel, MegaObjectModel, ToRawBlob, process_entry};
 use callisto::{mega_blob, mega_commit, mega_refs, mega_tag, mega_tree, raw_blob};
 use common::config::MonoConfig;
 use common::errors::MegaError;
-use common::utils::{generate_id, MEGA_BRANCH_NAME};
-use mercury::internal::object::blob::Blob;
-use mercury::internal::object::{MegaObjectModel, ObjectTrait};
-use mercury::internal::{object::commit::Commit, pack::entry::Entry};
+use common::model::Pagination;
+use common::utils::{MEGA_BRANCH_NAME, generate_id};
+use git_internal::internal::object::ObjectTrait;
+use git_internal::internal::object::blob::Blob;
+use git_internal::internal::{object::commit::Commit, pack::entry::Entry};
 
 use crate::storage::base_storage::{BaseStorage, StorageConnector};
 use crate::storage::commit_binding_storage::CommitBindingStorage;
@@ -170,16 +172,18 @@ impl MonoStorage {
                 let git_objects = git_objects.clone();
                 let commits_to_process = commits_to_process.clone();
                 async move {
-                    let raw_obj = entry.process_entry();
+                    let entry_data = entry.data.clone();
+                    let entry_hash = entry.hash;
+                    let raw_obj = process_entry(entry);
                     let model = raw_obj.convert_to_mega_model();
                     let mut git_objects = git_objects.lock().unwrap();
                     match model {
                         MegaObjectModel::Commit(commit) => {
                             // Store for binding processing
                             if let Ok(commit_obj) =
-                                mercury::internal::object::commit::Commit::from_bytes(
-                                    &entry.data,
-                                    entry.hash,
+                                git_internal::internal::object::commit::Commit::from_bytes(
+                                    &entry_data,
+                                    entry_hash,
                                 )
                             {
                                 let mut commits = commits_to_process.lock().unwrap();
@@ -188,25 +192,18 @@ impl MonoStorage {
                                     commit_obj.author.email.clone(),
                                 ));
                             }
-                            let c = callisto::mega_commit::Model::from(commit);
-                            git_objects.commits.push(c.into_active_model())
+                            git_objects.commits.push(commit.into_active_model())
                         }
                         MegaObjectModel::Tree(mut tree) => {
                             commit_id.clone_into(&mut tree.commit_id);
-                            let t = callisto::mega_tree::Model::from(tree);
-                            git_objects.trees.push(t.into_active_model());
+                            git_objects.trees.push(tree.into_active_model());
                         }
                         MegaObjectModel::Blob(mut blob, raw) => {
                             commit_id.clone_into(&mut blob.commit_id);
-                            let b = callisto::mega_blob::Model::from(blob.clone());
-                            git_objects.blobs.push(b.into_active_model());
-                            let r = callisto::raw_blob::Model::from(raw);
-                            git_objects.raw_blobs.push(r.into_active_model());
+                            git_objects.blobs.push(blob.clone().into_active_model());
+                            git_objects.raw_blobs.push(raw.into_active_model());
                         }
-                        MegaObjectModel::Tag(tag) => {
-                            let tg = callisto::mega_tag::Model::from(tag);
-                            git_objects.tags.push(tg.into_active_model())
-                        }
+                        MegaObjectModel::Tag(tag) => git_objects.tags.push(tag.into_active_model()),
                     }
                 }
             })
@@ -303,14 +300,7 @@ impl MonoStorage {
             return;
         }
         let converter = MegaModelConverter::init(mono_config);
-        // explicit conversion: Commit -> mercury sea_model -> callisto model
-        let sea_commit: mercury::internal::model::sea_models::mega_commit::Model =
-            mercury::internal::model::sea_models::mega_commit::Model::from(
-                converter.commit.clone(),
-            );
-        let commit: mega_commit::Model = <callisto::mega_commit::Model as From<
-            mercury::internal::model::sea_models::mega_commit::Model,
-        >>::from(sea_commit);
+        let commit: mega_commit::Model = converter.commit.into_mega_model();
         mega_commit::Entity::insert(commit.into_active_model())
             .exec(self.get_connection())
             .await
@@ -331,13 +321,7 @@ impl MonoStorage {
     pub async fn save_mega_commits(&self, commits: Vec<Commit>) -> Result<(), MegaError> {
         let save_models: Vec<mega_commit::ActiveModel> = commits
             .into_iter()
-            .map(|c| {
-                let sea: mercury::internal::model::sea_models::mega_commit::Model =
-                    mercury::internal::model::sea_models::mega_commit::Model::from(c);
-                <callisto::mega_commit::Model as From<
-                    mercury::internal::model::sea_models::mega_commit::Model,
-                >>::from(sea)
-            })
+            .map(|c| c.into_mega_model())
             .map(|m| m.into_active_model())
             .collect();
         self.batch_save_model(save_models).await.unwrap();
@@ -350,14 +334,9 @@ impl MonoStorage {
         commit_id: &str,
     ) -> Result<(), MegaError> {
         let mega_blobs: Vec<mega_blob::ActiveModel> = blobs
-            .clone()
-            .into_iter()
-            .map(|b| {
-                let sea: mercury::internal::model::sea_models::mega_blob::Model =
-                    mercury::internal::model::sea_models::mega_blob::Model::from(b);
-                let mut m: callisto::mega_blob::Model = <callisto::mega_blob::Model as From<
-                    mercury::internal::model::sea_models::mega_blob::Model,
-                >>::from(sea);
+            .iter()
+            .map(|b| (*b).clone().into_mega_model())
+            .map(|mut m: mega_blob::Model| {
                 m.commit_id = commit_id.to_owned();
                 m.into_active_model()
             })
@@ -366,13 +345,7 @@ impl MonoStorage {
 
         let raw_blobs: Vec<raw_blob::ActiveModel> = blobs
             .into_iter()
-            .map(|b| {
-                let sea: mercury::internal::model::sea_models::raw_blob::Model =
-                    mercury::internal::model::sea_models::raw_blob::Model::from(b);
-                <callisto::raw_blob::Model as From<
-                    mercury::internal::model::sea_models::raw_blob::Model,
-                >>::from(sea)
-            })
+            .map(|b| b.to_raw_blob())
             .map(|m| m.into_active_model())
             .collect();
         self.batch_save_model(raw_blobs).await.unwrap();
@@ -434,6 +407,52 @@ impl MonoStorage {
             .all(self.get_connection())
             .await
             .unwrap())
+    }
+
+    pub async fn get_tag_by_name(&self, name: &str) -> Result<Option<mega_tag::Model>, MegaError> {
+        let res = mega_tag::Entity::find()
+            .filter(mega_tag::Column::TagName.eq(name.to_string()))
+            .one(self.get_connection())
+            .await?;
+        Ok(res)
+    }
+
+    pub async fn insert_tag(&self, tag: mega_tag::Model) -> Result<mega_tag::Model, MegaError> {
+        let am: mega_tag::ActiveModel = tag.clone().into();
+        mega_tag::Entity::insert(am)
+            .exec(self.get_connection())
+            .await?;
+        let model = mega_tag::Entity::find()
+            .filter(mega_tag::Column::TagId.eq(tag.tag_id.clone()))
+            .one(self.get_connection())
+            .await?;
+        match model {
+            Some(m) => Ok(m),
+            None => Err(MegaError::with_message("Failed to load inserted tag")),
+        }
+    }
+
+    pub async fn delete_tag_by_name(&self, name: &str) -> Result<(), MegaError> {
+        mega_tag::Entity::delete_many()
+            .filter(mega_tag::Column::TagName.eq(name.to_string()))
+            .exec(self.get_connection())
+            .await?;
+        Ok(())
+    }
+
+    /// Paginated annotated tags stored in mega_tag table
+    pub async fn get_tags_by_page(
+        &self,
+        page: Pagination,
+    ) -> Result<(Vec<mega_tag::Model>, u64), MegaError> {
+        let paginator = mega_tag::Entity::find()
+            .order_by_asc(mega_tag::Column::TagName)
+            .paginate(self.get_connection(), page.per_page);
+        let num_items = paginator.num_items().await?;
+        Ok(paginator
+            .fetch_page(page.page.saturating_sub(1))
+            .await
+            .map(|m| (m, num_items))?)
     }
 }
 

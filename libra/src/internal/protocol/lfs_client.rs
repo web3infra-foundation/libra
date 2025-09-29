@@ -10,8 +10,8 @@ use ceres::lfs::lfs_structs::{
     VerifiableLockList, VerifiableLockRequest,
 };
 use futures_util::StreamExt;
-use mercury::internal::object::types::ObjectType;
-use mercury::internal::pack::entry::Entry;
+use git_internal::internal::object::types::ObjectType;
+use git_internal::internal::pack::entry::Entry;
 use reqwest::{Client, StatusCode};
 use ring::digest::{Context, SHA256};
 use serde::{Deserialize, Serialize};
@@ -853,7 +853,7 @@ mod tests {
     #[tokio::test]
     #[ignore] // need to start local mega server
     async fn test_push_object() {
-        let file_map = mercury::test_utils::setup_lfs_file().await;
+        let file_map = git_internal::test_utils::setup_lfs_file().await;
         let file = file_map
             .get("git-2d187177923cd618a75da6c6db45bb89d92bd504.pack")
             .unwrap();
@@ -870,7 +870,7 @@ mod tests {
     #[cfg(feature = "p2p")]
     #[ignore] // need to start local mega server
     async fn test_download_chunk() {
-        let file_map = mercury::test_utils::setup_lfs_file().await;
+        let file_map = git_internal::test_utils::setup_lfs_file().await;
         let file = file_map
             .get("git-2d187177923cd618a75da6c6db45bb89d92bd504.pack")
             .unwrap();

@@ -1,9 +1,10 @@
 use anyhow::Result;
 use axum::{
+    Json,
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
+use git_internal::errors::GitError;
 use thiserror::Error;
 
 use crate::model::CommonResult;
@@ -80,15 +81,9 @@ impl From<pgp::errors::Error> for MegaError {
     }
 }
 
-impl From<mercury::errors::GitError> for MegaError {
-    fn from(err: mercury::errors::GitError) -> MegaError {
-        MegaError::new(err.into(), 1)
-    }
-}
-
-impl From<MegaError> for mercury::errors::GitError {
-    fn from(err: MegaError) -> mercury::errors::GitError {
-        mercury::errors::GitError::CustomError(format!("MegaError: {}", err))
+impl From<MegaError> for GitError {
+    fn from(val: MegaError) -> Self {
+        GitError::CustomError(val.to_string())
     }
 }
 

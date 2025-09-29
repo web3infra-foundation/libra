@@ -3,15 +3,15 @@ use std::path::PathBuf;
 
 use colored::Colorize;
 
-use mercury::internal::object::commit::Commit;
-use mercury::internal::object::tree::Tree;
+use git_internal::internal::object::commit::Commit;
+use git_internal::internal::object::tree::Tree;
 
 use crate::command::calc_file_blob_hash;
 use crate::internal::head::Head;
 use crate::utils::object_ext::{CommitExt, TreeExt};
 use crate::utils::{path, util};
 use clap::Parser;
-use mercury::internal::index::Index;
+use git_internal::internal::index::Index;
 use std::io::Write;
 
 #[derive(Parser, Debug, Default)]

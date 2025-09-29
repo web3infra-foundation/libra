@@ -4,7 +4,7 @@ use sea_orm::ActiveValue::Set;
 use sea_orm::ConnectionTrait;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter};
 
-use mercury::hash::SHA1;
+use git_internal::hash::SHA1;
 
 use crate::internal::branch::Branch;
 use crate::internal::db::get_db_conn_instance;

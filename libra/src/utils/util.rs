@@ -1,12 +1,12 @@
+use git_internal::hash::SHA1;
+use git_internal::internal::object::types::ObjectType;
 use indicatif::{ProgressBar, ProgressStyle};
-use mercury::hash::SHA1;
-use mercury::internal::object::types::ObjectType;
 use path_absolutize::*;
+use regex::Regex;
 use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::{env, fs, io};
-use regex::Regex;
 
 use crate::utils::client_storage::ClientStorage;
 use crate::utils::path;
@@ -352,7 +352,7 @@ pub async fn get_commit_base(name: &str) -> Result<SHA1, String> {
         ObjectType::Commit => Ok(object_id),
         ObjectType::Tag => {
             // Manually dereference tag if search returned a tag object directly
-            let tag_obj: mercury::internal::object::tag::Tag =
+            let tag_obj: git_internal::internal::object::tag::Tag =
                 match crate::command::load_object(&object_id) {
                     Ok(obj) => obj,
                     Err(e) => return Err(format!("fatal: failed to load tag object: {}", e)),
@@ -497,7 +497,7 @@ pub fn check_conventional_commits_message(msg: &str) -> bool {
 }
 
 use crate::internal::config::Config;
-use mercury::internal::object::signature::{Signature, SignatureType};
+use git_internal::internal::object::signature::{Signature, SignatureType};
 
 pub async fn create_signatures() -> (Signature, Signature) {
     let user_name = Config::get("user", None, "name")

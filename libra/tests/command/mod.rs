@@ -1,4 +1,6 @@
-use libra::utils::util::format_commit_msg;
+use git_internal::hash::SHA1;
+use git_internal::internal::object::commit::Commit;
+use git_internal::internal::object::tree::Tree;
 use libra::command::branch::execute;
 use libra::command::branch::BranchArgs;
 use libra::command::get_target_commit;
@@ -15,13 +17,11 @@ use libra::command::{
 };
 use libra::internal::branch::Branch;
 use libra::internal::head::Head;
+use libra::utils::util::format_commit_msg;
 use libra::{
     command::commit::{self, CommitArgs},
     utils::test::{self, ChangeDirGuard},
 };
-use mercury::hash::SHA1;
-use mercury::internal::object::commit::Commit;
-use mercury::internal::object::tree::Tree;
 use serial_test::serial;
 use std::path::Path;
 use tempfile::tempdir;

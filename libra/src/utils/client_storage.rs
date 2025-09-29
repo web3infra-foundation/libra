@@ -6,14 +6,14 @@ use byteorder::{BigEndian, ReadBytesExt};
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
+use git_internal::errors::GitError;
+use git_internal::hash::SHA1;
+use git_internal::internal::object::commit::Commit;
+use git_internal::internal::object::types::ObjectType;
+use git_internal::internal::pack::cache_object::CacheObject;
+use git_internal::internal::pack::Pack;
+use git_internal::utils::read_sha1;
 use lru_mem::LruCache;
-use mercury::errors::GitError;
-use mercury::hash::SHA1;
-use mercury::internal::object::commit::Commit;
-use mercury::internal::object::types::ObjectType;
-use mercury::internal::pack::cache_object::CacheObject;
-use mercury::internal::pack::Pack;
-use mercury::utils::read_sha1;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
@@ -532,9 +532,9 @@ impl ClientStorage {
 
 #[cfg(test)]
 mod tests {
-    use mercury::internal::object::blob::Blob;
-    use mercury::internal::object::types::ObjectType;
-    use mercury::internal::object::ObjectTrait;
+    use git_internal::internal::object::blob::Blob;
+    use git_internal::internal::object::types::ObjectType;
+    use git_internal::internal::object::ObjectTrait;
     use serial_test::serial;
     use std::fs;
     use std::path::PathBuf;

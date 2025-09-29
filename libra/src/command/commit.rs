@@ -10,16 +10,16 @@ use crate::internal::branch::Branch;
 use crate::internal::config::Config as UserConfig;
 use crate::internal::head::Head;
 use crate::internal::reflog::{with_reflog, ReflogAction, ReflogContext};
-use crate::utils::util::{check_conventional_commits_message, format_commit_msg};
 use crate::utils::client_storage::ClientStorage;
 use crate::utils::path;
 use crate::utils::util;
+use crate::utils::util::{check_conventional_commits_message, format_commit_msg};
 use clap::Parser;
-use mercury::hash::SHA1;
-use mercury::internal::index::Index;
-use mercury::internal::object::commit::Commit;
-use mercury::internal::object::tree::{Tree, TreeItem, TreeItemMode};
-use mercury::internal::object::ObjectTrait;
+use git_internal::hash::SHA1;
+use git_internal::internal::index::Index;
+use git_internal::internal::object::commit::Commit;
+use git_internal::internal::object::tree::{Tree, TreeItem, TreeItemMode};
+use git_internal::internal::object::ObjectTrait;
 use sea_orm::ConnectionTrait;
 use std::process::Command;
 
@@ -305,7 +305,7 @@ async fn new_reflog_context(commit_id: &str, message: &str) -> ReflogContext {
 mod test {
     use std::env;
 
-    use mercury::internal::object::ObjectTrait;
+    use git_internal::internal::object::ObjectTrait;
     use serial_test::serial;
     use tempfile::tempdir;
 

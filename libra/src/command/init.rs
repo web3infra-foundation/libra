@@ -171,7 +171,8 @@ fn apply_shared(_root_dir: &Path, shared_mode: &str) -> io::Result<()> {
     match shared_mode {
         "true" | "false" | "umask" | "group" | "all" | "world" | "everybody" => {} // Valid string input
         mode if mode.starts_with('0') && mode.len() == 4 => {
-            if u32::from_str_radix(&mode[1..], 8).is_err() { //Valid perm input
+            if u32::from_str_radix(&mode[1..], 8).is_err() {
+                //Valid perm input
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!("invalid shared mode: {}", mode),

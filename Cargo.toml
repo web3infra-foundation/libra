@@ -7,9 +7,6 @@ resolver = "2"
 members = [
     "libra",
     "ceres",
-    "mercury",
-    "mercury/delta",
-    "mercury/zstdelta",
     "gemini",
     "jupiter",
     "jupiter/callisto",
@@ -20,20 +17,22 @@ members = [
     "saturn",
 ]
 
+default-members = [
+    "libra",
+]
+
 [workspace.dependencies]
 common = { path = "common" }
-mercury = { path = "mercury" }
 ceres = { path = "ceres" }
 gemini = { path = "gemini" }
 neptune = { path = "neptune" }
 jupiter = { path = "jupiter" }
 callisto = { path = "jupiter/callisto" }
 vault = { path = "vault" }
-delta = { path = "mercury/delta" }
-sapling-zstdelta = { path = "mercury/zstdelta" }
 bellatrix = { path = "bellatrix" }
 saturn = { path = "saturn" }
 
+git-internal = "0.1.0"
 
 ahash = "0.8"
 anyhow = "1.0"

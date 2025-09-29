@@ -7,8 +7,8 @@ use byteorder::{BigEndian, WriteBytesExt};
 use clap::Parser;
 use sha1::{Digest, Sha1};
 
-use mercury::errors::GitError;
-use mercury::internal::pack::Pack;
+use git_internal::errors::GitError;
+use git_internal::internal::pack::Pack;
 
 #[derive(Parser, Debug)]
 pub struct IndexPackArgs {

@@ -1,6 +1,6 @@
 use flate2::read::ZlibDecoder;
-use mercury::errors::GitError;
-use mercury::hash::SHA1;
+use git_internal::errors::GitError;
+use git_internal::hash::SHA1;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;

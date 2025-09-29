@@ -1,12 +1,13 @@
 [package]
 name = "neptune"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 infer = { workspace = true }
-mercury = { workspace = true }
+git-internal = { workspace = true }
 path-absolutize = { workspace = true }
 tracing = { workspace = true }
 utoipa = { workspace = true }
 serde = { workspace = true }
+diffs = { workspace = true }

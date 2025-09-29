@@ -1,10 +1,10 @@
 use super::*;
 use clap::Parser;
+use git_internal::hash::SHA1;
+use git_internal::internal::object::commit::Commit;
+use git_internal::internal::object::{blob::Blob, tree::Tree};
 use libra::utils::object_ext::TreeExt;
 use libra::utils::util;
-use mercury::hash::SHA1;
-use mercury::internal::object::commit::Commit;
-use mercury::internal::object::{blob::Blob, tree::Tree};
 use neptune::Diff;
 use std::cmp::min;
 use std::str::FromStr;

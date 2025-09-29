@@ -31,8 +31,8 @@ use crate::internal::protocol::https_client::BasicAuth;
 use crate::utils;
 use crate::utils::object_ext::BlobExt;
 use crate::utils::util;
-use mercury::internal::object::blob::Blob;
-use mercury::{errors::GitError, hash::SHA1, internal::object::ObjectTrait};
+use git_internal::internal::object::blob::Blob;
+use git_internal::{errors::GitError, hash::SHA1, internal::object::ObjectTrait};
 use rpassword::read_password;
 use std::io;
 use std::io::Write;
@@ -113,7 +113,7 @@ pub async fn get_target_commit(branch_or_commit: &str) -> Result<SHA1, Box<dyn s
 
 #[cfg(test)]
 mod tests {
-    use mercury::internal::object::commit::Commit;
+    use git_internal::internal::object::commit::Commit;
     use serial_test::serial;
     use tempfile::tempdir;
 

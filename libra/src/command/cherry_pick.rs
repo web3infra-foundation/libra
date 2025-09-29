@@ -2,15 +2,15 @@ use crate::command::{load_object, save_object};
 use crate::internal::branch::Branch;
 use crate::internal::head::Head;
 use crate::internal::reflog::{with_reflog, ReflogAction, ReflogContext};
-use crate::utils::util::format_commit_msg;
 use crate::utils::object_ext::BlobExt;
 use crate::utils::object_ext::TreeExt;
+use crate::utils::util::format_commit_msg;
 use crate::utils::{path, util};
 use clap::Parser;
-use mercury::hash::SHA1;
-use mercury::internal::index::{Index, IndexEntry};
-use mercury::internal::object::commit::Commit;
-use mercury::internal::object::tree::{Tree, TreeItem, TreeItemMode};
+use git_internal::hash::SHA1;
+use git_internal::internal::index::{Index, IndexEntry};
+use git_internal::internal::object::commit::Commit;
+use git_internal::internal::object::tree::{Tree, TreeItem, TreeItemMode};
 use sea_orm::ConnectionTrait;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -266,7 +266,7 @@ fn diff_trees(theirs: &Tree, base: &Tree) -> Vec<(PathBuf, Option<SHA1>, Option<
 ///
 /// This is used when applying cherry-pick changes to update the index state.
 fn update_index_entry(index: &mut Index, path: &Path, hash: SHA1) {
-    let blob = mercury::internal::object::blob::Blob::load(&hash);
+    let blob = git_internal::internal::object::blob::Blob::load(&hash);
     let entry = IndexEntry::new_from_blob(
         path.to_str().unwrap().to_string(),
         hash,
@@ -384,7 +384,7 @@ fn reset_workdir_to_index(index: &Index) -> Result<(), String> {
     for path_buf in &tracked_paths {
         let path_str = path_buf.to_str().unwrap();
         if let Some(entry) = index.get(path_str, 0) {
-            let blob = mercury::internal::object::blob::Blob::load(&entry.hash);
+            let blob = git_internal::internal::object::blob::Blob::load(&entry.hash);
             let target_path = workdir.join(path_str);
             if let Some(parent) = target_path.parent() {
                 fs::create_dir_all(parent).map_err(|e| e.to_string())?;

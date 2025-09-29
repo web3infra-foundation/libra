@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use mercury::errors::GitError;
-use mercury::internal::index::Index;
-use mercury::internal::object::tree::{Tree, TreeItem, TreeItemMode};
-use mercury::internal::object::ObjectTrait;
+use git_internal::errors::GitError;
+use git_internal::internal::index::Index;
+use git_internal::internal::object::tree::{Tree, TreeItem, TreeItemMode};
+use git_internal::internal::object::ObjectTrait;
 
 use crate::utils::object;
 

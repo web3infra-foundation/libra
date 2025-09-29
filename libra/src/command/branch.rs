@@ -4,7 +4,7 @@ use crate::{
 };
 use clap::Parser;
 use colored::Colorize;
-use mercury::internal::object::commit::Commit;
+use git_internal::internal::object::commit::Commit;
 
 use crate::command::load_object;
 

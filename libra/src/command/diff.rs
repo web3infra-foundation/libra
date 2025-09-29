@@ -5,7 +5,7 @@ use std::{
 };
 
 use clap::Parser;
-use mercury::{
+use git_internal::{
     hash::SHA1,
     internal::{
         index::Index,

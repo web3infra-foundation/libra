@@ -8,15 +8,15 @@ use crate::internal::head::Head;
 use crate::internal::model::reference;
 use crate::utils::client_storage::ClientStorage;
 use crate::utils::path;
-use mercury::errors::GitError;
-use mercury::hash::SHA1;
-use mercury::internal::object::blob::Blob;
-use mercury::internal::object::commit::Commit;
-use mercury::internal::object::signature::{Signature, SignatureType};
-use mercury::internal::object::tag::Tag as MercuryTag;
-use mercury::internal::object::tree::Tree;
-use mercury::internal::object::types::ObjectType;
-use mercury::internal::object::ObjectTrait;
+use git_internal::errors::GitError;
+use git_internal::hash::SHA1;
+use git_internal::internal::object::blob::Blob;
+use git_internal::internal::object::commit::Commit;
+use git_internal::internal::object::signature::{Signature, SignatureType};
+use git_internal::internal::object::tag::Tag as git_internalTag;
+use git_internal::internal::object::tree::Tree;
+use git_internal::internal::object::types::ObjectType;
+use git_internal::internal::object::ObjectTrait;
 
 // Constants for tag references
 const TAG_REF_PREFIX: &str = "refs/tags/";
@@ -28,7 +28,7 @@ const UNKNOWN_TAG: &str = "<unknown>";
 #[derive(Debug)]
 pub enum TagObject {
     Commit(Commit),
-    Tag(MercuryTag),
+    Tag(git_internalTag),
     Tree(Tree),
     Blob(Blob),
 }
@@ -79,7 +79,7 @@ pub async fn create(name: &str, message: Option<String>) -> Result<(), anyhow::E
             .unwrap_or_else(|| DEFAULT_EMAIL.to_string());
         let tagger_signature = Signature::new(SignatureType::Tagger, user_name, user_email);
 
-        let mercury_tag = MercuryTag::new(
+        let git_internal_tag = git_internalTag::new(
             head_commit_id,
             ObjectType::Commit,
             name.to_string(),
@@ -87,12 +87,12 @@ pub async fn create(name: &str, message: Option<String>) -> Result<(), anyhow::E
             msg,
         );
 
-        // The ID is now calculated inside MercuryTag::new, so we can use it directly.
-        let tag_data = mercury_tag.to_data()?;
+        // The ID is now calculated inside git_internalTag::new, so we can use it directly.
+        let tag_data = git_internal_tag.to_data()?;
         let storage = ClientStorage::init(path::objects());
-        storage.put(&mercury_tag.id, &tag_data, mercury_tag.get_type())?;
+        storage.put(&git_internal_tag.id, &tag_data, git_internal_tag.get_type())?;
 
-        ref_target_id = mercury_tag.id;
+        ref_target_id = git_internal_tag.id;
     } else {
         // For lightweight tags, the target is the commit itself
         ref_target_id = head_commit_id;
@@ -212,7 +212,7 @@ pub async fn load_object_trait(hash: &SHA1) -> Result<TagObject, GitError> {
             Ok(TagObject::Commit(commit))
         }
         ObjectType::Tag => {
-            let tag = load_object::<MercuryTag>(hash)
+            let tag = load_object::<git_internalTag>(hash)
                 .map_err(|e| GitError::ObjectNotFound(format!("{}: {}", hash, e)))?;
             Ok(TagObject::Tag(tag))
         }

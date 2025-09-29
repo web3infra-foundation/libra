@@ -1,8 +1,8 @@
 use ceres::protocol::ServiceType::UploadPack;
 use clap::Parser;
+use git_internal::hash::SHA1;
+use git_internal::internal::object::commit::Commit;
 use indicatif::ProgressBar;
-use mercury::hash::SHA1;
-use mercury::internal::object::commit::Commit;
 use sea_orm::TransactionTrait;
 use std::io;
 use std::time::Instant;
