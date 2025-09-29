@@ -1,0 +1,44 @@
+{
+    "users": {
+        "User::\"private\"": {
+            "euid": "User::\"private\"",
+            "parents": [
+                "UserGroup::\"admin\""
+            ]
+        }
+    },
+    "repos": {
+        "Repository::\"project/bens_private\"": {
+            "euid": "Repository::\"/project/bens_private\"",
+            "is_private": true,
+            "admins": "UserGroup::\"admin\"",
+            "maintainers": "UserGroup::\"maintainer\"",
+            "readers": "UserGroup::\"reader\"",
+            "parents": []
+        }
+    },
+    "user_groups": {
+        "UserGroup::\"admin\"": {
+            "euid": "UserGroup::\"admin\"",
+            "parents": [
+                "UserGroup::\"maintainer\""
+            ]
+        },
+        "UserGroup::\"maintainer\"": {
+            "euid": "UserGroup::\"maintainer\"",
+            "parents": [
+                "UserGroup::\"reader\""
+            ]
+        },
+        "UserGroup::\"reader\"": {
+            "euid": "UserGroup::\"reader\"",
+            "parents": []
+        }
+    },
+    "merge_requests": {
+
+    },
+    "issues": {
+
+    }
+}

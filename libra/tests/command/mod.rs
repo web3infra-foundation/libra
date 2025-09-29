@@ -1,4 +1,4 @@
-use common::utils::format_commit_msg;
+use libra::utils::util::format_commit_msg;
 use libra::command::branch::execute;
 use libra::command::branch::BranchArgs;
 use libra::command::get_target_commit;
