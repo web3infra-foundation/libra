@@ -1083,17 +1083,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a8241f3ebb85c056b509d4327ad0358fbbba6ffb340bf388f26350aeda225b1"
 
 [[package]]
-name = "bellatrix"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "common",
- "reqwest",
- "serde",
- "tracing",
-]
-
-[[package]]
 name = "better_default"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
