@@ -10,7 +10,6 @@ members = [
     "jupiter/callisto",
     "neptune",
     "common",
-    "vault",
     "saturn",
 ]
 
@@ -23,7 +22,6 @@ common = { path = "common" }
 neptune = { path = "neptune" }
 jupiter = { path = "jupiter" }
 callisto = { path = "jupiter/callisto" }
-vault = { path = "vault" }
 bellatrix = { path = "bellatrix" }
 saturn = { path = "saturn" }
 
