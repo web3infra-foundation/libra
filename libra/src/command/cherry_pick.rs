@@ -6,7 +6,7 @@ use crate::utils::object_ext::BlobExt;
 use crate::utils::object_ext::TreeExt;
 use crate::utils::{path, util};
 use clap::Parser;
-use common::utils::format_commit_msg;
+use crate::common_utils::format_commit_msg;
 use git_internal::hash::SHA1;
 use git_internal::internal::index::{Index, IndexEntry};
 use git_internal::internal::object::commit::Commit;

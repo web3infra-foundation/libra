@@ -113,7 +113,7 @@ pub async fn get_target_commit(branch_or_commit: &str) -> Result<SHA1, Box<dyn s
 
 #[cfg(test)]
 mod tests {
-    use common::utils::{format_commit_msg, parse_commit_msg};
+    use crate::common_utils::{format_commit_msg, parse_commit_msg};
     use git_internal::internal::object::commit::Commit;
     use serial_test::serial;
     use tempfile::tempdir;

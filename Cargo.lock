@@ -3544,7 +3544,6 @@ dependencies = [
  "chrono",
  "clap",
  "colored",
- "common",
  "flate2",
  "futures",
  "futures-util",

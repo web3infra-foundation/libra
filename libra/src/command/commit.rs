@@ -14,7 +14,7 @@ use crate::utils::client_storage::ClientStorage;
 use crate::utils::path;
 use crate::utils::util;
 use clap::Parser;
-use common::utils::{check_conventional_commits_message, format_commit_msg};
+use crate::common_utils::{check_conventional_commits_message, format_commit_msg};
 use git_internal::hash::SHA1;
 use git_internal::internal::index::Index;
 use git_internal::internal::object::ObjectTrait;
