@@ -1,7 +1,3 @@
-use callisto::lfs_objects;
-use callisto::sea_orm_active_enums::StorageTypeEnum;
-use chrono::{DateTime, Duration, Utc};
-use common::config::LFSConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -36,52 +32,6 @@ pub enum Action {
     Upload,
     #[serde(rename = "verify")]
     Verify,
-}
-
-#[derive(Debug, Clone)]
-pub struct MetaObject {
-    pub oid: String,
-    pub size: i64,
-    pub exist: bool,
-    pub splited: bool,
-}
-
-impl From<lfs_objects::Model> for MetaObject {
-    fn from(value: lfs_objects::Model) -> Self {
-        Self {
-            oid: value.oid,
-            size: value.size,
-            exist: value.exist,
-            splited: value.splited,
-        }
-    }
-}
-
-impl From<MetaObject> for lfs_objects::Model {
-    fn from(value: MetaObject) -> Self {
-        Self {
-            oid: value.oid,
-            size: value.size,
-            exist: value.exist,
-            splited: value.splited,
-        }
-    }
-}
-
-impl MetaObject {
-    pub fn new(req_obj: &RequestObject, config: &LFSConfig) -> Self {
-        let splited = config.local.enable_split;
-        Self {
-            oid: req_obj.oid.to_string(),
-            size: req_obj.size,
-            exist: true,
-            splited: if StorageTypeEnum::AwsS3 == config.storage_type.clone().into() {
-                false
-            } else {
-                splited
-            },
-        }
-    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
@@ -153,6 +103,7 @@ impl Link {
             href: href.to_string(),
             header,
             expires_at: {
+                use chrono::{DateTime, Duration, Utc};
                 let expire_time: DateTime<Utc> = Utc::now() + Duration::try_seconds(86400).unwrap();
                 expire_time.to_rfc3339()
             },
@@ -300,7 +251,7 @@ pub struct UnlockResponse {
     pub message: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug, Default)]
 pub struct LockList {
     pub locks: Vec<Lock>,
     pub next_cursor: String,
@@ -333,4 +284,13 @@ pub struct LockListQuery {
     pub limit: String,
     #[serde(default)]
     pub refspec: String,
+}
+
+// Define MetaObject as it's used in ResponseObject::new
+#[derive(Debug, Clone)]
+pub struct MetaObject {
+    pub oid: String,
+    pub size: i64,
+    pub exist: bool,
+    pub splited: bool,
 }

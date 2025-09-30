@@ -4,7 +4,7 @@ use crate::internal::protocol::ProtocolClient;
 use crate::internal::protocol::https_client::BasicAuth;
 use crate::utils::{lfs, util};
 use anyhow::anyhow;
-use ceres::lfs::lfs_structs::{
+use crate::lfs_structs::{
     Action, BatchRequest, ChunkDownloadObject, FetchchunkResponse, LockList, LockListQuery,
     LockRequest, ObjectError, Operation, Ref, RequestObject, ResponseObject, UnlockRequest,
     VerifiableLockList, VerifiableLockRequest,

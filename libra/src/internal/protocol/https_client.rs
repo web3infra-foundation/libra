@@ -2,7 +2,7 @@ use super::{
     DiscRef, FetchStream, ProtocolClient, generate_upload_pack_content, parse_discovered_references,
 };
 use crate::command::ask_basic_auth;
-use ceres::protocol::ServiceType;
+use crate::git_protocol::ServiceType;
 use futures_util::{StreamExt, TryStreamExt};
 use git_internal::errors::GitError;
 use reqwest::header::CONTENT_TYPE;
@@ -195,7 +195,7 @@ mod tests {
 
     use crate::utils::test::init_debug_logger;
     use crate::utils::test::init_logger;
-    use ceres::protocol::ServiceType::UploadPack;
+    use crate::git_protocol::ServiceType::UploadPack;
     use tokio::io::AsyncReadExt;
     use tokio::io::AsyncWriteExt;
 

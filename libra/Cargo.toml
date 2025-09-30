@@ -7,12 +7,12 @@ edition = "2024"
 default = []
 
 [dependencies]
+chrono = { workspace = true, features = ["serde"] }
 http = { workspace = true }
 anyhow = { workspace = true }
 byte-unit = { workspace = true }
 byteorder = { workspace = true }
 bytes = { workspace = true }
-ceres = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 colored = { workspace = true }
 common = { workspace = true }

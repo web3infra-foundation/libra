@@ -1,6 +1,6 @@
 use bytes::{Bytes, BytesMut};
-use ceres::protocol::ServiceType;
-use ceres::protocol::smart::{add_pkt_line_string, read_pkt_line};
+use crate::git_protocol::ServiceType;
+use crate::git_protocol::{add_pkt_line_string, read_pkt_line};
 use git_internal::errors::GitError;
 use git_internal::hash::SHA1;
 use url::Url;

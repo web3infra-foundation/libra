@@ -3,7 +3,7 @@ use crate::internal::head::Head;
 use crate::internal::protocol::lfs_client::LFSClient;
 use crate::utils::path_ext::PathExt;
 use crate::utils::{lfs, path, util};
-use ceres::lfs::lfs_structs::LockListQuery;
+use crate::lfs_structs::LockListQuery;
 use clap::Subcommand;
 use git_internal::internal::index::Index;
 use reqwest::StatusCode;

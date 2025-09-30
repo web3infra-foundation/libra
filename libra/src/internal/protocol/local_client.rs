@@ -2,7 +2,7 @@ use super::{
     DiscRef, FetchStream, ProtocolClient, generate_upload_pack_content, parse_discovered_references,
 };
 use bytes::Bytes;
-use ceres::protocol::ServiceType;
+use crate::git_protocol::ServiceType;
 use futures_util::stream::{self, StreamExt};
 use git_internal::errors::GitError;
 use std::env;
@@ -131,7 +131,7 @@ impl LocalClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ceres::protocol::ServiceType;
+    use crate::git_protocol::ServiceType;
     use std::ffi::OsStr;
     use std::process::Command as StdCommand;
     use tempfile::tempdir;

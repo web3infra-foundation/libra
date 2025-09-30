@@ -6,7 +6,6 @@ edition = "2024"
 resolver = "2"
 members = [
     "libra",
-    "ceres",
     "jupiter",
     "jupiter/callisto",
     "neptune",
@@ -22,7 +21,6 @@ default-members = [
 
 [workspace.dependencies]
 common = { path = "common" }
-ceres = { path = "ceres" }
 neptune = { path = "neptune" }
 jupiter = { path = "jupiter" }
 callisto = { path = "jupiter/callisto" }
@@ -80,7 +78,7 @@ serial_test = "3.0"
 testcontainers = "0.25"
 thiserror = "2.0"
 threadpool = "1.0"
-tokio = "1.0"
+tokio = { version = "1.0", features = ["rt-multi-thread", "rt", "macros", "process"] }
 tokio-util = "0.7"
 tracing = "0.1"
 tracing-subscriber = "0.3"

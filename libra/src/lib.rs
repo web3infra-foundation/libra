@@ -2,7 +2,9 @@ use git_internal::errors::GitError;
 
 pub mod cli;
 pub mod command;
+pub mod git_protocol;
 pub mod internal;
+pub mod lfs_structs;
 pub mod utils;
 
 /// Execute the Libra command in `sync` way.

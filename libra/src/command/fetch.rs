@@ -1,4 +1,4 @@
-use ceres::protocol::ServiceType::{self, UploadPack};
+use crate::git_protocol::ServiceType::{self, UploadPack};
 use clap::Parser;
 use git_internal::hash::SHA1;
 use git_internal::internal::object::commit::Commit;
