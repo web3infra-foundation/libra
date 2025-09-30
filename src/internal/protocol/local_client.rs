@@ -1,8 +1,8 @@
 use super::{
     DiscRef, FetchStream, ProtocolClient, generate_upload_pack_content, parse_discovered_references,
 };
-use bytes::Bytes;
 use crate::git_protocol::ServiceType;
+use bytes::Bytes;
 use futures_util::stream::{self, StreamExt};
 use git_internal::errors::GitError;
 use std::env;

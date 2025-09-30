@@ -1,6 +1,6 @@
-use bytes::{Bytes, BytesMut};
 use crate::git_protocol::ServiceType;
 use crate::git_protocol::{add_pkt_line_string, read_pkt_line};
+use bytes::{Bytes, BytesMut};
 use git_internal::errors::GitError;
 use git_internal::hash::SHA1;
 use url::Url;

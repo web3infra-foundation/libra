@@ -13,15 +13,15 @@ use std::io::Write;
 #[cfg(unix)]
 use std::process::{Command, Stdio};
 
+use crate::diff_engine::Diff;
 use git_internal::hash::SHA1;
 use git_internal::internal::object::{blob::Blob, commit::Commit, tree::Tree};
-use crate::diff_engine::Diff;
 use std::collections::VecDeque;
 use std::str::FromStr;
 
+use crate::common_utils::parse_commit_msg;
 use crate::utils::object_ext::TreeExt;
 use crate::utils::util;
-use crate::common_utils::parse_commit_msg;
 #[derive(Parser, Debug)]
 pub struct LogArgs {
     /// Limit the number of output

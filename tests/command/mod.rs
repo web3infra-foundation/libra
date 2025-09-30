@@ -1,4 +1,3 @@
-use libra::common_utils::format_commit_msg;
 use git_internal::hash::SHA1;
 use git_internal::internal::object::commit::Commit;
 use git_internal::internal::object::tree::Tree;
@@ -16,6 +15,7 @@ use libra::command::{
     load_object,
     remove::{self, RemoveArgs},
 };
+use libra::common_utils::format_commit_msg;
 use libra::internal::branch::Branch;
 use libra::internal::head::Head;
 use libra::{

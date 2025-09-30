@@ -4,6 +4,7 @@ use std::{
     path::PathBuf,
 };
 
+use crate::diff_engine::Diff;
 use clap::Parser;
 use git_internal::{
     hash::SHA1,
@@ -13,7 +14,6 @@ use git_internal::{
         pack::utils::calculate_object_hash,
     },
 };
-use crate::diff_engine::Diff;
 use similar;
 
 use crate::{

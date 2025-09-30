@@ -193,9 +193,9 @@ impl HttpsClient {
 #[cfg(test)]
 mod tests {
 
+    use crate::git_protocol::ServiceType::UploadPack;
     use crate::utils::test::init_debug_logger;
     use crate::utils::test::init_logger;
-    use crate::git_protocol::ServiceType::UploadPack;
     use tokio::io::AsyncReadExt;
     use tokio::io::AsyncWriteExt;
 

@@ -1,4 +1,5 @@
 use crate::command::{load_object, save_object};
+use crate::common_utils::format_commit_msg;
 use crate::internal::branch::Branch;
 use crate::internal::head::Head;
 use crate::internal::reflog::{ReflogAction, ReflogContext, with_reflog};
@@ -6,7 +7,6 @@ use crate::utils::object_ext::BlobExt;
 use crate::utils::object_ext::TreeExt;
 use crate::utils::{path, util};
 use clap::Parser;
-use crate::common_utils::format_commit_msg;
 use git_internal::hash::SHA1;
 use git_internal::internal::index::{Index, IndexEntry};
 use git_internal::internal::object::commit::Commit;

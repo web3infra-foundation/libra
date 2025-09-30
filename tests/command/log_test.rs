@@ -3,9 +3,9 @@ use clap::Parser;
 use git_internal::hash::SHA1;
 use git_internal::internal::object::commit::Commit;
 use git_internal::internal::object::{blob::Blob, tree::Tree};
+use libra::diff_engine::Diff;
 use libra::utils::object_ext::TreeExt;
 use libra::utils::util;
-use libra::diff_engine::Diff;
 use std::cmp::min;
 use std::str::FromStr;
 #[tokio::test]

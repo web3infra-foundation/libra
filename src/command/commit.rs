@@ -6,6 +6,7 @@ use std::{collections::HashSet, path::PathBuf};
 const EMPTY_TREE_HASH: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 use crate::command::load_object;
+use crate::common_utils::{check_conventional_commits_message, format_commit_msg};
 use crate::internal::branch::Branch;
 use crate::internal::config::Config as UserConfig;
 use crate::internal::head::Head;
@@ -14,7 +15,6 @@ use crate::utils::client_storage::ClientStorage;
 use crate::utils::path;
 use crate::utils::util;
 use clap::Parser;
-use crate::common_utils::{check_conventional_commits_message, format_commit_msg};
 use git_internal::hash::SHA1;
 use git_internal::internal::index::Index;
 use git_internal::internal::object::ObjectTrait;

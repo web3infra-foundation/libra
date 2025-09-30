@@ -26,7 +26,10 @@ impl FromStr for ServiceType {
         match s {
             "git-upload-pack" => Ok(ServiceType::UploadPack),
             "git-receive-pack" => Ok(ServiceType::ReceivePack),
-            _ => Err(GitError::InvalidArgument(format!("Invalid service name: {}", s))),
+            _ => Err(GitError::InvalidArgument(format!(
+                "Invalid service name: {}",
+                s
+            ))),
         }
     }
 }
