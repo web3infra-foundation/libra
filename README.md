@@ -34,7 +34,7 @@ Options:
 ```
 ## Features
 ### Clean Code
-Our code is designed to be clean and easy to read,
+Our code is designed to be clean and easy to read, 
 ensuring that it is both maintainable and understandable for developers of all skill levels.
 
 ### Cross-Platform
@@ -43,14 +43,14 @@ ensuring that it is both maintainable and understandable for developers of all s
 - [x] MacOS
 
 ### Compatibility with Git
-Our implementation is essentially fully compatible with `Git`
-(developed with reference to the `Git` documentation),
-including formats such as `objects`, `index`, `pack`, and `pack-index`.
+Our implementation is essentially fully compatible with `Git` 
+(developed with reference to the `Git` documentation), 
+including formats such as `objects`, `index`, `pack`, and `pack-index`. 
 Therefore, it can interact seamlessly with `Git` servers (like `push` and `pull`).
 
 ### Differences from Git:
 While maintaining compatibility with `Git`, we have made some innovations and changes:
-we use an `SQLite` database to manage loosely structured files such as `config`, `HEAD`, and `refs`,
+we use an `SQLite` database to manage loosely structured files such as `config`, `HEAD`, and `refs`, 
 achieving unified management.
 
 ## Functions
