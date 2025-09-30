@@ -6,10 +6,6 @@ edition = "2024"
 resolver = "2"
 members = [
     "libra",
-    "jupiter",
-    "jupiter/callisto",
-    "common",
-    "saturn",
 ]
 
 default-members = [
@@ -17,13 +13,6 @@ default-members = [
 ]
 
 [workspace.dependencies]
-common = { path = "common" }
-neptune = { path = "neptune" }
-jupiter = { path = "jupiter" }
-callisto = { path = "jupiter/callisto" }
-bellatrix = { path = "bellatrix" }
-saturn = { path = "saturn" }
-
 git-internal = "0.1.0"
 
 ahash = "0.8"
