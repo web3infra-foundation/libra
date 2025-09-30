@@ -13,7 +13,7 @@ use git_internal::{
         pack::utils::calculate_object_hash,
     },
 };
-use neptune::Diff;
+use crate::diff_engine::Diff;
 use similar;
 
 use crate::{

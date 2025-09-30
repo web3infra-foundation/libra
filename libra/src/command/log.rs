@@ -15,7 +15,7 @@ use std::process::{Command, Stdio};
 
 use git_internal::hash::SHA1;
 use git_internal::internal::object::{blob::Blob, commit::Commit, tree::Tree};
-use neptune::Diff;
+use crate::diff_engine::Diff;
 use std::collections::VecDeque;
 use std::str::FromStr;
 
