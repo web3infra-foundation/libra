@@ -102,16 +102,20 @@ pub async fn execute(args: CommitArgs) {
     }
 
     //Find commit message source
-    let message = if args.message.is_some() {
-        args.message.unwrap()
-    } else if args.file.is_some() {
-        //get message from file
-        match tokio::fs::read_to_string(args.file.unwrap()).await {
-            Ok(msg) => msg,
-            Err(e) => panic!("fatal: failed to read commit message from file, error message: {}", e.to_string()),
+    let message = match (args.message, args.file) {
+        //from -m
+        (Some(msg), _) => msg,
+        //from file
+        (None, Some(file_path)) => {
+            match tokio::fs::read_to_string(file_path).await {
+                Ok(msg) => msg,
+                Err(e) => panic!("fatal: failed to read commit message from file: {}", e),
+            }
         }
-    } else {
-        panic!("fatal: no commit message provided")
+        //no commit message, which is not supposed to happen
+        (None, None) => {
+            panic!("fatal: no commit message provided")
+        }
     };
 
     //Prepare commit message
@@ -322,9 +326,10 @@ async fn new_reflog_context(commit_id: &str, message: &str) -> ReflogContext {
 mod test {
     use std::env;
 
-    use git_internal::internal::object::ObjectTrait;
+    use git_internal::internal::object::{signature::Signature, ObjectTrait};
     use serial_test::serial;
     use tempfile::tempdir;
+    use tokio::{fs::{self, File}, io::{AsyncReadExt, AsyncWriteExt}};
 
     use crate::utils::test::*;
 
@@ -371,6 +376,73 @@ mod test {
         let args = CommitArgs::try_parse_from(["commit", "-F", "unreachable_file"]);
         assert!(args.is_ok());
         assert!(args.unwrap().file.is_some()); 
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_commit_message_from_file() {
+
+        let test_path = "test_data.txt";
+        
+        // All sorts of edge cases
+        let test_cases = vec![
+            // Regular string
+            "Hello, World! 你好，世界！",
+            // Special characters
+            "Special chars: \n\t\r\\\"'",
+            // Unicode
+            "Emoji: 😀🎉🚀, Unicode:  Café café",
+            // Empty
+            "",
+            // Mixed
+            "Mix: 中文\n\tEmoji😀\rSpecial\\\"'",
+        ];
+
+        for test_data in test_cases {
+            let bytes = test_data.as_bytes();
+            // Async write file
+            let mut file = File::create(&test_path).await.expect("create file failed");
+            file.write_all(bytes).await.expect("write test data to file failed");
+            file.sync_all().await.expect("write test data to file failed");
+
+            // Async read file
+            let content = tokio::fs::read_to_string(test_path).await.unwrap();
+
+            // Mock author
+            let author = Signature { 
+                signature_type: git_internal::internal::object::signature::SignatureType::Author, 
+                name: "test".to_string(), 
+                email: "test".to_string(), 
+                timestamp: 1, 
+                timezone: "test".to_string()
+            };
+
+            // Mock commiter
+            let commiter = Signature { 
+                signature_type: git_internal::internal::object::signature::SignatureType::Committer, 
+                name: "test".to_string(), 
+                email: "test".to_string(), 
+                timestamp: 1, 
+                timezone: "test".to_string()
+            };
+                
+            // Mock commit
+            let commit = Commit::new(author, commiter, SHA1([0; 20]), Vec::new(), &content);
+
+            // Commit to data
+            let commit_data = commit
+                .to_data()
+                .unwrap();
+
+            // Parse data
+            let message = Commit::from_bytes(&commit_data, commit.id).unwrap().message;
+
+            // Test eq
+            assert_eq!(message, test_data);
+
+            // Clean up
+            fs::remove_file(&test_path).await.expect("cleaning test file failed, please remove test file manually");
+        }
     }
 
     #[tokio::test]
