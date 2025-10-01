@@ -63,7 +63,7 @@ pub struct Tag {
 ///
 /// * `name` - The name of the tag.
 /// * `message` - If `Some`, creates an annotated tag with the given message. If `None`, creates a lightweight tag.
-pub async fn create(name: &str, message: Option<String>,force:bool) -> Result<(), anyhow::Error> {
+pub async fn create(name: &str, message: Option<String>, force: bool) -> Result<(), anyhow::Error> {
     let head_commit_id = Head::current_commit()
         .await
         .ok_or_else(|| anyhow::anyhow!("Cannot create tag: HEAD does not point to a commit"))?;

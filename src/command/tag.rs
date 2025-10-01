@@ -22,7 +22,7 @@ pub struct TagArgs {
     #[clap(short, long)]
     pub message: Option<String>,
 
-    #[clap(short,long,group="action")]
+    #[clap(short, long, group = "action")]
     pub force: bool,
 
 }
@@ -37,7 +37,7 @@ pub async fn execute(args: TagArgs) {
         if args.delete {
             delete_tag(&name).await;
         } else if args.message.is_some() {
-            create_tag(&name, args.message,args.force).await;
+            create_tag(&name, args.message, args.force).await;
         } else {
             show_tag(&name).await;
         }
@@ -46,7 +46,7 @@ pub async fn execute(args: TagArgs) {
     }
 }
 
-async fn create_tag(tag_name: &str, message: Option<String>,force:bool) {
+async fn create_tag(tag_name: &str, message: Option<String>, force: bool) {
     match tag::create(tag_name, message,force).await {
         Ok(_) => (),
         Err(e) => eprintln!("fatal: {}", e),
@@ -168,7 +168,7 @@ mod tests {
         assert_eq!(tags[0].name, "v1.0-annotated");
         assert_eq!(tags[0].object.get_type(), ObjectType::Tag);
 
-        //check message
+        // Check message
         let result = tag::find_tag_and_commit("v1.0-annotated").await;
         assert!(result.is_ok());
         let (object, _) = result.unwrap().unwrap();
