@@ -63,10 +63,24 @@ pub struct Tag {
 ///
 /// * `name` - The name of the tag.
 /// * `message` - If `Some`, creates an annotated tag with the given message. If `None`, creates a lightweight tag.
-pub async fn create(name: &str, message: Option<String>) -> Result<(), anyhow::Error> {
+pub async fn create(name: &str, message: Option<String>,force:bool) -> Result<(), anyhow::Error> {
     let head_commit_id = Head::current_commit()
         .await
         .ok_or_else(|| anyhow::anyhow!("Cannot create tag: HEAD does not point to a commit"))?;
+
+    let db = get_db_conn_instance().await;
+    let exists = reference::Entity::find()
+        .filter(reference::Column::Name.eq(format!("{}{}", TAG_REF_PREFIX, name)))
+        .filter(reference::Column::Kind.eq(reference::ConfigKind::Tag))
+        .one(db)
+        .await?;
+
+    if exists.is_some() && !force {
+        return Err(anyhow::anyhow!("Tag '{}' already exists", name));
+    } else if exists.is_some() && force {
+        // Delete existing tag if force is true
+        delete(name).await?;
+    }
 
     let ref_target_id: SHA1;
     if let Some(msg) = message {
