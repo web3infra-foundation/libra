@@ -25,15 +25,19 @@ use std::process::Command;
 
 #[derive(Parser, Debug, Default)]
 pub struct CommitArgs {
-    #[arg(short, long)]
-    pub message: String,
+    #[arg(short, long, required_unless_present("file"))]
+    pub message: Option<String>,
+
+    /// read message from file
+    #[arg(short = 'F', long, required_unless_present("message"))]
+    pub file: Option<String>,
 
     /// allow commit with empty index
     #[arg(long)]
     pub allow_empty: bool,
 
     /// check if the commit message follows conventional commits
-    #[arg(long, requires("message"))]
+    #[arg(long)]
     pub conventional: bool,
 
     /// amend the last commit
@@ -97,6 +101,19 @@ pub async fn execute(args: CommitArgs) {
         }
     }
 
+    //Find commit message source
+    let message = if args.message.is_some() {
+        args.message.unwrap()
+    } else if args.file.is_some() {
+        //get message from file
+        match tokio::fs::read_to_string(args.file.unwrap()).await {
+            Ok(msg) => msg,
+            Err(e) => panic!("fatal: failed to read commit message from file, error message: {}", e.to_string()),
+        }
+    } else {
+        panic!("fatal: no commit message provided")
+    };
+
     //Prepare commit message
     let commit_message = if args.signoff {
         // get user
@@ -109,9 +126,9 @@ pub async fn execute(args: CommitArgs) {
 
         // get sign line
         let signoff_line = format!("Signed-off-by: {user_name} <{user_email}>");
-        format!("{}\n\n{signoff_line}", args.message)
+        format!("{}\n\n{signoff_line}", message)
     } else {
-        args.message.clone()
+        message.clone()
     };
 
     // check format(if needed)
@@ -140,7 +157,7 @@ pub async fn execute(args: CommitArgs) {
         let commit = Commit::from_tree_id(
             tree.id,
             grandpa_commit_id,
-            &format_commit_msg(&args.message, None),
+            &format_commit_msg(&message, None),
         );
 
         storage
@@ -156,7 +173,7 @@ pub async fn execute(args: CommitArgs) {
     let commit = Commit::from_tree_id(
         tree.id,
         parents_commit_ids,
-        &format_commit_msg(&args.message, None),
+        &format_commit_msg(&message, None),
     );
 
     // TODO  default signature created in `from_tree_id`, wait `git config` to set correct user info
@@ -350,6 +367,10 @@ mod test {
         let args = args.unwrap();
         assert!(args.amend);
         assert!(args.signoff);
+
+        let args = CommitArgs::try_parse_from(["commit", "-F", "unreachable_file"]);
+        assert!(args.is_ok());
+        assert!(args.unwrap().file.is_some()); 
     }
 
     #[tokio::test]
