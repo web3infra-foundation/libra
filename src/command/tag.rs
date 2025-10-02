@@ -47,7 +47,7 @@ pub async fn execute(args: TagArgs) {
 }
 
 async fn create_tag(tag_name: &str, message: Option<String>, force: bool) {
-    match tag::create(tag_name, message,force).await {
+    match tag::create(tag_name, message, force).await {
         Ok(_) => (),
         Err(e) => eprintln!("fatal: {}", e),
     }
