@@ -412,19 +412,41 @@ pub fn check_gitignore(work_dir: &PathBuf, target_file: &PathBuf) -> bool {
     dir.pop();
 
     while dir.starts_with(work_dir) {
-        let mut cur_file = dir.clone();
-        cur_file.push(".libraignore");
-        if cur_file.exists() {
-            let (ignore, err) = Gitignore::new(&cur_file);
-            if let Some(e) = err {
-                println!(
-                    "warning: There are some invalid globs in libraignore file {cur_file:#?}:\n{e}\n"
-                );
-            }
-            if let Match::Ignore(_) = ignore.matched(target_file, false) {
-                return true;
-            }
+        let gitignore_path = dir.join(".libraignore");
+        if !gitignore_path.exists() {
+            dir.pop();
+            continue;
         }
+
+        let (ignore, err) = Gitignore::new(&gitignore_path);
+        if let Some(e) = err {
+            eprintln!(
+                "warning: There are some invalid globs in libraignore file {gitignore_path:#?}:\n{e}\n"
+            );
+        }
+
+        match ignore.matched(target_file, target_file.is_dir()) {
+            Match::Ignore(_) => return true,
+            Match::Whitelist(_) => return false,
+            Match::None => ()
+        }
+
+        let mut parent_dir = if target_file.is_dir() {
+            target_file.clone()
+        }
+        else {
+            target_file.parent().unwrap().to_path_buf()
+        };
+
+        while parent_dir.starts_with(work_dir) {
+            match ignore.matched(&parent_dir, true) {
+                Match::Ignore(_) => return true,
+                Match::Whitelist(_) => return false,
+                Match::None => ()
+            };
+            parent_dir.pop();
+        }
+
         dir.pop();
     }
 
@@ -506,7 +528,7 @@ mod test {
     #[serial]
     #[ignore]
     /// Tests that files matching patterns in .libraignore are correctly identified as ignored.
-    fn test_check_gitignore_ignore() {
+    fn test_check_gitignore_ignore_files() {
         let temp_path = tempdir().unwrap();
         let _guard = test::ChangeDirGuard::new(temp_path.path());
 
@@ -520,8 +542,23 @@ mod test {
     #[test]
     #[serial]
     #[ignore]
+    /// Tests that directories matching patterns in .libraignore are correctly identified as ignored.
+    fn test_check_gitignore_ignore_directory() {
+        let temp_path = tempdir().unwrap();
+        let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+        let mut gitignore_file = fs::File::create(".libraignore").unwrap();
+        gitignore_file.write_all(b"foo/").unwrap();
+
+        let target = temp_path.path().join("foo/bar");
+        assert!(check_gitignore(&temp_path.keep(), &target));
+    }
+
+    #[test]
+    #[serial]
+    #[ignore]
     /// Tests ignore pattern matching in subdirectories with .libraignore files at different directory levels.
-    fn test_check_gitignore_ignore_subdirectory() {
+    fn test_check_gitignore_ignore_subdirectory_files() {
         let temp_path = tempdir().unwrap();
         let _guard = test::ChangeDirGuard::new(temp_path.path());
 
@@ -556,7 +593,7 @@ mod test {
     #[serial]
     #[ignore]
     /// Tests that files not matching subdirectory-specific patterns in .libraignore are correctly identified as not ignored.
-    fn test_check_gitignore_not_ignore_subdirectory() {
+    fn test_check_gitignore_not_ignore_subdirectory_files() {
         let temp_path = tempdir().unwrap();
         let _guard = test::ChangeDirGuard::new(temp_path.path());
 
