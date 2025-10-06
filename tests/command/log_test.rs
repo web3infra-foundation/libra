@@ -194,7 +194,8 @@ async fn test_log_patch_no_pathspec() {
     })
     .await;
     commit::execute(CommitArgs {
-        message: "Add A".to_string(),
+        message: Some("Add A".to_string()),
+        file: None,
         allow_empty: false,
         conventional: false,
         amend: false,
@@ -216,7 +217,8 @@ async fn test_log_patch_no_pathspec() {
     })
     .await;
     commit::execute(CommitArgs {
-        message: "Add B".to_string(),
+        message: Some("Add B".to_string()),
+        file: None,
         allow_empty: false,
         conventional: false,
         amend: false,
@@ -306,7 +308,8 @@ async fn test_log_patch_with_pathspec() {
     .await;
 
     commit::execute(CommitArgs {
-        message: "Add A and B".to_string(),
+        message: Some("Add A and B".to_string()),
+        file: None,
         allow_empty: false,
         conventional: false,
         amend: false,

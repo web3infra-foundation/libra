@@ -45,7 +45,8 @@ async fn test_basic_diff() {
 
     // Create initial commit
     commit::execute(CommitArgs {
-        message: "Initial commit".to_string(),
+        message: Some("Initial commit".to_string()),
+        file: None,
         allow_empty: false,
         conventional: false,
         amend: false,
@@ -88,7 +89,8 @@ async fn test_diff_staged() {
 
     // Create initial commit
     commit::execute(CommitArgs {
-        message: "Initial commit".to_string(),
+        message: Some("Initial commit".to_string()),
+        file: None,
         allow_empty: false,
         conventional: false,
         amend: false,
@@ -147,7 +149,8 @@ async fn test_diff_between_commits() {
     .await;
 
     commit::execute(CommitArgs {
-        message: "Initial commit".to_string(),
+        message: Some("Initial commit".to_string()),
+        file: None,
         allow_empty: false,
         conventional: false,
         amend: false,
@@ -174,7 +177,8 @@ async fn test_diff_between_commits() {
     .await;
 
     commit::execute(CommitArgs {
-        message: "Second commit".to_string(),
+        message: Some("Second commit".to_string()),
+        file: None,
         allow_empty: false,
         conventional: false,
         amend: false,
@@ -225,7 +229,8 @@ async fn test_diff_with_pathspec() {
     .await;
 
     commit::execute(CommitArgs {
-        message: "Initial commit".to_string(),
+        message: Some("Initial commit".to_string()),
+        file: None,
         allow_empty: false,
         conventional: false,
         amend: false,
@@ -268,7 +273,8 @@ async fn test_diff_output_to_file() {
     .await;
 
     commit::execute(CommitArgs {
-        message: "Initial commit".to_string(),
+        message: Some("Initial commit".to_string()),
+        file: None,
         allow_empty: false,
         conventional: false,
         amend: false,
@@ -327,7 +333,8 @@ async fn test_diff_algorithms() {
     .await;
 
     commit::execute(CommitArgs {
-        message: "Initial commit".to_string(),
+        message: Some("Initial commit".to_string()),
+        file: None,
         allow_empty: false,
         conventional: false,
         amend: false,

@@ -14,7 +14,8 @@ async fn test_execute_commit_with_empty_index_fail() {
     let _guard = ChangeDirGuard::new(temp_path.path());
 
     let args = CommitArgs {
-        message: "init".to_string(),
+        message: Some("init".to_string()),
+        file: None,
         allow_empty: false,
         conventional: false,
         amend: false,
@@ -37,7 +38,8 @@ async fn test_execute_commit() {
     // create first empty commit
     {
         let args = CommitArgs {
-            message: "init".to_string(),
+            message: Some("init".to_string()),
+            file: None,
             allow_empty: true,
             conventional: false,
             amend: false,
@@ -63,7 +65,8 @@ async fn test_execute_commit() {
     // modify first empty commit
     {
         let args = CommitArgs {
-            message: "init commit".to_string(),
+            message: Some("init commit".to_string()),
+            file: None,
             allow_empty: true,
             conventional: false,
             amend: true,
@@ -106,7 +109,8 @@ async fn test_execute_commit() {
 
     {
         let args = CommitArgs {
-            message: "add some files".to_string(),
+            message: Some("add some files".to_string()),
+            file: None,
             allow_empty: false,
             conventional: false,
             amend: false,
@@ -135,7 +139,8 @@ async fn test_execute_commit() {
     //modify new commit
     {
         let args = CommitArgs {
-            message: "add some txt files".to_string(),
+            message: Some("add some txt files".to_string()),
+            file: None,
             allow_empty: true,
             conventional: false,
             amend: true,

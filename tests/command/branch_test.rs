@@ -12,7 +12,8 @@ async fn test_branch() {
     let _guard = ChangeDirGuard::new(temp_path.path());
 
     let commit_args = CommitArgs {
-        message: "first".to_string(),
+        message: Some("first".to_string()),
+        file: None,
         allow_empty: true,
         conventional: false,
         amend: false,
@@ -23,7 +24,8 @@ async fn test_branch() {
     let first_commit_id = Branch::find_branch("master", None).await.unwrap().commit;
 
     let commit_args = CommitArgs {
-        message: "second".to_string(),
+        message: Some("second".to_string()),
+        file: None,
         allow_empty: true,
         conventional: false,
         amend: false,
@@ -109,7 +111,8 @@ async fn test_create_branch_from_remote() {
     test::init_debug_logger();
 
     let args = CommitArgs {
-        message: "first".to_string(),
+        message: Some("first".to_string()),
+        file: None,
         allow_empty: true,
         conventional: false,
         amend: false,
@@ -148,7 +151,8 @@ async fn test_invalid_branch_name() {
     test::init_debug_logger();
 
     let args = CommitArgs {
-        message: "first".to_string(),
+        message: Some("first".to_string()),
+        file: None,
         allow_empty: true,
         conventional: false,
         amend: false,

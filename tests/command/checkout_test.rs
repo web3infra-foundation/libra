@@ -74,7 +74,8 @@ async fn test_checkout_module_functions() {
 
     // Initialize the main branch by creating an empty commit
     let commit_args = commit::CommitArgs {
-        message: "An empty initial commit".to_string(),
+        message: Some("An empty initial commit".to_string()),
+        file: None,
         allow_empty: true,
         conventional: false,
         amend: false,

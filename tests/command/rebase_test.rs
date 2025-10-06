@@ -25,7 +25,8 @@ async fn test_basic_rebase() {
     })
     .await;
     commit::execute(CommitArgs {
-        message: "C1: Add file.txt on master".to_string(),
+        message: Some("C1: Add file.txt on master".to_string()),
+        file: None,
         allow_empty: false,
         conventional: false,
         amend: false,
@@ -46,7 +47,8 @@ async fn test_basic_rebase() {
     })
     .await;
     commit::execute(CommitArgs {
-        message: "C2: Modify file.txt on master".to_string(),
+        message: Some("C2: Modify file.txt on master".to_string()),
+        file: None,
         allow_empty: false,
         conventional: false,
         amend: false,
@@ -76,7 +78,8 @@ async fn test_basic_rebase() {
     })
     .await;
     commit::execute(CommitArgs {
-        message: "F1: Add feature_a.txt on feature branch".to_string(),
+        message: Some("F1: Add feature_a.txt on feature branch".to_string()),
+        file: None,
         allow_empty: false,
         conventional: false,
         amend: false,
@@ -97,7 +100,8 @@ async fn test_basic_rebase() {
     })
     .await;
     commit::execute(CommitArgs {
-        message: "F2: Add feature_b.txt on feature branch".to_string(),
+        message: Some("F2: Add feature_b.txt on feature branch".to_string()),
+        file: None,
         allow_empty: false,
         conventional: false,
         amend: false,
@@ -126,7 +130,8 @@ async fn test_basic_rebase() {
     })
     .await;
     commit::execute(CommitArgs {
-        message: "C3: Add master_only.txt on master".to_string(),
+        message: Some("C3: Add master_only.txt on master".to_string()),
+        file: None,
         allow_empty: false,
         conventional: false,
         amend: false,
@@ -196,7 +201,8 @@ async fn test_rebase_already_up_to_date() {
     })
     .await;
     commit::execute(CommitArgs {
-        message: "First commit".to_string(),
+        message: Some("First commit".to_string()),
+        file: None,
         allow_empty: false,
         conventional: false,
         amend: false,
@@ -217,7 +223,8 @@ async fn test_rebase_already_up_to_date() {
     })
     .await;
     commit::execute(CommitArgs {
-        message: "Second commit".to_string(),
+        message: Some("Second commit".to_string()),
+        file: None,
         allow_empty: false,
         conventional: false,
         amend: false,
