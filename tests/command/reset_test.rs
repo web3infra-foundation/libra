@@ -20,7 +20,8 @@ async fn setup_standard_repo(temp_path: &std::path::Path) -> (SHA1, SHA1, SHA1, 
     })
     .await;
     commit::execute(CommitArgs {
-        message: "commit 1: add 1.txt".to_string(),
+        message: Some("commit 1: add 1.txt".to_string()),
+        file: None,
         allow_empty: false,
         conventional: false,
         amend: false,
@@ -52,7 +53,8 @@ async fn setup_standard_repo(temp_path: &std::path::Path) -> (SHA1, SHA1, SHA1, 
     })
     .await;
     commit::execute(CommitArgs {
-        message: "commit 2: add 2.txt".to_string(),
+        message: Some("commit 2: add 2.txt".to_string()),
+        file: None,
         allow_empty: false,
         conventional: false,
         amend: false,
@@ -84,7 +86,8 @@ async fn setup_standard_repo(temp_path: &std::path::Path) -> (SHA1, SHA1, SHA1, 
     })
     .await;
     commit::execute(CommitArgs {
-        message: "commit 3: add 3.txt".to_string(),
+        message: Some("commit 3: add 3.txt".to_string()),
+        file: None,
         allow_empty: false,
         conventional: false,
         amend: false,
@@ -116,7 +119,8 @@ async fn setup_standard_repo(temp_path: &std::path::Path) -> (SHA1, SHA1, SHA1, 
     })
     .await;
     commit::execute(CommitArgs {
-        message: "commit 4: add 4.txt".to_string(),
+        message: Some("commit 4: add 4.txt".to_string()),
+        file: None,
         allow_empty: false,
         conventional: false,
         amend: false,
