@@ -33,7 +33,8 @@ async fn test_basic_cherry_pick() {
     })
     .await;
     commit::execute(CommitArgs {
-        message: "C1: Initial commit, our common ancestor".to_string(),
+        message: Some("C1: Initial commit, our common ancestor".to_string()),
+        file: None,
         allow_empty: false,
         conventional: false,
         amend: false,
@@ -66,7 +67,8 @@ async fn test_basic_cherry_pick() {
     })
     .await;
     commit::execute(CommitArgs {
-        message: "C2: Add feature_a.txt".to_string(),
+        message: Some("C2: Add feature_a.txt".to_string()),
+        file: None,
         allow_empty: false,
         conventional: false,
         amend: false,
@@ -94,7 +96,8 @@ async fn test_basic_cherry_pick() {
     })
     .await;
     commit::execute(CommitArgs {
-        message: "C3: Add feature_b.txt".to_string(),
+        message: Some("C3: Add feature_b.txt".to_string()),
+        file: None,
         allow_empty: false,
         conventional: false,
         amend: false,
@@ -224,7 +227,8 @@ async fn test_cherry_pick_with_commit() {
     })
     .await;
     commit::execute(CommitArgs {
-        message: "Base commit".to_string(),
+        message: Some("Base commit".to_string()),
+        file: None,
         allow_empty: false,
         conventional: false,
         amend: false,
@@ -253,7 +257,8 @@ async fn test_cherry_pick_with_commit() {
     })
     .await;
     commit::execute(CommitArgs {
-        message: "Feature commit".to_string(),
+        message: Some("Feature commit".to_string()),
+        file: None,
         allow_empty: false,
         conventional: false,
         amend: false,
@@ -329,7 +334,8 @@ async fn test_cherry_pick_multiple_commits() {
     })
     .await;
     commit::execute(CommitArgs {
-        message: "Base commit".to_string(),
+        message: Some("Base commit".to_string()),
+        file: None,
         allow_empty: false,
         conventional: false,
         amend: false,
@@ -359,7 +365,8 @@ async fn test_cherry_pick_multiple_commits() {
     })
     .await;
     commit::execute(CommitArgs {
-        message: "Feature commit 1".to_string(),
+        message: Some("Feature commit 1".to_string()),
+        file: None,
         allow_empty: false,
         conventional: false,
         amend: false,
@@ -382,7 +389,8 @@ async fn test_cherry_pick_multiple_commits() {
     })
     .await;
     commit::execute(CommitArgs {
-        message: "Feature commit 2".to_string(),
+        message: Some("Feature commit 2".to_string()),
+        file: None,
         allow_empty: false,
         conventional: false,
         amend: false,

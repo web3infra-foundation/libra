@@ -38,7 +38,8 @@ async fn test_switch_function() {
     // create first empty commit
     {
         let args = CommitArgs {
-            message: "first".to_string(),
+            message: Some("first".to_string()),
+            file: None,
             allow_empty: true,
             conventional: false,
             amend: false,
@@ -81,7 +82,8 @@ async fn test_switch_function() {
         let commit_id_str = commit.id.to_string();
 
         let args = CommitArgs {
-            message: "second".to_string(),
+            message: Some("second".to_string()),
+            file: None,
             allow_empty: true,
             conventional: false,
             amend: false,
@@ -158,7 +160,8 @@ async fn test_detach_head_basic() {
 
     for i in 0..6 {
         let args = CommitArgs {
-            message: format!("commit_{i}"),
+            message: Some(format!("commit_{i}")),
+            file: None,
             allow_empty: true,
             conventional: false,
             amend: false,
@@ -198,7 +201,8 @@ async fn test_detach_head_basic() {
 
     for i in 6..12 {
         let args = CommitArgs {
-            message: format!("commit_{i}"),
+            message: Some(format!("commit_{i}")),
+            file: None,
             allow_empty: true,
             conventional: false,
             amend: false,

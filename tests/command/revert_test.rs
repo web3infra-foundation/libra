@@ -34,7 +34,8 @@ async fn test_basic_revert() {
     })
     .await;
     commit::execute(CommitArgs {
-        message: "C1: add 1.txt".to_string(),
+        message: Some("C1: add 1.txt".to_string()),
+        file: None,
         allow_empty: false,
         conventional: false,
         amend: false,
@@ -57,7 +58,8 @@ async fn test_basic_revert() {
     })
     .await;
     commit::execute(CommitArgs {
-        message: "C2: modify 1.txt".to_string(),
+        message: Some("C2: modify 1.txt".to_string()),
+        file: None,
         allow_empty: false,
         conventional: false,
         amend: false,
@@ -81,7 +83,8 @@ async fn test_basic_revert() {
     })
     .await;
     commit::execute(CommitArgs {
-        message: "C3: remove 1.txt, add 2.txt".to_string(),
+        message: Some("C3: remove 1.txt, add 2.txt".to_string()),
+        file: None,
         allow_empty: false,
         conventional: false,
         amend: false,
@@ -179,7 +182,8 @@ async fn test_revert_no_commit() {
     })
     .await;
     commit::execute(CommitArgs {
-        message: "Add test.txt".to_string(),
+        message: Some("Add test.txt".to_string()),
+        file: None,
         allow_empty: false,
         conventional: false,
         amend: false,
@@ -200,7 +204,8 @@ async fn test_revert_no_commit() {
     })
     .await;
     commit::execute(CommitArgs {
-        message: "Modify test.txt".to_string(),
+        message: Some("Modify test.txt".to_string()),
+        file: None,
         allow_empty: false,
         conventional: false,
         amend: false,
@@ -225,7 +230,8 @@ async fn test_revert_no_commit() {
 
     // Check that we can still commit the staged changes
     commit::execute(CommitArgs {
-        message: "Manual revert commit".to_string(),
+        message: Some("Manual revert commit".to_string()),
+        file: None,
         allow_empty: false,
         conventional: false,
         amend: false,
@@ -259,7 +265,8 @@ async fn test_revert_root_commit() {
     })
     .await;
     commit::execute(CommitArgs {
-        message: "Initial commit".to_string(),
+        message: Some("Initial commit".to_string()),
+        file: None,
         allow_empty: false,
         conventional: false,
         amend: false,
