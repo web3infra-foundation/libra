@@ -8,8 +8,8 @@ use libra::utils::object_ext::TreeExt;
 use libra::utils::util;
 use std::cmp::min;
 use std::str::FromStr;
-use std::fs;  // 添加 fs 导入
-use std::path::Path;  // 添加 Path 导入
+use std::fs;  
+use std::path::Path; 
 
 #[tokio::test]
 #[serial]
@@ -23,24 +23,6 @@ async fn test_get_reachable_commits() {
 
     let reachable_commits = get_reachable_commits(commit_id).await;
     assert_eq!(reachable_commits.len(), 6);
-}
-
-#[test]  // 移除 async，使用普通测试函数
-/// Test log name-only functionality in a real repository
-fn test_log_name_only_in_real_repo() {
-    // Create a temporary directory for testing
-    let test_dir = "test_log_name_only_temp";
-    if Path::new(test_dir).exists() {
-        fs::remove_dir_all(test_dir).unwrap();
-    }
-    fs::create_dir_all(test_dir).unwrap();
-    
-    // Note: Since this is a unit testing framework, you may need to use std::process::Command to actually execute commands.
-    // Or use the library's API to call functions directly.
-    
-    // 这里可以添加实际的测试逻辑
-    
-    fs::remove_dir_all(test_dir).unwrap();
 }
 
 #[tokio::test]
