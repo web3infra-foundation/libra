@@ -1,7 +1,7 @@
 use std::cmp::min;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-
+//
 use crate::command::load_object;
 use crate::internal::branch::Branch;
 use crate::internal::config::Config;
@@ -298,7 +298,7 @@ pub async fn execute(args: LogArgs) {
             if name_only {
                 let changed_files = get_changed_files_for_commit(&commit, paths.clone()).await;
                 if !changed_files.is_empty() {
-                    message.push_str("\n");
+                    message.push('\n');  
                     for file in changed_files {
                         message.push_str(&format!("{}\n", file));
                     }
@@ -391,30 +391,25 @@ async fn get_changed_files_for_commit(commit: &Commit, paths: Vec<PathBuf>) -> V
 
     // Added files (in new but not in old)
     for file in &new_files {
-        if !old_files.contains(file) {
-            if !should_filter || path_filter.contains(file) {
-                changed_files.push(format!("A\t{}", file.display()));
-            }
+        // 修复：合并嵌套 if 语句
+        if !old_files.contains(file) && (!should_filter || path_filter.contains(file)) {
+            changed_files.push(format!("A\t{}", file.display()));
         }
     }
 
     // Modified files (in both but different content)
     for (file, new_hash) in &new_blobs {
         if let Some((_, old_hash)) = old_blobs.iter().find(|(old_file, _)| old_file == file) {
-            if new_hash != old_hash {
-                if !should_filter || path_filter.contains(file) {
-                    changed_files.push(format!("M\t{}", file.display()));
-                }
+            if new_hash != old_hash && (!should_filter || path_filter.contains(file)) {
+                changed_files.push(format!("M\t{}", file.display()));
             }
         }
     }
 
     // Deleted files (in old but not in new)
     for file in &old_files {
-        if !new_files.contains(file) {
-            if !should_filter || path_filter.contains(file) {
-                changed_files.push(format!("D\t{}", file.display()));
-            }
+        if !new_files.contains(file) && (!should_filter || path_filter.contains(file)) {
+            changed_files.push(format!("D\t{}", file.display()));
         }
     }
 
@@ -556,17 +551,17 @@ mod tests {
     // Test parameter combination
     #[test]
     fn test_complex_arg_combinations() {
-    // Test multiple parameter combinations
-    let args = LogArgs::parse_from(&["libra", "log", "--name-only", "--oneline", "-n", "10"]);
-    assert!(args.name_only);
-    assert!(args.oneline);
-    assert_eq!(args.number, Some(10));
-    
-    let args = LogArgs::parse_from(&["libra", "log", "--name-only", "src/main.rs", "src/lib.rs"]);
-    assert!(args.name_only);
-    // Update expected pathspec value to include "log"
-    assert_eq!(args.pathspec, vec!["log", "src/main.rs", "src/lib.rs"]);
-}
+        // Test multiple parameter combinations
+        let args = LogArgs::parse_from(&["libra", "log", "--name-only", "--oneline", "-n", "10"]);
+        assert!(args.name_only);
+        assert!(args.oneline);
+        assert_eq!(args.number, Some(10));
+        
+        let args = LogArgs::parse_from(&["libra", "log", "--name-only", "src/main.rs", "src/lib.rs"]);
+        assert!(args.name_only);
+        // Update expected pathspec value to include "log"
+        assert_eq!(args.pathspec, vec!["log", "src/main.rs", "src/lib.rs"]);
+    }
 
     // Test parameter mutual exclusion logic
     #[test]
