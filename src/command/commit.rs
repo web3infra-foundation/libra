@@ -348,7 +348,7 @@ mod test {
         assert!(args.is_ok());
 
         let args = CommitArgs::try_parse_from(["commit", "--conventional"]);
-        assert!(args.is_err(), "conventional should require messag  e");
+        assert!(args.is_err(), "conventional should require message");
 
         let args = CommitArgs::try_parse_from(["commit"]);
         assert!(args.is_err(), "message is required");
