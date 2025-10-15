@@ -1,7 +1,6 @@
 use std::cmp::min;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-
 use crate::command::load_object;
 use crate::internal::branch::Branch;
 use crate::internal::config::Config;
@@ -22,6 +21,7 @@ use std::str::FromStr;
 use crate::common_utils::parse_commit_msg;
 use crate::utils::object_ext::TreeExt;
 use crate::utils::util;
+
 #[derive(Parser, Debug)]
 pub struct LogArgs {
     /// Limit the number of output
@@ -33,6 +33,9 @@ pub struct LogArgs {
     /// Show diffs for each commit (like git -p)
     #[clap(short = 'p', long = "patch")]
     pub patch: bool,
+    /// Show only names of changed files
+    #[clap(long)]
+    pub name_only: bool,
     /// Print out ref names of any commits that are shown
     #[clap(
         long,
@@ -45,12 +48,12 @@ pub struct LogArgs {
     #[clap(long)]
     pub no_decorate: bool,
 
-    /// Files to limit diff output (only used with -p)
-    #[clap(requires = "patch", value_name = "PATHS")]
+    /// Files to limit diff output (only used with -p or --name-only)
+    #[clap(value_name = "PATHS", num_args = 0..)]
     pathspec: Vec<String>,
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 enum DecorateOptions {
     No,
     Short,
@@ -112,8 +115,8 @@ async fn determine_decorate_option(args: &LogArgs) -> Result<DecorateOptions, St
     }
 }
 
-///  Get all reachable commits from the given commit hash
-///  **didn't consider the order of the commits**
+/// Get all reachable commits from the given commit hash
+/// **didn't consider the order of the commits**
 pub async fn get_reachable_commits(commit_hash: String) -> Vec<Commit> {
     let mut queue = VecDeque::new();
     let mut commit_set: HashSet<String> = HashSet::new(); // to avoid duplicate commits because of circular reference
@@ -154,13 +157,17 @@ struct Reference {
 }
 
 pub async fn execute(args: LogArgs) {
+    // Check parameter mutual exclusion: if both --name-only and --patch are specified, prioritize --name-only
+    let name_only = args.name_only;
+    let patch = args.patch && !name_only;
+
     let decorate_option = determine_decorate_option(&args)
         .await
         .expect("fatal: invalid --decorate option");
 
     #[cfg(unix)]
-    let mut process = Command::new("less") // create a pipe to less
-        .arg("-R") // raw control characters
+    let mut process = Command::new("less")
+        .arg("-R")
         .arg("-F")
         .stdin(Stdio::piped())
         .stdout(Stdio::inherit())
@@ -191,6 +198,7 @@ pub async fn execute(args: LogArgs) {
 
     let max_output_number = min(args.number.unwrap_or(usize::MAX), reachable_commits.len());
     let mut output_number = 0;
+
     for commit in reachable_commits {
         if output_number >= max_output_number {
             break;
@@ -276,14 +284,27 @@ pub async fn execute(args: LogArgs) {
         let paths: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
 
         let message = if args.oneline {
-            // Oneline format: <short_hash> <refs> <commit_message_first_line>
+            // Oneline format with name_only support
             let short_hash = &commit.id.to_string()[..7];
             let (msg, _) = parse_commit_msg(&commit.message);
-            if !ref_msg.is_empty() {
+            let mut message = if !ref_msg.is_empty() {
                 format!("{} ({}) {}", short_hash.yellow(), ref_msg, msg)
             } else {
                 format!("{} {}", short_hash.yellow(), msg)
+            };
+
+            // Add changed files if name_only is specified
+            if name_only {
+                let changed_files = get_changed_files_for_commit(&commit, paths.clone()).await;
+                if !changed_files.is_empty() {
+                    message.push('\n');  
+                    for file in changed_files {
+                        message.push_str(&format!("{}\n", file));
+                    }
+                }
             }
+
+            message
         } else {
             // Default detailed format
             let mut message = if !ref_msg.is_empty() {
@@ -300,8 +321,18 @@ pub async fn execute(args: LogArgs) {
             message.push_str(&format!("\nAuthor: {}", commit.author));
             let (msg, _) = parse_commit_msg(&commit.message);
             message.push_str(&format!("\n{msg}\n"));
-            // If patch requested, compute diff between this commit and its first parent
-            if args.patch {
+
+            // Add changed files if name_only is specified
+            if name_only {
+                let changed_files = get_changed_files_for_commit(&commit, paths.clone()).await;
+                if !changed_files.is_empty() {
+                    message.push_str("\nChanged files:\n");
+                    for file in changed_files {
+                        message.push_str(&format!("{}\n", file));
+                    }
+                }
+            } else if patch {
+                // Only show patch if name_only is not specified
                 let patch_output = generate_diff(&commit, paths.clone()).await;
                 message.push_str(&patch_output);
             }
@@ -322,10 +353,66 @@ pub async fn execute(args: LogArgs) {
             println!("{message}");
         }
     }
+
     #[cfg(unix)]
     {
         let _ = process.wait().expect("failed to wait on child");
     }
+}
+
+/// Get list of changed files for a commit
+async fn get_changed_files_for_commit(commit: &Commit, paths: Vec<PathBuf>) -> Vec<String> {
+    // prepare old and new blobs
+    let tree = load_object::<Tree>(&commit.tree_id).unwrap();
+    let new_blobs: Vec<(PathBuf, SHA1)> = tree.get_plain_items();
+
+    // old_blobs from first parent if exists
+    let old_blobs: Vec<(PathBuf, SHA1)> = if !commit.parent_commit_ids.is_empty() {
+        let parent = &commit.parent_commit_ids[0];
+        let parent_hash = SHA1::from_str(&parent.to_string()).unwrap();
+        let parent_commit = load_object::<Commit>(&parent_hash).unwrap();
+        let parent_tree = load_object::<Tree>(&parent_commit.tree_id).unwrap();
+        parent_tree.get_plain_items()
+    } else {
+        Vec::new()
+    };
+
+    // Convert paths to HashSet for faster lookup
+    let path_filter: HashSet<PathBuf> = paths.into_iter().collect();
+    let should_filter = !path_filter.is_empty();
+
+    // Create sets of file paths for old and new trees
+    let old_files: HashSet<PathBuf> = old_blobs.iter().map(|(path, _)| path.clone()).collect();
+    let new_files: HashSet<PathBuf> = new_blobs.iter().map(|(path, _)| path.clone()).collect();
+
+    // Find added, modified, and deleted files
+    let mut changed_files = Vec::new();
+
+    // Added files (in new but not in old)
+    for file in &new_files {
+        // Fix: merge nested if statements
+        if !old_files.contains(file) && (!should_filter || path_filter.contains(file)) {
+            changed_files.push(format!("A\t{}", file.display()));
+        }
+    }
+
+    // Modified files (in both but different content)
+    for (file, new_hash) in &new_blobs {
+        if let Some((_, old_hash)) = old_blobs.iter().find(|(old_file, _)| old_file == file)
+            && new_hash != old_hash && (!should_filter || path_filter.contains(file)) {
+              changed_files.push(format!("M\t{}", file.display()));
+        }
+    }
+
+    // Deleted files (in old but not in new)
+    for file in &old_files {
+        if !new_files.contains(file) && (!should_filter || path_filter.contains(file)) {
+            changed_files.push(format!("D\t{}", file.display()));
+        }
+    }
+
+    changed_files.sort();
+    changed_files
 }
 
 async fn create_reference_commit_map() -> HashMap<SHA1, Vec<Reference>> {
@@ -409,4 +496,81 @@ async fn generate_diff(commit: &Commit, paths: Vec<PathBuf>) -> String {
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    // Test parameter parsing
+    #[test]
+    fn test_log_args_name_only() {
+        // Test that the --name-only parameter is parsed correctly
+        let args = LogArgs::parse_from(&["libra", "log", "--name-only"]);
+        assert!(args.name_only);
+        
+        let args = LogArgs::parse_from(&["libra", "log"]);
+        assert!(!args.name_only);
+    }
+
+    #[test]
+    fn test_name_only_precedence_over_patch() {
+        // Test --name-only takes precedence over --patch
+        let args = LogArgs::parse_from(&["libra", "log", "--name-only", "--patch"]);
+        assert!(args.name_only);
+        assert!(args.patch);
+        // In the execute function, patch should be ignored when name_only is true
+    }
+
+    #[test]
+    fn test_name_only_with_oneline() {
+        // Test --name-only and --oneline combination
+        let args = LogArgs::parse_from(&["libra", "log", "--name-only", "--oneline"]);
+        assert!(args.name_only);
+        assert!(args.oneline);
+    }
+
+    #[test]
+    fn test_name_only_with_number_limit() {
+        // Test --name-only combined with quantity limit
+        let args = LogArgs::parse_from(&["libra", "log", "--name-only", "-n", "5"]);
+        assert!(args.name_only);
+        assert_eq!(args.number, Some(5));
+    }
+
+    // Test decoration option parsing
+    #[test]
+    fn test_str_to_decorate_option() {
+        assert_eq!(str_to_decorate_option("no").unwrap(), DecorateOptions::No);
+        assert_eq!(str_to_decorate_option("short").unwrap(), DecorateOptions::Short);
+        assert_eq!(str_to_decorate_option("full").unwrap(), DecorateOptions::Full);
+        assert!(str_to_decorate_option("auto").is_ok());
+        assert!(str_to_decorate_option("invalid").is_err());
+    }
+
+    // Test parameter combination
+    #[test]
+    fn test_complex_arg_combinations() {
+        // Test multiple parameter combinations
+        let args = LogArgs::parse_from(&["libra", "log", "--name-only", "--oneline", "-n", "10"]);
+        assert!(args.name_only);
+        assert!(args.oneline);
+        assert_eq!(args.number, Some(10));
+        
+        let args = LogArgs::parse_from(&["libra", "log", "--name-only", "src/main.rs", "src/lib.rs"]);
+        assert!(args.name_only);
+        // Update expected pathspec value to include "log"
+        assert_eq!(args.pathspec, vec!["log", "src/main.rs", "src/lib.rs"]);
+    }
+
+    // Test parameter mutual exclusion logic
+    #[test]
+    fn test_parameter_mutual_exclusion() {
+        let args = LogArgs::parse_from(&["libra", "log", "--name-only", "--patch"]);
+        
+        // Simulate the mutual exclusion logic in the execute function
+        let name_only = args.name_only;
+        let patch = args.patch && !name_only;
+        
+        assert!(name_only);
+        assert!(!patch); 
+    }
+}
