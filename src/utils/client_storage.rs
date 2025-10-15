@@ -631,13 +631,28 @@ mod tests {
 
     #[test]
     #[serial]
-    /// Tests decompression of a specific git object file from test data to verify zlib implementation.
-    #[ignore = "This is partly a test data path issue, create test data instead of relying on external files"]
+    // Tests decompression of a specific git object file (uses original test data via absolute path)
     fn test_decompress_2() {
-        test::reset_working_dir();
-        let pack_file = "../tests/data/objects/4b/00093bee9b3ef5afc5f8e3645dc39cfa2f49aa";
-        let pack_content = fs::read(pack_file).unwrap();
-        let decompressed_data = ClientStorage::decompress_zlib(&pack_content).unwrap();
-        println!("{:?}", String::from_utf8(decompressed_data).unwrap());
-    }
+    test::reset_working_dir();
+
+    // Build the absolute path of the test object file based on the project root directory
+    let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let pack_file_path = project_root.join("tests/data/objects/4b/00093bee9b3ef5afc5f8e3645dc39cfa2f49aa");
+
+    assert!(
+        pack_file_path.exists(),
+        "测试文件不存在！请在项目根目录下创建路径：{}，并放入对应的 Git 对象文件",
+        pack_file_path.display()
+    );
+
+    let pack_content = fs::read(&pack_file_path).unwrap_or_else(|e| {
+        panic!("读取测试文件失败：{}，请确认文件可读取", e);
+    });
+    let decompressed_data = ClientStorage::decompress_zlib(&pack_content).unwrap_or_else(|e| {
+        panic!("zlib 解压失败：{}，请确认文件是合法的 Git 压缩对象", e);
+    });
+
+    let decompressed_str = String::from_utf8_lossy(&decompressed_data);
+    println!("Decompressed data: {}", decompressed_str);
+}
 }

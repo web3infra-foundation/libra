@@ -330,7 +330,6 @@ mod test {
     use serial_test::serial;
     use tempfile::tempdir;
     use tokio::{fs::{self, File}, io::AsyncWriteExt};
-    //delete AsyncReadExt
     use crate::utils::test::*;
 
     use super::*;
@@ -447,29 +446,46 @@ mod test {
 
     #[tokio::test]
     #[serial]
-    #[ignore = "This is partly a test data path problem. You should create a test file to replace the external test data."] 
-    /// Tests the recursive tree creation from index entries.
-    /// Verifies that tree objects are correctly created, saved to storage, and properly organized in a hierarchical structure.
+    // Tests the recursive tree creation from index entries (uses original test data via absolute path)
     async fn test_create_tree() {
-        let temp_path = tempdir().unwrap();
-        setup_with_new_libra_in(temp_path.path()).await;
-        let _guard = ChangeDirGuard::new(temp_path.path());
+        // 1. 初始化临时 Libra 仓库（保持原有逻辑，确保仓库结构正确）
+         let temp_path = tempdir().unwrap();
+         setup_with_new_libra_in(temp_path.path()).await;
+         let _guard = ChangeDirGuard::new(temp_path.path());
 
-        let crate_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let index = Index::from_file(crate_path.join("../tests/data/index/index-760")).unwrap();
-        println!("{:?}", index.tracked_entries(0).len());
-        let storage = ClientStorage::init(path::objects());
-        let tree = create_tree(&index, &storage, temp_path.keep()).await;
+        // 2. 基于项目根目录（CARGO_MANIFEST_DIR）构建测试 index 文件的绝对路径（关键修复）
+        let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")); // 项目根目录（Cargo.toml 所在处）
+        let index_file_path = project_root.join("tests/data/index/index-760"); // 绝对路径：根目录/tests/data/...
 
-        assert!(storage.get(&tree.id).is_ok());
+        // 3. 检查文件是否存在，给出明确提示（指导你补充文件）
+        assert!(
+            index_file_path.exists(),
+            "测试文件不存在！请在项目根目录下创建路径：{}，并放入 index-760 文件",
+            index_file_path.display()
+        );
+    
+        // 4. 加载 index 文件（使用绝对路径，不再报错）
+        let index = Index::from_file(index_file_path).unwrap_or_else(|e| {
+            panic!("加载 index 文件失败：{}，请确认文件格式正确", e);
+        });
+        println!("加载的 index 包含 {} 个跟踪文件", index.tracked_entries(0).len());
+
+        // 5. 初始化存储（确保指向临时仓库的 objects 目录，避免干扰主仓库）
+        let temp_objects_dir = temp_path.path().join(".libra/objects"); // 临时仓库的 objects 目录
+        let storage = ClientStorage::init(temp_objects_dir);
+
+        // 6. 调用 create_tree（current_root 设为空，因为 index 中路径是相对于仓库根的）
+        let tree = create_tree(&index, &storage, PathBuf::new()).await;
+
+        // 7. 原有验证逻辑（不变）
+        assert!(storage.get(&tree.id).is_ok(), "根 tree 未保存到存储");
         for item in tree.tree_items.iter() {
             if item.mode == TreeItemMode::Tree {
-                assert!(storage.get(&item.id).is_ok());
-                // println!("tree: {}", item.name);
+                assert!(storage.get(&item.id).is_ok(), "子 tree 未保存：{}", item.name);
                 if item.name == "DeveloperExperience" {
-                    let sub_tree = storage.get(&item.id).unwrap();
-                    let tree = Tree::from_bytes(&sub_tree, item.id).unwrap();
-                    assert_eq!(tree.tree_items.len(), 4); // 4 subtree according to the test data
+                    let sub_tree_data = storage.get(&item.id).unwrap();
+                    let sub_tree = Tree::from_bytes(&sub_tree_data, item.id).unwrap();
+                    assert_eq!(sub_tree.tree_items.len(), 4, "DeveloperExperience 子 tree 条目数错误");
                 }
             }
         }

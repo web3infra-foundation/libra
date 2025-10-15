@@ -1,7 +1,6 @@
 use std::cmp::min;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-//
 use crate::command::load_object;
 use crate::internal::branch::Branch;
 use crate::internal::config::Config;
@@ -399,10 +398,9 @@ async fn get_changed_files_for_commit(commit: &Commit, paths: Vec<PathBuf>) -> V
 
     // Modified files (in both but different content)
     for (file, new_hash) in &new_blobs {
-        if let Some((_, old_hash)) = old_blobs.iter().find(|(old_file, _)| old_file == file) {
-            if new_hash != old_hash && (!should_filter || path_filter.contains(file)) {
-                changed_files.push(format!("M\t{}", file.display()));
-            }
+        if let Some((_, old_hash)) = old_blobs.iter().find(|(old_file, _)| old_file == file)
+            && new_hash != old_hash && (!should_filter || path_filter.contains(file)) {
+              changed_files.push(format!("M\t{}", file.display()));
         }
     }
 

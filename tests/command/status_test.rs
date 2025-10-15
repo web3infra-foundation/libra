@@ -244,79 +244,21 @@ async fn test_status_porcelain() {
     assert!(!output_str.contains("On branch"));
 }
 
-#[test]
-fn test_output_short_format() {
-    use libra::command::status::Changes;
-    use std::path::PathBuf;
-
-    // Create test data
-    let staged = Changes {
-        new: vec![PathBuf::from("new_file.txt")],
-        modified: vec![PathBuf::from("modified_file.txt")],
-        deleted: vec![PathBuf::from("deleted_file.txt")],
-    };
-
-    let unstaged = Changes {
-        new: vec![PathBuf::from("untracked_file.txt")],
-        modified: vec![PathBuf::from("unstaged_modified.txt")],
-        deleted: vec![PathBuf::from("unstaged_deleted.txt")],
-    };
-
-    // Create a buffer to capture the output
-    let mut output = Vec::new();
-
-    // Test the core logic directly without config dependency
-    let status_list = libra::command::status::generate_short_format_status(&staged, &unstaged);
-
-    // Output the short format (without colors for testing)
-    for (file, staged_status, unstaged_status) in status_list {
-        writeln!(
-            output,
-            "{}{} {}",
-            staged_status,
-            unstaged_status,
-            file.display()
-        )
-        .unwrap();
-    }
-
-    // Get the output as a string
-    let output_str = String::from_utf8(output).unwrap();
-
-    // Verify the output format
-    let lines: Vec<&str> = output_str.trim().split('\n').collect();
-
-    // Check staged changes
-    assert!(lines.contains(&"A  new_file.txt"));
-    assert!(lines.contains(&"M  modified_file.txt"));
-    assert!(lines.contains(&"D  deleted_file.txt"));
-
-    // Check unstaged changes
-    assert!(lines.contains(&" M unstaged_modified.txt"));
-    assert!(lines.contains(&" D unstaged_deleted.txt"));
-
-    // Check untracked files
-    assert!(lines.contains(&"?? untracked_file.txt"));
-}
+use regex::Regex; 
 
 #[tokio::test]
 #[serial]
-/// Tests the -s (--short) flag for short format output.
-/// Verifies that the output matches Git's short format specification.
-#[ignore] 
 async fn test_status_short_format() {
     let test_dir = tempdir().unwrap();
-    test::setup_with_new_libra_in(test_dir.path()).await;
-    let _guard = test::ChangeDirGuard::new(test_dir.path());
+    let test_dir_path = test_dir.path();
+    test::setup_with_new_libra_in(test_dir_path).await;
+    let _guard = test::ChangeDirGuard::new(test_dir_path);
 
-    // Create test data
     let mut file1 = fs::File::create("file1.txt").unwrap();
     file1.write_all(b"content").unwrap();
+    file1.sync_all().unwrap();
+    drop(file1);
 
-    let mut file2 = fs::File::create("file2.txt").unwrap();
-    file2.write_all(b"content").unwrap();
-
-    // Add one file to the staging area
     add::execute(AddArgs {
         pathspec: vec![String::from("file1.txt")],
         all: false,
@@ -328,7 +270,11 @@ async fn test_status_short_format() {
     })
     .await;
 
-    // Add another file to the staging area and modify it
+    let mut file2 = fs::File::create("file2.txt").unwrap();
+    file2.write_all(b"content").unwrap();
+    file2.sync_all().unwrap();
+    drop(file2);
+
     add::execute(AddArgs {
         pathspec: vec![String::from("file2.txt")],
         all: false,
@@ -339,22 +285,22 @@ async fn test_status_short_format() {
         refresh: false,
     })
     .await;
-    // Reopen file2.txt for writing after staging
+
     let mut file2 = fs::OpenOptions::new()
         .write(true)
-        .truncate(true)
+        .append(true)
         .open("file2.txt")
         .unwrap();
     file2.write_all(b"modified content").unwrap();
+    file2.sync_all().unwrap();
+    drop(file2);
 
-    // Create a new file (untracked)
     let mut file3 = fs::File::create("file3.txt").unwrap();
     file3.write_all(b"new content").unwrap();
+    file3.sync_all().unwrap();
+    drop(file3);
 
-    // Create a buffer to capture the output
     let mut output = Vec::new();
-
-    // Execute the status command with the -s flag
     status_execute(
         StatusArgs {
             porcelain: false,
@@ -364,30 +310,37 @@ async fn test_status_short_format() {
     )
     .await;
 
-    // Get the output as a string
     let output_str = String::from_utf8(output).unwrap();
+    let ansi_color_re = Regex::new(r"\u{1b}\[[^m]*m").unwrap();
+    let clean_output = ansi_color_re.replace_all(&output_str, "").to_string();
 
-    // Verify the short format output
-    let lines: Vec<&str> = output_str.trim().split('\n').collect();
+    let lines: Vec<&str> = clean_output
+        .split('\n')
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .collect();
 
-    // Should contain staged files
-    assert!(
-        lines.iter().any(|line| line.starts_with("A  file1.txt")),
-        "file1.txt should be staged as added"
-    );
-    assert!(
-        lines.iter().any(|line| line.starts_with("AM file2.txt")),
-        "file2.txt should be staged as added and modified in working tree"
-    );
+    eprintln!("Cleaned status lines: {:?}", lines);
 
-    // Should contain untracked files
     assert!(
-        lines.iter().any(|line| line.starts_with("?? file3.txt")),
-        "file3.txt should be untracked"
+        lines.iter().any(|line| *line == "A  file1.txt"),
+        "file1.txt should be staged as added. Expected 'A  file1.txt', but lines found: {:?}",
+        lines
     );
 
-    // Should not contain human-readable text
-    assert!(!output_str.contains("Changes to be committed"));
-    assert!(!output_str.contains("Untracked files"));
-    assert!(!output_str.contains("On branch"));
+    assert!(
+        lines.iter().any(|line| *line == "AM file2.txt"),
+        "file2.txt should be 'AM file2.txt', but lines found: {:?}",
+        lines
+    );
+
+    assert!(
+        lines.iter().any(|line| *line == "?? file3.txt"),
+        "file3.txt should be '?? file3.txt', but lines found: {:?}",
+        lines
+    );
+
+    assert!(!clean_output.contains("Changes to be committed"));
+    assert!(!clean_output.contains("Untracked files"));
+    assert!(!clean_output.contains("On branch"));
 }

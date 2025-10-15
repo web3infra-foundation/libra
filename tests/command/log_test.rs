@@ -8,8 +8,6 @@ use libra::utils::object_ext::TreeExt;
 use libra::utils::util;
 use std::cmp::min;
 use std::str::FromStr;
-
-
 #[tokio::test]
 #[serial]
 /// Tests retrieval of commits reachable from a specific commit hash
