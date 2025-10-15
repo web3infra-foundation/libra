@@ -391,7 +391,7 @@ async fn get_changed_files_for_commit(commit: &Commit, paths: Vec<PathBuf>) -> V
 
     // Added files (in new but not in old)
     for file in &new_files {
-        // 修复：合并嵌套 if 语句
+        // Fix: merge nested if statements
         if !old_files.contains(file) && (!should_filter || path_filter.contains(file)) {
             changed_files.push(format!("A\t{}", file.display()));
         }
@@ -568,7 +568,7 @@ mod tests {
     fn test_parameter_mutual_exclusion() {
         let args = LogArgs::parse_from(&["libra", "log", "--name-only", "--patch"]);
         
-        //Simulate the mutual exclusion logic in the execute function
+        // Simulate the mutual exclusion logic in the execute function
         let name_only = args.name_only;
         let patch = args.patch && !name_only;
         

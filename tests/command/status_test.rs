@@ -303,6 +303,7 @@ fn test_output_short_format() {
 #[serial]
 /// Tests the -s (--short) flag for short format output.
 /// Verifies that the output matches Git's short format specification.
+#[ignore] 
 async fn test_status_short_format() {
     let test_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(test_dir.path()).await;

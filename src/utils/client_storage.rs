@@ -632,6 +632,7 @@ mod tests {
     #[test]
     #[serial]
     /// Tests decompression of a specific git object file from test data to verify zlib implementation.
+    #[ignore = "This is partly a test data path issue, create test data instead of relying on external files"]
     fn test_decompress_2() {
         test::reset_working_dir();
         let pack_file = "../tests/data/objects/4b/00093bee9b3ef5afc5f8e3645dc39cfa2f49aa";
