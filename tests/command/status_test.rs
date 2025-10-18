@@ -538,7 +538,7 @@ async fn test_status_deleted_files() {
     })
     .await;
 
-    // 使用辅助函数创建 CommitArgs
+    // Use helper function to create CommitArgs
     commit::execute(create_commit_args("Add file to delete")).await;
 
     // Delete the file
