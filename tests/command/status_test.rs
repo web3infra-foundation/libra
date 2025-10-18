@@ -375,7 +375,7 @@ async fn test_status_short_format() {
 
     // Get the output as a string
     let output_str = String::from_utf8(output).unwrap();
-    println!("Actual short format output: {}", output_str); // 添加调试输出
+    println!("Actual short format output: {}", output_str); // Add debug output
 
     // Verify the short format output
     let lines: Vec<&str> = output_str.trim().split('\n').collect();
