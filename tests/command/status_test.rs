@@ -401,7 +401,7 @@ async fn test_status_short_format() {
         output_str
     );
 
-    // 检查输出格式是短格式（不应该包含人类可读的文本）
+    // Check that the output format is short (should not contain human-readable text)
     assert!(
         !output_str.contains("Changes to be committed"),
         "Short format should not contain human-readable text. Got: {}",
