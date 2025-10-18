@@ -332,3 +332,104 @@ async fn test_add_dry_run() {
     let changes = changes_to_be_staged();
     assert!(changes.new.iter().any(|x| x.to_str().unwrap() == file_path));
 }
+
+#[tokio::test]
+#[serial]
+/// Tests that running add without specifying files or --all should not modify index
+async fn test_add_without_path_should_error() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    // Create a file to ensure there's something that could be added
+    let file_path = "existing_file.txt";
+    let mut file = fs::File::create(file_path).unwrap();
+    file.write_all(b"Some content").unwrap();
+
+    // Try running `add` without any pathspec and without --all
+    add::execute(AddArgs {
+        pathspec: vec![],  // Empty pathspec
+        all: false,        // Not using --all
+        update: false,
+        refresh: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+
+    // Verify no files were added to the index
+    let changes = changes_to_be_committed().await;
+    assert!(
+        changes.new.is_empty(),
+        "Expected no files in index when no pathspec provided and --all not used"
+    );
+}
+
+#[tokio::test]
+#[serial]
+/// Tests adding a file that does not exist should produce an error
+async fn test_add_nonexistent_file_should_error() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    let fake_path = "no_such_file.txt";
+
+    // Try to add non-existent file
+    add::execute(AddArgs {
+        pathspec: vec![String::from(fake_path)],
+        all: false,
+        update: false,
+        refresh: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+
+    // The file should not be in the index
+    let changes = changes_to_be_committed().await;
+    let file_in_index = changes.new.iter().any(|x| x.to_str().unwrap() == fake_path);
+    assert!(!file_in_index, "Non-existent file should not be added to index");
+}
+
+#[tokio::test]
+#[serial]
+/// Tests adding the same file twice should not create duplicates in the index
+async fn test_add_duplicate_file_should_not_duplicate_index() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    let file_path = "dup_test.txt";
+    let mut file = fs::File::create(file_path).unwrap();
+    file.write_all(b"content").unwrap();
+
+    // Add same file twice
+    for i in 0..2 {
+        add::execute(AddArgs {
+            pathspec: vec![String::from(file_path)],
+            all: false,
+            update: false,
+            refresh: false,
+            verbose: false,
+            dry_run: false,
+            ignore_errors: false,
+        })
+        .await;
+        
+        // Check after each add operation
+        let changes = changes_to_be_committed().await;
+        let occurrences = changes
+            .new
+            .iter()
+            .filter(|x| x.to_str().unwrap() == file_path)
+            .count();
+        assert_eq!(
+            occurrences, 1, 
+            "File should appear exactly once in index after {} add operation(s)", 
+            i + 1
+        );
+    }
+}
