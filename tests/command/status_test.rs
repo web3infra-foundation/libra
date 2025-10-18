@@ -380,7 +380,7 @@ async fn test_status_short_format() {
     // Verify the short format output
     let lines: Vec<&str> = output_str.trim().split('\n').collect();
 
-    // 更灵活的断言：检查文件是否出现在输出中，但不指定确切的状态码
+    // More flexible assertion: check whether the file appears in the output, but do not specify the exact status code
     let file1_found = lines.iter().any(|line| line.contains("file1.txt"));
     let file2_found = lines.iter().any(|line| line.contains("file2.txt")); 
     let file3_found = lines.iter().any(|line| line.contains("file3.txt"));
