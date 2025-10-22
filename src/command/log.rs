@@ -361,7 +361,7 @@ pub async fn execute(args: LogArgs) {
 }
 
 /// Get list of changed files for a commit
-async fn get_changed_files_for_commit(commit: &Commit, paths: Vec<PathBuf>) -> Vec<String> {
+pub(crate) async fn get_changed_files_for_commit(commit: &Commit, paths: Vec<PathBuf>) -> Vec<String> {
     // prepare old and new blobs
     let tree = load_object::<Tree>(&commit.tree_id).unwrap();
     let new_blobs: Vec<(PathBuf, SHA1)> = tree.get_plain_items();
@@ -455,7 +455,7 @@ async fn create_reference_commit_map() -> HashMap<SHA1, Vec<Reference>> {
 }
 
 /// Generate unified diff between commit and its first parent (or empty tree)
-async fn generate_diff(commit: &Commit, paths: Vec<PathBuf>) -> String {
+pub(crate) async fn generate_diff(commit: &Commit, paths: Vec<PathBuf>) -> String {
     // prepare old and new blobs
     // new_blobs from commit tree
     let tree = load_object::<Tree>(&commit.tree_id).unwrap();
