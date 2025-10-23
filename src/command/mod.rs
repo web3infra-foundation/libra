@@ -21,6 +21,7 @@ pub mod remove;
 pub mod reset;
 pub mod restore;
 pub mod revert;
+pub mod show;
 pub mod tag;
 
 pub mod stash;

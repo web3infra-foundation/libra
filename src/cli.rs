@@ -50,6 +50,8 @@ enum Commands {
     Lfs(command::lfs::LfsCmds),
     #[command(about = "Show commit logs")]
     Log(command::log::LogArgs),
+    #[command(about = "Show various types of objects")]
+    Show(command::show::ShowArgs),
     #[command(about = "List, create, or delete branches")]
     Branch(command::branch::BranchArgs),
     #[command(about = "Create a new tag")]
@@ -157,6 +159,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> Result<(), GitError> {
         Commands::Stash(cmd) => command::stash::execute(cmd).await,
         Commands::Lfs(cmd) => command::lfs::execute(cmd).await,
         Commands::Log(args) => command::log::execute(args).await,
+        Commands::Show(args) => command::show::execute(args).await,
         Commands::Branch(args) => command::branch::execute(args).await,
         Commands::Tag(args) => command::tag::execute(args).await,
         Commands::Commit(args) => command::commit::execute(args).await,
