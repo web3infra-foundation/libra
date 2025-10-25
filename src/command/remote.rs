@@ -15,6 +15,13 @@ pub enum RemoteCmds {
         /// The name of the remote
         name: String,
     },
+    /// Rename a remote
+    Rename {
+        /// The current name of the remote
+        old: String,
+        /// The new name of the remote
+        new: String,
+    },
     /// List remotes
     #[command(name = "-v")]
     List,
@@ -29,6 +36,11 @@ pub async fn execute(command: RemoteCmds) {
         }
         RemoteCmds::Remove { name } => {
             if let Err(e) = Config::remove_remote(&name).await {
+                eprintln!("{e}");
+            }
+        }
+        RemoteCmds::Rename { old, new } => {
+            if let Err(e) = Config::rename_remote(&old, &new).await {
                 eprintln!("{e}");
             }
         }
