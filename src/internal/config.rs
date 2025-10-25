@@ -233,6 +233,51 @@ impl Config {
         Ok(())
     }
 
+    pub async fn rename_remote_with_conn<C: ConnectionTrait>(
+        db: &C,
+        old: &str,
+        new: &str,
+    ) -> Result<(), String> {
+        // Ensure the requested rename has a valid source and no conflicts.
+        if Self::remote_config_with_conn(db, old).await.is_none() {
+            return Err(format!("fatal: No such remote: {old}"));
+        }
+        if Self::remote_config_with_conn(db, new).await.is_some() {
+            return Err(format!("fatal: remote {new} already exists."));
+        }
+
+        let remote_entries = config::Entity::find()
+            .filter(config::Column::Configuration.eq("remote"))
+            .filter(config::Column::Name.eq(old))
+            .all(db)
+            .await
+            .unwrap();
+
+        // Update remote.<name>.* entries to point at the new name.
+        for entry in remote_entries {
+            let mut active: ActiveModel = entry.into();
+            active.name = Set(Some(new.to_owned()));
+            active.update(db).await.unwrap();
+        }
+
+        let branch_entries = config::Entity::find()
+            .filter(config::Column::Configuration.eq("branch"))
+            .filter(config::Column::Key.eq("remote"))
+            .filter(config::Column::Value.eq(old))
+            .all(db)
+            .await
+            .unwrap();
+
+        // Repoint branch.*.remote values that referenced the old remote.
+        for entry in branch_entries {
+            let mut active: ActiveModel = entry.into();
+            active.value = Set(new.to_owned());
+            active.update(db).await.unwrap();
+        }
+
+        Ok(())
+    }
+
     // _with_conn version for all_remote_configs
     pub async fn all_remote_configs_with_conn<C: ConnectionTrait>(db: &C) -> Vec<RemoteConfig> {
         let remotes = config::Entity::find()
@@ -395,6 +440,11 @@ impl Config {
     pub async fn remove_remote(name: &str) -> Result<(), String> {
         let db = get_db_conn_instance().await;
         Self::remove_remote_with_conn(db, name).await
+    }
+
+    pub async fn rename_remote(old: &str, new: &str) -> Result<(), String> {
+        let db = get_db_conn_instance().await;
+        Self::rename_remote_with_conn(db, old, new).await
     }
 
     pub async fn all_remote_configs() -> Vec<RemoteConfig> {
