@@ -44,7 +44,7 @@ When generating code or design suggestions, assume this context: high concurrenc
 - This engine targets very large repositories — focus on streaming I/O, minimal copying, O(n) algorithms, bounded memory overhead.
 - When dealing with packfiles: consider fan-out tables, delta-chain depth, object reuse, object relocation, compression with zstd or deflate.
 - Support both SHA-1 and SHA-256 object IDs; avoid assumptions about 20-byte vs 32-byte lengths.
-- Provide micro-benchmarks (via criterion) for hot paths; include allocation and throughput metrics and document any regressions.
+- Provide micro-benchmarks (via criterion) for hot paths; include allocation and throughput metrics. If a change causes a regression (e.g., >5% drop in throughput or >10% increase in allocation count), document it in the PR description and update benchmark results files. Significant regressions (>10% performance drop or allocation increase) should also be noted in CHANGELOG.md.
 
 ## Git compatibility & hashing
 
