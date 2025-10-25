@@ -51,7 +51,7 @@ When generating code or design suggestions, assume this context: high concurrenc
 - Must interoperate with standard Git objects, refs, packfile formats, index formats.
 - Support both legacy SHA-1 and new SHA-256 object IDs; design migration paths and dual-stack invariants.
 - When generating code proposals: explicitly document trade-offs (compatibility vs performance).
-- Avoid assumptions like “object ID is 20 bytes” or “fan-out table always 256 entries” unless clearly parameterised.
+- Avoid assumptions like “object ID is 20 bytes” or “fan-out table always 256 entries” unless clearly parameterized.
 
 ## API & CLI guidelines
 
