@@ -22,3 +22,7 @@ target
 .vscode/
 .claude/
 .qwen/
+
+# Buck2
+buck-out/
+.buckal/

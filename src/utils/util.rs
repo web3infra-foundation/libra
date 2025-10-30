@@ -428,13 +428,12 @@ pub fn check_gitignore(work_dir: &PathBuf, target_file: &PathBuf) -> bool {
         match ignore.matched(target_file, target_file.is_dir()) {
             Match::Ignore(_) => return true,
             Match::Whitelist(_) => return false,
-            Match::None => ()
+            Match::None => (),
         }
 
         let mut parent_dir = if target_file.is_dir() {
             target_file.clone()
-        }
-        else {
+        } else {
             target_file.parent().unwrap().to_path_buf()
         };
 
@@ -442,7 +441,7 @@ pub fn check_gitignore(work_dir: &PathBuf, target_file: &PathBuf) -> bool {
             match ignore.matched(&parent_dir, true) {
                 Match::Ignore(_) => return true,
                 Match::Whitelist(_) => return false,
-                Match::None => ()
+                Match::None => (),
             };
             parent_dir.pop();
         }

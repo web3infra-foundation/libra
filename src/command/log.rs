@@ -1,14 +1,14 @@
-use std::cmp::min;
-use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use crate::command::load_object;
 use crate::internal::branch::Branch;
 use crate::internal::config::Config;
 use crate::internal::head::Head;
 use clap::Parser;
 use colored::Colorize;
+use std::cmp::min;
+use std::collections::{HashMap, HashSet};
 #[cfg(unix)]
 use std::io::Write;
+use std::path::PathBuf;
 #[cfg(unix)]
 use std::process::{Command, Stdio};
 
@@ -297,7 +297,7 @@ pub async fn execute(args: LogArgs) {
             if name_only {
                 let changed_files = get_changed_files_for_commit(&commit, paths.clone()).await;
                 if !changed_files.is_empty() {
-                    message.push('\n');  
+                    message.push('\n');
                     for file in changed_files {
                         message.push_str(&format!("{}\n", file));
                     }
@@ -361,7 +361,10 @@ pub async fn execute(args: LogArgs) {
 }
 
 /// Get list of changed files for a commit
-pub(crate) async fn get_changed_files_for_commit(commit: &Commit, paths: Vec<PathBuf>) -> Vec<String> {
+pub(crate) async fn get_changed_files_for_commit(
+    commit: &Commit,
+    paths: Vec<PathBuf>,
+) -> Vec<String> {
     // prepare old and new blobs
     let tree = load_object::<Tree>(&commit.tree_id).unwrap();
     let new_blobs: Vec<(PathBuf, SHA1)> = tree.get_plain_items();
@@ -399,8 +402,10 @@ pub(crate) async fn get_changed_files_for_commit(commit: &Commit, paths: Vec<Pat
     // Modified files (in both but different content)
     for (file, new_hash) in &new_blobs {
         if let Some((_, old_hash)) = old_blobs.iter().find(|(old_file, _)| old_file == file)
-            && new_hash != old_hash && (!should_filter || path_filter.contains(file)) {
-              changed_files.push(format!("M\t{}", file.display()));
+            && new_hash != old_hash
+            && (!should_filter || path_filter.contains(file))
+        {
+            changed_files.push(format!("M\t{}", file.display()));
         }
     }
 
@@ -506,7 +511,7 @@ mod tests {
         // Test that the --name-only parameter is parsed correctly
         let args = LogArgs::parse_from(&["libra", "log", "--name-only"]);
         assert!(args.name_only);
-        
+
         let args = LogArgs::parse_from(&["libra", "log"]);
         assert!(!args.name_only);
     }
@@ -540,8 +545,14 @@ mod tests {
     #[test]
     fn test_str_to_decorate_option() {
         assert_eq!(str_to_decorate_option("no").unwrap(), DecorateOptions::No);
-        assert_eq!(str_to_decorate_option("short").unwrap(), DecorateOptions::Short);
-        assert_eq!(str_to_decorate_option("full").unwrap(), DecorateOptions::Full);
+        assert_eq!(
+            str_to_decorate_option("short").unwrap(),
+            DecorateOptions::Short
+        );
+        assert_eq!(
+            str_to_decorate_option("full").unwrap(),
+            DecorateOptions::Full
+        );
         assert!(str_to_decorate_option("auto").is_ok());
         assert!(str_to_decorate_option("invalid").is_err());
     }
@@ -554,8 +565,9 @@ mod tests {
         assert!(args.name_only);
         assert!(args.oneline);
         assert_eq!(args.number, Some(10));
-        
-        let args = LogArgs::parse_from(&["libra", "log", "--name-only", "src/main.rs", "src/lib.rs"]);
+
+        let args =
+            LogArgs::parse_from(&["libra", "log", "--name-only", "src/main.rs", "src/lib.rs"]);
         assert!(args.name_only);
         // Update expected pathspec value to include "log"
         assert_eq!(args.pathspec, vec!["log", "src/main.rs", "src/lib.rs"]);
@@ -565,12 +577,12 @@ mod tests {
     #[test]
     fn test_parameter_mutual_exclusion() {
         let args = LogArgs::parse_from(&["libra", "log", "--name-only", "--patch"]);
-        
+
         // Simulate the mutual exclusion logic in the execute function
         let name_only = args.name_only;
         let patch = args.patch && !name_only;
-        
+
         assert!(name_only);
-        assert!(!patch); 
+        assert!(!patch);
     }
 }

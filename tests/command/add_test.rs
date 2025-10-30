@@ -348,8 +348,8 @@ async fn test_add_without_path_should_error() {
 
     // Try running `add` without any pathspec and without --all
     add::execute(AddArgs {
-        pathspec: vec![],  // Empty pathspec
-        all: false,        // Not using --all
+        pathspec: vec![], // Empty pathspec
+        all: false,       // Not using --all
         update: false,
         refresh: false,
         verbose: false,
@@ -391,7 +391,10 @@ async fn test_add_nonexistent_file_should_error() {
     // The file should not be in the index
     let changes = changes_to_be_committed().await;
     let file_in_index = changes.new.iter().any(|x| x.to_str().unwrap() == fake_path);
-    assert!(!file_in_index, "Non-existent file should not be added to index");
+    assert!(
+        !file_in_index,
+        "Non-existent file should not be added to index"
+    );
 }
 
 #[tokio::test]
@@ -418,7 +421,7 @@ async fn test_add_duplicate_file_should_not_duplicate_index() {
             ignore_errors: false,
         })
         .await;
-        
+
         // Check after each add operation
         let changes = changes_to_be_committed().await;
         let occurrences = changes
@@ -427,8 +430,9 @@ async fn test_add_duplicate_file_should_not_duplicate_index() {
             .filter(|x| x.to_str().unwrap() == file_path)
             .count();
         assert_eq!(
-            occurrences, 1, 
-            "File should appear exactly once in index after {} add operation(s)", 
+            occurrences,
+            1,
+            "File should appear exactly once in index after {} add operation(s)",
             i + 1
         );
     }

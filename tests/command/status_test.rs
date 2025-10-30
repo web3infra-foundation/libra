@@ -347,7 +347,7 @@ async fn test_status_short_format() {
         refresh: false,
     })
     .await;
-    
+
     // Reopen file2.txt for writing after staging
     let mut file2 = fs::OpenOptions::new()
         .write(true)
@@ -382,7 +382,7 @@ async fn test_status_short_format() {
 
     // More flexible assertion: check whether the file appears in the output, but do not specify the exact status code
     let file1_found = lines.iter().any(|line| line.contains("file1.txt"));
-    let file2_found = lines.iter().any(|line| line.contains("file2.txt")); 
+    let file2_found = lines.iter().any(|line| line.contains("file2.txt"));
     let file3_found = lines.iter().any(|line| line.contains("file3.txt"));
 
     assert!(
@@ -440,12 +440,12 @@ async fn test_status_empty_repository() {
     .await;
 
     let output_str = String::from_utf8(output).unwrap();
-    
+
     // Should indicate no commits or nothing to commit in empty repo
     assert!(
-        output_str.contains("No commits yet") || 
-        output_str.contains("nothing to commit") ||
-        output_str.contains("initial commit"),
+        output_str.contains("No commits yet")
+            || output_str.contains("nothing to commit")
+            || output_str.contains("initial commit"),
         "Empty repository status should indicate initial state. Got: {}",
         output_str
     );
@@ -585,8 +585,8 @@ async fn test_status_with_subdirectories() {
     // Create files in different directories
     let files = [
         "root_file.txt",
-        "subdir/sub_file.txt", 
-        "subdir/nested/deep_file.txt"
+        "subdir/sub_file.txt",
+        "subdir/nested/deep_file.txt",
     ];
 
     for file_path in &files {
@@ -666,7 +666,7 @@ async fn test_status_verbose_output() {
     // Execute status command - we'll test that it completes without error
     // since we can't predict the exact verbose output format
     let mut output = Vec::new();
-    
+
     // This should complete successfully without panicking
     status_execute(
         StatusArgs {
@@ -678,7 +678,7 @@ async fn test_status_verbose_output() {
     .await;
 
     let output_str = String::from_utf8(output).unwrap();
-    
+
     // Basic verification that status produced some output
     assert!(
         !output_str.is_empty(),
