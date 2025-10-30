@@ -24,7 +24,6 @@ pub struct TagArgs {
 
     #[clap(short, long, group = "action")]
     pub force: bool,
-
 }
 
 pub async fn execute(args: TagArgs) {
