@@ -106,12 +106,10 @@ pub async fn execute(args: CommitArgs) {
         //from -m
         (Some(msg), _) => msg,
         //from file
-        (None, Some(file_path)) => {
-            match tokio::fs::read_to_string(file_path).await {
-                Ok(msg) => msg,
-                Err(e) => panic!("fatal: failed to read commit message from file: {}", e),
-            }
-        }
+        (None, Some(file_path)) => match tokio::fs::read_to_string(file_path).await {
+            Ok(msg) => msg,
+            Err(e) => panic!("fatal: failed to read commit message from file: {}", e),
+        },
         //no commit message, which is not supposed to happen
         (None, None) => {
             panic!("fatal: no commit message provided")
@@ -326,11 +324,14 @@ async fn new_reflog_context(commit_id: &str, message: &str) -> ReflogContext {
 mod test {
     use std::env;
 
-    use git_internal::internal::object::{signature::Signature, ObjectTrait};
+    use crate::utils::test::*;
+    use git_internal::internal::object::{ObjectTrait, signature::Signature};
     use serial_test::serial;
     use tempfile::tempdir;
-    use tokio::{fs::{self, File}, io::AsyncWriteExt};
-    use crate::utils::test::*;
+    use tokio::{
+        fs::{self, File},
+        io::AsyncWriteExt,
+    };
 
     use super::*;
 
@@ -374,15 +375,14 @@ mod test {
 
         let args = CommitArgs::try_parse_from(["commit", "-F", "unreachable_file"]);
         assert!(args.is_ok());
-        assert!(args.unwrap().file.is_some()); 
+        assert!(args.unwrap().file.is_some());
     }
 
     #[tokio::test]
     #[serial]
     async fn test_commit_message_from_file() {
-
         let test_path = "test_data.txt";
-        
+
         // All sorts of edge cases
         let test_cases = vec![
             // Regular string
@@ -401,37 +401,39 @@ mod test {
             let bytes = test_data.as_bytes();
             // Async write file
             let mut file = File::create(&test_path).await.expect("create file failed");
-            file.write_all(bytes).await.expect("write test data to file failed");
-            file.sync_all().await.expect("write test data to file failed");
+            file.write_all(bytes)
+                .await
+                .expect("write test data to file failed");
+            file.sync_all()
+                .await
+                .expect("write test data to file failed");
 
             // Async read file
             let content = tokio::fs::read_to_string(test_path).await.unwrap();
 
             // Mock author
-            let author = Signature { 
-                signature_type: git_internal::internal::object::signature::SignatureType::Author, 
-                name: "test".to_string(), 
-                email: "test".to_string(), 
-                timestamp: 1, 
-                timezone: "test".to_string()
+            let author = Signature {
+                signature_type: git_internal::internal::object::signature::SignatureType::Author,
+                name: "test".to_string(),
+                email: "test".to_string(),
+                timestamp: 1,
+                timezone: "test".to_string(),
             };
 
             // Mock commiter
-            let commiter = Signature { 
-                signature_type: git_internal::internal::object::signature::SignatureType::Committer, 
-                name: "test".to_string(), 
-                email: "test".to_string(), 
-                timestamp: 1, 
-                timezone: "test".to_string()
+            let commiter = Signature {
+                signature_type: git_internal::internal::object::signature::SignatureType::Committer,
+                name: "test".to_string(),
+                email: "test".to_string(),
+                timestamp: 1,
+                timezone: "test".to_string(),
             };
-                
+
             // Mock commit
             let commit = Commit::new(author, commiter, SHA1([0; 20]), Vec::new(), &content);
 
             // Commit to data
-            let commit_data = commit
-                .to_data()
-                .unwrap();
+            let commit_data = commit.to_data().unwrap();
 
             // Parse data
             let message = Commit::from_bytes(&commit_data, commit.id).unwrap().message;
@@ -440,7 +442,9 @@ mod test {
             assert_eq!(message, test_data);
 
             // Clean up
-            fs::remove_file(&test_path).await.expect("cleaning test file failed, please remove test file manually");
+            fs::remove_file(&test_path)
+                .await
+                .expect("cleaning test file failed, please remove test file manually");
         }
     }
 
@@ -449,9 +453,9 @@ mod test {
     // Tests the recursive tree creation from index entries (uses original test data via absolute path)
     async fn test_create_tree() {
         // 1. 初始化临时 Libra 仓库（保持原有逻辑，确保仓库结构正确）
-         let temp_path = tempdir().unwrap();
-         setup_with_new_libra_in(temp_path.path()).await;
-         let _guard = ChangeDirGuard::new(temp_path.path());
+        let temp_path = tempdir().unwrap();
+        setup_with_new_libra_in(temp_path.path()).await;
+        let _guard = ChangeDirGuard::new(temp_path.path());
 
         // 2. 基于项目根目录（CARGO_MANIFEST_DIR）构建测试 index 文件的绝对路径（关键修复）
         let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")); // 项目根目录（Cargo.toml 所在处）
@@ -463,12 +467,15 @@ mod test {
             "测试文件不存在！请在项目根目录下创建路径：{}，并放入 index-760 文件",
             index_file_path.display()
         );
-    
+
         // 4. 加载 index 文件（使用绝对路径，不再报错）
         let index = Index::from_file(index_file_path).unwrap_or_else(|e| {
             panic!("加载 index 文件失败：{}，请确认文件格式正确", e);
         });
-        println!("加载的 index 包含 {} 个跟踪文件", index.tracked_entries(0).len());
+        println!(
+            "加载的 index 包含 {} 个跟踪文件",
+            index.tracked_entries(0).len()
+        );
 
         // 5. 初始化存储（确保指向临时仓库的 objects 目录，避免干扰主仓库）
         let temp_objects_dir = temp_path.path().join(".libra/objects"); // 临时仓库的 objects 目录
@@ -481,11 +488,19 @@ mod test {
         assert!(storage.get(&tree.id).is_ok(), "根 tree 未保存到存储");
         for item in tree.tree_items.iter() {
             if item.mode == TreeItemMode::Tree {
-                assert!(storage.get(&item.id).is_ok(), "子 tree 未保存：{}", item.name);
+                assert!(
+                    storage.get(&item.id).is_ok(),
+                    "子 tree 未保存：{}",
+                    item.name
+                );
                 if item.name == "DeveloperExperience" {
                     let sub_tree_data = storage.get(&item.id).unwrap();
                     let sub_tree = Tree::from_bytes(&sub_tree_data, item.id).unwrap();
-                    assert_eq!(sub_tree.tree_items.len(), 4, "DeveloperExperience 子 tree 条目数错误");
+                    assert_eq!(
+                        sub_tree.tree_items.len(),
+                        4,
+                        "DeveloperExperience 子 tree 条目数错误"
+                    );
                 }
             }
         }
