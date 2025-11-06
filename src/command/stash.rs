@@ -714,7 +714,7 @@ fn merge_trees(base: &Tree, head: &Tree, stash: &Tree, git_dir: &Path) -> Result
     Tree::from_tree_items(final_items).map_err(|e| e.to_string())
 }
 
-/// Get the number of stashs
+/// Get the number of stashes
 pub(crate) fn get_stash_num() -> Result<usize, String> {
     if !has_stash() {
         return Ok(0);
@@ -728,9 +728,10 @@ pub(crate) fn get_stash_num() -> Result<usize, String> {
 
     let file = std::fs::File::open(stash_log_path).map_err(|e| e.to_string())?;
     let reader = BufReader::new(file);
+
     let count = reader
         .lines()
-        .filter_map(Result::ok)
+        .map_while(Result::ok)
         .filter(|line| !line.trim().is_empty())
         .count();
 

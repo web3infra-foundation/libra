@@ -710,7 +710,7 @@ async fn test_status_verbose_output() {
 #[tokio::test]
 #[serial]
 /// Tests --short --branch combination output
-/// Verifies that branch info is displayed in short format when --branch flag is enabled  
+/// Verifies that branch info is displayed in short format when --branch flag is enabled.
 async fn test_status_short_format_with_branch() {
     let test_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(test_dir.path()).await;
@@ -768,7 +768,7 @@ async fn test_status_short_format_with_branch() {
 #[tokio::test]
 #[serial]
 /// Tests --porcelain --branch combination output
-/// Verifies that branch info is displayed in porcelain format when --branch flag is enabled  
+/// Verifies that branch info is displayed in porcelain format when --branch flag is enabled.
 async fn test_status_porcelain_format_with_branch() {
     let test_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(test_dir.path()).await;

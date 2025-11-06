@@ -25,7 +25,7 @@ pub struct StatusArgs {
     #[clap(short = 's', long = "short")]
     pub short: bool,
 
-    /// Output with branch info (short or percelain mode)
+    /// Output with branch info (short or porcelain mode)
     #[clap(long = "branch")]
     pub branch: bool,
 
