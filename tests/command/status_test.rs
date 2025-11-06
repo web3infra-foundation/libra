@@ -1,4 +1,6 @@
 use super::*;
+use libra::cli::Stash;
+use libra::command::stash;
 use libra::command::status::StatusArgs;
 use libra::command::status::execute_to as status_execute;
 use libra::command::status::output_porcelain;
@@ -227,6 +229,8 @@ async fn test_status_porcelain() {
         StatusArgs {
             porcelain: true,
             short: false,
+            branch: false,
+            show_stash: false,
         },
         &mut output,
     )
@@ -368,6 +372,8 @@ async fn test_status_short_format() {
         StatusArgs {
             porcelain: false,
             short: true,
+            branch: false,
+            show_stash: false,
         },
         &mut output,
     )
@@ -434,6 +440,8 @@ async fn test_status_empty_repository() {
         StatusArgs {
             porcelain: false,
             short: false,
+            branch: false,
+            show_stash: false,
         },
         &mut output,
     )
@@ -493,6 +501,8 @@ async fn test_status_mixed_changes() {
         StatusArgs {
             porcelain: false,
             short: false,
+            branch: false,
+            show_stash: false,
         },
         &mut output,
     )
@@ -550,6 +560,8 @@ async fn test_status_deleted_files() {
         StatusArgs {
             porcelain: false,
             short: false,
+            branch: false,
+            show_stash: false,
         },
         &mut output,
     )
@@ -612,6 +624,8 @@ async fn test_status_with_subdirectories() {
         StatusArgs {
             porcelain: false,
             short: false,
+            branch: false,
+            show_stash: false,
         },
         &mut output,
     )
@@ -672,6 +686,8 @@ async fn test_status_verbose_output() {
         StatusArgs {
             porcelain: false,
             short: false,
+            branch: false,
+            show_stash: false,
         },
         &mut output,
     )
@@ -687,6 +703,371 @@ async fn test_status_verbose_output() {
     assert!(
         output_str.contains("script.sh"),
         "Should show staged file: {}",
+        output_str
+    );
+}
+
+#[tokio::test]
+#[serial]
+/// Tests --short --branch combination output
+/// Verifies that branch info is displayed in short format when --branch flag is enabled  
+async fn test_status_short_format_with_branch() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    // Create and commit a file
+    let mut file1 = fs::File::create("file1.txt").unwrap();
+    file1.write_all(b"content").unwrap();
+
+    // Add one file to the staging area
+    add::execute(AddArgs {
+        pathspec: vec![String::from("file1.txt")],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+    })
+    .await;
+
+    commit::execute(create_commit_args("Initial commit")).await;
+
+    // Modify the file
+    let mut file1 = fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open("file1.txt")
+        .unwrap();
+    file1.write_all(b"modified content").unwrap();
+
+    let mut output = Vec::new();
+
+    status_execute(
+        StatusArgs {
+            porcelain: false,
+            short: true,
+            branch: true,
+            show_stash: false,
+        },
+        &mut output,
+    )
+    .await;
+
+    let output_str = String::from_utf8(output).unwrap();
+
+    // Should show branch info in the first line with ## prefix
+    assert!(
+        output_str.contains("## master"),
+        "Short format with --branch should start with branch info (##). Got: {}",
+        output_str
+    );
+}
+
+#[tokio::test]
+#[serial]
+/// Tests --porcelain --branch combination output
+/// Verifies that branch info is displayed in porcelain format when --branch flag is enabled  
+async fn test_status_porcelain_format_with_branch() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    // Create and commit a file
+    let mut file1 = fs::File::create("file1.txt").unwrap();
+    file1.write_all(b"content").unwrap();
+
+    // Add one file to the staging area
+    add::execute(AddArgs {
+        pathspec: vec![String::from("file1.txt")],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+    })
+    .await;
+
+    commit::execute(create_commit_args("Initial commit")).await;
+
+    // Modify the file
+    let mut file1 = fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open("file1.txt")
+        .unwrap();
+    file1.write_all(b"modified content").unwrap();
+
+    let mut output = Vec::new();
+
+    status_execute(
+        StatusArgs {
+            porcelain: true,
+            short: false,
+            branch: true,
+            show_stash: false,
+        },
+        &mut output,
+    )
+    .await;
+
+    let output_str = String::from_utf8(output).unwrap();
+
+    // Should show branch info in the first line with ## prefix
+    assert!(
+        output_str.contains("## master"),
+        "Porcelain format with --branch should start with branch info (##). Got: {}",
+        output_str
+    );
+}
+
+#[tokio::test]
+#[serial]
+/// Tests --show-stash output when stash exists
+/// Verifies that stash count info is displayed in standard mode when --show-stash flag is enabled
+async fn test_status_show_stash_with_existing_stash() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    // Create and commit a file
+    let mut file1 = fs::File::create("file1.txt").unwrap();
+    file1.write_all(b"content").unwrap();
+
+    // Add one file to the staging area
+    add::execute(AddArgs {
+        pathspec: vec![String::from("file1.txt")],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+    })
+    .await;
+
+    commit::execute(create_commit_args("Initial commit")).await;
+
+    // Create changes for stashing
+    let mut file1 = fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open("file1.txt")
+        .unwrap();
+    file1.write_all(b"modified content").unwrap();
+
+    add::execute(AddArgs {
+        pathspec: vec![String::from("file1.txt")],
+        all: false,
+        update: false,
+        refresh: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+
+    stash::execute(Stash::Push {
+        message: Some("test stash".to_string()),
+    })
+    .await;
+
+    let mut output = Vec::new();
+
+    status_execute(
+        StatusArgs {
+            porcelain: false,
+            short: false,
+            branch: false,
+            show_stash: true,
+        },
+        &mut output,
+    )
+    .await;
+
+    let output_str = String::from_utf8(output).unwrap();
+
+    // Should display stash count info
+    assert!(
+        output_str.contains("Your stash currently has 1 entry"),
+        "Should show stash count when --show-stash flag is enabled. Got: {}",
+        output_str
+    );
+
+    // Test for porcelain mode
+    // Shouldn't output the stash count info
+    let mut output = Vec::new();
+
+    status_execute(
+        StatusArgs {
+            porcelain: true,
+            short: false,
+            branch: false,
+            show_stash: true,
+        },
+        &mut output,
+    )
+    .await;
+
+    let output_str = String::from_utf8(output).unwrap();
+
+    // Shouldn't display stash count info
+    assert!(
+        !output_str.contains("Your stash currently has 1 entry"),
+        "Porcelain format with --show-stash shouldn't start with stash count info. Got: {}",
+        output_str
+    );
+
+    // Test for short mode
+    // Shouldn't output the stash count info
+    let mut output = Vec::new();
+
+    status_execute(
+        StatusArgs {
+            porcelain: false,
+            short: true,
+            branch: false,
+            show_stash: true,
+        },
+        &mut output,
+    )
+    .await;
+
+    let output_str = String::from_utf8(output).unwrap();
+
+    // Shouldn't display stash count info
+    assert!(
+        !output_str.contains("Your stash currently has 1 entry"),
+        "Short format with --show-stash shouldn't start with stash count info. Got: {}",
+        output_str
+    );
+}
+
+#[tokio::test]
+#[serial]
+/// Tests --show-stash output when no stash exists
+/// Verifies that stash info is not displayed when no stash is present
+async fn test_status_show_stash_without_stash() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    // Create and commit a file
+    let mut file1 = fs::File::create("file1.txt").unwrap();
+    file1.write_all(b"content").unwrap();
+
+    // Add one file to the staging area
+    add::execute(AddArgs {
+        pathspec: vec![String::from("file1.txt")],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+    })
+    .await;
+
+    commit::execute(create_commit_args("Initial commit")).await;
+
+    let mut output = Vec::new();
+
+    status_execute(
+        StatusArgs {
+            porcelain: false,
+            short: false,
+            branch: false,
+            show_stash: true,
+        },
+        &mut output,
+    )
+    .await;
+
+    let output_str = String::from_utf8(output).unwrap();
+
+    // Should not display stash information when there are no stashes
+    assert!(
+        !output_str.contains("Your stash currently has"),
+        "Should not show stash info when no stash exists. Got: {}",
+        output_str
+    );
+}
+
+#[tokio::test]
+#[serial]
+/// Tests --branch output in detached HEAD state
+/// Verifies that branch info shows detached HEAD status correctly
+async fn test_status_branch_detached_head() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    // Create and commit a file
+    let mut file1 = fs::File::create("file1.txt").unwrap();
+    file1.write_all(b"initial content").unwrap();
+
+    add::execute(AddArgs {
+        pathspec: vec![String::from("file1.txt")],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+    })
+    .await;
+
+    commit::execute(create_commit_args("Initial commit")).await;
+
+    // Get the current commit hash for checkout
+    let current_commit = Head::current_commit().await.expect("Should have a commit");
+
+    // Create a second commit
+    let mut file2 = fs::File::create("file2.txt").unwrap();
+    file2.write_all(b"second file").unwrap();
+
+    add::execute(AddArgs {
+        pathspec: vec![String::from("file2.txt")],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+    })
+    .await;
+
+    commit::execute(create_commit_args("Second commit")).await;
+
+    // checkout the first commit to enter the detached state
+    switch::execute(SwitchArgs {
+        branch: Some(current_commit.to_string()),
+        create: None,
+        detach: true,
+    })
+    .await;
+
+    let mut output = Vec::new();
+
+    status_execute(
+        StatusArgs {
+            porcelain: false,
+            short: true,
+            branch: true,
+            show_stash: false,
+        },
+        &mut output,
+    )
+    .await;
+
+    let output_str = String::from_utf8(output).unwrap();
+    let display_info = format!("## HEAD (detached at {})", &current_commit.to_string()[..8]);
+    // Should show detached HEAD info with ## prefix
+    assert!(
+        output_str.contains(&display_info),
+        "Should show detached HEAD status in branch info. Got: {}",
         output_str
     );
 }
