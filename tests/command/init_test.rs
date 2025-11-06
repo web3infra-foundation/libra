@@ -1,4 +1,6 @@
 use super::*;
+use libra::internal::model::config;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 // use std::fs::File;
 use std::fs;
 
@@ -34,6 +36,7 @@ async fn test_init() {
         quiet: false,
         template: None,
         shared: None,
+        object_format: None,
     };
     // Run the init function
     init(args).await.unwrap();
@@ -82,6 +85,7 @@ async fn test_init_template() {
         quiet: false,
         template: Some(template_dir.path().to_str().unwrap().to_string()),
         shared: None,
+        object_format: None,
     };
 
     // Run the init function
@@ -140,6 +144,7 @@ async fn test_init_with_invalid_template_path() {
         quiet: false,
         template: Some(invalid_template_path.to_string()),
         shared: None,
+        object_format: None,
     };
 
     // Run the init function and expect it to return an error
@@ -174,6 +179,7 @@ async fn test_init_bare() {
         quiet: false,
         template: None,
         shared: None,
+        object_format: None,
     };
     // Run the init function
     init(args).await.unwrap();
@@ -196,6 +202,7 @@ async fn test_init_bare_with_existing_repo() {
         quiet: false,
         template: None,
         shared: None,
+        object_format: None,
     };
     init(init_args).await.unwrap(); // Execute init for bare repository
 
@@ -208,6 +215,7 @@ async fn test_init_bare_with_existing_repo() {
             quiet: false,
             template: None,
             shared: None,
+            object_format: None,
         };
         init(args).await
     };
@@ -234,6 +242,7 @@ async fn test_init_with_initial_branch() {
         quiet: false,
         template: None,
         shared: None,
+        object_format: None,
     };
     // Run the init function
     init(args).await.unwrap();
@@ -283,6 +292,7 @@ async fn test_invalid_branch_name(branch_name: &str) {
         quiet: false,
         template: None,
         shared: None,
+        object_format: None,
     };
     // Run the init function
     let result = init(args).await;
@@ -308,6 +318,7 @@ async fn test_init_with_directory() {
         quiet: false,
         template: None,
         shared: None,
+        object_format: None,
     };
     // Run the init function
     init(args).await.unwrap();
@@ -339,6 +350,7 @@ async fn test_init_with_invalid_directory() {
         quiet: false,
         template: None,
         shared: None,
+        object_format: None,
     };
     // Run the init function
     let result = init(args).await;
@@ -382,6 +394,7 @@ async fn test_init_with_unauthorized_directory() {
         quiet: false,
         template: None,
         shared: None,
+        object_format: None,
     };
     // Run the init function
     let result = init(args).await;
@@ -408,6 +421,7 @@ async fn test_init_quiet() {
         quiet: true,
         template: None,
         shared: None,
+        object_format: None,
     };
     // Run the init function
     init(args).await.unwrap();
@@ -431,6 +445,7 @@ async fn test_valid_shared_mode(shared_mode: &str) {
         quiet: false,
         template: None,
         shared: Some(shared_mode.to_string()),
+        object_format: None,
     };
     // Run the init function
     init(args).await.unwrap();
@@ -468,6 +483,7 @@ async fn test_invalid_share_mode(shared_mode: &str) {
         quiet: false,
         template: None,
         shared: Some(shared_mode.to_string()),
+        object_format: None,
     };
 
     let result = init(args).await;
@@ -501,4 +517,82 @@ async fn test_init_with_invalid_shared_mode() {
     test_invalid_share_mode("1234").await;
     test_invalid_share_mode("0888").await;
     test_invalid_share_mode("12345").await;
+}
+
+#[tokio::test]
+#[serial]
+/// Test init with a valid object format ('sha1')
+async fn test_init_with_valid_object_format_sha1() {
+    let target_dir = tempdir().unwrap().keep();
+    let args = InitArgs {
+        bare: false,
+        initial_branch: None,
+        repo_directory: target_dir.to_str().unwrap().to_string(),
+        quiet: false,
+        template: None,
+        shared: None,
+        object_format: Some("sha1".to_string()),
+    };
+    // This should succeed
+    let result = init(args).await;
+    assert!(
+        result.is_ok(),
+        "init with --object-format sha1 should succeed"
+    );
+
+    // Verify that the config file contains the correct object format
+    let db_path = target_dir.join(".libra/libra.db");
+    // Connect to the existing database instead of creating a new one
+    let conn = sea_orm::Database::connect(format!("sqlite://{}", db_path.to_str().unwrap()))
+        .await
+        .unwrap();
+    let config_entry = config::Entity::find()
+        .filter(config::Column::Configuration.eq("core"))
+        .filter(config::Column::Key.eq("objectformat"))
+        .one(&conn)
+        .await
+        .unwrap();
+    assert_eq!(config_entry.unwrap().value, "sha1");
+}
+
+#[tokio::test]
+#[serial]
+/// Test init with an unsupported but valid object format ('sha256')
+async fn test_init_with_unsupported_object_format_sha256() {
+    let target_dir = tempdir().unwrap().keep();
+    let args = InitArgs {
+        bare: false,
+        initial_branch: None,
+        repo_directory: target_dir.to_str().unwrap().to_string(),
+        quiet: false,
+        template: None,
+        shared: None,
+        object_format: Some("sha256".to_string()),
+    };
+    // This should fail with a specific error
+    let result = init(args).await;
+    let err = result.unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(err.to_string().contains("not supported yet"));
+}
+
+#[tokio::test]
+#[serial]
+/// Test init with an invalid object format (e.g., 'md5')
+async fn test_init_with_invalid_object_format() {
+    let target_dir = tempdir().unwrap().keep();
+    let args = InitArgs {
+        bare: false,
+        initial_branch: None,
+        repo_directory: target_dir.to_str().unwrap().to_string(),
+        quiet: false,
+        template: None,
+        shared: None,
+        object_format: Some("md5".to_string()),
+    };
+    // This should fail with a generic invalid format error
+    let result = init(args).await;
+    let err = result.unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(err.to_string().contains("invalid object format"));
 }

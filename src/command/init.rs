@@ -53,6 +53,14 @@ pub struct InitArgs {
     /// Note: On Windows, this option is ignored.
     #[clap(long, required = false, value_name = "MODE")]
     pub shared: Option<String>,
+
+    /// Specify the object format (hash algorithm) for the repository.
+    ///
+    /// Supported values:
+    /// - `sha1`: The default and currently the only supported format.
+    /// - `sha256`: Recognized as a valid format, but will return an error as it is not yet supported.
+    #[clap(long = "object-format", name = "format", required = false)]
+    pub object_format: Option<String>,
 }
 
 /// Execute the init function
@@ -203,7 +211,28 @@ pub async fn init(args: InitArgs) -> io::Result<()> {
     } else {
         cur_dir.join(ROOT_DIR)
     };
-
+    // check if format is supported
+    if let Some(format) = &args.object_format {
+        match format.to_lowercase().as_str() {
+            "sha1" => {
+                // sha1 is supported, do nothing and proceed.
+            }
+            "sha256" => {
+                // sha256 is a valid format, but not supported yet.
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "fatal: object format 'sha256' is not supported yet",
+                ));
+            }
+            _ => {
+                // Any other format is invalid.
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("fatal: invalid object format '{format}'"),
+                ));
+            }
+        }
+    }
     // Check if the root directory already exists
     if is_reinit(&cur_dir) {
         if !args.quiet {
@@ -312,7 +341,9 @@ pub async fn init(args: InitArgs) -> io::Result<()> {
     }
 
     // Create config table with bare parameter consideration
-    init_config(&conn, args.bare).await.unwrap();
+    init_config(&conn, args.bare, args.object_format.as_deref())
+        .await
+        .unwrap();
 
     // Determine the initial branch name: use provided name or default to "main"
     let initial_branch_name = args
@@ -350,7 +381,11 @@ pub async fn init(args: InitArgs) -> io::Result<()> {
 
 /// Initialize the configuration for the Libra repository
 /// This function creates the necessary configuration entries in the database.
-async fn init_config(conn: &DbConn, is_bare: bool) -> Result<(), DbErr> {
+async fn init_config(
+    conn: &DbConn,
+    is_bare: bool,
+    object_format: Option<&str>,
+) -> Result<(), DbErr> {
     // Begin a new transaction
     let txn = conn.begin().await?;
 
@@ -385,6 +420,14 @@ async fn init_config(conn: &DbConn, is_bare: bool) -> Result<(), DbErr> {
         };
         entry.insert(&txn).await?;
     }
+    // Insert the object format, defaulting to "sha1" if not specified.
+    let object_format_entry = config::ActiveModel {
+        configuration: Set("core".to_owned()),
+        key: Set("objectformat".to_owned()),
+        value: Set(object_format.unwrap_or("sha1").to_owned()),
+        ..Default::default() // id & name NotSet
+    };
+    object_format_entry.insert(&txn).await?;
     // Commit the transaction
     txn.commit().await?;
     Ok(())

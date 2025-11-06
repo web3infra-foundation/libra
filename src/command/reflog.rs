@@ -198,8 +198,9 @@ fn parse_reflog_selector(selector: &str) -> Option<(&str, usize)> {
     None
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Default)]
 enum FormatterKind {
+    #[default]
     Oneline,
     Short,
     Medium,
@@ -214,12 +215,6 @@ impl Display for FormatterKind {
             Self::Medium => f.write_str("medium"),
             Self::Full => f.write_str("full"),
         }
-    }
-}
-
-impl Default for FormatterKind {
-    fn default() -> Self {
-        Self::Oneline
     }
 }
 
