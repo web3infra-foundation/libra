@@ -91,6 +91,7 @@ pub async fn execute(args: CloneArgs) {
         quiet: false,
         template: None,
         shared: None,
+        object_format: None,
     };
     command::init::execute(init_args).await;
 

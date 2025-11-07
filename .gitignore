@@ -26,3 +26,5 @@ target
 # Buck2
 buck-out/
 .buckal/
+
+.libra/
