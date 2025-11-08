@@ -6,6 +6,7 @@ use colored::Colorize;
 use git_internal::internal::object::commit::Commit;
 use git_internal::internal::object::tree::Tree;
 
+use super::stash;
 use crate::command::calc_file_blob_hash;
 use crate::internal::head::Head;
 use crate::utils::object_ext::{CommitExt, TreeExt};
@@ -23,6 +24,14 @@ pub struct StatusArgs {
     /// Give the output in the short-format
     #[clap(short = 's', long = "short")]
     pub short: bool,
+
+    /// Output with branch info (short or porcelain mode)
+    #[clap(long = "branch")]
+    pub branch: bool,
+
+    /// Output with stash info (only in standard mode)
+    #[clap(long = "show-stash")]
+    pub show_stash: bool,
 }
 
 /// path: to workdir
@@ -50,7 +59,7 @@ impl Changes {
 }
 
 /**
- * 2 parts:
+ * Two parts:
  * 1. unstaged
  * 2. staged to be committed
  */
@@ -59,8 +68,10 @@ pub async fn execute_to(args: StatusArgs, writer: &mut impl Write) {
         return;
     }
 
+    let is_standard_mode = !args.porcelain && !args.short;
+
     // Do not output branch info in porcelain or short mode
-    if !args.porcelain && !args.short {
+    if is_standard_mode {
         match Head::current().await {
             Head::Detached(commit_hash) => {
                 writeln!(writer, "HEAD detached at {}", &commit_hash.to_string()[..8]).unwrap();
@@ -75,18 +86,34 @@ pub async fn execute_to(args: StatusArgs, writer: &mut impl Write) {
         }
     }
 
+    if is_standard_mode && args.show_stash {
+        let stash_num = stash::get_stash_num().unwrap_or(0);
+        let entry_text = if stash_num == 1 { "entry" } else { "entries" };
+        if stash_num > 0 {
+            writeln!(writer, "Your stash currently has {stash_num} {entry_text}").unwrap();
+        }
+    }
+
     // to cur_dir relative path
     let staged = changes_to_be_committed().await.to_relative();
     let unstaged = changes_to_be_staged().to_relative();
 
     // Use machine-readable output in porcelain mode
     if args.porcelain {
+        // if branch option is specified, print the branch info
+        if args.branch {
+            print_branch_info(writer).await;
+        }
         output_porcelain(&staged, &unstaged, writer);
         return;
     }
 
     // Use short format output
     if args.short {
+        // if branch option is specified, print the branch info
+        if args.branch {
+            print_branch_info(writer).await;
+        }
         output_short_format(&staged, &unstaged, writer).await;
         return;
     }
@@ -402,6 +429,23 @@ pub fn changes_to_be_staged() -> Changes {
         }
     }
     changes
+}
+
+/// Helper function for printing branch info when `branch` flag is enabled
+async fn print_branch_info(writer: &mut impl Write) {
+    match Head::current().await {
+        Head::Detached(commit_hash) => {
+            writeln!(
+                writer,
+                "## HEAD (detached at {})",
+                &commit_hash.to_string()[..8]
+            )
+            .unwrap();
+        }
+        Head::Branch(branch) => {
+            writeln!(writer, "## {branch}").unwrap();
+        }
+    }
 }
 
 #[cfg(test)]
