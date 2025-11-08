@@ -102,19 +102,7 @@ pub async fn execute_to(args: StatusArgs, writer: &mut impl Write) {
     if args.porcelain {
         // if branch option is specified, print the branch info
         if args.branch {
-            match Head::current().await {
-                Head::Detached(commit_hash) => {
-                    writeln!(
-                        writer,
-                        "## HEAD (detached at {})",
-                        &commit_hash.to_string()[..8]
-                    )
-                    .unwrap();
-                }
-                Head::Branch(branch) => {
-                    writeln!(writer, "## {branch}").unwrap();
-                }
-            }
+            print_branch_info(writer).await;
         }
         output_porcelain(&staged, &unstaged, writer);
         return;
@@ -124,19 +112,7 @@ pub async fn execute_to(args: StatusArgs, writer: &mut impl Write) {
     if args.short {
         // if branch option is specified, print the branch info
         if args.branch {
-            match Head::current().await {
-                Head::Detached(commit_hash) => {
-                    writeln!(
-                        writer,
-                        "## HEAD (detached at {})",
-                        &commit_hash.to_string()[..8]
-                    )
-                    .unwrap();
-                }
-                Head::Branch(branch) => {
-                    writeln!(writer, "## {branch}").unwrap();
-                }
-            }
+            print_branch_info(writer).await;
         }
         output_short_format(&staged, &unstaged, writer).await;
         return;
@@ -453,6 +429,23 @@ pub fn changes_to_be_staged() -> Changes {
         }
     }
     changes
+}
+
+/// Helper function for printing branch info when `branch` flag is enabled
+async fn print_branch_info(writer: &mut impl Write) {
+    match Head::current().await {
+        Head::Detached(commit_hash) => {
+            writeln!(
+                writer,
+                "## HEAD (detached at {})",
+                &commit_hash.to_string()[..8]
+            )
+            .unwrap();
+        }
+        Head::Branch(branch) => {
+            writeln!(writer, "## {branch}").unwrap();
+        }
+    }
 }
 
 #[cfg(test)]
