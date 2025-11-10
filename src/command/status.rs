@@ -185,7 +185,7 @@ pub async fn execute_to(args: StatusArgs, writer: &mut impl Write) {
 
     if args.ignored && !ignored_files.is_empty() {
         println!("Ignored files:");
-        println!("  use \"libra status --ignored\" to view, or update .libraignore");
+        println!("  (modify .libraignore to change which files are ignored)");
         for f in &ignored_files {
             let str = format!("\t{}", f.display());
             writeln!(writer, "{}", str.bright_red()).unwrap();
@@ -467,14 +467,11 @@ pub fn list_ignored_files() -> Changes {
     let workdir = util::working_dir();
     let index = Index::load(path::index()).unwrap();
 
-    if let Ok(files) = util::list_workdir_files() {
-        for file in files.iter() {
-            let file_abs = util::workdir_to_absolute(file);
-            if util::check_gitignore(&workdir, &file_abs)
-                && !index.tracked(file.to_str().unwrap(), 0)
-            {
-                changes.new.push(file.clone());
-            }
+    let files = util::list_workdir_files().unwrap();
+    for file in files.iter() {
+        let file_abs = util::workdir_to_absolute(file);
+        if util::check_gitignore(&workdir, &file_abs) && !index.tracked(file.to_str().unwrap(), 0) {
+            changes.new.push(file.clone());
         }
     }
 
