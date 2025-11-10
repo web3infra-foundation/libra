@@ -83,7 +83,7 @@ async fn test_remote_rename_updates_branch_tracking() {
 
     let branch_remote = Config::get("branch", Some("main"), "remote").await;
     assert_eq!(
-        branch_remote.as_deref(),
+        branch_remote.map(|m| m.value).as_deref(),
         Some("upstream"),
         "tracking branch should reference the new remote name"
     );

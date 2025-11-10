@@ -89,6 +89,7 @@ pub async fn execute(args: PushArgs) {
 
     let tracked_branch = Config::get("branch", Some(&branch), "merge")
         .await // New branch may not have tracking branch
+        .map(|m| m.value)
         .unwrap_or_else(|| format!("refs/heads/{branch}"));
 
     let tracked_ref = refs.iter().find(|r| r._ref == tracked_branch);

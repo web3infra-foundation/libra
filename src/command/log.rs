@@ -107,6 +107,7 @@ async fn determine_decorate_option(args: &LogArgs) -> Result<DecorateOptions, St
 
     if let Some(config_deco) = Config::get("log", None, "decorate")
         .await
+        .map(|m| m.value)
         .and_then(|s| str_to_decorate_option(&s).ok())
     {
         Ok(config_deco)
@@ -509,17 +510,17 @@ mod tests {
     #[test]
     fn test_log_args_name_only() {
         // Test that the --name-only parameter is parsed correctly
-        let args = LogArgs::parse_from(&["libra", "log", "--name-only"]);
+        let args = LogArgs::parse_from(["libra", "log", "--name-only"]);
         assert!(args.name_only);
 
-        let args = LogArgs::parse_from(&["libra", "log"]);
+        let args = LogArgs::parse_from(["libra", "log"]);
         assert!(!args.name_only);
     }
 
     #[test]
     fn test_name_only_precedence_over_patch() {
         // Test --name-only takes precedence over --patch
-        let args = LogArgs::parse_from(&["libra", "log", "--name-only", "--patch"]);
+        let args = LogArgs::parse_from(["libra", "log", "--name-only", "--patch"]);
         assert!(args.name_only);
         assert!(args.patch);
         // In the execute function, patch should be ignored when name_only is true
@@ -528,7 +529,7 @@ mod tests {
     #[test]
     fn test_name_only_with_oneline() {
         // Test --name-only and --oneline combination
-        let args = LogArgs::parse_from(&["libra", "log", "--name-only", "--oneline"]);
+        let args = LogArgs::parse_from(["libra", "log", "--name-only", "--oneline"]);
         assert!(args.name_only);
         assert!(args.oneline);
     }
@@ -536,7 +537,7 @@ mod tests {
     #[test]
     fn test_name_only_with_number_limit() {
         // Test --name-only combined with quantity limit
-        let args = LogArgs::parse_from(&["libra", "log", "--name-only", "-n", "5"]);
+        let args = LogArgs::parse_from(["libra", "log", "--name-only", "-n", "5"]);
         assert!(args.name_only);
         assert_eq!(args.number, Some(5));
     }
@@ -561,13 +562,13 @@ mod tests {
     #[test]
     fn test_complex_arg_combinations() {
         // Test multiple parameter combinations
-        let args = LogArgs::parse_from(&["libra", "log", "--name-only", "--oneline", "-n", "10"]);
+        let args = LogArgs::parse_from(["libra", "log", "--name-only", "--oneline", "-n", "10"]);
         assert!(args.name_only);
         assert!(args.oneline);
         assert_eq!(args.number, Some(10));
 
         let args =
-            LogArgs::parse_from(&["libra", "log", "--name-only", "src/main.rs", "src/lib.rs"]);
+            LogArgs::parse_from(["libra", "log", "--name-only", "src/main.rs", "src/lib.rs"]);
         assert!(args.name_only);
         // Update expected pathspec value to include "log"
         assert_eq!(args.pathspec, vec!["log", "src/main.rs", "src/lib.rs"]);
@@ -576,7 +577,7 @@ mod tests {
     // Test parameter mutual exclusion logic
     #[test]
     fn test_parameter_mutual_exclusion() {
-        let args = LogArgs::parse_from(&["libra", "log", "--name-only", "--patch"]);
+        let args = LogArgs::parse_from(["libra", "log", "--name-only", "--patch"]);
 
         // Simulate the mutual exclusion logic in the execute function
         let name_only = args.name_only;

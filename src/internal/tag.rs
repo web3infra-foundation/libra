@@ -1,11 +1,10 @@
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use std::str::FromStr;
 
 use crate::command::load_object;
 use crate::internal::config::Config;
 use crate::internal::db::get_db_conn_instance;
 use crate::internal::head::Head;
-use crate::internal::model::reference;
+use crate::internal::model::reference::{ConfigKind, Model};
 use crate::utils::client_storage::ClientStorage;
 use crate::utils::path;
 use git_internal::errors::GitError;
@@ -69,15 +68,20 @@ pub async fn create(name: &str, message: Option<String>, force: bool) -> Result<
         .ok_or_else(|| anyhow::anyhow!("Cannot create tag: HEAD does not point to a commit"))?;
 
     let db = get_db_conn_instance().await;
-    let exists = reference::Entity::find()
-        .filter(reference::Column::Name.eq(format!("{}{}", TAG_REF_PREFIX, name)))
-        .filter(reference::Column::Kind.eq(reference::ConfigKind::Tag))
-        .one(db)
-        .await?;
+    let full_tag_name = format!("{}{}", TAG_REF_PREFIX, name);
 
-    if exists.is_some() && !force {
+    let sql = "SELECT * FROM reference WHERE name = ?1 AND kind = ?2";
+    let mut rows = db
+        .query(
+            sql,
+            turso::params![full_tag_name.clone(), ConfigKind::Tag.as_str()],
+        )
+        .await?;
+    let exists = rows.next().await?.is_some();
+
+    if exists && !force {
         return Err(anyhow::anyhow!("Tag '{}' already exists", name));
-    } else if exists.is_some() && force {
+    } else if exists && force {
         // Delete existing tag if force is true
         delete(name).await?;
     }
@@ -87,9 +91,11 @@ pub async fn create(name: &str, message: Option<String>, force: bool) -> Result<
         // Create an annotated tag object
         let user_name = Config::get("user", None, "name")
             .await
+            .map(|m| m.value)
             .unwrap_or_else(|| DEFAULT_USER.to_string());
         let user_email = Config::get("user", None, "email")
             .await
+            .map(|m| m.value)
             .unwrap_or_else(|| DEFAULT_EMAIL.to_string());
         let tagger_signature = Signature::new(SignatureType::Tagger, user_name, user_email);
 
@@ -114,13 +120,17 @@ pub async fn create(name: &str, message: Option<String>, force: bool) -> Result<
 
     // Save the reference in the database
     let db_conn = get_db_conn_instance().await;
-    let new_ref = reference::ActiveModel {
-        name: Set(Some(format!("{}{}", TAG_REF_PREFIX, name))),
-        kind: Set(reference::ConfigKind::Tag),
-        commit: Set(Some(ref_target_id.to_string())),
-        ..Default::default()
-    };
-    new_ref.insert(db_conn).await?;
+    let sql = "INSERT INTO reference (name, kind, `commit`) VALUES (?1, ?2, ?3)";
+    db_conn
+        .execute(
+            sql,
+            turso::params![
+                full_tag_name.clone(),
+                ConfigKind::Tag.as_str(),
+                ref_target_id.to_string()
+            ],
+        )
+        .await?;
 
     Ok(())
 }
@@ -128,10 +138,15 @@ pub async fn create(name: &str, message: Option<String>, force: bool) -> Result<
 /// Lists all tags available in the repository.
 pub async fn list() -> Result<Vec<Tag>, anyhow::Error> {
     let db_conn = get_db_conn_instance().await;
-    let models = reference::Entity::find()
-        .filter(reference::Column::Kind.eq(reference::ConfigKind::Tag))
-        .all(db_conn)
+    let sql = "SELECT * FROM reference WHERE kind = ?1";
+    let mut rows = db_conn
+        .query(sql, turso::params![ConfigKind::Tag.as_str()])
         .await?;
+
+    let mut models = Vec::new();
+    while let Some(row) = rows.next().await? {
+        models.push(Model::from_row(&row).unwrap());
+    }
 
     let mut tags = Vec::new();
     for m in models {
@@ -164,13 +179,12 @@ pub async fn delete(name: &str) -> Result<(), anyhow::Error> {
     let db_conn = get_db_conn_instance().await;
     let full_ref_name = format!("{}{}", TAG_REF_PREFIX, name);
 
-    let result = reference::Entity::delete_many()
-        .filter(reference::Column::Name.eq(full_ref_name))
-        .filter(reference::Column::Kind.eq(reference::ConfigKind::Tag))
-        .exec(db_conn)
+    let sql = "DELETE FROM reference WHERE name = ?1 AND kind = ?2";
+    let rows_affected = db_conn
+        .execute(sql, turso::params![full_ref_name, ConfigKind::Tag.as_str()])
         .await?;
 
-    if result.rows_affected == 0 {
+    if rows_affected == 0 {
         Err(anyhow::anyhow!("tag '{}' not found", name))
     } else {
         Ok(())
@@ -182,14 +196,18 @@ pub async fn find_tag_and_commit(name: &str) -> Result<Option<(TagObject, Commit
     let db_conn = get_db_conn_instance().await;
     let full_ref_name = format!("{}{}", TAG_REF_PREFIX, name);
 
-    let model = reference::Entity::find()
-        .filter(reference::Column::Name.eq(full_ref_name))
-        .filter(reference::Column::Kind.eq(reference::ConfigKind::Tag))
-        .one(db_conn)
+    let sql = "SELECT * FROM reference WHERE name = ?1 AND kind = ?2";
+    let mut rows = db_conn
+        .query(sql, turso::params![full_ref_name, ConfigKind::Tag.as_str()])
         .await
         .map_err(|e| GitError::CustomError(e.to_string()))?;
 
-    if let Some(m) = model {
+    if let Some(row) = rows
+        .next()
+        .await
+        .map_err(|e| GitError::CustomError(e.to_string()))?
+    {
+        let m = Model::from_row(&row).map_err(|e| GitError::CustomError(e.to_string()))?;
         let commit_str = m
             .commit
             .as_ref()

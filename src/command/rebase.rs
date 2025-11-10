@@ -1,16 +1,15 @@
 use crate::command::{load_object, save_object};
 use crate::internal::branch::Branch;
-use crate::internal::db::get_db_conn_instance;
+use crate::internal::db::{DbConnection, get_db_conn_instance};
 use crate::internal::head::Head;
 use crate::internal::reflog;
-use crate::internal::reflog::{ReflogAction, ReflogContext, ReflogError, with_reflog};
+use crate::internal::reflog::{ReflogAction, ReflogContext, with_reflog};
 use crate::utils::object_ext::{BlobExt, TreeExt};
 use crate::utils::{path, util};
 use clap::Parser;
 use git_internal::hash::SHA1;
 use git_internal::internal::object::commit::Commit;
 use git_internal::internal::object::tree::Tree;
-use sea_orm::TransactionTrait;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -120,9 +119,11 @@ pub async fn execute(args: RebaseArgs) {
     let transaction_result = db
         .transaction(|txn| {
             Box::pin(async move {
-                reflog::Reflog::insert_single_entry(txn, &start_context, "HEAD").await?;
+                reflog::Reflog::insert_single_entry(txn, &start_context, "HEAD")
+                    .await
+                    .map_err(|e| std::io::Error::other(format!("Reflog error: {e}")))?;
                 Head::update_with_conn(txn, Head::Detached(upstream_id), None).await;
-                Ok::<_, ReflogError>(())
+                Ok::<_, std::io::Error>(())
             })
         })
         .await;
@@ -133,7 +134,7 @@ pub async fn execute(args: RebaseArgs) {
     }
 
     // This mimics Git's behavior.
-    Head::update_with_conn(db, Head::Detached(upstream_id), None).await;
+    Head::update_with_conn(db.as_ref(), Head::Detached(upstream_id), None).await;
     // Replay each commit on top of the upstream branch
     // Each commit is applied as a three-way merge and creates a new commit
     println!(
@@ -148,7 +149,7 @@ pub async fn execute(args: RebaseArgs) {
             Ok(replayed_commit_id) => {
                 new_base_id = replayed_commit_id;
                 // Temporarily move HEAD along with each replayed commit.
-                Head::update_with_conn(db, Head::Detached(new_base_id), None).await;
+                Head::update_with_conn(db.as_ref(), Head::Detached(new_base_id), None).await;
                 let original_commit: Commit = load_object(&commit_id).unwrap();
                 println!(
                     "Applied: {} {}",
@@ -158,7 +159,7 @@ pub async fn execute(args: RebaseArgs) {
             }
             Err(e) => {
                 // IMPORTANT: If rebase failed, we should reset HEAD back to the original branch.
-                Head::update_with_conn(db, Head::Branch(current_branch_name), None).await;
+                Head::update_with_conn(db.as_ref(), Head::Branch(current_branch_name), None).await;
                 eprintln!(
                     "error: could not apply {}: {}",
                     &commit_id.to_string()[..7],
@@ -184,7 +185,7 @@ pub async fn execute(args: RebaseArgs) {
     let branch_name_cloned = current_branch_name.clone();
     if let Err(e) = with_reflog(
         finish_context,
-        move |txn: &sea_orm::DatabaseTransaction| {
+        move |txn: &DbConnection| {
             Box::pin(async move {
                 // This is the crucial step: move the original branch from its old position
                 // to the final replayed commit.
@@ -207,7 +208,7 @@ pub async fn execute(args: RebaseArgs) {
     {
         eprintln!("fatal: failed to finalize rebase: {e}");
         // Attempt to restore HEAD to a safe state
-        Head::update_with_conn(db, Head::Detached(upstream_id), None).await;
+        Head::update_with_conn(db.as_ref(), Head::Detached(upstream_id), None).await;
     }
 
     // Reset the working directory and index to match the final state

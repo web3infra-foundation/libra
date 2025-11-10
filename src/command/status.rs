@@ -280,8 +280,8 @@ async fn should_use_colors() -> bool {
     use std::io::{self, IsTerminal};
 
     // Check color.status.short configuration
-    if let Some(color_setting) = Config::get("color", Some("status"), "short").await {
-        match color_setting.as_str() {
+    if let Some(color_model) = Config::get("color", Some("status"), "short").await {
+        match color_model.value.as_str() {
             "always" => true,
             "never" | "false" => false,
             "auto" | "true" => {
@@ -292,8 +292,8 @@ async fn should_use_colors() -> bool {
         }
     } else {
         // Check color.ui configuration as fallback
-        if let Some(color_setting) = Config::get("color", None, "ui").await {
-            match color_setting.as_str() {
+        if let Some(color_model) = Config::get("color", None, "ui").await {
+            match color_model.value.as_str() {
                 "always" => true,
                 "never" | "false" => false,
                 "auto" | "true" => {

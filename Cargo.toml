@@ -46,11 +46,7 @@ reqwest = { version = "0.12.23", features = ["stream", "json"] }
 ring = "0.17"
 rpassword = "7.0"
 scopeguard = "1.0"
-sea-orm = { version = "1.1.16", features = [
-    "sqlx-sqlite",
-    "runtime-tokio-rustls",
-    "macros",
-] }
+turso = "0.3"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 sha1 = "0.10"
@@ -85,7 +81,6 @@ openssl = "0.10"
 pgp = "0.15.0"
 quinn = "0.11"
 rcgen = "0.13"
-sea-orm-migration = "1.1.16"
 secp256k1 = "0.29"
 smallvec = "1.13"
 sysinfo = "0.32"

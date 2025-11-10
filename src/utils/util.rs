@@ -458,9 +458,11 @@ use git_internal::internal::object::signature::{Signature, SignatureType};
 pub async fn create_signatures() -> (Signature, Signature) {
     let user_name = Config::get("user", None, "name")
         .await
+        .map(|m| m.value)
         .unwrap_or_else(|| "Stasher".to_string());
     let user_email = Config::get("user", None, "email")
         .await
+        .map(|m| m.value)
         .unwrap_or_else(|| "stasher@example.com".to_string());
 
     let author = Signature::new(SignatureType::Author, user_name.clone(), user_email.clone());

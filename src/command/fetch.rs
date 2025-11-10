@@ -3,7 +3,6 @@ use clap::Parser;
 use git_internal::hash::SHA1;
 use git_internal::internal::object::commit::Commit;
 use indicatif::ProgressBar;
-use sea_orm::TransactionTrait;
 use std::io;
 use std::time::Instant;
 use std::vec;
@@ -13,7 +12,7 @@ use tokio_util::io::StreamReader;
 
 use crate::command::load_object;
 use crate::internal::db::get_db_conn_instance;
-use crate::internal::reflog::{HEAD, Reflog, ReflogAction, ReflogContext, ReflogError, zero_sha1};
+use crate::internal::reflog::{HEAD, Reflog, ReflogAction, ReflogContext, zero_sha1};
 use crate::utils::util;
 use crate::{
     command::index_pack::{self, IndexPackArgs},
@@ -324,7 +323,9 @@ pub async fn fetch_repository(remote_config: RemoteConfig, branch: Option<String
                         new_oid: r._hash.clone(),
                         action: ReflogAction::Fetch, // Using a simple Fetch action
                     };
-                    Reflog::insert_single_entry(txn, &context, &full_ref_name).await?;
+                    Reflog::insert_single_entry(txn, &context, &full_ref_name)
+                        .await
+                        .map_err(|e| std::io::Error::other(format!("Reflog error: {e}")))?;
                 }
 
                 // 2. Update the remote's HEAD pointer
@@ -351,7 +352,7 @@ pub async fn fetch_repository(remote_config: RemoteConfig, branch: Option<String
                 } else {
                     tracing::warn!("fetch empty, remote HEAD not found");
                 }
-                Ok::<_, ReflogError>(())
+                Ok::<_, std::io::Error>(())
             })
         })
         .await;

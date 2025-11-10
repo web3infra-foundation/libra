@@ -1,6 +1,7 @@
 use crate::command::{load_object, save_object};
 use crate::common_utils::format_commit_msg;
 use crate::internal::branch::Branch;
+use crate::internal::db::DbConnection;
 use crate::internal::head::Head;
 use crate::internal::reflog::{ReflogAction, ReflogContext, with_reflog};
 use crate::utils::object_ext::BlobExt;
@@ -11,7 +12,6 @@ use git_internal::hash::SHA1;
 use git_internal::internal::index::{Index, IndexEntry};
 use git_internal::internal::object::commit::Commit;
 use git_internal::internal::object::tree::{Tree, TreeItem, TreeItemMode};
-use sea_orm::ConnectionTrait;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -412,7 +412,7 @@ async fn resolve_commit(reference: &str) -> Result<SHA1, String> {
 /// This function updates the current branch to point to the specified commit.
 /// It only works when HEAD is pointing to a branch (not in detached HEAD state).
 /// The branch reference is updated to the new commit ID.
-async fn update_head<C: ConnectionTrait>(db: &C, commit_id: &str) {
+async fn update_head(db: &DbConnection, commit_id: &str) {
     if let Head::Branch(name) = Head::current_with_conn(db).await {
         Branch::update_branch_with_conn(db, &name, commit_id, None).await;
     }

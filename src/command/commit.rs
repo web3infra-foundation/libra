@@ -9,6 +9,7 @@ use crate::command::load_object;
 use crate::common_utils::{check_conventional_commits_message, format_commit_msg};
 use crate::internal::branch::Branch;
 use crate::internal::config::Config as UserConfig;
+use crate::internal::db::DbConnection;
 use crate::internal::head::Head;
 use crate::internal::reflog::{ReflogAction, ReflogContext, with_reflog};
 use crate::utils::client_storage::ClientStorage;
@@ -20,7 +21,6 @@ use git_internal::internal::index::Index;
 use git_internal::internal::object::ObjectTrait;
 use git_internal::internal::object::commit::Commit;
 use git_internal::internal::object::tree::{Tree, TreeItem, TreeItemMode};
-use sea_orm::ConnectionTrait;
 use std::process::Command;
 
 #[derive(Parser, Debug, Default)]
@@ -121,9 +121,11 @@ pub async fn execute(args: CommitArgs) {
         // get user
         let user_name = UserConfig::get("user", None, "name")
             .await
+            .map(|m| m.value)
             .unwrap_or_else(|| "unknown".to_string());
         let user_email = UserConfig::get("user", None, "email")
             .await
+            .map(|m| m.value)
             .unwrap_or_else(|| "unknown".to_string());
 
         // get sign line
@@ -272,7 +274,7 @@ async fn get_parents_ids() -> Vec<SHA1> {
 }
 
 /// update HEAD to new commit, if in branch, update branch's commit id, if detached head, update head's commit id
-async fn update_head<C: ConnectionTrait>(db: &C, commit_id: &str) {
+async fn update_head(db: &DbConnection, commit_id: &str) {
     // let head = reference::Model::current_head(db).await.unwrap();
     match Head::current_with_conn(db).await {
         Head::Branch(name) => {
@@ -338,7 +340,8 @@ mod test {
     #[test]
     ///Testing basic parameter parsing functionality.
     fn test_parse_args() {
-        let args = CommitArgs::try_parse_from(["commit", "-m", "init"]);
+        let args: Result<CommitArgs, clap::error::Error> =
+            CommitArgs::try_parse_from(["commit", "-m", "init"]);
         assert!(args.is_ok());
 
         let args = CommitArgs::try_parse_from(["commit", "-m", "init", "--allow-empty"]);

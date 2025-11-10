@@ -5,7 +5,7 @@ use super::{
     get_target_commit, load_object, log,
     restore::{self, RestoreArgs},
 };
-use crate::internal::db::get_db_conn_instance;
+use crate::internal::db::{DbConnection, get_db_conn_instance};
 use crate::internal::reflog::{ReflogAction, ReflogContext, with_reflog, zero_sha1};
 use crate::{
     internal::{branch::Branch, head::Head},
@@ -95,8 +95,8 @@ async fn merge_ff(target_commit: Commit, target_branch_name: &str) {
     println!("Fast-forward");
     let db = get_db_conn_instance().await;
 
-    let old_oid_opt = Head::current_commit_with_conn(db).await;
-    let current_head_state = Head::current_with_conn(db).await;
+    let old_oid_opt = Head::current_commit_with_conn(db.as_ref()).await;
+    let current_head_state = Head::current_with_conn(db.as_ref()).await;
 
     let action = ReflogAction::Merge {
         branch: target_branch_name.to_string(),
@@ -113,7 +113,7 @@ async fn merge_ff(target_commit: Commit, target_branch_name: &str) {
     // Use `with_reflog`. A merge operation should log for the branch.
     if let Err(e) = with_reflog(
         context,
-        move |txn: &sea_orm::DatabaseTransaction| {
+        move |txn: &DbConnection| {
             Box::pin(async move {
                 match &current_head_state {
                     Head::Branch(branch_name) => {
