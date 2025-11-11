@@ -27,7 +27,6 @@ rust_library(
         "color",
         "default",
         "derive",
-        "env",
         "error-context",
         "help",
         "std",

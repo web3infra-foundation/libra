@@ -27,13 +27,17 @@ rust_library(
         "default",
         "rng",
         "serde",
+        "sha1",
         "std",
         "v4",
+        "v5",
+        "v7",
     ],
     rustc_flags = ["@$(location :uuid-manifest[env_flags])"],
     visibility = ["PUBLIC"],
     deps = [
         "//third-party/rust/crates/getrandom/0.3.3:getrandom",
         "//third-party/rust/crates/serde/1.0.225:serde",
+        "//third-party/rust/crates/sha1_smol/1.0.1:sha1_smol",
     ],
 )

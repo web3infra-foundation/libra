@@ -41,7 +41,7 @@ rust_binary(
     edition = "2021",
     rustc_flags = ["@$(location :psm-manifest[env_flags])"],
     visibility = [],
-    deps = ["//third-party/rust/crates/cc/1.2.38:cc"],
+    deps = ["//third-party/rust/crates/cc/1.2.45:cc"],
 )
 
 buildscript_run(

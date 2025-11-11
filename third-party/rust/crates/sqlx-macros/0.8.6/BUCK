@@ -24,8 +24,6 @@ rust_library(
     crate_root = "vendor/src/lib.rs",
     edition = "2021",
     features = [
-        "_rt-tokio",
-        "_tls-rustls-ring-webpki",
         "bigdecimal",
         "chrono",
         "default",
