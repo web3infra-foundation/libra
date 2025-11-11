@@ -9,6 +9,7 @@ use git_internal::internal::object::tree::Tree;
 use super::stash;
 use crate::command::calc_file_blob_hash;
 use crate::internal::head::Head;
+use crate::utils::ignore::{self, IgnorePolicy};
 use crate::utils::object_ext::{CommitExt, TreeExt};
 use crate::utils::{path, util};
 use clap::Parser;
@@ -425,18 +426,25 @@ pub async fn changes_to_be_committed() -> Changes {
     changes
 }
 
-/// Compare the difference between `index` and the `workdir`
+/// Compare the difference between `index` and the `workdir` using the default ignore rules.
 pub fn changes_to_be_staged() -> Changes {
+    changes_to_be_staged_with_policy(IgnorePolicy::Respect)
+}
+
+/// Variant of [`changes_to_be_staged`] that lets callers pick the ignore strategy explicitly.
+/// Commands such as `add --force` or future `status --ignored` can switch policies as needed.
+pub fn changes_to_be_staged_with_policy(policy: IgnorePolicy) -> Changes {
     let mut changes = Changes::default();
     let workdir = util::working_dir();
     let index = Index::load(path::index()).unwrap();
     let tracked_files = index.tracked_files();
     for file in tracked_files.iter() {
+        if ignore::should_ignore(file, policy, &index) {
+            continue;
+        }
         let file_str = file.to_str().unwrap();
         let file_abs = util::workdir_to_absolute(file);
-        if util::check_gitignore(&workdir, &file_abs) {
-            continue;
-        } else if !file_abs.exists() {
+        if !file_abs.exists() {
             changes.deleted.push(file.clone());
         } else if index.is_modified(file_str, 0, &workdir) {
             // only calc the hash if the file is modified (metadata), for optimization
@@ -447,15 +455,11 @@ pub fn changes_to_be_staged() -> Changes {
         }
     }
     let files = util::list_workdir_files().unwrap(); // to workdir
-    for file in files.iter() {
-        let file_abs = util::workdir_to_absolute(file);
-        if util::check_gitignore(&workdir, &file_abs) {
-            // file ignored in .libraignore
-            continue;
-        }
-        if !index.tracked(file.to_str().unwrap(), 0) {
+    for file in ignore::filter_workdir_paths(files.into_iter(), policy, &index) {
+        let file_str = file.to_str().unwrap();
+        if !index.tracked(file_str, 0) {
             // file not tracked in `index`
-            changes.new.push(file.clone());
+            changes.new.push(file);
         }
     }
     changes
