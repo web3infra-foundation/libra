@@ -113,6 +113,16 @@ buildscript_run(
     name = "turso_core-build-script-run",
     package_name = "turso_core",
     buildscript_rule = ":turso_core-build-script-build",
+    env = {
+        "CARGO_PKG_LICENSE": "MIT",
+        "PROFILE": "debug",
+        "CARGO_PKG_AUTHORS": "turso",
+        "CARGO_PKG_DESCRIPTION": "Turso database core library",
+        "CARGO_PKG_HOMEPAGE": "",
+        "CARGO_PKG_REPOSITORY": "",
+        "RUSTDOC": "rustdoc",
+        "NUM_JOBS": "1",
+    },
     env_srcs = [":turso_core-manifest[env_dict]"],
     features = [
         "default",
