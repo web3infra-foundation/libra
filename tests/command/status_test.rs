@@ -6,6 +6,86 @@ use libra::command::status::execute_to as status_execute;
 use libra::command::status::output_porcelain;
 use std::fs;
 use std::io::Write;
+#[tokio::test]
+#[serial]
+/// Tests --ignored flag: ignored files appear in outputs
+async fn test_status_ignored_outputs() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    // Create .libraignore ignoring foo* and dir/
+    let mut ign = fs::File::create(".libraignore").unwrap();
+    ign.write_all(b"foo*\ndir/\n").unwrap();
+
+    // Create ignored files and non-ignored
+    fs::write("foo.txt", "x").unwrap();
+    fs::create_dir_all("dir").unwrap();
+    fs::write("dir/a.txt", "y").unwrap();
+    fs::write("bar.txt", "z").unwrap();
+
+    // Porcelain
+    let mut out = Vec::new();
+    status_execute(
+        StatusArgs {
+            porcelain: true,
+            short: false,
+            branch: false,
+            show_stash: false,
+            ignored: true,
+        },
+        &mut out,
+    )
+    .await;
+    let s = String::from_utf8(out).unwrap();
+    assert!(
+        s.lines().any(|l| l.starts_with("!! foo.txt")),
+        "porcelain should show !! for ignored file: {}",
+        s
+    );
+
+    // Short
+    let mut out = Vec::new();
+    status_execute(
+        StatusArgs {
+            porcelain: false,
+            short: true,
+            branch: false,
+            show_stash: false,
+            ignored: true,
+        },
+        &mut out,
+    )
+    .await;
+    let s = String::from_utf8(out).unwrap();
+    assert!(
+        s.lines().any(|l| l.starts_with("!! foo.txt")),
+        "short should show !! for ignored file: {}",
+        s
+    );
+
+    // Standard
+    let mut out = Vec::new();
+    status_execute(
+        StatusArgs {
+            porcelain: false,
+            short: false,
+            branch: false,
+            show_stash: false,
+            ignored: true,
+        },
+        &mut out,
+    )
+    .await;
+    let s = String::from_utf8(out).unwrap();
+    // In standard mode, headers are printed to stdout via println!, so the writer content may
+    // only include per-file lines. Assert that ignored file names are present.
+    assert!(
+        s.contains("foo.txt"),
+        "standard should include ignored file name in writer output: {}",
+        s
+    );
+}
 
 // Helper function to create CommitArgs with a message, using default values for other fields
 fn create_commit_args(message: &str) -> CommitArgs {
@@ -231,6 +311,7 @@ async fn test_status_porcelain() {
             short: false,
             branch: false,
             show_stash: false,
+            ignored: false,
         },
         &mut output,
     )
@@ -374,6 +455,7 @@ async fn test_status_short_format() {
             short: true,
             branch: false,
             show_stash: false,
+            ignored: false,
         },
         &mut output,
     )
@@ -442,6 +524,7 @@ async fn test_status_empty_repository() {
             short: false,
             branch: false,
             show_stash: false,
+            ignored: false,
         },
         &mut output,
     )
@@ -503,6 +586,7 @@ async fn test_status_mixed_changes() {
             short: false,
             branch: false,
             show_stash: false,
+            ignored: false,
         },
         &mut output,
     )
@@ -562,6 +646,7 @@ async fn test_status_deleted_files() {
             short: false,
             branch: false,
             show_stash: false,
+            ignored: false,
         },
         &mut output,
     )
@@ -626,6 +711,7 @@ async fn test_status_with_subdirectories() {
             short: false,
             branch: false,
             show_stash: false,
+            ignored: false,
         },
         &mut output,
     )
@@ -688,6 +774,7 @@ async fn test_status_verbose_output() {
             short: false,
             branch: false,
             show_stash: false,
+            ignored: false,
         },
         &mut output,
     )
@@ -750,6 +837,7 @@ async fn test_status_short_format_with_branch() {
             short: true,
             branch: true,
             show_stash: false,
+            ignored: false,
         },
         &mut output,
     )
@@ -808,6 +896,7 @@ async fn test_status_porcelain_format_with_branch() {
             short: false,
             branch: true,
             show_stash: false,
+            ignored: false,
         },
         &mut output,
     )
@@ -882,6 +971,7 @@ async fn test_status_show_stash_with_existing_stash() {
             short: false,
             branch: false,
             show_stash: true,
+            ignored: false,
         },
         &mut output,
     )
@@ -906,6 +996,7 @@ async fn test_status_show_stash_with_existing_stash() {
             short: false,
             branch: false,
             show_stash: true,
+            ignored: false,
         },
         &mut output,
     )
@@ -930,6 +1021,7 @@ async fn test_status_show_stash_with_existing_stash() {
             short: true,
             branch: false,
             show_stash: true,
+            ignored: false,
         },
         &mut output,
     )
@@ -980,6 +1072,7 @@ async fn test_status_show_stash_without_stash() {
             short: false,
             branch: false,
             show_stash: true,
+            ignored: false,
         },
         &mut output,
     )
@@ -1057,6 +1150,7 @@ async fn test_status_branch_detached_head() {
             short: true,
             branch: true,
             show_stash: false,
+            ignored: false,
         },
         &mut output,
     )
