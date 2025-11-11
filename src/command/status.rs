@@ -32,6 +32,10 @@ pub struct StatusArgs {
     /// Output with stash info (only in standard mode)
     #[clap(long = "show-stash")]
     pub show_stash: bool,
+
+    /// Show ignored files
+    #[clap(long = "ignored")]
+    pub ignored: bool,
 }
 
 /// path: to workdir
@@ -97,6 +101,11 @@ pub async fn execute_to(args: StatusArgs, writer: &mut impl Write) {
     // to cur_dir relative path
     let staged = changes_to_be_committed().await.to_relative();
     let unstaged = changes_to_be_staged().to_relative();
+    let ignored_files = if args.ignored {
+        list_ignored_files().to_relative().new
+    } else {
+        vec![]
+    };
 
     // Use machine-readable output in porcelain mode
     if args.porcelain {
@@ -105,6 +114,12 @@ pub async fn execute_to(args: StatusArgs, writer: &mut impl Write) {
             print_branch_info(writer).await;
         }
         output_porcelain(&staged, &unstaged, writer);
+        // Porcelain: ignored files prefixed with "!!"
+        if args.ignored {
+            for file in &ignored_files {
+                writeln!(writer, "!! {}", file.display()).unwrap();
+            }
+        }
         return;
     }
 
@@ -115,6 +130,12 @@ pub async fn execute_to(args: StatusArgs, writer: &mut impl Write) {
             print_branch_info(writer).await;
         }
         output_short_format(&staged, &unstaged, writer).await;
+        // Short: append ignored files with "!!"
+        if args.ignored {
+            for file in &ignored_files {
+                writeln!(writer, "!! {}", file.display()).unwrap();
+            }
+        }
         return;
     }
 
@@ -160,6 +181,15 @@ pub async fn execute_to(args: StatusArgs, writer: &mut impl Write) {
             let str = format!("\t{}", f.display());
             writeln!(writer, "{}", str.bright_red()).unwrap();
         });
+    }
+
+    if args.ignored && !ignored_files.is_empty() {
+        println!("Ignored files:");
+        println!("  (modify .libraignore to change which files are ignored)");
+        for f in &ignored_files {
+            let str = format!("\t{}", f.display());
+            writeln!(writer, "{}", str.bright_red()).unwrap();
+        }
     }
 }
 
@@ -428,6 +458,23 @@ pub fn changes_to_be_staged() -> Changes {
             changes.new.push(file.clone());
         }
     }
+    changes
+}
+
+/// List ignored files (not tracked by index, but ignored by .libraignore) under workdir
+pub fn list_ignored_files() -> Changes {
+    let mut changes = Changes::default();
+    let workdir = util::working_dir();
+    let index = Index::load(path::index()).unwrap();
+
+    let files = util::list_workdir_files().unwrap();
+    for file in files.iter() {
+        let file_abs = util::workdir_to_absolute(file);
+        if util::check_gitignore(&workdir, &file_abs) && !index.tracked(file.to_str().unwrap(), 0) {
+            changes.new.push(file.clone());
+        }
+    }
+
     changes
 }
 

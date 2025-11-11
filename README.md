@@ -104,10 +104,10 @@ achieving unified management.
 - status
   - [x] --porcelain
   - [x] -s, --short
-  - [ ] --branch
-  - [ ] --ignored
+  - [x] --branch
+  - [x] --ignored
   - [ ] --untracked-files[=no|normal|all]
-  - [ ] --show-stash
+  - [x] --show-stash
 
 - commit
   - [x] -m, --message <msg>
