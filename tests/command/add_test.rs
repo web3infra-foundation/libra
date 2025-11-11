@@ -414,6 +414,71 @@ async fn test_add_force_tracks_ignored_file() {
 
 #[tokio::test]
 #[serial]
+/// Ensures `add --force .` surfaces ignored directories and files recursively.
+async fn test_add_force_dot_includes_ignored_directory() {
+    let repo = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write(".libraignore", "ignored_dir/\n").unwrap();
+    fs::create_dir_all("ignored_dir").unwrap();
+    fs::write("ignored_dir/nested.txt", "ignored").unwrap();
+    fs::write("visible.txt", "seen").unwrap();
+
+    // Baseline: without --force the ignored directory stays hidden
+    add::execute(AddArgs {
+        pathspec: vec![".".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+
+    let staged_without_force = changes_to_be_committed().await;
+    assert!(
+        !staged_without_force
+            .new
+            .iter()
+            .any(|p| p.to_str().unwrap() == "ignored_dir/nested.txt"),
+        "ignored entries should not be staged when force is false"
+    );
+    assert!(
+        staged_without_force
+            .new
+            .iter()
+            .any(|p| p.to_str().unwrap() == "visible.txt"),
+        "non ignored files should still be staged"
+    );
+
+    // Re-run with --force to include ignored entries
+    add::execute(AddArgs {
+        pathspec: vec![".".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: true,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+
+    let staged_with_force = changes_to_be_committed().await;
+    assert!(
+        staged_with_force
+            .new
+            .iter()
+            .any(|p| p.to_str().unwrap() == "ignored_dir/nested.txt"),
+        "`add --force .` should surface ignored children"
+    );
+}
+
+#[tokio::test]
+#[serial]
 /// Tests the dry-run flag which should not actually add files
 async fn test_add_dry_run() {
     let test_dir = tempdir().unwrap();

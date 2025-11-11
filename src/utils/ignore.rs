@@ -131,6 +131,7 @@ mod tests {
 
         fs::write(".libraignore", "ignored.txt\n").unwrap();
         fs::write("ignored.txt", "ignored").unwrap();
+        fs::write("visible.txt", "visible").unwrap();
 
         let index = build_index();
         assert!(!should_ignore(
@@ -138,6 +139,23 @@ mod tests {
             IgnorePolicy::IncludeIgnored,
             &index
         ));
+
+        let filtered = filter_workdir_paths(
+            vec![PathBuf::from("ignored.txt"), PathBuf::from("visible.txt")],
+            IgnorePolicy::IncludeIgnored,
+            &index,
+        );
+        assert_eq!(
+            filtered,
+            vec![PathBuf::from("ignored.txt"), PathBuf::from("visible.txt")]
+        );
+
+        let unstaged =
+            crate::command::status::changes_to_be_staged_with_policy(IgnorePolicy::IncludeIgnored);
+        assert!(
+            unstaged.new.iter().any(|p| p == Path::new("ignored.txt")),
+            "IncludeIgnored policy should surface ignored entries for staging workflows"
+        );
     }
 
     #[tokio::test]
@@ -174,5 +192,54 @@ mod tests {
 
         let unstaged = changes_to_be_staged();
         assert!(!unstaged.new.iter().any(|p| p == Path::new("ignored.txt")));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn only_ignored_policy_excludes_tracked_entries() {
+        let repo = tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = test::ChangeDirGuard::new(repo.path());
+
+        fs::write(".libraignore", "ignored.txt\n").unwrap();
+        fs::write("ignored.txt", "initial").unwrap();
+
+        add::execute(AddArgs {
+            pathspec: vec!["ignored.txt".into()],
+            all: false,
+            update: false,
+            refresh: false,
+            force: true,
+            verbose: false,
+            dry_run: false,
+            ignore_errors: false,
+        })
+        .await;
+
+        let index = build_index();
+        assert!(
+            index.tracked("ignored.txt", 0),
+            "sanity check: ignored file should now be tracked"
+        );
+
+        let filtered = filter_workdir_paths(
+            vec![PathBuf::from("ignored.txt")],
+            IgnorePolicy::OnlyIgnored,
+            &index,
+        );
+        assert!(
+            filtered.is_empty(),
+            "tracked entries must be removed when requesting only ignored files"
+        );
+
+        let only_ignored =
+            crate::command::status::changes_to_be_staged_with_policy(IgnorePolicy::OnlyIgnored);
+        assert!(
+            !only_ignored
+                .new
+                .iter()
+                .any(|p| p == Path::new("ignored.txt")),
+            "OnlyIgnored policy should hide tracked files even if they match ignore patterns"
+        );
     }
 }
