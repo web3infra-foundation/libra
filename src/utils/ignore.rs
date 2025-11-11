@@ -15,7 +15,8 @@ pub enum IgnorePolicy {
 }
 
 /// Returns `true` if the given workdir-relative `path` should be filtered out under `policy`.
-/// The check is index-aware so tracked entries remain visible regardless of ignore configuration.
+/// The check is index-aware; tracked entries remain visible for `Respect`, are always included for
+/// `IncludeIgnored`, and get filtered when `OnlyIgnored` is requested.
 pub fn should_ignore(path: &Path, policy: IgnorePolicy, index: &Index) -> bool {
     let workdir = util::working_dir();
     should_ignore_with_workdir(path, policy, index, &workdir)

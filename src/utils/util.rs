@@ -403,11 +403,12 @@ pub fn default_progress_bar(len: u64) -> ProgressBar {
     progress_bar
 }
 
-/// Check each directory level from `work_dir` to `target_file` to see if there is a `.gitignore` file that matches `target_file`.
+/// Check each directory level from `work_dir` to `target_file` to see if there is a `.libraignore`
+/// file that matches `target_file`.
 ///
 /// Low-level helper historically used by status/add flows. Prefer the higher-level wrappers in
 /// `crate::utils::ignore::{should_ignore, filter_workdir_paths}` so that ignore policies and index
-/// awareness stay consistent. Call this directly only when you explicitly need raw `.gitignore`
+/// awareness stay consistent. Call this directly only when you explicitly need raw `.libraignore`
 /// parsing.
 ///
 /// Assume `target_file` is in `work_dir`.
