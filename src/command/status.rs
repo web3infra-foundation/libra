@@ -432,7 +432,7 @@ pub fn changes_to_be_staged() -> Changes {
 }
 
 /// Variant of [`changes_to_be_staged`] that lets callers pick the ignore strategy explicitly.
-/// Commands such as `add --force` or future `status --ignored` can switch policies as needed.
+/// Commands such as `add --force` or `status --ignored` can switch policies as needed.
 pub fn changes_to_be_staged_with_policy(policy: IgnorePolicy) -> Changes {
     let mut changes = Changes::default();
     let workdir = util::working_dir();

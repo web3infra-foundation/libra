@@ -6,7 +6,7 @@ use super::util;
 /// Describes how commands should treat entries matched by `.libraignore`.
 /// - `Respect`: honor ignore rules for untracked files but always keep tracked ones.
 /// - `IncludeIgnored`: disable ignore filtering entirely, used by `add --force` and similar flows.
-/// - `OnlyIgnored`: surface only the ignored set (reserved for follow-up extensions).
+/// - `OnlyIgnored`: surface only the ignored set, used by `status --ignored` flows.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IgnorePolicy {
     Respect,

@@ -451,7 +451,7 @@ async fn test_add_force_dot_includes_ignored_directory() {
             .new
             .iter()
             .any(|p| p.to_str().unwrap() == "visible.txt"),
-        "non ignored files should still be staged"
+        "non-ignored files should still be staged"
     );
 
     // Re-run with --force to include ignored entries
