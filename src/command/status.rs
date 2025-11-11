@@ -467,19 +467,7 @@ pub fn changes_to_be_staged_with_policy(policy: IgnorePolicy) -> Changes {
 
 /// List ignored files (not tracked by index, but ignored by .libraignore) under workdir
 pub fn list_ignored_files() -> Changes {
-    let mut changes = Changes::default();
-    let workdir = util::working_dir();
-    let index = Index::load(path::index()).unwrap();
-
-    let files = util::list_workdir_files().unwrap();
-    for file in files.iter() {
-        let file_abs = util::workdir_to_absolute(file);
-        if util::check_gitignore(&workdir, &file_abs) && !index.tracked(file.to_str().unwrap(), 0) {
-            changes.new.push(file.clone());
-        }
-    }
-
-    changes
+    changes_to_be_staged_with_policy(IgnorePolicy::OnlyIgnored)
 }
 
 /// Helper function for printing branch info when `branch` flag is enabled
