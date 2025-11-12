@@ -103,6 +103,7 @@ async fn test_execute_commit() {
             dry_run: false,
             ignore_errors: false,
             refresh: false,
+            force: false,
         };
         add::execute(args).await;
     }

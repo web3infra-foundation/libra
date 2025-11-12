@@ -30,6 +30,7 @@ async fn test_basic_cherry_pick() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -64,6 +65,7 @@ async fn test_basic_cherry_pick() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -93,6 +95,7 @@ async fn test_basic_cherry_pick() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -224,6 +227,7 @@ async fn test_cherry_pick_with_commit() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -254,6 +258,7 @@ async fn test_cherry_pick_with_commit() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -331,6 +336,7 @@ async fn test_cherry_pick_multiple_commits() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -362,6 +368,7 @@ async fn test_cherry_pick_multiple_commits() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -386,6 +393,7 @@ async fn test_cherry_pick_multiple_commits() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
     commit::execute(CommitArgs {
