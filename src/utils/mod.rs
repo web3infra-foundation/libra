@@ -1,4 +1,5 @@
 pub mod client_storage;
+pub mod ignore;
 pub mod lfs;
 pub mod object;
 pub mod object_ext;

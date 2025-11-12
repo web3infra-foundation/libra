@@ -22,7 +22,11 @@ use crate::{
         status::{self, changes_to_be_committed},
     },
     internal::head::Head,
-    utils::{object_ext::TreeExt, path, util},
+    utils::{
+        ignore::{self, IgnorePolicy},
+        object_ext::TreeExt,
+        path, util,
+    },
 };
 
 use crate::utils::util::to_workdir_path;
@@ -93,7 +97,7 @@ pub async fn execute(args: DiffArgs) {
             } else {
                 let changes = changes_to_be_committed().await;
                 // diff didn't show untracked or deleted files
-                get_files_blobs(&changes.modified)
+                get_files_blobs(&changes.modified, &index, IgnorePolicy::Respect)
             }
         }
     };
@@ -115,7 +119,7 @@ pub async fn execute(args: DiffArgs) {
                 // NOTE: git didn't show diff for untracked files, but we do
                 util::list_workdir_files().unwrap()
             };
-            get_files_blobs(&files)
+            get_files_blobs(&files, &index, IgnorePolicy::Respect)
         }
     };
 
@@ -181,15 +185,12 @@ async fn get_commit_blobs(commit_hash: &SHA1) -> Vec<(PathBuf, SHA1)> {
     tree.get_plain_items()
 }
 
-// diff need to print hash even if the file is not added
-fn get_files_blobs(files: &[PathBuf]) -> Vec<(PathBuf, SHA1)> {
-    let working_dir = util::working_dir();
+/// diff needs to print hashes even if the files have not been staged yet.
+/// This helper maps workdir paths to blob ids while applying the shared ignore policy.
+fn get_files_blobs(files: &[PathBuf], index: &Index, policy: IgnorePolicy) -> Vec<(PathBuf, SHA1)> {
     files
         .iter()
-        .filter(|&p| {
-            let path = util::workdir_to_absolute(p);
-            !util::check_gitignore(&working_dir, &path)
-        })
+        .filter(|path| !ignore::should_ignore(path, policy, index))
         .map(|p| {
             let path = util::workdir_to_absolute(p);
             let data = std::fs::read(&path).unwrap();
@@ -333,7 +334,12 @@ mod test {
         fs::File::create("should_ignore").unwrap();
         fs::File::create("not_ignore").unwrap();
 
-        let blob = get_files_blobs(&[PathBuf::from("should_ignore"), PathBuf::from("not_ignore")]);
+        let index = Index::load(path::index()).unwrap();
+        let blob = get_files_blobs(
+            &[PathBuf::from("should_ignore"), PathBuf::from("not_ignore")],
+            &index,
+            IgnorePolicy::Respect,
+        );
         assert_eq!(blob.len(), 1);
         assert_eq!(blob[0].0, PathBuf::from("not_ignore"));
     }

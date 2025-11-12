@@ -150,6 +150,7 @@ async fn test_changes_to_be_staged() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
 
@@ -281,6 +282,7 @@ async fn test_status_porcelain() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
 
@@ -293,6 +295,7 @@ async fn test_status_porcelain() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
     file2.write_all(b"modified content").unwrap();
@@ -418,6 +421,7 @@ async fn test_status_short_format() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
 
@@ -430,6 +434,7 @@ async fn test_status_short_format() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
 
@@ -563,6 +568,7 @@ async fn test_status_mixed_changes() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
 
@@ -629,6 +635,7 @@ async fn test_status_deleted_files() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
 
@@ -700,6 +707,7 @@ async fn test_status_with_subdirectories() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
 
@@ -760,6 +768,7 @@ async fn test_status_verbose_output() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
 
@@ -816,6 +825,7 @@ async fn test_status_short_format_with_branch() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
 
@@ -875,6 +885,7 @@ async fn test_status_porcelain_format_with_branch() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
 
@@ -934,6 +945,7 @@ async fn test_status_show_stash_with_existing_stash() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
 
@@ -952,6 +964,7 @@ async fn test_status_show_stash_with_existing_stash() {
         all: false,
         update: false,
         refresh: false,
+        force: false,
         verbose: false,
         dry_run: false,
         ignore_errors: false,
@@ -1059,6 +1072,7 @@ async fn test_status_show_stash_without_stash() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
 
@@ -1109,6 +1123,7 @@ async fn test_status_branch_detached_head() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
 
@@ -1129,6 +1144,7 @@ async fn test_status_branch_detached_head() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
 
