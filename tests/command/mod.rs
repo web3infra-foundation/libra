@@ -3,6 +3,7 @@ use git_internal::internal::object::commit::Commit;
 use git_internal::internal::object::tree::Tree;
 use libra::command::branch::BranchArgs;
 use libra::command::branch::execute;
+use libra::command::calc_file_blob_hash;
 use libra::command::get_target_commit;
 use libra::command::init::InitArgs;
 use libra::command::init::init;
