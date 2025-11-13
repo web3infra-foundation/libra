@@ -34,6 +34,10 @@ pub struct BranchArgs {
     #[clap(long, group = "sub")]
     pub show_current: bool,
 
+    /// Rename a branch. With one argument, renames the current branch. With two arguments, renames OLD_BRANCH to NEW_BRANCH.
+    #[clap(short = 'm', long = "move", group = "sub", value_names = ["OLD_BRANCH", "NEW_BRANCH"], num_args = 1..=2)]
+    pub rename: Vec<String>,
+
     /// show remote branches
     #[clap(short, long)] // TODO limit to required `list` option, even in default
     pub remotes: bool,
@@ -52,6 +56,8 @@ pub async fn execute(args: BranchArgs) {
                 eprintln!("fatal: HEAD is detached");
             }
         };
+    } else if !args.rename.is_empty() {
+        rename_branch(args.rename).await;
     } else if args.list {
         // default behavior
         list_branches(args.remotes).await;
@@ -133,6 +139,66 @@ async fn delete_branch(branch_name: String) {
     }
 
     Branch::delete_branch(&branch_name, None).await;
+}
+
+async fn rename_branch(args: Vec<String>) {
+    let (old_name, new_name) = match args.len() {
+        1 => {
+            // rename current branch
+            let head = Head::current().await;
+            match head {
+                Head::Branch(name) => (name, args[0].clone()),
+                Head::Detached(_) => {
+                    eprintln!("fatal: HEAD is detached");
+                    return;
+                }
+            }
+        }
+        2 => (args[0].clone(), args[1].clone()),
+        _ => {
+            eprintln!("fatal: too many arguments");
+            return;
+        }
+    };
+
+    if !is_valid_git_branch_name(&new_name) {
+        eprintln!("fatal: invalid branch name: {new_name}");
+        return;
+    }
+
+    // check if old branch exists
+    let old_branch = Branch::find_branch(&old_name, None).await;
+    if old_branch.is_none() {
+        eprintln!("fatal: branch '{old_name}' not found");
+        return;
+    }
+
+    // check if new branch name already exists
+    let new_branch_exists = Branch::find_branch(&new_name, None).await;
+    if new_branch_exists.is_some() {
+        eprintln!("fatal: A branch named '{new_name}' already exists.");
+        return;
+    }
+
+    let old_branch = old_branch.unwrap();
+    let commit_hash = old_branch.commit.to_string();
+
+    // create new branch with the same commit
+    Branch::update_branch(&new_name, &commit_hash, None).await;
+
+    // update HEAD if renaming current branch
+    let head = Head::current().await;
+    if let Head::Branch(name) = head
+        && name == old_name
+    {
+        let new_head = Head::Branch(new_name.clone());
+        Head::update(new_head, None).await;
+    }
+
+    // delete old branch
+    Branch::delete_branch(&old_name, None).await;
+
+    println!("Renamed branch '{old_name}' to '{new_name}'");
 }
 
 async fn show_current_branch() {
