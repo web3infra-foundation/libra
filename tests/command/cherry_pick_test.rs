@@ -41,6 +41,7 @@ async fn test_basic_cherry_pick() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        all: false,
     })
     .await;
     println!("C1: Created common ancestor.");
@@ -76,6 +77,7 @@ async fn test_basic_cherry_pick() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        all: false,
     })
     .await;
     println!("C2: Added feature_a.txt on feature branch.");
@@ -106,6 +108,7 @@ async fn test_basic_cherry_pick() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        all: false,
     })
     .await;
     println!("C3: Added feature_b.txt on feature branch.");
@@ -238,6 +241,7 @@ async fn test_cherry_pick_with_commit() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        all: false,
     })
     .await;
 
@@ -269,6 +273,7 @@ async fn test_cherry_pick_with_commit() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        all: false,
     })
     .await;
 
@@ -347,6 +352,7 @@ async fn test_cherry_pick_multiple_commits() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        all: false,
     })
     .await;
 
@@ -379,6 +385,7 @@ async fn test_cherry_pick_multiple_commits() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        all: false,
     })
     .await;
     let commit1 = Head::current_commit().await.expect("Should have commit1");
@@ -404,6 +411,7 @@ async fn test_cherry_pick_multiple_commits() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        all: false,
     })
     .await;
     let commit2 = Head::current_commit().await.expect("Should have commit2");

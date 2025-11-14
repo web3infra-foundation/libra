@@ -117,7 +117,7 @@ achieving unified management.
   - [x] --amend
   - [x] -s, --signoff
   - [x] --disable-pre
-  - [ ] -a, --all
+  - [x] -a, --all
   - [ ] -p, --patch
   - [ ] --no-verify
   - [ ] --no-edit
