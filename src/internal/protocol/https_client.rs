@@ -210,8 +210,8 @@ mod tests {
 
         let client = HttpsClient::from_url(&Url::parse(test_repo).unwrap());
         let refs = client.discovery_reference(UploadPack).await;
-        if refs.is_err() {
-            tracing::error!("{:?}", refs.err().unwrap());
+        if let Err(e) = refs {
+            tracing::error!("{:?}", e);
             panic!();
         } else {
             let refs = refs.unwrap();
