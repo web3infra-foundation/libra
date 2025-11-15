@@ -39,6 +39,7 @@ async fn setup_standard_repo(temp_path: &std::path::Path) -> (SHA1, SHA1, SHA1, 
         delete: None,
         set_upstream_to: None,
         show_current: false,
+        rename: vec![],
         remotes: false,
     })
     .await;
@@ -74,6 +75,7 @@ async fn setup_standard_repo(temp_path: &std::path::Path) -> (SHA1, SHA1, SHA1, 
         delete: None,
         set_upstream_to: None,
         show_current: false,
+        rename: vec![],
         remotes: false,
     })
     .await;
@@ -109,6 +111,7 @@ async fn setup_standard_repo(temp_path: &std::path::Path) -> (SHA1, SHA1, SHA1, 
         delete: None,
         set_upstream_to: None,
         show_current: false,
+        rename: vec![],
         remotes: false,
     })
     .await;
@@ -144,6 +147,7 @@ async fn setup_standard_repo(temp_path: &std::path::Path) -> (SHA1, SHA1, SHA1, 
         delete: None,
         set_upstream_to: None,
         show_current: false,
+        rename: vec![],
         remotes: false,
     })
     .await;
