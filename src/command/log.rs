@@ -107,6 +107,7 @@ async fn determine_decorate_option(args: &LogArgs) -> Result<DecorateOptions, St
 
     if let Some(config_deco) = Config::get("log", None, "decorate")
         .await
+        .map(|m| m.value)
         .and_then(|s| str_to_decorate_option(&s).ok())
     {
         Ok(config_deco)

@@ -3,6 +3,7 @@ use crate::command::restore::RestoreArgs;
 use crate::command::{self, branch};
 use crate::internal::branch::Branch;
 use crate::internal::config::{Config, RemoteConfig};
+use crate::internal::db::DbConnection;
 use crate::internal::head::Head;
 use crate::internal::reflog::{ReflogAction, ReflogContext, with_reflog, zero_sha1};
 use crate::utils::path_ext::PathExt;
@@ -10,7 +11,7 @@ use crate::utils::util;
 use clap::Parser;
 use colored::Colorize;
 use scopeguard::defer;
-use sea_orm::DatabaseTransaction;
+
 use std::cell::Cell;
 use std::path::PathBuf;
 use std::{env, fs};
@@ -118,7 +119,7 @@ async fn setup_repository(
     specified_branch: Option<String>,
 ) -> Result<(), String> {
     let db = crate::internal::db::get_db_conn_instance().await;
-    let remote_head = Head::remote_current_with_conn(db, &remote_config.name).await;
+    let remote_head = Head::remote_current_with_conn(db.as_ref(), &remote_config.name).await;
 
     // Determine which branch to check out.
     let branch_to_checkout = match specified_branch {
@@ -134,7 +135,7 @@ async fn setup_repository(
 
     if let Some(branch_name) = branch_to_checkout {
         let remote_tracking_ref = format!("refs/remotes/{}/{}", remote_config.name, branch_name);
-        let origin_branch = Branch::find_branch_with_conn(db, &remote_tracking_ref, None)
+        let origin_branch = Branch::find_branch_with_conn(db.as_ref(), &remote_tracking_ref, None)
             .await
             .ok_or_else(|| format!("fatal: remote branch '{}' not found.", branch_name))?;
 
@@ -153,7 +154,7 @@ async fn setup_repository(
         // `insert_ref` is true, as we are creating the initial branch reflog.
         with_reflog(
             context,
-            move |txn: &DatabaseTransaction| {
+            move |txn: &DbConnection| {
                 Box::pin(async move {
                     // 1. Create the local branch pointing to the fetched commit
                     Branch::update_branch_with_conn(
