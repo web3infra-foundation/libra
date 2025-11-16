@@ -423,3 +423,280 @@ async fn collect_combined_diff_for_commits(count: usize, paths: Vec<std::path::P
     }
     out
 }
+
+#[tokio::test]
+#[serial]
+async fn test_log_stat() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    test::ensure_file("file1.txt", Some("line1\nline2\nline3\n"));
+    add::execute(AddArgs {
+        pathspec: vec![String::from("file1.txt")],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("Add file1".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+    })
+    .await;
+
+    test::ensure_file("file2.txt", Some("content A\ncontent B\n"));
+    add::execute(AddArgs {
+        pathspec: vec![String::from("file2.txt")],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("Add file2".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+    })
+    .await;
+
+    let commit_hash = Head::current_commit().await.unwrap().to_string();
+    let commit_id = SHA1::from_str(&commit_hash).unwrap();
+    let commit = load_object::<Commit>(&commit_id).unwrap();
+
+    let stats = libra::command::log::compute_commit_stat(&commit, Vec::new()).await;
+
+    assert!(!stats.is_empty());
+    assert_eq!(stats.len(), 1);
+    assert_eq!(stats[0].path, "file2.txt");
+    assert_eq!(stats[0].insertions, 2);
+    assert_eq!(stats[0].deletions, 0);
+
+    let stat_output = libra::command::log::format_stat_output(&stats);
+    assert!(stat_output.contains("file2.txt"));
+    assert!(stat_output.contains("2"));
+    assert!(stat_output.contains("1 file"));
+    assert!(stat_output.contains("2 insertion"));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_log_stat_with_modifications() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    test::ensure_file("test.txt", Some("line1\nline2\nline3\n"));
+    add::execute(AddArgs {
+        pathspec: vec![String::from("test.txt")],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("Initial commit".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+    })
+    .await;
+
+    test::ensure_file("test.txt", Some("line1\nline2 modified\nline3\nline4\n"));
+    add::execute(AddArgs {
+        pathspec: vec![String::from("test.txt")],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("Modify test.txt".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+    })
+    .await;
+
+    let commit_hash = Head::current_commit().await.unwrap().to_string();
+    let commit_id = SHA1::from_str(&commit_hash).unwrap();
+    let commit = load_object::<Commit>(&commit_id).unwrap();
+
+    let stats = libra::command::log::compute_commit_stat(&commit, Vec::new()).await;
+
+    assert_eq!(stats.len(), 1);
+    assert_eq!(stats[0].path, "test.txt");
+    assert_eq!(stats[0].insertions, 4);
+    assert_eq!(stats[0].deletions, 3);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_log_graph() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    let commit_id = create_test_commit_tree().await;
+
+    let args = LogArgs::try_parse_from(["libra", "--number", "6", "--graph"]).unwrap();
+    assert!(args.graph);
+
+    let mut graph_state = libra::command::log::GraphState::new();
+
+    let commit_hash = SHA1::from_str(&commit_id).unwrap();
+    let commit = load_object::<Commit>(&commit_hash).unwrap();
+
+    let prefix = graph_state.render(&commit);
+    assert!(!prefix.is_empty());
+    assert!(prefix.contains('*'));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_log_graph_simple_chain() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    test::ensure_file("file1.txt", Some("content1\n"));
+    add::execute(AddArgs {
+        pathspec: vec![String::from("file1.txt")],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("First commit".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+    })
+    .await;
+
+    test::ensure_file("file2.txt", Some("content2\n"));
+    add::execute(AddArgs {
+        pathspec: vec![String::from("file2.txt")],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("Second commit".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+    })
+    .await;
+
+    let commit_hash = Head::current_commit().await.unwrap().to_string();
+    let reachable_commits = get_reachable_commits(commit_hash).await;
+
+    let mut graph_state = libra::command::log::GraphState::new();
+
+    for commit in reachable_commits.iter().take(2) {
+        let prefix = graph_state.render(commit);
+        assert!(prefix.starts_with("* ") || prefix.contains("* "));
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn test_log_stat_and_graph_combined() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    test::ensure_file("combo.txt", Some("line1\nline2\n"));
+    add::execute(AddArgs {
+        pathspec: vec![String::from("combo.txt")],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("Add combo file".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+    })
+    .await;
+
+    let args = LogArgs::try_parse_from(["libra", "--graph", "--stat"]).unwrap();
+    assert!(args.graph);
+    assert!(args.stat);
+
+    let commit_hash = Head::current_commit().await.unwrap().to_string();
+    let commit_id = SHA1::from_str(&commit_hash).unwrap();
+    let commit = load_object::<Commit>(&commit_id).unwrap();
+
+    let stats = libra::command::log::compute_commit_stat(&commit, Vec::new()).await;
+    assert_eq!(stats.len(), 1);
+
+    let mut graph_state = libra::command::log::GraphState::new();
+    let prefix = graph_state.render(&commit);
+    assert!(!prefix.is_empty());
+}
+
