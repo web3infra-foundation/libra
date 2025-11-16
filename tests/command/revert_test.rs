@@ -31,6 +31,7 @@ async fn test_basic_revert() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -41,6 +42,7 @@ async fn test_basic_revert() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        all: false,
     })
     .await;
     println!("C1: Added 1.txt");
@@ -55,6 +57,7 @@ async fn test_basic_revert() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -65,6 +68,7 @@ async fn test_basic_revert() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        all: false,
     })
     .await;
     println!("C2: Modified 1.txt");
@@ -80,6 +84,7 @@ async fn test_basic_revert() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -90,6 +95,7 @@ async fn test_basic_revert() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        all: false,
     })
     .await;
     println!("C3: Removed 1.txt, Added 2.txt");
@@ -179,6 +185,7 @@ async fn test_revert_no_commit() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -189,6 +196,7 @@ async fn test_revert_no_commit() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        all: false,
     })
     .await;
 
@@ -201,6 +209,7 @@ async fn test_revert_no_commit() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -211,6 +220,7 @@ async fn test_revert_no_commit() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        all: false,
     })
     .await;
 
@@ -237,6 +247,7 @@ async fn test_revert_no_commit() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        all: false,
     })
     .await;
 
@@ -262,6 +273,7 @@ async fn test_revert_root_commit() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -272,6 +284,7 @@ async fn test_revert_root_commit() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        all: false,
     })
     .await;
 

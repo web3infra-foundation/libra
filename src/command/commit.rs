@@ -5,7 +5,7 @@ use std::{collections::HashSet, path::PathBuf};
 
 const EMPTY_TREE_HASH: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
-use crate::command::load_object;
+use crate::command::{load_object, status};
 use crate::common_utils::{check_conventional_commits_message, format_commit_msg};
 use crate::internal::branch::Branch;
 use crate::internal::config::Config as UserConfig;
@@ -13,12 +13,13 @@ use crate::internal::db::DbConnection;
 use crate::internal::head::Head;
 use crate::internal::reflog::{ReflogAction, ReflogContext, with_reflog};
 use crate::utils::client_storage::ClientStorage;
-use crate::utils::path;
-use crate::utils::util;
+use crate::utils::object_ext::BlobExt;
+use crate::utils::{lfs, path, util};
 use clap::Parser;
 use git_internal::hash::SHA1;
-use git_internal::internal::index::Index;
+use git_internal::internal::index::{Index, IndexEntry};
 use git_internal::internal::object::ObjectTrait;
+use git_internal::internal::object::blob::Blob;
 use git_internal::internal::object::commit::Commit;
 use git_internal::internal::object::tree::{Tree, TreeItem, TreeItemMode};
 use std::process::Command;
@@ -50,14 +51,24 @@ pub struct CommitArgs {
 
     #[arg(long)]
     pub disable_pre: bool,
+
+    /// Automatically stage tracked files that have been modified or deleted
+    #[arg(short = 'a', long)]
+    pub all: bool,
 }
 
 pub async fn execute(args: CommitArgs) {
     /* check args */
+    let auto_stage_applied = if args.all {
+        // Mimic `git commit -a` by staging tracked modifications/deletions first
+        auto_stage_tracked_changes()
+    } else {
+        false
+    };
     let index = Index::load(path::index()).unwrap();
     let storage = ClientStorage::init(path::objects());
     let tracked_entries = index.tracked_entries(0);
-    if tracked_entries.is_empty() && !args.allow_empty {
+    if tracked_entries.is_empty() && !args.allow_empty && !auto_stage_applied {
         panic!("fatal: no changes added to commit, use --allow-empty to override");
     }
 
@@ -263,6 +274,51 @@ pub async fn create_tree(index: &Index, storage: &ClientStorage, current_root: P
     tree
 }
 
+fn auto_stage_tracked_changes() -> bool {
+    let pending = status::changes_to_be_staged();
+    if pending.modified.is_empty() && pending.deleted.is_empty() {
+        return false;
+    }
+
+    let index_path = path::index();
+    let mut index = Index::load(&index_path).unwrap();
+    let workdir = util::working_dir();
+    let mut touched = false;
+
+    for file in pending.modified {
+        let abs = util::workdir_to_absolute(&file);
+        if !abs.exists() {
+            continue;
+        }
+        // Refresh blob IDs for modified tracked files before updating the index
+        let blob = blob_from_file(&abs);
+        blob.save();
+        index.update(IndexEntry::new_from_file(&file, blob.id, &workdir).unwrap());
+        touched = true;
+    }
+
+    for file in pending.deleted {
+        if let Some(path) = file.to_str() {
+            // Drop entries that disappeared from the working tree
+            index.remove(path, 0);
+            touched = true;
+        }
+    }
+
+    if touched {
+        index.save(&index_path).unwrap();
+    }
+    touched
+}
+
+fn blob_from_file(path: impl AsRef<std::path::Path>) -> Blob {
+    if lfs::is_lfs_tracked(&path) {
+        Blob::from_lfs_file(path)
+    } else {
+        Blob::from_file(path)
+    }
+}
+
 /// get current head commit id as parent, if in branch, get branch's commit id, if detached head, get head's commit id
 async fn get_parents_ids() -> Vec<SHA1> {
     // let current_commit_id = reference::Model::current_commit_hash(db).await.unwrap();
@@ -369,6 +425,14 @@ mod test {
         let args = CommitArgs::try_parse_from(["commit", "-m", "init", "--signoff"]);
         assert!(args.is_ok());
         assert!(args.unwrap().signoff);
+
+        let args = CommitArgs::try_parse_from(["commit", "-m", "init", "-a"]);
+        assert!(args.is_ok());
+        assert!(args.unwrap().all);
+
+        let args = CommitArgs::try_parse_from(["commit", "-m", "init", "--all"]);
+        assert!(args.is_ok());
+        assert!(args.unwrap().all);
 
         let args = CommitArgs::try_parse_from(["commit", "-m", "init", "--amend", "--signoff"]);
         assert!(args.is_ok());

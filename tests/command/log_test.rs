@@ -188,6 +188,7 @@ async fn test_log_patch_no_pathspec() {
         all: false,
         update: false,
         refresh: false,
+        force: false,
         verbose: false,
         dry_run: false,
         ignore_errors: false,
@@ -201,6 +202,7 @@ async fn test_log_patch_no_pathspec() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        all: false,
     })
     .await;
 
@@ -211,6 +213,7 @@ async fn test_log_patch_no_pathspec() {
         all: false,
         update: false,
         refresh: false,
+        force: false,
         verbose: false,
         dry_run: false,
         ignore_errors: false,
@@ -224,6 +227,7 @@ async fn test_log_patch_no_pathspec() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        all: false,
     })
     .await;
 
@@ -301,6 +305,7 @@ async fn test_log_patch_with_pathspec() {
         all: false,
         update: false,
         refresh: false,
+        force: false,
         verbose: false,
         dry_run: false,
         ignore_errors: false,
@@ -315,6 +320,7 @@ async fn test_log_patch_with_pathspec() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        all: false,
     })
     .await;
 

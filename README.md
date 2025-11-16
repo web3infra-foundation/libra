@@ -84,7 +84,7 @@ achieving unified management.
   - [x] -v, --verbose
   - [x] -n, --dry-run
   - [x] --ignore-errors
-  - [ ] -f, --force
+  - [x] -f, --force
   - [ ] -p, --patch
   - [ ] -i, --interactive
   - [ ] -N, --intent-to-add
@@ -117,7 +117,7 @@ achieving unified management.
   - [x] --amend
   - [x] -s, --signoff
   - [x] --disable-pre
-  - [ ] -a, --all
+  - [x] -a, --all
   - [ ] -p, --patch
   - [ ] --no-verify
   - [ ] --no-edit

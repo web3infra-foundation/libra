@@ -22,6 +22,7 @@ async fn test_add_single_file() {
         all: false,
         update: false,
         refresh: false,
+        force: false,
         verbose: false,
         dry_run: false,
         ignore_errors: false,
@@ -60,6 +61,7 @@ async fn test_add_multiple_files() {
         all: false,
         update: false,
         refresh: false,
+        force: false,
         verbose: false,
         dry_run: false,
         ignore_errors: false,
@@ -110,6 +112,7 @@ async fn test_add_all_flag() {
         all: true,
         update: false,
         refresh: false,
+        force: false,
         verbose: false,
         dry_run: false,
         ignore_errors: false,
@@ -163,6 +166,7 @@ async fn test_add_update_flag() {
         all: false,
         update: false,
         refresh: false,
+        force: false,
         verbose: false,
         dry_run: false,
         ignore_errors: false,
@@ -190,6 +194,7 @@ async fn test_add_update_flag() {
         all: false,
         update: true,
         refresh: false,
+        force: false,
         verbose: false,
         dry_run: false,
         ignore_errors: false,
@@ -252,6 +257,7 @@ async fn test_add_with_ignore_patterns() {
         all: true,
         update: false,
         refresh: false,
+        force: false,
         verbose: false,
         dry_run: false,
         ignore_errors: false,
@@ -305,6 +311,174 @@ async fn test_add_with_ignore_patterns() {
 
 #[tokio::test]
 #[serial]
+/// Ensures `add --force` stages ignored files and subsequent updates no longer require force.
+async fn test_add_force_tracks_ignored_file() {
+    let repo = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write(".libraignore", "ignored.txt\n").unwrap();
+    fs::write("ignored.txt", "first").unwrap();
+
+    let ignored_path = "ignored.txt";
+
+    // Without --force the ignored file should stay hidden from staging
+    let unstaged_initial = changes_to_be_staged();
+    assert!(
+        !unstaged_initial
+            .new
+            .iter()
+            .any(|p| p.to_str().unwrap() == ignored_path)
+    );
+
+    add::execute(AddArgs {
+        pathspec: vec![ignored_path.into()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+
+    let staged_without_force = changes_to_be_committed().await;
+    assert!(
+        !staged_without_force
+            .new
+            .iter()
+            .any(|p| p.to_str().unwrap() == ignored_path)
+    );
+
+    // Force add should stage the ignored file
+    add::execute(AddArgs {
+        pathspec: vec![ignored_path.into()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: true,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+
+    let staged_with_force = changes_to_be_committed().await;
+    assert!(
+        staged_with_force
+            .new
+            .iter()
+            .any(|p| p.to_str().unwrap() == ignored_path)
+    );
+
+    // After being tracked, further updates should appear without --force
+    fs::write("ignored.txt", "second").unwrap();
+
+    let unstaged_after_edit = changes_to_be_staged();
+    assert!(
+        unstaged_after_edit
+            .modified
+            .iter()
+            .any(|p| p.to_str().unwrap() == ignored_path)
+    );
+
+    add::execute(AddArgs {
+        pathspec: vec![ignored_path.into()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+
+    let staged_after_update = changes_to_be_committed().await;
+    assert!(
+        staged_after_update
+            .new
+            .iter()
+            .any(|p| p.to_str().unwrap() == ignored_path)
+    );
+
+    let unstaged_final = changes_to_be_staged();
+    assert!(
+        !unstaged_final
+            .modified
+            .iter()
+            .any(|p| p.to_str().unwrap() == ignored_path)
+    );
+}
+
+#[tokio::test]
+#[serial]
+/// Ensures `add --force .` surfaces ignored directories and files recursively.
+async fn test_add_force_dot_includes_ignored_directory() {
+    let repo = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo.path());
+
+    fs::write(".libraignore", "ignored_dir/\n").unwrap();
+    fs::create_dir_all("ignored_dir").unwrap();
+    fs::write("ignored_dir/nested.txt", "ignored").unwrap();
+    fs::write("visible.txt", "seen").unwrap();
+
+    // Baseline: without --force the ignored directory stays hidden
+    add::execute(AddArgs {
+        pathspec: vec![".".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+
+    let staged_without_force = changes_to_be_committed().await;
+    assert!(
+        !staged_without_force
+            .new
+            .iter()
+            .any(|p| p.to_str().unwrap() == "ignored_dir/nested.txt"),
+        "ignored entries should not be staged when force is false"
+    );
+    assert!(
+        staged_without_force
+            .new
+            .iter()
+            .any(|p| p.to_str().unwrap() == "visible.txt"),
+        "non-ignored files should still be staged"
+    );
+
+    // Re-run with --force to include ignored entries
+    add::execute(AddArgs {
+        pathspec: vec![".".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: true,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+
+    let staged_with_force = changes_to_be_committed().await;
+    assert!(
+        staged_with_force
+            .new
+            .iter()
+            .any(|p| p.to_str().unwrap() == "ignored_dir/nested.txt"),
+        "`add --force .` should surface ignored children"
+    );
+}
+
+#[tokio::test]
+#[serial]
 /// Tests the dry-run flag which should not actually add files
 async fn test_add_dry_run() {
     let test_dir = tempdir().unwrap();
@@ -322,6 +496,7 @@ async fn test_add_dry_run() {
         all: false,
         update: false,
         refresh: false,
+        force: false,
         verbose: false,
         dry_run: true,
         ignore_errors: false,
@@ -352,6 +527,7 @@ async fn test_add_without_path_should_error() {
         all: false,       // Not using --all
         update: false,
         refresh: false,
+        force: false,
         verbose: false,
         dry_run: false,
         ignore_errors: false,
@@ -382,6 +558,7 @@ async fn test_add_nonexistent_file_should_error() {
         all: false,
         update: false,
         refresh: false,
+        force: false,
         verbose: false,
         dry_run: false,
         ignore_errors: false,
@@ -416,6 +593,7 @@ async fn test_add_duplicate_file_should_not_duplicate_index() {
             all: false,
             update: false,
             refresh: false,
+            force: false,
             verbose: false,
             dry_run: false,
             ignore_errors: false,

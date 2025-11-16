@@ -2,6 +2,7 @@ use serial_test::serial;
 use tempfile::tempdir;
 
 use super::*;
+use libra::utils::object_ext::TreeExt;
 #[tokio::test]
 #[serial]
 #[should_panic]
@@ -21,6 +22,7 @@ async fn test_execute_commit_with_empty_index_fail() {
         amend: false,
         signoff: false,
         disable_pre: true,
+        all: false,
     };
     commit::execute(args).await;
 }
@@ -45,6 +47,7 @@ async fn test_execute_commit() {
             amend: false,
             signoff: false,
             disable_pre: true,
+            all: false,
         };
         commit::execute(args).await;
 
@@ -72,6 +75,7 @@ async fn test_execute_commit() {
             amend: true,
             signoff: false,
             disable_pre: true,
+            all: false,
         };
         commit::execute(args).await;
 
@@ -103,6 +107,7 @@ async fn test_execute_commit() {
             dry_run: false,
             ignore_errors: false,
             refresh: false,
+            force: false,
         };
         add::execute(args).await;
     }
@@ -116,6 +121,7 @@ async fn test_execute_commit() {
             amend: false,
             signoff: false,
             disable_pre: true,
+            all: false,
         };
         commit::execute(args).await;
 
@@ -146,6 +152,7 @@ async fn test_execute_commit() {
             amend: true,
             signoff: false,
             disable_pre: true,
+            all: false,
         };
         commit::execute(args).await;
 
@@ -166,4 +173,136 @@ async fn test_execute_commit() {
         let tree: Tree = load_object(&tree_id).unwrap();
         assert_eq!(tree.tree_items.len(), 2); // 2 subtree according to the test data
     }
+}
+
+#[tokio::test]
+#[serial]
+async fn test_commit_with_all_flag_stages_tracked_changes() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    test::ensure_file("tracked.txt", Some("v1"));
+    add::execute(AddArgs {
+        pathspec: vec!["tracked.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        verbose: false,
+        force: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+
+    commit::execute(CommitArgs {
+        message: Some("initial".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+    })
+    .await;
+
+    test::ensure_file("tracked.txt", Some("updated"));
+    test::ensure_file("new.txt", Some("untracked"));
+
+    commit::execute(CommitArgs {
+        message: Some("with -a".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: true,
+    })
+    .await;
+
+    let head_id = Head::current_commit().await.unwrap();
+    let commit: Commit = load_object(&head_id).unwrap();
+    assert_eq!(commit.message.trim(), "with -a");
+    let tree: Tree = load_object(&commit.tree_id).unwrap();
+    let entries = tree.get_plain_items();
+    let tracked_blob_hash = calc_file_blob_hash("tracked.txt").unwrap();
+    let tracked_entry = entries
+        .iter()
+        .find(|(path, _)| path == &std::path::PathBuf::from("tracked.txt"))
+        .expect("tracked file stored in commit");
+    assert_eq!(tracked_entry.1, tracked_blob_hash);
+    assert!(
+        entries
+            .iter()
+            .all(|(path, _)| path != &std::path::PathBuf::from("new.txt")),
+        "untracked files should not be auto-staged by -a"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_commit_with_all_flag_records_deletions() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    test::ensure_file("keep.txt", Some("keep"));
+    add::execute(AddArgs {
+        pathspec: vec!["keep.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        verbose: false,
+        force: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+
+    commit::execute(CommitArgs {
+        message: Some("baseline".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+    })
+    .await;
+
+    std::fs::remove_file("keep.txt").unwrap();
+    test::ensure_file("new_untracked.txt", Some("left alone"));
+
+    commit::execute(CommitArgs {
+        message: Some("remove tracked".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: true,
+    })
+    .await;
+
+    let head_id = Head::current_commit().await.unwrap();
+    let commit: Commit = load_object(&head_id).unwrap();
+    assert_eq!(commit.message.trim(), "remove tracked");
+    let tree: Tree = load_object(&commit.tree_id).unwrap();
+    let entries = tree.get_plain_items();
+    assert!(
+        entries
+            .iter()
+            .all(|(path, _)| path != &std::path::PathBuf::from("keep.txt")),
+        "deleted tracked files should be removed from commit"
+    );
+    assert!(
+        entries
+            .iter()
+            .all(|(path, _)| path != &std::path::PathBuf::from("new_untracked.txt")),
+        "new untracked files should still be absent"
+    );
 }

@@ -17,6 +17,7 @@ async fn setup_standard_repo(temp_path: &std::path::Path) -> (SHA1, SHA1, SHA1, 
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -27,6 +28,7 @@ async fn setup_standard_repo(temp_path: &std::path::Path) -> (SHA1, SHA1, SHA1, 
         amend: false,
         signoff: false,
         disable_pre: true,
+        all: false,
     })
     .await;
     let commit1 = Head::current_commit().await.unwrap();
@@ -37,6 +39,7 @@ async fn setup_standard_repo(temp_path: &std::path::Path) -> (SHA1, SHA1, SHA1, 
         delete: None,
         set_upstream_to: None,
         show_current: false,
+        rename: vec![],
         remotes: false,
     })
     .await;
@@ -50,6 +53,7 @@ async fn setup_standard_repo(temp_path: &std::path::Path) -> (SHA1, SHA1, SHA1, 
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -60,6 +64,7 @@ async fn setup_standard_repo(temp_path: &std::path::Path) -> (SHA1, SHA1, SHA1, 
         amend: false,
         signoff: false,
         disable_pre: true,
+        all: false,
     })
     .await;
     let commit2 = Head::current_commit().await.unwrap();
@@ -70,6 +75,7 @@ async fn setup_standard_repo(temp_path: &std::path::Path) -> (SHA1, SHA1, SHA1, 
         delete: None,
         set_upstream_to: None,
         show_current: false,
+        rename: vec![],
         remotes: false,
     })
     .await;
@@ -83,6 +89,7 @@ async fn setup_standard_repo(temp_path: &std::path::Path) -> (SHA1, SHA1, SHA1, 
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -93,6 +100,7 @@ async fn setup_standard_repo(temp_path: &std::path::Path) -> (SHA1, SHA1, SHA1, 
         amend: false,
         signoff: false,
         disable_pre: true,
+        all: false,
     })
     .await;
     let commit3 = Head::current_commit().await.unwrap();
@@ -103,6 +111,7 @@ async fn setup_standard_repo(temp_path: &std::path::Path) -> (SHA1, SHA1, SHA1, 
         delete: None,
         set_upstream_to: None,
         show_current: false,
+        rename: vec![],
         remotes: false,
     })
     .await;
@@ -116,6 +125,7 @@ async fn setup_standard_repo(temp_path: &std::path::Path) -> (SHA1, SHA1, SHA1, 
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -126,6 +136,7 @@ async fn setup_standard_repo(temp_path: &std::path::Path) -> (SHA1, SHA1, SHA1, 
         amend: false,
         signoff: false,
         disable_pre: true,
+        all: false,
     })
     .await;
     let commit4 = Head::current_commit().await.unwrap();
@@ -136,6 +147,7 @@ async fn setup_standard_repo(temp_path: &std::path::Path) -> (SHA1, SHA1, SHA1, 
         delete: None,
         set_upstream_to: None,
         show_current: false,
+        rename: vec![],
         remotes: false,
     })
     .await;
@@ -158,6 +170,7 @@ async fn setup_test_state() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
 }

@@ -37,6 +37,7 @@ async fn test_basic_diff() {
         all: false,
         update: false,
         refresh: false,
+        force: false,
         verbose: false,
         dry_run: false,
         ignore_errors: false,
@@ -52,6 +53,7 @@ async fn test_basic_diff() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        all: false,
     })
     .await;
 
@@ -81,6 +83,7 @@ async fn test_diff_staged() {
         all: false,
         update: false,
         refresh: false,
+        force: false,
         verbose: false,
         dry_run: false,
         ignore_errors: false,
@@ -96,6 +99,7 @@ async fn test_diff_staged() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        all: false,
     })
     .await;
 
@@ -107,6 +111,7 @@ async fn test_diff_staged() {
         all: false,
         update: false,
         refresh: false,
+        force: false,
         verbose: false,
         dry_run: false,
         ignore_errors: false,
@@ -142,6 +147,7 @@ async fn test_diff_between_commits() {
         all: false,
         update: false,
         refresh: false,
+        force: false,
         verbose: false,
         dry_run: false,
         ignore_errors: false,
@@ -156,6 +162,7 @@ async fn test_diff_between_commits() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        all: false,
     })
     .await;
 
@@ -170,6 +177,7 @@ async fn test_diff_between_commits() {
         all: false,
         update: false,
         refresh: false,
+        force: false,
         verbose: false,
         dry_run: false,
         ignore_errors: false,
@@ -184,6 +192,7 @@ async fn test_diff_between_commits() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        all: false,
     })
     .await;
 
@@ -222,6 +231,7 @@ async fn test_diff_with_pathspec() {
         all: false,
         update: false,
         refresh: false,
+        force: false,
         verbose: false,
         dry_run: false,
         ignore_errors: false,
@@ -236,6 +246,7 @@ async fn test_diff_with_pathspec() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        all: false,
     })
     .await;
 
@@ -266,6 +277,7 @@ async fn test_diff_output_to_file() {
         all: false,
         update: false,
         refresh: false,
+        force: false,
         verbose: false,
         dry_run: false,
         ignore_errors: false,
@@ -280,6 +292,7 @@ async fn test_diff_output_to_file() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        all: false,
     })
     .await;
 
@@ -326,6 +339,7 @@ async fn test_diff_algorithms() {
         all: false,
         update: false,
         refresh: false,
+        force: false,
         verbose: false,
         dry_run: false,
         ignore_errors: false,
@@ -340,6 +354,7 @@ async fn test_diff_algorithms() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        all: false,
     })
     .await;
 
