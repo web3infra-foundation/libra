@@ -89,7 +89,6 @@ async fn read_tag_oid(name: &str) -> Option<String> {
 }
 
 
-
 /// Return a set of bare tag names currently present (no refs/tags/ prefix).
 async fn list_tag_names() -> HashSet<String> {
     list_tag_refs()
