@@ -2,10 +2,9 @@ use super::*;
 use libra::command::config::{self, ConfigArgs};
 use libra::command::tag::{self, TagArgs};
 use libra::internal::tag as internal_tag;
-use libra::utils::test::setup_with_new_libra_in;
+use libra::utils::test::{ChangeDirGuard, setup_with_new_libra_in};
 use serial_test::serial;
 use std::collections::HashSet;
-use std::env;
 use tempfile::tempdir;
 
 // Test helpers and utilities for tag tests.
@@ -107,16 +106,19 @@ async fn assert_tag_absent(name: &str) {
 // --- Shared setup helpers ---
 
 /// Create a new temporary repo, set it as current dir, set up identity, add a file and commit.
-/// Returns the TempDir so the caller can keep it alive while the test runs.
-async fn setup_repo_with_commit() -> tempfile::TempDir {
+/// Returns the TempDir and a ChangeDirGuard so the caller can keep the guard alive for test duration.
+async fn setup_repo_with_commit() -> (tempfile::TempDir, ChangeDirGuard) {
     setup_repo_with_commit_with("content", "Initial commit").await
 }
 
 /// Same as `setup_repo_with_commit` but allows specifying file content and commit message.
-async fn setup_repo_with_commit_with(content: &str, commit_msg: &str) -> tempfile::TempDir {
+async fn setup_repo_with_commit_with(
+    content: &str,
+    commit_msg: &str,
+) -> (tempfile::TempDir, ChangeDirGuard) {
     let temp = tempdir().unwrap();
-    // Switch working dir to the temp repo; keep the tempdir alive by returning it.
-    env::set_current_dir(temp.path()).unwrap();
+    // Switch working dir to the temp repo; keep the tempdir alive by returning it along with the guard.
+    let guard = ChangeDirGuard::new(temp.path());
     setup_with_new_libra_in(temp.path()).await;
     setup_user_identity().await;
 
@@ -145,7 +147,7 @@ async fn setup_repo_with_commit_with(content: &str, commit_msg: &str) -> tempfil
     })
     .await;
 
-    temp
+    (temp, guard)
 }
 
 // Test cases
@@ -154,7 +156,7 @@ async fn setup_repo_with_commit_with(content: &str, commit_msg: &str) -> tempfil
 #[serial]
 async fn test_basic_tag_creation() {
     // Create an isolated temporary repository and ensure a commit exists.
-    let _temp = setup_repo_with_commit().await;
+    let (_temp, _guard) = setup_repo_with_commit().await;
 
     // Create a lightweight tag that points to HEAD commit.
     internal_tag::create("v1.0.0", None, false).await.unwrap();
@@ -171,7 +173,7 @@ async fn test_basic_tag_creation() {
 #[serial]
 async fn test_tag_with_message() {
     // Create a tag with an annotation message (annotated tag) and verify presence.
-    let _temp = setup_repo_with_commit_with("content", "Commit with message").await;
+    let (_temp, _guard) = setup_repo_with_commit_with("content", "Commit with message").await;
 
     // Annotated tag creation (includes tagger and message fields internally).
     internal_tag::create("v1.0.1", Some("Release v1.0.1".into()), false)
@@ -201,7 +203,7 @@ async fn test_tag_with_message() {
 #[serial]
 async fn test_force_tag() {
     // Verify that forcing a tag replaces the ref target.
-    let _temp = setup_repo_with_commit_with("v1", "First").await;
+    let (_temp, _guard) = setup_repo_with_commit_with("v1", "First").await;
 
     internal_tag::create("v1.0", Some("Initial".into()), false)
         .await
@@ -256,7 +258,7 @@ async fn test_force_tag() {
 #[serial]
 async fn test_list_tags() {
     // Verify listing returns created tag names.
-    let _temp = setup_repo_with_commit_with("content", "Base").await;
+    let (_temp, _guard) = setup_repo_with_commit_with("content", "Base").await;
 
     internal_tag::create("v1.0.0", None, false).await.unwrap();
     internal_tag::create("v2.0.0", None, false).await.unwrap();
@@ -270,7 +272,7 @@ async fn test_list_tags() {
 #[serial]
 async fn test_delete_tag() {
     // Verify delete removes the tag ref.
-    let _temp = setup_repo_with_commit_with("content", "Delete base").await;
+    let (_temp, _guard) = setup_repo_with_commit_with("content", "Delete base").await;
 
     internal_tag::create("to-delete", None, false)
         .await
