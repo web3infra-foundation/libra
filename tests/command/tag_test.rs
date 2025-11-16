@@ -82,7 +82,7 @@ async fn read_tag_oid(name: &str) -> Option<String> {
 
     match &tag.object {
         internal_tag::TagObject::Commit(c) => Some(c.id.to_string()),
-        internal_tag::TagObject::Tag(t) => Some(t.id.to_string()),
+        internal_tag::TagObject::Tag(t) => Some(t.object_hash.to_string()),
         internal_tag::TagObject::Tree(tr) => Some(tr.id.to_string()),
         internal_tag::TagObject::Blob(b) => Some(b.id.to_string()),
     }
