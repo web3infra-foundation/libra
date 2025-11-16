@@ -1,13 +1,12 @@
-use libra::command::add::{self, AddArgs};
-use libra::command::commit::{self, CommitArgs};
+use super::*;
 use libra::command::config::{self, ConfigArgs};
 use libra::command::tag::{self, TagArgs};
 use libra::internal::tag as internal_tag;
-use libra::utils::test::{setup_with_new_libra_in};
+use libra::utils::test::setup_with_new_libra_in;
 use serial_test::serial;
-use tempfile::tempdir;
 use std::collections::HashSet;
 use std::env;
+use tempfile::tempdir;
 
 // Test helpers and utilities for tag tests.
 // These helpers work with the internal tag API (`internal::tag`) rather than the CLI
@@ -26,7 +25,8 @@ async fn setup_user_identity() {
         list: false,
         name_only: false,
         default: None,
-    }).await;
+    })
+    .await;
     config::execute(ConfigArgs {
         key: Some("user.email".into()),
         valuepattern: Some("test@example.com".into()),
@@ -38,7 +38,8 @@ async fn setup_user_identity() {
         list: false,
         name_only: false,
         default: None,
-    }).await;
+    })
+    .await;
 }
 
 /// Return the full ref name for a tag (e.g. "refs/tags/v1.0").
@@ -88,13 +89,9 @@ async fn read_tag_oid(name: &str) -> Option<String> {
     }
 }
 
-
 /// Return a set of bare tag names currently present (no refs/tags/ prefix).
 async fn list_tag_names() -> HashSet<String> {
-    list_tag_refs()
-        .await
-        .into_iter()
-        .collect()
+    list_tag_refs().await.into_iter().collect()
 }
 
 /// Assert the tag exists; provide helpful failure message.
@@ -133,7 +130,8 @@ async fn setup_repo_with_commit_with(content: &str, commit_msg: &str) -> tempfil
         ignore_errors: false,
         refresh: false,
         force: false,
-    }).await;
+    })
+    .await;
 
     commit::execute(CommitArgs {
         message: Some(commit_msg.into()),
@@ -144,7 +142,8 @@ async fn setup_repo_with_commit_with(content: &str, commit_msg: &str) -> tempfil
         signoff: false,
         disable_pre: false,
         all: false,
-    }).await;
+    })
+    .await;
 
     temp
 }
@@ -162,7 +161,10 @@ async fn test_basic_tag_creation() {
 
     // Verify tag presence and that we can read the pointed object id.
     assert_tag_exists("v1.0.0").await;
-    assert!(read_tag_oid("v1.0.0").await.is_some(), "Should be able to read tag OID");
+    assert!(
+        read_tag_oid("v1.0.0").await.is_some(),
+        "Should be able to read tag OID"
+    );
 }
 
 #[tokio::test]
@@ -172,14 +174,20 @@ async fn test_tag_with_message() {
     let _temp = setup_repo_with_commit_with("content", "Commit with message").await;
 
     // Annotated tag creation (includes tagger and message fields internally).
-    internal_tag::create("v1.0.1", Some("Release v1.0.1".into()), false).await.unwrap();
+    internal_tag::create("v1.0.1", Some("Release v1.0.1".into()), false)
+        .await
+        .unwrap();
 
     assert_tag_exists("v1.0.1").await;
     assert!(read_tag_oid("v1.0.1").await.is_some());
 
     // Verify the annotated tag object contains the expected message.
     let result = internal_tag::find_tag_and_commit("v1.0.1").await;
-    assert!(result.is_ok(), "find_tag_and_commit failed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "find_tag_and_commit failed: {:?}",
+        result.err()
+    );
     let opt = result.unwrap();
     let (object, _commit) = opt.expect("Annotated tag not found");
     if let internal_tag::TagObject::Tag(tag_object) = object {
@@ -195,7 +203,9 @@ async fn test_force_tag() {
     // Verify that forcing a tag replaces the ref target.
     let _temp = setup_repo_with_commit_with("v1", "First").await;
 
-    internal_tag::create("v1.0", Some("Initial".into()), false).await.unwrap();
+    internal_tag::create("v1.0", Some("Initial".into()), false)
+        .await
+        .unwrap();
     assert_tag_exists("v1.0").await;
     let before = read_tag_oid("v1.0").await;
 
@@ -210,7 +220,8 @@ async fn test_force_tag() {
         ignore_errors: false,
         refresh: false,
         force: false,
-    }).await;
+    })
+    .await;
     commit::execute(CommitArgs {
         message: Some("Second".into()),
         file: None,
@@ -220,7 +231,8 @@ async fn test_force_tag() {
         signoff: false,
         disable_pre: false,
         all: false,
-    }).await;
+    })
+    .await;
 
     // Use CLI path for force update to exercise both CLI and internal logic.
     tag::execute(TagArgs {
@@ -229,9 +241,15 @@ async fn test_force_tag() {
         delete: false,
         message: Some("Updated".into()),
         force: true,
-    }).await;
+    })
+    .await;
     let after = read_tag_oid("v1.0").await;
-    assert!(before.is_some() && after.is_some() && before != after, "force update should change OID (before: {:?}, after: {:?})", before, after);
+    assert!(
+        before.is_some() && after.is_some() && before != after,
+        "force update should change OID (before: {:?}, after: {:?})",
+        before,
+        after
+    );
 }
 
 #[tokio::test]
@@ -254,7 +272,9 @@ async fn test_delete_tag() {
     // Verify delete removes the tag ref.
     let _temp = setup_repo_with_commit_with("content", "Delete base").await;
 
-    internal_tag::create("to-delete", None, false).await.unwrap();
+    internal_tag::create("to-delete", None, false)
+        .await
+        .unwrap();
     assert_tag_exists("to-delete").await;
 
     tag::execute(TagArgs {
@@ -263,6 +283,7 @@ async fn test_delete_tag() {
         delete: true,
         message: None,
         force: false,
-    }).await;
+    })
+    .await;
     assert_tag_absent("to-delete").await;
 }
