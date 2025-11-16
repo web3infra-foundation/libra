@@ -204,6 +204,7 @@ async fn test_branch_rename() {
         amend: false,
         signoff: false,
         disable_pre: true,
+        all: false,
     };
     commit::execute(args).await;
     let commit_id = Head::current_commit().await.unwrap();
@@ -271,6 +272,7 @@ async fn test_rename_current_branch() {
         amend: false,
         signoff: false,
         disable_pre: true,
+        all: false,
     };
     commit::execute(args).await;
     let commit_id = Head::current_commit().await.unwrap();
@@ -331,6 +333,7 @@ async fn test_rename_to_existing_branch() {
         amend: false,
         signoff: false,
         disable_pre: true,
+        all: false,
     };
     commit::execute(args).await;
 
