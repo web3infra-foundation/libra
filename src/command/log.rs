@@ -54,7 +54,7 @@ pub struct LogArgs {
     #[clap(long)]
     pub stat: bool,
 
-    /// Files to limit diff output (only used with -p or --name-only)
+    /// Files to limit diff output (used with -p, --name-only, or --stat)
     #[clap(value_name = "PATHS", num_args = 0..)]
     pathspec: Vec<String>,
 }
@@ -476,26 +476,16 @@ pub struct FileStat {
 /// # Returns
 /// A vector of [`FileStat`] structs, each containing the file path, number of insertions, and number of deletions.
 pub async fn compute_commit_stat(commit: &Commit, paths: Vec<PathBuf>) -> Vec<FileStat> {
-    let tree = load_object::<Tree>(&commit.tree_id)
-        .unwrap_or_else(|_| panic!("failed to load tree object {}", commit.tree_id));
+    let tree = load_object::<Tree>(&commit.tree_id).expect("failed to load tree object");
     let new_blobs: Vec<(PathBuf, SHA1)> = tree.get_plain_items();
 
     let old_blobs: Vec<(PathBuf, SHA1)> = if !commit.parent_commit_ids.is_empty() {
         let parent = &commit.parent_commit_ids[0];
-        let parent_hash = SHA1::from_str(&parent.to_string()).unwrap_or_else(|_| {
-            panic!(
-                "failed to parse parent SHA1 {} for commit {}",
-                parent, commit.id
-            )
-        });
-        let parent_commit = load_object::<Commit>(&parent_hash)
-            .unwrap_or_else(|_| panic!("failed to load parent commit object {}", parent_hash));
-        let parent_tree = load_object::<Tree>(&parent_commit.tree_id).unwrap_or_else(|_| {
-            panic!(
-                "failed to load parent tree object {}",
-                parent_commit.tree_id
-            )
-        });
+        let parent_hash = SHA1::from_str(&parent.to_string()).expect("failed to parse parent SHA1");
+        let parent_commit =
+            load_object::<Commit>(&parent_hash).expect("failed to load parent commit object");
+        let parent_tree =
+            load_object::<Tree>(&parent_commit.tree_id).expect("failed to load parent tree object");
         parent_tree.get_plain_items()
     } else {
         Vec::new()
@@ -548,7 +538,9 @@ pub async fn compute_commit_stat(commit: &Commit, paths: Vec<PathBuf>) -> Vec<Fi
 /// shows the total number of files changed, insertions, and deletions.
 ///
 /// If `stats` is empty, returns an empty string.
-pub fn format_stat_output(stats: &[FileStat]) -> String {
+pub(crate) fn format_stat_output(stats: &[FileStat]) -> String {
+    const MAX_STAT_BAR_WIDTH: usize = 40;
+
     if stats.is_empty() {
         return String::new();
     }
@@ -560,9 +552,8 @@ pub fn format_stat_output(stats: &[FileStat]) -> String {
 
     for stat in stats {
         let changes = stat.insertions + stat.deletions;
-        let max_bar_width = 40;
-        let bar_width = if changes > max_bar_width {
-            max_bar_width
+        let bar_width = if changes > MAX_STAT_BAR_WIDTH {
+            MAX_STAT_BAR_WIDTH
         } else {
             changes
         };
@@ -606,7 +597,7 @@ pub fn format_stat_output(stats: &[FileStat]) -> String {
 /// graph prefix for each commit line. The internal algorithm updates the columns vector to
 /// reflect merges and branchings, ensuring the visual structure matches the commit graph.
 #[derive(Default)]
-pub struct GraphState {
+pub(crate) struct GraphState {
     columns: Vec<Option<SHA1>>,
 }
 
@@ -654,10 +645,8 @@ impl GraphState {
                 });
                 self.columns[pos] = Some(parent_hash);
             } else {
-                let first_parent =
-                    SHA1::from_str(&parent_ids[0].to_string()).unwrap_or_else(|_| {
-                        panic!("failed to parse first parent SHA1 for commit {}", commit_id)
-                    });
+                let first_parent = SHA1::from_str(&parent_ids[0].to_string())
+                    .expect("failed to parse first parent SHA1");
                 self.columns[pos] = Some(first_parent);
 
                 for parent_id in parent_ids.iter().skip(1) {
@@ -678,9 +667,8 @@ impl GraphState {
             }
 
             if !parent_ids.is_empty() {
-                let parent_hash = SHA1::from_str(&parent_ids[0].to_string()).unwrap_or_else(|_| {
-                    panic!("failed to parse parent SHA1 for commit {}", commit_id)
-                });
+                let parent_hash = SHA1::from_str(&parent_ids[0].to_string())
+                    .expect("failed to parse parent SHA1");
                 self.columns[0] = Some(parent_hash);
 
                 for parent_id in parent_ids.iter().skip(1) {
