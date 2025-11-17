@@ -538,7 +538,7 @@ pub async fn compute_commit_stat(commit: &Commit, paths: Vec<PathBuf>) -> Vec<Fi
 /// shows the total number of files changed, insertions, and deletions.
 ///
 /// If `stats` is empty, returns an empty string.
-pub(crate) fn format_stat_output(stats: &[FileStat]) -> String {
+pub fn format_stat_output(stats: &[FileStat]) -> String {
     const MAX_STAT_BAR_WIDTH: usize = 40;
 
     if stats.is_empty() {
@@ -597,7 +597,7 @@ pub(crate) fn format_stat_output(stats: &[FileStat]) -> String {
 /// graph prefix for each commit line. The internal algorithm updates the columns vector to
 /// reflect merges and branchings, ensuring the visual structure matches the commit graph.
 #[derive(Default)]
-pub(crate) struct GraphState {
+pub struct GraphState {
     columns: Vec<Option<SHA1>>,
 }
 
@@ -640,10 +640,8 @@ impl GraphState {
             if parent_ids.is_empty() {
                 self.columns[pos] = None;
             } else if parent_ids.len() == 1 {
-                let parent_hash = SHA1::from_str(&parent_ids[0].to_string()).unwrap_or_else(|_| panic!(
-                    "failed to parse parent SHA1 for commit {}",
-                    commit_id
-                ));
+                let parent_hash = SHA1::from_str(&parent_ids[0].to_string()).unwrap_or_else(|_| panic!("failed to parse parent SHA1 for commit {}",
+                    commit_id));
                 self.columns[pos] = Some(parent_hash);
             } else {
                 let first_parent = SHA1::from_str(&parent_ids[0].to_string())
@@ -673,10 +671,8 @@ impl GraphState {
                 self.columns[0] = Some(parent_hash);
 
                 for parent_id in parent_ids.iter().skip(1) {
-                    let parent_hash = SHA1::from_str(&parent_id.to_string()).unwrap_or_else(|_| panic!(
-                        "failed to parse parent SHA1 {} for commit {}",
-                        parent_id, commit_id
-                    ));
+                    let parent_hash = SHA1::from_str(&parent_id.to_string()).unwrap_or_else(|_| panic!("failed to parse parent SHA1 {} for commit {}",
+                        parent_id, commit_id));
                     self.columns.push(Some(parent_hash));
                 }
             }
