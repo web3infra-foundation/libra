@@ -122,10 +122,8 @@ pub async fn execute(command: RemoteCmds) {
                 for url in urls {
                     println!("{}", url);
                 }
-            } else {
-                if let Some(url) = urls.first() {
-                    println!("{}", url);
-                }
+            } else if let Some(url) = urls.first() {
+                println!("{}", url);
             }
         }
         RemoteCmds::SetUrl {
@@ -162,7 +160,6 @@ pub async fn execute(command: RemoteCmds) {
                 Config::insert("remote", Some(&name), key, &value).await;
             }
         }
-        
     }
 }
 

@@ -112,7 +112,6 @@ async fn test_remote_rename_conflict_returns_error() {
     assert!(result.is_err(), "rename into existing name should fail");
 }
 
-
 #[tokio::test]
 #[serial]
 async fn test_remote_set_url_add_appends_fetch_url() {
@@ -143,7 +142,6 @@ async fn test_remote_set_url_add_appends_fetch_url() {
     assert!(urls.contains(&"https://example.com/repo.git".to_string()));
     assert!(urls.contains(&"https://mirror.example.com/repo.git".to_string()));
 }
-
 
 #[tokio::test]
 #[serial]
@@ -183,7 +181,6 @@ async fn test_remote_set_url_delete_removes_matching_url() {
     assert_eq!(urls[0], "https://example.com/repo.git");
 }
 
-
 #[tokio::test]
 #[serial]
 async fn test_remote_set_url_push_and_get_pushurl_entries() {
@@ -209,7 +206,11 @@ async fn test_remote_set_url_push_and_get_pushurl_entries() {
     .await;
 
     let pushurls = Config::get_all("remote", Some("origin"), "pushurl").await;
-    assert_eq!(pushurls.len(), 1, "should have one pushurl after --add --push");
+    assert_eq!(
+        pushurls.len(),
+        1,
+        "should have one pushurl after --add --push"
+    );
     assert_eq!(pushurls[0], "ssh://git@example.com/repo.git");
 
     // Calling get-url --push should prefer pushurl entries (we don't capture stdout here,
@@ -221,7 +222,6 @@ async fn test_remote_set_url_push_and_get_pushurl_entries() {
     })
     .await;
 }
-
 
 #[tokio::test]
 #[serial]
