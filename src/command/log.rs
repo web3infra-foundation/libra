@@ -640,9 +640,10 @@ impl GraphState {
             if parent_ids.is_empty() {
                 self.columns[pos] = None;
             } else if parent_ids.len() == 1 {
-                let parent_hash = SHA1::from_str(&parent_ids[0].to_string()).unwrap_or_else(|_| {
-                    panic!("failed to parse parent SHA1 for commit {}", commit_id)
-                });
+                let parent_hash = SHA1::from_str(&parent_ids[0].to_string()).expect(&format!(
+                    "failed to parse parent SHA1 for commit {}",
+                    commit_id
+                ));
                 self.columns[pos] = Some(parent_hash);
             } else {
                 let first_parent = SHA1::from_str(&parent_ids[0].to_string())
@@ -672,12 +673,10 @@ impl GraphState {
                 self.columns[0] = Some(parent_hash);
 
                 for parent_id in parent_ids.iter().skip(1) {
-                    let parent_hash = SHA1::from_str(&parent_id.to_string()).unwrap_or_else(|_| {
-                        panic!(
-                            "failed to parse parent SHA1 {} for commit {}",
-                            parent_id, commit_id
-                        )
-                    });
+                    let parent_hash = SHA1::from_str(&parent_id.to_string()).expect(&format!(
+                        "failed to parse parent SHA1 {} for commit {}",
+                        parent_id, commit_id
+                    ));
                     self.columns.push(Some(parent_hash));
                 }
             }
