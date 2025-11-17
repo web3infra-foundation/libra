@@ -28,23 +28,35 @@ pub struct RemoveArgs {
     pub dry_run: bool,
 }
 
-pub fn execute(args: RemoveArgs) -> Result<(), GitError> {
+pub fn execute(args: RemoveArgs) {
     if !util::check_repo_exist() {
-        return Ok(());
+        return;
     }
     let idx_file = path::index();
-    let mut index = Index::load(&idx_file)?;
+    let mut index = match Index::load(&idx_file) {
+        Ok(index) => index,
+        Err(err) => {
+            eprintln!("fatal: {}", err);
+            return;
+        }
+    };
 
     // check if pathspec is all in index (skip if force is enabled)
     if !args.force {
-        validate_pathspec(&args.pathspec, &index)?
+        match validate_pathspec(&args.pathspec, &index) {
+            Ok(_) => (),
+            Err(err) => {
+                eprintln!("fatal: {}", err);
+                return;
+            }
+        }
     }
 
     let dirs = get_dirs(&args.pathspec, &index, args.force);
     if !dirs.is_empty() && !args.recursive {
         let error_msg = format!("not removing '{}' recursively without -r", dirs[0]);
-        println!("fatal: {error_msg}");
-        return Err(GitError::CustomError(error_msg));
+        eprintln!("fatal: {error_msg}");
+        return;
     }
 
     // In dry-run mode, show what would be removed but don't actually remove anything
@@ -84,8 +96,8 @@ pub fn execute(args: RemoveArgs) -> Result<(), GitError> {
                     } else {
                         // In forced mode, untracked files are not processed, consistent with Git behavior.
                         let error_msg = format!("pathspec '{path_str}' did not match any files");
-                        println!("fatal: {error_msg}");
-                        return Err(GitError::CustomError(error_msg));
+                        eprintln!("fatal: {error_msg}");
+                        return;
                     }
                 } else if index.tracked(&path_wd, 0) {
                     // Normal mode - only show if tracked (matches actual execution logic)
@@ -93,7 +105,7 @@ pub fn execute(args: RemoveArgs) -> Result<(), GitError> {
                 }
             }
         }
-        return Ok(());
+        return;
     }
 
     for path_str in args.pathspec.iter() {
@@ -108,7 +120,8 @@ pub fn execute(args: RemoveArgs) -> Result<(), GitError> {
                 println!("rm '{}'", file.bright_green());
             }
             if !args.cached {
-                fs::remove_dir_all(&path)?;
+                // The unwrap function needs to be replaced subsequently to ensure consistency with git's behavior.
+                fs::remove_dir_all(&path).unwrap();
             }
         } else {
             // file
@@ -120,8 +133,8 @@ pub fn execute(args: RemoveArgs) -> Result<(), GitError> {
                 } else {
                     // In forced mode, untracked files are not processed, consistent with Git behavior.
                     let error_msg = format!("pathspec '{path_str}' did not match any files");
-                    println!("fatal: {error_msg}");
-                    return Err(GitError::CustomError(error_msg));
+                    eprintln!("fatal: {error_msg}");
+                    return;
                 }
             } else {
                 // Normal mode - only remove if tracked
@@ -130,12 +143,13 @@ pub fn execute(args: RemoveArgs) -> Result<(), GitError> {
             }
 
             if !args.cached {
-                fs::remove_file(&path)?;
+                // The unwrap function needs to be replaced subsequently to ensure consistency with git's behavior.
+                fs::remove_file(&path).unwrap();
             }
         }
     }
-    index.save(&idx_file)?;
-    Ok(())
+    // The unwrap function needs to be replaced subsequently to ensure consistency with git's behavior.
+    index.save(&idx_file).unwrap();
 }
 
 /// check if pathspec is all valid(in index)
@@ -143,7 +157,6 @@ pub fn execute(args: RemoveArgs) -> Result<(), GitError> {
 fn validate_pathspec(pathspec: &[String], index: &Index) -> Result<(), GitError> {
     if pathspec.is_empty() {
         let error_msg = "No pathspec was given. Which files should I remove?".to_string();
-        println!("fatal: {error_msg}");
         return Err(GitError::CustomError(error_msg));
     }
     for path_str in pathspec.iter() {
@@ -154,7 +167,6 @@ fn validate_pathspec(pathspec: &[String], index: &Index) -> Result<(), GitError>
             // check if any tracked file in the directory
             if !index.contains_dir_file(&path_wd) {
                 let error_msg = format!("pathspec '{path_str}' did not match any files");
-                println!("fatal: {error_msg}");
                 return Err(GitError::CustomError(error_msg));
             }
         }
