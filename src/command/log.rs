@@ -324,6 +324,13 @@ pub async fn execute(args: LogArgs) {
                         message.push_str(&format!("{}\n", file));
                     }
                 }
+            } else if args.stat {
+                let stats = compute_commit_stat(&commit, paths.clone()).await;
+                let stat_output = format_stat_output(&stats);
+                if !stat_output.is_empty() {
+                    message.push('\n');
+                    message.push_str(&stat_output);
+                }
             }
 
             message
@@ -471,7 +478,7 @@ pub struct FileStat {
 ///
 /// # Parameters
 /// - `commit`: The commit to analyze.
-/// - `paths`: An optional list of path filters (files or directories) to restrict the analysis.
+/// - `paths`: A list of path filters (files or directories) to restrict the analysis; pass an empty vector for no filtering.
 ///
 /// # Returns
 /// A vector of [`FileStat`] structs, each containing the file path, number of insertions, and number of deletions.
@@ -640,8 +647,7 @@ impl GraphState {
             if parent_ids.is_empty() {
                 self.columns[pos] = None;
             } else if parent_ids.len() == 1 {
-                let parent_hash = SHA1::from_str(&parent_ids[0].to_string()).unwrap_or_else(|_| panic!("failed to parse parent SHA1 for commit {}",
-                    commit_id));
+                let parent_hash = SHA1::from_str(&parent_ids[0].to_string()).unwrap_or_else(|_| panic!("failed to parse parent SHA1 for commit {}", commit_id));
                 self.columns[pos] = Some(parent_hash);
             } else {
                 let first_parent = SHA1::from_str(&parent_ids[0].to_string())
@@ -671,8 +677,7 @@ impl GraphState {
                 self.columns[0] = Some(parent_hash);
 
                 for parent_id in parent_ids.iter().skip(1) {
-                    let parent_hash = SHA1::from_str(&parent_id.to_string()).unwrap_or_else(|_| panic!("failed to parse parent SHA1 {} for commit {}",
-                        parent_id, commit_id));
+                    let parent_hash = SHA1::from_str(&parent_id.to_string()).unwrap_or_else(|_| panic!("failed to parse parent SHA1 {} for commit {}", parent_id, commit_id));
                     self.columns.push(Some(parent_hash));
                 }
             }
