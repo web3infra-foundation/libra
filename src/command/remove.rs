@@ -82,8 +82,10 @@ pub fn execute(args: RemoveArgs) -> Result<(), GitError> {
                     if index.tracked(&path_wd, 0) {
                         println!("rm '{}'", path_wd.bright_yellow());
                     } else {
-                        // Even untracked files are processed in force mode
-                        println!("rm '{}'", path_wd.bright_yellow());
+                        // In forced mode, untracked files are not processed, consistent with Git behavior.
+                        let error_msg = format!("pathspec '{path_str}' did not match any files");
+                        println!("fatal: {error_msg}");
+                        return Err(GitError::CustomError(error_msg));
                     }
                 } else if index.tracked(&path_wd, 0) {
                     // Normal mode - only show if tracked (matches actual execution logic)
@@ -116,7 +118,10 @@ pub fn execute(args: RemoveArgs) -> Result<(), GitError> {
                     index.remove(&path_wd, 0);
                     println!("rm '{}'", path_wd.bright_green());
                 } else {
-                    println!("rm '{}'", path_wd.bright_yellow());
+                    // In forced mode, untracked files are not processed, consistent with Git behavior.
+                    let error_msg = format!("pathspec '{path_str}' did not match any files");
+                    println!("fatal: {error_msg}");
+                    return Err(GitError::CustomError(error_msg));
                 }
             } else {
                 // Normal mode - only remove if tracked
