@@ -699,4 +699,3 @@ async fn test_log_stat_and_graph_combined() {
     let prefix = graph_state.render(&commit);
     assert!(!prefix.is_empty());
 }
-
