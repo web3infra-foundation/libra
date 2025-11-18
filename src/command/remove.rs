@@ -5,7 +5,11 @@ use clap::Parser;
 use colored::Colorize;
 
 use git_internal::errors::GitError;
+use tokio::fs::remove_dir_all;
 
+use crate::command::status::{
+    changes_to_be_committed, changes_to_be_staged, changes_to_be_staged_with_policy,
+};
 use crate::utils::path_ext::PathExt;
 use crate::utils::{path, util};
 use git_internal::internal::index::Index;
@@ -28,11 +32,13 @@ pub struct RemoveArgs {
     pub dry_run: bool,
 }
 
-pub fn execute(args: RemoveArgs) {
+pub async fn execute(args: RemoveArgs) {
     if !util::check_repo_exist() {
         return;
     }
     let idx_file = path::index();
+    let mut remove_list = Vec::new();
+    let mut remove_dir_list = Vec::new();
     let mut index = match Index::load(&idx_file) {
         Ok(index) => index,
         Err(err) => {
@@ -41,113 +47,93 @@ pub fn execute(args: RemoveArgs) {
         }
     };
 
-    // check if pathspec is all in index (skip if force is enabled)
-    if !args.force {
-        match validate_pathspec(&args.pathspec, &index) {
-            Ok(_) => (),
-            Err(err) => {
-                eprintln!("fatal: {}", err);
-                return;
-            }
+    let dirs = get_dirs(&args.pathspec, &index, args.force);
+    match validate_pathspec(&args.pathspec, &index) {
+        Ok(_) => (),
+        Err(err) => {
+            eprintln!("fatal: {}", err);
+            return;
         }
     }
 
-    let dirs = get_dirs(&args.pathspec, &index, args.force);
     if !dirs.is_empty() && !args.recursive {
         let error_msg = format!("not removing '{}' recursively without -r", dirs[0]);
         eprintln!("fatal: {error_msg}");
         return;
     }
 
-    // In dry-run mode, show what would be removed but don't actually remove anything
-    if args.dry_run {
-        println!("Would remove the following:");
-        for path_str in args.pathspec.iter() {
-            let path = PathBuf::from(path_str);
-            let path_wd = path.to_workdir().to_string_or_panic();
-
-            if dirs.contains(path_str) {
-                // dir - find all files in this directory that are tracked
-                let entries = index.tracked_entries(0);
-                // Create directory prefix with proper path separator for cross-platform compatibility
-                let dir_prefix = if path_wd.is_empty() {
-                    String::new()
-                } else if path_wd.ends_with(std::path::MAIN_SEPARATOR) {
-                    path_wd.clone()
-                } else {
-                    format!("{}{}", path_wd, std::path::MAIN_SEPARATOR)
-                };
-                for entry in entries.iter() {
-                    if entry.name.starts_with(&dir_prefix) {
-                        println!("rm '{}'", entry.name.bright_yellow());
-                    }
-                }
-                if !args.cached {
-                    println!("rm directory '{}'", path_str.bright_yellow());
-                }
-            } else {
-                // file
-                if args.force {
-                    // In force mode: always try to remove (matches actual execution logic)
-                    // - If tracked, would be removed from index
-                    // - If not tracked, would still be processed (and filesystem file deleted if not cached)
-                    if index.tracked(&path_wd, 0) {
-                        println!("rm '{}'", path_wd.bright_yellow());
-                    } else {
-                        // In forced mode, untracked files are not processed, consistent with Git behavior.
-                        let error_msg = format!("pathspec '{path_str}' did not match any files");
-                        eprintln!("fatal: {error_msg}");
-                        return;
-                    }
-                } else if index.tracked(&path_wd, 0) {
-                    // Normal mode - only show if tracked (matches actual execution logic)
-                    println!("rm '{}'", path_wd.bright_yellow());
-                }
-            }
-        }
-        return;
-    }
-
+    // Check if all input paths are being traced.
     for path_str in args.pathspec.iter() {
         let path = PathBuf::from(path_str);
-        let path_wd = path.to_workdir().to_string_or_panic();
-
+        let relative_path = path.to_workdir().to_string_or_panic();
+        let mut empty_dir = true;
         if dirs.contains(path_str) {
-            // dir
-            let removed = index.remove_dir_files(&path_wd);
-            for file in removed.iter() {
-                // to workdir
-                println!("rm '{}'", file.bright_green());
+            // dir - find all files in this directory that are tracked
+            let entries = index.tracked_entries(0);
+            // Create directory prefix with proper path separator for cross-platform compatibility
+            let dir_prefix = if relative_path.is_empty() {
+                String::new()
+            } else if relative_path.ends_with(std::path::MAIN_SEPARATOR) {
+                relative_path.clone()
+            } else {
+                format!("{}{}", relative_path, std::path::MAIN_SEPARATOR)
+            };
+            for entry in entries.iter() {
+                if entry.name.starts_with(&dir_prefix) {
+                    remove_list.push(entry.name.clone());
+                    continue;
+                }
+                empty_dir = false
             }
-            if !args.cached {
-                // The unwrap function needs to be replaced subsequently to ensure consistency with git's behavior.
-                fs::remove_dir_all(&path).unwrap();
+            if empty_dir {
+                remove_dir_list.push(path_str)
             }
         } else {
             // file
-            if args.force {
-                // In force mode, remove from index if tracked, otherwise just delete from filesystem
-                if index.tracked(&path_wd, 0) {
-                    index.remove(&path_wd, 0);
-                    println!("rm '{}'", path_wd.bright_green());
-                } else {
-                    // In forced mode, untracked files are not processed, consistent with Git behavior.
-                    let error_msg = format!("pathspec '{path_str}' did not match any files");
-                    eprintln!("fatal: {error_msg}");
-                    return;
-                }
+            // - If tracked, would be removed from index
+            if index.tracked(&relative_path, 0) {
+                remove_list.push(path_str.clone());
             } else {
-                // Normal mode - only remove if tracked
-                index.remove(&path_wd, 0);
-                println!("rm '{}'", path_wd.bright_green());
-            }
-
-            if !args.cached {
-                // The unwrap function needs to be replaced subsequently to ensure consistency with git's behavior.
-                fs::remove_file(&path).unwrap();
+                // In forced mode, untracked files are not processed, consistent with Git behavior.
+                let error_msg = format!("pathspec '{path_str}' did not match any files");
+                eprintln!("fatal: {error_msg}");
+                return;
             }
         }
     }
+    // Check all input paths for any uncommitted changes.
+    if !args.force {
+        let changes_staged = changes_to_be_staged().polymerization();
+        let changes_commited = changes_to_be_committed().await.polymerization();
+        // The output for HEAD inconsistency and temporary storage inconsistency is different, and it will output all the problems.
+        // Do it tomorrow ！！
+        for path_str in remove_list.iter() {
+            if changes_staged.contains(&PathBuf::from(&path_str)) {
+                let error_msg = format!(
+                    "the following file has staged content differentfrom both thefile and the HEAD:\n\t\t{}\n\t(use -f to force removal)",
+                    &path_str
+                );
+                eprintln!("error: {error_msg}");
+                return;
+            }
+        }
+    }
+    for path_str in remove_list.iter() {
+        let relative_path = PathBuf::from(&path_str).to_workdir().to_string_or_panic();
+        index.remove(&relative_path, 0);
+    }
+    if !args.cached {
+        for path_str in remove_list {
+            let path = PathBuf::from(&path_str);
+            println!("rm '{}'", path_str.bright_yellow());
+            fs::remove_file(path).unwrap()
+        }
+        for path_str in remove_dir_list {
+            let path = PathBuf::from(&path_str);
+            fs::remove_dir(path).unwrap()
+        }
+    }
+
     // The unwrap function needs to be replaced subsequently to ensure consistency with git's behavior.
     index.save(&idx_file).unwrap();
 }
@@ -161,11 +147,11 @@ fn validate_pathspec(pathspec: &[String], index: &Index) -> Result<(), GitError>
     }
     for path_str in pathspec.iter() {
         let path = PathBuf::from(path_str);
-        let path_wd = path.to_workdir().to_string_or_panic();
-        if !index.tracked(&path_wd, 0) {
+        let relative_path = path.to_workdir().to_string_or_panic();
+        if !index.tracked(&relative_path, 0) {
             // not tracked, but path may be a directory
             // check if any tracked file in the directory
-            if !index.contains_dir_file(&path_wd) {
+            if !index.contains_dir_file(&relative_path) {
                 let error_msg = format!("pathspec '{path_str}' did not match any files");
                 return Err(GitError::CustomError(error_msg));
             }
@@ -179,18 +165,8 @@ fn get_dirs(pathspec: &[String], index: &Index, force: bool) -> Vec<String> {
     let mut dirs = Vec::new();
     for path_str in pathspec.iter() {
         let path = PathBuf::from(path_str);
-        let path_wd = path.to_workdir().to_string_or_panic();
-
-        if force {
-            // In force mode, check if the path exists and is a directory
-            if path.exists() && path.is_dir() {
-                dirs.push(path_str.clone());
-            }
-        } else {
-            // valid but not tracked, means a dir
-            if !index.tracked(&path_wd, 0) {
-                dirs.push(path_str.clone());
-            }
+        if path.exists() && path.is_dir() {
+            dirs.push(path_str.clone());
         }
     }
     dirs

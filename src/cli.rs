@@ -153,7 +153,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> Result<(), GitError> {
         Commands::Init(args) => command::init::execute(args).await,
         Commands::Clone(args) => command::clone::execute(args).await,
         Commands::Add(args) => command::add::execute(args).await,
-        Commands::Rm(args) => command::remove::execute(args),
+        Commands::Rm(args) => command::remove::execute(args).await,
         Commands::Restore(args) => command::restore::execute(args).await,
         Commands::Status(args) => command::status::execute(args).await,
         Commands::Stash(cmd) => command::stash::execute(cmd).await,
