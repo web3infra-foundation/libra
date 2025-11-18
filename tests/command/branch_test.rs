@@ -207,7 +207,7 @@ async fn test_branch_rename() {
         all: false,
     };
     commit::execute(args).await;
-    let commit_id = Head::current_commit().await.unwrap();
+    let commit_id_1 = Head::current_commit().await.unwrap();
 
     // Create a test branch
     let args = BranchArgs {
@@ -225,7 +225,7 @@ async fn test_branch_rename() {
     // Verify old branch exists
     let old_branch = Branch::find_branch("old_name", None).await;
     assert!(old_branch.is_some(), "old branch should exist");
-    assert_eq!(old_branch.unwrap().commit, commit_id);
+    assert_eq!(old_branch.unwrap().commit, commit_id_1);
 
     // Rename branch from old_name to new_name
     let args = BranchArgs {
@@ -250,7 +250,7 @@ async fn test_branch_rename() {
     // Verify new branch exists with same commit
     let new_branch = Branch::find_branch("new_name", None).await;
     assert!(new_branch.is_some(), "new branch should exist");
-    assert_eq!(new_branch.unwrap().commit, commit_id);
+    assert_eq!(new_branch.unwrap().commit, commit_id_1);
 }
 
 #[tokio::test]

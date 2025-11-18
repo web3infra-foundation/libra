@@ -133,12 +133,12 @@ achieving unified management.
   - [x] --decorate
   - [x] --no-decorate
   - [x] [pathspec]
-  - [ ] --graph
+  - [x] --graph
   - [ ] --pretty=<format>
   - [ ] --abbrev-commit
   - [ ] --name-only
   - [ ] --name-status
-  - [ ] --stat
+  - [x] --stat
   - [ ] --since <date> / --until <date>
   - [ ] --author <pattern>
 

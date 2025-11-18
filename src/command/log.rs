@@ -47,8 +47,14 @@ pub struct LogArgs {
     /// Do not print out ref names of any commits that are shown
     #[clap(long)]
     pub no_decorate: bool,
+    /// Draw a text-based graphical representation of the commit history
+    #[clap(long)]
+    pub graph: bool,
+    /// Show diffstat (file change statistics) for each commit
+    #[clap(long)]
+    pub stat: bool,
 
-    /// Files to limit diff output (only used with -p or --name-only)
+    /// Files to limit diff output (used with -p, --name-only, or --stat)
     #[clap(value_name = "PATHS", num_args = 0..)]
     pathspec: Vec<String>,
 }
@@ -198,6 +204,11 @@ pub async fn execute(args: LogArgs) {
 
     let max_output_number = min(args.number.unwrap_or(usize::MAX), reachable_commits.len());
     let mut output_number = 0;
+    let mut graph_state = if args.graph {
+        Some(GraphState::new())
+    } else {
+        None
+    };
 
     for commit in reachable_commits {
         if output_number >= max_output_number {
@@ -283,17 +294,28 @@ pub async fn execute(args: LogArgs) {
         // prepare pathspecs for diff if needed
         let paths: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
 
+        let graph_prefix = if let Some(ref mut gs) = graph_state {
+            gs.render(&commit)
+        } else {
+            String::new()
+        };
+
         let message = if args.oneline {
             // Oneline format with name_only support
             let short_hash = &commit.id.to_string()[..7];
             let (msg, _) = parse_commit_msg(&commit.message);
             let mut message = if !ref_msg.is_empty() {
-                format!("{} ({}) {}", short_hash.yellow(), ref_msg, msg)
+                format!(
+                    "{}{} ({}) {}",
+                    graph_prefix,
+                    short_hash.yellow(),
+                    ref_msg,
+                    msg
+                )
             } else {
-                format!("{} {}", short_hash.yellow(), msg)
+                format!("{}{} {}", graph_prefix, short_hash.yellow(), msg)
             };
 
-            // Add changed files if name_only is specified
             if name_only {
                 let changed_files = get_changed_files_for_commit(&commit, paths.clone()).await;
                 if !changed_files.is_empty() {
@@ -302,27 +324,38 @@ pub async fn execute(args: LogArgs) {
                         message.push_str(&format!("{}\n", file));
                     }
                 }
+            } else if args.stat {
+                let stats = compute_commit_stat(&commit, paths.clone()).await;
+                let stat_output = format_stat_output(&stats);
+                if !stat_output.is_empty() {
+                    message.push('\n');
+                    message.push_str(&stat_output);
+                }
             }
 
             message
         } else {
-            // Default detailed format
             let mut message = if !ref_msg.is_empty() {
                 format!(
-                    "{} {} ({})",
+                    "{}{} {} ({})",
+                    graph_prefix,
                     "commit".yellow(),
                     commit.id.to_string().yellow(),
                     ref_msg
                 )
             } else {
-                format!("{} {}", "commit".yellow(), commit.id.to_string().yellow())
+                format!(
+                    "{}{} {}",
+                    graph_prefix,
+                    "commit".yellow(),
+                    commit.id.to_string().yellow()
+                )
             };
 
             message.push_str(&format!("\nAuthor: {}", commit.author));
             let (msg, _) = parse_commit_msg(&commit.message);
             message.push_str(&format!("\n{msg}\n"));
 
-            // Add changed files if name_only is specified
             if name_only {
                 let changed_files = get_changed_files_for_commit(&commit, paths.clone()).await;
                 if !changed_files.is_empty() {
@@ -332,9 +365,15 @@ pub async fn execute(args: LogArgs) {
                     }
                 }
             } else if patch {
-                // Only show patch if name_only is not specified
                 let patch_output = generate_diff(&commit, paths.clone()).await;
                 message.push_str(&patch_output);
+            } else if args.stat {
+                let stats = compute_commit_stat(&commit, paths.clone()).await;
+                let stat_output = format_stat_output(&stats);
+                if !stat_output.is_empty() {
+                    message.push('\n');
+                    message.push_str(&stat_output);
+                }
             }
 
             message
@@ -418,6 +457,243 @@ pub(crate) async fn get_changed_files_for_commit(
 
     changed_files.sort();
     changed_files
+}
+
+/// Represents statistics about changes to a file in a commit.
+///
+/// This struct is used to report the number of lines inserted and deleted for a file
+/// as part of a commit's diff. It is typically returned by functions that compute
+/// per-file change statistics for a commit.
+#[derive(Debug)]
+pub struct FileStat {
+    /// The path to the file relative to the repository root.
+    pub path: String,
+    /// The number of lines inserted in this file by the commit.
+    pub insertions: usize,
+    /// The number of lines deleted from this file by the commit.
+    pub deletions: usize,
+}
+
+/// Computes file statistics (insertions and deletions) for a given commit by comparing it with its parent commit.
+///
+/// # Parameters
+/// - `commit`: The commit to analyze.
+/// - `paths`: A list of path filters (files or directories) to restrict the analysis; pass an empty vector for no filtering.
+///
+/// # Returns
+/// A vector of [`FileStat`] structs, each containing the file path, number of insertions, and number of deletions.
+pub async fn compute_commit_stat(commit: &Commit, paths: Vec<PathBuf>) -> Vec<FileStat> {
+    let tree = load_object::<Tree>(&commit.tree_id).expect("failed to load tree object");
+    let new_blobs: Vec<(PathBuf, SHA1)> = tree.get_plain_items();
+
+    let old_blobs: Vec<(PathBuf, SHA1)> = if !commit.parent_commit_ids.is_empty() {
+        let parent = &commit.parent_commit_ids[0];
+        let parent_hash = SHA1::from_str(&parent.to_string()).expect("failed to parse parent SHA1");
+        let parent_commit =
+            load_object::<Commit>(&parent_hash).expect("failed to load parent commit object");
+        let parent_tree =
+            load_object::<Tree>(&parent_commit.tree_id).expect("failed to load parent tree object");
+        parent_tree.get_plain_items()
+    } else {
+        Vec::new()
+    };
+
+    let read_content = |file: &PathBuf, hash: &SHA1| match load_object::<Blob>(hash) {
+        Ok(blob) => blob.data,
+        Err(_) => {
+            let file = util::to_workdir_path(file);
+            std::fs::read(&file).unwrap_or_default()
+        }
+    };
+
+    let diffs = Diff::diff(
+        old_blobs,
+        new_blobs,
+        String::from("histogram"),
+        paths.into_iter().collect(),
+        read_content,
+    )
+    .await;
+
+    let mut stats = Vec::new();
+    for diff_item in diffs {
+        let mut insertions = 0;
+        let mut deletions = 0;
+        for line in diff_item.data.lines() {
+            if line.starts_with('+') && !line.starts_with("+++") {
+                insertions += 1;
+            } else if line.starts_with('-') && !line.starts_with("---") {
+                deletions += 1;
+            }
+        }
+        if insertions > 0 || deletions > 0 {
+            stats.push(FileStat {
+                path: diff_item.path,
+                insertions,
+                deletions,
+            });
+        }
+    }
+    stats
+}
+
+/// Formats a list of file statistics into a Git-style summary with colored bars.
+///
+/// Each file is displayed on its own line, showing the file path, the total number of changes,
+/// and a visual bar: green `+` for insertions and red `-` for deletions. The bar's length is
+/// proportional to the number of changes, up to a maximum width. At the end, a summary line
+/// shows the total number of files changed, insertions, and deletions.
+///
+/// If `stats` is empty, returns an empty string.
+pub fn format_stat_output(stats: &[FileStat]) -> String {
+    const MAX_STAT_BAR_WIDTH: usize = 40;
+
+    if stats.is_empty() {
+        return String::new();
+    }
+
+    let mut output = String::new();
+    let total_insertions: usize = stats.iter().map(|s| s.insertions).sum();
+    let total_deletions: usize = stats.iter().map(|s| s.deletions).sum();
+    let total_files = stats.len();
+
+    for stat in stats {
+        let changes = stat.insertions + stat.deletions;
+        let bar_width = if changes > MAX_STAT_BAR_WIDTH {
+            MAX_STAT_BAR_WIDTH
+        } else {
+            changes
+        };
+
+        let plus_count = if changes > 0 {
+            (stat.insertions * bar_width) / changes
+        } else {
+            0
+        };
+        let minus_count = bar_width.saturating_sub(plus_count);
+
+        output.push_str(&format!(
+            " {} | {:>3} {}{}\n",
+            stat.path,
+            changes,
+            "+".repeat(plus_count).green(),
+            "-".repeat(minus_count).red()
+        ));
+    }
+
+    output.push_str(&format!(
+        " {} file{} changed, {} insertion{}({}), {} deletion{}({})\n",
+        total_files,
+        if total_files == 1 { "" } else { "s" },
+        total_insertions,
+        if total_insertions == 1 { "" } else { "s" },
+        "+".green(),
+        total_deletions,
+        if total_deletions == 1 { "" } else { "s" },
+        "-".red()
+    ));
+
+    output
+}
+
+/// Maintains state for rendering an ASCII commit graph visualization.
+///
+/// `GraphState` tracks the columns representing active branches and parent/child relationships
+/// as the commit history is traversed. It is designed to be created once and used to render
+/// each commit in traversal order (e.g., topological or chronological), producing the correct
+/// graph prefix for each commit line. The internal algorithm updates the columns vector to
+/// reflect merges and branchings, ensuring the visual structure matches the commit graph.
+#[derive(Default)]
+pub struct GraphState {
+    columns: Vec<Option<SHA1>>,
+}
+
+impl GraphState {
+    /// Creates a new, empty `GraphState` for rendering a commit graph.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Renders the ASCII graph prefix for a given commit, updating internal state.
+    ///
+    /// Call this method for each commit in traversal order. It returns a string representing
+    /// the graph structure (e.g., `* | |`) for the current commit, updating the internal
+    /// columns to reflect parent/child relationships and merges.
+    ///
+    /// # Arguments
+    ///
+    /// * `commit` - The commit to render in the graph.
+    ///
+    /// # Returns
+    ///
+    /// A string containing the ASCII graph prefix for the commit.
+    pub fn render(&mut self, commit: &Commit) -> String {
+        let commit_id = commit.id;
+        let parent_ids = &commit.parent_commit_ids;
+
+        let mut prefix = String::new();
+
+        if let Some(pos) = self.columns.iter().position(|&c| c == Some(commit_id)) {
+            for (i, col) in self.columns.iter().enumerate() {
+                if i == pos {
+                    prefix.push_str("* ");
+                } else if col.is_some() {
+                    prefix.push_str("| ");
+                } else {
+                    prefix.push_str("  ");
+                }
+            }
+
+            if parent_ids.is_empty() {
+                self.columns[pos] = None;
+            } else if parent_ids.len() == 1 {
+                let parent_hash = SHA1::from_str(&parent_ids[0].to_string()).unwrap_or_else(|_| {
+                    panic!("failed to parse parent SHA1 for commit {}", commit_id)
+                });
+                self.columns[pos] = Some(parent_hash);
+            } else {
+                let first_parent = SHA1::from_str(&parent_ids[0].to_string())
+                    .expect("failed to parse first parent SHA1");
+                self.columns[pos] = Some(first_parent);
+
+                for parent_id in parent_ids.iter().skip(1) {
+                    let parent_hash = SHA1::from_str(&parent_id.to_string()).unwrap_or_else(|_| {
+                        panic!(
+                            "failed to parse parent SHA1 {} for commit {}",
+                            parent_id, commit_id
+                        )
+                    });
+                    self.columns.push(Some(parent_hash));
+                }
+            }
+        } else {
+            self.columns.insert(0, None);
+            prefix.push_str("* ");
+            for _ in 1..self.columns.len() {
+                prefix.push_str("| ");
+            }
+
+            if !parent_ids.is_empty() {
+                let parent_hash = SHA1::from_str(&parent_ids[0].to_string())
+                    .expect("failed to parse parent SHA1");
+                self.columns[0] = Some(parent_hash);
+
+                for parent_id in parent_ids.iter().skip(1) {
+                    let parent_hash = SHA1::from_str(&parent_id.to_string()).unwrap_or_else(|_| {
+                        panic!(
+                            "failed to parse parent SHA1 {} for commit {}",
+                            parent_id, commit_id
+                        )
+                    });
+                    self.columns.push(Some(parent_hash));
+                }
+            }
+        }
+
+        self.columns.retain(|c| c.is_some());
+
+        prefix
+    }
 }
 
 async fn create_reference_commit_map() -> HashMap<SHA1, Vec<Reference>> {
