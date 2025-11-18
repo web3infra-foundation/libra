@@ -725,7 +725,7 @@ async fn test_status_with_subdirectories() {
     )
     .await;
 
-    let output_str = String::from_utf8(output).unwrap();
+    let output_str = String::from_utf8(output).unwrap().replace("\\", "/");
 
     // Should show files from all directories
     for file_path in &files {

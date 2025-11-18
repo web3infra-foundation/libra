@@ -27,4 +27,7 @@ target
 buck-out/
 .buckal/
 
+# Generated when moving Windows files to WSL
+*:Zone.Identifier
+
 .libra/
