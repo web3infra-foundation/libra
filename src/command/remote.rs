@@ -98,6 +98,10 @@ pub async fn execute(command: RemoteCmds) {
             }
         }
         RemoteCmds::GetUrl { push, all, name } => {
+            if Config::remote_config(&name).await.is_none() {
+                eprintln!("fatal: No such remote: {name}");
+                return;
+            }
             // If --push, prefer explicit pushurl entries; fall back to url if none.
             if push {
                 let push_urls = Config::get_all("remote", Some(&name), "pushurl").await;
@@ -118,7 +122,7 @@ pub async fn execute(command: RemoteCmds) {
             if urls.is_empty() {
                 eprintln!("fatal: no URL configured for remote '{name}'");
             } else if all || push {
-                // --push with no pushurl falls back to printing all configured url entries
+                // --all prints all URLs; --push with no pushurl also prints all regular urls
                 for url in urls {
                     println!("{}", url);
                 }
@@ -134,6 +138,10 @@ pub async fn execute(command: RemoteCmds) {
             name,
             value,
         } => {
+            if Config::remote_config(&name).await.is_none() {
+                eprintln!("fatal: No such remote: {name}");
+                return;
+            }
             // Determine which config key to operate on
             let key = if push { "pushurl" } else { "url" };
 
@@ -155,7 +163,9 @@ pub async fn execute(command: RemoteCmds) {
                 Config::remove_config("remote", Some(&name), key, None, true).await;
                 Config::insert("remote", Some(&name), key, &value).await;
             } else {
-                // Replace first existing entry: remove first occurrence then insert new value
+                // Replace first existing entry: remove first occurrence then insert new value.
+                // If no URL existed initially, the removal is a no-op and the insert will add the new URL.
+                // This handles both the 'replace existing' and 'set new URL when none exists' cases.
                 Config::remove_config("remote", Some(&name), key, None, false).await;
                 Config::insert("remote", Some(&name), key, &value).await;
             }
