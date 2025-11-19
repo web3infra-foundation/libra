@@ -8,6 +8,12 @@ use git_internal::internal::object::commit::Commit;
 
 use crate::command::load_object;
 
+pub enum BranchListMode {
+    Local,
+    Remote,
+    All,
+}
+
 #[derive(Parser, Debug)]
 pub struct BranchArgs {
     /// new branch name
@@ -42,7 +48,7 @@ pub struct BranchArgs {
     #[clap(short, long)] // TODO limit to required `list` option, even in default
     pub remotes: bool,
 
-    /// show all branches (include local and remote)
+    /// show all branches (includes local and remote)
     #[clap(short, long, group = "sub")]
     pub all: bool,
 }
@@ -62,11 +68,16 @@ pub async fn execute(args: BranchArgs) {
         };
     } else if !args.rename.is_empty() {
         rename_branch(args.rename).await;
-    } else if args.list {
+    } else if args.list || args.all || args.remotes {
         // default behavior
-        list_branches(args.remotes).await;
-    } else if args.all {
-        list_all_branches().await;
+        let mode = if args.all {
+            BranchListMode::All
+        } else if args.remotes {
+            BranchListMode::Remote
+        } else {
+            BranchListMode::Local
+        };
+        list_branches(mode).await;
     } else {
         panic!("should not reach here")
     }
@@ -219,92 +230,89 @@ async fn show_current_branch() {
         }
     }
 }
+async fn display_head_state() -> String {
+    let head = Head::current().await;
+    if let Head::Detached(commit) = head {
+        let s = "HEAD detached at  ".to_string() + &commit.to_string()[..8];
+        let s = s.green();
+        println!("{s}");
+    };
+    match head {
+        Head::Branch(name) => name,
+        Head::Detached(_) => "".to_string(),
+    }
+}
 
-pub async fn list_branches(remotes: bool) {
-    let branches = match remotes {
-        true => {
-            // list all remote branches
+fn format_branch_name(branch: &Branch) -> String {
+    branch
+        .remote
+        .as_ref()
+        .map(|remote| format!("{}/{}", remote, branch.name))
+        .unwrap_or_else(|| branch.name.clone())
+        .red()
+        .to_string()
+}
+
+fn display_branches(branches: Vec<Branch>, head_name: &str, is_remote: bool) {
+    let branches_sorted = {
+        let mut sorted_branches = branches;
+        sorted_branches.sort_by(|a, b| {
+            if a.name == head_name {
+                std::cmp::Ordering::Less
+            } else if b.name == head_name {
+                std::cmp::Ordering::Greater
+            } else {
+                a.name.cmp(&b.name)
+            }
+        });
+        sorted_branches
+    };
+
+    for branch in branches_sorted {
+        let name = if is_remote {
+            format_branch_name(&branch)
+        } else {
+            branch.name.clone()
+        };
+
+        if head_name == branch.name {
+            println!("* {}", name.green());
+        } else {
+            println!("  {}", name);
+        }
+    }
+}
+pub async fn list_branches(mode: BranchListMode) {
+    let head_name = display_head_state().await;
+
+    match mode {
+        BranchListMode::Local => {
+            let branches = Branch::list_branches(None).await;
+            display_branches(branches, &head_name, false);
+        }
+
+        BranchListMode::Remote => {
             let remote_configs = Config::all_remote_configs().await;
             let mut branches = vec![];
             for remote in remote_configs {
                 let remote_branches = Branch::list_branches(Some(&remote.name)).await;
                 branches.extend(remote_branches);
             }
-            branches
+            display_branches(branches, &head_name, true);
         }
-        false => Branch::list_branches(None).await,
-    };
 
-    let head = Head::current().await;
-    if let Head::Detached(commit) = head {
-        let s = "HEAD detached at  ".to_string() + &commit.to_string()[..8];
-        let s = s.green();
-        println!("{s}");
-    };
-    let head_name = match head {
-        Head::Branch(name) => name,
-        Head::Detached(_) => "".to_string(),
-    };
-    for branch in branches {
-        let name = branch
-            .remote
-            .map(|remote| remote + "/" + &branch.name)
-            .unwrap_or_else(|| branch.name.clone());
+        BranchListMode::All => {
+            let branches = Branch::list_branches(None).await;
+            display_branches(branches, &head_name, false);
 
-        if head_name == name {
-            println!("* {}", name.green());
-        } else {
-            println!("  {name}");
-        };
-    }
-}
-
-pub async fn list_all_branches() {
-    let mut local_branches = Branch::list_branches(None).await;
-
-    let remote_configs = Config::all_remote_configs().await;
-    let mut remote_branches = vec![];
-    for remote in remote_configs {
-        let branches = Branch::list_branches(Some(&remote.name)).await;
-        remote_branches.extend(branches);
-    }
-
-    let head = Head::current().await;
-    if let Head::Detached(commit) = head {
-        let s = "HEAD detached at  ".to_string() + &commit.to_string()[..8];
-        let s = s.green();
-        println!("{s}");
-    }
-
-    let head_name = match head {
-        Head::Branch(name) => name,
-        Head::Detached(_) => "".to_string(),
-    };
-
-    local_branches.sort_by(|a, b| {
-        if a.name == head_name {
-            std::cmp::Ordering::Less
-        } else if b.name == head_name {
-            std::cmp::Ordering::Greater
-        } else {
-            a.name.cmp(&b.name)
+            let remote_configs = Config::all_remote_configs().await;
+            let mut remote_branches = vec![];
+            for remote in remote_configs {
+                let remote_branches_for_remote = Branch::list_branches(Some(&remote.name)).await;
+                remote_branches.extend(remote_branches_for_remote);
+            }
+            display_branches(remote_branches, &head_name, true);
         }
-    });
-
-    for branch in local_branches {
-        if head_name == branch.name {
-            println!("* {}", branch.name.green());
-        } else {
-            println!("  {}", branch.name);
-        }
-    }
-
-    for branch in remote_branches {
-        let name = branch
-            .remote
-            .map(|remote| remote + "/" + &branch.name)
-            .unwrap_or_else(|| branch.name.clone());
-        println!("  {}", name.red());
     }
 }
 

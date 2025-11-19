@@ -394,7 +394,7 @@ async fn test_rename_to_existing_branch() {
 
 #[tokio::test]
 #[serial]
-/// Tests listing all branches (local + remote) with output verification.  
+/// Tests listing all branches (local + remote).
 async fn test_list_all_branches() {
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
@@ -452,7 +452,7 @@ async fn test_list_all_branches() {
         remotes: false,
         all: true,
     };
-    execute(args).await; // This will print to stdout, which is fine for tests  
+    execute(args).await; // This will print to stdout, which is fine for tests
 
     // Verify branches exist
     assert!(
