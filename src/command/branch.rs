@@ -41,6 +41,10 @@ pub struct BranchArgs {
     /// show remote branches
     #[clap(short, long)] // TODO limit to required `list` option, even in default
     pub remotes: bool,
+
+    /// show all branches (include local and remote)
+    #[clap(short, long, group = "sub")]
+    pub all: bool,
 }
 pub async fn execute(args: BranchArgs) {
     if args.new_branch.is_some() {
@@ -61,6 +65,8 @@ pub async fn execute(args: BranchArgs) {
     } else if args.list {
         // default behavior
         list_branches(args.remotes).await;
+    } else if args.all {
+        list_all_branches().await;
     } else {
         panic!("should not reach here")
     }
@@ -250,6 +256,55 @@ pub async fn list_branches(remotes: bool) {
         } else {
             println!("  {name}");
         };
+    }
+}
+
+pub async fn list_all_branches() {
+    let mut local_branches = Branch::list_branches(None).await;
+
+    let remote_configs = Config::all_remote_configs().await;
+    let mut remote_branches = vec![];
+    for remote in remote_configs {
+        let branches = Branch::list_branches(Some(&remote.name)).await;
+        remote_branches.extend(branches);
+    }
+
+    let head = Head::current().await;
+    if let Head::Detached(commit) = head {
+        let s = "HEAD detached at  ".to_string() + &commit.to_string()[..8];
+        let s = s.green();
+        println!("{s}");
+    }
+
+    let head_name = match head {
+        Head::Branch(name) => name,
+        Head::Detached(_) => "".to_string(),
+    };
+
+    local_branches.sort_by(|a, b| {
+        if a.name == head_name {
+            std::cmp::Ordering::Less
+        } else if b.name == head_name {
+            std::cmp::Ordering::Greater
+        } else {
+            a.name.cmp(&b.name)
+        }
+    });
+
+    for branch in local_branches {
+        if head_name == branch.name {
+            println!("* {}", branch.name.green());
+        } else {
+            println!("  {}", branch.name);
+        }
+    }
+
+    for branch in remote_branches {
+        let name = branch
+            .remote
+            .map(|remote| remote + "/" + &branch.name)
+            .unwrap_or_else(|| branch.name.clone());
+        println!("  {}", name.red());
     }
 }
 
