@@ -45,8 +45,9 @@ async fn test_remove_single_file() {
         pathspec: vec![String::from("test_file.txt")],
         cached: false,
         recursive: false,
-        force: false,
+        force: true,
         dry_run: false,
+        ignore_unmatch: false,
     };
     remove::execute(args).await;
 
@@ -114,6 +115,7 @@ async fn test_remove_cached() {
         recursive: false,
         force: false,
         dry_run: false,
+        ignore_unmatch: false,
     };
     remove::execute(args).await;
 
@@ -168,8 +170,9 @@ async fn test_remove_directory_recursive() {
         pathspec: vec![String::from("test_dir")],
         cached: false,
         recursive: true,
-        force: false,
+        force: true,
         dry_run: false,
+        ignore_unmatch: false,
     };
     remove::execute(args).await;
 
@@ -244,6 +247,7 @@ async fn test_remove_directory_without_recursive() {
         recursive: false,
         force: false,
         dry_run: false,
+        ignore_unmatch: false,
     };
     remove::execute(args).await;
     // Removing a directory without recursive should fail - the function should handle this internally
@@ -278,6 +282,7 @@ async fn test_remove_untracked_file() {
         recursive: false,
         force: false,
         dry_run: false,
+        ignore_unmatch: false,
     };
     remove::execute(args).await;
     // Removing an untracked file should return an error - the function should handle this internally
@@ -322,8 +327,9 @@ async fn test_remove_modified_file() {
         pathspec: vec![String::from("test_file.txt")],
         cached: false,
         recursive: false,
-        force: false,
+        force: true,
         dry_run: false,
+        ignore_unmatch: false,
     };
     remove::execute(args).await;
 
@@ -391,8 +397,9 @@ async fn test_remove_multiple_files() {
         pathspec: vec![String::from("file1.txt"), String::from("file3.txt")],
         cached: false,
         recursive: false,
-        force: false,
+        force: true,
         dry_run: false,
+        ignore_unmatch: false,
     };
     remove::execute(args).await;
     // Verify the specified files were removed
@@ -439,6 +446,7 @@ async fn test_remove_dry_run() {
         recursive: false,
         force: false,
         dry_run: true,
+        ignore_unmatch: false,
     };
     remove::execute(args).await;
 
@@ -495,6 +503,7 @@ async fn test_remove_dry_run_cached() {
         recursive: false,
         force: false,
         dry_run: true,
+        ignore_unmatch: false,
     };
     remove::execute(args).await;
 
@@ -545,6 +554,7 @@ async fn test_remove_dry_run_recursive() {
         recursive: true,
         force: false,
         dry_run: true,
+        ignore_unmatch: false,
     };
     remove::execute(args).await;
 

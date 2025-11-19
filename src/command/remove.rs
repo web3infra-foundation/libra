@@ -27,6 +27,9 @@ pub struct RemoveArgs {
     /// show what would be removed without actually removing
     #[clap(long)]
     pub dry_run: bool,
+    /// Exit with a zero status even if no files matched.
+    #[clap(long)]
+    pub ignore_unmatch: bool,
 }
 
 //  ==============================================
@@ -73,7 +76,7 @@ pub async fn execute(args: RemoveArgs) {
     };
 
     let dirs = get_dirs(&args.pathspec);
-    match validate_pathspec(&args.pathspec, &index) {
+    match validate_pathspec(&args.pathspec, &index, args.ignore_unmatch) {
         Ok(_) => (),
         Err(err) => {
             eprintln!("fatal: {}", err);
@@ -116,7 +119,7 @@ pub async fn execute(args: RemoveArgs) {
             // - If tracked, would be removed from index
             if index.tracked(&relative_path, 0) {
                 remove_list.push(path_str.clone());
-            } else {
+            } else if !args.ignore_unmatch {
                 // In forced mode, untracked files are not processed, consistent with Git behavior.
                 let error_msg = format!("pathspec '{path_str}' did not match any files");
                 eprintln!("fatal: {error_msg}");
@@ -226,7 +229,11 @@ pub async fn execute(args: RemoveArgs) {
 
 /// check if pathspec is all valid(in index)
 /// - if path is a dir, check if any file in the dir is in index
-fn validate_pathspec(pathspec: &[String], index: &Index) -> Result<(), GitError> {
+fn validate_pathspec(
+    pathspec: &[String],
+    index: &Index,
+    ignore_unmatch: bool,
+) -> Result<(), GitError> {
     if pathspec.is_empty() {
         let error_msg = "No pathspec was given. Which files should I remove?".to_string();
         return Err(GitError::CustomError(error_msg));
@@ -237,7 +244,7 @@ fn validate_pathspec(pathspec: &[String], index: &Index) -> Result<(), GitError>
         if !index.tracked(&relative_path, 0) {
             // not tracked, but path may be a directory
             // check if any tracked file in the directory
-            if !index.contains_dir_file(&relative_path) {
+            if !index.contains_dir_file(&relative_path) && !ignore_unmatch {
                 let error_msg = format!("pathspec '{path_str}' did not match any files");
                 return Err(GitError::CustomError(error_msg));
             }
