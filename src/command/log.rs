@@ -205,19 +205,12 @@ pub async fn execute(args: LogArgs) {
     reachable_commits.sort_by(|a, b| b.committer.timestamp.cmp(&a.committer.timestamp));
 
     // Apply grep filtering
-    let filtered_commits = if let Some(pattern) = &args.grep {
-        reachable_commits
+    if let Some(pattern) = &args.grep {
+        reachable_commits = reachable_commits
             .into_iter()
-            .filter(|commit| {
-                commit.message.contains(pattern)
-            })
-            .collect()
-    } else {
-        reachable_commits
-    };
-
-    // Use the filtered commit list
-    let mut reachable_commits = filtered_commits;
+            .filter(|commit| commit.message.contains(pattern))
+            .collect();
+    }
 
     let ref_commits = create_reference_commit_map().await;
 
