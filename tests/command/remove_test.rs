@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 // Except for the force test, all tests must also include checking for the presence of
-// a force situation.Because under normal circumstances, if the commit stage and the working
+// a force situation. Because under normal circumstances, if the commit stage and the working
 // area are not consistent, deletion is prohibited.
 
 /// Helper function to create a file with content.
@@ -184,14 +184,14 @@ async fn test_remove_directory_recursive() {
         ignore_unmatch: false,
     };
     remove::execute(args.clone()).await;
-    // Verify the directory and files were exists if force is false
+    // Verify the directory and files still exists if force is false
     assert!(
         fs::metadata("test_dir").is_ok(),
-        "Directory should be removed"
+        "Directory should still exist"
     );
-    assert!(file1.exists(), "File 1 should be removed");
-    assert!(file2.exists(), "File 2 should be removed");
-    assert!(file3.exists(), "File 3 should be removed");
+    assert!(file1.exists(), "File 1 should still exist");
+    assert!(file2.exists(), "File 2 should still exist");
+    assert!(file3.exists(), "File 3 should still exist");
 
     args.force = true;
     remove::execute(args).await;
@@ -611,7 +611,7 @@ async fn test_remove_dry_run_recursive() {
 }
 #[tokio::test]
 #[serial]
-/// Tests --dry-run with recursive directory removal
+/// Tests --ignore-unmatch with recursive directory removal
 async fn test_remove_ignore_unmatch() {
     let test_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(test_dir.path()).await;
@@ -655,6 +655,6 @@ async fn test_remove_ignore_unmatch() {
     args.ignore_unmatch = true;
     remove::execute(args).await;
 
-    assert!(!file1.exists(), "File 1 should remove");
+    assert!(!file1.exists(), "File 1 should be remove");
     assert!(file2.exists(), "File 2 should still exist");
 }

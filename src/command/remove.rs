@@ -53,10 +53,15 @@ pub struct RemoveArgs {
 //  2. Has staged conflicting content:
 //     When the staged content of the file differs from both the file itself (working tree) and HEAD,
 //     the error message will prompt to use -f to force deletion.
+/// Represents the status of files with uncommitted changes, used to determine
+/// which files have local modifications, staged changes, or both, relative to the index and HEAD.
 #[derive(Debug, Default)]
 struct DiffStatus {
+    /// Files with local modifications: working tree differs from index.
     index_workingtree: Option<Vec<String>>,
+    /// Files with staged changes: index differs from HEAD (commit).
     index_commit: Option<Vec<String>>,
+    /// Files with both staged and working tree changes that differ from HEAD.
     index_commit_workingtree: Vec<String>,
 }
 
@@ -90,7 +95,7 @@ pub async fn execute(args: RemoveArgs) {
         return;
     }
 
-    // Check if all input paths are being traced.
+    // Build the remove list from input paths, handling tracked files and optionally ignoring untracked paths based on the `ignore_unmatch` flag.
     for path_str in args.pathspec.iter() {
         let path = PathBuf::from(path_str);
         let relative_path = path.to_workdir().to_string_or_panic();
@@ -120,7 +125,7 @@ pub async fn execute(args: RemoveArgs) {
             if index.tracked(&relative_path, 0) {
                 remove_list.push(path_str.clone());
             } else if !args.ignore_unmatch {
-                // In forced mode, untracked files are not processed, consistent with Git behavior.
+                // If ignore_unmatch is false, error if the pathspec does not match any tracked files (consistent with Git behavior).
                 let error_msg = format!("pathspec '{path_str}' did not match any files");
                 eprintln!("fatal: {error_msg}");
                 return;
@@ -133,12 +138,12 @@ pub async fn execute(args: RemoveArgs) {
     if !args.force {
         let mut error_msg = String::new();
         let changes_staged = changes_to_be_staged().polymerization();
-        let changes_commited = changes_to_be_committed().await.polymerization();
+        let changes_committed = changes_to_be_committed().await.polymerization();
         // Check for both
         let mut buf = Vec::new();
         for path_str in remove_list.iter() {
             if changes_staged.contains(&PathBuf::from(&path_str))
-                && changes_commited.contains(&PathBuf::from(&path_str))
+                && changes_committed.contains(&PathBuf::from(&path_str))
             {
                 buf.push(path_str.clone());
             }
@@ -162,7 +167,7 @@ pub async fn execute(args: RemoveArgs) {
             // Check for workingtree changes in committed files
             let mut buf = Vec::new();
             for path_str in remove_list.iter() {
-                if changes_commited.contains(&PathBuf::from(path_str))
+                if changes_committed.contains(&PathBuf::from(path_str))
                     && !diff_status.index_commit_workingtree.contains(path_str)
                 {
                     buf.push(path_str.clone());
@@ -173,23 +178,42 @@ pub async fn execute(args: RemoveArgs) {
             }
 
             // Print error reason
-            if diff_status.index_commit.is_some() {
-                error_msg.push_str("error: the following file has changes staged in the index:\n");
-                for file in diff_status.index_commit.as_ref().unwrap() {
+            if let Some(files) = diff_status.index_commit.as_ref() {
+                error_msg.push_str(&format!(
+                    "error: the following {} changes staged in the index:\n",
+                    if files.len() > 1 {
+                        "files have"
+                    } else {
+                        "file has"
+                    }
+                ));
+                for file in files {
                     error_msg.push_str(&format!("\t{}\n", file));
                 }
                 error_msg.push_str("(use --cached to keep the file, or -f to force removal)");
             }
-            if diff_status.index_workingtree.is_some() {
-                error_msg.push_str("error: the following file has local modifications:\n");
-                for file in diff_status.index_workingtree.as_ref().unwrap() {
+            if let Some(files) = diff_status.index_workingtree.as_ref() {
+                error_msg.push_str(&format!(
+                    "error: the following {} local modifications:\n",
+                    if files.len() > 1 {
+                        "files have"
+                    } else {
+                        "file has"
+                    }
+                ));
+                for file in files {
                     error_msg.push_str(&format!("\t{}\n", file));
                 }
                 error_msg.push_str("(use --cached to keep the file, or -f to force removal)");
             }
         }
         if !diff_status.index_commit_workingtree.is_empty() {
-            error_msg.push_str("error: the following file has staged content different from both the\nfile and the HEAD:\n");
+            error_msg.push_str(&format!("error: the following {} staged content different from both the\nfile and the HEAD:\n",
+                if diff_status.index_commit_workingtree.len() > 1 {
+                    "files have"
+                } else {
+                    "file has"
+                }));
             for file in diff_status.index_commit_workingtree {
                 error_msg.push_str(&format!("\t{}\n", file));
             }
@@ -211,20 +235,25 @@ pub async fn execute(args: RemoveArgs) {
     if !args.cached && !args.dry_run {
         for path_str in remove_list {
             let path = PathBuf::from(&path_str);
-            fs::remove_file(path).await.unwrap()
+            if let Err(e) = fs::remove_file(&path).await {
+                eprintln!("Failed to remove file {}: {}", &path.display(), e);
+            }
         }
         for path_str in remove_dir_list {
             let path = PathBuf::from(&path_str);
             if args.recursive {
-                fs::remove_dir_all(path).await.unwrap()
-            } else {
-                fs::remove_dir(path).await.unwrap()
+                if let Err(e) = fs::remove_dir_all(&path).await {
+                    eprintln!("Failed to remove directory {}: {}", &path.display(), e);
+                }
+            } else if let Err(e) = fs::remove_dir(&path).await {
+                eprintln!("Failed to remove directory {}: {}", &path.display(), e);
             }
         }
     }
 
-    // The unwrap function needs to be replaced subsequently to ensure consistency with git's behavior.
-    index.save(&idx_file).unwrap();
+    if index.save(&idx_file).is_err() {
+        eprintln!("Failed to save index.");
+    }
 }
 
 /// check if pathspec is all valid(in index)
