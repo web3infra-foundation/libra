@@ -41,7 +41,12 @@ enum RemoteClient {
 
 impl RemoteClient {
     fn from_spec(spec: &str) -> Result<Self, String> {
-        if let Ok(url) = Url::parse(spec) {
+        if let Ok(mut url) = Url::parse(spec) {
+            // Convert Windows path like "D:\test\1" to "file:///d:/test/1"
+            if url.scheme().len() == 1 {
+                url = Url::parse(&format!("file:///{}:{}", url.scheme(), url.path()))
+                    .map_err(|_| format!("invalid Windows file url: {spec}"))?;
+            }
             match url.scheme() {
                 "http" | "https" => Ok(Self::Http(HttpsClient::from_url(&url))),
                 "file" => {

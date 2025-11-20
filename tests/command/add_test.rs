@@ -443,7 +443,7 @@ async fn test_add_force_dot_includes_ignored_directory() {
         !staged_without_force
             .new
             .iter()
-            .any(|p| p.to_str().unwrap() == "ignored_dir/nested.txt"),
+            .any(|p| p.to_str().unwrap().replace("\\", "/") == "ignored_dir/nested.txt"),
         "ignored entries should not be staged when force is false"
     );
     assert!(
@@ -472,7 +472,7 @@ async fn test_add_force_dot_includes_ignored_directory() {
         staged_with_force
             .new
             .iter()
-            .any(|p| p.to_str().unwrap() == "ignored_dir/nested.txt"),
+            .any(|p| p.to_str().unwrap().replace("\\", "/") == "ignored_dir/nested.txt"),
         "`add --force .` should surface ignored children"
     );
 }
