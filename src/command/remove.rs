@@ -151,7 +151,7 @@ pub async fn execute(args: RemoveArgs) {
             let mut buf = Vec::new();
             for path_str in remove_list.iter() {
                 if changes_staged.contains(&PathBuf::from(path_str))
-                    && !diff_status.index_commit_workingtree.contains(&path_str)
+                    && !diff_status.index_commit_workingtree.contains(path_str)
                 {
                     buf.push(path_str.clone());
                 }
@@ -163,7 +163,7 @@ pub async fn execute(args: RemoveArgs) {
             let mut buf = Vec::new();
             for path_str in remove_list.iter() {
                 if changes_commited.contains(&PathBuf::from(path_str))
-                    && !diff_status.index_commit_workingtree.contains(&path_str)
+                    && !diff_status.index_commit_workingtree.contains(path_str)
                 {
                     buf.push(path_str.clone());
                 }
