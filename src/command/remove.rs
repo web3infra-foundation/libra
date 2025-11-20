@@ -1,17 +1,17 @@
-use std::fs;
 use std::path::PathBuf;
 
 use clap::Parser;
 use colored::Colorize;
 
 use git_internal::errors::GitError;
+use tokio::fs;
 
 use crate::command::status::{changes_to_be_committed, changes_to_be_staged};
 use crate::utils::path_ext::PathExt;
 use crate::utils::{path, util};
 use git_internal::internal::index::Index;
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug,Clone)]
 pub struct RemoveArgs {
     /// file or dir to remove
     pub pathspec: Vec<String>,
@@ -211,14 +211,14 @@ pub async fn execute(args: RemoveArgs) {
     if !args.cached && !args.dry_run {
         for path_str in remove_list {
             let path = PathBuf::from(&path_str);
-            fs::remove_file(path).unwrap()
+            fs::remove_file(path).await.unwrap()
         }
         for path_str in remove_dir_list {
             let path = PathBuf::from(&path_str);
             if args.recursive {
-                fs::remove_dir_all(path).unwrap()
+                fs::remove_dir_all(path).await.unwrap()
             } else {
-                fs::remove_dir(path).unwrap()
+                fs::remove_dir(path).await.unwrap()
             }
         }
     }
