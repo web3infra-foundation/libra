@@ -11,7 +11,7 @@ use crate::utils::path_ext::PathExt;
 use crate::utils::{path, util};
 use git_internal::internal::index::Index;
 
-#[derive(Parser, Debug,Clone)]
+#[derive(Parser, Debug, Clone)]
 pub struct RemoveArgs {
     /// file or dir to remove
     pub pathspec: Vec<String>,
@@ -150,7 +150,7 @@ pub async fn execute(args: RemoveArgs) {
             // Check for unstaged changes in workingtree files
             let mut buf = Vec::new();
             for path_str in remove_list.iter() {
-                if changes_staged.contains(&PathBuf::from(&path_str))
+                if changes_staged.contains(&PathBuf::from(path_str))
                     && !diff_status.index_commit_workingtree.contains(&path_str)
                 {
                     buf.push(path_str.clone());
@@ -162,7 +162,7 @@ pub async fn execute(args: RemoveArgs) {
             // Check for workingtree changes in committed files
             let mut buf = Vec::new();
             for path_str in remove_list.iter() {
-                if changes_commited.contains(&PathBuf::from(&path_str))
+                if changes_commited.contains(&PathBuf::from(path_str))
                     && !diff_status.index_commit_workingtree.contains(&path_str)
                 {
                     buf.push(path_str.clone());

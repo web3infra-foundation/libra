@@ -54,7 +54,10 @@ async fn test_remove_single_file() {
         ignore_unmatch: false,
     };
     remove::execute(args.clone()).await;
-    assert!(file_path.exists(), "File should exist after removal if force is false");
+    assert!(
+        file_path.exists(),
+        "File should exist after removal if force is false"
+    );
     args.force = true;
     remove::execute(args).await;
     // Verify the file was removed from the filesystem
@@ -633,7 +636,10 @@ async fn test_remove_ignore_unmatch() {
 
     // Run rm without ignore_unmatch flag
     let mut args = RemoveArgs {
-        pathspec: vec![String::from("test_dir/file1.txt"), String::from("test_dir/file2.txt")],
+        pathspec: vec![
+            String::from("test_dir/file1.txt"),
+            String::from("test_dir/file2.txt"),
+        ],
         cached: false,
         recursive: true,
         force: true,
@@ -649,11 +655,6 @@ async fn test_remove_ignore_unmatch() {
     args.ignore_unmatch = true;
     remove::execute(args).await;
 
-
     assert!(!file1.exists(), "File 1 should remove");
     assert!(file2.exists(), "File 2 should still exist");
-
-
-
-
 }
