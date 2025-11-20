@@ -57,6 +57,10 @@ pub struct LogArgs {
     /// Files to limit diff output (used with -p, --name-only, or --stat)
     #[clap(value_name = "PATHS", num_args = 0..)]
     pathspec: Vec<String>,
+
+    /// Filter commits by message content
+    #[clap(long)]
+    pub grep: Option<String>,
 }
 
 #[derive(PartialEq, Debug)]
@@ -199,6 +203,21 @@ pub async fn execute(args: LogArgs) {
     let mut reachable_commits = get_reachable_commits(commit_hash.clone()).await;
     // default sort with signature time
     reachable_commits.sort_by(|a, b| b.committer.timestamp.cmp(&a.committer.timestamp));
+
+    // Apply grep filtering
+    let filtered_commits = if let Some(pattern) = &args.grep {
+        reachable_commits
+            .into_iter()
+            .filter(|commit| {
+                commit.message.contains(pattern)
+            })
+            .collect()
+    } else {
+        reachable_commits
+    };
+
+    // Use the filtered commit list
+    let mut reachable_commits = filtered_commits;
 
     let ref_commits = create_reference_commit_map().await;
 
@@ -860,5 +879,31 @@ mod tests {
 
         assert!(name_only);
         assert!(!patch);
+    }
+
+    // Test grep parameter parsing
+    #[test]
+    fn test_log_args_grep() {
+        let args = LogArgs::parse_from(["libra", "log", "--grep", "fix"]);
+        assert_eq!(args.grep, Some("fix".to_string()));
+
+        let args = LogArgs::parse_from(["libra", "log"]);
+        assert_eq!(args.grep, None);
+    }
+
+    // Test grep combined with other arguments
+    #[test]
+    fn test_grep_with_other_args() {
+        let args = LogArgs::parse_from(["libra", "log", "--grep", "feature", "--oneline", "-n", "5"]);
+        assert_eq!(args.grep, Some("feature".to_string()));
+        assert!(args.oneline);
+        assert_eq!(args.number, Some(5));
+    }
+
+    // Test case-sensitive matching
+    #[test]
+    fn test_grep_case_sensitive() {
+        let args = LogArgs::parse_from(["libra", "log", "--grep", "FIX"]);
+        assert_eq!(args.grep, Some("FIX".to_string()));
     }
 }
