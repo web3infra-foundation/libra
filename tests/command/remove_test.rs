@@ -3,6 +3,10 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 
+// Except for the force test, all tests must also include checking for the presence of
+// a force situation. Because under normal circumstances, if the commit stage and the working
+// area are not consistent, deletion is prohibited.
+
 /// Helper function to create a file with content.
 fn create_file(path: &str, content: &str) -> PathBuf {
     let path = PathBuf::from(path);
@@ -41,15 +45,21 @@ async fn test_remove_single_file() {
     assert!(file_path.exists(), "File should exist before removal");
 
     // Remove the file
-    let args = RemoveArgs {
+    let mut args = RemoveArgs {
         pathspec: vec![String::from("test_file.txt")],
         cached: false,
         recursive: false,
         force: false,
         dry_run: false,
+        ignore_unmatch: false,
     };
-    remove::execute(args).unwrap();
-
+    remove::execute(args.clone()).await;
+    assert!(
+        file_path.exists(),
+        "File should exist after removal if force is false"
+    );
+    args.force = true;
+    remove::execute(args).await;
     // Verify the file was removed from the filesystem
     assert!(
         !file_path.exists(),
@@ -114,8 +124,9 @@ async fn test_remove_cached() {
         recursive: false,
         force: false,
         dry_run: false,
+        ignore_unmatch: false,
     };
-    remove::execute(args).unwrap();
+    remove::execute(args).await;
 
     // Verify the file still exists in the filesystem
     assert!(file_path.exists(), "File should still exist in filesystem");
@@ -164,16 +175,27 @@ async fn test_remove_directory_recursive() {
     assert!(file3.exists(), "File 3 should exist");
 
     // Remove the directory recursively
-    let args = RemoveArgs {
+    let mut args = RemoveArgs {
         pathspec: vec![String::from("test_dir")],
         cached: false,
         recursive: true,
         force: false,
         dry_run: false,
+        ignore_unmatch: false,
     };
-    remove::execute(args).unwrap();
+    remove::execute(args.clone()).await;
+    // Verify the directory and files still exists if force is false
+    assert!(
+        fs::metadata("test_dir").is_ok(),
+        "Directory should still exist"
+    );
+    assert!(file1.exists(), "File 1 should still exist");
+    assert!(file2.exists(), "File 2 should still exist");
+    assert!(file3.exists(), "File 3 should still exist");
 
-    // Verify the directory and files were removed
+    args.force = true;
+    remove::execute(args).await;
+    // Verify the directory and files were removed if force is true
     assert!(
         fs::metadata("test_dir").is_err(),
         "Directory should be removed"
@@ -244,11 +266,10 @@ async fn test_remove_directory_without_recursive() {
         recursive: false,
         force: false,
         dry_run: false,
+        ignore_unmatch: false,
     };
-    assert!(
-        remove::execute(args).is_err(),
-        "Removing a directory without recursive should fail"
-    );
+    remove::execute(args).await;
+    // Removing a directory without recursive should fail - the function should handle this internally
 
     // Verify the directory and files still exist
     assert!(
@@ -274,20 +295,21 @@ async fn test_remove_untracked_file() {
     assert!(file_path.exists(), "File should exist");
 
     // Attempt to remove the untracked file (should fail/do nothing)
-    let args = RemoveArgs {
+    let mut args = RemoveArgs {
         pathspec: vec![String::from("untracked_file.txt")],
         cached: false,
         recursive: false,
         force: false,
         dry_run: false,
+        ignore_unmatch: false,
     };
-    let result = remove::execute(args);
-    assert!(
-        result.is_err(),
-        "Removing an untracked file should return an error, not panic"
-    );
+    remove::execute(args.clone()).await;
+    // Removing an untracked file should return an error - the function should handle this internally
 
     // Verify the file still exists
+    assert!(file_path.exists(), "File should still exist");
+    args.force = true;
+    remove::execute(args).await;
     assert!(file_path.exists(), "File should still exist");
 }
 
@@ -327,10 +349,11 @@ async fn test_remove_modified_file() {
         pathspec: vec![String::from("test_file.txt")],
         cached: false,
         recursive: false,
-        force: false,
+        force: true,
         dry_run: false,
+        ignore_unmatch: false,
     };
-    remove::execute(args).unwrap();
+    remove::execute(args).await;
 
     // Verify the file was removed.
     assert!(!file_path.exists(), "File should be removed");
@@ -392,14 +415,21 @@ async fn test_remove_multiple_files() {
     assert!(file3.exists(), "File 3 should exist");
 
     // Remove multiple files at once
-    let args = RemoveArgs {
+    let mut args = RemoveArgs {
         pathspec: vec![String::from("file1.txt"), String::from("file3.txt")],
         cached: false,
         recursive: false,
         force: false,
         dry_run: false,
+        ignore_unmatch: false,
     };
-    remove::execute(args).unwrap();
+    remove::execute(args.clone()).await;
+    // Verify the specified files were removed
+    assert!(file1.exists(), "File 1 should still exist");
+    assert!(file2.exists(), "File 2 should still exist");
+    assert!(file3.exists(), "File 3 should still exist");
+    args.force = true;
+    remove::execute(args).await;
     // Verify the specified files were removed
     assert!(!file1.exists(), "File 1 should be removed");
     assert!(file2.exists(), "File 2 should still exist");
@@ -444,8 +474,9 @@ async fn test_remove_dry_run() {
         recursive: false,
         force: false,
         dry_run: true,
+        ignore_unmatch: false,
     };
-    remove::execute(args).unwrap();
+    remove::execute(args).await;
 
     // Verify that no files were actually removed
     assert!(file1.exists(), "File 1 should still exist after dry-run");
@@ -500,8 +531,9 @@ async fn test_remove_dry_run_cached() {
         recursive: false,
         force: false,
         dry_run: true,
+        ignore_unmatch: false,
     };
-    remove::execute(args).unwrap();
+    remove::execute(args).await;
 
     // Verify the file still exists in both filesystem and index
     assert!(file_path.exists(), "File should still exist in filesystem");
@@ -550,8 +582,9 @@ async fn test_remove_dry_run_recursive() {
         recursive: true,
         force: false,
         dry_run: true,
+        ignore_unmatch: false,
     };
-    remove::execute(args).unwrap();
+    remove::execute(args).await;
 
     // Verify that no files or directories were actually removed
     assert!(file1.exists(), "File 1 should still exist after dry-run");
@@ -575,4 +608,53 @@ async fn test_remove_dry_run_recursive() {
             .any(|x| x.to_str().unwrap().starts_with("test_dir/")),
         "No files in test_dir should appear as deleted"
     );
+}
+#[tokio::test]
+#[serial]
+/// Tests --ignore-unmatch with recursive directory removal
+async fn test_remove_ignore_unmatch() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    // Create a directory with files
+    let file1 = create_file("test_dir/file1.txt", "File 1 content");
+    let file2 = create_file("test_dir/file2.txt", "File 2 content");
+
+    // Add file 1 to the index
+    add::execute(AddArgs {
+        pathspec: vec![String::from("test_dir/file1.txt")],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+
+    // Run rm without ignore_unmatch flag
+    let mut args = RemoveArgs {
+        pathspec: vec![
+            String::from("test_dir/file1.txt"),
+            String::from("test_dir/file2.txt"),
+        ],
+        cached: false,
+        recursive: true,
+        force: true,
+        dry_run: false,
+        ignore_unmatch: false,
+    };
+    remove::execute(args.clone()).await;
+
+    // Verify that no files or directories were removed
+    assert!(file1.exists(), "File 1 should still exist");
+    assert!(file2.exists(), "File 2 should still exist");
+
+    args.ignore_unmatch = true;
+    remove::execute(args).await;
+
+    assert!(!file1.exists(), "File 1 should be remove");
+    assert!(file2.exists(), "File 2 should still exist");
 }
