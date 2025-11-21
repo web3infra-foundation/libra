@@ -61,6 +61,12 @@ impl Changes {
             });
         change
     }
+    pub fn polymerization(&self) -> Vec<PathBuf> {
+        let mut poly = self.new.clone();
+        poly.extend(self.modified.clone());
+        poly.extend(self.deleted.clone());
+        poly
+    }
 }
 
 /**
