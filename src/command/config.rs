@@ -142,7 +142,9 @@ async fn set_config(key: &Key, value: &str) {
 /// Get the first configuration by the given key and value pattern
 async fn get_config(key: &Key, default: Option<&str>, valuepattern: Option<&str>) {
     let value: Option<String> =
-        config::Config::get(&key.configuration, key.name.as_deref(), &key.key).await;
+        config::Config::get(&key.configuration, key.name.as_deref(), &key.key)
+            .await
+            .map(|m| m.value);
     if let Some(v) = value {
         if let Some(vp) = valuepattern {
             // if value pattern is present, check it

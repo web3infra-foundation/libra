@@ -24,9 +24,7 @@ rust_library(
     crate_root = "vendor/src/lib.rs",
     edition = "2021",
     features = [
-        "_rt-tokio",
         "_sqlite",
-        "_tls-rustls-ring-webpki",
         "bigdecimal",
         "chrono",
         "default",
@@ -35,7 +33,6 @@ rust_library(
         "sqlite",
         "sqlx-sqlite",
         "time",
-        "tokio",
         "uuid",
     ],
     rustc_flags = ["@$(location :sqlx-macros-core-manifest[env_flags])"],
@@ -56,7 +53,6 @@ rust_library(
         "//third-party/rust/crates/sqlx-postgres/0.8.6:sqlx-postgres",
         "//third-party/rust/crates/sqlx-sqlite/0.8.6:sqlx-sqlite",
         "//third-party/rust/crates/syn/2.0.106:syn",
-        "//third-party/rust/crates/tokio/1.47.1:tokio",
         "//third-party/rust/crates/url/2.5.7:url",
     ],
 )

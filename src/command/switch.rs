@@ -6,7 +6,7 @@ use super::{
     status,
 };
 use crate::command::status::StatusArgs;
-use crate::internal::db::get_db_conn_instance;
+use crate::internal::db::{DbConnection, get_db_conn_instance};
 use crate::internal::reflog::{ReflogAction, ReflogContext, with_reflog};
 use crate::{
     command::branch,
@@ -76,11 +76,11 @@ pub async fn check_status() -> bool {
 async fn switch_to_commit(commit_hash: SHA1) {
     let db = get_db_conn_instance().await;
 
-    let old_head_commit = Head::current_commit_with_conn(db)
+    let old_head_commit = Head::current_commit_with_conn(db.as_ref())
         .await
         .expect("Cannot switch: HEAD is unborn.");
 
-    let from_ref_name = match Head::current_with_conn(db).await {
+    let from_ref_name = match Head::current_with_conn(db.as_ref()).await {
         Head::Branch(name) => name,
         Head::Detached(hash) => hash.to_string()[..7].to_string(), // Use short hash for detached HEAD
     };
@@ -97,7 +97,7 @@ async fn switch_to_commit(commit_hash: SHA1) {
 
     if let Err(e) = with_reflog(
         context,
-        move |txn: &sea_orm::DatabaseTransaction| {
+        move |txn: &DbConnection| {
             Box::pin(async move {
                 let new_head = Head::Detached(commit_hash);
                 Head::update_with_conn(txn, new_head, None).await;
@@ -120,7 +120,7 @@ async fn switch_to_commit(commit_hash: SHA1) {
 async fn switch_to_branch(branch_name: String) {
     let db = get_db_conn_instance().await;
 
-    let target_branch = match Branch::find_branch_with_conn(db, &branch_name, None).await {
+    let target_branch = match Branch::find_branch_with_conn(db.as_ref(), &branch_name, None).await {
         Some(b) => b,
         None => {
             if !Branch::search_branch(&branch_name).await.is_empty() {
@@ -133,11 +133,11 @@ async fn switch_to_branch(branch_name: String) {
     };
     let target_commit_id = target_branch.commit;
 
-    let old_head_commit = Head::current_commit_with_conn(db)
+    let old_head_commit = Head::current_commit_with_conn(db.as_ref())
         .await
         .expect("Cannot switch: HEAD is unborn.");
 
-    let from_ref_name = match Head::current_with_conn(db).await {
+    let from_ref_name = match Head::current_with_conn(db.as_ref()).await {
         Head::Branch(name) => name,
         Head::Detached(hash) => hash.to_string()[..7].to_string(),
     };
@@ -160,7 +160,7 @@ async fn switch_to_branch(branch_name: String) {
     // `log_for_branch` is `false`. This is the key insight for `switch`/`checkout`.
     if let Err(e) = with_reflog(
         context,
-        move |txn: &sea_orm::DatabaseTransaction| {
+        move |txn: &DbConnection| {
             Box::pin(async move {
                 let new_head = Head::Branch(branch_name.clone());
                 Head::update_with_conn(txn, new_head, None).await;

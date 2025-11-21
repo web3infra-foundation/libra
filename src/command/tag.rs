@@ -1,7 +1,7 @@
 use crate::internal::tag;
+use chrono;
 use clap::Parser;
 use git_internal::internal::object::types::ObjectType;
-use sea_orm::sqlx::types::chrono;
 
 #[derive(Parser, Debug)]
 #[command(about = "Create, list, delete, or verify a tag object")]
