@@ -93,7 +93,10 @@ pub async fn execute(args: DiffArgs) {
                     Some(commit_hash) => get_commit_blobs(&commit_hash).await,
                     // Handle the edge case where there's no commit history (new repository)
                     // Early return as there are no existing commits to compare against
-                    None => return,
+                    None => {
+                        println!("No commits yet - nothing to compare");
+                        return;
+                    },
                 }
             } else {
                 let changes = changes_to_be_committed().await;
