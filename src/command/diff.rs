@@ -17,10 +17,7 @@ use git_internal::{
 use similar;
 
 use crate::{
-    command::{
-        get_target_commit, load_object,
-        status::{self, changes_to_be_committed},
-    },
+    command::{get_target_commit, load_object, status::changes_to_be_committed},
     internal::head::Head,
     utils::{
         ignore::{self, IgnorePolicy},
@@ -91,9 +88,16 @@ pub async fn execute(args: DiffArgs) {
         },
         None => {
             // if the staged is not empty, use it as old commit. Otherwise, use HEAD
-            if status::changes_to_be_committed().await.is_empty() {
-                let commit_hash = Head::current_commit().await.unwrap();
-                get_commit_blobs(&commit_hash).await
+            if changes_to_be_committed().await.is_empty() {
+                match Head::current_commit().await {
+                    Some(commit_hash) => get_commit_blobs(&commit_hash).await,
+                    // Handle the edge case where there's no commit history (new repository)
+                    // Early return as there are no existing commits to compare against
+                    None => {
+                        println!("No commits yet - nothing to compare");
+                        return;
+                    },
+                }
             } else {
                 let changes = changes_to_be_committed().await;
                 // diff didn't show untracked or deleted files

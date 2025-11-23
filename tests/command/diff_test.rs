@@ -23,6 +23,20 @@ fn modify_file(path: &str, content: &str) {
 
 #[tokio::test]
 #[serial]
+/// Tests diff command immediately after libra init (empty repository scenario).
+/// This tests the edge case where there are no commits and no staged changes.
+async fn test_diff_after_init() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = ChangeDirGuard::new(test_dir.path());
+
+    let args = DiffArgs::parse_from(["diff"]);
+
+    diff::execute(args).await;
+}
+
+#[tokio::test]
+#[serial]
 /// Tests the basic diff functionality between working directory and HEAD.
 async fn test_basic_diff() {
     let test_dir = tempdir().unwrap();
