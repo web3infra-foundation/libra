@@ -96,7 +96,7 @@ pub async fn execute(args: DiffArgs) {
                     None => {
                         println!("No commits yet - nothing to compare");
                         return;
-                    },
+                    }
                 }
             } else {
                 let changes = changes_to_be_committed().await;
