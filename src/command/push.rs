@@ -25,7 +25,6 @@ use url::Url;
 
 #[derive(Parser, Debug)]
 pub struct PushArgs {
-    // TODO --force
     /// repository, e.g. origin
     #[clap(requires("refspec"))]
     repository: Option<String>,
@@ -35,6 +34,10 @@ pub struct PushArgs {
 
     #[clap(long, short = 'u', requires("refspec"), requires("repository"))]
     set_upstream: bool,
+
+    /// force push to remote repository
+    #[clap(long, short = 'f')]
+    force: bool,
 }
 
 pub async fn execute(args: PushArgs) {
@@ -69,11 +72,13 @@ pub async fn execute(args: PushArgs) {
     let repo_url = Config::get_remote_url(&repository).await;
 
     let branch = args.refspec.unwrap_or(branch);
-    let commit_hash = Branch::find_branch(&branch, None)
-        .await
-        .unwrap()
-        .commit
-        .to_string();
+    let commit_hash = match Branch::find_branch(&branch, None).await {
+        Some(branch_info) => branch_info.commit.to_string(),
+        None => {
+            eprintln!("fatal: branch '{}' not found", branch);
+            return;
+        }
+    };
 
     println!("pushing {branch}({commit_hash}) to {repository}({repo_url})");
 
@@ -99,6 +104,23 @@ pub async fn execute(args: PushArgs) {
     if remote_hash == commit_hash {
         println!("Everything up-to-date");
         return;
+    }
+
+    // Check if remote is ancestor of local (for fast-forward check)
+    let remote_sha1 = SHA1::from_str(&remote_hash).unwrap();
+    let local_sha1 = SHA1::from_str(&commit_hash).unwrap();
+    let can_fast_forward = is_ancestor(&remote_sha1, &local_sha1);
+
+    // If remote has commits that local doesn't have and force is not specified, reject push
+    if !can_fast_forward && !args.force {
+        eprintln!("fatal: cannot push non-fast-forwardable reference");
+        eprintln!("hint: need to fetch and merge remote changes first");
+        return;
+    }
+
+    if args.force {
+        println!("{}", "warning: forcing update of remote reference (override history)".yellow());
+        println!("{}", "warning: this may overwrite remote commits, use with caution".yellow());
     }
 
     let mut data = BytesMut::new();
@@ -166,6 +188,9 @@ pub async fn execute(args: PushArgs) {
     assert_eq!(len, 0);
 
     println!("{}", "Push success".green());
+    
+    let remote_tracking_branch = format!("refs/remotes/{}/{}", repository, branch);
+    Branch::update_branch(&remote_tracking_branch, &commit_hash, None).await;
 
     // set after push success
     if args.set_upstream {
@@ -274,6 +299,36 @@ fn incremental_objs(local_ref: SHA1, remote_ref: SHA1) -> HashSet<Entry> {
     objs
 }
 
+/// Check if ancestor is an ancestor of descendant
+fn is_ancestor(ancestor: &SHA1, descendant: &SHA1) -> bool {
+    if ancestor == descendant {
+        return true;
+    }
+
+    let mut queue = VecDeque::new();
+    let mut visited = HashSet::new();
+
+    queue.push_back(*descendant);
+    visited.insert(*descendant);
+
+    while let Some(commit_id) = queue.pop_front() {
+        if &commit_id == ancestor {
+            return true;
+        }
+
+        let commit = Commit::load(&commit_id);
+
+        for parent_id in &commit.parent_commit_ids {
+            if !visited.contains(parent_id) {
+                visited.insert(*parent_id);
+                queue.push_back(*parent_id);
+            }
+        }
+    }
+
+    false
+}
+
 /// calc objects that in `new_tree` but not in `old_tree`
 /// - if `old_tree` is None, return all objects in `new_tree` (include tree itself)
 fn diff_tree_objs(old_tree: Option<&SHA1>, new_tree: &SHA1) -> HashSet<Entry> {
@@ -333,18 +388,35 @@ mod test {
         assert_eq!(args.repository, None);
         assert_eq!(args.refspec, None);
         assert!(!args.set_upstream);
+        assert!(!args.force);
 
         let args = vec!["push", "origin", "master"];
         let args = PushArgs::parse_from(args);
         assert_eq!(args.repository, Some("origin".to_string()));
         assert_eq!(args.refspec, Some("master".to_string()));
         assert!(!args.set_upstream);
+        assert!(!args.force);
 
         let args = vec!["push", "-u", "origin", "master"];
         let args = PushArgs::parse_from(args);
         assert_eq!(args.repository, Some("origin".to_string()));
         assert_eq!(args.refspec, Some("master".to_string()));
         assert!(args.set_upstream);
+        assert!(!args.force);
+
+        let args = vec!["push", "--force", "origin", "master"];
+        let args = PushArgs::parse_from(args);
+        assert_eq!(args.repository, Some("origin".to_string()));
+        assert_eq!(args.refspec, Some("master".to_string()));
+        assert!(!args.set_upstream);
+        assert!(args.force);
+
+        let args = vec!["push", "-f", "origin", "master"];
+        let args = PushArgs::parse_from(args);
+        assert_eq!(args.repository, Some("origin".to_string()));
+        assert_eq!(args.refspec, Some("master".to_string()));
+        assert!(!args.set_upstream);
+        assert!(args.force);
     }
 
     #[test]
