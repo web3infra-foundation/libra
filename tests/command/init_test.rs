@@ -1,7 +1,5 @@
 use super::*;
-use libra::internal::model::config;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
-// use std::fs::File;
+use libra::internal::config::Config;
 use std::fs;
 
 pub fn verify_init(base_dir: &Path) {
@@ -541,18 +539,12 @@ async fn test_init_with_valid_object_format_sha1() {
     );
 
     // Verify that the config file contains the correct object format
-    let db_path = target_dir.join(".libra/libra.db");
-    // Connect to the existing database instead of creating a new one
-    let conn = sea_orm::Database::connect(format!("sqlite://{}", db_path.to_str().unwrap()))
+    // Change to the target directory so Config can find the database
+    std::env::set_current_dir(&target_dir).unwrap();
+    let config_value = Config::get("core", None, "objectformat")
         .await
-        .unwrap();
-    let config_entry = config::Entity::find()
-        .filter(config::Column::Configuration.eq("core"))
-        .filter(config::Column::Key.eq("objectformat"))
-        .one(&conn)
-        .await
-        .unwrap();
-    assert_eq!(config_entry.unwrap().value, "sha1");
+        .expect("Config entry should exist");
+    assert_eq!(config_value.value, "sha1");
 }
 
 #[tokio::test]

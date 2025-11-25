@@ -23,7 +23,10 @@ rust_library(
     crate = "concurrent_queue",
     crate_root = "vendor/src/lib.rs",
     edition = "2021",
-    features = ["std"],
+    features = [
+        "default",
+        "std",
+    ],
     rustc_flags = ["@$(location :concurrent-queue-manifest[env_flags])"],
     visibility = ["PUBLIC"],
     deps = ["//third-party/rust/crates/crossbeam-utils/0.8.21:crossbeam-utils"],

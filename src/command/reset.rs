@@ -177,7 +177,7 @@ async fn perform_reset(
 ) -> Result<(), String> {
     // avoids holding the transaction open while doing read-only preparations.
     let db = get_db_conn_instance().await;
-    let old_oid = Head::current_commit_with_conn(db)
+    let old_oid = Head::current_commit_with_conn(db.as_ref())
         .await
         .ok_or_else(|| "Cannot reset: HEAD is unborn and points to no commit.".to_string())?;
 
@@ -191,7 +191,7 @@ async fn perform_reset(
 
     // determine if HEAD is attached to a branch or detached. This is crucial for
     // deciding which reference pointer to update in the transaction.
-    let current_head_state = Head::current_with_conn(db).await;
+    let current_head_state = Head::current_with_conn(db.as_ref()).await;
 
     let action = ReflogAction::Reset {
         target: target_ref_str.to_string(),

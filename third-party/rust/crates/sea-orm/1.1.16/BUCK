@@ -28,8 +28,6 @@ rust_library(
         "chrono",
         "default",
         "macros",
-        "runtime-tokio",
-        "runtime-tokio-rustls",
         "rust_decimal",
         "sea-query-binder",
         "serde_json",

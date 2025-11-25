@@ -9,13 +9,12 @@ use std::{
     path::Path,
 };
 
-use sea_orm::{ActiveModelTrait, DbConn, DbErr, Set, TransactionTrait};
-
 use clap::Parser;
 
 use crate::command::branch;
-use crate::internal::db;
-use crate::internal::model::{config, reference};
+use crate::internal::config::Config;
+use crate::internal::db::{self, DbConnection};
+use crate::internal::model::reference::ConfigKind;
 use crate::utils::util::{DATABASE, ROOT_DIR};
 
 const DEFAULT_BRANCH: &str = "master";
@@ -351,12 +350,11 @@ pub async fn init(args: InitArgs) -> io::Result<()> {
         .unwrap_or_else(|| DEFAULT_BRANCH.to_owned());
 
     // Create HEAD
-    reference::ActiveModel {
-        name: Set(Some(initial_branch_name.clone())),
-        kind: Set(reference::ConfigKind::Head),
-        ..Default::default() // all others are `NotSet`
-    }
-    .insert(&conn)
+    let sql = "INSERT INTO reference (name, kind) VALUES (?1, ?2)";
+    conn.execute(
+        sql,
+        turso::params![initial_branch_name.clone(), ConfigKind::Head.as_str()],
+    )
     .await
     .unwrap();
 
@@ -382,13 +380,10 @@ pub async fn init(args: InitArgs) -> io::Result<()> {
 /// Initialize the configuration for the Libra repository
 /// This function creates the necessary configuration entries in the database.
 async fn init_config(
-    conn: &DbConn,
+    conn: &DbConnection,
     is_bare: bool,
     object_format: Option<&str>,
-) -> Result<(), DbErr> {
-    // Begin a new transaction
-    let txn = conn.begin().await?;
-
+) -> Result<(), io::Error> {
     // Define the configuration entries for non-Windows systems
     #[cfg(not(target_os = "windows"))]
     let entries = [
@@ -411,25 +406,17 @@ async fn init_config(
 
     // Insert each configuration entry into the database
     for (key, value) in entries {
-        // tip: Set(None) == NotSet == default == NULL
-        let entry = config::ActiveModel {
-            configuration: Set("core".to_owned()),
-            key: Set(key.to_owned()),
-            value: Set(value.to_owned()),
-            ..Default::default() // id & name NotSet
-        };
-        entry.insert(&txn).await?;
+        Config::insert_with_conn(conn, "core", None, key, value).await;
     }
     // Insert the object format, defaulting to "sha1" if not specified.
-    let object_format_entry = config::ActiveModel {
-        configuration: Set("core".to_owned()),
-        key: Set("objectformat".to_owned()),
-        value: Set(object_format.unwrap_or("sha1").to_owned()),
-        ..Default::default() // id & name NotSet
-    };
-    object_format_entry.insert(&txn).await?;
-    // Commit the transaction
-    txn.commit().await?;
+    Config::insert_with_conn(
+        conn,
+        "core",
+        None,
+        "objectformat",
+        object_format.unwrap_or("sha1"),
+    )
+    .await;
     Ok(())
 }
 

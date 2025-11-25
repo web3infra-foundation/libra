@@ -23,6 +23,13 @@ rust_library(
     crate = "strum",
     crate_root = "vendor/src/lib.rs",
     edition = "2018",
+    features = [
+        "default",
+        "derive",
+        "std",
+        "strum_macros",
+    ],
     rustc_flags = ["@$(location :strum-manifest[env_flags])"],
     visibility = ["PUBLIC"],
+    deps = ["//third-party/rust/crates/strum_macros/0.26.4:strum_macros"],
 )

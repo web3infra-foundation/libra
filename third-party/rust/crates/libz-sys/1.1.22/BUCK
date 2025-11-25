@@ -26,11 +26,13 @@ rust_library(
     env = {
         "OUT_DIR": "$(location :libz-sys-build-script-run[out_dir])",
     },
+    features = ["libc"],
     rustc_flags = [
         "@$(location :libz-sys-build-script-run[rustc_flags])",
         "@$(location :libz-sys-manifest[env_flags])",
     ],
     visibility = ["PUBLIC"],
+    deps = ["//third-party/rust/crates/libc/0.2.175:libc"],
 )
 
 rust_binary(
@@ -39,10 +41,11 @@ rust_binary(
     crate = "build_script_build",
     crate_root = "vendor/build.rs",
     edition = "2018",
+    features = ["libc"],
     rustc_flags = ["@$(location :libz-sys-manifest[env_flags])"],
     visibility = [],
     deps = [
-        "//third-party/rust/crates/cc/1.2.38:cc",
+        "//third-party/rust/crates/cc/1.2.45:cc",
         "//third-party/rust/crates/pkg-config/0.3.32:pkg-config",
         "//third-party/rust/crates/vcpkg/0.2.15:vcpkg",
     ],
@@ -53,6 +56,7 @@ buildscript_run(
     package_name = "libz-sys",
     buildscript_rule = ":libz-sys-build-script-build",
     env_srcs = [":libz-sys-manifest[env_dict]"],
+    features = ["libc"],
     version = "1.1.22",
     manifest_dir = ":libz-sys-vendor",
     visibility = ["PUBLIC"],

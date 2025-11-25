@@ -2,15 +2,15 @@ use crate::command::load_object;
 use crate::internal::config;
 use crate::internal::db::get_db_conn_instance;
 use crate::internal::model::reflog::Model;
-use crate::internal::reflog::{HEAD, Reflog, ReflogError};
+use crate::internal::reflog::{HEAD, Reflog};
+use chrono;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use git_internal::hash::SHA1;
 use git_internal::internal::object::commit::Commit;
-use sea_orm::sqlx::types::chrono;
-use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
+use std::io;
 #[cfg(unix)]
 use std::io::Write;
 #[cfg(unix)]
@@ -57,7 +57,7 @@ async fn handle_show(ref_name: &str, pretty: FormatterKind) {
     let db = get_db_conn_instance().await;
 
     let ref_name = parse_ref_name(ref_name).await;
-    let logs = match Reflog::find_all(db, &ref_name).await {
+    let logs = match Reflog::find_all(db.as_ref(), &ref_name).await {
         Ok(logs) => logs,
         Err(e) => {
             eprintln!("fatal: failed to get reflog entries: {e}");
@@ -113,7 +113,7 @@ async fn parse_ref_name(partial_ref_name: &str) -> String {
 
 async fn handle_exists(ref_name: &str) {
     let db = get_db_conn_instance().await;
-    let log = Reflog::find_one(db, ref_name)
+    let log = Reflog::find_one(db.as_ref(), ref_name)
         .await
         .expect("fatal: failed to get reflog entry");
     match log {
@@ -161,23 +161,23 @@ async fn delete_single_group(group: &[(&str, usize)]) {
     db.transaction(|txn| {
         Box::pin(async move {
             let ref_name = &group[0].0;
-            let logs = Reflog::find_all(txn, ref_name).await?;
+            let logs = Reflog::find_all(txn, ref_name)
+                .await
+                .map_err(|e| io::Error::other(format!("{e}")))?;
 
             for (_, index) in &group {
                 if let Some(entry) = logs.get(*index) {
                     let id = entry.id;
-                    txn.execute(Statement::from_sql_and_values(
-                        DbBackend::Sqlite,
-                        "DELETE FROM reflog WHERE id = ?;",
-                        [id.into()],
-                    ))
-                    .await?;
+                    let sql = "DELETE FROM reflog WHERE id = ?1";
+                    txn.execute(sql, turso::params![id])
+                        .await
+                        .map_err(|e| io::Error::other(format!("{e}")))?;
                     continue;
                 }
                 eprintln!("fatal: reflog entry `{ref_name}@{{{index}}}` not found")
             }
 
-            Ok::<_, ReflogError>(())
+            Ok::<_, io::Error>(())
         })
     })
     .await

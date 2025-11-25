@@ -1,13 +1,9 @@
 use std::str::FromStr;
 
-use sea_orm::ActiveValue::Set;
-use sea_orm::{ActiveModelTrait, ConnectionTrait};
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
-
 use git_internal::hash::SHA1;
 
-use crate::internal::db::get_db_conn_instance;
-use crate::internal::model::reference;
+use crate::internal::db::{DbConnection, get_db_conn_instance};
+use crate::internal::model::reference::{ConfigKind, Model};
 
 #[derive(Debug)]
 pub struct Branch {
@@ -17,24 +13,36 @@ pub struct Branch {
 }
 
 //  `_with_conn` version of the helper function
-async fn query_reference_with_conn<C>(
-    db: &C,
+async fn query_reference_with_conn(
+    db: &DbConnection,
     branch_name: &str,
     remote: Option<&str>,
-) -> Option<reference::Model>
-where
-    C: ConnectionTrait,
-{
-    reference::Entity::find()
-        .filter(reference::Column::Name.eq(branch_name))
-        .filter(reference::Column::Kind.eq(reference::ConfigKind::Branch))
-        .filter(match remote {
-            Some(remote) => reference::Column::Remote.eq(remote),
-            None => reference::Column::Remote.is_null(),
-        })
-        .one(db)
+) -> Option<Model> {
+    let mut rows = match remote {
+        Some(r) => {
+            let sql = "SELECT * FROM reference WHERE name = ?1 AND kind = ?2 AND remote = ?3";
+            db.query(
+                sql,
+                turso::params![branch_name, ConfigKind::Branch.as_str(), r],
+            )
+            .await
+            .unwrap()
+        }
+        None => {
+            let sql = "SELECT * FROM reference WHERE name = ?1 AND kind = ?2 AND remote IS NULL";
+            db.query(
+                sql,
+                turso::params![branch_name, ConfigKind::Branch.as_str()],
+            )
+            .await
+            .unwrap()
+        }
+    };
+
+    rows.next()
         .await
         .unwrap()
+        .map(|row| Model::from_row(&row).unwrap())
 }
 
 /*
@@ -48,54 +56,54 @@ where
  *   connection from the pool and are suitable for single, non-transactional operations.
  *
  * - `*_with_conn` variants (e.g., `find_branch_with_conn`, `update_branch_with_conn`)
- *   accept an existing connection or transaction handle (`&C where C: ConnectionTrait`).
+ *   accept an existing connection handle (`&DbConnection`).
  *
  * **WARNING**: To use these functions within a database transaction (e.g., inside
  * a `db.transaction(|txn| { ... })` block), you MUST call the `*_with_conn`
- * variant, passing the transaction handle `txn`. Calling a public version from
+ * variant, passing the connection handle. Calling a public version from
  * inside a transaction will try to acquire a second connection from the pool,
  * leading to a deadlock.
  *
- * Correct Usage (in a transaction): `Branch::update_branch_with_conn(txn, ...).await;`
+ * Correct Usage (in a transaction): `Branch::update_branch_with_conn(db, ...).await;`
  * Incorrect Usage (in a transaction): `Branch::update_branch(...).await;` // DEADLOCK!
  */
 impl Branch {
     //  `_with_conn` version for `list_branches`
-    pub async fn list_branches_with_conn<C>(db: &C, remote: Option<&str>) -> Vec<Self>
-    where
-        C: ConnectionTrait,
-    {
-        let branches = reference::Entity::find()
-            .filter(reference::Column::Kind.eq(reference::ConfigKind::Branch))
-            .filter(match remote {
-                Some(remote) => reference::Column::Remote.eq(remote),
-                None => reference::Column::Remote.is_null(),
-            })
-            .all(db)
-            .await
-            .unwrap();
-
+    pub async fn list_branches_with_conn(db: &DbConnection, remote: Option<&str>) -> Vec<Self> {
+        let mut rows = match remote {
+            Some(r) => {
+                let sql = "SELECT * FROM reference WHERE kind = ?1 AND remote = ?2";
+                db.query(sql, turso::params![ConfigKind::Branch.as_str(), r])
+                    .await
+                    .unwrap()
+            }
+            None => {
+                let sql = "SELECT * FROM reference WHERE kind = ?1 AND remote IS NULL";
+                db.query(sql, turso::params![ConfigKind::Branch.as_str()])
+                    .await
+                    .unwrap()
+            }
+        };
+        let mut branches = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            let branch_model = Model::from_row(&row).unwrap();
+            branches.push(Branch {
+                name: branch_model.name.clone().unwrap(),
+                commit: SHA1::from_str(branch_model.commit.as_ref().unwrap()).unwrap(),
+                remote: branch_model.remote.clone(),
+            });
+        }
         branches
-            .iter()
-            .map(|branch| Branch {
-                name: branch.name.as_ref().unwrap().clone(),
-                commit: SHA1::from_str(branch.commit.as_ref().unwrap()).unwrap(),
-                remote: branch.remote.clone(),
-            })
-            .collect()
     }
 
     /// list all remote branches
     pub async fn list_branches(remote: Option<&str>) -> Vec<Self> {
         let db_conn = get_db_conn_instance().await;
-        Self::list_branches_with_conn(db_conn, remote).await
+        Self::list_branches_with_conn(db_conn.as_ref(), remote).await
     }
 
     //  `_with_conn` version for `exists`
-    pub async fn exists_with_conn<C>(db: &C, branch_name: &str) -> bool
-    where
-        C: ConnectionTrait,
-    {
+    pub async fn exists_with_conn(db: &DbConnection, branch_name: &str) -> bool {
         let branch = Self::find_branch_with_conn(db, branch_name, None).await;
         branch.is_some()
     }
@@ -103,18 +111,15 @@ impl Branch {
     /// is the branch exists
     pub async fn exists(branch_name: &str) -> bool {
         let db_conn = get_db_conn_instance().await;
-        Self::exists_with_conn(db_conn, branch_name).await
+        Self::exists_with_conn(db_conn.as_ref(), branch_name).await
     }
 
     //  `_with_conn` version for `find_branch`
-    pub async fn find_branch_with_conn<C>(
-        db: &C,
+    pub async fn find_branch_with_conn(
+        db: &DbConnection,
         branch_name: &str,
         remote: Option<&str>,
-    ) -> Option<Self>
-    where
-        C: ConnectionTrait,
-    {
+    ) -> Option<Self> {
         let branch = query_reference_with_conn(db, branch_name, remote).await;
         match branch {
             Some(branch) => Some(Branch {
@@ -129,14 +134,11 @@ impl Branch {
     /// get the branch by name
     pub async fn find_branch(branch_name: &str, remote: Option<&str>) -> Option<Self> {
         let db_conn = get_db_conn_instance().await;
-        Self::find_branch_with_conn(db_conn, branch_name, remote).await
+        Self::find_branch_with_conn(db_conn.as_ref(), branch_name, remote).await
     }
 
     //  `_with_conn` version for `search_branch`
-    pub async fn search_branch_with_conn<C>(db: &C, branch_name: &str) -> Vec<Self>
-    where
-        C: ConnectionTrait,
-    {
+    pub async fn search_branch_with_conn(db: &DbConnection, branch_name: &str) -> Vec<Self> {
         let mut branch_name_str = branch_name.to_string();
         let mut remote = String::new();
 
@@ -165,35 +167,37 @@ impl Branch {
     /// so we need to search all possible branches
     pub async fn search_branch(branch_name: &str) -> Vec<Self> {
         let db_conn = get_db_conn_instance().await;
-        Self::search_branch_with_conn(db_conn, branch_name).await
+        Self::search_branch_with_conn(db_conn.as_ref(), branch_name).await
     }
 
     //  `_with_conn` version for `update_branch`
-    pub async fn update_branch_with_conn<C>(
-        db: &C,
+    pub async fn update_branch_with_conn(
+        db: &DbConnection,
         branch_name: &str,
         commit_hash: &str,
         remote: Option<&str>,
-    ) where
-        C: ConnectionTrait,
-    {
+    ) {
         let branch = query_reference_with_conn(db, branch_name, remote).await;
 
         match branch {
-            Some(branch) => {
-                let mut branch: reference::ActiveModel = branch.into();
-                branch.commit = Set(Some(commit_hash.to_owned()));
-                branch.update(db).await.unwrap();
+            Some(branch_model) => {
+                let sql = "UPDATE reference SET `commit` = ?1 WHERE id = ?2";
+                db.execute(sql, turso::params![commit_hash, branch_model.id])
+                    .await
+                    .unwrap();
             }
             None => {
-                reference::ActiveModel {
-                    name: Set(Some(branch_name.to_owned())),
-                    kind: Set(reference::ConfigKind::Branch),
-                    commit: Set(Some(commit_hash.to_owned())),
-                    remote: Set(remote.map(|s| s.to_owned())),
-                    ..Default::default()
-                }
-                .insert(db)
+                let sql =
+                    "INSERT INTO reference (name, kind, `commit`, remote) VALUES (?1, ?2, ?3, ?4)";
+                db.execute(
+                    sql,
+                    turso::params![
+                        branch_name,
+                        ConfigKind::Branch.as_str(),
+                        commit_hash,
+                        remote
+                    ],
+                )
                 .await
                 .unwrap();
             }
@@ -202,24 +206,25 @@ impl Branch {
 
     pub async fn update_branch(branch_name: &str, commit_hash: &str, remote: Option<&str>) {
         let db_conn = get_db_conn_instance().await;
-        Self::update_branch_with_conn(db_conn, branch_name, commit_hash, remote).await
+        Self::update_branch_with_conn(db_conn.as_ref(), branch_name, commit_hash, remote).await
     }
 
     // `_with_conn` version for `delete_branch`
-    pub async fn delete_branch_with_conn<C>(db: &C, branch_name: &str, remote: Option<&str>)
-    where
-        C: ConnectionTrait,
-    {
-        let branch: reference::ActiveModel = query_reference_with_conn(db, branch_name, remote)
+    pub async fn delete_branch_with_conn(
+        db: &DbConnection,
+        branch_name: &str,
+        remote: Option<&str>,
+    ) {
+        let branch = query_reference_with_conn(db, branch_name, remote)
             .await
-            .unwrap()
-            .into();
-        branch.delete(db).await.unwrap();
+            .unwrap();
+        let sql = "DELETE FROM reference WHERE id = ?1";
+        db.execute(sql, turso::params![branch.id]).await.unwrap();
     }
 
     pub async fn delete_branch(branch_name: &str, remote: Option<&str>) {
         let db_conn = get_db_conn_instance().await;
-        Self::delete_branch_with_conn(db_conn, branch_name, remote).await
+        Self::delete_branch_with_conn(db_conn.as_ref(), branch_name, remote).await
     }
 }
 

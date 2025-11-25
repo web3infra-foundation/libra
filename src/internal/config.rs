@@ -1,13 +1,9 @@
 use std::collections::HashSet;
 use std::mem::swap;
 
-use sea_orm::ActiveValue::Set;
-use sea_orm::entity::ActiveModelTrait;
-use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, ModelTrait, QueryFilter};
-
-use crate::internal::db::get_db_conn_instance;
+use crate::internal::db::{DbConnection, get_db_conn_instance};
 use crate::internal::head::Head;
-use crate::internal::model::config::{self, ActiveModel, Model};
+use crate::internal::model::config::Model;
 
 pub struct Config;
 
@@ -34,99 +30,114 @@ pub struct BranchConfig {
  *   connection from the pool and are suitable for single, non-transactional operations.
  *
  * - `*_with_conn` variants (e.g., `get_with_conn`, `update_with_conn`)
- *   accept an existing connection or transaction handle (`&C where C: ConnectionTrait`).
+ *   accept an existing connection handle (`&DbConnection`).
  *
  * **WARNING**: To use these functions within a database transaction (e.g., inside
  * a `db.transaction(|txn| { ... })` block), you MUST call the `*_with_conn`
- * variant, passing the transaction handle `txn`. Calling a public version from
+ * variant, passing the connection handle. Calling a public version from
  * inside a transaction will try to acquire a second connection from the pool,
  * leading to a deadlock.
  *
- * Correct Usage (in a transaction): `Config::update_with_conn(txn, ...).await;`
+ * Correct Usage (in a transaction): `Config::update_with_conn(db, ...).await;`
  * Incorrect Usage (in a transaction): `Config::update(...).await;` // DEADLOCK!
  */
 impl Config {
     // _with_conn version for insert
-    pub async fn insert_with_conn<C: ConnectionTrait>(
-        db: &C,
+    pub async fn insert_with_conn(
+        db: &DbConnection,
         configuration: &str,
         name: Option<&str>,
         key: &str,
         value: &str,
     ) {
-        let config = ActiveModel {
-            configuration: Set(configuration.to_owned()),
-            name: Set(name.map(|s| s.to_owned())),
-            key: Set(key.to_owned()),
-            value: Set(value.to_owned()),
-            ..Default::default()
-        };
-        config.save(db).await.unwrap();
+        let sql = "INSERT INTO config (configuration, name, key, value) VALUES (?1, ?2, ?3, ?4)";
+        db.execute(sql, turso::params![configuration, name, key, value])
+            .await
+            .unwrap();
     }
 
     // _with_conn version for update
-    pub async fn update_with_conn<C: ConnectionTrait>(
-        db: &C,
+    pub async fn update_with_conn(
+        db: &DbConnection,
         configuration: &str,
         name: Option<&str>,
         key: &str,
         value: &str,
     ) -> Model {
-        let mut config: ActiveModel = config::Entity::find()
-            .filter(config::Column::Configuration.eq(configuration))
-            .filter(match name {
-                Some(str) => config::Column::Name.eq(str),
-                None => config::Column::Name.is_null(),
-            })
-            .filter(config::Column::Key.eq(key))
-            .one(db)
+        match name {
+            Some(n) => {
+                let sql = "UPDATE config SET value = ?4 WHERE configuration = ?1 AND name = ?2 AND key = ?3";
+                db.execute(sql, turso::params![configuration, n, key, value])
+                    .await
+                    .unwrap();
+            }
+            None => {
+                let sql = "UPDATE config SET value = ?3 WHERE configuration = ?1 AND name IS NULL AND key = ?2";
+                db.execute(sql, turso::params![configuration, key, value])
+                    .await
+                    .unwrap();
+            }
+        }
+        Self::get_with_conn(db, configuration, name, key)
             .await
             .unwrap()
-            .unwrap()
-            .into();
-        config.value = Set(value.to_owned());
-        config.update(db).await.unwrap()
     }
 
     // _with_conn version for query
-    async fn query_with_conn<C: ConnectionTrait>(
-        db: &C,
+    pub async fn query_with_conn(
+        db: &DbConnection,
         configuration: &str,
         name: Option<&str>,
         key: &str,
     ) -> Vec<Model> {
-        config::Entity::find()
-            .filter(config::Column::Configuration.eq(configuration))
-            .filter(match name {
-                Some(str) => config::Column::Name.eq(str),
-                None => config::Column::Name.is_null(),
-            })
-            .filter(config::Column::Key.eq(key))
-            .all(db)
-            .await
-            .unwrap()
+        let mut result = Vec::new();
+        match name {
+            Some(n) => {
+                let sql =
+                    "SELECT * FROM config WHERE configuration = ?1 AND name = ?2 AND key = ?3";
+                let mut rows = db
+                    .query(sql, turso::params![configuration, n, key])
+                    .await
+                    .unwrap();
+                while let Some(row) = rows.next().await.unwrap() {
+                    result.push(Model::from_row(&row).unwrap());
+                }
+            }
+            None => {
+                let sql =
+                    "SELECT * FROM config WHERE configuration = ?1 AND name IS NULL AND key = ?2";
+                let mut rows = db
+                    .query(sql, turso::params![configuration, key])
+                    .await
+                    .unwrap();
+                while let Some(row) = rows.next().await.unwrap() {
+                    result.push(Model::from_row(&row).unwrap());
+                }
+            }
+        }
+        result
     }
 
     // _with_conn version for get
-    pub async fn get_with_conn<C: ConnectionTrait>(
-        db: &C,
+    pub async fn get_with_conn(
+        db: &DbConnection,
         configuration: &str,
         name: Option<&str>,
         key: &str,
-    ) -> Option<String> {
-        let values = Self::query_with_conn(db, configuration, name, key).await;
-        values.first().map(|c| c.value.to_owned())
+    ) -> Option<Model> {
+        let configs = Self::query_with_conn(db, configuration, name, key).await;
+        configs.into_iter().next()
     }
 
     // _with_conn version for get_remote
-    pub async fn get_remote_with_conn<C: ConnectionTrait>(db: &C, branch: &str) -> Option<String> {
-        Config::get_with_conn(db, "branch", Some(branch), "remote").await
+    pub async fn get_remote_with_conn(db: &DbConnection, branch: &str) -> Option<String> {
+        Config::get_with_conn(db, "branch", Some(branch), "remote")
+            .await
+            .map(|m| m.value)
     }
 
     // _with_conn version for get_current_remote
-    pub async fn get_current_remote_with_conn<C: ConnectionTrait>(
-        db: &C,
-    ) -> Result<Option<String>, ()> {
+    pub async fn get_current_remote_with_conn(db: &DbConnection) -> Result<Option<String>, ()> {
         match Head::current_with_conn(db).await {
             Head::Branch(name) => Ok(Config::get_remote_with_conn(db, &name).await),
             Head::Detached(_) => {
@@ -137,15 +148,15 @@ impl Config {
     }
 
     // _with_conn version for get_remote_url
-    pub async fn get_remote_url_with_conn<C: ConnectionTrait>(db: &C, remote: &str) -> String {
+    pub async fn get_remote_url_with_conn(db: &DbConnection, remote: &str) -> String {
         match Config::get_with_conn(db, "remote", Some(remote), "url").await {
-            Some(url) => url,
+            Some(model) => model.value,
             None => panic!("fatal: No URL configured for remote '{remote}'."),
         }
     }
 
     // _with_conn version for get_current_remote_url
-    pub async fn get_current_remote_url_with_conn<C: ConnectionTrait>(db: &C) -> Option<String> {
+    pub async fn get_current_remote_url_with_conn(db: &DbConnection) -> Option<String> {
         match Config::get_current_remote_with_conn(db).await.unwrap() {
             Some(remote) => Some(Config::get_remote_url_with_conn(db, &remote).await),
             None => None,
@@ -153,8 +164,8 @@ impl Config {
     }
 
     // _with_conn version for get_all
-    pub async fn get_all_with_conn<C: ConnectionTrait>(
-        db: &C,
+    pub async fn get_all_with_conn(
+        db: &DbConnection,
         configuration: &str,
         name: Option<&str>,
         key: &str,
@@ -167,27 +178,24 @@ impl Config {
     }
 
     // _with_conn version for list_all
-    pub async fn list_all_with_conn<C: ConnectionTrait>(db: &C) -> Vec<(String, String)> {
-        config::Entity::find()
-            .all(db)
-            .await
-            .unwrap()
-            .iter()
-            .map(|m| {
-                (
-                    match &m.name {
-                        Some(n) => m.configuration.to_owned() + "." + n + "." + &m.key,
-                        None => m.configuration.to_owned() + "." + &m.key,
-                    },
-                    m.value.to_owned(),
-                )
-            })
-            .collect()
+    pub async fn list_all_with_conn(db: &DbConnection) -> Vec<(String, String)> {
+        let sql = "SELECT * FROM config";
+        let mut rows = db.query(sql, turso::params![]).await.unwrap();
+        let mut result = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            let m = Model::from_row(&row).unwrap();
+            let key_name = match &m.name {
+                Some(n) => m.configuration.to_owned() + "." + n + "." + &m.key,
+                None => m.configuration.to_owned() + "." + &m.key,
+            };
+            result.push((key_name, m.value));
+        }
+        result
     }
 
     // _with_conn version for remove_config
-    pub async fn remove_config_with_conn<C: ConnectionTrait>(
-        db: &C,
+    pub async fn remove_config_with_conn(
+        db: &DbConnection,
         configuration: &str,
         name: Option<&str>,
         key: &str,
@@ -196,45 +204,42 @@ impl Config {
     ) {
         let entries: Vec<Model> = Self::query_with_conn(db, configuration, name, key).await;
         for e in entries {
-            let _res = match valuepattern {
-                Some(vp) => {
-                    if e.value.contains(vp) {
-                        e.delete(db).await
-                    } else {
-                        continue;
-                    }
-                }
-                None => e.delete(db).await,
+            let should_delete = match valuepattern {
+                Some(vp) => e.value.contains(vp),
+                None => true,
             };
-            if !delete_all {
-                break;
+            if should_delete {
+                let sql = "DELETE FROM config WHERE id = ?1";
+                db.execute(sql, turso::params![e.id]).await.unwrap();
+                if !delete_all {
+                    break;
+                }
             }
         }
     }
 
     // _with_conn version for remove_remote
-    pub async fn remove_remote_with_conn<C: ConnectionTrait>(
-        db: &C,
-        name: &str,
-    ) -> Result<(), String> {
-        let remote = config::Entity::find()
-            .filter(config::Column::Configuration.eq("remote"))
-            .filter(config::Column::Name.eq(name))
-            .all(db)
-            .await
-            .unwrap();
-        if remote.is_empty() {
+    pub async fn remove_remote_with_conn(db: &DbConnection, name: &str) -> Result<(), String> {
+        let sql = "SELECT * FROM config WHERE configuration = ?1 AND name = ?2";
+        let mut rows = db.query(sql, turso::params!["remote", name]).await.unwrap();
+        let mut remote_entries = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            remote_entries.push(Model::from_row(&row).unwrap());
+        }
+
+        if remote_entries.is_empty() {
             return Err(format!("fatal: No such remote: {name}"));
         }
-        for r in remote {
-            let r: ActiveModel = r.into();
-            r.delete(db).await.unwrap();
+
+        for r in remote_entries {
+            let sql = "DELETE FROM config WHERE id = ?1";
+            db.execute(sql, turso::params![r.id]).await.unwrap();
         }
         Ok(())
     }
 
-    pub async fn rename_remote_with_conn<C: ConnectionTrait>(
-        db: &C,
+    pub async fn rename_remote_with_conn(
+        db: &DbConnection,
         old: &str,
         new: &str,
     ) -> Result<(), String> {
@@ -246,95 +251,78 @@ impl Config {
             return Err(format!("fatal: remote {new} already exists."));
         }
 
-        let remote_entries = config::Entity::find()
-            .filter(config::Column::Configuration.eq("remote"))
-            .filter(config::Column::Name.eq(old))
-            .all(db)
-            .await
-            .unwrap();
-
         // Update remote.<name>.* entries to point at the new name.
-        for entry in remote_entries {
-            let mut active: ActiveModel = entry.into();
-            active.name = Set(Some(new.to_owned()));
-            active.update(db).await.unwrap();
-        }
-
-        let branch_entries = config::Entity::find()
-            .filter(config::Column::Configuration.eq("branch"))
-            .filter(config::Column::Key.eq("remote"))
-            .filter(config::Column::Value.eq(old))
-            .all(db)
+        let sql = "UPDATE config SET name = ?1 WHERE configuration = ?2 AND name = ?3";
+        db.execute(sql, turso::params![new, "remote", old])
             .await
             .unwrap();
 
         // Repoint branch.*.remote values that referenced the old remote.
-        for entry in branch_entries {
-            let mut active: ActiveModel = entry.into();
-            active.value = Set(new.to_owned());
-            active.update(db).await.unwrap();
-        }
+        let sql =
+            "UPDATE config SET value = ?1 WHERE configuration = ?2 AND key = ?3 AND value = ?4";
+        db.execute(sql, turso::params![new, "branch", "remote", old])
+            .await
+            .unwrap();
 
         Ok(())
     }
 
     // _with_conn version for all_remote_configs
-    pub async fn all_remote_configs_with_conn<C: ConnectionTrait>(db: &C) -> Vec<RemoteConfig> {
-        let remotes = config::Entity::find()
-            .filter(config::Column::Configuration.eq("remote"))
-            .all(db)
-            .await
-            .unwrap();
-        let remote_names = remotes
+    pub async fn all_remote_configs_with_conn(db: &DbConnection) -> Vec<RemoteConfig> {
+        let sql = "SELECT * FROM config WHERE configuration = ?1";
+        let mut rows = db.query(sql, turso::params!["remote"]).await.unwrap();
+        let mut remotes = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            remotes.push(Model::from_row(&row).unwrap());
+        }
+
+        let remote_names: HashSet<String> = remotes
             .iter()
-            .map(|remote| remote.name.as_ref().unwrap().clone())
-            .collect::<HashSet<String>>();
+            .filter_map(|remote| remote.name.as_ref().cloned())
+            .collect();
 
         remote_names
             .iter()
-            .map(|name| {
-                let url = remotes
+            .filter_map(|name| {
+                remotes
                     .iter()
-                    .find(|remote| remote.name.as_ref().unwrap() == name)
-                    .unwrap()
-                    .value
-                    .to_owned();
-                RemoteConfig {
-                    name: name.to_owned(),
-                    url,
-                }
+                    .find(|remote| remote.name.as_ref().unwrap() == name && remote.key == "url")
+                    .map(|remote| RemoteConfig {
+                        name: name.to_owned(),
+                        url: remote.value.to_owned(),
+                    })
             })
             .collect()
     }
 
     // _with_conn version for remote_config
-    pub async fn remote_config_with_conn<C: ConnectionTrait>(
-        db: &C,
-        name: &str,
-    ) -> Option<RemoteConfig> {
-        let remote = config::Entity::find()
-            .filter(config::Column::Configuration.eq("remote"))
-            .filter(config::Column::Name.eq(name))
-            .one(db)
+    pub async fn remote_config_with_conn(db: &DbConnection, name: &str) -> Option<RemoteConfig> {
+        let sql = "SELECT * FROM config WHERE configuration = ?1 AND name = ?2 AND key = ?3";
+        let mut rows = db
+            .query(sql, turso::params!["remote", name, "url"])
             .await
             .unwrap();
-        remote.map(|r| RemoteConfig {
-            name: r.name.unwrap(),
-            url: r.value,
-        })
+
+        if let Some(row) = rows.next().await.unwrap() {
+            let r = Model::from_row(&row).unwrap();
+            Some(RemoteConfig {
+                name: r.name.unwrap(),
+                url: r.value,
+            })
+        } else {
+            None
+        }
     }
 
     // _with_conn version for branch_config
-    pub async fn branch_config_with_conn<C: ConnectionTrait>(
-        db: &C,
-        name: &str,
-    ) -> Option<BranchConfig> {
-        let config_entries = config::Entity::find()
-            .filter(config::Column::Configuration.eq("branch"))
-            .filter(config::Column::Name.eq(name))
-            .all(db)
-            .await
-            .unwrap();
+    pub async fn branch_config_with_conn(db: &DbConnection, name: &str) -> Option<BranchConfig> {
+        let sql = "SELECT * FROM config WHERE configuration = ?1 AND name = ?2";
+        let mut rows = db.query(sql, turso::params!["branch", name]).await.unwrap();
+        let mut config_entries = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            config_entries.push(Model::from_row(&row).unwrap());
+        }
+
         if config_entries.is_empty() {
             None
         } else {
@@ -368,57 +356,57 @@ impl Config {
 
     pub async fn insert(configuration: &str, name: Option<&str>, key: &str, value: &str) {
         let db = get_db_conn_instance().await;
-        Self::insert_with_conn(db, configuration, name, key, value).await;
+        Self::insert_with_conn(db.as_ref(), configuration, name, key, value).await;
     }
 
     // Update one configuration entry in database using given configuration, name, key and value
     pub async fn update(configuration: &str, name: Option<&str>, key: &str, value: &str) -> Model {
         let db = get_db_conn_instance().await;
-        Self::update_with_conn(db, configuration, name, key, value).await
+        Self::update_with_conn(db.as_ref(), configuration, name, key, value).await
     }
 
     /// Get one configuration value
-    pub async fn get(configuration: &str, name: Option<&str>, key: &str) -> Option<String> {
+    pub async fn get(configuration: &str, name: Option<&str>, key: &str) -> Option<Model> {
         let db = get_db_conn_instance().await;
-        Self::get_with_conn(db, configuration, name, key).await
+        Self::get_with_conn(db.as_ref(), configuration, name, key).await
     }
 
     /// Get remote repo name by branch name
     /// - You may need to `[branch::set-upstream]` if return `None`
     pub async fn get_remote(branch: &str) -> Option<String> {
         let db = get_db_conn_instance().await;
-        Self::get_remote_with_conn(db, branch).await
+        Self::get_remote_with_conn(db.as_ref(), branch).await
     }
 
     /// Get remote repo name of current branch
     /// - `Error` if `HEAD` is detached
     pub async fn get_current_remote() -> Result<Option<String>, ()> {
         let db = get_db_conn_instance().await;
-        Self::get_current_remote_with_conn(db).await
+        Self::get_current_remote_with_conn(db.as_ref()).await
     }
 
     pub async fn get_remote_url(remote: &str) -> String {
         let db = get_db_conn_instance().await;
-        Self::get_remote_url_with_conn(db, remote).await
+        Self::get_remote_url_with_conn(db.as_ref(), remote).await
     }
 
     /// return `None` if no remote is set
     pub async fn get_current_remote_url() -> Option<String> {
         let db = get_db_conn_instance().await;
-        Self::get_current_remote_url_with_conn(db).await
+        Self::get_current_remote_url_with_conn(db.as_ref()).await
     }
 
     /// Get all configuration values
     /// - e.g. remote.origin.url can be multiple
     pub async fn get_all(configuration: &str, name: Option<&str>, key: &str) -> Vec<String> {
         let db = get_db_conn_instance().await;
-        Self::get_all_with_conn(db, configuration, name, key).await
+        Self::get_all_with_conn(db.as_ref(), configuration, name, key).await
     }
 
     /// Get literally all the entries in database without any filtering
     pub async fn list_all() -> Vec<(String, String)> {
         let db = get_db_conn_instance().await;
-        Self::list_all_with_conn(db).await
+        Self::list_all_with_conn(db.as_ref()).await
     }
 
     /// Delete one or all configuration using given key and value pattern
@@ -430,7 +418,15 @@ impl Config {
         delete_all: bool,
     ) {
         let db = get_db_conn_instance().await;
-        Self::remove_config_with_conn(db, configuration, name, key, valuepattern, delete_all).await;
+        Self::remove_config_with_conn(
+            db.as_ref(),
+            configuration,
+            name,
+            key,
+            valuepattern,
+            delete_all,
+        )
+        .await;
     }
 
     /// Delete all the configuration entries using given configuration field (--remove-section)
@@ -439,26 +435,26 @@ impl Config {
     // }
     pub async fn remove_remote(name: &str) -> Result<(), String> {
         let db = get_db_conn_instance().await;
-        Self::remove_remote_with_conn(db, name).await
+        Self::remove_remote_with_conn(db.as_ref(), name).await
     }
 
     pub async fn rename_remote(old: &str, new: &str) -> Result<(), String> {
         let db = get_db_conn_instance().await;
-        Self::rename_remote_with_conn(db, old, new).await
+        Self::rename_remote_with_conn(db.as_ref(), old, new).await
     }
 
     pub async fn all_remote_configs() -> Vec<RemoteConfig> {
         let db = get_db_conn_instance().await;
-        Self::all_remote_configs_with_conn(db).await
+        Self::all_remote_configs_with_conn(db.as_ref()).await
     }
 
     pub async fn remote_config(name: &str) -> Option<RemoteConfig> {
         let db = get_db_conn_instance().await;
-        Self::remote_config_with_conn(db, name).await
+        Self::remote_config_with_conn(db.as_ref(), name).await
     }
 
     pub async fn branch_config(name: &str) -> Option<BranchConfig> {
         let db = get_db_conn_instance().await;
-        Self::branch_config_with_conn(db, name).await
+        Self::branch_config_with_conn(db.as_ref(), name).await
     }
 }
