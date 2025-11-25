@@ -119,8 +119,14 @@ pub async fn execute(args: PushArgs) {
     }
 
     if args.force {
-        println!("{}", "warning: forcing update of remote reference (override history)".yellow());
-        println!("{}", "warning: this may overwrite remote commits, use with caution".yellow());
+        println!(
+            "{}",
+            "warning: forcing update of remote reference (override history)".yellow()
+        );
+        println!(
+            "{}",
+            "warning: this may overwrite remote commits, use with caution".yellow()
+        );
     }
 
     let mut data = BytesMut::new();
@@ -188,7 +194,7 @@ pub async fn execute(args: PushArgs) {
     assert_eq!(len, 0);
 
     println!("{}", "Push success".green());
-    
+
     let remote_tracking_branch = format!("refs/remotes/{}/{}", repository, branch);
     Branch::update_branch(&remote_tracking_branch, &commit_hash, None).await;
 
