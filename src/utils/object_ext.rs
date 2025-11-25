@@ -71,13 +71,9 @@ impl CommitExt for Commit {
 
     fn try_load(hash: &SHA1) -> Option<Commit> {
         let storage = util::objects_storage();
-        match storage.get(hash) {
-            Ok(commit_data) => match Commit::from_bytes(&commit_data, *hash) {
-                Ok(commit) => Some(commit),
-                Err(_) => None,
-            },
-            Err(_) => None,
-        }
+        storage.get(hash)
+            .ok()
+            .and_then(|commit_data| Commit::from_bytes(&commit_data, *hash).ok())
     }
 }
 
