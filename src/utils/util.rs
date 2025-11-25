@@ -44,12 +44,12 @@ pub fn cur_dir() -> PathBuf {
             }
 
             // Fallback 2: directory of the current executable if available
-            if let Ok(exec) = env::current_exe() {
-                if let Some(parent) = exec.parent() {
-                    if parent.exists() && parent.is_dir() {
-                        return parent.to_path_buf();
-                    }
-                }
+            if let Ok(exec) = env::current_exe()
+                && let Some(parent) = exec.parent()
+                && parent.exists()
+                && parent.is_dir()
+            {
+                return parent.to_path_buf();
             }
 
             // Fallback 3: root directory to ensure a stable, existing path
@@ -503,17 +503,12 @@ pub async fn create_signatures() -> (Signature, Signature) {
 
 #[cfg(test)]
 mod test {
-    use std::env;
-    use std::path::PathBuf;
-
-    use tempfile::tempdir;
-    use serial_test::serial;
-    
     use super::*;
     use crate::utils::test;
-    
-
-    
+    use serial_test::serial;
+    use std::env;
+    use std::path::PathBuf;
+    use tempfile::tempdir;
 
     #[test]
     ///Test get current directory success.
