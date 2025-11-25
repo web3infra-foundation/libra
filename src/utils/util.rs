@@ -32,7 +32,30 @@ pub const ATTRIBUTES: &str = ".libra_attributes";
 ///
 /// A `PathBuf` representing the current working directory.
 pub fn cur_dir() -> PathBuf {
-    env::current_dir().unwrap()
+    match env::current_dir() {
+        Ok(dir) => dir,
+        Err(_) => {
+            // Fallback 1: use PWD if present and valid
+            if let Ok(pwd) = env::var("PWD") {
+                let p = PathBuf::from(&pwd);
+                if p.exists() && p.is_dir() {
+                    return p;
+                }
+            }
+
+            // Fallback 2: directory of the current executable if available
+            if let Ok(exec) = env::current_exe()
+                && let Some(parent) = exec.parent()
+                && parent.exists()
+                && parent.is_dir()
+            {
+                return parent.to_path_buf();
+            }
+
+            // Fallback 3: root directory to ensure a stable, existing path
+            PathBuf::from("/")
+        }
+    }
 }
 
 /// Try to get the storage path of the repository, which is the path of the `.libra` directory
@@ -154,12 +177,16 @@ where
     P: AsRef<Path>,
     B: AsRef<Path>,
 {
-    // × crate `PathAbs` is NOT good enough
-    // 1. `PathAbs::new` can not handle `.` or `./`, all return ""
-    // 2. `PathAbs::new` generate prefix: '\\?\' on Windows
-    // So, we replace it with `path_absolutize` √
-    let path_abs = path.as_ref().absolutize().unwrap();
-    let base_abs = base.as_ref().absolutize().unwrap();
+    // Use safe absolutize that tolerates invalid current directory on some Linux/CI envs
+    let path_abs = match path.as_ref().absolutize() {
+        Ok(p) => p.into_owned(),
+        Err(_) => cur_dir().join(path.as_ref()),
+    };
+    let base_abs = match base.as_ref().absolutize() {
+        Ok(b) => b.into_owned(),
+        Err(_) => cur_dir().join(base.as_ref()),
+    };
+
     if let Some(rel_path) = pathdiff::diff_paths(path_abs, base_abs) {
         if rel_path.to_string_lossy() == "" {
             PathBuf::from(".")
@@ -486,9 +513,20 @@ mod test {
     #[test]
     ///Test get current directory success.
     fn cur_dir_returns_current_directory() {
-        let expected = env::current_dir().unwrap();
-        let actual = cur_dir();
-        assert_eq!(actual, expected);
+        match env::current_dir() {
+            Ok(expected) => {
+                let actual = cur_dir();
+                assert_eq!(actual, expected);
+            }
+            Err(_) => {
+                // On some Linux/CI environments, current_dir can fail if the working
+                // directory was removed. In that case, ensure cur_dir still returns
+                // a stable, existing directory via its fallback logic.
+                let actual = cur_dir();
+                assert!(actual.exists(), "cur_dir should return an existing path");
+                assert!(actual.is_dir(), "cur_dir should point to a directory");
+            }
+        }
     }
 
     #[test]
