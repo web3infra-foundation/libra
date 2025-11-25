@@ -109,16 +109,19 @@ pub async fn execute(args: PushArgs) {
     // Check if remote is ancestor of local (for fast-forward check)
     let remote_sha1 = SHA1::from_str(&remote_hash).unwrap();
     let local_sha1 = SHA1::from_str(&commit_hash).unwrap();
-    let can_fast_forward = is_ancestor(&remote_sha1, &local_sha1);
+    let can_fast_forward = if remote_sha1 == SHA1::default() {
+        true // New branch, always fast-forwardable
+    } else {
+        is_ancestor(&remote_sha1, &local_sha1)
+    };
 
     // If remote has commits that local doesn't have and force is not specified, reject push
     if !can_fast_forward && !args.force {
         eprintln!("fatal: cannot push non-fast-forwardable reference");
         eprintln!("hint: need to fetch and merge remote changes first");
         return;
-    }
-
-    if args.force {
+    } else if !can_fast_forward && args.force {
+        // Force push case - only show warning when force is actually needed
         println!(
             "{}",
             "warning: forcing update of remote reference (override history)".yellow()
@@ -217,7 +220,12 @@ fn collect_history_commits(commit_id: &SHA1) -> HashSet<SHA1> {
     while let Some(commit) = queue.pop_front() {
         commits.insert(commit);
 
-        let commit = Commit::load(&commit);
+        // Try to load the commit; if missing or corrupt, skip this path
+        let commit = match Commit::try_load(&commit) {
+            Some(c) => c,
+            None => continue,
+        };
+
         for parent in commit.parent_commit_ids.iter() {
             queue.push_back(*parent);
         }
@@ -231,7 +239,10 @@ fn incremental_objs(local_ref: SHA1, remote_ref: SHA1) -> HashSet<Entry> {
     // just fast-forward optimization
     if remote_ref != SHA1::default() {
         // remote exists
-        let mut commit = Commit::load(&local_ref);
+        let mut commit = match Commit::try_load(&local_ref) {
+            Some(c) => c,
+            None => return HashSet::new(), // If commit doesn't exist, return empty set
+        };
         let mut commits = Vec::new();
         let mut ok = true;
         loop {
@@ -245,15 +256,28 @@ fn incremental_objs(local_ref: SHA1, remote_ref: SHA1) -> HashSet<Entry> {
                 break;
             }
             // update commit to it's only parent
-            commit = Commit::load(&commit.parent_commit_ids[0]);
+            commit = match Commit::try_load(&commit.parent_commit_ids[0]) {
+                Some(c) => c,
+                None => {
+                    ok = false;
+                    break;
+                }
+            };
         }
         if ok {
             // fast-forward
             let mut objs = HashSet::new();
             commits.reverse(); // from old to new
             for i in 0..commits.len() - 1 {
-                let old_tree = Commit::load(&commits[i]).tree_id;
-                let new_commit = Commit::load(&commits[i + 1]);
+                let old_commit = match Commit::try_load(&commits[i]) {
+                    Some(c) => c,
+                    None => continue,
+                };
+                let old_tree = old_commit.tree_id;
+                let new_commit = match Commit::try_load(&commits[i + 1]) {
+                    Some(c) => c,
+                    None => continue,
+                };
                 objs.extend(diff_tree_objs(Some(&old_tree), &new_commit.tree_id));
                 objs.insert(new_commit.into());
             }
@@ -271,8 +295,11 @@ fn incremental_objs(local_ref: SHA1, remote_ref: SHA1) -> HashSet<Entry> {
     }
     let mut root_commit = None;
 
-    while let Some(commit) = queue.pop_front() {
-        let commit = Commit::load(&commit);
+    while let Some(commit_id) = queue.pop_front() {
+        let commit = match Commit::try_load(&commit_id) {
+            Some(c) => c,
+            None => continue,
+        };
         let parents = &commit.parent_commit_ids;
         if parents.is_empty() {
             if root_commit.is_none() {
@@ -282,7 +309,11 @@ fn incremental_objs(local_ref: SHA1, remote_ref: SHA1) -> HashSet<Entry> {
             }
         }
         for parent in parents.iter() {
-            let parent_tree = Commit::load(parent).tree_id;
+            let parent_commit = match Commit::try_load(parent) {
+                Some(c) => c,
+                None => continue,
+            };
+            let parent_tree = parent_commit.tree_id;
             objs.extend(diff_tree_objs(Some(&parent_tree), &commit.tree_id));
             if !exist_commits.contains(parent) && !visit.contains(parent) {
                 queue.push_back(*parent);
@@ -322,7 +353,11 @@ fn is_ancestor(ancestor: &SHA1, descendant: &SHA1) -> bool {
             return true;
         }
 
-        let commit = Commit::load(&commit_id);
+        // Try to load the commit; if missing or corrupt, skip this path
+        let commit = match Commit::try_load(&commit_id) {
+            Some(c) => c,
+            None => continue,
+        };
 
         for parent_id in &commit.parent_commit_ids {
             if !visited.contains(parent_id) {
