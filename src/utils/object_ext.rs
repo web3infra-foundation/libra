@@ -17,6 +17,7 @@ pub trait TreeExt {
 
 pub trait CommitExt {
     fn load(hash: &SHA1) -> Commit;
+    fn try_load(hash: &SHA1) -> Option<Commit>;
 }
 
 pub trait BlobExt {
@@ -66,6 +67,14 @@ impl CommitExt for Commit {
         let storage = util::objects_storage();
         let commit_data = storage.get(hash).unwrap();
         Commit::from_bytes(&commit_data, *hash).unwrap()
+    }
+
+    fn try_load(hash: &SHA1) -> Option<Commit> {
+        let storage = util::objects_storage();
+        storage
+            .get(hash)
+            .ok()
+            .and_then(|commit_data| Commit::from_bytes(&commit_data, *hash).ok())
     }
 }
 
