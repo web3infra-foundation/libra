@@ -77,83 +77,66 @@ pub async fn execute(args: BlameArgs) {
         .enumerate()
         .map(|(idx, content)| LineBlame {
             line_number: idx + 1,
-            commit_id: commit_id.clone(),
+            commit_id,
             author: commit_obj.author.name.clone(),
             date: commit_obj.author.timestamp.to_string(),
             content: content.clone(),
         })
         .collect();
 
-    // walk backwards through commit history
-    let mut current_commit = commit_obj;
-    let mut current_lines = target_lines;
+    // walk backwards through commit history, handling all parents (for merges)
+    use std::collections::VecDeque;
+    let mut queue: VecDeque<(SHA1, Commit, Vec<String>)> = VecDeque::new();
+    queue.push_back((commit_id, commit_obj, target_lines));
 
-    loop {
-        // checking if this commit has a parent
-        let parent_id = match current_commit.parent_commit_ids.first() {
-            Some(id) => id,
-            None => {
-                break; // no more parents, we're done
-            }
-        };
+    while let Some((current_id, current_commit, current_lines)) = queue.pop_front() {
+        // if no lines are blamed to the current commit, stop traversing this branch
+        if !blame_lines.iter().any(|b| b.commit_id == current_id) {
+            continue;
+        }
 
-        // the parent commit
-        let parent_commit = match load_object::<Commit>(parent_id) {
-            Ok(obj) => obj,
-            Err(_) => {
-                break;
-            }
-        };
+        for parent_id in &current_commit.parent_commit_ids {
+            let parent_commit = match load_object::<Commit>(parent_id) {
+                Ok(obj) => obj,
+                Err(_) => continue,
+            };
 
-        // getting the file in the parent commit
-        let parent_lines = match get_file_lines(&parent_commit, &args.file) {
-            Ok(lines) => {
-                if lines.is_empty() {
-                    break;
+            let parent_lines = match get_file_lines(&parent_commit, &args.file) {
+                Ok(lines) => {
+                    if lines.is_empty() {
+                        continue;
+                    }
+                    lines
                 }
-                lines
-            }
-            Err(_) => {
-                break; // file was created in current commit
-            }
-        };
+                Err(_) => continue, // file was created in current commit
+            };
 
-        // compute diff operations between parent and current
-        let operations = compute_diff(&parent_lines, &current_lines);
+            // compute diff operations between parent and current
+            let operations = compute_diff(&parent_lines, &current_lines);
 
-        for op in operations {
-            use git_internal::diff::DiffOperation;
-            match op {
-                // line was inserted in current commit - blame the current commit
-                DiffOperation::Insert { line: _, .. } => {
-                    // This line was added in current_commit, so it's already blamed correctly
-                }
-
-                // line unchanged - it came from parent, update blame
-                DiffOperation::Equal { old_line, new_line } => {
-                    // get the content from the final file (blame_lines)
-                    let final_content = blame_lines.get(new_line - 1).map(|b| &b.content);
-                    let parent_content = parent_lines.get(old_line - 1);
-
-                    // only update if the final file content matches parent content
-                    if final_content == parent_content && final_content.is_some() {
-                        // content matches, line came from parent
-                        if let Some(blame) = blame_lines.get_mut(new_line - 1) {
-                            blame.commit_id = parent_id.clone();
-                            blame.author = parent_commit.author.name.clone();
-                            blame.date = parent_commit.author.timestamp.to_string();
+            for op in operations {
+                use git_internal::diff::DiffOperation;
+                match op {
+                    DiffOperation::Insert { .. } => {}
+                    DiffOperation::Equal { old_line, new_line } => {
+                        let final_idx = new_line - 1;
+                        if let Some(blame) = blame_lines.get_mut(final_idx) {
+                            // move blame if it currently belongs to the current commit
+                            if blame.commit_id == current_id {
+                                let parent_content = parent_lines.get(old_line - 1);
+                                if Some(&blame.content) == parent_content {
+                                    blame.commit_id = *parent_id;
+                                    blame.author = parent_commit.author.name.clone();
+                                    blame.date = parent_commit.author.timestamp.to_string();
+                                }
+                            }
                         }
                     }
-                }
-                // line was deleted - doesn't exist in final file, ignore
-                DiffOperation::Delete { .. } => {
-                    // deleted lines don't appear in the final file
+                    DiffOperation::Delete { .. } => {}
                 }
             }
+            queue.push_back((*parent_id, parent_commit, parent_lines));
         }
-        // move to parent for next iteration
-        current_commit = parent_commit;
-        current_lines = parent_lines;
     }
 
     // line range if specified
@@ -207,20 +190,28 @@ pub async fn execute(args: BlameArgs) {
 
     #[cfg(unix)]
     {
-        let mut child = Command::new("less")
+        match Command::new("less")
             .arg("-R") // Allow ANSI colors
             .arg("-F") // Quit if output fits on one screen
             .stdin(Stdio::piped())
             .spawn()
-            .expect("Failed to spawn less");
-
-        if let Some(stdin) = child.stdin.as_mut() {
-            stdin
-                .write_all(output.as_bytes())
-                .expect("Failed to write to less");
+        {
+            Ok(mut child) => {
+                let write_result = if let Some(stdin) = child.stdin.as_mut() {
+                    stdin.write_all(output.as_bytes())
+                } else {
+                    Ok(())
+                };
+                if write_result.is_err() || child.wait().is_err() {
+                    // If writing to less or waiting for less fails, fallback to printing
+                    print!("{}", output);
+                }
+            }
+            Err(_) => {
+                // If spawning less fails, fallback to printing
+                print!("{}", output);
+            }
         }
-
-        child.wait().expect("Failed to wait for less");
     }
 
     #[cfg(not(unix))]

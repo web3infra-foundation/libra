@@ -185,7 +185,7 @@ pub async fn execute(args: DiffArgs) {
             }
             #[cfg(not(unix))]
             {
-                io::stdout().write_all(output.join("").as_bytes()).unwrap();
+                io::stdout().write_all(output.as_bytes()).unwrap();
             }
         }
     }
@@ -318,6 +318,28 @@ mod test {
             ]);
             assert!(args.is_err());
             assert!(args.err().unwrap().kind() == clap::error::ErrorKind::MissingRequiredArgument);
+        }
+        #[ignore]
+        {
+            // --algorithm arg
+            let args = DiffArgs::try_parse_from([
+                "diff",
+                "--old",
+                "old",
+                "--new",
+                "new",
+                "--algorithm",
+                "myers",
+                "target paths",
+            ])
+            .unwrap();
+            assert_eq!(args.algorithm, Some("myers".to_string()));
+        }
+        #[ignore]
+        {
+            // --algorithm arg with default value
+            let args = DiffArgs::try_parse_from(["diff", "--old", "old", "target paths"]).unwrap();
+            assert_eq!(args.algorithm, Some("histogram".to_string()));
         }
     }
 

@@ -25,16 +25,10 @@ rust_library(
     edition = "2021",
     features = [
         "alloc",
-        "critical-section",
         "default",
-        "portable-atomic",
         "race",
         "std",
     ],
     rustc_flags = ["@$(location :once_cell-manifest[env_flags])"],
     visibility = ["PUBLIC"],
-    deps = [
-        "//third-party/rust/crates/critical-section/1.2.0:critical-section",
-        "//third-party/rust/crates/portable-atomic/1.11.1:portable-atomic",
-    ],
 )

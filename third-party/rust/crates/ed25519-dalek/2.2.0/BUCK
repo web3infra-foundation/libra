@@ -25,7 +25,10 @@ rust_library(
     edition = "2021",
     features = [
         "alloc",
+        "default",
         "fast",
+        "pkcs8",
+        "rand_core",
         "std",
         "zeroize",
     ],
@@ -34,9 +37,10 @@ rust_library(
     deps = [
         "//third-party/rust/crates/curve25519-dalek/4.1.3:curve25519-dalek",
         "//third-party/rust/crates/ed25519/2.2.3:ed25519",
-        "//third-party/rust/crates/serde/1.0.225:serde",
+        "//third-party/rust/crates/rand_core/0.6.4:rand_core",
+        "//third-party/rust/crates/serde/1.0.228:serde",
         "//third-party/rust/crates/sha2/0.10.9:sha2",
         "//third-party/rust/crates/subtle/2.6.1:subtle",
-        "//third-party/rust/crates/zeroize/1.8.1:zeroize",
+        "//third-party/rust/crates/zeroize/1.8.2:zeroize",
     ],
 )

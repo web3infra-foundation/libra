@@ -42,9 +42,9 @@ rust_library(
     rustc_flags = ["@$(location :sea-query-binder-manifest[env_flags])"],
     visibility = ["PUBLIC"],
     deps = [
-        "//third-party/rust/crates/bigdecimal/0.4.8:bigdecimal",
+        "//third-party/rust/crates/bigdecimal/0.4.9:bigdecimal",
         "//third-party/rust/crates/chrono/0.4.42:chrono",
-        "//third-party/rust/crates/rust_decimal/1.38.0:rust_decimal",
+        "//third-party/rust/crates/rust_decimal/1.39.0:rust_decimal",
         "//third-party/rust/crates/sea-query/0.32.7:sea-query",
         "//third-party/rust/crates/serde_json/1.0.145:serde_json",
         "//third-party/rust/crates/sqlx/0.8.6:sqlx",
