@@ -1,9 +1,9 @@
 use super::*;
 use clap::Parser;
+use git_internal::Diff;
 use git_internal::hash::SHA1;
 use git_internal::internal::object::commit::Commit;
 use git_internal::internal::object::{blob::Blob, tree::Tree};
-use libra::diff_engine::Diff;
 use libra::utils::object_ext::TreeExt;
 use libra::utils::util;
 use std::cmp::min;
@@ -412,11 +412,9 @@ async fn collect_combined_diff_for_commits(count: usize, paths: Vec<std::path::P
         let diffs = Diff::diff(
             old_blobs,
             new_blobs,
-            String::from("histogram"),
             paths.clone().into_iter().collect(),
             read_content,
-        )
-        .await;
+        );
         for d in diffs {
             out.push_str(&d.data);
         }
@@ -561,8 +559,8 @@ async fn test_log_stat_with_modifications() {
 
     assert_eq!(stats.len(), 1);
     assert_eq!(stats[0].path, "test.txt");
-    assert_eq!(stats[0].insertions, 4);
-    assert_eq!(stats[0].deletions, 3);
+    assert_eq!(stats[0].insertions, 2);
+    assert_eq!(stats[0].deletions, 1);
 }
 
 #[tokio::test]

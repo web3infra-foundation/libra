@@ -12,7 +12,7 @@ use std::path::PathBuf;
 #[cfg(unix)]
 use std::process::{Command, Stdio};
 
-use crate::diff_engine::Diff;
+use git_internal::Diff;
 use git_internal::hash::SHA1;
 use git_internal::internal::object::{blob::Blob, commit::Commit, tree::Tree};
 use std::collections::VecDeque;
@@ -509,11 +509,9 @@ pub async fn compute_commit_stat(commit: &Commit, paths: Vec<PathBuf>) -> Vec<Fi
     let diffs = Diff::diff(
         old_blobs,
         new_blobs,
-        String::from("histogram"),
         paths.into_iter().collect(),
         read_content,
-    )
-    .await;
+    );
 
     let mut stats = Vec::new();
     for diff_item in diffs {
@@ -764,11 +762,9 @@ pub(crate) async fn generate_diff(commit: &Commit, paths: Vec<PathBuf>) -> Strin
     let diffs = Diff::diff(
         old_blobs,
         new_blobs,
-        String::from("histogram"),
         paths.into_iter().collect(),
         read_content,
-    )
-    .await;
+    );
     let mut out = String::new();
     for d in diffs {
         out.push_str(&d.data);

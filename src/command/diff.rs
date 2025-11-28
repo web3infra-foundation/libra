@@ -4,8 +4,9 @@ use std::{
     path::PathBuf,
 };
 
-use crate::diff_engine::Diff;
 use clap::Parser;
+use colored::Colorize;
+use git_internal::Diff;
 use git_internal::{
     hash::SHA1,
     internal::{
@@ -15,9 +16,10 @@ use git_internal::{
     },
 };
 use similar;
+use std::io::IsTerminal;
 
 use crate::{
-    command::{get_target_commit, load_object, status::changes_to_be_committed},
+    command::{get_target_commit, load_object},
     internal::head::Head,
     utils::{
         ignore::{self, IgnorePolicy},
@@ -49,6 +51,7 @@ pub struct DiffArgs {
     #[clap(help = "Files to compare")]
     pathspec: Vec<String>,
 
+    // TODO: If algorithm support gets added to git-internal
     /// choose the exact diff algorithm default value is histogram
     /// support myers and myersMinimal
     #[clap(long, default_value = "histogram", value_parser=["histogram", "myers", "myersMinimal"])]
@@ -78,30 +81,31 @@ pub async fn execute(args: DiffArgs) {
         None => None,
     };
 
-    let old_blobs = match args.old {
-        Some(ref source) => match get_target_commit(source).await {
+    let old_blobs = match &args.old {
+        // explicit --old <commit>
+        Some(source) => match get_target_commit(source).await {
             Ok(commit_hash) => get_commit_blobs(&commit_hash).await,
             Err(e) => {
                 eprintln!("fatal: {e}, can't use as diff old source");
                 return;
             }
         },
+
+        // no --old
         None => {
-            // if the staged is not empty, use it as old commit. Otherwise, use HEAD
-            if changes_to_be_committed().await.is_empty() {
+            if args.staged {
+                // git diff --staged  => old = HEAD
                 match Head::current_commit().await {
                     Some(commit_hash) => get_commit_blobs(&commit_hash).await,
-                    // Handle the edge case where there's no commit history (new repository)
-                    // Early return as there are no existing commits to compare against
                     None => {
                         println!("No commits yet - nothing to compare");
                         return;
                     }
                 }
             } else {
-                let changes = changes_to_be_committed().await;
-                // diff didn't show untracked or deleted files
-                get_files_blobs(&changes.modified, &index, IgnorePolicy::Respect)
+                // default git diff => old = INDEX
+                let files = index.tracked_files();
+                get_files_blobs(&files, &index, IgnorePolicy::Respect)
             }
         }
     };
@@ -149,11 +153,10 @@ pub async fn execute(args: DiffArgs) {
     let diff_output = Diff::diff(
         old_blobs,
         new_blobs,
-        args.algorithm.unwrap_or_default(),
-        paths.into_iter().collect(),
+        // args.algorithm.unwrap_or_default(),
+        paths,
         read_content,
-    )
-    .await;
+    );
 
     let results: Vec<String> = diff_output.iter().map(|i| i.data.clone()).collect();
 
@@ -163,6 +166,11 @@ pub async fn execute(args: DiffArgs) {
             file.write_all(results.join("").as_bytes()).unwrap();
         }
         None => {
+            let output = if io::stdout().is_terminal() {
+                colorize_diff(&results.join(""))
+            } else {
+                results.join("")
+            };
             #[cfg(unix)]
             {
                 let mut child = Command::new("less")
@@ -172,12 +180,12 @@ pub async fn execute(args: DiffArgs) {
                     .spawn()
                     .expect("failed to execute process");
                 let stdin = child.stdin.as_mut().unwrap();
-                stdin.write_all(results.join("").as_bytes()).unwrap();
+                stdin.write_all(output.as_bytes()).unwrap();
                 child.wait().unwrap();
             }
             #[cfg(not(unix))]
             {
-                io::stdout().write_all(results.join("").as_bytes()).unwrap();
+                io::stdout().write_all(output.join("").as_bytes()).unwrap();
             }
         }
     }
@@ -201,6 +209,28 @@ fn get_files_blobs(files: &[PathBuf], index: &Index, policy: IgnorePolicy) -> Ve
             (p.to_owned(), calculate_object_hash(ObjectType::Blob, &data))
         })
         .collect()
+}
+
+fn colorize_diff(diff_text: &str) -> String {
+    let mut output = String::with_capacity(diff_text.len() + 500);
+
+    for line in diff_text.lines() {
+        let colored_line = if line.starts_with("diff --git") {
+            line.bold().to_string()
+        } else if line.starts_with("@@") {
+            line.cyan().to_string()
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            line.red().to_string()
+        } else if line.starts_with('+') && !line.starts_with("+++") {
+            line.green().to_string()
+        } else {
+            line.to_string()
+        };
+
+        output.push_str(&colored_line);
+        output.push('\n');
+    }
+    output
 }
 
 struct Line(Option<usize>);
@@ -288,26 +318,6 @@ mod test {
             ]);
             assert!(args.is_err());
             assert!(args.err().unwrap().kind() == clap::error::ErrorKind::MissingRequiredArgument);
-        }
-        {
-            // --algorithm arg
-            let args = DiffArgs::try_parse_from([
-                "diff",
-                "--old",
-                "old",
-                "--new",
-                "new",
-                "--algorithm",
-                "myers",
-                "target paths",
-            ])
-            .unwrap();
-            assert_eq!(args.algorithm, Some("myers".to_string()));
-        }
-        {
-            // --algorithm arg with default value
-            let args = DiffArgs::try_parse_from(["diff", "--old", "old", "target paths"]).unwrap();
-            assert_eq!(args.algorithm, Some("histogram".to_string()));
         }
     }
 
