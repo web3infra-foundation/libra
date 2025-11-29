@@ -74,8 +74,10 @@ enum Commands {
     Fetch(command::fetch::FetchArgs),
     #[command(about = "Fetch from and integrate with another repository or a local branch")]
     Pull(command::pull::PullArgs),
-    #[command(about = "Show different between files")]
+    #[command(about = "Show differences between files")]
     Diff(command::diff::DiffArgs),
+    #[command(about = "Show author and history of each line of a file")]
+    Blame(command::blame::BlameArgs),
     #[command(about = "Revert some existing commits")]
     Revert(command::revert::RevertArgs),
     #[command(subcommand, about = "Manage set of tracked repositories")]
@@ -172,6 +174,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> Result<(), GitError> {
         Commands::IndexPack(args) => command::index_pack::execute(args),
         Commands::Fetch(args) => command::fetch::execute(args).await,
         Commands::Diff(args) => command::diff::execute(args).await,
+        Commands::Blame(args) => command::blame::execute(args).await,
         Commands::Revert(args) => command::revert::execute(args).await,
         Commands::Remote(cmd) => command::remote::execute(cmd).await,
         Commands::Pull(args) => command::pull::execute(args).await,

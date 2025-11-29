@@ -8,7 +8,10 @@ use clap::Parser;
 use sha1::{Digest, Sha1};
 
 use git_internal::errors::GitError;
+use git_internal::hash::SHA1;
+use git_internal::internal::metadata::{EntryMeta, MetaAttached};
 use git_internal::internal::pack::Pack;
+use git_internal::internal::pack::entry::Entry;
 
 #[derive(Parser, Debug)]
 pub struct IndexPackArgs {
@@ -70,9 +73,16 @@ pub fn build_index_v1(pack_file: &str, index_file: &str) -> Result<(), GitError>
         Some(tmp_path.to_path_buf()),
         true,
     );
-    pack.decode(&mut pack_reader, move |entry, offset| {
-        obj_map_c.lock().unwrap().insert(entry.hash, offset);
-    })?;
+    pack.decode(
+        &mut pack_reader,
+        move |meta_entry: MetaAttached<Entry, EntryMeta>| {
+            let entry = &meta_entry.inner;
+            let hash_key = entry.hash;
+            let offset = meta_entry.meta.pack_offset.unwrap();
+            obj_map_c.lock().unwrap().insert(hash_key, offset);
+        },
+        None::<fn(SHA1)>,
+    )?;
 
     let mut index_hash = Sha1::new();
     let mut index_file = std::fs::File::create(index_file)?;

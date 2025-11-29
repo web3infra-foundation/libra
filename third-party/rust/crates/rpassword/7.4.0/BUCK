@@ -26,7 +26,7 @@ rust_library(
     rustc_flags = ["@$(location :rpassword-manifest[env_flags])"],
     visibility = ["PUBLIC"],
     deps = [
-        "//third-party/rust/crates/libc/0.2.175:libc",
+        "//third-party/rust/crates/libc/0.2.177:libc",
         "//third-party/rust/crates/rtoolbox/0.0.3:rtoolbox",
     ],
 )

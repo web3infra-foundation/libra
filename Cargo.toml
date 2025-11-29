@@ -7,7 +7,7 @@ edition = "2024"
 default = []
 
 [dependencies]
-git-internal = "0.1.0"
+git-internal = "0.2.2"
 anyhow = "1.0.100"
 byte-unit = "5.2.0"
 byteorder = "1.5.0"
@@ -27,7 +27,7 @@ lru-mem = "0.3.0"
 once_cell = "1.21.3"
 regex = "1.12.2"
 reqwest = { version = "0.12.24", features = [
-    "stream", 
+    "stream",
     "json"
 ]}
 ring = "0.17.14"
@@ -44,9 +44,9 @@ sha1 = "0.10.6"
 similar = "2.7.0"
 thiserror = "2.0.17"
 tokio = { version = "1.48.0", features = [
-    "rt-multi-thread", 
-    "rt", 
-    "macros", 
+    "rt-multi-thread",
+    "rt",
+    "macros",
     "process"
 ]}
 tokio-util = { version = "0.7.17", features = ["io"] }
@@ -67,9 +67,9 @@ pager = "0.16.1"
 tempfile = "3.23.0"
 serial_test = "3.2.0"
 tokio = { version = "1.48.0", features = [
-    "rt-multi-thread", 
-    "rt", 
-    "macros", 
+    "rt-multi-thread",
+    "rt",
+    "macros",
     "process"
 ]}
 testcontainers = { version = "0.25.2", features = [

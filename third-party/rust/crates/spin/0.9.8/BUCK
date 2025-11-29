@@ -36,7 +36,7 @@ rust_library(
     ],
     rustc_flags = ["@$(location :spin-manifest[env_flags])"],
     named_deps = {
-        "lock_api_crate": "//third-party/rust/crates/lock_api/0.4.13:lock_api",
+        "lock_api_crate": "//third-party/rust/crates/lock_api/0.4.14:lock_api",
     },
     visibility = ["PUBLIC"],
 )

@@ -23,10 +23,7 @@ rust_library(
     crate = "rand_chacha",
     crate_root = "vendor/src/lib.rs",
     edition = "2021",
-    features = [
-        "default",
-        "std",
-    ],
+    features = ["std"],
     rustc_flags = ["@$(location :rand_chacha-manifest[env_flags])"],
     visibility = ["PUBLIC"],
     deps = [

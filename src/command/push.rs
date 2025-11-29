@@ -14,6 +14,7 @@ use bytes::BytesMut;
 use clap::Parser;
 use colored::Colorize;
 use git_internal::hash::SHA1;
+use git_internal::internal::metadata::{EntryMeta, MetaAttached};
 use git_internal::internal::object::blob::Blob;
 use git_internal::internal::object::commit::Commit;
 use git_internal::internal::object::tree::{Tree, TreeItemMode};
@@ -166,16 +167,22 @@ pub async fn execute(args: PushArgs) {
         }
     }
 
-    // let (tx, rx) = mpsc::channel::<Entry>();
-    let (entry_tx, entry_rx) = mpsc::channel(1_000_000);
+    let (entry_tx, entry_rx) = mpsc::channel::<MetaAttached<Entry, EntryMeta>>(1_000_000);
     let (stream_tx, mut stream_rx) = mpsc::channel(1_000_000);
 
     let encoder = PackEncoder::new(objs.len(), 0, stream_tx); // TODO: diff slow, so window_size = 0
     encoder.encode_async(entry_rx).await.unwrap();
 
-    for entry in objs {
+    for obj in objs.iter().cloned() {
         // TODO progress bar
-        entry_tx.send(entry).await.unwrap();
+        let meta_entry = MetaAttached {
+            inner: obj,
+            meta: EntryMeta::default(),
+        };
+        if let Err(e) = entry_tx.send(meta_entry).await {
+            tracing::error!("fatal: failed to send entry: {}", e);
+            return;
+        }
     }
     drop(entry_tx);
 

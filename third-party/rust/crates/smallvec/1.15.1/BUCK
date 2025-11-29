@@ -27,9 +27,8 @@ rust_library(
         "const_generics",
         "const_new",
         "serde",
-        "write",
     ],
     rustc_flags = ["@$(location :smallvec-manifest[env_flags])"],
     visibility = ["PUBLIC"],
-    deps = ["//third-party/rust/crates/serde/1.0.225:serde"],
+    deps = ["//third-party/rust/crates/serde/1.0.228:serde"],
 )
