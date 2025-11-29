@@ -36,8 +36,8 @@ rust_library(
     ],
     visibility = ["PUBLIC"],
     deps = [
-        "//third-party/rust/crates/typenum/1.18.0:typenum",
-        "//third-party/rust/crates/zeroize/1.8.1:zeroize",
+        "//third-party/rust/crates/typenum/1.19.0:typenum",
+        "//third-party/rust/crates/zeroize/1.8.2:zeroize",
     ],
 )
 

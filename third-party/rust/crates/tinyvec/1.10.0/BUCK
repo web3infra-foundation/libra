@@ -26,8 +26,6 @@ rust_library(
     features = [
         "alloc",
         "default",
-        "grab_spare_slice",
-        "std",
         "tinyvec_macros",
     ],
     rustc_flags = ["@$(location :tinyvec-manifest[env_flags])"],

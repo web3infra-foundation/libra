@@ -27,8 +27,6 @@ rust_library(
         "OSX_10_10",
         "OSX_10_11",
         "OSX_10_12",
-        "OSX_10_13",
-        "OSX_10_14",
         "OSX_10_9",
         "default",
     ],
@@ -36,6 +34,6 @@ rust_library(
     visibility = ["PUBLIC"],
     deps = [
         "//third-party/rust/crates/core-foundation-sys/0.8.7:core-foundation-sys",
-        "//third-party/rust/crates/libc/0.2.175:libc",
+        "//third-party/rust/crates/libc/0.2.177:libc",
     ],
 )

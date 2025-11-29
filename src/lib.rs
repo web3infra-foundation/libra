@@ -3,7 +3,6 @@ use git_internal::errors::GitError;
 pub mod cli;
 pub mod command;
 pub mod common_utils;
-pub mod diff_engine;
 pub mod git_protocol;
 pub mod internal;
 pub mod lfs_structs;

@@ -23,6 +23,7 @@ rust_library(
     crate = "block_padding",
     crate_root = "vendor/src/lib.rs",
     edition = "2021",
+    features = ["std"],
     rustc_flags = ["@$(location :block-padding-manifest[env_flags])"],
     visibility = ["PUBLIC"],
     deps = ["//third-party/rust/crates/generic-array/0.14.7:generic-array"],

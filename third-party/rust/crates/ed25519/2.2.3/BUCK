@@ -25,6 +25,7 @@ rust_library(
     edition = "2021",
     features = [
         "alloc",
+        "pkcs8",
         "std",
     ],
     rustc_flags = ["@$(location :ed25519-manifest[env_flags])"],
