@@ -1,4 +1,4 @@
-use git_internal::hash::SHA1;
+use git_internal::hash::ObjectHash;
 use git_internal::internal::object::commit::Commit;
 use git_internal::internal::object::tree::Tree;
 use libra::command::branch::BranchArgs;
@@ -27,6 +27,7 @@ use serial_test::serial;
 use std::path::Path;
 use tempfile::tempdir;
 mod add_test;
+mod blame_test;
 mod branch_test;
 mod checkout_test;
 mod cherry_pick_test;

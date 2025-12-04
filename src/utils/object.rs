@@ -1,11 +1,11 @@
 use flate2::read::ZlibDecoder;
 use git_internal::errors::GitError;
-use git_internal::hash::SHA1;
+use git_internal::hash::ObjectHash;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
 /// Helper function to read and decompress a git object from the object database.
-pub fn read_git_object(git_dir: &Path, hash: &SHA1) -> Result<Vec<u8>, GitError> {
+pub fn read_git_object(git_dir: &Path, hash: &ObjectHash) -> Result<Vec<u8>, GitError> {
     let hash_str = hash.to_string();
     let object_path = git_dir
         .join("objects")
@@ -29,11 +29,15 @@ pub fn read_git_object(git_dir: &Path, hash: &SHA1) -> Result<Vec<u8>, GitError>
 }
 
 /// Helper function to write a git object to the object database.
-pub fn write_git_object(git_dir: &Path, object_type: &str, data: &[u8]) -> Result<SHA1, GitError> {
+pub fn write_git_object(
+    git_dir: &Path,
+    object_type: &str,
+    data: &[u8],
+) -> Result<ObjectHash, GitError> {
     let header = format!("{} {}\0", object_type, data.len());
     let mut content = header.into_bytes();
     content.extend_from_slice(data);
-    let hash = SHA1::new(&content);
+    let hash = ObjectHash::new(&content);
     let hash_str = hash.to_string();
 
     let object_path = git_dir

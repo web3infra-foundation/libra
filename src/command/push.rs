@@ -8,12 +8,12 @@ use crate::internal::head::Head;
 use crate::internal::protocol::ProtocolClient;
 use crate::internal::protocol::https_client::HttpsClient;
 use crate::internal::protocol::lfs_client::LFSClient;
-use crate::internal::reflog::{Reflog, ReflogAction, ReflogContext, ReflogError, zero_sha1};
+use crate::internal::reflog::{Reflog, ReflogAction, ReflogContext, ReflogError};
 use crate::utils::object_ext::{BlobExt, CommitExt, TreeExt};
 use bytes::BytesMut;
 use clap::Parser;
 use colored::Colorize;
-use git_internal::hash::SHA1;
+use git_internal::hash::{ObjectHash, get_hash_kind};
 use git_internal::internal::metadata::{EntryMeta, MetaAttached};
 use git_internal::internal::object::blob::Blob;
 use git_internal::internal::object::commit::Commit;
@@ -104,16 +104,16 @@ pub async fn execute(args: PushArgs) {
     // [0; 20] if new branch
     let remote_hash = tracked_ref
         .map(|r| r._hash.clone())
-        .unwrap_or(SHA1::default().to_string());
+        .unwrap_or(ObjectHash::default().to_string());
     if remote_hash == commit_hash {
         println!("Everything up-to-date");
         return;
     }
 
     // Check if remote is ancestor of local (for fast-forward check)
-    let remote_sha1 = SHA1::from_str(&remote_hash).unwrap();
-    let local_sha1 = SHA1::from_str(&commit_hash).unwrap();
-    let can_fast_forward = if remote_sha1 == SHA1::default() {
+    let remote_sha1 = ObjectHash::from_str(&remote_hash).unwrap();
+    let local_sha1 = ObjectHash::from_str(&commit_hash).unwrap();
+    let can_fast_forward = if remote_sha1 == ObjectHash::default() {
         true // New branch, always fast-forwardable
     } else {
         is_ancestor(&remote_sha1, &local_sha1)
@@ -153,8 +153,8 @@ pub async fn execute(args: PushArgs) {
 
     // TODO 考虑remote有多个refs，可以少发一点commits
     let objs = incremental_objs(
-        SHA1::from_str(&commit_hash).unwrap(),
-        SHA1::from_str(&remote_hash).unwrap(),
+        ObjectHash::from_str(&commit_hash).unwrap(),
+        ObjectHash::from_str(&remote_hash).unwrap(),
     );
 
     {
@@ -225,7 +225,9 @@ pub async fn execute(args: PushArgs) {
                 // Get the old OID before updating
                 let old_oid = Branch::find_branch_with_conn(txn, &remote_tracking_branch, None)
                     .await
-                    .map_or(zero_sha1().to_string(), |b| b.commit.to_string());
+                    .map_or(ObjectHash::zero_str(get_hash_kind()).to_string(), |b| {
+                        b.commit.to_string()
+                    });
 
                 // Update the branch
                 Branch::update_branch_with_conn(txn, &remote_tracking_branch, &commit_hash, None)
@@ -254,8 +256,8 @@ pub async fn execute(args: PushArgs) {
 }
 
 /// collect all commits from `commit_id` to root commit
-fn collect_history_commits(commit_id: &SHA1) -> HashSet<SHA1> {
-    if commit_id == &SHA1::default() {
+fn collect_history_commits(commit_id: &ObjectHash) -> HashSet<ObjectHash> {
+    if commit_id == &ObjectHash::default() {
         // 0000...0000 means not exist
         return HashSet::new();
     }
@@ -279,11 +281,11 @@ fn collect_history_commits(commit_id: &SHA1) -> HashSet<SHA1> {
     commits
 }
 
-fn incremental_objs(local_ref: SHA1, remote_ref: SHA1) -> HashSet<Entry> {
+fn incremental_objs(local_ref: ObjectHash, remote_ref: ObjectHash) -> HashSet<Entry> {
     tracing::debug!("local_ref: {}, remote_ref: {}", local_ref, remote_ref);
 
     // just fast-forward optimization
-    if remote_ref != SHA1::default() {
+    if remote_ref != ObjectHash::default() {
         // remote exists
         let mut commit = match Commit::try_load(&local_ref) {
             Some(c) => c,
@@ -402,7 +404,7 @@ fn incremental_objs(local_ref: SHA1, remote_ref: SHA1) -> HashSet<Entry> {
 /// or if `ancestor` and `descendant` are the same commit. Returns `false` otherwise.
 ///
 /// If a commit cannot be loaded (missing or corrupt), that path is skipped and the search continues.
-fn is_ancestor(ancestor: &SHA1, descendant: &SHA1) -> bool {
+fn is_ancestor(ancestor: &ObjectHash, descendant: &ObjectHash) -> bool {
     if ancestor == descendant {
         return true;
     }
@@ -440,7 +442,7 @@ fn is_ancestor(ancestor: &SHA1, descendant: &SHA1) -> bool {
 
 /// calc objects that in `new_tree` but not in `old_tree`
 /// - if `old_tree` is None, return all objects in `new_tree` (include tree itself)
-fn diff_tree_objs(old_tree: Option<&SHA1>, new_tree: &SHA1) -> HashSet<Entry> {
+fn diff_tree_objs(old_tree: Option<&ObjectHash>, new_tree: &ObjectHash) -> HashSet<Entry> {
     // TODO: skip objs that has been added in caller
     let mut objs = HashSet::new();
     if let Some(old_tree) = old_tree
@@ -488,7 +490,7 @@ fn diff_tree_objs(old_tree: Option<&SHA1>, new_tree: &SHA1) -> HashSet<Entry> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use git_internal::hash::SHA1;
+    use git_internal::hash::ObjectHash;
     use std::str::FromStr;
 
     #[test]
@@ -557,7 +559,7 @@ mod test {
     /// Verifies correct behavior for same commit, direct parent, multiple generations, and divergent branches.
     fn test_is_ancestor() {
         // Test same commit - should return true
-        let commit_id = SHA1::from_str("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0").unwrap();
+        let commit_id = ObjectHash::from_str("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0").unwrap();
         assert!(is_ancestor(&commit_id, &commit_id));
 
         // Note: Additional tests would require creating actual commit objects in the test environment

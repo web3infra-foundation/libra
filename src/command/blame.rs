@@ -7,7 +7,7 @@ use crate::{
 use chrono::DateTime;
 use clap::Parser;
 use git_internal::diff::compute_diff;
-use git_internal::hash::SHA1;
+use git_internal::hash::ObjectHash;
 use git_internal::internal::object::{blob::Blob, commit::Commit, tree::Tree};
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -29,7 +29,7 @@ pub struct BlameArgs {
 
 struct LineBlame {
     line_number: usize,
-    commit_id: SHA1,
+    commit_id: ObjectHash,
     author: String,
     date: String,
     content: String,
@@ -86,7 +86,7 @@ pub async fn execute(args: BlameArgs) {
 
     // walk backwards through commit history, handling all parents (for merges)
     use std::collections::VecDeque;
-    let mut queue: VecDeque<(SHA1, Commit, Vec<String>)> = VecDeque::new();
+    let mut queue: VecDeque<(ObjectHash, Commit, Vec<String>)> = VecDeque::new();
     queue.push_back((commit_id, commit_obj, target_lines));
 
     while let Some((current_id, current_commit, current_lines)) = queue.pop_front() {

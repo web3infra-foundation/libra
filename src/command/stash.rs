@@ -8,7 +8,7 @@ use crate::utils::object_ext::TreeExt;
 use crate::utils::{object, tree, util};
 use colored::Colorize;
 use git_internal::errors::GitError;
-use git_internal::hash::SHA1;
+use git_internal::hash::ObjectHash;
 use git_internal::internal::index::{Index, Time};
 use git_internal::internal::object::ObjectTrait;
 use git_internal::internal::object::commit::Commit;
@@ -184,7 +184,7 @@ async fn apply(stash: Option<String>) -> Result<(), String> {
 /// Returns true on success, false on failure.
 async fn do_apply(stash: Option<String>) -> Result<(), String> {
     let (index, hash_str) = resolve_stash_to_commit_hash(stash)?;
-    let stash_commit_hash = SHA1::from_str(&hash_str).map_err(|e| e.to_string())?;
+    let stash_commit_hash = ObjectHash::from_str(&hash_str).map_err(|e| e.to_string())?;
     let git_dir = util::try_get_storage_path(None).map_err(|e| e.to_string())?;
 
     println!("Applying stash@{{{}}}...", index);
@@ -353,7 +353,7 @@ async fn has_changes() -> bool {
         }
         None => {
             // No HEAD commit yet (empty repository). Compare against the empty tree.
-            SHA1::from_str("4b825dc642cb6eb9a060e54bf8d69288fbee4904").unwrap()
+            ObjectHash::from_str("4b825dc642cb6eb9a060e54bf8d69288fbee4904").unwrap()
         }
     };
 
@@ -393,7 +393,7 @@ async fn has_changes() -> bool {
             let header = format!("blob {}\0", content.len());
             let mut full_content = header.into_bytes();
             full_content.extend_from_slice(&content);
-            let current_hash = SHA1::new(&full_content);
+            let current_hash = ObjectHash::new(&full_content);
 
             if current_hash != entry.hash {
                 return true; // Content is different, definitely modified.
@@ -464,7 +464,7 @@ fn resolve_stash_to_commit_hash(stash_ref: Option<String>) -> Result<(usize, Str
 /// Updates the stash ref and its reflog.
 fn update_stash_ref(
     git_dir: &Path,
-    stash_hash: &SHA1,
+    stash_hash: &ObjectHash,
     committer: &Signature,
     message: &str,
 ) -> Result<(), GitError> {
@@ -474,10 +474,10 @@ fn update_stash_ref(
     // 1. Get old hash from refs/stash
     let old_hash = if stash_ref_path.exists() {
         let content = fs::read_to_string(&stash_ref_path)?;
-        SHA1::from_str(content.trim())
+        ObjectHash::from_str(content.trim())
             .map_err(|_| GitError::InvalidHashValue(content.trim().to_string()))?
     } else {
-        SHA1::default() // Null hash
+        ObjectHash::default() // Null hash
     };
 
     // 2. Write new hash to refs/stash
@@ -516,7 +516,7 @@ fn update_stash_ref(
     Ok(())
 }
 
-async fn perform_hard_reset(target_commit_id: &SHA1) -> Result<(), String> {
+async fn perform_hard_reset(target_commit_id: &ObjectHash) -> Result<(), String> {
     let git_dir = util::try_get_storage_path(None).map_err(|e| e.to_string())?;
     let workdir = git_dir
         .parent()

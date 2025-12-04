@@ -9,7 +9,7 @@ use crate::internal::model::reference;
 use crate::utils::client_storage::ClientStorage;
 use crate::utils::path;
 use git_internal::errors::GitError;
-use git_internal::hash::SHA1;
+use git_internal::hash::ObjectHash;
 use git_internal::internal::object::ObjectTrait;
 use git_internal::internal::object::blob::Blob;
 use git_internal::internal::object::commit::Commit;
@@ -82,7 +82,7 @@ pub async fn create(name: &str, message: Option<String>, force: bool) -> Result<
         delete(name).await?;
     }
 
-    let ref_target_id: SHA1;
+    let ref_target_id: ObjectHash;
     if let Some(msg) = message {
         // Create an annotated tag object
         let user_name = Config::get("user", None, "name")
@@ -141,8 +141,8 @@ pub async fn list() -> Result<Vec<Tag>, anyhow::Error> {
                 m.name.as_deref().unwrap_or(UNKNOWN_TAG)
             )
         })?;
-        let object_id =
-            SHA1::from_str(commit_str).map_err(|e| anyhow::anyhow!("Invalid SHA1: {}", e))?;
+        let object_id = ObjectHash::from_str(commit_str)
+            .map_err(|e| anyhow::anyhow!("Invalid ObjectHash: {}", e))?;
         let object = load_object_trait(&object_id).await?;
         let tag_name = m
             .name
@@ -194,7 +194,7 @@ pub async fn find_tag_and_commit(name: &str) -> Result<Option<(TagObject, Commit
             .commit
             .as_ref()
             .ok_or_else(|| GitError::CustomError("Tag is missing commit field".to_string()))?;
-        let target_id = SHA1::from_str(commit_str)
+        let target_id = ObjectHash::from_str(commit_str)
             .map_err(|_| GitError::InvalidHashValue(commit_str.to_string()))?;
         let ref_object = load_object_trait(&target_id).await?;
 
@@ -213,7 +213,7 @@ pub async fn find_tag_and_commit(name: &str) -> Result<Option<(TagObject, Commit
 }
 
 /// Load a Git object and return it as a `TagObject`.
-pub async fn load_object_trait(hash: &SHA1) -> Result<TagObject, GitError> {
+pub async fn load_object_trait(hash: &ObjectHash) -> Result<TagObject, GitError> {
     // Use ClientStorage to get the object type first
     let storage = ClientStorage::init(path::objects());
     let obj_type = storage

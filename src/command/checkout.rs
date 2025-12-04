@@ -1,5 +1,5 @@
 use clap::Parser;
-use git_internal::hash::SHA1;
+use git_internal::hash::ObjectHash;
 
 use crate::{
     command::restore::{self, RestoreArgs},
@@ -107,7 +107,7 @@ async fn check_and_switch_branch(branch_name: &str) {
     }
 }
 
-async fn restore_to_commit(commit_id: SHA1) {
+async fn restore_to_commit(commit_id: ObjectHash) {
     let restore_args = RestoreArgs {
         worktree: true,
         staged: true,
