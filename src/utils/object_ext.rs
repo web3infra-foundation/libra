@@ -1,5 +1,5 @@
 use colored::Colorize;
-use git_internal::hash::SHA1;
+use git_internal::hash::ObjectHash;
 use git_internal::internal::object::ObjectTrait;
 use git_internal::internal::object::blob::Blob;
 use git_internal::internal::object::commit::Commit;
@@ -11,31 +11,31 @@ use std::path::{Path, PathBuf};
 use crate::utils::{lfs, util};
 
 pub trait TreeExt {
-    fn load(hash: &SHA1) -> Tree;
-    fn get_plain_items(&self) -> Vec<(PathBuf, SHA1)>;
+    fn load(hash: &ObjectHash) -> Tree;
+    fn get_plain_items(&self) -> Vec<(PathBuf, ObjectHash)>;
 }
 
 pub trait CommitExt {
-    fn load(hash: &SHA1) -> Commit;
-    fn try_load(hash: &SHA1) -> Option<Commit>;
+    fn load(hash: &ObjectHash) -> Commit;
+    fn try_load(hash: &ObjectHash) -> Option<Commit>;
 }
 
 pub trait BlobExt {
-    fn load(hash: &SHA1) -> Blob;
+    fn load(hash: &ObjectHash) -> Blob;
     fn from_file(path: impl AsRef<Path>) -> Blob;
     fn from_lfs_file(path: impl AsRef<Path>) -> Blob;
-    fn save(&self) -> SHA1;
+    fn save(&self) -> ObjectHash;
 }
 
 impl TreeExt for Tree {
-    fn load(hash: &SHA1) -> Tree {
+    fn load(hash: &ObjectHash) -> Tree {
         let storage = util::objects_storage();
         let tree_data = storage.get(hash).unwrap();
         Tree::from_bytes(&tree_data, *hash).unwrap()
     }
 
     /// Get all the items in the tree recursively (to workdir path)
-    fn get_plain_items(&self) -> Vec<(PathBuf, SHA1)> {
+    fn get_plain_items(&self) -> Vec<(PathBuf, ObjectHash)> {
         let mut items = Vec::new();
         for item in self.tree_items.iter() {
             if item.mode != TreeItemMode::Tree {
@@ -53,7 +53,7 @@ impl TreeExt for Tree {
                     sub_entries
                         .iter()
                         .map(|(path, hash)| (PathBuf::from(item.name.clone()).join(path), *hash))
-                        .collect::<Vec<(PathBuf, SHA1)>>()
+                        .collect::<Vec<(PathBuf, ObjectHash)>>()
                         .as_mut(),
                 );
             }
@@ -63,13 +63,13 @@ impl TreeExt for Tree {
 }
 
 impl CommitExt for Commit {
-    fn load(hash: &SHA1) -> Commit {
+    fn load(hash: &ObjectHash) -> Commit {
         let storage = util::objects_storage();
         let commit_data = storage.get(hash).unwrap();
         Commit::from_bytes(&commit_data, *hash).unwrap()
     }
 
-    fn try_load(hash: &SHA1) -> Option<Commit> {
+    fn try_load(hash: &ObjectHash) -> Option<Commit> {
         let storage = util::objects_storage();
         storage
             .get(hash)
@@ -79,7 +79,7 @@ impl CommitExt for Commit {
 }
 
 impl BlobExt for Blob {
-    fn load(hash: &SHA1) -> Blob {
+    fn load(hash: &ObjectHash) -> Blob {
         let storage = util::objects_storage();
         let blob_data = storage.get(hash).unwrap();
         Blob::from_bytes(&blob_data, *hash).unwrap()
@@ -105,7 +105,7 @@ impl BlobExt for Blob {
         Blob::from_content(&pointer)
     }
 
-    fn save(&self) -> SHA1 {
+    fn save(&self) -> ObjectHash {
         let storage = util::objects_storage();
         let id = self.id;
         if !storage.exist(&id) {

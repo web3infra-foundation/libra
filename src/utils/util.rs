@@ -1,4 +1,4 @@
-use git_internal::hash::SHA1;
+use git_internal::hash::ObjectHash;
 use git_internal::internal::object::types::ObjectType;
 use indicatif::{ProgressBar, ProgressStyle};
 use path_absolutize::*;
@@ -323,14 +323,14 @@ pub fn path_to_string(path: &Path) -> String {
     path.to_string_lossy().to_string()
 }
 
-/// Resolve a string to a commit SHA1.
+/// Resolve a string to a commit ObjectHash.
 /// The string can be a branch name, a tag name, or a commit hash prefix.
 /// Order of resolution:
 /// 1. HEAD
 /// 2. Local Branch
 /// 3. Tag
 /// 4. Commit hash prefix
-pub async fn get_commit_base(name: &str) -> Result<SHA1, String> {
+pub async fn get_commit_base(name: &str) -> Result<ObjectHash, String> {
     // 1. Check for HEAD
     if name.to_uppercase() == "HEAD" {
         if let Some(commit_id) = Head::current_commit().await {

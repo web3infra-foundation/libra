@@ -6,7 +6,28 @@ use crate::command;
 use crate::utils;
 use clap::{Parser, Subcommand};
 use git_internal::errors::GitError;
+use git_internal::hash::{HashKind, set_hash_kind};
+/// Reads the repository's configuration and sets the global hash kind.
+/// This must be called for any command that operates within an existing repository.
+async fn set_local_hash_kind() -> Result<(), GitError> {
+    // Use the public API from the `config` module to get the configuration value.
+    let object_format = crate::internal::config::Config::get("core", None, "objectformat")
+        .await
+        .unwrap_or_else(|| "sha1".to_string());
 
+    let hash_kind = match object_format.as_str() {
+        "sha1" => HashKind::Sha1,
+        "sha256" => HashKind::Sha256,
+        _ => {
+            return Err(GitError::InvalidHashValue(format!(
+                "unsupported object format: '{}'",
+                object_format
+            )));
+        }
+    };
+    set_hash_kind(hash_kind);
+    Ok(())
+}
 // The Cli struct represents the root of the command line interface.
 #[derive(Parser, Debug)]
 #[command(
@@ -145,15 +166,23 @@ pub async fn parse_async(args: Option<&[&str]>) -> Result<(), GitError> {
         None => Cli::parse(),
     };
     // TODO: try check repo before parsing
-    if let Commands::Init(_) = args.command {
-    } else if let Commands::Clone(_) = args.command {
-    } else if !utils::util::check_repo_exist() {
-        return Err(GitError::RepoNotFound);
+    // For commands that don't initialize a repo, set the hash kind first.
+    match args.command {
+        Commands::Init(_) | Commands::Clone(_) => {}
+        _ => {
+            if !utils::util::check_repo_exist() {
+                return Err(GitError::RepoNotFound);
+            }
+            set_local_hash_kind().await?;
+        }
     }
     // parse the command and execute the corresponding function with it's args
     match args.command {
-        Commands::Init(args) => command::init::execute(args).await,
-        Commands::Clone(args) => command::clone::execute(args).await,
+        Commands::Init(args) => {
+            command::init::execute(args).await;
+            set_local_hash_kind().await?; // set hash kind after init
+        }
+        Commands::Clone(args) => command::clone::execute(args).await, //clone will use init internally,so we don't need to set hash kind here again
         Commands::Add(args) => command::add::execute(args).await,
         Commands::Rm(args) => command::remove::execute(args).await,
         Commands::Restore(args) => command::restore::execute(args).await,

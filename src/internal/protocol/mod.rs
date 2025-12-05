@@ -2,7 +2,7 @@ use crate::git_protocol::ServiceType;
 use crate::git_protocol::{add_pkt_line_string, read_pkt_line};
 use bytes::{Bytes, BytesMut};
 use git_internal::errors::GitError;
-use git_internal::hash::SHA1;
+use git_internal::hash::ObjectHash;
 use url::Url;
 
 pub mod https_client;
@@ -65,7 +65,7 @@ pub fn parse_discovered_references(
         let rest = rest.trim();
 
         if !processed_first_ref {
-            if hash == SHA1::default().to_string() {
+            if hash == ObjectHash::default().to_string() {
                 tracing::debug!(
                     "discovery for {:?} returned zero hash, treating as empty repository",
                     service

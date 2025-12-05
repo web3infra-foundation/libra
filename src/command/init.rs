@@ -18,6 +18,7 @@ use crate::internal::db;
 use crate::internal::model::{config, reference};
 use crate::utils::util::{DATABASE, ROOT_DIR};
 
+use git_internal::hash::{HashKind, set_hash_kind};
 const DEFAULT_BRANCH: &str = "master";
 
 #[derive(Parser, Debug, Clone)]
@@ -58,7 +59,7 @@ pub struct InitArgs {
     ///
     /// Supported values:
     /// - `sha1`: The default and currently the only supported format.
-    /// - `sha256`: Recognized as a valid format, but will return an error as it is not yet supported.
+    /// - `sha256`: An alternative format using SHA-256 hashing.
     #[clap(long = "object-format", name = "format", required = false)]
     pub object_format: Option<String>,
 }
@@ -211,28 +212,23 @@ pub async fn init(args: InitArgs) -> io::Result<()> {
     } else {
         cur_dir.join(ROOT_DIR)
     };
-    // check if format is supported
-    if let Some(format) = &args.object_format {
-        match format.to_lowercase().as_str() {
-            "sha1" => {
-                // sha1 is supported, do nothing and proceed.
-            }
-            "sha256" => {
-                // sha256 is a valid format, but not supported yet.
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "fatal: object format 'sha256' is not supported yet",
-                ));
-            }
-            _ => {
-                // Any other format is invalid.
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("fatal: invalid object format '{format}'"),
-                ));
-            }
-        }
+    // check if format is supported,Now SHA-1 and SHA-256 are supported.
+    let object_format_value = args
+        .object_format
+        .as_ref()
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_else(|| "sha1".to_string());
+
+    if object_format_value != "sha1" && object_format_value != "sha256" {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "unsupported object format: '{}'. Supported formats are 'sha1' and 'sha256'.",
+                object_format_value
+            ),
+        ));
     }
+
     // Check if the root directory already exists
     if is_reinit(&cur_dir) {
         if !args.quiet {
@@ -341,7 +337,7 @@ pub async fn init(args: InitArgs) -> io::Result<()> {
     }
 
     // Create config table with bare parameter consideration
-    init_config(&conn, args.bare, args.object_format.as_deref())
+    init_config(&conn, args.bare, Some(object_format_value.as_str()))
         .await
         .unwrap();
 
@@ -375,6 +371,12 @@ pub async fn init(args: InitArgs) -> io::Result<()> {
             root_dir.display()
         );
     }
+    // Set the global hash kind for the repository
+    set_hash_kind(match object_format_value.as_str() {
+        "sha1" => HashKind::Sha1,
+        "sha256" => HashKind::Sha256,
+        _ => HashKind::Sha1,
+    });
 
     Ok(())
 }

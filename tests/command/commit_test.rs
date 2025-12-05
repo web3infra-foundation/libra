@@ -306,3 +306,85 @@ async fn test_commit_with_all_flag_records_deletions() {
         "new untracked files should still be absent"
     );
 }
+
+#[tokio::test]
+#[serial]
+/// Verifies commit and amend operations in a SHA-256 repository.
+async fn test_commit_sha256() {
+    let temp_path = tempdir().unwrap();
+    test::setup_clean_testing_env_in(temp_path.path());
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    // Initialize a repository with SHA-256 object format
+    init(InitArgs {
+        bare: false,
+        initial_branch: Some("main".to_string()),
+        repo_directory: temp_path.path().to_str().unwrap().to_string(),
+        quiet: true,
+        template: None,
+        shared: None,
+        object_format: Some("sha256".to_string()),
+    })
+    .await
+    .unwrap();
+
+    // Create and add a file
+    test::ensure_file("a.txt", Some("hello sha256"));
+    add::execute(AddArgs {
+        pathspec: vec!["a.txt".to_string()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+
+    // Create the first commit
+    commit::execute(CommitArgs {
+        message: Some("first sha256 commit".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+    })
+    .await;
+
+    // Verify the commit hash is SHA-256 (64 hex characters)
+    let head_commit = Head::current_commit().await.expect("HEAD missing");
+    assert_eq!(
+        head_commit.to_string().len(),
+        64,
+        "Commit hash should be SHA-256"
+    );
+
+    // Amend the commit
+    commit::execute(CommitArgs {
+        message: Some("amended sha256 commit".to_string()),
+        file: None,
+        allow_empty: true, // allow_empty is needed for amend if no new changes are staged
+        conventional: false,
+        amend: true,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+    })
+    .await;
+
+    // Verify the amended commit hash is also SHA-256
+    let amended_commit = Head::current_commit().await.expect("Amended HEAD missing");
+    assert_eq!(
+        amended_commit.to_string().len(),
+        64,
+        "Amended commit hash should be SHA-256"
+    );
+    assert_ne!(
+        head_commit, amended_commit,
+        "Amend should create a new commit"
+    );
+}

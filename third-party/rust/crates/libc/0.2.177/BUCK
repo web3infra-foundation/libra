@@ -28,7 +28,6 @@ rust_library(
     },
     features = [
         "default",
-        "extra_traits",
         "std",
     ],
     rustc_flags = [
@@ -46,7 +45,6 @@ rust_binary(
     edition = "2021",
     features = [
         "default",
-        "extra_traits",
         "std",
     ],
     rustc_flags = ["@$(location :libc-manifest[env_flags])"],
@@ -60,7 +58,6 @@ buildscript_run(
     env_srcs = [":libc-manifest[env_dict]"],
     features = [
         "default",
-        "extra_traits",
         "std",
     ],
     version = "0.2.177",

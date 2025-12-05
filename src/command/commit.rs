@@ -3,8 +3,6 @@ use std::process::Stdio;
 use std::str::FromStr;
 use std::{collections::HashSet, path::PathBuf};
 
-const EMPTY_TREE_HASH: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
-
 use crate::command::{load_object, status};
 use crate::common_utils::{check_conventional_commits_message, format_commit_msg};
 use crate::internal::branch::Branch;
@@ -15,12 +13,13 @@ use crate::utils::client_storage::ClientStorage;
 use crate::utils::object_ext::BlobExt;
 use crate::utils::{lfs, path, util};
 use clap::Parser;
-use git_internal::hash::SHA1;
+use git_internal::hash::{ObjectHash, get_hash_kind};
 use git_internal::internal::index::{Index, IndexEntry};
 use git_internal::internal::object::ObjectTrait;
 use git_internal::internal::object::blob::Blob;
 use git_internal::internal::object::commit::Commit;
 use git_internal::internal::object::tree::{Tree, TreeItem, TreeItemMode};
+use git_internal::internal::object::types::ObjectType;
 use sea_orm::ConnectionTrait;
 use std::process::Command;
 
@@ -262,7 +261,8 @@ pub async fn create_tree(index: &Index, storage: &ClientStorage, current_root: P
     let tree = {
         // `from_tree_items` can't create empty tree, so use `from_bytes` instead
         if tree_items.is_empty() {
-            Tree::from_bytes(&[], SHA1::from_str(EMPTY_TREE_HASH).unwrap()).unwrap()
+            let empty_id = ObjectHash::from_type_and_data(ObjectType::Tree, &[]);
+            Tree::from_bytes(&[], empty_id).unwrap()
         } else {
             Tree::from_tree_items(tree_items).unwrap()
         }
@@ -318,7 +318,7 @@ fn blob_from_file(path: impl AsRef<std::path::Path>) -> Blob {
 }
 
 /// get current head commit id as parent, if in branch, get branch's commit id, if detached head, get head's commit id
-async fn get_parents_ids() -> Vec<SHA1> {
+async fn get_parents_ids() -> Vec<ObjectHash> {
     // let current_commit_id = reference::Model::current_commit_hash(db).await.unwrap();
     let current_commit_id = Head::current_commit().await;
     match current_commit_id {
@@ -337,7 +337,7 @@ async fn update_head<C: ConnectionTrait>(db: &C, commit_id: &str) {
         }
         // None => {
         Head::Detached(_) => {
-            let head = Head::Detached(SHA1::from_str(commit_id).unwrap());
+            let head = Head::Detached(ObjectHash::from_str(commit_id).unwrap());
             Head::update_with_conn(db, head, None).await;
         }
     }
@@ -363,8 +363,8 @@ async fn update_head_and_reflog(commit_id: &str, commit_message: &str) {
 async fn new_reflog_context(commit_id: &str, message: &str) -> ReflogContext {
     let old_oid = Head::current_commit()
         .await
-        .unwrap_or(SHA1::from_bytes(&[0; 20]))
-        ._to_string();
+        .unwrap_or(ObjectHash::from_bytes(&vec![0u8; get_hash_kind().size()]).unwrap())
+        .to_string();
     let new_oid = commit_id.to_string();
     let action = ReflogAction::Commit {
         message: message.to_string(),
@@ -494,7 +494,8 @@ mod test {
             };
 
             // Mock commit
-            let commit = Commit::new(author, commiter, SHA1([0; 20]), Vec::new(), &content);
+            let zero = ObjectHash::from_bytes(&vec![0u8; get_hash_kind().size()]).unwrap();
+            let commit = Commit::new(author, commiter, zero, Vec::new(), &content);
 
             // Commit to data
             let commit_data = commit.to_data().unwrap();

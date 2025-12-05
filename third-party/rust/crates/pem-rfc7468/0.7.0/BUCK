@@ -23,10 +23,7 @@ rust_library(
     crate = "pem_rfc7468",
     crate_root = "vendor/src/lib.rs",
     edition = "2021",
-    features = [
-        "alloc",
-        "std",
-    ],
+    features = ["alloc"],
     rustc_flags = ["@$(location :pem-rfc7468-manifest[env_flags])"],
     visibility = ["PUBLIC"],
     deps = ["//third-party/rust/crates/base64ct/1.6.0:base64ct"],
