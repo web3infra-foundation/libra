@@ -3,7 +3,7 @@
 version = 1
 
 [fingerprints]
-"path+file:///home/jl-jiang/Dev/r2cn/libra#0.1.0" = "51247d567534849ee6fb83d10332a64d30da0682703ec552cfcfb03c754f9737"
+"path+file://($WORKSPACE)#0.1.0" = "51247d567534849ee6fb83d10332a64d30da0682703ec552cfcfb03c754f9737"
 "registry+https://github.com/rust-lang/crates.io-index#adler2@2.0.1" = "7081ce7693ca45bff0e855374e6b7f386805bba1de9f7c288b1c706b99abef7f"
 "registry+https://github.com/rust-lang/crates.io-index#aead@0.5.2" = "7aded40575af74fcf3661cae3c8feffc989eddf3a2b8653c4d7357b9e880999d"
 "registry+https://github.com/rust-lang/crates.io-index#aes-gcm@0.10.3" = "a94867eb8bcfef13f41f0a54030c6a5eb07223d6dc12a8bf32fc3e78ea3ac4a5"
