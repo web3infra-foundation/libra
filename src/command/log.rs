@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use git_internal::Diff;
-use git_internal::hash::SHA1;
+use git_internal::hash::ObjectHash;
 use git_internal::internal::object::{blob::Blob, commit::Commit, tree::Tree};
 use std::collections::VecDeque;
 use std::str::FromStr;
@@ -131,7 +131,7 @@ pub async fn get_reachable_commits(commit_hash: String) -> Vec<Commit> {
 
     while !queue.is_empty() {
         let commit_id = queue.pop_front().unwrap();
-        let commit_id_hash = SHA1::from_str(&commit_id).unwrap();
+        let commit_id_hash = ObjectHash::from_str(&commit_id).unwrap();
         let commit = load_object::<Commit>(&commit_id_hash)
             .expect("fatal: storage broken, object not found");
         if commit_set.contains(&commit_id) {
@@ -406,12 +406,12 @@ pub(crate) async fn get_changed_files_for_commit(
 ) -> Vec<String> {
     // prepare old and new blobs
     let tree = load_object::<Tree>(&commit.tree_id).unwrap();
-    let new_blobs: Vec<(PathBuf, SHA1)> = tree.get_plain_items();
+    let new_blobs: Vec<(PathBuf, ObjectHash)> = tree.get_plain_items();
 
     // old_blobs from first parent if exists
-    let old_blobs: Vec<(PathBuf, SHA1)> = if !commit.parent_commit_ids.is_empty() {
+    let old_blobs: Vec<(PathBuf, ObjectHash)> = if !commit.parent_commit_ids.is_empty() {
         let parent = &commit.parent_commit_ids[0];
-        let parent_hash = SHA1::from_str(&parent.to_string()).unwrap();
+        let parent_hash = ObjectHash::from_str(&parent.to_string()).unwrap();
         let parent_commit = load_object::<Commit>(&parent_hash).unwrap();
         let parent_tree = load_object::<Tree>(&parent_commit.tree_id).unwrap();
         parent_tree.get_plain_items()
@@ -484,11 +484,12 @@ pub struct FileStat {
 /// A vector of [`FileStat`] structs, each containing the file path, number of insertions, and number of deletions.
 pub async fn compute_commit_stat(commit: &Commit, paths: Vec<PathBuf>) -> Vec<FileStat> {
     let tree = load_object::<Tree>(&commit.tree_id).expect("failed to load tree object");
-    let new_blobs: Vec<(PathBuf, SHA1)> = tree.get_plain_items();
+    let new_blobs: Vec<(PathBuf, ObjectHash)> = tree.get_plain_items();
 
-    let old_blobs: Vec<(PathBuf, SHA1)> = if !commit.parent_commit_ids.is_empty() {
+    let old_blobs: Vec<(PathBuf, ObjectHash)> = if !commit.parent_commit_ids.is_empty() {
         let parent = &commit.parent_commit_ids[0];
-        let parent_hash = SHA1::from_str(&parent.to_string()).expect("failed to parse parent SHA1");
+        let parent_hash =
+            ObjectHash::from_str(&parent.to_string()).expect("failed to parse parent ObjectHash");
         let parent_commit =
             load_object::<Commit>(&parent_hash).expect("failed to load parent commit object");
         let parent_tree =
@@ -498,7 +499,7 @@ pub async fn compute_commit_stat(commit: &Commit, paths: Vec<PathBuf>) -> Vec<Fi
         Vec::new()
     };
 
-    let read_content = |file: &PathBuf, hash: &SHA1| match load_object::<Blob>(hash) {
+    let read_content = |file: &PathBuf, hash: &ObjectHash| match load_object::<Blob>(hash) {
         Ok(blob) => blob.data,
         Err(_) => {
             let file = util::to_workdir_path(file);
@@ -603,7 +604,7 @@ pub fn format_stat_output(stats: &[FileStat]) -> String {
 /// reflect merges and branchings, ensuring the visual structure matches the commit graph.
 #[derive(Default)]
 pub struct GraphState {
-    columns: Vec<Option<SHA1>>,
+    columns: Vec<Option<ObjectHash>>,
 }
 
 impl GraphState {
@@ -645,22 +646,24 @@ impl GraphState {
             if parent_ids.is_empty() {
                 self.columns[pos] = None;
             } else if parent_ids.len() == 1 {
-                let parent_hash = SHA1::from_str(&parent_ids[0].to_string()).unwrap_or_else(|_| {
-                    panic!("failed to parse parent SHA1 for commit {}", commit_id)
-                });
+                let parent_hash =
+                    ObjectHash::from_str(&parent_ids[0].to_string()).unwrap_or_else(|_| {
+                        panic!("failed to parse parent ObjectHash for commit {}", commit_id)
+                    });
                 self.columns[pos] = Some(parent_hash);
             } else {
-                let first_parent = SHA1::from_str(&parent_ids[0].to_string())
-                    .expect("failed to parse first parent SHA1");
+                let first_parent = ObjectHash::from_str(&parent_ids[0].to_string())
+                    .expect("failed to parse first parent ObjectHash");
                 self.columns[pos] = Some(first_parent);
 
                 for parent_id in parent_ids.iter().skip(1) {
-                    let parent_hash = SHA1::from_str(&parent_id.to_string()).unwrap_or_else(|_| {
-                        panic!(
-                            "failed to parse parent SHA1 {} for commit {}",
-                            parent_id, commit_id
-                        )
-                    });
+                    let parent_hash =
+                        ObjectHash::from_str(&parent_id.to_string()).unwrap_or_else(|_| {
+                            panic!(
+                                "failed to parse parent ObjectHash {} for commit {}",
+                                parent_id, commit_id
+                            )
+                        });
                     self.columns.push(Some(parent_hash));
                 }
             }
@@ -672,17 +675,18 @@ impl GraphState {
             }
 
             if !parent_ids.is_empty() {
-                let parent_hash = SHA1::from_str(&parent_ids[0].to_string())
-                    .expect("failed to parse parent SHA1");
+                let parent_hash = ObjectHash::from_str(&parent_ids[0].to_string())
+                    .expect("failed to parse parent ObjectHash");
                 self.columns[0] = Some(parent_hash);
 
                 for parent_id in parent_ids.iter().skip(1) {
-                    let parent_hash = SHA1::from_str(&parent_id.to_string()).unwrap_or_else(|_| {
-                        panic!(
-                            "failed to parse parent SHA1 {} for commit {}",
-                            parent_id, commit_id
-                        )
-                    });
+                    let parent_hash =
+                        ObjectHash::from_str(&parent_id.to_string()).unwrap_or_else(|_| {
+                            panic!(
+                                "failed to parse parent ObjectHash {} for commit {}",
+                                parent_id, commit_id
+                            )
+                        });
                     self.columns.push(Some(parent_hash));
                 }
             }
@@ -694,8 +698,8 @@ impl GraphState {
     }
 }
 
-async fn create_reference_commit_map() -> HashMap<SHA1, Vec<Reference>> {
-    let mut commit_to_refs: HashMap<SHA1, Vec<Reference>> = HashMap::new();
+async fn create_reference_commit_map() -> HashMap<ObjectHash, Vec<Reference>> {
+    let mut commit_to_refs: HashMap<ObjectHash, Vec<Reference>> = HashMap::new();
 
     let all_branches = Branch::list_branches(None).await;
     for branch in all_branches {
@@ -738,12 +742,12 @@ pub(crate) async fn generate_diff(commit: &Commit, paths: Vec<PathBuf>) -> Strin
     // prepare old and new blobs
     // new_blobs from commit tree
     let tree = load_object::<Tree>(&commit.tree_id).unwrap();
-    let new_blobs: Vec<(PathBuf, SHA1)> = tree.get_plain_items();
+    let new_blobs: Vec<(PathBuf, ObjectHash)> = tree.get_plain_items();
 
     // old_blobs from first parent if exists
-    let old_blobs: Vec<(PathBuf, SHA1)> = if !commit.parent_commit_ids.is_empty() {
+    let old_blobs: Vec<(PathBuf, ObjectHash)> = if !commit.parent_commit_ids.is_empty() {
         let parent = &commit.parent_commit_ids[0];
-        let parent_hash = SHA1::from_str(&parent.to_string()).unwrap();
+        let parent_hash = ObjectHash::from_str(&parent.to_string()).unwrap();
         let parent_commit = load_object::<Commit>(&parent_hash).unwrap();
         let parent_tree = load_object::<Tree>(&parent_commit.tree_id).unwrap();
         parent_tree.get_plain_items()
@@ -751,7 +755,7 @@ pub(crate) async fn generate_diff(commit: &Commit, paths: Vec<PathBuf>) -> Strin
         Vec::new()
     };
 
-    let read_content = |file: &PathBuf, hash: &SHA1| match load_object::<Blob>(hash) {
+    let read_content = |file: &PathBuf, hash: &ObjectHash| match load_object::<Blob>(hash) {
         Ok(blob) => blob.data,
         Err(_) => {
             let file = util::to_workdir_path(file);

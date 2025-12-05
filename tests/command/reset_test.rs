@@ -5,7 +5,9 @@ use libra::command::status::changes_to_be_staged;
 use std::fs;
 
 /// Setup a standard test repository with 4 commits and branches
-async fn setup_standard_repo(temp_path: &std::path::Path) -> (SHA1, SHA1, SHA1, SHA1) {
+async fn setup_standard_repo(
+    temp_path: &std::path::Path,
+) -> (ObjectHash, ObjectHash, ObjectHash, ObjectHash) {
     test::setup_with_new_libra_in(temp_path).await;
 
     fs::write("1.txt", "content 1").unwrap();

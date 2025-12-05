@@ -1,5 +1,5 @@
 use clap::Parser;
-use git_internal::hash::SHA1;
+use git_internal::hash::ObjectHash;
 
 use super::{
     restore::{self, RestoreArgs},
@@ -73,7 +73,7 @@ pub async fn check_status() -> bool {
 }
 
 /// change the working directory to the version of commit_hash
-async fn switch_to_commit(commit_hash: SHA1) {
+async fn switch_to_commit(commit_hash: ObjectHash) {
     let db = get_db_conn_instance().await;
 
     let old_head_commit = Head::current_commit_with_conn(db)
@@ -179,7 +179,7 @@ async fn switch_to_branch(branch_name: String) {
     println!("Switched to branch '{}'", target_branch.name);
 }
 
-async fn restore_to_commit(commit_id: SHA1) {
+async fn restore_to_commit(commit_id: ObjectHash) {
     let restore_args = RestoreArgs {
         worktree: true,
         staged: true,
@@ -197,7 +197,7 @@ mod tests {
     #[test]
     /// Test parsing RestoreArgs from command-line style arguments
     fn test_parse_from() {
-        let commit_id = SHA1::from_str("0cb5eb6281e1c0df48a70716869686c694706189").unwrap();
+        let commit_id = ObjectHash::from_str("0cb5eb6281e1c0df48a70716869686c694706189").unwrap();
         let restore_args = RestoreArgs::parse_from([
             "restore", // important, the first will be ignored
             "--worktree",

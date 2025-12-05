@@ -2,7 +2,7 @@
 
 use clap::Parser;
 use colored::Colorize;
-use git_internal::hash::SHA1;
+use git_internal::hash::ObjectHash;
 use git_internal::internal::object::blob::Blob;
 use git_internal::internal::object::commit::Commit;
 use git_internal::internal::object::tree::Tree;
@@ -63,7 +63,7 @@ pub async fn execute(args: ShowArgs) {
     }
 
     // 尝试解析为直接的哈希值
-    if let Ok(hash) = SHA1::from_str(object_ref) {
+    if let Ok(hash) = ObjectHash::from_str(object_ref) {
         show_object_by_hash(&hash, &args).await;
         return;
     }
@@ -74,7 +74,7 @@ pub async fn execute(args: ShowArgs) {
 
 /// 通过哈希值显示对象（自动检测类型）
 fn show_object_by_hash<'a>(
-    hash: &'a SHA1,
+    hash: &'a ObjectHash,
     args: &'a ShowArgs,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
     Box::pin(async move {
@@ -102,7 +102,7 @@ fn show_object_by_hash<'a>(
 }
 
 /// 显示提交及其详细信息和差异
-async fn show_commit(commit_hash: &SHA1, args: &ShowArgs) {
+async fn show_commit(commit_hash: &ObjectHash, args: &ShowArgs) {
     // 加载提交对象
     let commit = match load_object::<Commit>(commit_hash) {
         Ok(c) => c,
@@ -143,7 +143,7 @@ async fn show_commit(commit_hash: &SHA1, args: &ShowArgs) {
 }
 
 /// 显示标签对象
-async fn show_tag_by_hash(hash: &SHA1, args: &ShowArgs) {
+async fn show_tag_by_hash(hash: &ObjectHash, args: &ShowArgs) {
     match tag::load_object_trait(hash).await {
         Ok(tag::TagObject::Tag(tag_obj)) => {
             // 显示标签信息
@@ -180,7 +180,7 @@ async fn show_tag_by_hash(hash: &SHA1, args: &ShowArgs) {
 }
 
 /// 显示树对象
-async fn show_tree(hash: &SHA1) {
+async fn show_tree(hash: &ObjectHash) {
     let tree = match load_object::<Tree>(hash) {
         Ok(t) => t,
         Err(e) => {
@@ -200,7 +200,7 @@ async fn show_tree(hash: &SHA1) {
 }
 
 /// 显示二进制对象
-async fn show_blob(hash: &SHA1) {
+async fn show_blob(hash: &ObjectHash) {
     let blob = match load_object::<Blob>(hash) {
         Ok(b) => b,
         Err(e) => {

@@ -4,11 +4,12 @@ use crate::command::{self, branch};
 use crate::internal::branch::Branch;
 use crate::internal::config::{Config, RemoteConfig};
 use crate::internal::head::Head;
-use crate::internal::reflog::{ReflogAction, ReflogContext, with_reflog, zero_sha1};
+use crate::internal::reflog::{ReflogAction, ReflogContext, with_reflog};
 use crate::utils::path_ext::PathExt;
 use crate::utils::util;
 use clap::Parser;
 use colored::Colorize;
+use git_internal::hash::{ObjectHash, get_hash_kind};
 use scopeguard::defer;
 use sea_orm::DatabaseTransaction;
 use std::cell::Cell;
@@ -145,7 +146,7 @@ async fn setup_repository(
 
         let context = ReflogContext {
             // In a clone, there is no "old" oid. A zero-hash is the standard representation.
-            old_oid: zero_sha1().to_string(),
+            old_oid: ObjectHash::zero_str(get_hash_kind()).to_string(),
             new_oid: origin_branch.commit.to_string(),
             action,
         };

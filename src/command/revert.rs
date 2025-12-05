@@ -5,7 +5,7 @@ use crate::internal::head::Head;
 use crate::utils::object_ext::{BlobExt, TreeExt};
 use crate::utils::{path, util};
 use clap::Parser;
-use git_internal::hash::SHA1;
+use git_internal::hash::ObjectHash;
 use git_internal::internal::index::{Index, IndexEntry};
 use git_internal::internal::object::commit::Commit;
 use git_internal::internal::object::tree::{Tree, TreeItemMode};
@@ -44,7 +44,7 @@ pub async fn execute(args: RevertArgs) {
         return;
     }
 
-    // Resolve the commit reference to a SHA1 hash
+    // Resolve the commit reference to a ObjectHash hash
     let commit_id = match resolve_commit(&args.commit).await {
         Ok(id) => id,
         Err(e) => {
@@ -75,7 +75,10 @@ pub async fn execute(args: RevertArgs) {
 
 /// Revert a single commit by applying its parent's state
 /// This function handles the core logic of reverting a commit
-async fn revert_single_commit(commit_id: &SHA1, args: &RevertArgs) -> Result<Option<SHA1>, String> {
+async fn revert_single_commit(
+    commit_id: &ObjectHash,
+    args: &RevertArgs,
+) -> Result<Option<ObjectHash>, String> {
     // Load the commit object to be reverted
     let reverted_commit: Commit =
         load_object(commit_id).map_err(|e| format!("failed to load commit: {e}"))?;
@@ -152,7 +155,7 @@ async fn revert_single_commit(commit_id: &SHA1, args: &RevertArgs) -> Result<Opt
     }
 
     // Build new tree and index from the final file list
-    // Note: This requires a helper function to build Tree from HashMap<PathBuf, SHA1>
+    // Note: This requires a helper function to build Tree from HashMap<PathBuf, ObjectHash>
     // This is a complex operation, simplified here by rebuilding the index directly
     let final_tree_id = build_tree_from_map(current_files).await?;
     let final_tree: Tree = load_object(&final_tree_id).map_err(|e| e.to_string())?;
@@ -175,11 +178,11 @@ async fn revert_single_commit(commit_id: &SHA1, args: &RevertArgs) -> Result<Opt
 /// Helper function: Build a Tree object from a file mapping
 /// This is a simplified implementation that creates a temporary index and builds a tree from it
 async fn build_tree_from_map(
-    files: std::collections::HashMap<PathBuf, SHA1>,
-) -> Result<SHA1, String> {
+    files: std::collections::HashMap<PathBuf, ObjectHash>,
+) -> Result<ObjectHash, String> {
     // Helper function to recursively build subtrees
     fn build_subtree(
-        paths: &std::collections::HashMap<PathBuf, SHA1>,
+        paths: &std::collections::HashMap<PathBuf, ObjectHash>,
         current_dir: &PathBuf,
     ) -> Result<Tree, String> {
         let mut tree_items = Vec::new();
@@ -222,7 +225,7 @@ async fn build_tree_from_map(
 
 /// Handle reverting the root commit (initial commit)
 /// Root commits have no parents, so reverting them means creating an empty repository state
-async fn revert_root_commit(args: &RevertArgs) -> Result<Option<SHA1>, String> {
+async fn revert_root_commit(args: &RevertArgs) -> Result<Option<ObjectHash>, String> {
     let new_index = Index::new(); // Create an empty index
 
     let current_index = Index::load(path::index()).unwrap_or_else(|_| Index::new());
@@ -316,10 +319,10 @@ fn reset_workdir_safely(current_index: &Index, new_index: &Index) -> Result<(), 
 /// Create a revert commit that undoes the changes of the specified commit
 /// The new commit will have a tree that represents the reverted state
 async fn create_revert_commit(
-    reverted_commit_id: &SHA1,
-    parent_id: &SHA1,
-    tree_id: &SHA1,
-) -> Result<SHA1, String> {
+    reverted_commit_id: &ObjectHash,
+    parent_id: &ObjectHash,
+    tree_id: &ObjectHash,
+) -> Result<ObjectHash, String> {
     let reverted_commit: Commit = load_object(reverted_commit_id)
         .map_err(|e| format!("failed to load reverted commit: {e}"))?;
 
@@ -344,7 +347,7 @@ async fn create_revert_commit(
 }
 
 /// Create a commit that reverts the root commit (creates empty repository state)
-async fn create_empty_revert_commit(parent_id: &SHA1) -> Result<SHA1, String> {
+async fn create_empty_revert_commit(parent_id: &ObjectHash) -> Result<ObjectHash, String> {
     // Create an empty tree for the revert commit
     let empty_tree = create_empty_tree()?;
     let revert_message = "Revert root commit\n\nThis reverts the initial commit.";
@@ -370,8 +373,8 @@ fn create_empty_tree() -> Result<Tree, String> {
     Ok(tree)
 }
 
-/// Resolve a commit reference (hash, branch name, or HEAD) to a SHA1
-async fn resolve_commit(reference: &str) -> Result<SHA1, String> {
+/// Resolve a commit reference (hash, branch name, or HEAD) to a ObjectHash
+async fn resolve_commit(reference: &str) -> Result<ObjectHash, String> {
     util::get_commit_base(reference).await
 }
 

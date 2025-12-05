@@ -7,12 +7,12 @@ use flate2::Compression;
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use git_internal::errors::GitError;
-use git_internal::hash::SHA1;
+use git_internal::hash::ObjectHash;
 use git_internal::internal::object::commit::Commit;
 use git_internal::internal::object::types::ObjectType;
 use git_internal::internal::pack::Pack;
 use git_internal::internal::pack::cache_object::CacheObject;
-use git_internal::utils::read_sha1;
+use git_internal::utils::read_sha;
 use lru_mem::LruCache;
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -46,7 +46,7 @@ impl ClientStorage {
     }
 
     /// e.g. 6ae8a755... -> 6a/e8a755...
-    fn transform_path(&self, hash: &SHA1) -> String {
+    fn transform_path(&self, hash: &ObjectHash) -> String {
         let hash = hash.to_string();
         Path::new(&hash[0..2])
             .join(&hash[2..hash.len()])
@@ -56,11 +56,11 @@ impl ClientStorage {
     }
 
     /// join `base_path` and `obj_id` to get the full path of the object
-    fn get_obj_path(&self, obj_id: &SHA1) -> PathBuf {
+    fn get_obj_path(&self, obj_id: &ObjectHash) -> PathBuf {
         Path::new(&self.base_path).join(self.transform_path(obj_id))
     }
 
-    pub fn get_object_type(&self, obj_id: &SHA1) -> Result<ObjectType, GitError> {
+    pub fn get_object_type(&self, obj_id: &ObjectHash) -> Result<ObjectType, GitError> {
         if self.exist_loosely(obj_id) {
             let raw_data = self.read_raw_data(obj_id)?;
             let data = Self::decompress_zlib(&raw_data)?;
@@ -74,7 +74,7 @@ impl ClientStorage {
     }
 
     /// Check if the object with `obj_id` is of type `obj_type`
-    pub fn is_object_type(&self, obj_id: &SHA1, obj_type: ObjectType) -> bool {
+    pub fn is_object_type(&self, obj_id: &ObjectHash, obj_type: ObjectType) -> bool {
         match self.get_object_type(obj_id) {
             Ok(t) => t == obj_type,
             Err(_) => false,
@@ -83,7 +83,7 @@ impl ClientStorage {
 
     /// Search objects that start with `obj_id`, loose & pack
     /// add support for relative path
-    pub async fn search(&self, obj_id: &str) -> Vec<SHA1> {
+    pub async fn search(&self, obj_id: &str) -> Vec<ObjectHash> {
         if obj_id == "HEAD" {
             return vec![Head::current_commit().await.unwrap()];
         }
@@ -110,7 +110,7 @@ impl ClientStorage {
                         if let Some(branch) = Branch::find_branch(base_ref, None).await {
                             branch.commit
                         } else {
-                            let matches: Vec<SHA1> = self
+                            let matches: Vec<ObjectHash> = self
                                 .list_objects_pack()
                                 .into_iter()
                                 .chain(self.list_objects_loose().into_iter())
@@ -147,10 +147,14 @@ impl ClientStorage {
     /// then follow first parent three generations up
     ///
     /// Parameters:
-    /// - base_commit: Starting commit SHA1
+    /// - base_commit: Starting commit ObjectHash
     /// - path: Reference path string (e.g. "^2~3", "~~~", "^~^2")
     ///
-    fn navigate_commit_path(&self, base_commit: SHA1, path: &str) -> Result<SHA1, GitError> {
+    fn navigate_commit_path(
+        &self,
+        base_commit: ObjectHash,
+        path: &str,
+    ) -> Result<ObjectHash, GitError> {
         let mut current = base_commit;
 
         let re = Regex::new(r"(\^|~)(\d*)").unwrap();
@@ -182,7 +186,7 @@ impl ClientStorage {
     }
     /// get the reference of HEAD, e.g. HEAD~1, HEAD^2
     #[allow(dead_code)]
-    async fn parse_head_reference(&self, reference: &str) -> Result<SHA1, GitError> {
+    async fn parse_head_reference(&self, reference: &str) -> Result<ObjectHash, GitError> {
         let mut current = Head::current_commit().await.unwrap();
 
         if reference == "HEAD" {
@@ -216,7 +220,7 @@ impl ClientStorage {
     }
 
     /// get the nth parent commit of a commit
-    fn get_parent_commit(&self, commit_id: &SHA1, n: usize) -> Result<SHA1, GitError> {
+    fn get_parent_commit(&self, commit_id: &ObjectHash, n: usize) -> Result<ObjectHash, GitError> {
         let commit: Commit = load_object(commit_id)?;
 
         // the index starts from 0
@@ -230,7 +234,7 @@ impl ClientStorage {
     }
 
     /// list all objects' hash in `objects`
-    fn list_objects_loose(&self) -> Vec<SHA1> {
+    fn list_objects_loose(&self) -> Vec<ObjectHash> {
         let mut objects = Vec::new();
         let paths = fs::read_dir(&self.base_path).unwrap();
         for path in paths {
@@ -244,7 +248,7 @@ impl ClientStorage {
                         let parent_name = path.file_name().unwrap().to_str().unwrap().to_string();
                         let file_name = sub_path.file_name().unwrap().to_str().unwrap().to_string();
                         let file_name = parent_name + &file_name;
-                        objects.push(SHA1::from_str(&file_name).unwrap()); // this will check format, so don't worry
+                        objects.push(ObjectHash::from_str(&file_name).unwrap()); // this will check format, so don't worry
                     }
                 }
             }
@@ -253,7 +257,7 @@ impl ClientStorage {
     }
 
     /// List all objects' hash in PACKs
-    fn list_objects_pack(&self) -> HashSet<SHA1> {
+    fn list_objects_pack(&self) -> HashSet<ObjectHash> {
         let idxes = self.list_all_idx();
         let mut objs = HashSet::new();
         for idx in idxes {
@@ -298,7 +302,7 @@ impl ClientStorage {
         (obj_type, size, end_of_header)
     }
 
-    fn read_raw_data(&self, obj_id: &SHA1) -> Result<Vec<u8>, io::Error> {
+    fn read_raw_data(&self, obj_id: &ObjectHash) -> Result<Vec<u8>, io::Error> {
         let path = self.get_obj_path(obj_id);
         let mut file = fs::File::open(path)?;
         let mut buffer = Vec::new();
@@ -306,7 +310,7 @@ impl ClientStorage {
         Ok(buffer)
     }
 
-    pub fn get(&self, object_id: &SHA1) -> Result<Vec<u8>, GitError> {
+    pub fn get(&self, object_id: &ObjectHash) -> Result<Vec<u8>, GitError> {
         if self.exist_loosely(object_id) {
             let raw_data = self.read_raw_data(object_id)?;
             let data = Self::decompress_zlib(&raw_data)?;
@@ -325,7 +329,7 @@ impl ClientStorage {
     /// Save content to `objects`
     pub fn put(
         &self,
-        obj_id: &SHA1,
+        obj_id: &ObjectHash,
         content: &[u8],
         obj_type: ObjectType,
     ) -> Result<String, io::Error> {
@@ -342,13 +346,13 @@ impl ClientStorage {
     }
 
     /// Check if the object with `obj_id` exists in `objects` or PACKs
-    pub fn exist(&self, obj_id: &SHA1) -> bool {
+    pub fn exist(&self, obj_id: &ObjectHash) -> bool {
         let path = self.get_obj_path(obj_id);
         Path::exists(&path) || self.get_from_pack(obj_id).unwrap().is_some()
     }
 
     /// Check if the object with `obj_id` exists in `objects`
-    fn exist_loosely(&self, obj_id: &SHA1) -> bool {
+    fn exist_loosely(&self, obj_id: &ObjectHash) -> bool {
         let path = self.get_obj_path(obj_id);
         Path::exists(&path)
     }
@@ -389,7 +393,10 @@ impl ClientStorage {
     }
 
     /// Get object from PACKs by hash, if not found, return None
-    fn get_from_pack(&self, obj_id: &SHA1) -> Result<Option<(Vec<u8>, ObjectType)>, GitError> {
+    fn get_from_pack(
+        &self,
+        obj_id: &ObjectHash,
+    ) -> Result<Option<(Vec<u8>, ObjectType)>, GitError> {
         let idxes = self.list_all_idx(); // list or build
         for idx in idxes {
             let res = Self::read_pack_by_idx(&idx, obj_id)?;
@@ -414,7 +421,7 @@ impl ClientStorage {
     }
 
     /// List all objects hash in .idx file
-    fn list_idx_objects(idx_file: &Path) -> Result<Vec<SHA1>, io::Error> {
+    fn list_idx_objects(idx_file: &Path) -> Result<Vec<ObjectHash>, io::Error> {
         let fanout: [u32; 256] = Self::read_idx_fanout(idx_file)?; // TODO param change to `&mut File`, to auto seek
         let mut idx_file = fs::File::open(idx_file)?;
         idx_file.seek(io::SeekFrom::Start(FANOUT))?; // important!
@@ -422,7 +429,7 @@ impl ClientStorage {
         let mut objs = Vec::new();
         for _ in 0..fanout[255] {
             let _offset = idx_file.read_u32::<BigEndian>()?;
-            let hash = read_sha1(&mut idx_file)?;
+            let hash = read_sha(&mut idx_file)?;
 
             objs.push(hash);
         }
@@ -430,11 +437,11 @@ impl ClientStorage {
     }
 
     /// Read object `offset` from .idx file by `hash`
-    fn read_idx(idx_file: &Path, obj_id: &SHA1) -> Result<Option<u64>, io::Error> {
+    fn read_idx(idx_file: &Path, obj_id: &ObjectHash) -> Result<Option<u64>, io::Error> {
         let fanout: [u32; 256] = Self::read_idx_fanout(idx_file)?;
         let mut idx_file = fs::File::open(idx_file)?;
 
-        let first_byte = obj_id.0[0];
+        let first_byte = obj_id.as_ref()[0];
         let start = if first_byte == 0 {
             0
         } else {
@@ -445,7 +452,7 @@ impl ClientStorage {
         idx_file.seek(io::SeekFrom::Start(FANOUT + 24 * start as u64))?;
         for _ in start..end {
             let offset = idx_file.read_u32::<BigEndian>()?;
-            let hash = read_sha1(&mut idx_file)?;
+            let hash = read_sha(&mut idx_file)?;
 
             if &hash == obj_id {
                 return Ok(Some(offset as u64));
@@ -456,7 +463,10 @@ impl ClientStorage {
     }
 
     /// Get object from pack by .idx file
-    fn read_pack_by_idx(idx_file: &Path, obj_id: &SHA1) -> Result<Option<CacheObject>, GitError> {
+    fn read_pack_by_idx(
+        idx_file: &Path,
+        obj_id: &ObjectHash,
+    ) -> Result<Option<CacheObject>, GitError> {
         let pack_file = idx_file.with_extension("pack");
         let res = Self::read_idx(idx_file, obj_id)?;
         match res {
@@ -567,7 +577,7 @@ mod tests {
 
     #[tokio::test]
     /// Tests object search functionality by partial hash prefix.
-    /// Verifies that objects can be correctly found when searching with a partial SHA1 hash.
+    /// Verifies that objects can be correctly found when searching with a partial ObjectHash hash.
     async fn test_search() {
         let blob = Blob::from_content("Hello, world!");
 

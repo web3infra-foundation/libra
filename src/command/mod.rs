@@ -34,14 +34,14 @@ use crate::utils;
 use crate::utils::object_ext::BlobExt;
 use crate::utils::util;
 use git_internal::internal::object::blob::Blob;
-use git_internal::{errors::GitError, hash::SHA1, internal::object::ObjectTrait};
+use git_internal::{errors::GitError, hash::ObjectHash, internal::object::ObjectTrait};
 use rpassword::read_password;
 use std::io;
 use std::io::Write;
 use std::path::Path;
 
 // impl load for all objects
-pub fn load_object<T>(hash: &SHA1) -> Result<T, GitError>
+pub fn load_object<T>(hash: &ObjectHash) -> Result<T, GitError>
 where
     T: ObjectTrait,
 {
@@ -51,7 +51,7 @@ where
 }
 
 // impl save for all objects
-pub fn save_object<T>(object: &T, obj_id: &SHA1) -> Result<(), GitError>
+pub fn save_object<T>(object: &T, obj_id: &ObjectHash) -> Result<(), GitError>
 where
     T: ObjectTrait,
 {
@@ -96,7 +96,7 @@ pub fn ask_basic_auth() -> BasicAuth {
 
 /// Calculate the hash of a file blob
 /// - for `lfs` file: calculate hash of the pointer data
-pub fn calc_file_blob_hash(path: impl AsRef<Path>) -> io::Result<SHA1> {
+pub fn calc_file_blob_hash(path: impl AsRef<Path>) -> io::Result<ObjectHash> {
     let blob = if utils::lfs::is_lfs_tracked(&path) {
         let (pointer, _) = utils::lfs::generate_pointer_file(&path);
         Blob::from_content(&pointer)
@@ -107,7 +107,9 @@ pub fn calc_file_blob_hash(path: impl AsRef<Path>) -> io::Result<SHA1> {
 }
 
 /// Get the commit hash from branch name or commit hash, support remote branch
-pub async fn get_target_commit(branch_or_commit: &str) -> Result<SHA1, Box<dyn std::error::Error>> {
+pub async fn get_target_commit(
+    branch_or_commit: &str,
+) -> Result<ObjectHash, Box<dyn std::error::Error>> {
     util::get_commit_base(branch_or_commit)
         .await
         .map_err(|e| e.into())
@@ -129,7 +131,7 @@ mod tests {
         let temp_path = tempdir().unwrap();
         test::setup_with_new_libra_in(temp_path.path()).await;
         let _guard = test::ChangeDirGuard::new(temp_path.path());
-        let object = Commit::from_tree_id(SHA1::new(&[1; 20]), vec![], "\nCommit_1");
+        let object = Commit::from_tree_id(ObjectHash::new(&[1; 20]), vec![], "\nCommit_1");
         save_object(&object, &object.id).unwrap();
         let _ = load_object::<Commit>(&object.id).unwrap();
     }

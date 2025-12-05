@@ -7,7 +7,7 @@ use crate::utils::object_ext::BlobExt;
 use crate::utils::object_ext::TreeExt;
 use crate::utils::{path, util};
 use clap::Parser;
-use git_internal::hash::SHA1;
+use git_internal::hash::ObjectHash;
 use git_internal::internal::index::{Index, IndexEntry};
 use git_internal::internal::object::commit::Commit;
 use git_internal::internal::object::tree::{Tree, TreeItem, TreeItemMode};
@@ -34,7 +34,7 @@ pub struct CherryPickArgs {
 /// This is useful for selectively applying commits from one branch to another without merging.
 ///
 /// The process involves:
-/// 1. Resolving commit references to SHA1 hashes
+/// 1. Resolving commit references to ObjectHash hashes
 /// 2. For each commit, performing a three-way merge to apply changes
 /// 3. Creating new commits with the same changes and the current HEAD as the parent
 ///    TODO: Now, it will apply the picked commits exactly as they are,
@@ -103,11 +103,11 @@ pub async fn execute(args: CherryPickArgs) {
 /// 3. Applies the resulting changes to the index and working directory
 /// 4. Optionally creates a new commit with the applied changes
 ///
-/// Returns the SHA1 of the new commit if created, or None if --no-commit was used
+/// Returns the ObjectHash of the new commit if created, or None if --no-commit was used
 async fn cherry_pick_single_commit(
-    commit_id: &SHA1,
+    commit_id: &ObjectHash,
     args: &CherryPickArgs,
-) -> Result<Option<SHA1>, String> {
+) -> Result<Option<ObjectHash>, String> {
     let commit_to_pick: Commit =
         load_object(commit_id).map_err(|e| format!("failed to load commit: {e}"))?;
 
@@ -185,8 +185,8 @@ async fn cherry_pick_single_commit(
 /// 4. Updates the HEAD reference to point to the new commit
 async fn create_cherry_pick_commit(
     original_commit: &Commit,
-    parent_id: &SHA1,
-) -> Result<SHA1, String> {
+    parent_id: &ObjectHash,
+) -> Result<ObjectHash, String> {
     let index = Index::load(path::index()).map_err(|e| format!("failed to load index: {e}"))?;
 
     // Create tree from current index state
@@ -236,11 +236,14 @@ async fn create_cherry_pick_commit(
 /// This function compares two tree objects and returns a list of differences.
 /// Each difference is represented as a tuple containing:
 /// - PathBuf: The file path
-/// - Option<SHA1>: The hash in the "theirs" tree (None if deleted)
-/// - Option<SHA1>: The hash in the "base" tree (None if newly added)
+/// - Option<ObjectHash>: The hash in the "theirs" tree (None if deleted)
+/// - Option<ObjectHash>: The hash in the "base" tree (None if newly added)
 ///
 /// This is used to determine what changes need to be applied when cherry-picking.
-fn diff_trees(theirs: &Tree, base: &Tree) -> Vec<(PathBuf, Option<SHA1>, Option<SHA1>)> {
+fn diff_trees(
+    theirs: &Tree,
+    base: &Tree,
+) -> Vec<(PathBuf, Option<ObjectHash>, Option<ObjectHash>)> {
     let mut diffs = Vec::new();
     let their_items: HashMap<_, _> = theirs.get_plain_items().into_iter().collect();
     let base_items: HashMap<_, _> = base.get_plain_items().into_iter().collect();
@@ -265,7 +268,7 @@ fn diff_trees(theirs: &Tree, base: &Tree) -> Vec<(PathBuf, Option<SHA1>, Option<
 /// 3. Adds the entry to the index (overwriting any existing entry with the same path)
 ///
 /// This is used when applying cherry-pick changes to update the index state.
-fn update_index_entry(index: &mut Index, path: &Path, hash: SHA1) {
+fn update_index_entry(index: &mut Index, path: &Path, hash: ObjectHash) {
     let blob = git_internal::internal::object::blob::Blob::load(&hash);
     let entry = IndexEntry::new_from_blob(
         path.to_str().unwrap().to_string(),
@@ -285,8 +288,8 @@ fn update_index_entry(index: &mut Index, path: &Path, hash: SHA1) {
 /// This is a reusable utility function that can be used in commit.rs and revert.rs
 /// as well, since creating trees from index state is a common operation.
 ///
-/// Returns the SHA1 hash of the root tree object.
-fn create_tree_from_index(index: &Index) -> Result<SHA1, String> {
+/// Returns the ObjectHash hash of the root tree object.
+fn create_tree_from_index(index: &Index) -> Result<ObjectHash, String> {
     // Path -> TreeItem mapping
     let mut entries_map: HashMap<PathBuf, Vec<TreeItem>> = HashMap::new();
     for path_buf in index.tracked_files() {
@@ -328,7 +331,7 @@ fn create_tree_from_index(index: &Index) -> Result<SHA1, String> {
 fn build_tree_recursively(
     current_path: &Path,
     entries_map: &mut HashMap<PathBuf, Vec<TreeItem>>,
-) -> Result<SHA1, String> {
+) -> Result<ObjectHash, String> {
     let mut current_items = entries_map.remove(current_path).unwrap_or_default();
 
     // Find all subdirectories and build them recursively
@@ -395,15 +398,15 @@ fn reset_workdir_to_index(index: &Index) -> Result<(), String> {
     Ok(())
 }
 
-/// Resolve a commit reference (like "HEAD", branch name, or SHA1) to a SHA1 hash
+/// Resolve a commit reference (like "HEAD", branch name, or ObjectHash) to a ObjectHash hash
 ///
 /// This function uses the utility function to convert various commit references
-/// into their corresponding SHA1 hashes. It supports:
-/// - Full SHA1 hashes
-/// - Abbreviated SHA1 hashes  
+/// into their corresponding ObjectHash hashes. It supports:
+/// - Full ObjectHash hashes
+/// - Abbreviated ObjectHash hashes  
 /// - Branch names
 /// - Special references like "HEAD"
-async fn resolve_commit(reference: &str) -> Result<SHA1, String> {
+async fn resolve_commit(reference: &str) -> Result<ObjectHash, String> {
     util::get_commit_base(reference).await
 }
 

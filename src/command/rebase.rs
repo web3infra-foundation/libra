@@ -7,7 +7,7 @@ use crate::internal::reflog::{ReflogAction, ReflogContext, ReflogError, with_ref
 use crate::utils::object_ext::{BlobExt, TreeExt};
 use crate::utils::{path, util};
 use clap::Parser;
-use git_internal::hash::SHA1;
+use git_internal::hash::ObjectHash;
 use git_internal::internal::object::commit::Commit;
 use git_internal::internal::object::tree::Tree;
 use sea_orm::TransactionTrait;
@@ -227,12 +227,12 @@ pub async fn execute(args: RebaseArgs) {
     );
 }
 
-/// Resolve a branch name or commit reference to a SHA1 hash
+/// Resolve a branch name or commit reference to a ObjectHash hash
 ///
 /// This function first tries to find a branch with the given name,
 /// then falls back to resolving it as a commit reference (hash, HEAD, etc.).
 /// This allows the rebase command to work with both branch names and commit hashes.
-async fn resolve_branch_or_commit(reference: &str) -> Result<SHA1, String> {
+async fn resolve_branch_or_commit(reference: &str) -> Result<ObjectHash, String> {
     util::get_commit_base(reference).await
 }
 
@@ -245,7 +245,10 @@ async fn resolve_branch_or_commit(reference: &str) -> Result<SHA1, String> {
 /// - Ours: The new parent commit (where we want to apply the changes)
 ///
 /// The result is a new commit with the same changes but a different parent.
-async fn replay_commit(commit_to_replay_id: &SHA1, new_parent_id: &SHA1) -> Result<SHA1, String> {
+async fn replay_commit(
+    commit_to_replay_id: &ObjectHash,
+    new_parent_id: &ObjectHash,
+) -> Result<ObjectHash, String> {
     let commit_to_replay: Commit = load_object(commit_to_replay_id).map_err(|e| e.to_string())?;
     let original_parent_id = commit_to_replay
         .parent_commit_ids
@@ -274,7 +277,8 @@ async fn replay_commit(commit_to_replay_id: &SHA1, new_parent_id: &SHA1) -> Resu
 
     // Calculate what changed between base and their trees
     let diff = diff_trees(&their_tree, &base_tree);
-    let mut merged_items: HashMap<PathBuf, SHA1> = our_tree.get_plain_items().into_iter().collect();
+    let mut merged_items: HashMap<PathBuf, ObjectHash> =
+        our_tree.get_plain_items().into_iter().collect();
 
     // Apply the changes to our tree
     for (path, their_hash, _base_hash) in diff {
@@ -313,7 +317,10 @@ async fn replay_commit(commit_to_replay_id: &SHA1, new_parent_id: &SHA1) -> Resu
 ///
 /// TODO: Implement proper LCA algorithm for better merge base detection
 /// TODO: Optimize performance for large repositories with many commits
-async fn find_merge_base(commit1_id: &SHA1, commit2_id: &SHA1) -> Result<Option<SHA1>, String> {
+async fn find_merge_base(
+    commit1_id: &ObjectHash,
+    commit2_id: &ObjectHash,
+) -> Result<Option<ObjectHash>, String> {
     let mut visited1 = HashSet::new();
     let mut visited2 = HashSet::new();
     let mut queue1 = vec![*commit1_id];
@@ -355,7 +362,10 @@ async fn find_merge_base(commit1_id: &SHA1, commit2_id: &SHA1) -> Result<Option<
 ///
 /// The commits are returned in chronological order (oldest first) so they
 /// can be replayed in the correct sequence.
-async fn collect_commits_to_replay(base_id: &SHA1, head_id: &SHA1) -> Result<Vec<SHA1>, String> {
+async fn collect_commits_to_replay(
+    base_id: &ObjectHash,
+    head_id: &ObjectHash,
+) -> Result<Vec<ObjectHash>, String> {
     let mut commits = Vec::new();
     let mut current_id = *head_id;
 
@@ -381,11 +391,14 @@ async fn collect_commits_to_replay(base_id: &SHA1, head_id: &SHA1) -> Result<Vec
 /// This function compares two trees and returns a list of all files that
 /// differ between them. Each difference is represented as a tuple containing:
 /// - PathBuf: The file path that differs
-/// - Option<SHA1>: The file hash in the "theirs" tree (None if deleted)
-/// - Option<SHA1>: The file hash in the "base" tree (None if newly added)
+/// - Option<ObjectHash>: The file hash in the "theirs" tree (None if deleted)
+/// - Option<ObjectHash>: The file hash in the "base" tree (None if newly added)
 ///
 /// This is used to determine what changes need to be applied during replay.
-fn diff_trees(theirs: &Tree, base: &Tree) -> Vec<(PathBuf, Option<SHA1>, Option<SHA1>)> {
+fn diff_trees(
+    theirs: &Tree,
+    base: &Tree,
+) -> Vec<(PathBuf, Option<ObjectHash>, Option<ObjectHash>)> {
     let their_items: HashMap<_, _> = theirs.get_plain_items().into_iter().collect();
     let base_items: HashMap<_, _> = base.get_plain_items().into_iter().collect();
     let all_paths: HashSet<_> = their_items.keys().chain(base_items.keys()).collect();
@@ -409,8 +422,8 @@ fn diff_trees(theirs: &Tree, base: &Tree) -> Vec<(PathBuf, Option<SHA1>, Option<
 /// - Creating tree objects for each directory
 /// - Recursively building the tree structure from root to leaves
 ///
-/// Returns the SHA1 hash of the root tree object.
-fn create_tree_from_items_map(items: &HashMap<PathBuf, SHA1>) -> Result<SHA1, String> {
+/// Returns the ObjectHash hash of the root tree object.
+fn create_tree_from_items_map(items: &HashMap<PathBuf, ObjectHash>) -> Result<ObjectHash, String> {
     // Group files by their parent directories
     let mut entries_map: HashMap<PathBuf, Vec<git_internal::internal::object::tree::TreeItem>> =
         HashMap::new();
@@ -440,7 +453,7 @@ fn create_tree_from_items_map(items: &HashMap<PathBuf, SHA1>) -> Result<SHA1, St
 fn build_tree_recursively(
     current_path: &Path,
     entries_map: &mut HashMap<PathBuf, Vec<git_internal::internal::object::tree::TreeItem>>,
-) -> Result<SHA1, String> {
+) -> Result<ObjectHash, String> {
     // Get all files/items in the current directory
     let mut current_items = entries_map.remove(current_path).unwrap_or_default();
 

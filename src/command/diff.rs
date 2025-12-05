@@ -8,7 +8,7 @@ use clap::Parser;
 use colored::Colorize;
 use git_internal::Diff;
 use git_internal::{
-    hash::SHA1,
+    hash::ObjectHash,
     internal::{
         index::Index,
         object::{blob::Blob, commit::Commit, tree::Tree, types::ObjectType},
@@ -134,7 +134,7 @@ pub async fn execute(args: DiffArgs) {
     // use pathspec to filter files
     let paths: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
 
-    let read_content = |file: &PathBuf, hash: &SHA1| {
+    let read_content = |file: &PathBuf, hash: &ObjectHash| {
         // read content from blob or file
         match load_object::<Blob>(hash) {
             Ok(blob) => blob.data,
@@ -191,7 +191,7 @@ pub async fn execute(args: DiffArgs) {
     }
 }
 
-async fn get_commit_blobs(commit_hash: &SHA1) -> Vec<(PathBuf, SHA1)> {
+async fn get_commit_blobs(commit_hash: &ObjectHash) -> Vec<(PathBuf, ObjectHash)> {
     let commit = load_object::<Commit>(commit_hash).unwrap();
     let tree = load_object::<Tree>(&commit.tree_id).unwrap();
     tree.get_plain_items()
@@ -199,7 +199,11 @@ async fn get_commit_blobs(commit_hash: &SHA1) -> Vec<(PathBuf, SHA1)> {
 
 /// diff needs to print hashes even if the files have not been staged yet.
 /// This helper maps workdir paths to blob ids while applying the shared ignore policy.
-fn get_files_blobs(files: &[PathBuf], index: &Index, policy: IgnorePolicy) -> Vec<(PathBuf, SHA1)> {
+fn get_files_blobs(
+    files: &[PathBuf],
+    index: &Index,
+    policy: IgnorePolicy,
+) -> Vec<(PathBuf, ObjectHash)> {
     files
         .iter()
         .filter(|path| !ignore::should_ignore(path, policy, index))

@@ -6,9 +6,9 @@ use std::sync::{Arc, Mutex};
 use byteorder::{BigEndian, WriteBytesExt};
 use clap::Parser;
 use sha1::{Digest, Sha1};
-
+//use crc32fast::Hasher as Crc32; //use for index version 2
 use git_internal::errors::GitError;
-use git_internal::hash::SHA1;
+use git_internal::hash::{HashKind, ObjectHash, get_hash_kind};
 use git_internal::internal::metadata::{EntryMeta, MetaAttached};
 use git_internal::internal::pack::Pack;
 use git_internal::internal::pack::entry::Entry;
@@ -61,6 +61,12 @@ pub fn execute(args: IndexPackArgs) {
 /// Build index file for pack file, version 1
 /// [pack-format](https://git-scm.com/docs/pack-format)
 pub fn build_index_v1(pack_file: &str, index_file: &str) -> Result<(), GitError> {
+    // version 1 only supports SHA-1 hash
+    if get_hash_kind() != HashKind::Sha1 {
+        return Err(GitError::InvalidPackFile(
+            "Index version 1 only supports SHA-1 hash".to_string(),
+        ));
+    }
     let pack_path = PathBuf::from(pack_file);
     let tmp_path = pack_path.parent().unwrap();
     let pack_file = std::fs::File::open(pack_file)?;
@@ -81,7 +87,7 @@ pub fn build_index_v1(pack_file: &str, index_file: &str) -> Result<(), GitError>
             let offset = meta_entry.meta.pack_offset.unwrap();
             obj_map_c.lock().unwrap().insert(hash_key, offset);
         },
-        None::<fn(SHA1)>,
+        None::<fn(ObjectHash)>,
     )?;
 
     let mut index_hash = Sha1::new();
@@ -97,7 +103,7 @@ pub fn build_index_v1(pack_file: &str, index_file: &str) -> Result<(), GitError>
     let obj_map = Arc::try_unwrap(obj_map).unwrap().into_inner().unwrap();
     for (hash, _) in obj_map.iter() {
         // sorted
-        let first_byte = hash.0[0];
+        let first_byte = hash.as_ref()[0];
         while first_byte > i {
             // `while` rather than `if` to fill the gap, e.g. 0, 1, 2, 2, 2, 6
             fan_out.write_u32::<BigEndian>(cnt)?;
@@ -122,19 +128,23 @@ pub fn build_index_v1(pack_file: &str, index_file: &str) -> Result<(), GitError>
     for (hash, offset) in obj_map {
         let mut buf = Vec::with_capacity(24);
         buf.write_u32::<BigEndian>(offset as u32)?;
-        buf.write_all(&hash.0)?;
+        buf.write_all(hash.as_ref())?;
 
         index_hash.update(&buf);
         index_file.write_all(&buf)?;
     }
 
-    index_hash.update(pack.signature.0);
+    index_hash.update(pack.signature.as_ref());
     // A copy of the pack checksum at the end of the corresponding pack-file.
-    index_file.write_all(&pack.signature.0)?;
+    index_file.write_all(pack.signature.as_ref())?;
     let index_hash: [u8; 20] = index_hash.finalize().into();
     // Index checksum of all of the above.
     index_file.write_all(&index_hash)?;
 
     tracing::debug!("Index file is written to {:?}", index_file);
     Ok(())
+}
+
+pub fn build_index_v2(_pack_file: &str, _index_file: &str) -> Result<(), GitError> {
+    todo!("implement index version 2");
 }

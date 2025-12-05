@@ -1,7 +1,7 @@
 use super::*;
 use clap::Parser;
 use git_internal::Diff;
-use git_internal::hash::SHA1;
+use git_internal::hash::ObjectHash;
 use git_internal::internal::object::commit::Commit;
 use git_internal::internal::object::{blob::Blob, tree::Tree};
 use libra::utils::object_ext::TreeExt;
@@ -66,7 +66,7 @@ async fn test_execute_log() {
 ///            4     7
 async fn create_test_commit_tree() -> String {
     let mut commit_1 = Commit::from_tree_id(
-        SHA1::new(&[1; 20]),
+        ObjectHash::new(&[1; 20]),
         vec![],
         &format_commit_msg("Commit_1", None),
     );
@@ -75,7 +75,7 @@ async fn create_test_commit_tree() -> String {
     save_object(&commit_1, &commit_1.id).unwrap();
 
     let mut commit_2 = Commit::from_tree_id(
-        SHA1::new(&[2; 20]),
+        ObjectHash::new(&[2; 20]),
         vec![commit_1.id],
         &format_commit_msg("Commit_2", None),
     );
@@ -83,7 +83,7 @@ async fn create_test_commit_tree() -> String {
     save_object(&commit_2, &commit_2.id).unwrap();
 
     let mut commit_3 = Commit::from_tree_id(
-        SHA1::new(&[3; 20]),
+        ObjectHash::new(&[3; 20]),
         vec![commit_2.id],
         &format_commit_msg("Commit_3", None),
     );
@@ -91,7 +91,7 @@ async fn create_test_commit_tree() -> String {
     save_object(&commit_3, &commit_3.id).unwrap();
 
     let mut commit_4 = Commit::from_tree_id(
-        SHA1::new(&[4; 20]),
+        ObjectHash::new(&[4; 20]),
         vec![commit_2.id],
         &format_commit_msg("Commit_4", None),
     );
@@ -99,7 +99,7 @@ async fn create_test_commit_tree() -> String {
     save_object(&commit_4, &commit_4.id).unwrap();
 
     let mut commit_5 = Commit::from_tree_id(
-        SHA1::new(&[5; 20]),
+        ObjectHash::new(&[5; 20]),
         vec![commit_2.id, commit_4.id],
         &format_commit_msg("Commit_5", None),
     );
@@ -107,7 +107,7 @@ async fn create_test_commit_tree() -> String {
     save_object(&commit_5, &commit_5.id).unwrap();
 
     let mut commit_6 = Commit::from_tree_id(
-        SHA1::new(&[6; 20]),
+        ObjectHash::new(&[6; 20]),
         vec![commit_3.id, commit_5.id],
         &format_commit_msg("Commit_6", None),
     );
@@ -115,7 +115,7 @@ async fn create_test_commit_tree() -> String {
     save_object(&commit_6, &commit_6.id).unwrap();
 
     let mut commit_7 = Commit::from_tree_id(
-        SHA1::new(&[7; 20]),
+        ObjectHash::new(&[7; 20]),
         vec![commit_5.id],
         &format_commit_msg("Commit_7", None),
     );
@@ -388,26 +388,27 @@ async fn collect_combined_diff_for_commits(count: usize, paths: Vec<std::path::P
     let mut out = String::new();
     for commit in reachable_commits.into_iter().take(max_output_number) {
         let tree = load_object::<Tree>(&commit.tree_id).unwrap();
-        let new_blobs: Vec<(std::path::PathBuf, SHA1)> = tree.get_plain_items();
+        let new_blobs: Vec<(std::path::PathBuf, ObjectHash)> = tree.get_plain_items();
 
-        let old_blobs: Vec<(std::path::PathBuf, SHA1)> = if !commit.parent_commit_ids.is_empty() {
-            let parent = &commit.parent_commit_ids[0];
-            let parent_hash = SHA1::from_str(&parent.to_string()).unwrap();
-            let parent_commit = load_object::<Commit>(&parent_hash).unwrap();
-            let parent_tree = load_object::<Tree>(&parent_commit.tree_id).unwrap();
-            parent_tree.get_plain_items()
-        } else {
-            Vec::new()
-        };
+        let old_blobs: Vec<(std::path::PathBuf, ObjectHash)> =
+            if !commit.parent_commit_ids.is_empty() {
+                let parent = &commit.parent_commit_ids[0];
+                let parent_hash = ObjectHash::from_str(&parent.to_string()).unwrap();
+                let parent_commit = load_object::<Commit>(&parent_hash).unwrap();
+                let parent_tree = load_object::<Tree>(&parent_commit.tree_id).unwrap();
+                parent_tree.get_plain_items()
+            } else {
+                Vec::new()
+            };
 
-        let read_content = |file: &std::path::PathBuf, hash: &SHA1| match load_object::<Blob>(hash)
-        {
-            Ok(blob) => blob.data,
-            Err(_) => {
-                let file = util::to_workdir_path(file);
-                std::fs::read(&file).unwrap()
-            }
-        };
+        let read_content =
+            |file: &std::path::PathBuf, hash: &ObjectHash| match load_object::<Blob>(hash) {
+                Ok(blob) => blob.data,
+                Err(_) => {
+                    let file = util::to_workdir_path(file);
+                    std::fs::read(&file).unwrap()
+                }
+            };
 
         let diffs = Diff::diff(
             old_blobs,
@@ -478,7 +479,7 @@ async fn test_log_stat() {
     .await;
 
     let commit_hash = Head::current_commit().await.unwrap().to_string();
-    let commit_id = SHA1::from_str(&commit_hash).unwrap();
+    let commit_id = ObjectHash::from_str(&commit_hash).unwrap();
     let commit = load_object::<Commit>(&commit_id).unwrap();
 
     let stats = libra::command::log::compute_commit_stat(&commit, Vec::new()).await;
@@ -552,7 +553,7 @@ async fn test_log_stat_with_modifications() {
     .await;
 
     let commit_hash = Head::current_commit().await.unwrap().to_string();
-    let commit_id = SHA1::from_str(&commit_hash).unwrap();
+    let commit_id = ObjectHash::from_str(&commit_hash).unwrap();
     let commit = load_object::<Commit>(&commit_id).unwrap();
 
     let stats = libra::command::log::compute_commit_stat(&commit, Vec::new()).await;
@@ -577,7 +578,7 @@ async fn test_log_graph() {
 
     let mut graph_state = libra::command::log::GraphState::new();
 
-    let commit_hash = SHA1::from_str(&commit_id).unwrap();
+    let commit_hash = ObjectHash::from_str(&commit_id).unwrap();
     let commit = load_object::<Commit>(&commit_hash).unwrap();
 
     let prefix = graph_state.render(&commit);
@@ -687,7 +688,7 @@ async fn test_log_stat_and_graph_combined() {
     assert!(args.stat);
 
     let commit_hash = Head::current_commit().await.unwrap().to_string();
-    let commit_id = SHA1::from_str(&commit_hash).unwrap();
+    let commit_id = ObjectHash::from_str(&commit_hash).unwrap();
     let commit = load_object::<Commit>(&commit_id).unwrap();
 
     let stats = libra::command::log::compute_commit_stat(&commit, Vec::new()).await;

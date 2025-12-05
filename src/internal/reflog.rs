@@ -3,7 +3,6 @@ use crate::internal::db::get_db_conn_instance;
 use crate::internal::head::Head;
 use crate::internal::model::reflog;
 use crate::internal::model::reflog::{ActiveModel, Model};
-use git_internal::hash::SHA1;
 use sea_orm::{
     ActiveModelTrait, DatabaseTransaction, EntityTrait, QueryFilter, QueryOrder, Set,
     TransactionTrait,
@@ -360,8 +359,4 @@ async fn ensure_reflog_table_exists<C: ConnectionTrait>(db: &C) -> Result<(), Re
 
     db.execute(create_index_stmt).await?;
     Ok(())
-}
-
-pub fn zero_sha1() -> SHA1 {
-    SHA1::from_bytes(&[0; 20])
 }

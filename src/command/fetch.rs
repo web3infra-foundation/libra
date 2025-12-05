@@ -1,6 +1,6 @@
 use crate::git_protocol::ServiceType::{self, UploadPack};
 use clap::Parser;
-use git_internal::hash::SHA1;
+use git_internal::hash::{ObjectHash, get_hash_kind};
 use git_internal::internal::object::commit::Commit;
 use indicatif::ProgressBar;
 use sea_orm::TransactionTrait;
@@ -13,7 +13,7 @@ use tokio_util::io::StreamReader;
 
 use crate::command::load_object;
 use crate::internal::db::get_db_conn_instance;
-use crate::internal::reflog::{HEAD, Reflog, ReflogAction, ReflogContext, ReflogError, zero_sha1};
+use crate::internal::reflog::{HEAD, Reflog, ReflogAction, ReflogContext, ReflogError};
 use crate::utils::util;
 use crate::{
     command::index_pack::{self, IndexPackArgs},
@@ -258,19 +258,20 @@ pub async fn fetch_repository(remote_config: RemoteConfig, branch: Option<String
     bar.finish();
 
     /* save pack file */
-    let pack_file = if pack_data.len() < 20 {
+    let hash_len = get_hash_kind().size();
+    let pack_file = if pack_data.len() < hash_len {
         tracing::debug!("No pack data returned from remote");
         None
     } else {
-        let payload_len = pack_data.len() - 20;
-        let hash = SHA1::new(&pack_data[..payload_len]);
+        let payload_len = pack_data.len() - hash_len;
+        let hash = ObjectHash::new(&pack_data[..payload_len]);
 
-        let checksum = SHA1::from_bytes(&pack_data[payload_len..]);
+        let checksum = ObjectHash::from_bytes(&pack_data[payload_len..]).unwrap();
         assert_eq!(hash, checksum);
         let checksum = checksum.to_string();
         println!("checksum: {checksum}");
 
-        if pack_data.len() > 32 {
+        if pack_data.len() > 12 + hash_len {
             // 12 header + 20 hash
             let pack_file = utils::path::objects()
                 .join("pack")
@@ -318,7 +319,9 @@ pub async fn fetch_repository(remote_config: RemoteConfig, branch: Option<String
                     // Get the old OID *before* updating the branch
                     let old_oid = Branch::find_branch_with_conn(txn, &full_ref_name, None)
                         .await
-                        .map_or(zero_sha1().to_string(), |b| b.commit.to_string());
+                        .map_or(ObjectHash::zero_str(get_hash_kind()), |b| {
+                            b.commit.to_string()
+                        });
 
                     // Update the branch pointer
                     Branch::update_branch_with_conn(txn, &full_ref_name, &r._hash, None).await;
@@ -370,7 +373,7 @@ async fn current_have() -> Vec<String> {
     #[derive(PartialEq, Eq, PartialOrd, Ord)]
     struct QueueItem {
         priority: usize,
-        commit: SHA1,
+        commit: ObjectHash,
     }
     let mut c_pending = std::collections::BinaryHeap::new();
     let mut inserted = HashSet::new();

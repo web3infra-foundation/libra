@@ -6,7 +6,7 @@ use crate::internal::reflog::{ReflogAction, ReflogContext, with_reflog};
 use crate::utils::object_ext::{BlobExt, TreeExt};
 use crate::utils::{path, util};
 use clap::Parser;
-use git_internal::hash::SHA1;
+use git_internal::hash::ObjectHash;
 use git_internal::internal::index::{Index, IndexEntry};
 use git_internal::internal::object::commit::Commit;
 use git_internal::internal::object::tree::Tree;
@@ -171,7 +171,7 @@ async fn reset_pathspecs(pathspecs: &[String], target: &str) {
 /// Perform the actual reset operation based on the specified mode.
 /// Updates HEAD pointer and optionally resets index and working directory.
 async fn perform_reset(
-    target_commit_id: SHA1,
+    target_commit_id: ObjectHash,
     mode: ResetMode,
     target_ref_str: &str, // e.g, "HEAD~2"
 ) -> Result<(), String> {
@@ -250,7 +250,7 @@ async fn perform_reset(
 
 /// Reset the index to match the specified commit's tree.
 /// Clears the current index and rebuilds it from the commit's tree structure.
-pub(crate) fn reset_index_to_commit(commit_id: &SHA1) -> Result<(), String> {
+pub(crate) fn reset_index_to_commit(commit_id: &ObjectHash) -> Result<(), String> {
     let commit: Commit =
         load_object(commit_id).map_err(|e| format!("failed to load commit: {e}"))?;
 
@@ -274,8 +274,8 @@ pub(crate) fn reset_index_to_commit(commit_id: &SHA1) -> Result<(), String> {
 /// Removes files that exist in the original commit but not in the target commit,
 /// and restores files from the target commit's tree.
 pub(crate) async fn reset_working_directory_to_commit(
-    commit_id: &SHA1,
-    original_head_commit: Option<SHA1>,
+    commit_id: &ObjectHash,
+    original_head_commit: Option<ObjectHash>,
 ) -> Result<(), String> {
     let commit: Commit =
         load_object(commit_id).map_err(|e| format!("failed to load commit: {e}"))?;
@@ -500,16 +500,16 @@ pub(crate) fn remove_empty_directories(workdir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Resolve a reference string to a commit SHA1.
+/// Resolve a reference string to a commit ObjectHash.
 /// Accepts commit hashes, branch names, or HEAD references.
-async fn resolve_commit(reference: &str) -> Result<SHA1, String> {
+async fn resolve_commit(reference: &str) -> Result<ObjectHash, String> {
     get_target_commit(reference)
         .await
         .map_err(|e| e.to_string())
 }
 
 /// Get the first line of a commit's message for display purposes.
-fn get_commit_summary(commit_id: &SHA1) -> Result<String, String> {
+fn get_commit_summary(commit_id: &ObjectHash) -> Result<String, String> {
     let commit: Commit =
         load_object(commit_id).map_err(|e| format!("failed to load commit: {e}"))?;
 

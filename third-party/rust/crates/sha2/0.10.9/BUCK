@@ -25,7 +25,6 @@ rust_library(
     edition = "2018",
     features = [
         "default",
-        "oid",
         "std",
     ],
     rustc_flags = ["@$(location :sha2-manifest[env_flags])"],

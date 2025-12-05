@@ -5,7 +5,7 @@ use crate::internal::model::reflog::Model;
 use crate::internal::reflog::{HEAD, Reflog, ReflogError};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
-use git_internal::hash::SHA1;
+use git_internal::hash::ObjectHash;
 use git_internal::internal::object::commit::Commit;
 use sea_orm::sqlx::types::chrono;
 use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
@@ -278,7 +278,7 @@ impl Display for ReflogFormatter<'_> {
 }
 
 fn find_commit(commit_hash: &str) -> Commit {
-    let hash = SHA1::from_str(commit_hash).unwrap();
+    let hash = ObjectHash::from_str(commit_hash).unwrap();
     load_object::<Commit>(&hash).unwrap()
 }
 
