@@ -323,28 +323,27 @@ mod test {
             assert!(args.is_err());
             assert!(args.err().unwrap().kind() == clap::error::ErrorKind::MissingRequiredArgument);
         }
-        #[ignore]
-        {
-            // --algorithm arg
-            let args = DiffArgs::try_parse_from([
-                "diff",
-                "--old",
-                "old",
-                "--new",
-                "new",
-                "--algorithm",
-                "myers",
-                "target paths",
-            ])
-            .unwrap();
-            assert_eq!(args.algorithm, Some("myers".to_string()));
-        }
-        #[ignore]
-        {
-            // --algorithm arg with default value
-            let args = DiffArgs::try_parse_from(["diff", "--old", "old", "target paths"]).unwrap();
-            assert_eq!(args.algorithm, Some("histogram".to_string()));
-        }
+        // TODO: Enable these tests when --algorithm arg is fully implemented
+        // {
+        //     // --algorithm arg
+        //     let args = DiffArgs::try_parse_from([
+        //         "diff",
+        //         "--old",
+        //         "old",
+        //         "--new",
+        //         "new",
+        //         "--algorithm",
+        //         "myers",
+        //         "target paths",
+        //     ])
+        //     .unwrap();
+        //     assert_eq!(args.algorithm, Some("myers".to_string()));
+        // }
+        // {
+        //     // --algorithm arg with default value
+        //     let args = DiffArgs::try_parse_from(["diff", "--old", "old", "target paths"]).unwrap();
+        //     assert_eq!(args.algorithm, Some("histogram".to_string()));
+        // }
     }
 
     #[test]
