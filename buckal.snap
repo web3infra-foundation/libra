@@ -3,7 +3,7 @@
 version = 1
 
 [fingerprints]
-"path+file://($WORKSPACE)#0.1.0" = "f87bf50ae50536ba6c2e248dfbad214d0cfe8e1cd19d4dc8a49b69bde72d6314"
+"path+file://($WORKSPACE)#0.1.0" = "10c5c7f07cb94537ec4c720021e474d403655a41fe2e78bc073704fda507672a"
 "registry+https://github.com/rust-lang/crates.io-index#adler2@2.0.1" = "7081ce7693ca45bff0e855374e6b7f386805bba1de9f7c288b1c706b99abef7f"
 "registry+https://github.com/rust-lang/crates.io-index#ahash@0.7.8" = "263bbc26dec8ade458658cf9dae3ef8fc606e85f04c7b47abb4f9255319689ac"
 "registry+https://github.com/rust-lang/crates.io-index#ahash@0.8.12" = "f778671dc433ee46d961aca6e08860d4146d990e1822df6b553893e379d8bfa5"
