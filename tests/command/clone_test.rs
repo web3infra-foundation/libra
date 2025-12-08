@@ -165,7 +165,7 @@ async fn test_clone_to_existing_dir() {
 #[tokio::test]
 #[serial]
 #[ignore]
-/// Test the clone command in the case where a file with the same name as the target directory already exists.
+/// Test that clone fails when a file exists at the target path.
 async fn test_clone_to_dir_with_existing_file_name() {
     let temp_path = tempdir().unwrap();
     let _guard = test::ChangeDirGuard::new(temp_path.path());
@@ -182,9 +182,11 @@ async fn test_clone_to_dir_with_existing_file_name() {
     })
     .await;
 
-    // Verify that the `.libra` directory does not exist
-    let libra_dir = conflict_path.join(".libra");
-    assert!(!libra_dir.exists());
+    // Verify that the pre-existing file remains a file (clone should not succeed)
+    assert!(
+        conflict_path.is_file(),
+        "pre-existing file should remain a file"
+    );
     // Make sure that the pre-existing file should still exist
     assert!(
         conflict_path.exists(),
