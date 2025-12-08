@@ -23,6 +23,7 @@ use git_internal::internal::pack::entry::Entry;
 use sea_orm::TransactionTrait;
 use std::collections::{HashSet, VecDeque};
 use std::io::Write;
+use std::path::Path;
 use std::str::FromStr;
 use tokio::sync::mpsc;
 use url::Url;
@@ -86,7 +87,27 @@ pub async fn execute(args: PushArgs) {
 
     println!("pushing {branch}({commit_hash}) to {repository}({repo_url})");
 
-    let url = Url::parse(&repo_url).unwrap();
+    let url = match Url::parse(&repo_url).or_else(|e| {
+        if e == url::ParseError::RelativeUrlWithoutBase && Path::new(&repo_url).exists() {
+            Url::from_file_path(Path::new(&repo_url))
+                .map_err(|_| url::ParseError::RelativeUrlWithoutBase)
+        } else {
+            Err(e)
+        }
+    }) {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!("fatal: invalid remote url '{}': {}", repo_url, e);
+            return;
+        }
+    };
+
+    // Local file path remote is not supported for push; avoid pretending success.
+    if url.scheme() == "file" {
+        eprintln!("fatal: pushing to local file repositories is not yet supported");
+        return;
+    }
+
     let client = HttpsClient::from_url(&url);
     let refs = match client.discovery_reference(ReceivePack).await {
         Ok(refs) => refs,
@@ -216,6 +237,27 @@ pub async fn execute(args: PushArgs) {
     println!("{}", "Push success".green());
 
     let remote_tracking_branch = format!("refs/remotes/{}/{}", repository, branch);
+    update_remote_tracking(&remote_tracking_branch, &commit_hash).await;
+
+    // set after push success
+    if args.set_upstream {
+        branch::set_upstream(&branch, &format!("{repository}/{branch}")).await;
+    }
+}
+
+/// Updates the remote tracking branch reference and records a Push action in the reflog.
+///
+/// This operation is performed atomically within a database transaction to keep the branch
+/// pointer and reflog entry consistent.
+///
+/// # Arguments
+/// * `remote_tracking_branch` - The full ref name (e.g., "refs/remotes/origin/master")
+/// * `commit_hash` - The commit hash to update the branch to
+///
+/// If the transaction fails, an error is printed to stderr.
+async fn update_remote_tracking(remote_tracking_branch: &str, commit_hash: &str) {
+    let remote_tracking_branch = remote_tracking_branch.to_string();
+    let commit_hash = commit_hash.to_string();
 
     // Update the remote tracking branch with a reflog entry using a transaction
     let db = get_db_conn_instance().await;
@@ -237,7 +279,7 @@ pub async fn execute(args: PushArgs) {
                 let context = ReflogContext {
                     old_oid,
                     new_oid: commit_hash.clone(),
-                    action: ReflogAction::Fetch, // Using Fetch action similar to fetch command
+                    action: ReflogAction::Push,
                 };
                 Reflog::insert_single_entry(txn, &context, &remote_tracking_branch).await?;
                 Ok::<_, ReflogError>(())
@@ -247,11 +289,6 @@ pub async fn execute(args: PushArgs) {
 
     if let Err(e) = transaction_result {
         eprintln!("fatal: failed to update remote tracking branch: {}", e);
-    }
-
-    // set after push success
-    if args.set_upstream {
-        branch::set_upstream(&branch, &format!("{repository}/{branch}")).await;
     }
 }
 
