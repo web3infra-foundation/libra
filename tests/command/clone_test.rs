@@ -155,7 +155,7 @@ async fn test_clone_to_existing_dir() {
     // Make sure that the pre-existing file should still exist
     assert!(dummy_file.exists(), "pre-existing file should still exist");
     let content = std::fs::read_to_string(&dummy_file).unwrap();
-    //Make sure that the pre-existing file content should remain unchanged
+    // Make sure that the pre-existing file content should remain unchanged
     assert_eq!(
         content, "test",
         "pre-existing file content should remain unchanged"
@@ -182,7 +182,7 @@ async fn test_clone_to_dir_with_existing_file_name() {
     })
     .await;
 
-    // Verify that the `.libra` directory not exists
+    // Verify that the `.libra` directory does not exist
     let libra_dir = conflict_path.join(".libra");
     assert!(!libra_dir.exists());
     // Make sure that the pre-existing file should still exist
@@ -191,7 +191,7 @@ async fn test_clone_to_dir_with_existing_file_name() {
         "pre-existing file should still exist"
     );
     let content = std::fs::read_to_string(&conflict_path).unwrap();
-    //Make sure that the pre-existing file content should remain unchanged
+    // Make sure that the pre-existing file content should remain unchanged
     assert_eq!(
         content, "test",
         "pre-existing file content should remain unchanged"
