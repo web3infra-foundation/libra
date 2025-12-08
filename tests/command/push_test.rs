@@ -1,7 +1,10 @@
 use clap::Parser;
 use libra::command::push;
+use libra::internal::db::get_db_conn_instance;
+use libra::internal::reflog::Reflog;
 use libra::utils::test::ChangeDirGuard;
 use serial_test::serial;
+use std::env;
 use std::process::Command;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -50,6 +53,87 @@ async fn test_push_force_flag_parsing() {
     // Test that -f flag is correctly parsed
     let args = push::PushArgs::parse_from(["push", "-f", "origin", "main"]);
     assert!(args.force);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_push_file_remote_fails_without_reflog() {
+    // local file remotes are not supported; ensure we fail loudly and avoid reflog writes
+    let remote_dir = tempfile::tempdir().unwrap();
+    let remote_path = remote_dir.path();
+
+    // local repo
+    let local_dir = tempfile::tempdir().unwrap();
+    let local_path = local_dir.path();
+    let _guard = ChangeDirGuard::new(local_path);
+    let out = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(local_path)
+        .arg("init")
+        .output()
+        .expect("init");
+    assert!(
+        out.status.success(),
+        "init failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // add file + commit
+    std::fs::write(local_path.join("file.txt"), "hello").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(local_path)
+        .args(["add", "file.txt"])
+        .output()
+        .expect("add");
+    assert!(
+        out.status.success(),
+        "add failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(local_path)
+        .args(["commit", "-m", "init"])
+        .output()
+        .expect("commit");
+    assert!(
+        out.status.success(),
+        "commit failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // add remote (local path, will be treated as file://)
+    let out = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(local_path)
+        .args(["remote", "add", "origin", remote_path.to_str().unwrap()])
+        .output()
+        .expect("remote add");
+    assert!(
+        out.status.success(),
+        "remote add failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // push should fail with clear fatal message
+    let out = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(local_path)
+        .args(["push", "origin", "master"])
+        .output()
+        .expect("push");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("pushing to local file repositories is not yet supported"),
+        "stderr should mention unsupported file:// push, got: {stderr}"
+    );
+
+    // ensure no reflog entry is written
+    env::set_current_dir(local_path).expect("set current dir to local repo");
+    let db = get_db_conn_instance().await;
+    let entry = Reflog::find_one(db, "refs/remotes/origin/master")
+        .await
+        .expect("query reflog");
+    assert!(
+        entry.is_none(),
+        "reflog should not be created when push fails"
+    );
 }
 
 #[tokio::test]

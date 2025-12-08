@@ -63,11 +63,18 @@ pub fn cur_dir() -> PathBuf {
 pub fn try_get_storage_path(path: Option<PathBuf>) -> Result<PathBuf, io::Error> {
     let mut path = path.clone().unwrap_or_else(cur_dir);
     let orig = path.clone();
+
     loop {
-        let libra = path.join(ROOT_DIR);
-        if libra.exists() {
-            return Ok(libra);
+        let standard_repo = path.join(ROOT_DIR);
+        if standard_repo.exists() {
+            return Ok(standard_repo);
         }
+
+        // Bare repository: database and objects live in the repository root without `.libra`
+        if path.join(DATABASE).exists() && path.join("objects").exists() {
+            return Ok(path);
+        }
+
         if !path.pop() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,

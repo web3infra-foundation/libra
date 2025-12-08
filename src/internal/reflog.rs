@@ -71,6 +71,7 @@ impl Display for ReflogContext {
             ),
             ReflogAction::Fetch => write!(f, "fast-forward"),
             ReflogAction::Pull => write!(f, "fast-forward"),
+            ReflogAction::Push => write!(f, "push"),
             ReflogAction::Rebase { state, details } => write!(f, "({state}) {details}"),
             ReflogAction::Clone { from } => write!(f, "from {from}"),
         }
@@ -88,6 +89,7 @@ pub enum ReflogAction {
     Rebase { state: String, details: String },
     Fetch,
     Pull,
+    Push,
     Clone { from: String },
 }
 
@@ -104,6 +106,7 @@ pub enum ReflogActionKind {
     Fetch,
     // pull is a combination of `fetch` and `merge`, maybe we don't need to do anything...
     Pull,
+    Push,
     Clone,
 }
 
@@ -119,6 +122,7 @@ impl Display for ReflogActionKind {
             Self::Rebase => write!(f, "rebase"),
             Self::Fetch => write!(f, "fetch"),
             Self::Pull => write!(f, "pull"),
+            Self::Push => write!(f, "push"),
             Self::Clone => write!(f, "clone"),
         }
     }
@@ -137,6 +141,7 @@ impl ReflogAction {
             Self::Rebase { .. } => ReflogActionKind::Rebase,
             Self::Checkout { .. } => ReflogActionKind::Checkout,
             Self::Fetch => ReflogActionKind::Fetch,
+            Self::Push => ReflogActionKind::Push,
         }
     }
 }
