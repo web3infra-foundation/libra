@@ -149,7 +149,7 @@ async fn test_clone_to_existing_dir() {
     })
     .await;
 
-    // Make sure that the `.libra` directory not exists
+    // Verify that the `.libra` directory does not exist
     let libra_dir = repo_path.join(".libra");
     assert!(!libra_dir.exists());
     // Make sure that the pre-existing file should still exist
