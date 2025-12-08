@@ -130,7 +130,7 @@ async fn test_clone_to_existing_empty_dir() {
 #[tokio::test]
 #[serial]
 #[ignore]
-/// Test when a file exists inside the target directory
+/// Test that clone fails when the target directory exists and is not empty
 async fn test_clone_to_existing_dir() {
     let temp_path = tempdir().unwrap();
     let _guard = test::ChangeDirGuard::new(temp_path.path());
