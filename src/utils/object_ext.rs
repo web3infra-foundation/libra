@@ -13,6 +13,9 @@ use crate::utils::{lfs, util};
 pub trait TreeExt {
     fn load(hash: &ObjectHash) -> Tree;
     fn get_plain_items(&self) -> Vec<(PathBuf, ObjectHash)>;
+    /// Get all the items in the tree recursively with mode information
+    /// Returns (path, hash, mode) tuples
+    fn get_plain_items_with_mode(&self) -> Vec<(PathBuf, ObjectHash, TreeItemMode)>;
 }
 
 pub trait CommitExt {
@@ -56,6 +59,26 @@ impl TreeExt for Tree {
                         .collect::<Vec<(PathBuf, ObjectHash)>>()
                         .as_mut(),
                 );
+            }
+        }
+        items
+    }
+
+    /// Get all the items in the tree recursively with mode information
+    fn get_plain_items_with_mode(&self) -> Vec<(PathBuf, ObjectHash, TreeItemMode)> {
+        let mut items = Vec::new();
+        for item in self.tree_items.iter() {
+            if item.mode != TreeItemMode::Tree {
+                // Not Tree, maybe Blob, link, etc.
+                items.push((PathBuf::from(item.name.clone()), item.id, item.mode));
+            } else {
+                let sub_tree = Tree::load(&item.id);
+                let sub_entries = sub_tree.get_plain_items_with_mode();
+
+                // Use extend() instead of append() to avoid intermediate allocation
+                items.extend(sub_entries.into_iter().map(|(path, hash, mode)| {
+                    (PathBuf::from(item.name.clone()).join(path), hash, mode)
+                }));
             }
         }
         items
