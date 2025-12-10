@@ -231,5 +231,4 @@ async fn test_push_force_with_local_changes() {
 
     // Note: This is a placeholder for a more comprehensive integration test
     // that would require a more complex setup with actual Git repositories
-    assert!(true); // Placeholder assertion
 }
