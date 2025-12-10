@@ -411,7 +411,10 @@ fn get_worktree_mode(_file_path: &std::path::Path) -> u32 {
     0o100644
 }
 
-/// Check if a file mode indicates a submodule
+/// Returns true if the given file mode represents a submodule (gitlink) entry.
+///
+/// In Git, submodules are stored in the index and tree with mode `0o160000`.
+/// This function checks for that specific mode to identify submodules.
 fn is_submodule_mode(mode: u32) -> bool {
     mode == 0o160000
 }
