@@ -1,8 +1,8 @@
 use crate::internal::tag;
+use crate::internal::tag::TagObject;
 use clap::Parser;
 use git_internal::internal::object::types::ObjectType;
 use sea_orm::sqlx::types::chrono;
-use crate::internal::tag::TagObject;
 
 #[derive(Parser, Debug)]
 #[command(about = "Create, list, delete, or verify a tag object")]
@@ -31,7 +31,7 @@ pub struct TagArgs {
 }
 
 pub async fn execute(args: TagArgs) {
-    if args.list || args.n_lines.is_some(){
+    if args.list || args.n_lines.is_some() {
         let show_lines = args.n_lines.unwrap_or(0);
         list_tags(show_lines).await;
         return;
@@ -110,7 +110,6 @@ pub async fn render_tags(show_lines: usize) -> Result<String, anyhow::Error> {
     }
 
     Ok(output)
-
 }
 
 async fn delete_tag(tag_name: &str) {

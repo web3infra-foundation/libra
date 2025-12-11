@@ -347,7 +347,7 @@ async fn test_annotation_lines_tag() {
         refresh: false,
         force: false,
     })
-        .await;
+    .await;
     commit::execute(CommitArgs {
         message: Some("Third".into()),
         file: None,
@@ -358,21 +358,24 @@ async fn test_annotation_lines_tag() {
         disable_pre: false,
         all: false,
     })
-        .await;
+    .await;
 
     // Make third tag with multi line annotation
     tag::execute(TagArgs {
         name: Some("v1.0.3".into()),
         list: false,
         delete: false,
-        message: Some("multi \
+        message: Some(
+            "multi \
         line \
         annotation \
-        tag".into()),
+        tag"
+            .into(),
+        ),
         force: false,
         n_lines: None,
     })
-        .await;
+    .await;
 
     let output1 = tag::render_tags(4).await.unwrap();
 
@@ -390,7 +393,6 @@ async fn test_annotation_lines_tag() {
     assert!(output1.contains("line"));
     assert!(output1.contains("annotation"));
     assert!(output1.contains("tag"));
-
 
     let output2 = tag::render_tags(2).await.unwrap();
 
