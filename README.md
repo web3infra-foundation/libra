@@ -137,7 +137,7 @@ This section documents the compatibility between **Libra**’s CLI and **Git** a
 ### Commit & History: `commit`, `log`, `tag`, `show`, `reflog`
 
 | Command | Option / Form | Git | Libra | Status | Priority (for ⛔) | Notes |
-| --- | --- | --- | - | -- | --- | --- |
+| --- | --- | --- | --- | --- | --- | --- |
 | `commit` | `-m, --message <msg>` | Yes | Yes | ✅ | - | Commit message |
 |  | `-F, --file <path>` | Yes | Yes | ✅ | - | Read message from file |
 |  | `--allow-empty` | Yes | Yes | ✅ | - | Allow empty commit |
