@@ -137,48 +137,48 @@ This section documents the compatibility between **Libra**’s CLI and **Git** a
 ### Commit & History: `commit`, `log`, `tag`, `show`, `reflog`
 
 | Command | Option / Form | Git | Libra | Status | Priority (for ⛔) | Notes |
-| --- | --- | --- | --- | --- | --- | --- |
-| `commit` | `-m, --message <msg>` | Yes | Yes | ✅ | - | Commit message |
-|  | `-F, --file <path>` | Yes | Yes | ✅ | - | Read message from file |
-|  | `--allow-empty` | Yes | Yes | ✅ | - | Allow empty commit |
-|  | `--conventional` | No | Yes | ⚠️ | P1 | Libra extension for conventional commits |
-|  | `--amend` | Yes | Yes | ✅ | - | Amend previous commit |
-|  | `-s, --signoff` | Yes | Yes | ✅ | - | Add Signed-off-by |
-|  | `--disable-pre` | Approx. `--no-verify` | Yes | ⚠️ | P0 | Behavior should be aligned with Git hook semantics as much as possible |
-|  | `-a, --all` | Yes | Yes | ✅ | - | Auto‑stage tracked changes |
-|  | `-p, --patch` | Yes | No | ⛔ | P1 | Patch‑mode commit (often paired with `add -p`) |
-|  | `--no-verify` | Yes | No | ⛔ | P0 | Standard way to skip hooks; should coexist with or alias `--disable-pre` |
-|  | `--no-edit` | Yes | No | ⛔ | P1 | Reuse previous message |
-|  | `--author <name>` | Yes | No | ⛔ | P0 | Override author identity |
-|  | `--date <when>` | Yes | No | ⛔ | P0 | Override author date |
-|  | `-S, --gpg-sign` / `--no-gpg-sign` | Yes | No | ⛔ | P1 | GPG signing support |
-| `log` | `-n, --number <n>` | Yes | Yes | ✅ | - | Limit number of commits |
-|  | `--oneline` | Yes | Yes | ✅ | - | One‑line output |
-|  | `-p, --patch` | Yes | Yes | ✅ | - | Show patch |
-|  | `--decorate / --no-decorate` | Yes | Yes | ✅ | - | Show/hide ref decorations |
-|  | `[pathspec]` | Yes | Yes | ✅ | - | Restrict to paths |
-|  | `--graph` | Yes | Yes | ✅ | - | ASCII commit graph |
-|  | `--pretty=<format>` | Yes | No | ⛔ | P0 | Customizable formatting; heavily used in tooling |
-|  | `--abbrev-commit` | Yes | No | ⛔ | P1 | Shorten commit IDs |
-|  | `--name-only / --name-status` | Yes | No | ⛔ | P0 | Show changed files, with or without status |
-|  | `--stat` | Yes | Yes | ✅ | - | Diffstat summary |
-|  | `--since <date> / --until <date>` | Yes | No | ⛔ | P0 | Time‑based filtering |
-|  | `--author <pattern>` | Yes | No | ⛔ | P0 | Author‑based filtering |
-| `tag` | `<name>` | Yes | Yes | ✅ | - | Lightweight tag |
-|  | `-l, --list [pattern]` | Yes | Yes | ✅ | - | List tags |
-|  | `-d, --delete <name>` | Yes | Yes | ✅ | - | Delete tags |
-|  | `-m, --message <msg>` | Yes | Yes | ✅ | - | Annotated tag message |
-|  | `-f, --force` | Yes | Yes | ✅ | - | Force re‑tag |
-|  | `-a` | Yes | No | ⛔ | P0 | Explicit annotated tag |
-|  | `-s, --sign` | Yes | No | ⛔ | P1 | GPG‑signed tags |
-|  | `-u <keyid>` | Yes | No | ⛔ | P1 | Select signing key |
-|  | `-n <n>` | Yes | No | ⛔ | P2 | Show annotation lines |
-|  | `-v, --verify` | Yes | No | ⛔ | P1 | Verify tag signatures |
-| `show` | (basic usage) | Yes | Yes | ⚠️ | P1 | Core behavior implemented; detailed flag parity needs further audit |
-| `reflog` | `show [--pretty=<fmt>]` | Yes | Yes | ⚠️ | P1 | Supported; `--pretty` formatting parity may not be full Git parity |
-|  | `delete <selectors...>` | Yes | Yes | ✅ | - | Delete reflog entries |
-|  | `exists <ref>` | Yes | Yes | ✅ | - | Check reflog presence |
-|  | `expire [--expire=<time>]` | Yes | No | ⛔ | P1 | Cleanup policy for reflogs |
+| --- | --- | --- |-------| -- | --- | --- |
+| `commit` | `-m, --message <msg>` | Yes | Yes   | ✅ | - | Commit message |
+|  | `-F, --file <path>` | Yes | Yes   | ✅ | - | Read message from file |
+|  | `--allow-empty` | Yes | Yes   | ✅ | - | Allow empty commit |
+|  | `--conventional` | No | Yes   | ⚠️ | P1 | Libra extension for conventional commits |
+|  | `--amend` | Yes | Yes   | ✅ | - | Amend previous commit |
+|  | `-s, --signoff` | Yes | Yes   | ✅ | - | Add Signed-off-by |
+|  | `--disable-pre` | Approx. `--no-verify` | Yes   | ⚠️ | P0 | Behavior should be aligned with Git hook semantics as much as possible |
+|  | `-a, --all` | Yes | Yes   | ✅ | - | Auto‑stage tracked changes |
+|  | `-p, --patch` | Yes | No    | ⛔ | P1 | Patch‑mode commit (often paired with `add -p`) |
+|  | `--no-verify` | Yes | No    | ⛔ | P0 | Standard way to skip hooks; should coexist with or alias `--disable-pre` |
+|  | `--no-edit` | Yes | No    | ⛔ | P1 | Reuse previous message |
+|  | `--author <name>` | Yes | No    | ⛔ | P0 | Override author identity |
+|  | `--date <when>` | Yes | No    | ⛔ | P0 | Override author date |
+|  | `-S, --gpg-sign` / `--no-gpg-sign` | Yes | No    | ⛔ | P1 | GPG signing support |
+| `log` | `-n, --number <n>` | Yes | Yes   | ✅ | - | Limit number of commits |
+|  | `--oneline` | Yes | Yes   | ✅ | - | One‑line output |
+|  | `-p, --patch` | Yes | Yes   | ✅ | - | Show patch |
+|  | `--decorate / --no-decorate` | Yes | Yes   | ✅ | - | Show/hide ref decorations |
+|  | `[pathspec]` | Yes | Yes   | ✅ | - | Restrict to paths |
+|  | `--graph` | Yes | Yes   | ✅ | - | ASCII commit graph |
+|  | `--pretty=<format>` | Yes | No    | ⛔ | P0 | Customizable formatting; heavily used in tooling |
+|  | `--abbrev-commit` | Yes | No    | ⛔ | P1 | Shorten commit IDs |
+|  | `--name-only / --name-status` | Yes | No    | ⛔ | P0 | Show changed files, with or without status |
+|  | `--stat` | Yes | Yes   | ✅ | - | Diffstat summary |
+|  | `--since <date> / --until <date>` | Yes | No    | ⛔ | P0 | Time‑based filtering |
+|  | `--author <pattern>` | Yes | No    | ⛔ | P0 | Author‑based filtering |
+| `tag` | `<name>` | Yes | Yes   | ✅ | - | Lightweight tag |
+|  | `-l, --list [pattern]` | Yes | Yes   | ✅ | - | List tags |
+|  | `-d, --delete <name>` | Yes | Yes   | ✅ | - | Delete tags |
+|  | `-m, --message <msg>` | Yes | Yes   | ✅ | - | Annotated tag message |
+|  | `-f, --force` | Yes | Yes   | ✅ | - | Force re‑tag |
+|  | `-a` | Yes | No    | ⛔ | P0 | Explicit annotated tag |
+|  | `-s, --sign` | Yes | No    | ⛔ | P1 | GPG‑signed tags |
+|  | `-u <keyid>` | Yes | No    | ⛔ | P1 | Select signing key |
+|  | `-n <n>` | Yes | Yes   | ✅ | P2 | Show annotation lines |
+|  | `-v, --verify` | Yes | No    | ⛔ | P1 | Verify tag signatures |
+| `show` | (basic usage) | Yes | Yes   | ⚠️ | P1 | Core behavior implemented; detailed flag parity needs further audit |
+| `reflog` | `show [--pretty=<fmt>]` | Yes | Yes   | ⚠️ | P1 | Supported; `--pretty` formatting parity may not be full Git parity |
+|  | `delete <selectors...>` | Yes | Yes   | ✅ | - | Delete reflog entries |
+|  | `exists <ref>` | Yes | Yes   | ✅ | - | Check reflog presence |
+|  | `expire [--expire=<time>]` | Yes | No    | ⛔ | P1 | Cleanup policy for reflogs |
 
 ---
 
