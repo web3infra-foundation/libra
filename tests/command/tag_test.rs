@@ -243,6 +243,7 @@ async fn test_force_tag() {
         delete: false,
         message: Some("Updated".into()),
         force: true,
+        n_lines: None,
     })
     .await;
     let after = read_tag_oid("v1.0").await;
@@ -285,7 +286,124 @@ async fn test_delete_tag() {
         delete: true,
         message: None,
         force: false,
+        n_lines: None,
     })
     .await;
     assert_tag_absent("to-delete").await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_annotation_lines_tag() {
+    let (_temp, _guard) = setup_repo_with_commit_with("lightweight-tag", "First").await;
+
+    // lightweight tag creation
+    internal_tag::create("v1.0.0", None, false).await.unwrap();
+
+    // Make second commit with updated content
+    std::fs::write("file.txt", "annotation-tag").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["file.txt".into()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("Second".into()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+    })
+    .await;
+
+    // Make second tag with single line annotation
+    tag::execute(TagArgs {
+        name: Some("v1.0.1".into()),
+        list: false,
+        delete: false,
+        message: Some("Single line annotation message".into()),
+        force: false,
+        n_lines: None,
+    })
+    .await;
+
+    std::fs::write("file.txt", "annotation-multi-line-tag").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["file.txt".into()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+        .await;
+    commit::execute(CommitArgs {
+        message: Some("Third".into()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+    })
+        .await;
+
+    // Make third tag with multi line annotation
+    tag::execute(TagArgs {
+        name: Some("v1.0.3".into()),
+        list: false,
+        delete: false,
+        message: Some("multi \
+        line \
+        annotation \
+        tag".into()),
+        force: false,
+        n_lines: None,
+    })
+        .await;
+
+    let output1 = tag::render_tags(4).await.unwrap();
+
+    // v1.0.0（lightweight tag）
+    assert!(output1.contains("v1.0.0"));
+    assert!(output1.contains("First"));
+
+    // v1.0.1（single line tag）
+    assert!(output1.contains("v1.0.1"));
+    assert!(output1.contains("Single line annotation message"));
+
+    // v1.0.3（multi line tag）
+    assert!(output1.contains("v1.0.3"));
+    assert!(output1.contains("multi"));
+    assert!(output1.contains("line"));
+    assert!(output1.contains("annotation"));
+    assert!(output1.contains("tag"));
+
+
+    let output2 = tag::render_tags(2).await.unwrap();
+
+    // v1.0.0（lightweight tag）
+    assert!(output2.contains("v1.0.0"));
+    assert!(output2.contains("First"));
+
+    // v1.0.1（single line tag）
+    assert!(output2.contains("v1.0.1"));
+    assert!(output2.contains("Single line annotation message"));
+
+    // v1.0.3（multi line tag）
+    assert!(output2.contains("v1.0.3"));
+    assert!(output2.contains("multi"));
+    assert!(output2.contains("line"));
 }
