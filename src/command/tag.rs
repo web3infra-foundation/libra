@@ -109,7 +109,7 @@ pub async fn render_tags(show_lines: usize) -> Result<String, anyhow::Error> {
         }
     }
 
-    return Ok(output);
+    Ok(output)
 
 }
 
