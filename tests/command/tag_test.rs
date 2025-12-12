@@ -365,13 +365,7 @@ async fn test_annotation_lines_tag() {
         name: Some("v1.0.3".into()),
         list: false,
         delete: false,
-        message: Some(
-            "multi \
-        line \
-        annotation \
-        tag"
-            .into(),
-        ),
+        message: Some("multi\nline\nannotation\ntag".into()),
         force: false,
         n_lines: None,
     })
@@ -379,33 +373,43 @@ async fn test_annotation_lines_tag() {
 
     let output1 = tag::render_tags(4).await.unwrap();
 
+    // Split the output into lines
+    let output_lines1: Vec<&str> = output1
+        .lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .collect();
+
     // v1.0.0（lightweight tag）
-    assert!(output1.contains("v1.0.0"));
-    assert!(output1.contains("First"));
+    assert!(output_lines1.contains(&"v1.0.0               First"));
 
     // v1.0.1（single line tag）
-    assert!(output1.contains("v1.0.1"));
-    assert!(output1.contains("Single line annotation message"));
+    assert!(output_lines1.contains(&"v1.0.1               Single line annotation message"));
 
     // v1.0.3（multi line tag）
-    assert!(output1.contains("v1.0.3"));
-    assert!(output1.contains("multi"));
-    assert!(output1.contains("line"));
-    assert!(output1.contains("annotation"));
-    assert!(output1.contains("tag"));
+    assert!(output_lines1.contains(&"v1.0.3               multi"));
+    assert!(output_lines1.contains(&"line"));
+    assert!(output_lines1.contains(&"annotation"));
+    assert!(output_lines1.contains(&"tag"));
 
     let output2 = tag::render_tags(2).await.unwrap();
 
+    // Split the output into lines
+    let output_lines2: Vec<&str> = output2
+        .lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .collect();
+
     // v1.0.0（lightweight tag）
-    assert!(output2.contains("v1.0.0"));
-    assert!(output2.contains("First"));
+    assert!(output_lines2.contains(&"v1.0.0               First"));
 
     // v1.0.1（single line tag）
-    assert!(output2.contains("v1.0.1"));
-    assert!(output2.contains("Single line annotation message"));
+    assert!(output_lines2.contains(&"v1.0.1               Single line annotation message"));
 
     // v1.0.3（multi line tag）
-    assert!(output2.contains("v1.0.3"));
-    assert!(output2.contains("multi"));
-    assert!(output2.contains("line"));
+    assert!(output_lines2.contains(&"v1.0.3               multi"));
+    assert!(output_lines2.contains(&"line"));
+    assert!(!output_lines2.contains(&"annotation"));
+    assert!(!output_lines2.contains(&"tag"));
 }

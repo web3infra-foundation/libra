@@ -26,6 +26,7 @@ pub struct TagArgs {
     #[clap(short, long, group = "action")]
     pub force: bool,
 
+    /// Number of annotation lines to display when listing tags (0 for tag names only)
     #[clap(short, long)]
     pub n_lines: Option<usize>,
 }
@@ -80,8 +81,7 @@ pub async fn render_tags(show_lines: usize) -> Result<String, anyhow::Error> {
 
     for tag in tags {
         if show_lines == 0 {
-            println!("{}", tag.name);
-            output.push_str(&tag.name);
+            output.push_str(&format!("{}\n", tag.name));
             continue;
         }
 
