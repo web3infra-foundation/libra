@@ -172,7 +172,7 @@ This section documents the compatibility between **Libra**’s CLI and **Git** a
 |  | `-a` | Yes | No | ⛔ | P0 | Explicit annotated tag |
 |  | `-s, --sign` | Yes | No | ⛔ | P1 | GPG‑signed tags |
 |  | `-u <keyid>` | Yes | No | ⛔ | P1 | Select signing key |
-|  | `-n <n>` | Yes | No | ⛔ | P2 | Show annotation lines |
+|  | `-n <n>` | Yes | Yes | ✅ | P2 | Show annotation lines |
 |  | `-v, --verify` | Yes | No | ⛔ | P1 | Verify tag signatures |
 | `show` | (basic usage) | Yes | Yes | ⚠️ | P1 | Core behavior implemented; detailed flag parity needs further audit |
 | `reflog` | `show [--pretty=<fmt>]` | Yes | Yes | ⚠️ | P1 | Supported; `--pretty` formatting parity may not be full Git parity |
