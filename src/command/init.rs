@@ -9,12 +9,12 @@ use std::{
     path::Path,
 };
 
-use sea_orm::{ActiveModelTrait, DbConn, DbErr, Set, TransactionTrait};
-
+use sea_orm::{ActiveModelTrait, DbConn, Set, TransactionTrait};
 use clap::Parser;
 
 use crate::command::branch;
 use crate::internal::db;
+use crate::internal::hash::{HashKind, set_hash_kind};
 use crate::internal::model::{config, reference};
 use crate::utils::util::{DATABASE, ROOT_DIR};
 
@@ -22,41 +22,60 @@ const DEFAULT_BRANCH: &str = "master";
 
 #[derive(Parser, Debug, Clone)]
 pub struct InitArgs {
-    /// 创建一个裸仓库
+    /// Create a bare repository
     #[clap(long, required = false)]
-    pub bare: bool, // 默认值是 false
+    pub bare: bool, // Default is false
 
-    /// 用于创建仓库的模板目录
+    /// directory from which templates will be used
     #[clap(long = "template", name = "template-directory", required = false)]
     pub template: Option<String>,
 
-    /// 设置初始分支名称
+    /// Set the initial branch name
     #[clap(short = 'b', long, required = false)]
     pub initial_branch: Option<String>,
 
-    /// 在指定目录下创建仓库
+    /// Create a repository in the specified directory
     #[clap(default_value = ".")]
     pub repo_directory: String,
 
-    /// 抑制所有输出
+    /// Suppress all output
     #[clap(long, short = 'q', required = false)]
     pub quiet: bool,
 
-    /// 指定仓库共享模式
-    /// 支持值: `umask`, `group`, `all`
+    /// Specify repository sharing mode
+    ///
+    /// Supported values:
+    /// - `umask`: Default behavior (permissions depend on the user's umask).
+    /// - `group`: Makes the repository group-writable so multiple users
+    ///   in the same group can collaborate more easily.
+    /// - `all`: Makes the repository readable by all users on the system.
+    ///
+    /// Note: On Windows, this option is ignored.
     #[clap(long, required = false, value_name = "MODE")]
     pub shared: Option<String>,
 
-    /// 指定仓库对象格式（哈希算法）
-    /// 支持值: `sha1`, `sha256`
+    /// Specify the object format (hash algorithm) for the repository.
+    ///
+    /// Supported values:
+    /// - `sha1`: The default and currently the only supported format.
+    /// - `sha256`: An alternative format using SHA-256 hashing.
     #[clap(long = "object-format", name = "format", required = false)]
     pub object_format: Option<String>,
-
-    /// 指定一个独立的 git 目录
+    
+    /// Specify a separate directory for Git storage
     #[clap(long = "separate-git-dir", value_name = "PATH", required = false)]
     pub separate_git_dir: Option<String>,
 }
 
+/// Execute the init function
+pub async fn execute(args: InitArgs) {
+    match init(args).await {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("Error: {e}");
+        }
+    }
+}
 
 /// Check if the repository has already been initialized based on the presence of the description file.
 fn is_reinit(cur_dir: &Path) -> bool {
@@ -187,17 +206,17 @@ fn apply_shared(_root_dir: &Path, shared_mode: &str) -> io::Result<()> {
 /// It also sets up the database and the initial configuration.
 #[allow(dead_code)]
 pub async fn init(args: InitArgs) -> io::Result<()> {
-    // 获取当前目录
+    // Get current directory
     let cur_dir = Path::new(&args.repo_directory).to_path_buf();
 
-    // 处理 --separate-git-dir 参数
+    // Handle --separate-git-dir parameter
     let root_dir = match &args.separate_git_dir {
         Some(separate_git_dir) => {
             let separate_git_path = Path::new(separate_git_dir);
             if !separate_git_path.exists() {
-                fs::create_dir_all(separate_git_path)?; // 如果指定的 Git 目录不存在，则创建
+                fs::create_dir_all(separate_git_path)?; // Create the directory if it doesn't exist
             }
-            separate_git_path.to_path_buf() // 使用指定的目录
+            separate_git_path.to_path_buf() // Use the specified directory
         }
         None => {
             if args.bare {
@@ -208,18 +227,30 @@ pub async fn init(args: InitArgs) -> io::Result<()> {
         }
     };
 
-    // 检查仓库是否已经初始化
-    if is_reinit(&cur_dir) {
+    // Check if the repository is already initialized
+    if is_reinit(&cur_dir) || (args.separate_git_dir.is_some() && is_reinit(&root_dir)) {
         if !args.quiet {
-            eprintln!("已经初始化 - [{}]", root_dir.display());
+            eprintln!("Already initialized - [{}]", root_dir.display());
         }
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
-            "初始化失败：指定的位置已经初始化过仓库。如果需要重新初始化，请删除现有的目录或文件。",
+            "Initialization failed: The repository is already initialized at the specified location.\nIf you wish to reinitialize, please remove the existing directory or file.",
         ));
     }
 
-    // 检查目标目录是否可写
+    // Check if the branch name is valid
+    if let Some(ref branch_name) = args.initial_branch
+        && !branch::is_valid_git_branch_name(branch_name)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "invalid branch name: '{branch_name}'.\n\nBranch names must:\n- Not contain spaces, control characters, or any of these characters: \\ : \" ? * [\n- Not start or end with a slash ('/'), or end with a dot ('.')\n- Not contain consecutive slashes ('//') or dots ('..')\n- Not be reserved names like 'HEAD' or contain '@{{'\n- Not be empty or just a dot ('.')\n\nPlease choose a valid branch name."
+            ),
+        ));
+    }
+
+    // Check if the target directory is writable
     match is_writable(&cur_dir) {
         Ok(_) => {}
         Err(e) => {
@@ -227,28 +258,57 @@ pub async fn init(args: InitArgs) -> io::Result<()> {
         }
     }
 
-    // 确保根目录存在
+    // Ensure root directory exists
     fs::create_dir_all(&root_dir)?;
+    
+    // When using --separate-git-dir, create a .git file in the working directory that points to the actual git directory
+    if args.separate_git_dir.is_some() && !args.bare {
+        let separate_git_path = Path::new(args.separate_git_dir.as_ref().unwrap());
+        let gitlink_path = cur_dir.join(".git");
+        let gitlink_content = format!("gitdir: {}", separate_git_path.display());
+        fs::write(gitlink_path, gitlink_content)?;
+    }
 
-    // 如果提供了模板路径，则复制模板文件到根目录
+    // Validate and set object_format_value
+    let object_format_value = if let Some(format) = &args.object_format {
+        match format.to_lowercase().as_str() {
+            "sha1" => "sha1".to_string(),
+            "sha256" => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "fatal: object format 'sha256' is not supported yet",
+                ));
+            }
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("fatal: invalid object format '{format}'"),
+                ));
+            }
+        }
+    } else {
+        "sha1".to_string()
+    };
+
+    // If a template path is provided, copy template files to the root directory
     if let Some(template_path) = &args.template {
         let template_dir = Path::new(template_path);
         if template_dir.exists() {
-            copy_template(template_dir, &root_dir)?; // 复制模板内容
+            copy_template(template_dir, &root_dir)?; // Copy template content
         } else {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("模板目录 '{}' 不存在", template_path),
+                format!("Template directory '{}' not found", template_path),
             ));
         }
     } else {
-        // 创建仓库相关的目录和文件
+        // Create repository-related directories and files
         let dirs = ["info", "hooks"];
         for dir in dirs {
-            fs::create_dir_all(root_dir.join(dir))?; // 创建 info 和 hooks 目录
+            fs::create_dir_all(root_dir.join(dir))?; // Create info and hooks directories
         }
 
-        // 创建必要的配置文件
+        // Create necessary configuration files
         fs::write(
             root_dir.join("info/exclude"),
             include_str!("../../template/exclude"),
@@ -262,7 +322,7 @@ pub async fn init(args: InitArgs) -> io::Result<()> {
             include_str!("../../template/pre-commit.sh"),
         )?;
 
-        // 设置文件权限
+        // Set file permissions
         #[cfg(not(target_os = "windows"))]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -270,20 +330,26 @@ pub async fn init(args: InitArgs) -> io::Result<()> {
             fs::set_permissions(root_dir.join("hooks").join("pre-commit.sh"), perms)?;
         }
 
-        // 创建 .libra 相关目录
-        let dirs = ["objects/pack", "objects/info"];
-        for dir in dirs {
-            fs::create_dir_all(root_dir.join(dir))?;
-        }
+        // Create Windows PowerShell pre-commit hook
+        fs::write(
+            root_dir.join("hooks").join("pre-commit.ps1"),
+            include_str!("../../template/pre-commit.ps1"),
+        )?;
     }
 
-    // 创建数据库
+    // Create .libra related directories (always create regardless of template)
+    let dirs = ["objects/pack", "objects/info"];
+    for dir in dirs {
+        fs::create_dir_all(root_dir.join(dir))?;
+    }
+
+    // Create database
     let conn;
     let database = root_dir.join(DATABASE);
 
     #[cfg(target_os = "windows")]
     {
-        // Windows 系统需要转换路径格式
+        // On Windows, we need to convert the path to a UNC path
         let database = database.to_str().unwrap().replace("\\", "/");
         conn = db::create_database(database.as_str()).await?;
     }
@@ -293,17 +359,17 @@ pub async fn init(args: InitArgs) -> io::Result<()> {
         conn = db::create_database(database.to_str().unwrap()).await?;
     }
 
-    // 初始化配置
+    // Initialize configuration
     init_config(&conn, args.bare, Some(object_format_value.as_str()))
         .await
         .unwrap();
 
-    // 设置默认的初始分支名称
+    // Set default initial branch name
     let initial_branch_name = args
         .initial_branch
         .unwrap_or_else(|| DEFAULT_BRANCH.to_owned());
 
-    // 创建 HEAD 引用
+    // Create HEAD reference
     reference::ActiveModel {
         name: Set(Some(initial_branch_name.clone())),
         kind: Set(reference::ConfigKind::Head),
@@ -313,10 +379,10 @@ pub async fn init(args: InitArgs) -> io::Result<()> {
     .await
     .unwrap();
 
-    // 设置 .libra 为隐藏文件夹
+    // Set .libra as hidden folder
     set_dir_hidden(root_dir.to_str().unwrap())?;
 
-    // 如果指定了共享权限，应用共享设置
+    // If shared permissions are specified, apply shared settings
     if let Some(shared_mode) = &args.shared {
         apply_shared(&root_dir, shared_mode)?;
     }
@@ -324,12 +390,12 @@ pub async fn init(args: InitArgs) -> io::Result<()> {
     if !args.quiet {
         let repo_type = if args.bare { "bare " } else { "" };
         println!(
-            "正在初始化空的 {repo_type}Libra 仓库于 {}，初始分支为 '{initial_branch_name}'",
+            "Initializing empty {repo_type}Libra repository in {} with initial branch '{initial_branch_name}'",
             root_dir.display()
         );
     }
 
-    // 设置全局哈希算法
+    // Set global hash algorithm
     set_hash_kind(match object_format_value.as_str() {
         "sha1" => HashKind::Sha1,
         "sha256" => HashKind::Sha256,
@@ -339,14 +405,13 @@ pub async fn init(args: InitArgs) -> io::Result<()> {
     Ok(())
 }
 
-
 /// Initialize the configuration for the Libra repository
 /// This function creates the necessary configuration entries in the database.
 async fn init_config(
     conn: &DbConn,
     is_bare: bool,
     object_format: Option<&str>,
-) -> Result<(), DbErr> {
+) -> sea_orm::DbErr {
     // Begin a new transaction
     let txn = conn.begin().await?;
 
