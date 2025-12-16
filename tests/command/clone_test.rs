@@ -19,6 +19,7 @@ async fn test_clone_branch() {
         remote_repo: remote_url,
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
         branch: Some("dev".to_string()),
+        single_branch: false,
     })
     .await;
 
@@ -49,6 +50,7 @@ async fn test_clone_default_branch() {
         remote_repo: remote_url,
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
         branch: None,
+        single_branch: false,
     })
     .await;
 
@@ -79,6 +81,7 @@ async fn test_clone_empty_repo() {
         remote_repo: remote_url,
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
         branch: None,
+        single_branch: false,
     })
     .await;
 
@@ -111,6 +114,7 @@ async fn test_clone_to_existing_empty_dir() {
         remote_repo: remote_url,
         local_path: Some(repo_path.to_str().unwrap().to_string()),
         branch: Some("dev".to_string()),
+        single_branch: false,
     })
     .await;
 
@@ -146,6 +150,7 @@ async fn test_clone_to_existing_dir() {
         remote_repo: remote_url,
         local_path: Some(repo_path.to_str().unwrap().to_string()),
         branch: Some("dev".to_string()),
+        single_branch: false,
     })
     .await;
 
@@ -179,6 +184,7 @@ async fn test_clone_to_dir_with_existing_file_name() {
         remote_repo: remote_url,
         local_path: Some(conflict_path.to_str().unwrap().to_string()),
         branch: Some("dev".to_string()),
+        single_branch: false,
     })
     .await;
 

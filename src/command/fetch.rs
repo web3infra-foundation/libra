@@ -111,7 +111,7 @@ pub async fn execute(args: FetchArgs) {
     if args.all {
         let remotes = Config::all_remote_configs().await;
         let tasks = remotes.into_iter().map(|remote| async move {
-            fetch_repository(remote, None).await;
+            fetch_repository(remote, None, false).await;
         });
         futures::future::join_all(tasks).await;
     } else {
@@ -130,7 +130,7 @@ pub async fn execute(args: FetchArgs) {
         };
         let remote_config = Config::remote_config(&remote).await;
         match remote_config {
-            Some(remote_config) => fetch_repository(remote_config, args.refspec).await,
+            Some(remote_config) => fetch_repository(remote_config, args.refspec, false).await,
             None => {
                 tracing::error!("remote config '{}' not found", remote);
                 eprintln!("fatal: '{remote}' does not appear to be a libra repository");
@@ -141,7 +141,12 @@ pub async fn execute(args: FetchArgs) {
 
 /// Fetch from remote repository
 /// - `branch` is optional, if `None`, fetch all branches
-pub async fn fetch_repository(remote_config: RemoteConfig, branch: Option<String>) {
+/// - 'single_branch' is bool, if `true`, fetch only the specified branch
+pub async fn fetch_repository(
+    remote_config: RemoteConfig,
+    branch: Option<String>,
+    single_branch: bool,
+) {
     println!(
         "fetching from {}{}",
         remote_config.name,
@@ -189,7 +194,10 @@ pub async fn fetch_repository(remote_config: RemoteConfig, branch: Option<String
         } else {
             branch.to_owned()
         };
-        refs.retain(|r| r._ref == branch);
+        // remove other branches
+        if single_branch {
+            refs.retain(|r| r._ref == branch);
+        }
 
         if refs.is_empty() {
             eprintln!("fatal: '{branch}' not found in remote");
