@@ -1,14 +1,13 @@
+//! HEAD management backed by the database, supporting local and remote heads, detached states, and transaction-safe query/update helpers.
+
 use std::str::FromStr;
 
-use sea_orm::ActiveValue::Set;
-use sea_orm::ConnectionTrait;
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter};
-
 use git_internal::hash::ObjectHash;
+use sea_orm::{
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter,
+};
 
-use crate::internal::branch::Branch;
-use crate::internal::db::get_db_conn_instance;
-use crate::internal::model::reference;
+use crate::internal::{branch::Branch, db::get_db_conn_instance, model::reference};
 
 #[derive(Debug, Clone)]
 pub enum Head {

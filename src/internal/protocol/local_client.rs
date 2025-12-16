@@ -1,16 +1,21 @@
+//! Local protocol client using filesystem paths to run upload-pack/receive-pack locally and stream pack data over async pipes.
+
+use std::{
+    env,
+    io::Error as IoError,
+    path::{Path, PathBuf},
+};
+
+use bytes::Bytes;
+use futures_util::stream::{self, StreamExt};
+use git_internal::errors::GitError;
+use tokio::{io::AsyncWriteExt, process::Command};
+use url::Url;
+
 use super::{
     DiscRef, FetchStream, ProtocolClient, generate_upload_pack_content, parse_discovered_references,
 };
 use crate::git_protocol::ServiceType;
-use bytes::Bytes;
-use futures_util::stream::{self, StreamExt};
-use git_internal::errors::GitError;
-use std::env;
-use std::io::Error as IoError;
-use std::path::{Path, PathBuf};
-use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
-use url::Url;
 
 #[derive(Debug, Clone)]
 pub struct LocalClient {
@@ -130,13 +135,14 @@ impl LocalClient {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::git_protocol::ServiceType;
-    use std::ffi::OsStr;
-    use std::process::Command as StdCommand;
+    use std::{ffi::OsStr, process::Command as StdCommand};
+
     use tempfile::tempdir;
     use tokio::io::AsyncReadExt;
     use tokio_util::io::StreamReader;
+
+    use super::*;
+    use crate::git_protocol::ServiceType;
 
     fn run_git<I, S>(cwd: Option<&Path>, args: I) -> StdCommand
     where

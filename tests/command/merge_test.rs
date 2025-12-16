@@ -1,4 +1,7 @@
+//! Tests merge command scenarios including fast-forward handling and conflict reporting.
+
 use std::process::Command;
+
 use tempfile::TempDir;
 
 /// Helper function: Initialize a temporary Libra repository

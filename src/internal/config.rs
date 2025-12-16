@@ -1,13 +1,17 @@
-use std::collections::HashSet;
-use std::mem::swap;
+//! Config storage helpers backed by SeaORM to insert, update, and retrieve values, manage remote/branch settings, and merge scoped configs.
 
-use sea_orm::ActiveValue::Set;
-use sea_orm::entity::ActiveModelTrait;
-use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, ModelTrait, QueryFilter};
+use std::{collections::HashSet, mem::swap};
 
-use crate::internal::db::get_db_conn_instance;
-use crate::internal::head::Head;
-use crate::internal::model::config::{self, ActiveModel, Model};
+use sea_orm::{
+    ActiveValue::Set, ColumnTrait, ConnectionTrait, EntityTrait, ModelTrait, QueryFilter,
+    entity::ActiveModelTrait,
+};
+
+use crate::internal::{
+    db::get_db_conn_instance,
+    head::Head,
+    model::config::{self, ActiveModel, Model},
+};
 
 pub struct Config;
 

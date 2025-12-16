@@ -1,12 +1,13 @@
-use crate::{
-    command::get_target_commit,
-    internal::{branch::Branch, config::Config, head::Head},
-};
+//! Branch management utilities for creating, deleting, listing, and switching branches while handling upstream metadata.
+
 use clap::Parser;
 use colored::Colorize;
 use git_internal::internal::object::commit::Commit;
 
-use crate::command::load_object;
+use crate::{
+    command::{get_target_commit, load_object},
+    internal::{branch::Branch, config::Config, head::Head},
+};
 
 pub enum BranchListMode {
     Local,

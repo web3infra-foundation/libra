@@ -1,22 +1,27 @@
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+//! Tag operations that resolve target objects, build annotated or lightweight tags, persist refs in the database, and write tag objects to storage.
+
 use std::str::FromStr;
 
-use crate::command::load_object;
-use crate::internal::config::Config;
-use crate::internal::db::get_db_conn_instance;
-use crate::internal::head::Head;
-use crate::internal::model::reference;
-use crate::utils::client_storage::ClientStorage;
-use crate::utils::path;
-use git_internal::errors::GitError;
-use git_internal::hash::ObjectHash;
-use git_internal::internal::object::ObjectTrait;
-use git_internal::internal::object::blob::Blob;
-use git_internal::internal::object::commit::Commit;
-use git_internal::internal::object::signature::{Signature, SignatureType};
-use git_internal::internal::object::tag::Tag as git_internalTag;
-use git_internal::internal::object::tree::Tree;
-use git_internal::internal::object::types::ObjectType;
+use git_internal::{
+    errors::GitError,
+    hash::ObjectHash,
+    internal::object::{
+        ObjectTrait,
+        blob::Blob,
+        commit::Commit,
+        signature::{Signature, SignatureType},
+        tag::Tag as git_internalTag,
+        tree::Tree,
+        types::ObjectType,
+    },
+};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+
+use crate::{
+    command::load_object,
+    internal::{config::Config, db::get_db_conn_instance, head::Head, model::reference},
+    utils::{client_storage::ClientStorage, path},
+};
 
 // Constants for tag references
 const TAG_REF_PREFIX: &str = "refs/tags/";

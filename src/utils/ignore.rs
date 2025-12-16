@@ -1,5 +1,8 @@
-use git_internal::internal::index::Index;
+//! Ignore handling utilities defining policies for .libraignore, index-aware filtering, and helpers to test whether paths are ignored.
+
 use std::path::{Path, PathBuf};
+
+use git_internal::internal::index::Index;
 
 use super::util;
 
@@ -74,14 +77,20 @@ fn is_path_ignored(path: &Path, workdir: &PathBuf) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::command::add::{self, AddArgs};
-    use crate::command::status::{changes_to_be_committed, changes_to_be_staged};
-    use crate::utils::test;
+    use std::fs;
+
     use git_internal::internal::index::Index;
     use serial_test::serial;
-    use std::fs;
     use tempfile::tempdir;
+
+    use super::*;
+    use crate::{
+        command::{
+            add::{self, AddArgs},
+            status::{changes_to_be_committed, changes_to_be_staged},
+        },
+        utils::test,
+    };
 
     fn build_index() -> Index {
         Index::load(crate::utils::path::index()).unwrap()

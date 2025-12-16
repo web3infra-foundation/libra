@@ -1,17 +1,16 @@
+//! Tests checkout behavior for switching branches and creating new ones via restore logic.
+
 use colored::Colorize;
-use libra::command::branch;
-use libra::command::checkout::check_branch;
-use libra::command::checkout::get_current_branch;
-use libra::command::checkout::switch_branch;
 use libra::{
     command::{
         add::{self, AddArgs},
+        branch,
+        checkout::{check_branch, get_current_branch, switch_branch},
         commit, init,
         restore::{self, RestoreArgs},
     },
     internal::head::Head,
-    utils::test,
-    utils::util,
+    utils::{test, util},
 };
 use serial_test::serial;
 use tempfile::tempdir;

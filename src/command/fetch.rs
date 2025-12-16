@@ -1,36 +1,44 @@
-use crate::git_protocol::ServiceType::{self, UploadPack};
+//! Fetch command to negotiate with remotes, download pack data, update remote-tracking refs, and honor prune/depth options.
+
+use std::{
+    collections::HashSet,
+    fs, io,
+    io::{Error as IoError, Write},
+    time::Instant,
+    vec,
+};
+
 use clap::Parser;
-use git_internal::hash::{ObjectHash, get_hash_kind};
-use git_internal::internal::object::commit::Commit;
+use git_internal::{
+    errors::GitError,
+    hash::{ObjectHash, get_hash_kind},
+    internal::object::commit::Commit,
+};
 use indicatif::ProgressBar;
 use sea_orm::TransactionTrait;
-use std::io;
-use std::time::Instant;
-use std::vec;
-use std::{collections::HashSet, fs, io::Write};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio_util::io::StreamReader;
+use url::Url;
 
-use crate::command::load_object;
-use crate::internal::db::get_db_conn_instance;
-use crate::internal::reflog::{HEAD, Reflog, ReflogAction, ReflogContext, ReflogError};
-use crate::utils::util;
 use crate::{
-    command::index_pack::{self, IndexPackArgs},
+    command::{
+        index_pack::{self, IndexPackArgs},
+        load_object,
+    },
+    git_protocol::ServiceType::{self, UploadPack},
     internal::{
         branch::Branch,
         config::{Config, RemoteConfig},
+        db::get_db_conn_instance,
         head::Head,
         protocol::{
             DiscRef, FetchStream, ProtocolClient, https_client::HttpsClient,
             local_client::LocalClient,
         },
+        reflog::{HEAD, Reflog, ReflogAction, ReflogContext, ReflogError},
     },
-    utils::{self, path_ext::PathExt},
+    utils::{self, path_ext::PathExt, util},
 };
-use git_internal::errors::GitError;
-use std::io::Error as IoError;
-use url::Url;
 
 const DEFAULT_REMOTE: &str = "origin";
 

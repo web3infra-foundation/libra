@@ -1,13 +1,17 @@
+//! Provides diff command logic comparing commits, the index, and the working tree with algorithm selection, pathspec filtering, and optional file output.
+
+#[cfg(unix)]
+use std::process::{Command, Stdio};
 use std::{
     fmt,
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     path::PathBuf,
 };
 
 use clap::Parser;
 use colored::Colorize;
-use git_internal::Diff;
 use git_internal::{
+    Diff,
     hash::ObjectHash,
     internal::{
         index::Index,
@@ -16,7 +20,6 @@ use git_internal::{
     },
 };
 use similar;
-use std::io::IsTerminal;
 
 use crate::{
     command::{get_target_commit, load_object},
@@ -25,12 +28,9 @@ use crate::{
         ignore::{self, IgnorePolicy},
         object_ext::TreeExt,
         path, util,
+        util::to_workdir_path,
     },
 };
-
-use crate::utils::util::to_workdir_path;
-#[cfg(unix)]
-use std::process::{Command, Stdio};
 
 #[derive(Parser, Debug)]
 pub struct DiffArgs {
@@ -281,12 +281,13 @@ fn similar_diff_result(old: &str, new: &str, w: &mut dyn io::Write) {
 
 #[cfg(test)]
 mod test {
-    use crate::utils::test;
-    use serial_test::serial;
     use std::fs;
+
+    use serial_test::serial;
     use tempfile::tempdir;
 
     use super::*;
+    use crate::utils::test;
     #[test]
     /// Tests command line argument parsing for the diff command with various parameter combinations.
     /// Verifies parameter requirements, conflicts and default values are handled correctly.

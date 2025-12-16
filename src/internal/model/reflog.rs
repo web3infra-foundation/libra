@@ -1,3 +1,5 @@
+//! SeaORM entity definition for reflog entries that record ref transitions with actor metadata and messages.
+
 use sea_orm::entity::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]

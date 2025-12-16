@@ -1,3 +1,5 @@
+//! Common helpers for formatting commit messages, parsing embedded GPG signatures, and validating Conventional Commit styles.
+
 use regex::Regex;
 
 pub const ZERO_ID: &str = match std::str::from_utf8(&[b'0'; 40]) {

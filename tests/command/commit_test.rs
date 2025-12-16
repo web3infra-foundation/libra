@@ -1,8 +1,10 @@
+//! Integration tests for the commit command covering staged changes, message handling, and tree/hash updates.
+
+use libra::utils::object_ext::TreeExt;
 use serial_test::serial;
 use tempfile::tempdir;
 
 use super::*;
-use libra::utils::object_ext::TreeExt;
 #[tokio::test]
 #[serial]
 #[should_panic]

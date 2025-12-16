@@ -1,22 +1,23 @@
-//! Show 命令实现
+//! Show command that resolves object IDs and prints commit, tree, blob, or ref details with formatting suitable for diffable objects.
+
+use std::{path::PathBuf, str::FromStr};
 
 use clap::Parser;
 use colored::Colorize;
-use git_internal::hash::ObjectHash;
-use git_internal::internal::object::blob::Blob;
-use git_internal::internal::object::commit::Commit;
-use git_internal::internal::object::tree::Tree;
-use git_internal::internal::object::types::ObjectType;
-use std::path::PathBuf;
-use std::str::FromStr;
+use git_internal::{
+    hash::ObjectHash,
+    internal::object::{blob::Blob, commit::Commit, tree::Tree, types::ObjectType},
+};
 
-use crate::command::load_object;
-use crate::command::log::{generate_diff, get_changed_files_for_commit};
-use crate::common_utils::parse_commit_msg;
-use crate::internal::tag;
-use crate::utils::client_storage::ClientStorage;
-use crate::utils::path;
-use crate::utils::{object_ext::TreeExt, util};
+use crate::{
+    command::{
+        load_object,
+        log::{generate_diff, get_changed_files_for_commit},
+    },
+    common_utils::parse_commit_msg,
+    internal::tag,
+    utils::{client_storage::ClientStorage, object_ext::TreeExt, path, util},
+};
 
 /// 显示各种类型的对象
 #[derive(Parser, Debug)]
