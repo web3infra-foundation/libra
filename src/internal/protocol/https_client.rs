@@ -1,16 +1,16 @@
+//! HTTPS smart protocol client that discovers refs, negotiates upload-pack/receive-pack, streams pack data, and supports basic authentication.
+
+use std::{io::Error as IoError, ops::Deref, sync::Mutex};
+
+use futures_util::{StreamExt, TryStreamExt};
+use git_internal::errors::GitError;
+use reqwest::{Body, RequestBuilder, Response, StatusCode, header::CONTENT_TYPE};
+use url::Url;
+
 use super::{
     DiscRef, FetchStream, ProtocolClient, generate_upload_pack_content, parse_discovered_references,
 };
-use crate::command::ask_basic_auth;
-use crate::git_protocol::ServiceType;
-use futures_util::{StreamExt, TryStreamExt};
-use git_internal::errors::GitError;
-use reqwest::header::CONTENT_TYPE;
-use reqwest::{Body, RequestBuilder, Response, StatusCode};
-use std::io::Error as IoError;
-use std::ops::Deref;
-use std::sync::Mutex;
-use url::Url;
+use crate::{command::ask_basic_auth, git_protocol::ServiceType};
 
 /// A Git protocol client that communicates with a Git server over HTTPS.
 /// Only support `SmartProtocol` now, see [http-protocol](https://www.git-scm.com/docs/http-protocol) for protocol details.
@@ -193,13 +193,13 @@ impl HttpsClient {
 #[cfg(test)]
 mod tests {
 
-    use crate::git_protocol::ServiceType::UploadPack;
-    use crate::utils::test::init_debug_logger;
-    use crate::utils::test::init_logger;
-    use tokio::io::AsyncReadExt;
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
+    use crate::{
+        git_protocol::ServiceType::UploadPack,
+        utils::test::{init_debug_logger, init_logger},
+    };
 
     #[tokio::test]
     #[ignore] // This test requires network connectivity

@@ -1,12 +1,21 @@
+//! Extension traits for Tree/Commit/Blob to load from storage, expand items recursively with modes, save blobs, and support LFS-backed files.
+
+use std::{
+    fs,
+    io::{BufReader, Read},
+    path::{Path, PathBuf},
+};
+
 use colored::Colorize;
-use git_internal::hash::ObjectHash;
-use git_internal::internal::object::ObjectTrait;
-use git_internal::internal::object::blob::Blob;
-use git_internal::internal::object::commit::Commit;
-use git_internal::internal::object::tree::{Tree, TreeItemMode};
-use std::fs;
-use std::io::{BufReader, Read};
-use std::path::{Path, PathBuf};
+use git_internal::{
+    hash::ObjectHash,
+    internal::object::{
+        ObjectTrait,
+        blob::Blob,
+        commit::Commit,
+        tree::{Tree, TreeItemMode},
+    },
+};
 
 use crate::utils::{lfs, util};
 

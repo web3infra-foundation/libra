@@ -1,16 +1,17 @@
-use super::*;
-use libra::command::add;
-use libra::command::cherry_pick;
-use libra::command::cherry_pick::CherryPickArgs;
-use libra::command::commit;
-use libra::command::init;
-use libra::command::switch;
-use libra::command::switch::SwitchArgs;
-use libra::internal::head::Head;
+//! Tests cherry-pick scenarios that apply commits and verify results or conflicts.
+
+use std::{fs, path::PathBuf};
+
+use libra::{
+    command::{
+        add, cherry_pick, cherry_pick::CherryPickArgs, commit, init, switch, switch::SwitchArgs,
+    },
+    internal::head::Head,
+};
 use serial_test::serial;
-use std::fs;
-use std::path::PathBuf;
 use tempfile::tempdir;
+
+use super::*;
 
 /// Test basic cherry-pick functionality
 /// This test follows the workflow:

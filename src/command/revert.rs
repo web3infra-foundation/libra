@@ -1,17 +1,28 @@
-use crate::command::{load_object, save_object};
-use crate::common_utils::format_commit_msg;
-use crate::internal::branch::Branch;
-use crate::internal::head::Head;
-use crate::utils::object_ext::{BlobExt, TreeExt};
-use crate::utils::{path, util};
+//! Implements the revert command by parsing targets, reversing commit changes into the index/worktree, and optionally creating a new commit.
+
+use std::{collections::HashSet, fs, path::PathBuf};
+
 use clap::Parser;
-use git_internal::hash::ObjectHash;
-use git_internal::internal::index::{Index, IndexEntry};
-use git_internal::internal::object::commit::Commit;
-use git_internal::internal::object::tree::{Tree, TreeItemMode};
-use std::collections::HashSet;
-use std::fs;
-use std::path::PathBuf;
+use git_internal::{
+    hash::ObjectHash,
+    internal::{
+        index::{Index, IndexEntry},
+        object::{
+            commit::Commit,
+            tree::{Tree, TreeItemMode},
+        },
+    },
+};
+
+use crate::{
+    command::{load_object, save_object},
+    common_utils::format_commit_msg,
+    internal::{branch::Branch, head::Head},
+    utils::{
+        object_ext::{BlobExt, TreeExt},
+        path, util,
+    },
+};
 
 /// Arguments for the revert command.
 /// Reverts the specified commit by creating a new commit that undoes the changes.

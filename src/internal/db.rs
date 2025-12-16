@@ -1,13 +1,17 @@
-use crate::internal::model::*;
-use crate::utils::path;
-use sea_orm::{ConnectOptions, Database, DatabaseConnection};
-use sea_orm::{
-    ConnectionTrait, DbConn, DbErr, Schema, Statement, TransactionError, TransactionTrait,
+//! Database utilities for establishing SQLite connections, managing per-test connection pools, creating schemas, and exposing pooled handles.
+
+use std::{
+    io,
+    io::{Error as IOError, ErrorKind},
+    path::Path,
 };
-use std::io;
-use std::io::Error as IOError;
-use std::io::ErrorKind;
-use std::path::Path;
+
+use sea_orm::{
+    ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbConn, DbErr, Schema,
+    Statement, TransactionError, TransactionTrait,
+};
+
+use crate::{internal::model::*, utils::path};
 
 // #[cfg(not(test))]
 // use tokio::sync::OnceCell;
@@ -42,13 +46,14 @@ pub async fn establish_connection(db_path: &str) -> Result<DatabaseConnection, I
 // }
 
 // #[cfg(test)]
-use once_cell::sync::Lazy;
 // #[cfg(test)]
 use std::collections::HashMap;
 //#[cfg(test)]
 //use std::ops::Deref;
 // #[cfg(test)]
 use std::path::PathBuf;
+
+use once_cell::sync::Lazy;
 // #[cfg(test)]
 use tokio::sync::Mutex;
 
@@ -164,13 +169,14 @@ pub async fn create_database(db_path: &str) -> io::Result<DatabaseConnection> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use sea_orm::{
         ActiveModelTrait, ActiveValue::NotSet, ColumnTrait, EntityTrait, QueryFilter, Set,
     };
     use tests::reference::ConfigKind;
 
     use super::*;
-    use std::fs;
 
     /// TestDbPath is a helper struct create and delete test database file
     struct TestDbPath(String);

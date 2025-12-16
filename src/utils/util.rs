@@ -1,21 +1,21 @@
-use git_internal::hash::ObjectHash;
-use git_internal::internal::object::types::ObjectType;
+//! Core utility toolbox for repo detection, path conversion, ignore checking, storage access, hashing helpers, and miscellaneous formatting/time utilities.
+
+use std::{
+    collections::HashSet,
+    env, fs, io,
+    io::Write,
+    path::{Path, PathBuf},
+};
+
+use git_internal::{hash::ObjectHash, internal::object::types::ObjectType};
+use ignore::{Match, gitignore::Gitignore};
 use indicatif::{ProgressBar, ProgressStyle};
 use path_absolutize::*;
-use std::collections::HashSet;
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::{env, fs, io};
 
-use crate::utils::client_storage::ClientStorage;
-use crate::utils::path;
-use crate::utils::path_ext::PathExt;
-
-use ignore::{Match, gitignore::Gitignore};
-
-use crate::internal::branch::Branch;
-use crate::internal::head::Head;
-use crate::internal::tag;
+use crate::{
+    internal::{branch::Branch, head::Head, tag},
+    utils::{client_storage::ClientStorage, path, path_ext::PathExt},
+};
 
 pub const ROOT_DIR: &str = ".libra";
 pub const DATABASE: &str = "libra.db";
@@ -492,8 +492,9 @@ pub fn check_gitignore(work_dir: &PathBuf, target_file: &PathBuf) -> bool {
     false
 }
 
-use crate::internal::config::Config;
 use git_internal::internal::object::signature::{Signature, SignatureType};
+
+use crate::internal::config::Config;
 
 pub async fn create_signatures() -> (Signature, Signature) {
     let user_name = Config::get("user", None, "name")
@@ -510,12 +511,13 @@ pub async fn create_signatures() -> (Signature, Signature) {
 
 #[cfg(test)]
 mod test {
+    use std::{env, path::PathBuf};
+
+    use serial_test::serial;
+    use tempfile::tempdir;
+
     use super::*;
     use crate::utils::test;
-    use serial_test::serial;
-    use std::env;
-    use std::path::PathBuf;
-    use tempfile::tempdir;
 
     #[test]
     ///Test get current directory success.

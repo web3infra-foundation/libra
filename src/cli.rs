@@ -1,12 +1,12 @@
-//! This is the main entry point for the Libra.
-//! It includes the definition of the CLI and the main function.
-//!
-//!
-use crate::command;
-use crate::utils;
+//! CLI entry for Libra, defining clap subcommands, setting the hash algorithm from config, and dispatching each command handler.
+
 use clap::{Parser, Subcommand};
-use git_internal::errors::GitError;
-use git_internal::hash::{HashKind, set_hash_kind};
+use git_internal::{
+    errors::GitError,
+    hash::{HashKind, set_hash_kind},
+};
+
+use crate::{command, utils};
 /// Reads the repository's configuration and sets the global hash kind.
 /// This must be called for any command that operates within an existing repository.
 async fn set_local_hash_kind() -> Result<(), GitError> {

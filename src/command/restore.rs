@@ -1,20 +1,31 @@
-use crate::command::calc_file_blob_hash;
-use crate::internal::branch::Branch;
-use crate::internal::head::Head;
-use crate::internal::protocol::lfs_client::LFSClient;
-use crate::utils::object_ext::{BlobExt, CommitExt, TreeExt};
-use crate::utils::path_ext::PathExt;
-use crate::utils::{lfs, path, util};
+//! Implements restore flows to reset files or entire trees from commits or the index, respecting pathspecs and staged vs worktree targets.
+
+use std::{
+    collections::{HashMap, HashSet},
+    fs, io,
+    path::PathBuf,
+};
+
 use clap::Parser;
-use git_internal::hash::ObjectHash;
-use git_internal::internal::index::{Index, IndexEntry};
-use git_internal::internal::object::blob::Blob;
-use git_internal::internal::object::commit::Commit;
-use git_internal::internal::object::tree::Tree;
-use git_internal::internal::object::types::ObjectType;
-use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
-use std::{fs, io};
+use git_internal::{
+    hash::ObjectHash,
+    internal::{
+        index::{Index, IndexEntry},
+        object::{blob::Blob, commit::Commit, tree::Tree, types::ObjectType},
+    },
+};
+
+use crate::{
+    command::calc_file_blob_hash,
+    internal::{branch::Branch, head::Head, protocol::lfs_client::LFSClient},
+    utils::{
+        lfs,
+        object_ext::{BlobExt, CommitExt, TreeExt},
+        path,
+        path_ext::PathExt,
+        util,
+    },
+};
 
 #[derive(Parser, Debug)]
 pub struct RestoreArgs {

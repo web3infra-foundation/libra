@@ -1,16 +1,24 @@
+//! Merge command orchestration that resolves base/target commits, performs recursive merge, stages results, and updates refs or surfaces conflicts.
+
+use clap::Parser;
+use git_internal::{
+    hash::{ObjectHash, get_hash_kind},
+    internal::object::commit::Commit,
+};
+
 use super::{
     get_target_commit, load_object, log,
     restore::{self, RestoreArgs},
 };
-use crate::internal::db::get_db_conn_instance;
-use crate::internal::reflog::{ReflogAction, ReflogContext, with_reflog};
 use crate::{
-    internal::{branch::Branch, head::Head},
+    internal::{
+        branch::Branch,
+        db::get_db_conn_instance,
+        head::Head,
+        reflog::{ReflogAction, ReflogContext, with_reflog},
+    },
     utils::util,
 };
-use clap::Parser;
-use git_internal::hash::{ObjectHash, get_hash_kind};
-use git_internal::internal::object::commit::Commit;
 
 #[derive(Parser, Debug)]
 pub struct MergeArgs {

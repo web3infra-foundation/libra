@@ -1,20 +1,37 @@
-use crate::command::{load_object, save_object};
-use crate::common_utils::format_commit_msg;
-use crate::internal::branch::Branch;
-use crate::internal::head::Head;
-use crate::internal::reflog::{ReflogAction, ReflogContext, with_reflog};
-use crate::utils::object_ext::BlobExt;
-use crate::utils::object_ext::TreeExt;
-use crate::utils::{path, util};
+//! Applies commits onto the current branch by replaying their changes into the index/worktree and emitting new commits or conflict notices.
+
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::{Path, PathBuf},
+};
+
 use clap::Parser;
-use git_internal::hash::ObjectHash;
-use git_internal::internal::index::{Index, IndexEntry};
-use git_internal::internal::object::commit::Commit;
-use git_internal::internal::object::tree::{Tree, TreeItem, TreeItemMode};
+use git_internal::{
+    hash::ObjectHash,
+    internal::{
+        index::{Index, IndexEntry},
+        object::{
+            commit::Commit,
+            tree::{Tree, TreeItem, TreeItemMode},
+        },
+    },
+};
 use sea_orm::ConnectionTrait;
-use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::path::{Path, PathBuf};
+
+use crate::{
+    command::{load_object, save_object},
+    common_utils::format_commit_msg,
+    internal::{
+        branch::Branch,
+        head::Head,
+        reflog::{ReflogAction, ReflogContext, with_reflog},
+    },
+    utils::{
+        object_ext::{BlobExt, TreeExt},
+        path, util,
+    },
+};
 
 /// Arguments for the cherry-pick command
 #[derive(Parser, Debug)]

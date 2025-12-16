@@ -1,11 +1,17 @@
-use crate::command::status;
-use crate::utils::object_ext::BlobExt;
-use clap::Parser;
-use git_internal::internal::index::{Index, IndexEntry};
-use git_internal::internal::object::blob::Blob;
+//! Stages changes for commit by parsing pathspecs and modes, respecting ignore policy, refreshing index entries, and writing blob objects.
+
 use std::path::{Path, PathBuf};
 
-use crate::utils::{ignore::IgnorePolicy, lfs, path, util};
+use clap::Parser;
+use git_internal::internal::{
+    index::{Index, IndexEntry},
+    object::blob::Blob,
+};
+
+use crate::{
+    command::status,
+    utils::{ignore::IgnorePolicy, lfs, object_ext::BlobExt, path, util},
+};
 
 #[derive(Parser, Debug)]
 pub struct AddArgs {

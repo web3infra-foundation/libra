@@ -1,6 +1,8 @@
+//! Tests add command behavior for staging files, refresh operations, and edge cases.
+
+use std::{fs, io::Write};
+
 use super::*;
-use std::fs;
-use std::io::Write;
 
 #[tokio::test]
 #[serial]

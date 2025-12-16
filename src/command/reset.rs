@@ -1,19 +1,33 @@
-use crate::command::{get_target_commit, load_object};
-use crate::internal::branch::Branch;
-use crate::internal::db::get_db_conn_instance;
-use crate::internal::head::Head;
-use crate::internal::reflog::{ReflogAction, ReflogContext, with_reflog};
-use crate::utils::object_ext::{BlobExt, TreeExt};
-use crate::utils::{path, util};
+//! Reset command covering soft/mixed/hard behaviors to move HEAD and align the index or working tree to a chosen commit.
+
+use std::{
+    collections::HashSet,
+    fs,
+    path::{Path, PathBuf},
+};
+
 use clap::Parser;
-use git_internal::hash::ObjectHash;
-use git_internal::internal::index::{Index, IndexEntry};
-use git_internal::internal::object::commit::Commit;
-use git_internal::internal::object::tree::Tree;
-use std::collections::HashSet;
-use std::fs;
-use std::path::Path;
-use std::path::PathBuf;
+use git_internal::{
+    hash::ObjectHash,
+    internal::{
+        index::{Index, IndexEntry},
+        object::{commit::Commit, tree::Tree},
+    },
+};
+
+use crate::{
+    command::{get_target_commit, load_object},
+    internal::{
+        branch::Branch,
+        db::get_db_conn_instance,
+        head::Head,
+        reflog::{ReflogAction, ReflogContext, with_reflog},
+    },
+    utils::{
+        object_ext::{BlobExt, TreeExt},
+        path, util,
+    },
+};
 
 #[derive(Parser, Debug)]
 pub struct ResetArgs {

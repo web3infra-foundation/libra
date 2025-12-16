@@ -1,9 +1,13 @@
+//! Tests rebase command applying commits onto new bases and handling conflicts.
+
 #![cfg(test)]
-use super::*;
+use std::fs;
+
 use libra::command::rebase::{RebaseArgs, execute};
 use serial_test::serial;
-use std::fs;
 use tempfile::tempdir;
+
+use super::*;
 
 #[tokio::test]
 #[serial]

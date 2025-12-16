@@ -1,26 +1,30 @@
-use crate::command::load_object;
-use crate::internal::branch::Branch;
-use crate::internal::config::Config;
-use crate::internal::head::Head;
-use clap::Parser;
-use colored::Colorize;
-use std::cmp::min;
-use std::collections::{HashMap, HashSet};
+//! Log command rendering commit history with optional decorations, filtering, and custom formatting utilities.
+
 #[cfg(unix)]
 use std::io::Write;
-use std::path::PathBuf;
 #[cfg(unix)]
 use std::process::{Command, Stdio};
+use std::{
+    cmp::min,
+    collections::{HashMap, HashSet, VecDeque},
+    path::PathBuf,
+    str::FromStr,
+};
 
-use git_internal::Diff;
-use git_internal::hash::ObjectHash;
-use git_internal::internal::object::{blob::Blob, commit::Commit, tree::Tree};
-use std::collections::VecDeque;
-use std::str::FromStr;
+use clap::Parser;
+use colored::Colorize;
+use git_internal::{
+    Diff,
+    hash::ObjectHash,
+    internal::object::{blob::Blob, commit::Commit, tree::Tree},
+};
 
-use crate::common_utils::parse_commit_msg;
-use crate::utils::object_ext::TreeExt;
-use crate::utils::util;
+use crate::{
+    command::load_object,
+    common_utils::parse_commit_msg,
+    internal::{branch::Branch, config::Config, head::Head},
+    utils::{object_ext::TreeExt, util},
+};
 
 #[derive(Parser, Debug)]
 pub struct LogArgs {
@@ -778,8 +782,9 @@ pub(crate) async fn generate_diff(commit: &Commit, paths: Vec<PathBuf>) -> Strin
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use clap::Parser;
+
+    use super::*;
 
     // Test parameter parsing
     #[test]

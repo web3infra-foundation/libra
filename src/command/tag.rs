@@ -1,8 +1,10 @@
-use crate::internal::tag;
-use crate::internal::tag::TagObject;
+//! Manages tags by resolving target commits, creating lightweight or annotated tag objects, storing refs, and listing existing tags.
+
 use clap::Parser;
 use git_internal::internal::object::types::ObjectType;
 use sea_orm::sqlx::types::chrono;
+
+use crate::internal::{tag, tag::TagObject};
 
 #[derive(Parser, Debug)]
 #[command(about = "Create, list, delete, or verify a tag object")]
@@ -149,13 +151,14 @@ async fn show_tag(tag_name: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::cli::parse_async;
-    use crate::internal::tag;
+    use std::fs;
+
     use git_internal::internal::object::types::ObjectType;
     use serial_test::serial;
-    use std::fs;
     use tempfile::tempdir;
+
+    use super::*;
+    use crate::{cli::parse_async, internal::tag};
 
     async fn setup_repo_with_commit() -> tempfile::TempDir {
         let temp_dir = tempdir().unwrap();

@@ -1,3 +1,5 @@
+//! Tests config command read/write behaviors, scope handling, and edge cases.
+
 use libra::command::config;
 use serial_test::serial;
 use tempfile::tempdir;

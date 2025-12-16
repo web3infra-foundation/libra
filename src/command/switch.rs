@@ -1,3 +1,5 @@
+//! Switch command to change branches safely, validating clean state, handling creation, and delegating checkout behavior to restore logic.
+
 use clap::Parser;
 use git_internal::hash::ObjectHash;
 
@@ -5,12 +7,14 @@ use super::{
     restore::{self, RestoreArgs},
     status,
 };
-use crate::command::status::StatusArgs;
-use crate::internal::db::get_db_conn_instance;
-use crate::internal::reflog::{ReflogAction, ReflogContext, with_reflog};
 use crate::{
-    command::branch,
-    internal::{branch::Branch, head::Head},
+    command::{branch, status::StatusArgs},
+    internal::{
+        branch::Branch,
+        db::get_db_conn_instance,
+        head::Head,
+        reflog::{ReflogAction, ReflogContext, with_reflog},
+    },
     utils::util::{self, get_commit_base},
 };
 
@@ -191,9 +195,10 @@ async fn restore_to_commit(commit_id: ObjectHash) {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use super::*;
     use crate::command::restore::RestoreArgs;
-    use std::str::FromStr;
     #[test]
     /// Test parsing RestoreArgs from command-line style arguments
     fn test_parse_from() {

@@ -1,9 +1,11 @@
-use super::*;
-use std::fs;
-use std::io::Write;
+//! Tests diff command across commits, stage, and working tree with algorithm and pathspec options.
+
+use std::{fs, io::Write};
 
 use clap::Parser;
 use libra::command::diff::{self, DiffArgs};
+
+use super::*;
 
 /// Helper function to create a file with content.
 fn create_file(path: &str, content: &str) {

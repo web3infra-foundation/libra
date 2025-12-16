@@ -1,26 +1,39 @@
-use crate::cli::Stash;
-use crate::command::reset::{
-    rebuild_index_from_tree, remove_empty_directories, reset_index_to_commit,
-    restore_working_directory_from_tree,
-};
-use crate::internal::head::Head;
-use crate::utils::object_ext::TreeExt;
-use crate::utils::{object, tree, util};
-use colored::Colorize;
-use git_internal::errors::GitError;
-use git_internal::hash::ObjectHash;
-use git_internal::internal::index::{Index, Time};
-use git_internal::internal::object::ObjectTrait;
-use git_internal::internal::object::commit::Commit;
-use git_internal::internal::object::signature::Signature;
-use git_internal::internal::object::tree::{Tree, TreeItem, TreeItemMode};
-use std::collections::HashSet;
-use std::fs;
-use std::io::{BufRead, BufReader};
+//! Implements stash push/pop/show/drop/apply by saving worktree/index states as commits and restoring them on demand.
+
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
-use std::str::FromStr;
+use std::{
+    collections::HashSet,
+    fs,
+    io::{BufRead, BufReader},
+    path::{Path, PathBuf},
+    str::FromStr,
+};
+
+use colored::Colorize;
+use git_internal::{
+    errors::GitError,
+    hash::ObjectHash,
+    internal::{
+        index::{Index, Time},
+        object::{
+            ObjectTrait,
+            commit::Commit,
+            signature::Signature,
+            tree::{Tree, TreeItem, TreeItemMode},
+        },
+    },
+};
+
+use crate::{
+    cli::Stash,
+    command::reset::{
+        rebuild_index_from_tree, remove_empty_directories, reset_index_to_commit,
+        restore_working_directory_from_tree,
+    },
+    internal::head::Head,
+    utils::{object, object_ext::TreeExt, tree, util},
+};
 
 pub async fn execute(stash_cmd: Stash) {
     let result = match stash_cmd {
