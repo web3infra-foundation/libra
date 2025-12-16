@@ -1,9 +1,13 @@
+//! Helpers to read or write compressed git objects on disk, returning raw payloads and computing their object hashes.
+
+use std::{
+    fs,
+    io::{Read, Write},
+    path::Path,
+};
+
 use flate2::read::ZlibDecoder;
-use git_internal::errors::GitError;
-use git_internal::hash::ObjectHash;
-use std::fs;
-use std::io::{Read, Write};
-use std::path::Path;
+use git_internal::{errors::GitError, hash::ObjectHash};
 /// Helper function to read and decompress a git object from the object database.
 pub fn read_git_object(git_dir: &Path, hash: &ObjectHash) -> Result<Vec<u8>, GitError> {
     let hash_str = hash.to_string();

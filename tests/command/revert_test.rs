@@ -1,9 +1,12 @@
-use super::*;
+//! Tests revert command for reversing commits with and without auto-commit.
+
+use std::{fs, path::PathBuf};
+
 use libra::command::revert;
 use serial_test::serial;
-use std::fs;
-use std::path::PathBuf;
 use tempfile::tempdir;
+
+use super::*;
 
 /// Test basic revert functionality with file additions, modifications, and deletions
 /// This test follows the workflow:

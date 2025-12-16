@@ -1,4 +1,7 @@
-use super::*;
+//! Tests blame output to ensure line attribution and formatting for specified commits and ranges.
+
+use std::{fs, io::Write};
+
 use libra::command::{
     add::{self, AddArgs},
     blame::{self, BlameArgs},
@@ -6,9 +9,9 @@ use libra::command::{
     get_target_commit,
     init::{self, InitArgs},
 };
-use std::fs;
-use std::io::Write;
 use tempfile::tempdir;
+
+use super::*;
 
 async fn setup_repo_with_hash(
     temp: &tempfile::TempDir,

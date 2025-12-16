@@ -1,11 +1,19 @@
+//! Tests status reporting for staged, unstaged, ignored files and path filtering.
+
+use std::{fs, io::Write};
+
+use libra::{
+    cli::Stash,
+    command::{
+        stash,
+        status::{
+            PorcelainVersion, StatusArgs, UntrackedFiles, execute_to as status_execute,
+            output_porcelain,
+        },
+    },
+};
+
 use super::*;
-use libra::cli::Stash;
-use libra::command::stash;
-use libra::command::status::execute_to as status_execute;
-use libra::command::status::output_porcelain;
-use libra::command::status::{PorcelainVersion, StatusArgs, UntrackedFiles};
-use std::fs;
-use std::io::Write;
 #[tokio::test]
 #[serial]
 /// Tests --ignored flag: ignored files appear in outputs
@@ -214,8 +222,9 @@ async fn test_changes_to_be_staged() {
 
 #[test]
 fn test_output_porcelain_format() {
-    use libra::command::status::Changes;
     use std::path::PathBuf;
+
+    use libra::command::status::Changes;
 
     // Create test data
     let staged = Changes {
@@ -344,8 +353,9 @@ async fn test_status_porcelain() {
 
 #[test]
 fn test_output_short_format() {
-    use libra::command::status::Changes;
     use std::path::PathBuf;
+
+    use libra::command::status::Changes;
 
     // Create test data
     let staged = Changes {

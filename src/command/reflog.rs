@@ -1,21 +1,29 @@
-use crate::command::load_object;
-use crate::internal::config;
-use crate::internal::db::get_db_conn_instance;
-use crate::internal::model::reflog::Model;
-use crate::internal::reflog::{HEAD, Reflog, ReflogError};
-use clap::{Parser, Subcommand};
-use colored::Colorize;
-use git_internal::hash::ObjectHash;
-use git_internal::internal::object::commit::Commit;
-use sea_orm::sqlx::types::chrono;
-use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
-use std::collections::HashMap;
-use std::fmt::{Display, Formatter};
+//! Reads and displays reflog entries for HEAD or branches with filtering and timestamp formatting options.
+
 #[cfg(unix)]
 use std::io::Write;
 #[cfg(unix)]
 use std::process::{Command, Stdio};
-use std::str::FromStr;
+use std::{
+    collections::HashMap,
+    fmt::{Display, Formatter},
+    str::FromStr,
+};
+
+use clap::{Parser, Subcommand};
+use colored::Colorize;
+use git_internal::{hash::ObjectHash, internal::object::commit::Commit};
+use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait, sqlx::types::chrono};
+
+use crate::{
+    command::load_object,
+    internal::{
+        config,
+        db::get_db_conn_instance,
+        model::reflog::Model,
+        reflog::{HEAD, Reflog, ReflogError},
+    },
+};
 
 #[derive(Parser, Debug)]
 pub struct ReflogArgs {

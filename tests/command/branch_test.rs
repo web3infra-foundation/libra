@@ -1,8 +1,11 @@
+//! Tests branch subcommand for creation, listing, deletion, and switching logic.
+
 #![cfg(test)]
-use super::*;
 use libra::internal::config::Config;
 use serial_test::serial;
 use tempfile::tempdir;
+
+use super::*;
 #[tokio::test]
 #[serial]
 /// Tests core branch management functionality including creation and listing.

@@ -1,3 +1,5 @@
+//! Command module hub exporting all subcommands plus shared helpers for loading/saving objects and prompting for authentication.
+
 pub mod add;
 pub mod blame;
 pub mod branch;
@@ -29,16 +31,20 @@ pub mod stash;
 pub mod status;
 pub mod switch;
 
-use crate::internal::protocol::https_client::BasicAuth;
-use crate::utils;
-use crate::utils::object_ext::BlobExt;
-use crate::utils::util;
-use git_internal::internal::object::blob::Blob;
-use git_internal::{errors::GitError, hash::ObjectHash, internal::object::ObjectTrait};
+use std::{io, io::Write, path::Path};
+
+use git_internal::{
+    errors::GitError,
+    hash::ObjectHash,
+    internal::object::{ObjectTrait, blob::Blob},
+};
 use rpassword::read_password;
-use std::io;
-use std::io::Write;
-use std::path::Path;
+
+use crate::{
+    internal::protocol::https_client::BasicAuth,
+    utils,
+    utils::{object_ext::BlobExt, util},
+};
 
 // impl load for all objects
 pub fn load_object<T>(hash: &ObjectHash) -> Result<T, GitError>
@@ -117,13 +123,15 @@ pub async fn get_target_commit(
 
 #[cfg(test)]
 mod tests {
-    use crate::common_utils::{format_commit_msg, parse_commit_msg};
     use git_internal::internal::object::commit::Commit;
     use serial_test::serial;
     use tempfile::tempdir;
 
     use super::*;
-    use crate::utils::test;
+    use crate::{
+        common_utils::{format_commit_msg, parse_commit_msg},
+        utils::test,
+    };
     #[tokio::test]
     #[serial]
     /// Test objects can be correctly saved to and loaded from storage.

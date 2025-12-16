@@ -1,15 +1,16 @@
+//! Removes paths from the index and working tree according to pathspecs, supporting recursive deletion and cache-only modes.
+
 use std::path::PathBuf;
 
 use clap::Parser;
 use colored::Colorize;
-
-use git_internal::errors::GitError;
+use git_internal::{errors::GitError, internal::index::Index};
 use tokio::fs;
 
-use crate::command::status::{changes_to_be_committed, changes_to_be_staged};
-use crate::utils::path_ext::PathExt;
-use crate::utils::{path, util};
-use git_internal::internal::index::Index;
+use crate::{
+    command::status::{changes_to_be_committed, changes_to_be_staged},
+    utils::{path, path_ext::PathExt, util},
+};
 
 #[derive(Parser, Debug, Clone)]
 pub struct RemoveArgs {

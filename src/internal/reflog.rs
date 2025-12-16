@@ -1,17 +1,26 @@
-use crate::internal::config;
-use crate::internal::db::get_db_conn_instance;
-use crate::internal::head::Head;
-use crate::internal::model::reflog;
-use crate::internal::model::reflog::{ActiveModel, Model};
-use sea_orm::{
-    ActiveModelTrait, DatabaseTransaction, EntityTrait, QueryFilter, QueryOrder, Set,
-    TransactionTrait,
+//! Reflog persistence layer that writes formatted entries, queries by ref name, and enforces transaction-safe patterns for updates.
+
+use std::{
+    fmt::{Debug, Display, Formatter},
+    future::Future,
+    pin::Pin,
+    time::{SystemTime, UNIX_EPOCH},
 };
-use sea_orm::{ColumnTrait, ConnectionTrait, DbBackend, DbErr, Statement, TransactionError};
-use std::fmt::{Debug, Display, Formatter};
-use std::future::Future;
-use std::pin::Pin;
-use std::time::{SystemTime, UNIX_EPOCH};
+
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseTransaction, DbBackend, DbErr,
+    EntityTrait, QueryFilter, QueryOrder, Set, Statement, TransactionError, TransactionTrait,
+};
+
+use crate::internal::{
+    config,
+    db::get_db_conn_instance,
+    head::Head,
+    model::{
+        reflog,
+        reflog::{ActiveModel, Model},
+    },
+};
 
 pub const HEAD: &str = "HEAD";
 

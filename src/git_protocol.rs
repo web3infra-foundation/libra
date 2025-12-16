@@ -1,7 +1,9 @@
-use bytes::{Buf, BufMut};
+//! Packet-line helpers and service type parsing for the Git smart protocol, covering upload-pack and receive-pack flows.
+
 use core::fmt;
 use std::str::FromStr;
 
+use bytes::{Buf, BufMut};
 use git_internal::errors::GitError;
 
 #[derive(Debug, PartialEq, Clone, Copy)]

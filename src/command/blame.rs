@@ -1,16 +1,22 @@
-use crate::utils::util;
-use crate::{
-    command::{get_target_commit, load_object},
-    utils::object_ext::TreeExt,
+//! Runs blame for a file at a given commit by walking trees/diffs, attributing lines to commits, and streaming formatted output.
+
+use std::{
+    io::Write,
+    process::{Command, Stdio},
 };
 
 use chrono::DateTime;
 use clap::Parser;
-use git_internal::diff::compute_diff;
-use git_internal::hash::ObjectHash;
-use git_internal::internal::object::{blob::Blob, commit::Commit, tree::Tree};
-use std::io::Write;
-use std::process::{Command, Stdio};
+use git_internal::{
+    diff::compute_diff,
+    hash::ObjectHash,
+    internal::object::{blob::Blob, commit::Commit, tree::Tree},
+};
+
+use crate::{
+    command::{get_target_commit, load_object},
+    utils::{object_ext::TreeExt, util},
+};
 
 #[derive(Parser, Debug)]
 pub struct BlameArgs {

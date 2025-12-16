@@ -1,3 +1,5 @@
+//! Config command for reading and writing settings across scopes, supporting key/value parsing and remote/branch associations.
+
 use clap::Parser;
 
 use crate::internal::config;

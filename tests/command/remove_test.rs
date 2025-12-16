@@ -1,7 +1,8 @@
+//! Tests rm command removing files from the index and working tree while respecting flags.
+
+use std::{fs, io::Write, path::PathBuf};
+
 use super::*;
-use std::fs;
-use std::io::Write;
-use std::path::PathBuf;
 
 // Except for the force test, all tests must also include checking for the presence of
 // a force situation. Because under normal circumstances, if the commit stage and the working

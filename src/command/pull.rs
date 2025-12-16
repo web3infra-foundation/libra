@@ -1,7 +1,9 @@
-use crate::internal::{config::Config, head::Head};
+//! Pull command combining fetch with merge or rebase depending on options, handling fast-forward checks and remote tracking setup.
+
+use clap::Parser;
 
 use super::{fetch, merge};
-use clap::Parser;
+use crate::internal::{config::Config, head::Head};
 #[derive(Parser, Debug)]
 pub struct PullArgs {
     /// The repository to pull from

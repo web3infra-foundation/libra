@@ -1,16 +1,18 @@
-use libra::command::fetch;
-use libra::internal::{
-    branch::Branch,
-    config::{Config, RemoteConfig},
+//! Tests fetch command behavior for remote ref updates and pack retrieval flows.
+
+use std::{fs, process::Command, time::Duration};
+
+use libra::{
+    command::fetch,
+    internal::{
+        branch::Branch,
+        config::{Config, RemoteConfig},
+    },
+    utils::test::{ChangeDirGuard, setup_with_new_libra_in},
 };
-use libra::utils::test::{ChangeDirGuard, setup_with_new_libra_in};
 use serial_test::serial;
-use std::fs;
-use std::process::Command;
-use std::time::Duration;
 use tempfile::{TempDir, tempdir};
-use tokio::process::Command as TokioCommand;
-use tokio::time::timeout;
+use tokio::{process::Command as TokioCommand, time::timeout};
 
 /// Helper function: Initialize a temporary Libra repository
 fn init_temp_repo() -> TempDir {

@@ -1,6 +1,11 @@
+//! Tests for remote subcommands validating add/list/show behavior and URL mutation scenarios.
+
+use libra::{
+    command::remote::{self, RemoteCmds},
+    internal::config::Config,
+};
+
 use super::*;
-use libra::command::remote::{self, RemoteCmds};
-use libra::internal::config::Config;
 
 #[tokio::test]
 #[serial]

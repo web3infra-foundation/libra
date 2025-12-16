@@ -1,28 +1,34 @@
-use crate::command;
-use crate::command::load_object;
-use crate::internal::branch::Branch;
-use crate::internal::head::Head;
+//! Client-side object storage wrapper with caches for loose and pack objects, zlib compression handling, and search/navigation helpers across refs.
+
+use std::{
+    collections::{HashMap, HashSet},
+    fs, io,
+    io::{BufReader, Cursor, prelude::*},
+    path::{Path, PathBuf},
+    str::FromStr,
+    sync::{Arc, Mutex},
+};
+
 use byteorder::{BigEndian, ReadBytesExt};
-use flate2::Compression;
-use flate2::read::ZlibDecoder;
-use flate2::write::ZlibEncoder;
-use git_internal::errors::GitError;
-use git_internal::hash::ObjectHash;
-use git_internal::internal::object::commit::Commit;
-use git_internal::internal::object::types::ObjectType;
-use git_internal::internal::pack::Pack;
-use git_internal::internal::pack::cache_object::CacheObject;
-use git_internal::utils::read_sha;
+use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
+use git_internal::{
+    errors::GitError,
+    hash::ObjectHash,
+    internal::{
+        object::{commit::Commit, types::ObjectType},
+        pack::{Pack, cache_object::CacheObject},
+    },
+    utils::read_sha,
+};
 use lru_mem::LruCache;
 use once_cell::sync::Lazy;
 use regex::Regex;
-use std::collections::{HashMap, HashSet};
-use std::io::prelude::*;
-use std::io::{BufReader, Cursor};
-use std::path::{Path, PathBuf};
-use std::str::FromStr;
-use std::sync::{Arc, Mutex};
-use std::{fs, io};
+
+use crate::{
+    command,
+    command::load_object,
+    internal::{branch::Branch, head::Head},
+};
 
 static PACK_OBJ_CACHE: Lazy<Mutex<LruCache<String, CacheObject>>> = Lazy::new(|| {
     // `lazy_static!` may affect IDE's code completion
@@ -542,16 +548,13 @@ impl ClientStorage {
 
 #[cfg(test)]
 mod tests {
-    use git_internal::internal::object::ObjectTrait;
-    use git_internal::internal::object::blob::Blob;
-    use git_internal::internal::object::types::ObjectType;
-    use serial_test::serial;
-    use std::fs;
-    use std::path::PathBuf;
+    use std::{fs, path::PathBuf};
 
-    use crate::utils::test;
+    use git_internal::internal::object::{ObjectTrait, blob::Blob, types::ObjectType};
+    use serial_test::serial;
 
     use super::ClientStorage;
+    use crate::utils::test;
 
     #[test]
     #[ignore]

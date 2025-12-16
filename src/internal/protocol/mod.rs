@@ -1,9 +1,10 @@
-use crate::git_protocol::ServiceType;
-use crate::git_protocol::{add_pkt_line_string, read_pkt_line};
+//! Protocol abstraction for Git transport with shared advertisement parsing and traits implemented by HTTPS, local, and LFS clients.
+
 use bytes::{Bytes, BytesMut};
-use git_internal::errors::GitError;
-use git_internal::hash::ObjectHash;
+use git_internal::{errors::GitError, hash::ObjectHash};
 use url::Url;
+
+use crate::git_protocol::{ServiceType, add_pkt_line_string, read_pkt_line};
 
 pub mod https_client;
 pub mod lfs_client;

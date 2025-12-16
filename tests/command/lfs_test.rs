@@ -1,4 +1,7 @@
+//! Tests LFS subcommands covering upload/download negotiation, locks, and tracking detection.
+
 use std::process::Command;
+
 use tempfile::TempDir;
 
 /// Helper function: Initialize a temporary Libra repository

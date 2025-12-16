@@ -1,13 +1,16 @@
-use super::*;
+//! Tests log command output ordering and formatting of commit history.
+
+use std::{cmp::min, str::FromStr};
+
 use clap::Parser;
-use git_internal::Diff;
-use git_internal::hash::ObjectHash;
-use git_internal::internal::object::commit::Commit;
-use git_internal::internal::object::{blob::Blob, tree::Tree};
-use libra::utils::object_ext::TreeExt;
-use libra::utils::util;
-use std::cmp::min;
-use std::str::FromStr;
+use git_internal::{
+    Diff,
+    hash::ObjectHash,
+    internal::object::{blob::Blob, commit::Commit, tree::Tree},
+};
+use libra::utils::{object_ext::TreeExt, util};
+
+use super::*;
 #[tokio::test]
 #[serial]
 /// Tests retrieval of commits reachable from a specific commit hash

@@ -1,13 +1,13 @@
+//! Branch store utilities to find/create/update/delete branch refs in the database with transaction-safe helpers and commit resolution.
+
 use std::str::FromStr;
 
-use sea_orm::ActiveValue::Set;
-use sea_orm::{ActiveModelTrait, ConnectionTrait};
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
-
 use git_internal::hash::ObjectHash;
+use sea_orm::{
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter,
+};
 
-use crate::internal::db::get_db_conn_instance;
-use crate::internal::model::reference;
+use crate::internal::{db::get_db_conn_instance, model::reference};
 
 #[derive(Debug)]
 pub struct Branch {
@@ -225,11 +225,11 @@ impl Branch {
 
 #[cfg(test)]
 mod tests {
-    use crate::utils::test;
     use serial_test::serial;
     use tempfile::tempdir;
 
     use super::*;
+    use crate::utils::test;
 
     #[tokio::test]
     #[serial]

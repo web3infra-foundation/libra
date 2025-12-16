@@ -1,17 +1,24 @@
-use std::collections::BTreeMap;
-use std::io::Write;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+//! Builds pack index files by reading pack data, computing object offsets and hashes, and writing corresponding .idx outputs.
+
+use std::{
+    collections::BTreeMap,
+    io::Write,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use byteorder::{BigEndian, WriteBytesExt};
 use clap::Parser;
-use sha1::{Digest, Sha1};
 //use crc32fast::Hasher as Crc32; //use for index version 2
 use git_internal::errors::GitError;
-use git_internal::hash::{HashKind, ObjectHash, get_hash_kind};
-use git_internal::internal::metadata::{EntryMeta, MetaAttached};
-use git_internal::internal::pack::Pack;
-use git_internal::internal::pack::entry::Entry;
+use git_internal::{
+    hash::{HashKind, ObjectHash, get_hash_kind},
+    internal::{
+        metadata::{EntryMeta, MetaAttached},
+        pack::{Pack, entry::Entry},
+    },
+};
+use sha1::{Digest, Sha1};
 
 #[derive(Parser, Debug)]
 pub struct IndexPackArgs {

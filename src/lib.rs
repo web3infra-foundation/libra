@@ -1,3 +1,5 @@
+//! Library entry for the Libra CLI exposing modules and sync/async exec helpers for embedding.
+
 use git_internal::errors::GitError;
 
 pub mod cli;
@@ -28,10 +30,10 @@ pub async fn exec_async(mut args: Vec<&str>) -> Result<(), GitError> {
 
 #[cfg(test)]
 mod tests {
-    use crate::utils::test;
-
     use serial_test::serial;
     use tempfile::TempDir;
+
+    use crate::utils::test;
 
     #[test]
     #[serial]
@@ -43,9 +45,9 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn test_lfs_client() {
-        use crate::internal::protocol::ProtocolClient;
-        use crate::internal::protocol::lfs_client::LFSClient;
         use url::Url;
+
+        use crate::internal::protocol::{ProtocolClient, lfs_client::LFSClient};
 
         let client = LFSClient::from_url(&Url::parse("https://git.gitmono.org").unwrap());
         println!("{client:?}");

@@ -1,4 +1,4 @@
-//! This is the main entry point for the Libra.
+//! Binary entry point that boots the async runtime, parses CLI arguments, and dispatches execution.
 
 use git_internal::errors::GitError;
 use libra::cli;

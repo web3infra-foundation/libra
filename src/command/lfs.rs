@@ -1,16 +1,22 @@
-use crate::command::status;
-use crate::internal::head::Head;
-use crate::internal::protocol::lfs_client::LFSClient;
-use crate::lfs_structs::LockListQuery;
-use crate::utils::path_ext::PathExt;
-use crate::utils::{lfs, path, util};
+//! LFS subcommands for authentication, batch negotiation, lock management, and integrating media storage with standard workflows.
+
+use std::{
+    fs::{File, OpenOptions},
+    io,
+    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
+    path::Path,
+};
+
 use clap::Subcommand;
 use git_internal::internal::index::Index;
 use reqwest::StatusCode;
-use std::fs::{File, OpenOptions};
-use std::io;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
-use std::path::Path;
+
+use crate::{
+    command::status,
+    internal::{head::Head, protocol::lfs_client::LFSClient},
+    lfs_structs::LockListQuery,
+    utils::{lfs, path, path_ext::PathExt, util},
+};
 
 /// [Docs](https://github.com/git-lfs/git-lfs/tree/main/docs/man)
 #[derive(Subcommand, Debug)]

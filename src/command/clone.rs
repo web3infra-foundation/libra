@@ -1,20 +1,24 @@
-use super::fetch::{self};
-use crate::command::restore::RestoreArgs;
-use crate::command::{self, branch};
-use crate::internal::branch::Branch;
-use crate::internal::config::{Config, RemoteConfig};
-use crate::internal::head::Head;
-use crate::internal::reflog::{ReflogAction, ReflogContext, with_reflog};
-use crate::utils::path_ext::PathExt;
-use crate::utils::util;
+//! Supports cloning repositories by parsing URLs, fetching objects via protocol clients, checking out the working tree, and writing initial refs/config.
+
+use std::{cell::Cell, env, fs, path::PathBuf};
+
 use clap::Parser;
 use colored::Colorize;
 use git_internal::hash::{ObjectHash, get_hash_kind};
 use scopeguard::defer;
 use sea_orm::DatabaseTransaction;
-use std::cell::Cell;
-use std::path::PathBuf;
-use std::{env, fs};
+
+use super::fetch::{self};
+use crate::{
+    command::{self, branch, restore::RestoreArgs},
+    internal::{
+        branch::Branch,
+        config::{Config, RemoteConfig},
+        head::Head,
+        reflog::{ReflogAction, ReflogContext, with_reflog},
+    },
+    utils::{path_ext::PathExt, util},
+};
 
 #[derive(Parser, Debug)]
 pub struct CloneArgs {

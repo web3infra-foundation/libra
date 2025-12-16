@@ -1,19 +1,32 @@
-use crate::command::{load_object, save_object};
-use crate::internal::branch::Branch;
-use crate::internal::db::get_db_conn_instance;
-use crate::internal::head::Head;
-use crate::internal::reflog;
-use crate::internal::reflog::{ReflogAction, ReflogContext, ReflogError, with_reflog};
-use crate::utils::object_ext::{BlobExt, TreeExt};
-use crate::utils::{path, util};
+//! Rebase implementation that parses onto/branch arguments, replays commits onto a new base, handles conflicts, and updates branch refs.
+
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::{Path, PathBuf},
+};
+
 use clap::Parser;
-use git_internal::hash::ObjectHash;
-use git_internal::internal::object::commit::Commit;
-use git_internal::internal::object::tree::Tree;
+use git_internal::{
+    hash::ObjectHash,
+    internal::object::{commit::Commit, tree::Tree},
+};
 use sea_orm::TransactionTrait;
-use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::path::{Path, PathBuf};
+
+use crate::{
+    command::{load_object, save_object},
+    internal::{
+        branch::Branch,
+        db::get_db_conn_instance,
+        head::Head,
+        reflog,
+        reflog::{ReflogAction, ReflogContext, ReflogError, with_reflog},
+    },
+    utils::{
+        object_ext::{BlobExt, TreeExt},
+        path, util,
+    },
+};
 
 /// Command-line arguments for the rebase operation
 #[derive(Parser, Debug)]

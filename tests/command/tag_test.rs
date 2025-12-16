@@ -1,11 +1,19 @@
-use super::*;
-use libra::command::config::{self, ConfigArgs};
-use libra::command::tag::{self, TagArgs};
-use libra::internal::tag as internal_tag;
-use libra::utils::test::{ChangeDirGuard, setup_with_new_libra_in};
-use serial_test::serial;
+//! Tests tag creation and listing flows for lightweight and annotated tags.
+
 use std::collections::HashSet;
+
+use libra::{
+    command::{
+        config::{self, ConfigArgs},
+        tag::{self, TagArgs},
+    },
+    internal::tag as internal_tag,
+    utils::test::{ChangeDirGuard, setup_with_new_libra_in},
+};
+use serial_test::serial;
 use tempfile::tempdir;
+
+use super::*;
 
 // Test helpers and utilities for tag tests.
 // These helpers work with the internal tag API (`internal::tag`) rather than the CLI

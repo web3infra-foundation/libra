@@ -1,5 +1,8 @@
-use crate::utils::util;
+//! Path extension helpers for converting between workdir and absolute paths, string conversions, and containment checks across path lists.
+
 use std::path::{Path, PathBuf};
+
+use crate::utils::util;
 
 pub trait PathExt {
     fn to_workdir(&self) -> PathBuf;

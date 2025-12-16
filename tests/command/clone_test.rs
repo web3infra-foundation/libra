@@ -1,7 +1,6 @@
-use libra::command;
-use libra::command::clone::CloneArgs;
-use libra::internal::head::Head;
-use libra::utils::test;
+//! Tests clone command setup to ensure objects, refs, and working copies are created correctly.
+
+use libra::{command, command::clone::CloneArgs, internal::head::Head, utils::test};
 use serial_test::serial;
 use tempfile::tempdir;
 

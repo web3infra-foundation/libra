@@ -1,6 +1,7 @@
+//! Tests switch command for branch creation, switching, and dirty-state checks.
+
 use git_internal::internal::index::Index;
-use libra::utils::client_storage::ClientStorage;
-use libra::utils::path;
+use libra::utils::{client_storage::ClientStorage, path};
 
 use super::*;
 

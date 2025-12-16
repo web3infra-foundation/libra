@@ -1,5 +1,8 @@
-use serde::{Deserialize, Serialize};
+//! Data structures for Git LFS operations, including transfer modes, operations, actions, locks, and batch request/response payloads.
+
 use std::collections::HashMap;
+
+use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub enum TransferMode {

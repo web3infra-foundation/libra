@@ -1,24 +1,23 @@
-//! This module implements the `init` command for the Libra CLI.
-//!
-//! The `init` command creates a new Libra repository in the current directory or a specified directory.
-//! It supports customizing the initial branch name with the `--initial-branch` parameter.
-//!
+//! Initializes a repository by creating .libra storage, seeding HEAD and default refs/config, and preparing the backing database.
+
 use std::{
     fs,
     io::{self, ErrorKind},
     path::Path,
 };
 
+use clap::Parser;
+use git_internal::hash::{HashKind, set_hash_kind};
 use sea_orm::{ActiveModelTrait, DbConn, DbErr, Set, TransactionTrait};
 
-use clap::Parser;
-
-use crate::command::branch;
-use crate::internal::db;
-use crate::internal::model::{config, reference};
-use crate::utils::util::{DATABASE, ROOT_DIR};
-
-use git_internal::hash::{HashKind, set_hash_kind};
+use crate::{
+    command::branch,
+    internal::{
+        db,
+        model::{config, reference},
+    },
+    utils::util::{DATABASE, ROOT_DIR},
+};
 const DEFAULT_BRANCH: &str = "master";
 
 #[derive(Parser, Debug, Clone)]

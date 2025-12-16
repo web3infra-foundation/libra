@@ -1,17 +1,23 @@
-use crate::utils::path_ext::PathExt;
-use crate::utils::{path, util};
+//! LFS helpers to detect tracked files from attributes, compute SHA256 OIDs, build request payloads/headers, and stream uploads or downloads.
+
+use std::{
+    fs,
+    fs::File,
+    io,
+    io::{BufRead, BufReader, Read},
+    path::{Path, PathBuf},
+};
+
 use git_internal::internal::index::Index;
 use ignore::{Match, gitignore::GitignoreBuilder};
 use lazy_static::lazy_static;
 use regex::Regex;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue};
 use ring::digest::{Context, SHA256};
-use std::fs::File;
-use std::io::{BufRead, BufReader, Read};
-use std::path::{Path, PathBuf};
-use std::{fs, io};
 use url::Url;
 use wax::Pattern;
+
+use crate::utils::{path, path_ext::PathExt, util};
 
 lazy_static! {
     static ref LFS_PATTERNS: Vec<String> = { // cache
@@ -270,8 +276,9 @@ pub fn extract_lfs_patterns(file_path: &str) -> io::Result<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serial_test::serial;
+
+    use super::*;
 
     #[tokio::test]
     #[serial]

@@ -1,8 +1,12 @@
-use super::*;
-use libra::internal::model::config;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+//! Tests init command creating repository layout, configs, and database tables.
+
 // use std::fs::File;
 use std::fs;
+
+use libra::internal::model::config;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+use super::*;
 
 pub fn verify_init(base_dir: &Path) {
     // List of subdirectories to verify
@@ -54,6 +58,7 @@ async fn test_init() {
 /// Test the init function with a template directory
 async fn test_init_template() {
     use std::fs;
+
     use tempfile::tempdir;
 
     // Create a temporary target directory for the new repo

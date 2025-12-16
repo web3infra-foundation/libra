@@ -1,21 +1,34 @@
-use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+//! Implements status reporting with ignore policy support, computing staged/unstaged/untracked sets and printing concise summaries.
+
+use std::{
+    collections::{HashMap, HashSet},
+    io::Write,
+    path::PathBuf,
+};
 
 use clap::{Parser, ValueEnum};
 use colored::Colorize;
-
-use git_internal::hash::{ObjectHash, get_hash_kind};
-use git_internal::internal::object::commit::Commit;
-use git_internal::internal::object::tree::{Tree, TreeItemMode};
+use git_internal::{
+    hash::{ObjectHash, get_hash_kind},
+    internal::{
+        index::Index,
+        object::{
+            commit::Commit,
+            tree::{Tree, TreeItemMode},
+        },
+    },
+};
 
 use super::stash;
-use crate::command::calc_file_blob_hash;
-use crate::internal::head::Head;
-use crate::utils::ignore::{self, IgnorePolicy};
-use crate::utils::object_ext::{CommitExt, TreeExt};
-use crate::utils::{path, util};
-use git_internal::internal::index::Index;
-use std::io::Write;
+use crate::{
+    command::calc_file_blob_hash,
+    internal::head::Head,
+    utils::{
+        ignore::{self, IgnorePolicy},
+        object_ext::{CommitExt, TreeExt},
+        path, util,
+    },
+};
 
 #[derive(Parser, Debug, Default)]
 pub struct StatusArgs {
@@ -629,8 +642,9 @@ pub async fn output_short_format(staged: &Changes, unstaged: &Changes, writer: &
 
 /// Check if colors should be used based on configuration
 async fn should_use_colors() -> bool {
-    use crate::internal::config::Config;
     use std::io::{self, IsTerminal};
+
+    use crate::internal::config::Config;
 
     // Check color.status.short configuration
     if let Some(color_setting) = Config::get("color", Some("status"), "short").await {

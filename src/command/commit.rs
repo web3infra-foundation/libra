@@ -1,27 +1,40 @@
-use super::save_object;
-use std::process::Stdio;
-use std::str::FromStr;
-use std::{collections::HashSet, path::PathBuf};
+//! Commit command that collects staged changes, builds tree and commit objects, validates messages (including GPG), and updates HEAD/refs.
 
-use crate::command::{load_object, status};
-use crate::common_utils::{check_conventional_commits_message, format_commit_msg};
-use crate::internal::branch::Branch;
-use crate::internal::config::Config as UserConfig;
-use crate::internal::head::Head;
-use crate::internal::reflog::{ReflogAction, ReflogContext, with_reflog};
-use crate::utils::client_storage::ClientStorage;
-use crate::utils::object_ext::BlobExt;
-use crate::utils::{lfs, path, util};
+use std::{
+    collections::HashSet,
+    path::PathBuf,
+    process::{Command, Stdio},
+    str::FromStr,
+};
+
 use clap::Parser;
-use git_internal::hash::{ObjectHash, get_hash_kind};
-use git_internal::internal::index::{Index, IndexEntry};
-use git_internal::internal::object::ObjectTrait;
-use git_internal::internal::object::blob::Blob;
-use git_internal::internal::object::commit::Commit;
-use git_internal::internal::object::tree::{Tree, TreeItem, TreeItemMode};
-use git_internal::internal::object::types::ObjectType;
+use git_internal::{
+    hash::{ObjectHash, get_hash_kind},
+    internal::{
+        index::{Index, IndexEntry},
+        object::{
+            ObjectTrait,
+            blob::Blob,
+            commit::Commit,
+            tree::{Tree, TreeItem, TreeItemMode},
+            types::ObjectType,
+        },
+    },
+};
 use sea_orm::ConnectionTrait;
-use std::process::Command;
+
+use super::save_object;
+use crate::{
+    command::{load_object, status},
+    common_utils::{check_conventional_commits_message, format_commit_msg},
+    internal::{
+        branch::Branch,
+        config::Config as UserConfig,
+        head::Head,
+        reflog::{ReflogAction, ReflogContext, with_reflog},
+    },
+    utils::{client_storage::ClientStorage, lfs, object_ext::BlobExt, path, util},
+};
 
 #[derive(Parser, Debug, Default)]
 pub struct CommitArgs {
@@ -380,7 +393,6 @@ async fn new_reflog_context(commit_id: &str, message: &str) -> ReflogContext {
 mod test {
     use std::env;
 
-    use crate::utils::test::*;
     use git_internal::internal::object::{ObjectTrait, signature::Signature};
     use serial_test::serial;
     use tempfile::tempdir;
@@ -390,6 +402,7 @@ mod test {
     };
 
     use super::*;
+    use crate::utils::test::*;
 
     #[test]
     ///Testing basic parameter parsing functionality.

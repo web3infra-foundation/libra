@@ -1,32 +1,44 @@
-use crate::command::branch;
-use crate::git_protocol::ServiceType::ReceivePack;
-use crate::git_protocol::{add_pkt_line_string, read_pkt_line};
-use crate::internal::branch::Branch;
-use crate::internal::config::Config;
-use crate::internal::db::get_db_conn_instance;
-use crate::internal::head::Head;
-use crate::internal::protocol::ProtocolClient;
-use crate::internal::protocol::https_client::HttpsClient;
-use crate::internal::protocol::lfs_client::LFSClient;
-use crate::internal::reflog::{Reflog, ReflogAction, ReflogContext, ReflogError};
-use crate::utils::object_ext::{BlobExt, CommitExt, TreeExt};
+//! Push command wiring that reads remote configuration, negotiates with servers, and sends local refs and pack data for update.
+
+use std::{
+    collections::{HashSet, VecDeque},
+    io::Write,
+    path::Path,
+    str::FromStr,
+};
+
 use bytes::BytesMut;
 use clap::Parser;
 use colored::Colorize;
-use git_internal::hash::{ObjectHash, get_hash_kind};
-use git_internal::internal::metadata::{EntryMeta, MetaAttached};
-use git_internal::internal::object::blob::Blob;
-use git_internal::internal::object::commit::Commit;
-use git_internal::internal::object::tree::{Tree, TreeItemMode};
-use git_internal::internal::pack::encode::PackEncoder;
-use git_internal::internal::pack::entry::Entry;
+use git_internal::{
+    hash::{ObjectHash, get_hash_kind},
+    internal::{
+        metadata::{EntryMeta, MetaAttached},
+        object::{
+            blob::Blob,
+            commit::Commit,
+            tree::{Tree, TreeItemMode},
+        },
+        pack::{encode::PackEncoder, entry::Entry},
+    },
+};
 use sea_orm::TransactionTrait;
-use std::collections::{HashSet, VecDeque};
-use std::io::Write;
-use std::path::Path;
-use std::str::FromStr;
 use tokio::sync::mpsc;
 use url::Url;
+
+use crate::{
+    command::branch,
+    git_protocol::{ServiceType::ReceivePack, add_pkt_line_string, read_pkt_line},
+    internal::{
+        branch::Branch,
+        config::Config,
+        db::get_db_conn_instance,
+        head::Head,
+        protocol::{ProtocolClient, https_client::HttpsClient, lfs_client::LFSClient},
+        reflog::{Reflog, ReflogAction, ReflogContext, ReflogError},
+    },
+    utils::object_ext::{BlobExt, CommitExt, TreeExt},
+};
 
 #[derive(Parser, Debug)]
 pub struct PushArgs {
@@ -526,9 +538,11 @@ fn diff_tree_objs(old_tree: Option<&ObjectHash>, new_tree: &ObjectHash) -> HashS
 
 #[cfg(test)]
 mod test {
-    use super::*;
-    use git_internal::hash::ObjectHash;
     use std::str::FromStr;
+
+    use git_internal::hash::ObjectHash;
+
+    use super::*;
 
     #[test]
     /// Tests successful parsing of push command arguments with different parameter combinations.
