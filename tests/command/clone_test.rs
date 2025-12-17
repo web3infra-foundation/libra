@@ -39,6 +39,39 @@ async fn test_clone_branch() {
 #[tokio::test]
 #[serial]
 #[ignore]
+/// Test the clone command with a specific branch and single branch
+async fn test_clone_branch_single_branch() {
+    let temp_path = tempdir().unwrap();
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    let remote_url = "https://gitee.com/pikady/mega-libra-clone-branch-test.git".to_string();
+
+    command::clone::execute(CloneArgs {
+        remote_repo: remote_url,
+        local_path: Some(temp_path.path().to_str().unwrap().to_string()),
+        branch: Some("dev".to_string()),
+        single_branch: true,
+    })
+    .await;
+
+    // Verify that the `.libra` directory exists
+    let libra_dir = temp_path.path().join(".libra");
+    assert!(libra_dir.exists());
+
+    // Verify the Head reference
+    match Head::current().await {
+        Head::Branch(current_branch) => {
+            assert_eq!(current_branch, "dev");
+        }
+        _ => panic!("should be branch"),
+    };
+
+    // TODO: Verify that only the specified branch is cloned
+}
+
+#[tokio::test]
+#[serial]
+#[ignore]
 /// Test the clone command with the default branch
 async fn test_clone_default_branch() {
     let temp_path = tempdir().unwrap();
@@ -65,6 +98,39 @@ async fn test_clone_default_branch() {
         }
         _ => panic!("should be branch"),
     };
+}
+
+#[tokio::test]
+#[serial]
+#[ignore]
+/// Test the clone command with the default branch and single branch
+async fn test_clone_default_branch_single_branch() {
+    let temp_path = tempdir().unwrap();
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    let remote_url = "https://gitee.com/pikady/mega-libra-clone-branch-test.git".to_string();
+
+    command::clone::execute(CloneArgs {
+        remote_repo: remote_url,
+        local_path: Some(temp_path.path().to_str().unwrap().to_string()),
+        branch: None,
+        single_branch: true,
+    })
+    .await;
+
+    // Verify that the `.libra` directory exists
+    let libra_dir = temp_path.path().join(".libra");
+    assert!(libra_dir.exists());
+
+    // Verify the Head reference
+    match Head::current().await {
+        Head::Branch(current_branch) => {
+            assert_eq!(current_branch, "master");
+        }
+        _ => panic!("should be branch"),
+    };
+
+    // TODO: Verify the single branch
 }
 
 #[tokio::test]
