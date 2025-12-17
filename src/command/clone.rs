@@ -29,7 +29,7 @@ pub struct CloneArgs {
     pub branch: Option<String>,
 
     /// Clone only one branch, HEAD or --branch
-    #[clap(long, default_value = "false")]
+    #[clap(long)]
     pub single_branch: bool,
 }
 
