@@ -28,9 +28,13 @@ pub struct CloneArgs {
     /// The local path to clone the repository to
     pub local_path: Option<String>,
 
-    /// The branch to clone
+    /// Checkout <BRANCH> instead of the remote's HEAD
     #[clap(short = 'b', long, required = false)]
     pub branch: Option<String>,
+
+    /// Clone only one branch, HEAD or --branch
+    #[clap(long)]
+    pub single_branch: bool,
 }
 
 pub async fn execute(args: CloneArgs) {
@@ -105,7 +109,12 @@ pub async fn execute(args: CloneArgs) {
         name: "origin".to_string(),
         url: remote_repo.clone(),
     };
-    fetch::fetch_repository(remote_config.clone(), args.branch.clone()).await;
+    fetch::fetch_repository(
+        remote_config.clone(),
+        args.branch.clone(),
+        args.single_branch,
+    )
+    .await;
 
     /* setup */
     if let Err(e) = setup_repository(remote_config, args.branch.clone()).await {

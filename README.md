@@ -89,7 +89,7 @@ This section documents the compatibility between **Libra**’s CLI and **Git** a
 |  | `[local_path]` | Yes | Yes | ✅ | - | Target directory |
 |  | `-b, --branch <name>` | Yes | Yes | ✅ | - | Check out given branch |
 |  | `--depth <n>` | Yes | No | ⛔ | P0 | Shallow clone, widely used in CI and large repos |
-|  | `--single-branch` | Yes | No | ⛔ | P0 | Clone only the specified branch |
+|  | `--single-branch` | Yes | Yes | ✅ | - | Clone only the specified branch |
 |  | `--recurse-submodules` | Yes | No | ⛔ | P1 | Requires submodule support; important in mono‑repos |
 |  | `--bare` | Yes | No | ⛔ | P0 | Bare clone for server‑side usage |
 |  | `--mirror` | Yes | No | ⛔ | P1 | Full mirror including refs, for replication scenarios |

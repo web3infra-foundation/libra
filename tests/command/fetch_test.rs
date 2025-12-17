@@ -245,6 +245,7 @@ async fn test_fetch_local_repository() {
             url: remote_path.clone(),
         },
         None,
+        false,
     )
     .await;
 
