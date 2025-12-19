@@ -71,8 +71,7 @@ pub struct LogArgs {
 
     /// Files to limit diff output (used with -p, --name-only, or --stat)
     #[clap(value_name = "PATHS", num_args = 0..)]
-    //to test add pub
-    pub pathspec: Vec<String>,
+    pathspec: Vec<String>,
 }
 
 #[derive(PartialEq, Debug)]
