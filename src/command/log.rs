@@ -323,26 +323,26 @@ pub async fn execute(args: LogArgs) {
 
             // Determine the commit hash display format based on user arguments
             if args.no_abbrev_commit {
-                // Use full commit hash if --no-abbrev-commit flag is specified
+                // Use full commit hash if --no-abbrev-commit flag is specified or --abbrev-commit is not provided
                 hash = &commit_str;
             } else {
-                // When --oneline is specified, use the minimum unique hash length unless --abbrev is provided with a value greater than 0
+                // Use the minimum unique hash length unless --abbrev is provided with a value greater than 0
+                let commit_len = commit_str.len();
                 match args.abbrev {
                     Some(n) => {
                         if n == 0 {
                             hash = &commit_str[..7];
-                        } else if n > commit_str.len() {
-                            hash = &commit_str;
                         } else {
-                            hash = &commit_str[..n];
+                            let abbrev_len = min(n, commit_len);
+                            hash = &commit_str[..abbrev_len];
                         }
                     }
                     None => {
-                        hash = &commit_str[..len];
+                        let abbrev_len = min(len, commit_len);
+                        hash = &commit_str[..abbrev_len];
                     }
                 }
             }
-
             let (msg, _) = parse_commit_msg(&commit.message);
             let mut message = if !ref_msg.is_empty() {
                 format!("{}{} ({}) {}", graph_prefix, hash.yellow(), ref_msg, msg)
@@ -378,18 +378,19 @@ pub async fn execute(args: LogArgs) {
                 hash = &commit_str;
             } else {
                 // Use the minimum unique hash length unless --abbrev is provided with a value greater than 0
+                let commit_len = commit_str.len();
                 match args.abbrev {
                     Some(n) => {
                         if n == 0 {
                             hash = &commit_str[..7];
-                        } else if n > commit_str.len() {
-                            hash = &commit_str;
                         } else {
-                            hash = &commit_str[..n];
+                            let abbrev_len = min(n, commit_len);
+                            hash = &commit_str[..abbrev_len];
                         }
                     }
                     None => {
-                        hash = &commit_str[..len];
+                        let abbrev_len = min(len, commit_len);
+                        hash = &commit_str[..abbrev_len];
                     }
                 }
             }

@@ -531,17 +531,17 @@ pub async fn create_signatures() -> (Signature, Signature) {
 /// across the given set of reachable commits.
 pub fn get_min_unique_hash_length(commits: &[Commit]) -> usize {
     //get all commit ids
-    let hashs: Vec<String> = commits.iter().map(|commit| commit.id.to_string()).collect();
+    let hashes: Vec<String> = commits.iter().map(|commit| commit.id.to_string()).collect();
     //if there is no commit or only one commit, return 7
-    if hashs.is_empty() || hashs.len() == 1 {
+    if hashes.is_empty() || hashes.len() == 1 {
         7
     } else {
         //get the maximum length of all commit ids
-        let max_length = hashs.iter().map(|h| h.len()).max().unwrap_or(0);
+        let max_length = hashes.iter().map(|h| h.len()).max().unwrap_or(0);
         (7..=max_length)
             .find(|&len| {
                 let mut prefixes = HashSet::new();
-                hashs
+                hashes
                     .iter()
                     .all(|hash| prefixes.insert(hash.get(0..len).unwrap_or(hash)))
             })

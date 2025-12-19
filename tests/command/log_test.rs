@@ -586,6 +586,10 @@ async fn test_log_abbrev_params() {
     let commit = reachable_commits.first().unwrap();
     let commit_str = commit.id.to_string();
     let full_hash = commit_str.clone();
+    // 提取完整哈希的长度，用于后续超大值边界测试
+    let full_hash_len = full_hash.len();
+    // 定义一个远大于哈希长度的超大值（比如1000），模拟极端场景
+    let oversized_abbrev = full_hash_len + 1000;
 
     // Helper function to run log command and get the output
     let run_log_command = |args: &[&str]| -> String {
@@ -606,24 +610,25 @@ async fn test_log_abbrev_params() {
     let extract_commit_hash = |output: &str, oneline: bool| -> String {
         if oneline {
             // Oneline format: "hash message"
-            output
-                .split_whitespace()
-                .next()
-                .expect("expected at least one whitespace-separated token (the commit hash) in oneline log output")
-                .to_string()
+            output.split_whitespace().next().unwrap().to_string()
         } else {
-            // Non-oneline format: a line starting with "commit " followed by the hash, e.g. "commit <hash>"
-            let commit_line = output
+            // Non-oneline format: "commit hash"
+            output
                 .lines()
                 .find(|line| line.starts_with("commit "))
-                .expect("expected a line starting with 'commit ' in non-oneline log output");
-            commit_line
+                .unwrap()
                 .split_whitespace()
                 .nth(1)
-                .expect("expected commit line in format 'commit <hash>' with the hash as the second token")
+                .unwrap()
                 .to_string()
         }
     };
+
+    let oneline_abbrev_over_len = format!("--abbrev={}", full_hash_len + 1);
+    let oneline_abbrev_oversized = format!("--abbrev={}", oversized_abbrev);
+
+    let non_oneline_abbrev_over_len = format!("--abbrev={}", full_hash_len + 1);
+    let non_oneline_abbrev_oversized = format!("--abbrev={}", oversized_abbrev);
 
     // Test cases for oneline format
     let oneline_test_cases = vec![
@@ -631,7 +636,9 @@ async fn test_log_abbrev_params() {
         (vec!["--oneline"], len), // Default oneline uses min unique length
         (vec!["--oneline", "--abbrev=0"], 7), // oneline with abbrev=0 uses default 7
         (vec!["--oneline", "--abbrev=5"], 5), // oneline with abbrev=5 uses 5 characters
-        (vec!["--oneline", "--no-abbrev-commit"], full_hash.len()), // oneline with no_abbrev_commit uses full hash
+        (vec!["--oneline", "--no-abbrev-commit"], full_hash_len), // oneline with no_abbrev_commit uses full hash
+        (vec!["--oneline", &oneline_abbrev_over_len], full_hash_len),
+        (vec!["--oneline", &oneline_abbrev_oversized], full_hash_len),
     ];
 
     // Test oneline format cases
@@ -659,13 +666,18 @@ async fn test_log_abbrev_params() {
     // Test cases for non-oneline format
     let non_oneline_test_cases = vec![
         // (args, expected_hash_length)
-        (vec![], full_hash.len()), // Default non-oneline uses full hash
+        (vec![], full_hash_len),        // Default non-oneline uses full hash
         (vec!["--abbrev-commit"], len), // non-oneline with abbrev_commit uses min unique length
         (vec!["--abbrev-commit", "--abbrev=3"], 3), // non-oneline with abbrev_commit and abbrev=3 uses 3 characters
+        (vec!["--abbrev-commit", "--no-abbrev-commit"], full_hash_len), // non-oneline with both uses full hash
         (
-            vec!["--abbrev-commit", "--no-abbrev-commit"],
-            full_hash.len(),
-        ), // non-oneline with both uses full hash
+            vec!["--abbrev-commit", &non_oneline_abbrev_over_len],
+            full_hash_len,
+        ),
+        (
+            vec!["--abbrev-commit", &non_oneline_abbrev_oversized],
+            full_hash_len,
+        ),
     ];
 
     // Test non-oneline format cases
