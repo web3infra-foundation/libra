@@ -41,7 +41,7 @@ pub struct LogArgs {
     /// Length of abbreviated commit hash
     #[clap(long)]
     pub abbrev: Option<usize>,
-    ///show fush hash
+    /// Show full hash
     #[clap(long)]
     pub no_abbrev_commit: bool,
 
