@@ -586,9 +586,9 @@ async fn test_log_abbrev_params() {
     let commit = reachable_commits.first().unwrap();
     let commit_str = commit.id.to_string();
     let full_hash = commit_str.clone();
-    // 提取完整哈希的长度，用于后续超大值边界测试
+    // Extract the full hash length for subsequent oversized-abbreviation boundary tests
     let full_hash_len = full_hash.len();
-    // 定义一个远大于哈希长度的超大值（比如1000），模拟极端场景
+    // Define an abbreviation length much larger than the hash (e.g., +1000) to simulate an extreme edge case
     let oversized_abbrev = full_hash_len + 1000;
 
     // Helper function to run log command and get the output
