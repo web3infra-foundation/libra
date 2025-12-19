@@ -159,7 +159,7 @@ This section documents the compatibility between **Libra**’s CLI and **Git** a
 |  | `[pathspec]` | Yes | Yes | ✅ | - | Restrict to paths |
 |  | `--graph` | Yes | Yes | ✅ | - | ASCII commit graph |
 |  | `--pretty=<format>` | Yes | No | ⛔ | P0 | Customizable formatting; heavily used in tooling |
-|  | `--abbrev-commit` | Yes | No | ⛔ | P1 | Shorten commit IDs |
+|  | `--abbrev-commit` | Yes | YES | ✅ | - | Shorten commit IDs |
 |  | `--name-only / --name-status` | Yes | No | ⛔ | P0 | Show changed files, with or without status |
 |  | `--stat` | Yes | Yes | ✅ | - | Diffstat summary |
 |  | `--since <date> / --until <date>` | Yes | No | ⛔ | P0 | Time‑based filtering |
