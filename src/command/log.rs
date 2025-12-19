@@ -34,6 +34,17 @@ pub struct LogArgs {
     /// Shorthand for --pretty=oneline --abbrev-commit
     #[clap(long)]
     pub oneline: bool,
+
+    /// Show abbreviated commit hash instead of full hash
+    #[clap(long)]
+    pub abbrev_commit: bool,
+    /// Length of abbreviated commit hash
+    #[clap(long)]
+    pub abbrev: Option<usize>,
+    /// Show full hash
+    #[clap(long)]
+    pub no_abbrev_commit: bool,
+
     /// Show diffs for each commit (like git -p)
     #[clap(short = 'p', long = "patch")]
     pub patch: bool,
@@ -213,7 +224,8 @@ pub async fn execute(args: LogArgs) {
     } else {
         None
     };
-
+    //get the minimum unique hash length of the reachable commits
+    let len = util::get_min_unique_hash_length(&reachable_commits);
     for commit in reachable_commits {
         if output_number >= max_output_number {
             break;
@@ -305,19 +317,36 @@ pub async fn execute(args: LogArgs) {
         };
 
         let message = if args.oneline {
-            // Oneline format with name_only support
-            let short_hash = &commit.id.to_string()[..7];
+            let commit_str = commit.id.to_string();
+            let hash: &str;
+
+            // Determine the commit hash display format based on user arguments
+            if args.no_abbrev_commit {
+                // Use full commit hash if --no-abbrev-commit flag is specified or --abbrev-commit is not provided
+                hash = &commit_str;
+            } else {
+                // Use the minimum unique hash length unless --abbrev is provided with a value greater than 0
+                let commit_len = commit_str.len();
+                match args.abbrev {
+                    Some(n) => {
+                        if n == 0 {
+                            hash = &commit_str[..7];
+                        } else {
+                            let abbrev_len = min(n, commit_len);
+                            hash = &commit_str[..abbrev_len];
+                        }
+                    }
+                    None => {
+                        let abbrev_len = min(len, commit_len);
+                        hash = &commit_str[..abbrev_len];
+                    }
+                }
+            }
             let (msg, _) = parse_commit_msg(&commit.message);
             let mut message = if !ref_msg.is_empty() {
-                format!(
-                    "{}{} ({}) {}",
-                    graph_prefix,
-                    short_hash.yellow(),
-                    ref_msg,
-                    msg
-                )
+                format!("{}{} ({}) {}", graph_prefix, hash.yellow(), ref_msg, msg)
             } else {
-                format!("{}{} {}", graph_prefix, short_hash.yellow(), msg)
+                format!("{}{} {}", graph_prefix, hash.yellow(), msg)
             };
 
             if name_only {
@@ -339,21 +368,42 @@ pub async fn execute(args: LogArgs) {
 
             message
         } else {
+            let commit_str = commit.id.to_string();
+            let hash: &str;
+
+            // Determine the commit hash display format based on user arguments
+            if args.no_abbrev_commit || !args.abbrev_commit {
+                // Use full commit hash if --no-abbrev-commit flag is specified or --abbrev-commit is not provided
+                hash = &commit_str;
+            } else {
+                // Use the minimum unique hash length unless --abbrev is provided with a value greater than 0
+                let commit_len = commit_str.len();
+                match args.abbrev {
+                    Some(n) => {
+                        if n == 0 {
+                            hash = &commit_str[..7];
+                        } else {
+                            let abbrev_len = min(n, commit_len);
+                            hash = &commit_str[..abbrev_len];
+                        }
+                    }
+                    None => {
+                        let abbrev_len = min(len, commit_len);
+                        hash = &commit_str[..abbrev_len];
+                    }
+                }
+            }
+
             let mut message = if !ref_msg.is_empty() {
                 format!(
                     "{}{} {} ({})",
                     graph_prefix,
                     "commit".yellow(),
-                    commit.id.to_string().yellow(),
+                    hash.yellow(),
                     ref_msg
                 )
             } else {
-                format!(
-                    "{}{} {}",
-                    graph_prefix,
-                    "commit".yellow(),
-                    commit.id.to_string().yellow()
-                )
+                format!("{}{} {}", graph_prefix, "commit".yellow(), hash.yellow())
             };
 
             message.push_str(&format!("\nAuthor: {}", commit.author));

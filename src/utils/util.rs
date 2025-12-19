@@ -7,7 +7,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use git_internal::{hash::ObjectHash, internal::object::types::ObjectType};
+use git_internal::{
+    hash::ObjectHash,
+    internal::object::{commit::Commit, types::ObjectType},
+};
 use ignore::{Match, gitignore::Gitignore};
 use indicatif::{ProgressBar, ProgressStyle};
 use path_absolutize::*;
@@ -507,6 +510,43 @@ pub async fn create_signatures() -> (Signature, Signature) {
     let author = Signature::new(SignatureType::Author, user_name.clone(), user_email.clone());
     let committer = Signature::new(SignatureType::Committer, user_name, user_email);
     (author, committer)
+}
+
+/// Compute the minimum prefix length at which all commit IDs are uniquely identifiable.
+///
+/// This function inspects the textual object IDs of all `commits` and searches for the
+/// smallest prefix length `len` such that the first `len` characters of every commit ID
+/// are pairwise distinct. The search range is from `7` (inclusive) up to the maximum
+/// hash string length present in `commits` (inclusive).
+///
+/// Return value semantics:
+/// - If `commits` is empty or contains only a single commit, this returns `7`. In these
+///   cases, there is no ambiguity, and the conventional minimal prefix length is used.
+/// - Otherwise, it returns the smallest `len >= 7` for which all commit ID prefixes of
+///   length `len` are unique.
+/// - If no such `len` exists before the end of the hash strings, the full hash length
+///   (i.e., the maximum ID length observed) is returned.
+///
+/// This is useful for producing short, Git-style abbreviated IDs that remain unambiguous
+/// across the given set of reachable commits.
+pub fn get_min_unique_hash_length(commits: &[Commit]) -> usize {
+    // Get all commit IDs.
+    let hashes: Vec<String> = commits.iter().map(|commit| commit.id.to_string()).collect();
+    // If there is no commit or only one commit, return 7.
+    if hashes.is_empty() || hashes.len() == 1 {
+        7
+    } else {
+        // Get the maximum length of all commit IDs.
+        let max_length = hashes.iter().map(|h| h.len()).max().unwrap_or(0);
+        (7..=max_length)
+            .find(|&len| {
+                let mut prefixes = HashSet::new();
+                hashes
+                    .iter()
+                    .all(|hash| prefixes.insert(hash.get(0..len).unwrap_or(hash)))
+            })
+            .unwrap_or(max_length) // Worst case: use full hash length
+    }
 }
 
 #[cfg(test)]

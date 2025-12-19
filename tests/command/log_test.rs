@@ -569,6 +569,142 @@ async fn test_log_stat_with_modifications() {
 
 #[tokio::test]
 #[serial]
+/// Tests log command with commit hash abbreviation parameters
+async fn test_log_abbrev_params() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    // Create test commits
+    let commit_id = create_test_commit_tree().await;
+    let reachable_commits = get_reachable_commits(commit_id).await;
+
+    // Get the minimum unique hash length calculated by the log command
+    let len = libra::utils::util::get_min_unique_hash_length(&reachable_commits);
+
+    // Test with a single commit for consistency
+    let commit = reachable_commits.first().unwrap();
+    let commit_str = commit.id.to_string();
+    let full_hash = commit_str.clone();
+    // Extract the full hash length for subsequent oversized-abbreviation boundary tests
+    let full_hash_len = full_hash.len();
+    // Define an abbreviation length much larger than the hash (e.g., +1000) to simulate an extreme edge case
+    let oversized_abbrev = full_hash_len + 1000;
+
+    // Helper function to run log command and get the output
+    let run_log_command = |args: &[&str]| -> String {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_libra"))
+            .arg("log")
+            .args(args)
+            .output()
+            .expect("Failed to execute log command");
+        assert!(
+            output.status.success(),
+            "Log command failed with stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).expect("Failed to parse log output")
+    };
+
+    // Helper function to extract the commit hash from log output
+    let extract_commit_hash = |output: &str, oneline: bool| -> String {
+        if oneline {
+            // Oneline format: "hash message"
+            output.split_whitespace().next().unwrap().to_string()
+        } else {
+            // Non-oneline format: "commit hash"
+            output
+                .lines()
+                .find(|line| line.starts_with("commit "))
+                .unwrap()
+                .split_whitespace()
+                .nth(1)
+                .unwrap()
+                .to_string()
+        }
+    };
+
+    let oneline_abbrev_over_len = format!("--abbrev={}", full_hash_len + 1);
+    let oneline_abbrev_oversized = format!("--abbrev={}", oversized_abbrev);
+
+    let non_oneline_abbrev_over_len = format!("--abbrev={}", full_hash_len + 1);
+    let non_oneline_abbrev_oversized = format!("--abbrev={}", oversized_abbrev);
+
+    // Test cases for oneline format
+    let oneline_test_cases = vec![
+        // (args, expected_hash_length)
+        (vec!["--oneline"], len), // Default oneline uses min unique length
+        (vec!["--oneline", "--abbrev=0"], 7), // oneline with abbrev=0 uses default 7
+        (vec!["--oneline", "--abbrev=5"], 5), // oneline with abbrev=5 uses 5 characters
+        (vec!["--oneline", "--no-abbrev-commit"], full_hash_len), // oneline with no_abbrev_commit uses full hash
+        (vec!["--oneline", &oneline_abbrev_over_len], full_hash_len),
+        (vec!["--oneline", &oneline_abbrev_oversized], full_hash_len),
+    ];
+
+    // Test oneline format cases
+    for (args, expected_len) in oneline_test_cases {
+        let output = run_log_command(&args);
+        let hash = extract_commit_hash(&output, true);
+        assert_eq!(
+            hash.len(),
+            expected_len,
+            "Failed oneline test with args: {:?}, got hash: '{}' (length: {}), expected length: {}",
+            args,
+            hash,
+            hash.len(),
+            expected_len
+        );
+        // Also verify it's a prefix of the full hash
+        assert!(
+            commit_str.starts_with(&hash),
+            "Hash '{}' is not a prefix of full hash '{}'",
+            hash,
+            commit_str
+        );
+    }
+
+    // Test cases for non-oneline format
+    let non_oneline_test_cases = vec![
+        // (args, expected_hash_length)
+        (vec![], full_hash_len),        // Default non-oneline uses full hash
+        (vec!["--abbrev-commit"], len), // non-oneline with abbrev_commit uses min unique length
+        (vec!["--abbrev-commit", "--abbrev=3"], 3), // non-oneline with abbrev_commit and abbrev=3 uses 3 characters
+        (vec!["--abbrev-commit", "--no-abbrev-commit"], full_hash_len), // non-oneline with both uses full hash
+        (
+            vec!["--abbrev-commit", &non_oneline_abbrev_over_len],
+            full_hash_len,
+        ),
+        (
+            vec!["--abbrev-commit", &non_oneline_abbrev_oversized],
+            full_hash_len,
+        ),
+    ];
+
+    // Test non-oneline format cases
+    for (args, expected_len) in non_oneline_test_cases {
+        let output = run_log_command(&args);
+        let hash = extract_commit_hash(&output, false);
+        assert_eq!(
+            hash.len(),
+            expected_len,
+            "Failed non-oneline test with args: {:?}, got hash: '{}' (length: {}), expected length: {}",
+            args,
+            hash,
+            hash.len(),
+            expected_len
+        );
+        // Also verify it's a prefix of the full hash
+        assert!(
+            commit_str.starts_with(&hash),
+            "Hash '{}' is not a prefix of full hash '{}'",
+            hash,
+            commit_str
+        );
+    }
+}
+
+#[tokio::test]
+#[serial]
 async fn test_log_graph() {
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
