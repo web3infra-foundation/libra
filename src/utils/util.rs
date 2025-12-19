@@ -6,7 +6,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
 };
-
+use git_internal::internal::object::commit::Commit;
 use git_internal::{hash::ObjectHash, internal::object::types::ObjectType};
 use ignore::{Match, gitignore::Gitignore};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -508,6 +508,30 @@ pub async fn create_signatures() -> (Signature, Signature) {
     let committer = Signature::new(SignatureType::Committer, user_name, user_email);
     (author, committer)
 }
+
+/// Get the minimum unique hash length of the reachable commits
+pub fn get_min_unique_hash_length(commits: &[Commit]) -> usize {
+    //get all commit ids
+    let hashs: Vec<String> = commits
+        .iter()
+        .map(|commit| commit.id.to_string())
+        .collect();
+    //if there is no commit or only one commit, return 7
+    if hashs.is_empty()|| hashs.len() == 1{
+        7 
+    } else {
+        //get the maximum length of all commit ids
+        let max_length = hashs.iter().map(|h| h.len()).max().unwrap_or(0);
+        (7..=max_length)
+            .find(|&len| {
+                let mut prefixes = HashSet::new();
+                hashs.iter()
+                    .all(|hash| prefixes.insert(hash.get(0..len).unwrap_or(hash)))
+            })
+            .unwrap_or(max_length) // 最坏情况使用完整哈希长度
+    }
+}
+
 
 #[cfg(test)]
 mod test {
