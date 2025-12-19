@@ -530,13 +530,13 @@ pub async fn create_signatures() -> (Signature, Signature) {
 /// This is useful for producing short, Git-style abbreviated IDs that remain unambiguous
 /// across the given set of reachable commits.
 pub fn get_min_unique_hash_length(commits: &[Commit]) -> usize {
-    //get all commit ids
+    // Get all commit IDs.
     let hashes: Vec<String> = commits.iter().map(|commit| commit.id.to_string()).collect();
-    //if there is no commit or only one commit, return 7
+    // If there is no commit or only one commit, return 7.
     if hashes.is_empty() || hashes.len() == 1 {
         7
     } else {
-        //get the maximum length of all commit ids
+        // Get the maximum length of all commit IDs.
         let max_length = hashes.iter().map(|h| h.len()).max().unwrap_or(0);
         (7..=max_length)
             .find(|&len| {
