@@ -21,8 +21,15 @@ use git_internal::{
 
 use crate::{
     command::load_object,
-    common_utils::parse_commit_msg,
-    internal::{branch::Branch, config::Config, head::Head},
+    internal::{
+        branch::Branch,
+        config::Config,
+        head::Head,
+        log::{
+            date_parser::parse_date,
+            formatter::{CommitFormatter, FormatContext, FormatType},
+        },
+    },
     utils::{object_ext::TreeExt, util},
 };
 
@@ -51,6 +58,21 @@ pub struct LogArgs {
     /// Show only names of changed files
     #[clap(long)]
     pub name_only: bool,
+    /// Show names and status of changed files
+    #[clap(long)]
+    pub name_status: bool,
+    /// Filter commits by author name or email
+    #[clap(long)]
+    pub author: Option<String>,
+    /// Show commits more recent than a specific date
+    #[clap(long)]
+    pub since: Option<String>,
+    /// Show commits older than a specific date
+    #[clap(long)]
+    pub until: Option<String>,
+    /// Custom pretty format (e.g. `%h - %s`)
+    #[clap(long)]
+    pub pretty: Option<String>,
     /// Print out ref names of any commits that are shown
     #[clap(
         long,
@@ -79,6 +101,77 @@ enum DecorateOptions {
     No,
     Short,
     Full,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeType {
+    Added,
+    Modified,
+    Deleted,
+}
+
+#[derive(Debug, Clone)]
+pub struct FileChange {
+    pub path: PathBuf,
+    pub status: ChangeType,
+}
+
+struct CommitFilter {
+    author: Option<String>,
+    since: Option<i64>,
+    until: Option<i64>,
+    paths: Vec<PathBuf>,
+}
+
+impl CommitFilter {
+    fn new(
+        author: Option<String>,
+        since: Option<i64>,
+        until: Option<i64>,
+        paths: Vec<PathBuf>,
+    ) -> Self {
+        Self {
+            author: author.map(|s| s.to_lowercase()),
+            since,
+            until,
+            paths,
+        }
+    }
+
+    async fn matches(&self, commit: &Commit, cached_changes: Option<&[FileChange]>) -> bool {
+        if let Some(author_filter) = &self.author {
+            let author = format!(
+                "{} <{}>",
+                commit.author.name.to_lowercase(),
+                commit.author.email.to_lowercase()
+            );
+            if !author.contains(author_filter) {
+                return false;
+            }
+        }
+
+        let ts = commit.committer.timestamp as i64;
+        if let Some(since) = self.since
+            && ts < since
+        {
+            return false;
+        }
+        if let Some(until) = self.until
+            && ts > until
+        {
+            return false;
+        }
+
+        if self.paths.is_empty() {
+            return true;
+        }
+
+        if let Some(changes) = cached_changes {
+            !changes.is_empty()
+        } else {
+            commit_touches_paths(commit, &self.paths).await
+        }
+    }
 }
 
 fn str_to_decorate_option(s: &str) -> Result<DecorateOptions, String> {
@@ -178,9 +271,27 @@ struct Reference {
 }
 
 pub async fn execute(args: LogArgs) {
-    // Check parameter mutual exclusion: if both --name-only and --patch are specified, prioritize --name-only
-    let name_only = args.name_only;
-    let patch = args.patch && !name_only;
+    let name_status = args.name_status;
+    // Check parameter mutual exclusion: if both name flags and --patch are specified, prioritize the name display flags
+    let name_only = args.name_only && !name_status;
+    let patch = args.patch && !name_only && !name_status;
+
+    let since = match args.since.as_deref().map(parse_date).transpose() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("fatal: {}", e);
+            return;
+        }
+    };
+    let until = match args.until.as_deref().map(parse_date).transpose() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("fatal: {}", e);
+            return;
+        }
+    };
+    let path_filters: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
+    let filter = CommitFilter::new(args.author.clone(), since, until, path_filters.clone());
 
     let decorate_option = determine_decorate_option(&args)
         .await
@@ -216,6 +327,16 @@ pub async fn execute(args: LogArgs) {
     reachable_commits.sort_by(|a, b| b.committer.timestamp.cmp(&a.committer.timestamp));
 
     let ref_commits = create_reference_commit_map().await;
+    let full_hash_len = commit_hash.len();
+
+    let format_type = if args.oneline {
+        FormatType::Oneline
+    } else if let Some(template) = args.pretty.clone() {
+        FormatType::Custom(template)
+    } else {
+        FormatType::Full
+    };
+    let formatter = CommitFormatter::new(format_type);
 
     let max_output_number = min(args.number.unwrap_or(usize::MAX), reachable_commits.len());
     let mut output_number = 0;
@@ -224,12 +345,31 @@ pub async fn execute(args: LogArgs) {
     } else {
         None
     };
-    //get the minimum unique hash length of the reachable commits
-    let len = util::get_min_unique_hash_length(&reachable_commits);
+    // Decide abbreviated hash length
+    let default_abbrev = util::get_min_unique_hash_length(&reachable_commits).max(7);
+    let abbrev_len = if args.no_abbrev_commit {
+        full_hash_len
+    } else if let Some(n) = args.abbrev {
+        if n == 0 { default_abbrev } else { n }
+    } else if args.abbrev_commit || args.oneline || args.pretty.is_some() {
+        default_abbrev
+    } else {
+        full_hash_len
+    };
     for commit in reachable_commits {
         if output_number >= max_output_number {
             break;
         }
+        let mut cached_changes = if filter.paths.is_empty() && !name_only && !name_status {
+            None
+        } else {
+            Some(get_changed_files_for_commit(&commit, &path_filters).await)
+        };
+
+        if !filter.matches(&commit, cached_changes.as_deref()).await {
+            continue;
+        }
+
         output_number += 1;
 
         let ref_msg = if decorate_option != DecorateOptions::No {
@@ -307,131 +447,46 @@ pub async fn execute(args: LogArgs) {
             String::new()
         };
 
-        // prepare pathspecs for diff if needed
-        let paths: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
-
         let graph_prefix = if let Some(ref mut gs) = graph_state {
             gs.render(&commit)
         } else {
             String::new()
         };
 
-        let message = if args.oneline {
-            let commit_str = commit.id.to_string();
-            let hash: &str;
-
-            // Determine the commit hash display format based on user arguments
-            if args.no_abbrev_commit {
-                // Use full commit hash if --no-abbrev-commit flag is specified or --abbrev-commit is not provided
-                hash = &commit_str;
-            } else {
-                // Use the minimum unique hash length unless --abbrev is provided with a value greater than 0
-                let commit_len = commit_str.len();
-                match args.abbrev {
-                    Some(n) => {
-                        if n == 0 {
-                            hash = &commit_str[..7];
-                        } else {
-                            let abbrev_len = min(n, commit_len);
-                            hash = &commit_str[..abbrev_len];
-                        }
-                    }
-                    None => {
-                        let abbrev_len = min(len, commit_len);
-                        hash = &commit_str[..abbrev_len];
-                    }
-                }
-            }
-            let (msg, _) = parse_commit_msg(&commit.message);
-            let mut message = if !ref_msg.is_empty() {
-                format!("{}{} ({}) {}", graph_prefix, hash.yellow(), ref_msg, msg)
-            } else {
-                format!("{}{} {}", graph_prefix, hash.yellow(), msg)
-            };
-
-            if name_only {
-                let changed_files = get_changed_files_for_commit(&commit, paths.clone()).await;
-                if !changed_files.is_empty() {
-                    message.push('\n');
-                    for file in changed_files {
-                        message.push_str(&format!("{}\n", file));
-                    }
-                }
-            } else if args.stat {
-                let stats = compute_commit_stat(&commit, paths.clone()).await;
-                let stat_output = format_stat_output(&stats);
-                if !stat_output.is_empty() {
-                    message.push('\n');
-                    message.push_str(&stat_output);
-                }
-            }
-
-            message
-        } else {
-            let commit_str = commit.id.to_string();
-            let hash: &str;
-
-            // Determine the commit hash display format based on user arguments
-            if args.no_abbrev_commit || !args.abbrev_commit {
-                // Use full commit hash if --no-abbrev-commit flag is specified or --abbrev-commit is not provided
-                hash = &commit_str;
-            } else {
-                // Use the minimum unique hash length unless --abbrev is provided with a value greater than 0
-                let commit_len = commit_str.len();
-                match args.abbrev {
-                    Some(n) => {
-                        if n == 0 {
-                            hash = &commit_str[..7];
-                        } else {
-                            let abbrev_len = min(n, commit_len);
-                            hash = &commit_str[..abbrev_len];
-                        }
-                    }
-                    None => {
-                        let abbrev_len = min(len, commit_len);
-                        hash = &commit_str[..abbrev_len];
-                    }
-                }
-            }
-
-            let mut message = if !ref_msg.is_empty() {
-                format!(
-                    "{}{} {} ({})",
-                    graph_prefix,
-                    "commit".yellow(),
-                    hash.yellow(),
-                    ref_msg
-                )
-            } else {
-                format!("{}{} {}", graph_prefix, "commit".yellow(), hash.yellow())
-            };
-
-            message.push_str(&format!("\nAuthor: {}", commit.author));
-            let (msg, _) = parse_commit_msg(&commit.message);
-            message.push_str(&format!("\n{msg}\n"));
-
-            if name_only {
-                let changed_files = get_changed_files_for_commit(&commit, paths.clone()).await;
-                if !changed_files.is_empty() {
-                    message.push_str("\nChanged files:\n");
-                    for file in changed_files {
-                        message.push_str(&format!("{}\n", file));
-                    }
-                }
-            } else if patch {
-                let patch_output = generate_diff(&commit, paths.clone()).await;
-                message.push_str(&patch_output);
-            } else if args.stat {
-                let stats = compute_commit_stat(&commit, paths.clone()).await;
-                let stat_output = format_stat_output(&stats);
-                if !stat_output.is_empty() {
-                    message.push('\n');
-                    message.push_str(&stat_output);
-                }
-            }
-
-            message
+        let ctx = FormatContext {
+            graph_prefix: &graph_prefix,
+            decoration: &ref_msg,
+            abbrev_len,
         };
+        let mut message = formatter.format(&commit, &ctx);
+
+        if name_only || name_status {
+            if let Some(changes) = cached_changes.take()
+                && !changes.is_empty()
+            {
+                if !message.ends_with('\n') {
+                    message.push('\n');
+                }
+                message.push_str(&format_changes(&changes, name_status));
+            }
+        } else if patch {
+            let patch_output = generate_diff(&commit, path_filters.clone()).await;
+            if !patch_output.is_empty() {
+                if !message.ends_with('\n') {
+                    message.push('\n');
+                }
+                message.push_str(&patch_output);
+            }
+        } else if args.stat {
+            let stats = compute_commit_stat(&commit, path_filters.clone()).await;
+            let stat_output = format_stat_output(&stats);
+            if !stat_output.is_empty() {
+                if !message.ends_with('\n') {
+                    message.push('\n');
+                }
+                message.push_str(&stat_output);
+            }
+        }
 
         #[cfg(unix)]
         {
@@ -453,16 +508,22 @@ pub async fn execute(args: LogArgs) {
     }
 }
 
+async fn commit_touches_paths(commit: &Commit, filters: &[PathBuf]) -> bool {
+    if filters.is_empty() {
+        return true;
+    }
+    let changes = get_changed_files_for_commit(commit, filters).await;
+    !changes.is_empty()
+}
+
 /// Get list of changed files for a commit
 pub(crate) async fn get_changed_files_for_commit(
     commit: &Commit,
-    paths: Vec<PathBuf>,
-) -> Vec<String> {
-    // prepare old and new blobs
+    paths: &[PathBuf],
+) -> Vec<FileChange> {
     let tree = load_object::<Tree>(&commit.tree_id).unwrap();
     let new_blobs: Vec<(PathBuf, ObjectHash)> = tree.get_plain_items();
 
-    // old_blobs from first parent if exists
     let old_blobs: Vec<(PathBuf, ObjectHash)> = if !commit.parent_commit_ids.is_empty() {
         let parent = &commit.parent_commit_ids[0];
         let parent_hash = ObjectHash::from_str(&parent.to_string()).unwrap();
@@ -473,44 +534,67 @@ pub(crate) async fn get_changed_files_for_commit(
         Vec::new()
     };
 
-    // Convert paths to HashSet for faster lookup
-    let path_filter: HashSet<PathBuf> = paths.into_iter().collect();
-    let should_filter = !path_filter.is_empty();
+    let matches_filter = |path: &PathBuf, filters: &[PathBuf]| -> bool {
+        if filters.is_empty() {
+            return true;
+        }
+        filters.iter().any(|filter| util::is_sub_path(path, filter))
+    };
 
-    // Create sets of file paths for old and new trees
     let old_files: HashSet<PathBuf> = old_blobs.iter().map(|(path, _)| path.clone()).collect();
     let new_files: HashSet<PathBuf> = new_blobs.iter().map(|(path, _)| path.clone()).collect();
 
-    // Find added, modified, and deleted files
     let mut changed_files = Vec::new();
 
-    // Added files (in new but not in old)
     for file in &new_files {
-        // Fix: merge nested if statements
-        if !old_files.contains(file) && (!should_filter || path_filter.contains(file)) {
-            changed_files.push(format!("A\t{}", file.display()));
+        if !old_files.contains(file) && matches_filter(file, paths) {
+            changed_files.push(FileChange {
+                path: file.clone(),
+                status: ChangeType::Added,
+            });
         }
     }
 
-    // Modified files (in both but different content)
     for (file, new_hash) in &new_blobs {
         if let Some((_, old_hash)) = old_blobs.iter().find(|(old_file, _)| old_file == file)
             && new_hash != old_hash
-            && (!should_filter || path_filter.contains(file))
+            && matches_filter(file, paths)
         {
-            changed_files.push(format!("M\t{}", file.display()));
+            changed_files.push(FileChange {
+                path: file.clone(),
+                status: ChangeType::Modified,
+            });
         }
     }
 
-    // Deleted files (in old but not in new)
     for file in &old_files {
-        if !new_files.contains(file) && (!should_filter || path_filter.contains(file)) {
-            changed_files.push(format!("D\t{}", file.display()));
+        if !new_files.contains(file) && matches_filter(file, paths) {
+            changed_files.push(FileChange {
+                path: file.clone(),
+                status: ChangeType::Deleted,
+            });
         }
     }
 
-    changed_files.sort();
+    changed_files.sort_by(|a, b| a.path.cmp(&b.path));
     changed_files
+}
+
+fn format_changes(changes: &[FileChange], include_status: bool) -> String {
+    let mut out = String::new();
+    for change in changes {
+        if include_status {
+            let status = match change.status {
+                ChangeType::Added => "A",
+                ChangeType::Modified => "M",
+                ChangeType::Deleted => "D",
+            };
+            out.push_str(&format!("{}\t{}\n", status, change.path.display()));
+        } else {
+            out.push_str(&format!("{}\n", change.path.display()));
+        }
+    }
+    out
 }
 
 /// Represents statistics about changes to a file in a commit.
@@ -832,6 +916,8 @@ pub(crate) async fn generate_diff(commit: &Commit, paths: Vec<PathBuf>) -> Strin
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use clap::Parser;
 
     use super::*;
@@ -904,16 +990,79 @@ mod tests {
         assert_eq!(args.pathspec, vec!["log", "src/main.rs", "src/lib.rs"]);
     }
 
+    #[test]
+    fn test_new_filters_parsing() {
+        let args = LogArgs::parse_from([
+            "libra",
+            "log",
+            "--author",
+            "lvy",
+            "--since",
+            "2025-12-19",
+            "--until",
+            "2025-12-19",
+        ]);
+        assert_eq!(args.author.as_deref(), Some("lvy"));
+        assert_eq!(args.since.as_deref(), Some("2025-12-19"));
+        assert_eq!(args.until.as_deref(), Some("2025-12-19"));
+    }
+
+    #[test]
+    fn test_name_status_parsing() {
+        let args = LogArgs::parse_from(["libra", "log", "--name-status"]);
+        assert!(args.name_status);
+        assert!(!args.name_only);
+    }
+
+    #[test]
+    fn test_format_changes_output() {
+        let changes = vec![FileChange {
+            path: PathBuf::from("src/main.rs"),
+            status: ChangeType::Added,
+        }];
+        let with_status = format_changes(&changes, true);
+        assert!(with_status.contains("A\tsrc/main.rs"));
+
+        let names_only = format_changes(&changes, false);
+        assert!(names_only.contains("src/main.rs"));
+        assert!(!names_only.contains("A\t"));
+    }
+
+    #[tokio::test]
+    async fn test_commit_filter_author_and_time() {
+        let mut commit = Commit::from_tree_id(ObjectHash::new(&[1; 20]), vec![], "msg");
+        commit.author.name = "lvy".into();
+        commit.author.email = "lvy@test.com".into();
+        commit.committer.timestamp = 1_766_102_400; // 2025-12-19 00:00:00 UTC
+
+        let filter = CommitFilter::new(
+            Some("lvy".to_string()),
+            Some(1_766_000_000),
+            Some(1_766_200_000),
+            Vec::new(),
+        );
+
+        assert!(filter.matches(&commit, None).await);
+    }
+
     // Test parameter mutual exclusion logic
     #[test]
     fn test_parameter_mutual_exclusion() {
         let args = LogArgs::parse_from(["libra", "log", "--name-only", "--patch"]);
 
-        // Simulate the mutual exclusion logic in the execute function
-        let name_only = args.name_only;
-        let patch = args.patch && !name_only;
+        let name_status = args.name_status;
+        let name_only = args.name_only && !name_status;
+        let patch = args.patch && !name_only && !name_status;
 
         assert!(name_only);
+        assert!(!patch);
+
+        let args = LogArgs::parse_from(["libra", "log", "--name-status", "--patch"]);
+        let name_status = args.name_status;
+        let name_only = args.name_only && !name_status;
+        let patch = args.patch && !name_only && !name_status;
+
+        assert!(name_status);
         assert!(!patch);
     }
 }
