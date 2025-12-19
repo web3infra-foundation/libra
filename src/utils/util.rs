@@ -545,7 +545,7 @@ pub fn get_min_unique_hash_length(commits: &[Commit]) -> usize {
                     .iter()
                     .all(|hash| prefixes.insert(hash.get(0..len).unwrap_or(hash)))
             })
-            .unwrap_or(max_length) // 最坏情况使用完整哈希长度
+            .unwrap_or(max_length) // Worst case: use full hash length
     }
 }
 
