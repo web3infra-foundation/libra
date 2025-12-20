@@ -116,7 +116,7 @@ impl CommitFormatter {
         result = result.replace("%f", &subject_line.replace(' ', "-"));
         result = result.replace("%an", commit.author.name.trim());
         result = result.replace("%ae", commit.author.email.trim());
-        result = result.replace("%ad", &format_timestamp(commit.committer.timestamp as i64));
+        result = result.replace("%ad", &format_timestamp(commit.author.timestamp as i64));
         result = result.replace("%cn", commit.committer.name.trim());
         result = result.replace("%ce", commit.committer.email.trim());
         result = result.replace("%cd", &format_timestamp(commit.committer.timestamp as i64));
@@ -142,6 +142,7 @@ mod tests {
         let mut commit = Commit::from_tree_id(ObjectHash::new(&[1; 20]), vec![], message);
         commit.author.name = "Alice".into();
         commit.author.email = "alice@test.com".into();
+        commit.author.timestamp = 1_600_000_000;
         commit.committer.name = "Alice".into();
         commit.committer.email = "alice@test.com".into();
         commit.committer.timestamp = 1_700_000_000;
@@ -160,5 +161,45 @@ mod tests {
         let out = formatter.format(&commit, &ctx);
         assert!(out.contains(" - Test subject"));
         assert!(out.split_whitespace().next().unwrap().len() <= 8);
+    }
+
+    #[test]
+    fn format_custom_all_placeholders() {
+        let mut commit = build_commit("Fancy subject line");
+        commit.author.name = "Author Name".into();
+        commit.author.email = "author@test.com".into();
+        commit.author.timestamp = 1_600_000_000;
+        commit.committer.name = "Committer Name".into();
+        commit.committer.email = "committer@test.com".into();
+        commit.committer.timestamp = 1_700_000_000;
+
+        let formatter = CommitFormatter::new(FormatType::Custom(
+            "%H %h %s %f %an %ae %ad %cn %ce %cd %d".into(),
+        ));
+        let ctx = FormatContext {
+            graph_prefix: "* ",
+            decoration: "tag: v1.0",
+            abbrev_len: 8,
+        };
+
+        let out = formatter.format(&commit, &ctx);
+        let full_hash = commit.id.to_string();
+        let short_hash = full_hash.chars().take(ctx.abbrev_len).collect::<String>();
+        let author_date = format_timestamp(commit.author.timestamp as i64);
+        let committer_date = format_timestamp(commit.committer.timestamp as i64);
+
+        assert!(out.starts_with("* "));
+        assert!(out.contains(&full_hash));
+        assert!(out.contains(&short_hash));
+        assert!(out.contains("Fancy subject line"));
+        assert!(out.contains("Fancy-subject-line"));
+        assert!(out.contains(commit.author.name.trim()));
+        assert!(out.contains(commit.author.email.trim()));
+        assert!(out.contains(&author_date));
+        assert!(out.contains(commit.committer.name.trim()));
+        assert!(out.contains(commit.committer.email.trim()));
+        assert!(out.contains(&committer_date));
+        assert!(out.contains(" (tag: v1.0)"));
+        assert_ne!(author_date, committer_date);
     }
 }

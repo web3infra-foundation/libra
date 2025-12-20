@@ -138,7 +138,7 @@ impl CommitFilter {
         }
     }
 
-    async fn matches(&self, commit: &Commit, cached_changes: Option<&[FileChange]>) -> bool {
+    fn passes_non_path_filters(&self, commit: &Commit) -> bool {
         if let Some(author_filter) = &self.author {
             let author = format!(
                 "{} <{}>",
@@ -162,6 +162,10 @@ impl CommitFilter {
             return false;
         }
 
+        true
+    }
+
+    async fn matches_paths(&self, commit: &Commit, cached_changes: Option<&[FileChange]>) -> bool {
         if self.paths.is_empty() {
             return true;
         }
@@ -171,6 +175,14 @@ impl CommitFilter {
         } else {
             commit_touches_paths(commit, &self.paths).await
         }
+    }
+
+    async fn matches(&self, commit: &Commit, cached_changes: Option<&[FileChange]>) -> bool {
+        if !self.passes_non_path_filters(commit) {
+            return false;
+        }
+
+        self.matches_paths(commit, cached_changes).await
     }
 }
 
@@ -360,6 +372,10 @@ pub async fn execute(args: LogArgs) {
         if output_number >= max_output_number {
             break;
         }
+        if !filter.passes_non_path_filters(&commit) {
+            continue;
+        }
+
         let mut cached_changes = if filter.paths.is_empty() && !name_only && !name_status {
             None
         } else {

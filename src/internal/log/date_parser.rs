@@ -3,7 +3,8 @@ use chrono::{DateTime, Duration, NaiveDate, Utc};
 
 /// Parse date strings used by `log` filters.
 /// Supports absolute dates (`YYYY-MM-DD`), full timestamps with timezone,
-/// unix timestamps, and relative forms like `1 week ago`.
+/// unix timestamps, and relative forms like `1 week ago`, `3 days ago`,
+/// `2 hours ago`, `15 minutes ago`, `2 months ago`, or `1 year ago`.
 pub fn parse_date(input: &str) -> Result<i64> {
     let trimmed = input.trim();
 
@@ -50,6 +51,8 @@ fn parse_relative_date(input: &str) -> Option<i64> {
         u if u.starts_with("day") => now - Duration::days(value),
         u if u.starts_with("hour") => now - Duration::hours(value),
         u if u.starts_with("min") => now - Duration::minutes(value),
+        u if u.starts_with("month") => now - Duration::days(30 * value),
+        u if u.starts_with("year") => now - Duration::days(365 * value),
         _ => return None,
     };
 
@@ -70,5 +73,17 @@ mod tests {
     fn parse_relative_week() {
         let ts = parse_date("1 week ago").unwrap();
         assert!(ts < Utc::now().timestamp());
+    }
+
+    #[test]
+    fn parse_relative_month_and_year() {
+        let now = Utc::now().timestamp();
+        let two_months = parse_date("2 months ago").unwrap();
+        let one_year = parse_date("1 year ago").unwrap();
+
+        assert!(two_months < now);
+        assert!(one_year < now);
+        assert!(two_months <= now - Duration::days(59).num_seconds());
+        assert!(one_year <= now - Duration::days(364).num_seconds());
     }
 }
