@@ -12,7 +12,7 @@ use git_internal::{
 use crate::{
     command::{
         load_object,
-        log::{generate_diff, get_changed_files_for_commit},
+        log::{ChangeType, generate_diff, get_changed_files_for_commit},
     },
     common_utils::parse_commit_msg,
     internal::tag,
@@ -125,11 +125,11 @@ async fn show_commit(commit_hash: &ObjectHash, args: &ShowArgs) {
             show_diffstat(&commit, paths.clone()).await;
         } else if args.name_only {
             // 仅显示改变的文件名
-            let changed_files = get_changed_files_for_commit(&commit, paths).await;
+            let changed_files = get_changed_files_for_commit(&commit, &paths).await;
             if !changed_files.is_empty() {
                 println!();
                 for file in changed_files {
-                    println!("{}", file);
+                    println!("{}", file.path.display());
                 }
             }
         } else {
@@ -291,7 +291,7 @@ fn display_commit_info(commit: &Commit, args: &ShowArgs) {
 
 /// 显示差异统计（更改摘要）
 async fn show_diffstat(commit: &Commit, paths: Vec<PathBuf>) {
-    let changed_files = get_changed_files_for_commit(commit, paths).await;
+    let changed_files = get_changed_files_for_commit(commit, &paths).await;
 
     if changed_files.is_empty() {
         return;
@@ -302,29 +302,28 @@ async fn show_diffstat(commit: &Commit, paths: Vec<PathBuf>) {
     // 统计更改
     let mut additions = 0;
     let mut deletions = 0;
-    let mut files_changed = 0;
 
-    for file in &changed_files {
-        files_changed += 1;
-        // 解析状态前缀（A/M/D）
-        if file.starts_with('A') {
-            additions += 1;
-        } else if file.starts_with('D') {
-            deletions += 1;
-        } else if file.starts_with('M') {
-            // 对于修改的文件，我们需要计算实际的行更改
-            // 为了简单起见，只是计数为两者
-            additions += 1;
-            deletions += 1;
+    for change in &changed_files {
+        match change.status {
+            ChangeType::Added => additions += 1,
+            ChangeType::Deleted => deletions += 1,
+            ChangeType::Modified => {
+                additions += 1;
+                deletions += 1;
+            }
         }
-        println!("{}", file);
+        let status = match change.status {
+            ChangeType::Added => "A",
+            ChangeType::Modified => "M",
+            ChangeType::Deleted => "D",
+        };
+        println!("{}  {}", status, change.path.display());
     }
 
-    println!();
     println!(
-        "{} file{} changed, {} insertion{}(+), {} deletion{}(-)",
-        files_changed,
-        if files_changed != 1 { "s" } else { "" },
+        "\n{} file{} changed, {} insertion{}(+), {} deletion{}(-)",
+        changed_files.len(),
+        if changed_files.len() != 1 { "s" } else { "" },
         additions,
         if additions != 1 { "s" } else { "" },
         deletions,
