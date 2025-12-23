@@ -182,6 +182,7 @@ pub async fn execute(args: CommitArgs) {
             )
         });
         let grandpa_commit_id = parent_commit.parent_commit_ids;
+        // if no_edit is True, use parent commit message;else use commit message from args
         let final_message = if args.no_edit{
             parent_commit.message.clone()
         } else {
