@@ -38,11 +38,11 @@ use crate::{
 
 #[derive(Parser, Debug, Default)]
 pub struct CommitArgs {
-    #[arg(short, long, required_unless_present("file"))]
+    #[arg(short, long, required_unless_present_any(["file", "no_edit"]))]
     pub message: Option<String>,
 
     /// read message from file
-    #[arg(short = 'F', long, required_unless_present("message"))]
+    #[arg(short = 'F', long, required_unless_present_any(["message", "no_edit"]))]
     pub file: Option<String>,
 
     /// allow commit with empty index
@@ -57,6 +57,9 @@ pub struct CommitArgs {
     #[arg(long)]
     pub amend: bool,
 
+    /// use the message from the original commit when amending
+    #[arg(long, requires = "amend",conflicts_with_all(["message", "file"]))]
+    pub no_edit: bool,
     /// add signed-off-by line at the end of the commit message
     #[arg(short = 's', long)]
     pub signoff: bool,
@@ -179,10 +182,15 @@ pub async fn execute(args: CommitArgs) {
             )
         });
         let grandpa_commit_id = parent_commit.parent_commit_ids;
+        let final_message = if args.no_edit{
+            parent_commit.message.clone()
+        } else {
+            message.clone()
+        };
         let commit = Commit::from_tree_id(
             tree.id,
             grandpa_commit_id,
-            &format_commit_msg(&message, None),
+            &format_commit_msg(&final_message, None),
         );
 
         storage
@@ -190,7 +198,7 @@ pub async fn execute(args: CommitArgs) {
             .unwrap();
 
         /* update HEAD */
-        update_head_and_reflog(&commit.id.to_string(), &commit_message).await;
+        update_head_and_reflog(&commit.id.to_string(), &final_message).await;
         return;
     }
 
@@ -424,10 +432,13 @@ mod test {
 
         let args = CommitArgs::try_parse_from(["commit", "-m", "init", "--amend"]);
         assert!(args.is_ok());
-
+        //failed
+        let args = CommitArgs::try_parse_from(["commit","--amend","--no-edit"]);
+        assert!(args.is_ok());
+        let args = CommitArgs::try_parse_from(["commit","--no-edit"]);
+        assert!(args.is_err(),"--no-edit requires --amend");
         let args = CommitArgs::try_parse_from(["commit", "-m", "init", "--allow-empty", "--amend"]);
         assert!(args.is_ok());
-
         let args = CommitArgs::try_parse_from(["commit", "-m", "init", "-s"]);
         assert!(args.is_ok());
         assert!(args.unwrap().signoff);
@@ -444,6 +455,10 @@ mod test {
         assert!(args.is_ok());
         assert!(args.unwrap().all);
 
+        let args = CommitArgs::try_parse_from(["commit","-m","init","--amend","--no-edit"]);
+        assert!(args.is_err(),"--no-edit conflicts with --message and --file");
+        let args = CommitArgs::try_parse_from(["commit","-F","init","--amend","--no-edit"]);
+        assert!(args.is_err(),"--no-edit conflicts with --message and --file");
         let args = CommitArgs::try_parse_from(["commit", "-m", "init", "--amend", "--signoff"]);
         assert!(args.is_ok());
         let args = args.unwrap();
@@ -584,3 +599,4 @@ mod test {
         }
     }
 }
+
