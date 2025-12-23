@@ -138,7 +138,15 @@ pub async fn execute(args: CommitArgs) {
         },
         //no commit message, which is not supposed to happen
         (None, None) => {
-            panic!("fatal: no commit message provided")
+            if !args.no_edit{
+                panic!("fatal: no commit message provided")
+            }
+            else{
+                //its ok to use "" because no_edit is True ,
+                //and we will use the message from the original commit
+                // message wont be used by amend
+                "".to_string()
+            }
         }
     };
 
