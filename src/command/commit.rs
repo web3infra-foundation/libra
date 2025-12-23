@@ -196,7 +196,7 @@ pub async fn execute(args: CommitArgs) {
         let commit = Commit::from_tree_id(
             tree.id,
             grandpa_commit_id,
-            &format_commit_msg(&commit_message, None),
+            &format_commit_msg(&final_message, None),
         );
 
         storage
