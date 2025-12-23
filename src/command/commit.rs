@@ -38,11 +38,11 @@ use crate::{
 
 #[derive(Parser, Debug, Default)]
 pub struct CommitArgs {
-    #[arg(short, long, required_unless_present("file"))]
+    #[arg(short, long, required_unless_present_any(["file", "no_edit"]))]
     pub message: Option<String>,
 
     /// read message from file
-    #[arg(short = 'F', long, required_unless_present("message"))]
+    #[arg(short = 'F', long, required_unless_present_any(["message", "no_edit"]))]
     pub file: Option<String>,
 
     /// allow commit with empty index
@@ -57,6 +57,9 @@ pub struct CommitArgs {
     #[arg(long)]
     pub amend: bool,
 
+    /// use the message from the original commit when amending
+    #[arg(long, requires = "amend",conflicts_with_all(["message", "file"]))]
+    pub no_edit: bool,
     /// add signed-off-by line at the end of the commit message
     #[arg(short = 's', long)]
     pub signoff: bool,
@@ -135,9 +138,75 @@ pub async fn execute(args: CommitArgs) {
         },
         //no commit message, which is not supposed to happen
         (None, None) => {
-            panic!("fatal: no commit message provided")
+            if !args.no_edit {
+                panic!("fatal: no commit message provided")
+            } else {
+                //its ok to use "" because no_edit is True ,
+                //and we will use the message from the original commit
+                // message wont be used by amend
+                "".to_string()
+            }
         }
     };
+    /* Create tree */
+    let tree = create_tree(&index, &storage, "".into()).await;
+
+    /* Create & save commit objects */
+    let parents_commit_ids = get_parents_ids().await;
+
+    // Amend commits are only supported for a single parent commit.
+    if args.amend {
+        if parents_commit_ids.len() > 1 {
+            panic!("fatal: --amend is not supported for merge commits with multiple parents");
+        }
+        let parent_commit = load_object::<Commit>(&parents_commit_ids[0]).unwrap_or_else(|_| {
+            panic!(
+                "fatal: not a valid object name: '{}'",
+                parents_commit_ids[0]
+            )
+        });
+        let grandpa_commit_id = parent_commit.parent_commit_ids;
+        // if no_edit is True, use parent commit message;else use commit message from args
+        let final_message = if args.no_edit {
+            parent_commit.message.clone()
+        } else {
+            message.clone()
+        };
+        //Prepare commit message
+        let commit_message = if args.signoff {
+            // get user
+            let user_name = UserConfig::get("user", None, "name")
+                .await
+                .unwrap_or_else(|| "unknown".to_string());
+            let user_email = UserConfig::get("user", None, "email")
+                .await
+                .unwrap_or_else(|| "unknown".to_string());
+
+            // get sign line
+            let signoff_line = format!("Signed-off-by: {user_name} <{user_email}>");
+            format!("{}\n\n{signoff_line}", final_message)
+        } else {
+            final_message.clone()
+        };
+
+        // check format(if needed)
+        if args.conventional && !check_conventional_commits_message(&commit_message) {
+            panic!("fatal: commit message does not follow conventional commits");
+        }
+        let commit = Commit::from_tree_id(
+            tree.id,
+            grandpa_commit_id,
+            &format_commit_msg(&final_message, None),
+        );
+
+        storage
+            .put(&commit.id, &commit.to_data().unwrap(), commit.get_type())
+            .unwrap();
+
+        /* update HEAD */
+        update_head_and_reflog(&commit.id.to_string(), &commit_message).await;
+        return;
+    }
 
     //Prepare commit message
     let commit_message = if args.signoff {
@@ -159,39 +228,6 @@ pub async fn execute(args: CommitArgs) {
     // check format(if needed)
     if args.conventional && !check_conventional_commits_message(&commit_message) {
         panic!("fatal: commit message does not follow conventional commits");
-    }
-
-    /* Create tree */
-    let tree = create_tree(&index, &storage, "".into()).await;
-
-    /* Create & save commit objects */
-    let parents_commit_ids = get_parents_ids().await;
-
-    // Amend commits are only supported for a single parent commit.
-    if args.amend {
-        if parents_commit_ids.len() > 1 {
-            panic!("fatal: --amend is not supported for merge commits with multiple parents");
-        }
-        let parent_commit = load_object::<Commit>(&parents_commit_ids[0]).unwrap_or_else(|_| {
-            panic!(
-                "fatal: not a valid object name: '{}'",
-                parents_commit_ids[0]
-            )
-        });
-        let grandpa_commit_id = parent_commit.parent_commit_ids;
-        let commit = Commit::from_tree_id(
-            tree.id,
-            grandpa_commit_id,
-            &format_commit_msg(&message, None),
-        );
-
-        storage
-            .put(&commit.id, &commit.to_data().unwrap(), commit.get_type())
-            .unwrap();
-
-        /* update HEAD */
-        update_head_and_reflog(&commit.id.to_string(), &commit_message).await;
-        return;
     }
 
     // There must be a `blank line`(\n) before `message`, or remote unpack failed
@@ -424,10 +460,13 @@ mod test {
 
         let args = CommitArgs::try_parse_from(["commit", "-m", "init", "--amend"]);
         assert!(args.is_ok());
-
+        //failed
+        let args = CommitArgs::try_parse_from(["commit", "--amend", "--no-edit"]);
+        assert!(args.is_ok());
+        let args = CommitArgs::try_parse_from(["commit", "--no-edit"]);
+        assert!(args.is_err(), "--no-edit requires --amend");
         let args = CommitArgs::try_parse_from(["commit", "-m", "init", "--allow-empty", "--amend"]);
         assert!(args.is_ok());
-
         let args = CommitArgs::try_parse_from(["commit", "-m", "init", "-s"]);
         assert!(args.is_ok());
         assert!(args.unwrap().signoff);
@@ -444,6 +483,16 @@ mod test {
         assert!(args.is_ok());
         assert!(args.unwrap().all);
 
+        let args = CommitArgs::try_parse_from(["commit", "-m", "init", "--amend", "--no-edit"]);
+        assert!(
+            args.is_err(),
+            "--no-edit conflicts with --message and --file"
+        );
+        let args = CommitArgs::try_parse_from(["commit", "-F", "init", "--amend", "--no-edit"]);
+        assert!(
+            args.is_err(),
+            "--no-edit conflicts with --message and --file"
+        );
         let args = CommitArgs::try_parse_from(["commit", "-m", "init", "--amend", "--signoff"]);
         assert!(args.is_ok());
         let args = args.unwrap();
@@ -453,6 +502,37 @@ mod test {
         let args = CommitArgs::try_parse_from(["commit", "-F", "unreachable_file"]);
         assert!(args.is_ok());
         assert!(args.unwrap().file.is_some());
+    }
+
+    #[test]
+    fn test_commit_message() {
+        let args = CommitArgs {
+            message: None,
+            file: None,
+            allow_empty: false,
+            conventional: false,
+            amend: true,
+            no_edit: true,
+            signoff: false,
+            disable_pre: false,
+            all: false,
+        };
+        fn message_and_file_are_none(args: &CommitArgs) -> Option<String> {
+            let message = match (&args.message, &args.file) {
+                (Some(msg), _) => Some(msg.clone()),
+                (None, Some(file)) => Some(file.clone()),
+                (None, None) => {
+                    if args.no_edit {
+                        Some("".to_string())
+                    } else {
+                        None
+                    }
+                }
+            };
+            message
+        }
+        let message = message_and_file_are_none(&args);
+        assert_eq!(message, Some("".to_string()));
     }
 
     #[tokio::test]
