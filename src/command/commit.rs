@@ -504,6 +504,41 @@ mod test {
         assert!(args.unwrap().file.is_some());
     }
 
+    #[test]
+    fn test_commit_message(){
+        let args = CommitArgs{
+            message: None,
+            file: None,
+            allow_empty: false,
+            conventional: false,
+            amend: true,
+            no_edit: true,
+            signoff: false,
+            disable_pre: false,
+            all: false,
+        };
+        fn message_and_file_are_none(args:& CommitArgs)->Option<String>{
+            let message = match (&args.message,&args.file){
+                (Some(msg),_)=>Some(msg.clone()),
+                (None,Some(file))=>{
+                    Some(file.clone())
+                },
+                (None,None)=>{
+                    if args.no_edit{
+                        Some("".to_string())
+                    }else{
+                        None
+                    }
+                },
+            };
+            message
+        }
+        let message = message_and_file_are_none(&args);
+        assert_eq!(message,Some("".to_string()));
+
+    }
+
+
     #[tokio::test]
     #[serial]
     async fn test_commit_message_from_file() {
