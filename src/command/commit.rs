@@ -183,7 +183,7 @@ pub async fn execute(args: CommitArgs) {
         });
         let grandpa_commit_id = parent_commit.parent_commit_ids;
         // if no_edit is True, use parent commit message;else use commit message from args
-        let final_message = if args.no_edit{
+        let final_message = if args.no_edit {
             parent_commit.message.clone()
         } else {
             message.clone()
@@ -434,10 +434,10 @@ mod test {
         let args = CommitArgs::try_parse_from(["commit", "-m", "init", "--amend"]);
         assert!(args.is_ok());
         //failed
-        let args = CommitArgs::try_parse_from(["commit","--amend","--no-edit"]);
+        let args = CommitArgs::try_parse_from(["commit", "--amend", "--no-edit"]);
         assert!(args.is_ok());
-        let args = CommitArgs::try_parse_from(["commit","--no-edit"]);
-        assert!(args.is_err(),"--no-edit requires --amend");
+        let args = CommitArgs::try_parse_from(["commit", "--no-edit"]);
+        assert!(args.is_err(), "--no-edit requires --amend");
         let args = CommitArgs::try_parse_from(["commit", "-m", "init", "--allow-empty", "--amend"]);
         assert!(args.is_ok());
         let args = CommitArgs::try_parse_from(["commit", "-m", "init", "-s"]);
@@ -456,10 +456,16 @@ mod test {
         assert!(args.is_ok());
         assert!(args.unwrap().all);
 
-        let args = CommitArgs::try_parse_from(["commit","-m","init","--amend","--no-edit"]);
-        assert!(args.is_err(),"--no-edit conflicts with --message and --file");
-        let args = CommitArgs::try_parse_from(["commit","-F","init","--amend","--no-edit"]);
-        assert!(args.is_err(),"--no-edit conflicts with --message and --file");
+        let args = CommitArgs::try_parse_from(["commit", "-m", "init", "--amend", "--no-edit"]);
+        assert!(
+            args.is_err(),
+            "--no-edit conflicts with --message and --file"
+        );
+        let args = CommitArgs::try_parse_from(["commit", "-F", "init", "--amend", "--no-edit"]);
+        assert!(
+            args.is_err(),
+            "--no-edit conflicts with --message and --file"
+        );
         let args = CommitArgs::try_parse_from(["commit", "-m", "init", "--amend", "--signoff"]);
         assert!(args.is_ok());
         let args = args.unwrap();
@@ -600,4 +606,3 @@ mod test {
         }
     }
 }
-
