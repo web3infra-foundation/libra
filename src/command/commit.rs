@@ -148,29 +148,6 @@ pub async fn execute(args: CommitArgs) {
             }
         }
     };
-
-    //Prepare commit message
-    let commit_message = if args.signoff {
-        // get user
-        let user_name = UserConfig::get("user", None, "name")
-            .await
-            .unwrap_or_else(|| "unknown".to_string());
-        let user_email = UserConfig::get("user", None, "email")
-            .await
-            .unwrap_or_else(|| "unknown".to_string());
-
-        // get sign line
-        let signoff_line = format!("Signed-off-by: {user_name} <{user_email}>");
-        format!("{}\n\n{signoff_line}", message)
-    } else {
-        message.clone()
-    };
-
-    // check format(if needed)
-    if args.conventional && !check_conventional_commits_message(&commit_message) {
-        panic!("fatal: commit message does not follow conventional commits");
-    }
-
     /* Create tree */
     let tree = create_tree(&index, &storage, "".into()).await;
 
@@ -195,10 +172,31 @@ pub async fn execute(args: CommitArgs) {
         } else {
             message.clone()
         };
+        //Prepare commit message
+        let commit_message = if args.signoff {
+            // get user
+            let user_name = UserConfig::get("user", None, "name")
+                .await
+                .unwrap_or_else(|| "unknown".to_string());
+            let user_email = UserConfig::get("user", None, "email")
+                .await
+                .unwrap_or_else(|| "unknown".to_string());
+
+            // get sign line
+            let signoff_line = format!("Signed-off-by: {user_name} <{user_email}>");
+            format!("{}\n\n{signoff_line}", final_message)
+        } else {
+            final_message.clone()
+        };
+
+        // check format(if needed)
+        if args.conventional && !check_conventional_commits_message(&commit_message) {
+            panic!("fatal: commit message does not follow conventional commits");
+        }
         let commit = Commit::from_tree_id(
             tree.id,
             grandpa_commit_id,
-            &format_commit_msg(&final_message, None),
+            &format_commit_msg(&commit_message, None),
         );
 
         storage
@@ -206,8 +204,30 @@ pub async fn execute(args: CommitArgs) {
             .unwrap();
 
         /* update HEAD */
-        update_head_and_reflog(&commit.id.to_string(), &final_message).await;
+        update_head_and_reflog(&commit.id.to_string(), &commit_message).await;
         return;
+    }
+
+    //Prepare commit message
+    let commit_message = if args.signoff {
+        // get user
+        let user_name = UserConfig::get("user", None, "name")
+            .await
+            .unwrap_or_else(|| "unknown".to_string());
+        let user_email = UserConfig::get("user", None, "email")
+            .await
+            .unwrap_or_else(|| "unknown".to_string());
+
+        // get sign line
+        let signoff_line = format!("Signed-off-by: {user_name} <{user_email}>");
+        format!("{}\n\n{signoff_line}", message)
+    } else {
+        message.clone()
+    };
+
+    // check format(if needed)
+    if args.conventional && !check_conventional_commits_message(&commit_message) {
+        panic!("fatal: commit message does not follow conventional commits");
     }
 
     // There must be a `blank line`(\n) before `message`, or remote unpack failed
