@@ -29,20 +29,18 @@ pub struct CloneArgs {
     pub branch: Option<String>,
 }
 
-
-
 pub async fn execute(args: CloneArgs) {
-    let mut remote_repo = args.remote_repo; // https://gitee.com/caiqihang2024/image-viewer2.0.git
-    // must end with '/' or Url::join will work incorrectly
+    let mut remote_repo = args.remote_repo;
+    // ensure URL ends with a slash for correct URL joining
     if !remote_repo.ends_with('/') {
         remote_repo.push('/');
     }
+    
     let local_path = args.local_path.unwrap_or_else(|| {
         let repo_name = util::get_repo_name_from_url(&remote_repo).unwrap();
         util::cur_dir().join(repo_name).to_string_or_panic()
     });
 
-    /* create local path */
     let local_path = PathBuf::from(local_path);
     {
         if local_path.exists() && !util::is_empty_dir(&local_path) {
@@ -53,7 +51,7 @@ pub async fn execute(args: CloneArgs) {
             return;
         }
 
-        // make sure the directory exists
+        // create the directory if it doesn't exist
         if let Err(e) = fs::create_dir_all(&local_path) {
             eprintln!(
                 "fatal: could not create directory '{}': {}",
@@ -63,29 +61,36 @@ pub async fn execute(args: CloneArgs) {
             return;
         }
         let repo_name = local_path.file_name().unwrap().to_str().unwrap();
-        println!("Cloning into '{repo_name}'");
+        println!("Cloning into '{repo_name}'...");
     }
 
     let is_success = Cell::new(false);
-    // clean up the directory if panic
     defer! {
         if !is_success.get() {
-            fs::remove_dir_all(&local_path).unwrap();
-            eprintln!("{}", "fatal: clone failed, delete repo directory automatically".red());
+            if let Err(e) = fs::remove_dir_all(&local_path) {
+                eprintln!("fatal: failed to clean up after clone failure: {}", e);
+            } else {
+                eprintln!("{}", "fatal: clone failed, repo directory deleted".red());
+            }
         }
     }
 
-    //check if the branch name is valid
-    if let Some(branch) = args.branch.clone()
-        && !branch::is_valid_git_branch_name(&branch)
+    // Validate the branch name if specified
+    if let Some(ref branch) = args.branch
+        && !branch::is_valid_git_branch_name(branch)
     {
         eprintln!(
-            "invalid branch name: '{branch}'.\n\nBranch names must:\n- Not contain spaces, control characters, or any of these characters: \\ : \" ? * [\n- Not start or end with a slash ('/'), or end with a dot ('.')\n- Not contain consecutive slashes ('//') or dots ('..')\n- Not be reserved names like 'HEAD' or contain '@{{'\n- Not be empty or just a dot ('.')\n\nPlease choose a valid branch name."
+            "fatal: invalid branch name: '{branch}'.\nBranch names must:\n\
+            - Not contain spaces, control characters, or any of these characters: \\ : \" ? * [\n\
+            - Not start or end with a slash ('/'), or end with a dot ('.')\n\
+            - Not contain consecutive slashes ('//') or dots ('..')\n\
+            - Not be reserved names like 'HEAD' or contain '@{{'\n\
+            - Not be empty or just a dot ('.')."
         );
         return;
     }
 
-    // CAUTION: change [current_dir] to the repo directory
+    // Set the current directory to the new local path for repo cloning
     env::set_current_dir(&local_path).unwrap();
     let init_args = command::init::InitArgs {
         bare: false,
@@ -95,23 +100,24 @@ pub async fn execute(args: CloneArgs) {
         template: None,
         shared: None,
         object_format: None,
-        separate_git_dir: None,  // 添加这一行
+        separate_git_dir: None,  // Keeping separate_git_dir as None for simplicity
     };
     command::init::execute(init_args).await;
 
-    /* fetch remote */
+    // Fetch the remote repository
     let remote_config = RemoteConfig {
         name: "origin".to_string(),
         url: remote_repo.clone(),
     };
     fetch::fetch_repository(remote_config.clone(), args.branch.clone()).await;
 
-    /* setup */
+    // Set up the repository (create branches, configure remote tracking)
     if let Err(e) = setup_repository(remote_config, args.branch.clone()).await {
         eprintln!("fatal: {}", e);
         return;
     }
 
+    // Mark the clone operation as successful
     is_success.set(true);
 }
 
@@ -124,14 +130,13 @@ async fn setup_repository(
     let db = crate::internal::db::get_db_conn_instance().await;
     let remote_head = Head::remote_current_with_conn(db, &remote_config.name).await;
 
-    // Determine which branch to check out.
     let branch_to_checkout = match specified_branch {
         Some(b_name) => Some(b_name),
         None => {
             if let Some(Head::Branch(name)) = remote_head {
                 Some(name)
             } else {
-                None // This case handles empty repos or detached HEADs
+                None // For empty repos or detached HEADs
             }
         }
     };
@@ -142,24 +147,20 @@ async fn setup_repository(
             .await
             .ok_or_else(|| format!("fatal: remote branch '{}' not found.", branch_name))?;
 
-        // Prepare the reflog context *before* the transaction
         let action = ReflogAction::Clone {
             from: remote_config.url.clone(),
         };
 
         let context = ReflogContext {
-            // In a clone, there is no "old" oid. A zero-hash is the standard representation.
             old_oid: ObjectHash::zero_str(get_hash_kind()).to_string(),
             new_oid: origin_branch.commit.to_string(),
             action,
         };
 
-        // `insert_ref` is true, as we are creating the initial branch reflog.
         with_reflog(
             context,
             move |txn: &DatabaseTransaction| {
                 Box::pin(async move {
-                    // 1. Create the local branch pointing to the fetched commit
                     Branch::update_branch_with_conn(
                         txn,
                         &branch_name,
@@ -168,10 +169,8 @@ async fn setup_repository(
                     )
                     .await;
 
-                    // 2. Set HEAD to point to the new local branch
                     Head::update_with_conn(txn, Head::Branch(branch_name.to_owned()), None).await;
 
-                    // 3. Configure remote tracking for the branch
                     let merge_ref = format!("refs/heads/{}", branch_name);
                     Config::insert_with_conn(
                         txn,
@@ -190,7 +189,6 @@ async fn setup_repository(
                     )
                     .await;
 
-                    // 4. Configure the remote URL
                     Config::insert_with_conn(
                         txn,
                         "remote",
@@ -207,7 +205,7 @@ async fn setup_repository(
         .await
         .map_err(|e| e.to_string())?;
 
-        // After the DB is set up, restore the working directory
+        // Restore working directory after setup
         command::restore::execute(RestoreArgs {
             worktree: true,
             staged: true,
@@ -218,7 +216,6 @@ async fn setup_repository(
     } else {
         println!("warning: You appear to have cloned an empty repository.");
 
-        // We only need to set the remote URL. No reflog is created as there are no commits.
         Config::insert(
             "remote",
             Some(&remote_config.name),
@@ -227,7 +224,6 @@ async fn setup_repository(
         )
         .await;
 
-        // Optionally set up a default branch config for a future 'master' or 'main'
         let default_branch = "master";
         let merge_ref = format!("refs/heads/{}", default_branch);
         Config::insert("branch", Some(default_branch), "merge", &merge_ref).await;
@@ -242,7 +238,3 @@ async fn setup_repository(
 
     Ok(())
 }
-
-/// Unit tests for the clone module
-#[cfg(test)]
-mod tests {}
