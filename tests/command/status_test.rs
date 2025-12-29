@@ -1,20 +1,20 @@
 //! Tests status reporting for staged, unstaged, ignored files and path filtering.
 
 use std::{fs, io::Write};
-
-use libra::{
-    cli::Stash,
-    command::{
-        stash,
-        status::{
-            PorcelainVersion, StatusArgs, UntrackedFiles, execute_to as status_execute,
-            output_porcelain,
-        },
+use std::path::PathBuf;
+use libra::{cli::Stash, command::{
+    stash,
+    status,
+    status::{
+        PorcelainVersion, StatusArgs, UntrackedFiles, execute_to as status_execute,
+        output_porcelain,
     },
-};
+    commit,
+    add,
+}};
 
 use super::*;
-#[tokio::test]
+#[ tokio::test]
 #[serial]
 /// Tests --ignored flag: ignored files appear in outputs
 async fn test_status_ignored_outputs() {
@@ -1789,5 +1789,297 @@ async fn test_status_porcelain_v2_deleted_file() {
         parts[4], "100644",
         "mI should be 100644 for deleted file: {}",
         deleted_line
+    );
+}
+
+
+#[tokio::test]
+#[serial]
+/// Tests `status --short --branch` on an empty repository.
+/// Verifies that branch information is shown and no file entries appear.
+async fn test_status_empty_repo_short_with_branch() {
+    // 1. Create a temporary repository and initialize libra
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    // 2. Execute `status --short --branch`
+    let mut output = Vec::new();
+    status_execute(
+        StatusArgs {
+            short: true,
+            branch: true,
+            ..Default::default()
+        },
+        &mut output,
+    ).await;
+
+    // 3. Convert output to string for asserting
+    let output_str = String::from_utf8(output).unwrap();
+
+    // 4. Should contain branch information (e.g. "## master")
+    assert!(
+        output_str.contains("master"),
+        "Expected branch name to appear in output"
+    );
+
+    // 5. Should NOT contain any file paths or file status entries
+    // (empty repo should not list files)
+    let has_file_like_output = output_str
+        .lines()
+        .any(|line| ["A ", "M ", "D ", "?? "].iter().any(|prefix| line.starts_with(prefix)));
+
+    assert!(
+        !has_file_like_output,
+        "No file entries should be shown in empty repo, but got:\n{}",
+        output_str
+    );
+}
+
+#[tokio::test]
+#[serial]
+/// Tests `status --porcelain` on an empty repository
+///
+/// Expected behavior:
+/// -No panic -No file entries -Output is either empty or contains only branch info
+async fn test_status_empty_repo_porcelain(){
+    //1.Create
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    //2.Run `status --porcelain`
+    let mut output = Vec::new();
+    status_execute(
+        StatusArgs {
+            porcelain: Some(PorcelainVersion::V1),
+            ..Default::default()
+        },&mut output,
+    ).await;
+    let output_str =  String::from_utf8(output).unwrap();
+
+    //3.Assert Output which should be empty or contain only branch info
+    assert!(
+        output_str.trim().is_empty() ,
+        "Expected empty output or branch info , got :\n{}",
+        output_str
+    )
+}
+
+#[tokio::test]
+#[serial]
+/// Tests that status correctly handles filenames with spaces and special character.
+async fn test_status_with_space_and_spacial_character_filenames(){
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    //Create files with spaces and special character.
+    fs::write("hello world.txt","hello").unwrap();
+    fs::write("中文 文件.txt","你好").unwrap();
+    fs::write("a{[]}.txt","a").unwrap();
+
+    //Run status
+    let output = run_status_and_capture_output().await;
+
+    //Assertions: filenames must appear and not be truncated
+    let output_str = String::from_utf8(output).unwrap();
+    assert!(output_str.contains("hello world.txt"),"Missing filename with space");
+    assert!(output_str.contains("中文 文件.txt"),"Missing filename with unicode");
+    assert!(output_str.contains("a{[]}.txt"),"Missing filename with brackets");
+}
+
+#[tokio::test]
+#[serial]
+/// Tests that running `status` multiple times produces identical output
+///
+/// Expected behavior: -No panic -Output remains stable across repeated invocations
+async fn test_status_idempotent(){
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    //Create a file so that status has something to repeat
+    fs::write("file.txt","hello").unwrap();
+
+    let output1 = run_status_and_capture_output().await;
+    let output2 = run_status_and_capture_output().await;
+    let output3 = run_status_and_capture_output().await;
+
+    assert_eq!(output1, output2);
+    assert_eq!(output2, output3);
+}
+
+async fn run_status_and_capture_output() -> Vec<u8> {
+    let mut output = Vec::new();
+    status_execute(
+        StatusArgs::default(),
+        &mut output,
+    ).await;
+    output
+}
+
+#[tokio::test]
+#[serial]
+/// Tests status behavior with a larger number of files
+///
+/// Expected behavior:
+/// -No panic -Output contains most or all file entries
+async fn test_status_with_many_files(){
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    //Create multiple files
+    for i in 0..30{
+        fs::write(format!("file{}.txt",i), "x").unwrap();
+    }
+
+    //Run status
+    let output = run_status_and_capture_output().await;
+    let output_str = String::from_utf8(output).unwrap();
+
+    let relevant_lines: Vec<&str> = output_str
+        .lines()
+        .filter(|line| {
+            // file0.txt - file29.txt
+            (0..30).any(|i| line.contains(&format!("file{}.txt", i)))
+        })
+        .collect();
+
+    // Assertion: Ensure exactly 30 lines show the created files
+    assert_eq!(
+        relevant_lines.len(),
+        30,
+        "Expected 30 lines showing created files, but found {}.\n\nFull output:\n{}",
+        relevant_lines.len(),
+        output_str
+    );
+
+    // Verify each expected file appears in the output
+    for i in 0..30 {
+        let filename = format!("file{}.txt", i);
+        assert!(
+            output_str.contains(&filename),
+            "Missing expected file in status output: {}",
+            filename
+        );
+    }
+}
+
+#[tokio::test]
+#[serial]
+/// Tests precise reporting of staged and unstaged changes
+///
+/// Simulates a scenario where:
+/// - One file is modified but not staged
+/// - One new file is added and staged
+/// Verifies that `status` correctly separates them into respective categories.
+async fn test_status_precise_staged_and_unstaged() {
+    let temp = tempfile::tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp.path());
+
+    // Create initial commit with 'a.txt'
+    fs::write("a.txt", "hello").unwrap();
+
+    //add a.txt
+    add::execute(add::AddArgs {
+        pathspec: vec!["a.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        verbose: false,
+        force: false,
+        dry_run: false,
+        ignore_errors: false,
+    }).await;
+
+    //commit -m "init"
+    commit::execute(commit::CommitArgs {
+        message: Some("init".into()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        amend: false,
+        no_edit: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+    }).await;
+
+    // Modify existing file (unstaged change)
+    fs::write("a.txt", "modified").unwrap();
+
+    // Create new file (currently unstaged)
+    fs::write("b.txt", "new file").unwrap();
+
+    // Stage the new file `add b.txt`
+    add::execute(add::AddArgs {
+        pathspec: vec!["b.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        verbose: false,
+        force: false,
+        dry_run: false,
+        ignore_errors: false,
+    }).await;
+
+    // Query staged and unstaged changes
+    let staged = status::changes_to_be_committed().await;
+    let unstaged = status::changes_to_be_staged();
+
+    // Assert staged changes: only 'b.txt' as new
+    assert_eq!(staged.new, vec![PathBuf::from("b.txt")]);
+    assert!(staged.modified.is_empty());
+    assert!(staged.deleted.is_empty());
+
+    // Assert unstaged changes: only modified 'a.txt'
+    assert_eq!(unstaged.modified, vec![PathBuf::from("a.txt")]);
+    assert!(unstaged.new.is_empty());
+    assert!(unstaged.deleted.is_empty());
+}
+
+#[tokio::test]
+#[serial]
+/// Test: status should NOT show ignored files unless --ignored is specified
+async fn test_status_only_ignored_files() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    // Create .libraignore and ignored files
+    std::fs::write(".libraignore", "ignored.txt\n").unwrap();
+    std::fs::write("ignored.txt", "ignored").unwrap();
+
+    // Case1: Default status(without --ignored)
+    let mut out = Vec::new();
+    status_execute(StatusArgs::default(), &mut out).await;
+    let out = String::from_utf8(out).unwrap();
+
+    // The ignored file should NOT appear in default output
+    // Even if status prints headers or helper text, the filename itself must be absent
+    assert!(
+        !out.contains("ignored.txt"),
+        "ignored file should NOT appear in default status output"
+    );
+
+    // Case 2: status --ignored
+    let mut out2 = Vec::new();
+    status_execute(
+        StatusArgs {
+            ignored: true,
+            ..Default::default()
+        },
+        &mut out2,
+    ).await;
+
+    let out2 = String::from_utf8(out2).unwrap();
+
+    // With --ignored, the ignored file must be shown
+    assert!(
+        out2.contains("ignored.txt"),
+        "ignored file should appear when --ignored is used"
     );
 }
