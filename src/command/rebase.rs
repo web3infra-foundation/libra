@@ -3,13 +3,15 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
+    io::{BufRead, BufReader},
     path::{Path, PathBuf},
+    str::FromStr,
 };
 
 use clap::Parser;
 use git_internal::{
     hash::ObjectHash,
-    internal::object::{commit::Commit, tree::Tree},
+    internal::object::{blob::Blob, commit::Commit, tree::Tree},
 };
 use sea_orm::TransactionTrait;
 
@@ -28,13 +30,198 @@ use crate::{
     },
 };
 
+/// Rebase state stored in .libra/rebase-merge/
+#[derive(Debug, Clone)]
+pub struct RebaseState {
+    /// Original branch name being rebased
+    pub head_name: String,
+    /// Commit hash being rebased onto
+    pub onto: ObjectHash,
+    /// Original HEAD commit before rebase started
+    pub orig_head: ObjectHash,
+    /// Remaining commits to replay (in order)
+    pub todo: Vec<ObjectHash>,
+    /// Commits already replayed
+    pub done: Vec<ObjectHash>,
+    /// Current commit being applied (stopped due to conflict)
+    pub stopped_sha: Option<ObjectHash>,
+    /// Current new base (HEAD of rebased commits so far)
+    pub current_head: ObjectHash,
+}
+
+impl RebaseState {
+    /// Get the path to the rebase-merge directory
+    pub fn rebase_dir() -> PathBuf {
+        util::storage_path().join("rebase-merge")
+    }
+
+    /// Check if a rebase is in progress
+    pub fn is_in_progress() -> bool {
+        Self::rebase_dir().exists()
+    }
+
+    /// Save rebase state to .libra/rebase-merge/
+    pub fn save(&self) -> Result<(), String> {
+        let dir = Self::rebase_dir();
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+        // Save head-name
+        fs::write(
+            dir.join("head-name"),
+            format!("refs/heads/{}", self.head_name),
+        )
+        .map_err(|e| e.to_string())?;
+
+        // Save onto
+        fs::write(dir.join("onto"), self.onto.to_string()).map_err(|e| e.to_string())?;
+
+        // Save orig-head
+        fs::write(dir.join("orig-head"), self.orig_head.to_string()).map_err(|e| e.to_string())?;
+
+        // Save current-head
+        fs::write(dir.join("current-head"), self.current_head.to_string())
+            .map_err(|e| e.to_string())?;
+
+        // Save todo (one commit per line)
+        let todo_content: String = self.todo.iter().map(|h| h.to_string() + "\n").collect();
+        fs::write(dir.join("todo"), todo_content).map_err(|e| e.to_string())?;
+
+        // Save done (one commit per line)
+        let done_content: String = self.done.iter().map(|h| h.to_string() + "\n").collect();
+        fs::write(dir.join("done"), done_content).map_err(|e| e.to_string())?;
+
+        // Save stopped-sha if present
+        if let Some(stopped) = &self.stopped_sha {
+            fs::write(dir.join("stopped-sha"), stopped.to_string()).map_err(|e| e.to_string())?;
+        } else {
+            let stopped_path = dir.join("stopped-sha");
+            if stopped_path.exists() {
+                fs::remove_file(stopped_path).map_err(|e| e.to_string())?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Load rebase state from .libra/rebase-merge/
+    pub fn load() -> Result<Self, String> {
+        let dir = Self::rebase_dir();
+        if !dir.exists() {
+            return Err("No rebase in progress".to_string());
+        }
+
+        // Load head-name
+        let head_name_raw = fs::read_to_string(dir.join("head-name"))
+            .map_err(|e| format!("Failed to read head-name: {}", e))?;
+        let head_name = head_name_raw
+            .trim()
+            .strip_prefix("refs/heads/")
+            .unwrap_or(head_name_raw.trim())
+            .to_string();
+
+        // Load onto
+        let onto_str = fs::read_to_string(dir.join("onto"))
+            .map_err(|e| format!("Failed to read onto: {}", e))?;
+        let onto = ObjectHash::from_str(onto_str.trim())
+            .map_err(|e| format!("Invalid onto hash: {}", e))?;
+
+        // Load orig-head
+        let orig_head_str = fs::read_to_string(dir.join("orig-head"))
+            .map_err(|e| format!("Failed to read orig-head: {}", e))?;
+        let orig_head = ObjectHash::from_str(orig_head_str.trim())
+            .map_err(|e| format!("Invalid orig-head hash: {}", e))?;
+
+        // Load current-head
+        let current_head_str = fs::read_to_string(dir.join("current-head"))
+            .map_err(|e| format!("Failed to read current-head: {}", e))?;
+        let current_head = ObjectHash::from_str(current_head_str.trim())
+            .map_err(|e| format!("Invalid current-head hash: {}", e))?;
+
+        // Load todo
+        let todo = Self::load_commit_list(&dir.join("todo"))?;
+
+        // Load done
+        let done = Self::load_commit_list(&dir.join("done"))?;
+
+        // Load stopped-sha if present
+        let stopped_sha = if dir.join("stopped-sha").exists() {
+            let stopped_str = fs::read_to_string(dir.join("stopped-sha"))
+                .map_err(|e| format!("Failed to read stopped-sha: {}", e))?;
+            Some(
+                ObjectHash::from_str(stopped_str.trim())
+                    .map_err(|e| format!("Invalid stopped-sha hash: {}", e))?,
+            )
+        } else {
+            None
+        };
+
+        Ok(RebaseState {
+            head_name,
+            onto,
+            orig_head,
+            todo,
+            done,
+            stopped_sha,
+            current_head,
+        })
+    }
+
+    /// Remove the rebase state directory
+    pub fn cleanup() -> Result<(), String> {
+        let dir = Self::rebase_dir();
+        if dir.exists() {
+            fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn load_commit_list(path: &Path) -> Result<Vec<ObjectHash>, String> {
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let file = fs::File::open(path).map_err(|e| e.to_string())?;
+        let reader = BufReader::new(file);
+        let mut commits = Vec::new();
+        for line in reader.lines() {
+            let line = line.map_err(|e| e.to_string())?;
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                let hash = ObjectHash::from_str(trimmed)
+                    .map_err(|e| format!("Invalid commit hash '{}': {}", trimmed, e))?;
+                commits.push(hash);
+            }
+        }
+        Ok(commits)
+    }
+}
+
+/// Result of attempting to replay a commit
+pub enum ReplayResult {
+    /// Commit was successfully replayed, contains the new commit hash
+    Success(ObjectHash),
+    /// Conflict occurred, contains list of conflicting file paths
+    Conflict(Vec<PathBuf>),
+}
+
 /// Command-line arguments for the rebase operation
 #[derive(Parser, Debug)]
 pub struct RebaseArgs {
     /// The upstream branch to rebase the current branch onto.
     /// This can be a branch name, commit hash, or other Git reference.
-    #[clap(required = true)]
-    pub upstream: String,
+    #[clap(required_unless_present_any = ["continue_rebase", "abort", "skip"])]
+    pub upstream: Option<String>,
+
+    /// Continue an in-progress rebase after resolving conflicts
+    #[clap(long = "continue", conflicts_with_all = ["abort", "skip", "upstream"])]
+    pub continue_rebase: bool,
+
+    /// Abort the current rebase and restore the original branch
+    #[clap(long, conflicts_with_all = ["continue_rebase", "skip", "upstream"])]
+    pub abort: bool,
+
+    /// Skip the current commit and continue with the next
+    #[clap(long, conflicts_with_all = ["continue_rebase", "abort", "upstream"])]
+    pub skip: bool,
 }
 
 /// Execute the rebase command
@@ -53,6 +240,42 @@ pub async fn execute(args: RebaseArgs) {
         return;
     }
 
+    // Handle --continue, --abort, --skip
+    if args.continue_rebase {
+        rebase_continue().await;
+        return;
+    }
+    if args.abort {
+        rebase_abort().await;
+        return;
+    }
+    if args.skip {
+        rebase_skip().await;
+        return;
+    }
+
+    // Check if rebase is already in progress
+    if RebaseState::is_in_progress() {
+        eprintln!("fatal: rebase already in progress");
+        eprintln!("hint: use 'libra rebase --continue' to continue rebasing");
+        eprintln!("hint: use 'libra rebase --abort' to abort and restore the original branch");
+        eprintln!("hint: use 'libra rebase --skip' to skip this commit");
+        return;
+    }
+
+    let upstream = match args.upstream {
+        Some(u) => u,
+        None => {
+            eprintln!("fatal: no upstream specified");
+            return;
+        }
+    };
+
+    start_rebase(&upstream).await;
+}
+
+/// Start a new rebase operation
+async fn start_rebase(upstream: &str) {
     let db = get_db_conn_instance().await;
 
     // Get the current branch that will be moved to the new base
@@ -74,7 +297,7 @@ pub async fn execute(args: RebaseArgs) {
     };
 
     // Resolve the upstream reference to a concrete commit ID
-    let upstream_id = match resolve_branch_or_commit(&args.upstream).await {
+    let upstream_id = match resolve_branch_or_commit(upstream).await {
         Ok(id) => id,
         Err(e) => {
             eprintln!("fatal: {e}");
@@ -94,9 +317,74 @@ pub async fn execute(args: RebaseArgs) {
 
     // Check if rebase is actually needed
     if base_id == head_to_rebase_id {
+        let fast_forward_action = ReflogAction::Rebase {
+            state: "fast-forward".to_string(),
+            details: format!("moving {} to {}", current_branch_name, upstream),
+        };
+        let fast_forward_context = ReflogContext {
+            old_oid: head_to_rebase_id.to_string(),
+            new_oid: upstream_id.to_string(),
+            action: fast_forward_action,
+        };
+
+        let branch_name_cloned = current_branch_name.clone();
+        let upstream_id_str = upstream_id.to_string();
+        if let Err(e) = with_reflog(
+            fast_forward_context,
+            move |txn: &sea_orm::DatabaseTransaction| {
+                Box::pin(async move {
+                    Branch::update_branch_with_conn(
+                        txn,
+                        &branch_name_cloned,
+                        &upstream_id_str,
+                        None,
+                    )
+                    .await;
+                    Head::update_with_conn(txn, Head::Branch(branch_name_cloned), None).await;
+                    Ok(())
+                })
+            },
+            true,
+        )
+        .await
+        {
+            eprintln!("fatal: failed to fast-forward: {e}");
+            return;
+        }
+
+        let upstream_commit: Commit = match load_object(&upstream_id) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("fatal: failed to load upstream commit: {:?}", e);
+                return;
+            }
+        };
+        let upstream_tree: Tree = match load_object(&upstream_commit.tree_id) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("fatal: failed to load upstream tree: {:?}", e);
+                return;
+            }
+        };
+
+        let index_file = path::index();
+        let mut index = git_internal::internal::index::Index::new();
+        if let Err(e) = rebuild_index_from_tree(&upstream_tree, &mut index, "") {
+            eprintln!("fatal: failed to rebuild index: {}", e);
+            return;
+        }
+        if let Err(e) = index.save(&index_file) {
+            eprintln!("fatal: failed to save index: {:?}", e);
+            return;
+        }
+        if let Err(e) = reset_workdir_to_index(&index) {
+            eprintln!("fatal: failed to reset working directory: {}", e);
+            return;
+        }
+
         println!(
-            "Branch '{}' is already based on '{}'. No rebase needed.",
-            current_branch_name, args.upstream
+            "Fast-forwarded branch '{}' to '{}'.",
+            current_branch_name, upstream
         );
         return;
     }
@@ -118,12 +406,12 @@ pub async fn execute(args: RebaseArgs) {
         "Rebasing {} commits from '{}' onto '{}'...",
         commits_to_replay.len(),
         current_branch_name,
-        args.upstream
+        upstream
     );
 
     let start_action = ReflogAction::Rebase {
         state: "start".to_string(),
-        details: format!("checkout {}", args.upstream),
+        details: format!("checkout {}", upstream),
     };
     let start_context = ReflogContext {
         old_oid: head_to_rebase_id.to_string(),
@@ -145,56 +433,111 @@ pub async fn execute(args: RebaseArgs) {
         return;
     }
 
+    // Save rebase state
+    let mut state = RebaseState {
+        head_name: current_branch_name.clone(),
+        onto: upstream_id,
+        orig_head: head_to_rebase_id,
+        todo: commits_to_replay.clone(),
+        done: Vec::new(),
+        stopped_sha: None,
+        current_head: upstream_id,
+    };
+
+    if let Err(e) = state.save() {
+        eprintln!("fatal: failed to save rebase state: {}", e);
+        return;
+    }
+
     // This mimics Git's behavior.
     Head::update_with_conn(db, Head::Detached(upstream_id), None).await;
-    // Replay each commit on top of the upstream branch
-    // Each commit is applied as a three-way merge and creates a new commit
+
+    // Continue replaying commits
+    continue_replay(&mut state, &current_branch_name, upstream).await;
+}
+
+/// Continue replaying commits from the current state
+async fn continue_replay(state: &mut RebaseState, branch_name: &str, upstream_display: &str) {
+    let db = get_db_conn_instance().await;
+
     println!(
         "Rebasing {} commits from `{}` onto `{}`...",
-        commits_to_replay.len(),
-        current_branch_name,
-        args.upstream
+        state.todo.len(),
+        branch_name,
+        upstream_display
     );
-    let mut new_base_id = upstream_id;
-    for commit_id in commits_to_replay {
-        match replay_commit(&commit_id, &new_base_id).await {
-            Ok(replayed_commit_id) => {
-                new_base_id = replayed_commit_id;
-                // Temporarily move HEAD along with each replayed commit.
-                Head::update_with_conn(db, Head::Detached(new_base_id), None).await;
+
+    while let Some(commit_id) = state.todo.first().cloned() {
+        match replay_commit_with_conflict_detection(&commit_id, &state.current_head).await {
+            ReplayResult::Success(replayed_commit_id) => {
+                state.current_head = replayed_commit_id;
+                // Move commit from todo to done
+                state.todo.remove(0);
+                state.done.push(commit_id);
+                state.stopped_sha = None;
+
+                // Update HEAD
+                Head::update_with_conn(db, Head::Detached(state.current_head), None).await;
+
                 let original_commit: Commit = load_object(&commit_id).unwrap();
                 println!(
                     "Applied: {} {}",
-                    &new_base_id.to_string()[..7],
+                    &state.current_head.to_string()[..7],
                     original_commit.message.lines().next().unwrap_or("")
                 );
+
+                // Save state after each successful commit
+                if let Err(e) = state.save() {
+                    eprintln!("warning: failed to save rebase state: {}", e);
+                }
             }
-            Err(e) => {
-                // IMPORTANT: If rebase failed, we should reset HEAD back to the original branch.
-                Head::update_with_conn(db, Head::Branch(current_branch_name), None).await;
+            ReplayResult::Conflict(conflicts) => {
+                // Save state with stopped_sha
+                state.stopped_sha = Some(commit_id);
+                if let Err(e) = state.save() {
+                    eprintln!("fatal: failed to save rebase state: {}", e);
+                }
+
+                let original_commit: Commit = load_object(&commit_id).unwrap();
                 eprintln!(
                     "error: could not apply {}: {}",
                     &commit_id.to_string()[..7],
-                    e
+                    original_commit.message.lines().next().unwrap_or("")
                 );
-                eprintln!("Rebase failed. HEAD reset to original state.");
+                eprintln!("CONFLICT in {} file(s):", conflicts.len());
+                for path in &conflicts {
+                    eprintln!("  {}", path.display());
+                }
+                eprintln!();
+                eprintln!("After resolving conflicts, mark them with 'libra add <file>'");
+                eprintln!("then run 'libra rebase --continue'");
+                eprintln!("To skip this commit, run 'libra rebase --skip'");
+                eprintln!("To abort and return to the original branch, run 'libra rebase --abort'");
                 return;
             }
         }
     }
 
-    let final_commit_id = new_base_id;
+    // All commits replayed successfully - finalize
+    finalize_rebase(state).await;
+}
+
+/// Finalize rebase after all commits are replayed
+async fn finalize_rebase(state: &RebaseState) {
+    let db = get_db_conn_instance().await;
+    let final_commit_id = state.current_head;
+
     let finish_action = ReflogAction::Rebase {
         state: "finish".to_string(),
-        details: format!("returning to refs/heads/{current_branch_name}"),
+        details: format!("returning to refs/heads/{}", state.head_name),
     };
     let finish_context = ReflogContext {
-        old_oid: head_to_rebase_id.to_string(),
+        old_oid: state.orig_head.to_string(),
         new_oid: final_commit_id.to_string(),
         action: finish_action,
     };
 
-    let branch_name_cloned = current_branch_name.clone();
+    let branch_name_cloned = state.head_name.clone();
     if let Err(e) = with_reflog(
         finish_context,
         move |txn: &sea_orm::DatabaseTransaction| {
@@ -220,12 +563,13 @@ pub async fn execute(args: RebaseArgs) {
     {
         eprintln!("fatal: failed to finalize rebase: {e}");
         // Attempt to restore HEAD to a safe state
-        Head::update_with_conn(db, Head::Detached(upstream_id), None).await;
+        Head::update_with_conn(db, Head::Detached(state.onto), None).await;
+        return;
     }
 
     // Reset the working directory and index to match the final state
-    // This ensures that the workspace reflects the rebased commits
-    let final_commit: Commit = load_object(&new_base_id).unwrap();
+    // This ensures the workspace reflects the rebased commits
+    let final_commit: Commit = load_object(&state.current_head).unwrap();
     let final_tree: Tree = load_object(&final_commit.tree_id).unwrap();
 
     let index_file = path::index();
@@ -234,10 +578,337 @@ pub async fn execute(args: RebaseArgs) {
     index.save(&index_file).unwrap();
     reset_workdir_to_index(&index).unwrap();
 
+    // Clean up rebase state
+    if let Err(e) = RebaseState::cleanup() {
+        eprintln!("warning: failed to clean up rebase state: {}", e);
+    }
+
     println!(
         "Successfully rebased branch '{}' onto '{}'.",
-        current_branch_name, args.upstream
+        state.head_name,
+        &state.onto.to_string()[..7]
     );
+}
+
+/// Continue a rebase after conflict resolution
+async fn rebase_continue() {
+    if !RebaseState::is_in_progress() {
+        eprintln!("fatal: no rebase in progress");
+        return;
+    }
+
+    let mut state = match RebaseState::load() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("fatal: failed to load rebase state: {}", e);
+            return;
+        }
+    };
+
+    // Check if there's a stopped commit that needs to be continued
+    let stopped_sha = match state.stopped_sha {
+        Some(sha) => sha,
+        None => {
+            // No conflict, just continue with remaining commits
+            if state.todo.is_empty() {
+                finalize_rebase(&state).await;
+            } else {
+                let head_name = state.head_name.clone();
+                let onto_display = state.onto.to_string()[..7].to_string();
+                continue_replay(&mut state, &head_name, &onto_display).await;
+            }
+            return;
+        }
+    };
+
+    // Create a commit from the current index (user should have resolved conflicts)
+    let index_file = path::index();
+    let index = match git_internal::internal::index::Index::load(&index_file) {
+        Ok(idx) => idx,
+        Err(e) => {
+            eprintln!("fatal: failed to load index: {:?}", e);
+            return;
+        }
+    };
+
+    // Check for unmerged entries (stage != 0)
+    if has_unmerged_entries(&index) {
+        eprintln!("error: you must resolve all conflicts before continuing");
+        eprintln!("hint: use 'libra add <file>' to mark conflicts as resolved");
+        return;
+    }
+
+    // Create tree from current index
+    let new_tree_id = match create_tree_from_index(&index) {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("fatal: failed to create tree: {}", e);
+            return;
+        }
+    };
+
+    // Get the original commit message
+    let original_commit: Commit = match load_object(&stopped_sha) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("fatal: failed to load original commit: {:?}", e);
+            return;
+        }
+    };
+
+    // Create new commit
+    let new_commit = Commit::from_tree_id(
+        new_tree_id,
+        vec![state.current_head],
+        &original_commit.message,
+    );
+    if let Err(e) = save_object(&new_commit, &new_commit.id) {
+        eprintln!("fatal: failed to save commit: {:?}", e);
+        return;
+    }
+
+    println!(
+        "Applied: {} {}",
+        &new_commit.id.to_string()[..7],
+        original_commit.message.lines().next().unwrap_or("")
+    );
+
+    // Update state
+    state.current_head = new_commit.id;
+    state.todo.remove(0);
+    state.done.push(stopped_sha);
+    state.stopped_sha = None;
+
+    // Update HEAD
+    let db = get_db_conn_instance().await;
+    Head::update_with_conn(db, Head::Detached(state.current_head), None).await;
+
+    if let Err(e) = state.save() {
+        eprintln!("warning: failed to save state: {}", e);
+    }
+
+    // Continue with remaining commits
+    if state.todo.is_empty() {
+        finalize_rebase(&state).await;
+    } else {
+        let head_name = state.head_name.clone();
+        let onto_display = state.onto.to_string()[..7].to_string();
+        continue_replay(&mut state, &head_name, &onto_display).await;
+    }
+}
+
+/// Abort the current rebase and restore the original state
+async fn rebase_abort() {
+    if !RebaseState::is_in_progress() {
+        eprintln!("fatal: no rebase in progress");
+        return;
+    }
+
+    let state = match RebaseState::load() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("fatal: failed to load rebase state: {}", e);
+            return;
+        }
+    };
+
+    let db = get_db_conn_instance().await;
+
+    // Restore HEAD to original branch
+    let abort_action = ReflogAction::Rebase {
+        state: "abort".to_string(),
+        details: format!("returning to refs/heads/{}", state.head_name),
+    };
+    let abort_context = ReflogContext {
+        old_oid: state.current_head.to_string(),
+        new_oid: state.orig_head.to_string(),
+        action: abort_action,
+    };
+
+    let branch_name_cloned = state.head_name.clone();
+    let orig_head = state.orig_head;
+    if let Err(e) = with_reflog(
+        abort_context,
+        move |txn: &sea_orm::DatabaseTransaction| {
+            Box::pin(async move {
+                Head::update_with_conn(txn, Head::Branch(branch_name_cloned), None).await;
+                Ok(())
+            })
+        },
+        true,
+    )
+    .await
+    {
+        eprintln!("warning: failed to record reflog: {e}");
+        // Continue anyway
+    }
+
+    Head::update_with_conn(db, Head::Branch(state.head_name.clone()), None).await;
+
+    // Reset working directory to original HEAD
+    let orig_commit: Commit = match load_object(&orig_head) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("fatal: failed to load original commit: {:?}", e);
+            return;
+        }
+    };
+    let orig_tree: Tree = match load_object(&orig_commit.tree_id) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("fatal: failed to load original tree: {:?}", e);
+            return;
+        }
+    };
+
+    let index_file = path::index();
+    let mut index = git_internal::internal::index::Index::new();
+    if let Err(e) = rebuild_index_from_tree(&orig_tree, &mut index, "") {
+        eprintln!("fatal: failed to rebuild index: {}", e);
+        return;
+    }
+    if let Err(e) = index.save(&index_file) {
+        eprintln!("fatal: failed to save index: {:?}", e);
+        return;
+    }
+    if let Err(e) = reset_workdir_to_index(&index) {
+        eprintln!("fatal: failed to reset working directory: {}", e);
+        return;
+    }
+
+    // Clean up rebase state
+    if let Err(e) = RebaseState::cleanup() {
+        eprintln!("warning: failed to clean up rebase state: {}", e);
+    }
+
+    println!("Rebase aborted. Restored branch '{}'.", state.head_name);
+}
+
+/// Skip the current commit and continue with the next
+async fn rebase_skip() {
+    if !RebaseState::is_in_progress() {
+        eprintln!("fatal: no rebase in progress");
+        return;
+    }
+
+    let mut state = match RebaseState::load() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("fatal: failed to load rebase state: {}", e);
+            return;
+        }
+    };
+
+    let skipped_sha = match state.stopped_sha {
+        Some(sha) => sha,
+        None => {
+            if state.todo.is_empty() {
+                eprintln!("fatal: no commit to skip");
+                return;
+            }
+            state.todo[0]
+        }
+    };
+
+    let original_commit: Commit = match load_object(&skipped_sha) {
+        Ok(c) => c,
+        Err(_) => {
+            eprintln!("warning: could not load skipped commit");
+            Commit::from_tree_id(ObjectHash::default(), vec![], "unknown")
+        }
+    };
+
+    println!(
+        "Skipped: {} {}",
+        &skipped_sha.to_string()[..7],
+        original_commit.message.lines().next().unwrap_or("")
+    );
+
+    // Remove the commit from todo
+    if !state.todo.is_empty() {
+        state.todo.remove(0);
+    }
+    state.stopped_sha = None;
+
+    // Reset index and working directory to current_head
+    let current_commit: Commit = match load_object(&state.current_head) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("fatal: failed to load current commit: {:?}", e);
+            return;
+        }
+    };
+    let current_tree: Tree = match load_object(&current_commit.tree_id) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("fatal: failed to load current tree: {:?}", e);
+            return;
+        }
+    };
+
+    let index_file = path::index();
+    let mut index = git_internal::internal::index::Index::new();
+    if let Err(e) = rebuild_index_from_tree(&current_tree, &mut index, "") {
+        eprintln!("fatal: failed to rebuild index: {}", e);
+        return;
+    }
+    if let Err(e) = index.save(&index_file) {
+        eprintln!("fatal: failed to save index: {:?}", e);
+        return;
+    }
+    if let Err(e) = reset_workdir_to_index(&index) {
+        eprintln!("fatal: failed to reset working directory: {}", e);
+        return;
+    }
+
+    if let Err(e) = state.save() {
+        eprintln!("warning: failed to save state: {}", e);
+    }
+
+    // Continue with remaining commits
+    if state.todo.is_empty() {
+        finalize_rebase(&state).await;
+    } else {
+        let head_name = state.head_name.clone();
+        let onto_display = state.onto.to_string()[..7].to_string();
+        continue_replay(&mut state, &head_name, &onto_display).await;
+    }
+}
+
+/// Check if index has unmerged entries (conflict markers)
+///
+/// A file is considered unmerged if it has stage 1/2/3 entries but NO stage 0 entry.
+/// If a file has been staged at stage 0 (via `add`), it's considered resolved
+/// even if old conflict stage entries still exist in the index.
+fn has_unmerged_entries(index: &git_internal::internal::index::Index) -> bool {
+    let resolved: HashSet<String> = index
+        .tracked_entries(0)
+        .into_iter()
+        .map(|entry| entry.name.clone())
+        .collect();
+
+    for stage in 1..=3 {
+        for entry in index.tracked_entries(stage) {
+            if !resolved.contains(&entry.name) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Create a tree from the current index
+fn create_tree_from_index(
+    index: &git_internal::internal::index::Index,
+) -> Result<ObjectHash, String> {
+    let mut items: HashMap<PathBuf, ObjectHash> = HashMap::new();
+    for path in index.tracked_files() {
+        let path_str = path.to_string_lossy();
+        if let Some(entry) = index.get(&path_str, 0) {
+            items.insert(path.clone(), entry.hash);
+        }
+    }
+    create_tree_from_items_map(&items)
 }
 
 /// Resolve a branch name or commit reference to a ObjectHash hash
@@ -249,6 +920,300 @@ async fn resolve_branch_or_commit(reference: &str) -> Result<ObjectHash, String>
     util::get_commit_base(reference).await
 }
 
+/// Replay a single commit with conflict detection
+///
+/// This function performs a three-way merge to apply the changes from one commit
+/// onto a different base commit, with proper conflict detection.
+async fn replay_commit_with_conflict_detection(
+    commit_to_replay_id: &ObjectHash,
+    new_parent_id: &ObjectHash,
+) -> ReplayResult {
+    let commit_to_replay: Commit = match load_object(commit_to_replay_id) {
+        Ok(c) => c,
+        Err(e) => return ReplayResult::Conflict(vec![PathBuf::from(format!("error: {}", e))]),
+    };
+
+    let original_parent_id = match commit_to_replay.parent_commit_ids.first() {
+        Some(id) => id,
+        None => return ReplayResult::Conflict(vec![PathBuf::from("commit has no parents")]),
+    };
+
+    // Load the three trees needed for the three-way merge
+    let base_tree: Tree = match load_object::<Commit>(original_parent_id)
+        .and_then(|c| load_object(&c.tree_id))
+    {
+        Ok(t) => t,
+        Err(e) => return ReplayResult::Conflict(vec![PathBuf::from(format!("base tree: {}", e))]),
+    };
+
+    let their_tree: Tree = match load_object(&commit_to_replay.tree_id) {
+        Ok(t) => t,
+        Err(e) => return ReplayResult::Conflict(vec![PathBuf::from(format!("their tree: {}", e))]),
+    };
+
+    let our_tree: Tree = match load_object::<Commit>(new_parent_id)
+        .and_then(|c| load_object(&c.tree_id))
+    {
+        Ok(t) => t,
+        Err(e) => return ReplayResult::Conflict(vec![PathBuf::from(format!("our tree: {}", e))]),
+    };
+
+    // Get all items from each tree
+    let base_items: HashMap<PathBuf, ObjectHash> =
+        base_tree.get_plain_items().into_iter().collect();
+    let their_items: HashMap<PathBuf, ObjectHash> =
+        their_tree.get_plain_items().into_iter().collect();
+    let our_items: HashMap<PathBuf, ObjectHash> = our_tree.get_plain_items().into_iter().collect();
+
+    // Collect all paths
+    let all_paths: HashSet<PathBuf> = base_items
+        .keys()
+        .chain(their_items.keys())
+        .chain(our_items.keys())
+        .cloned()
+        .collect();
+
+    let mut merged_items: HashMap<PathBuf, ObjectHash> = HashMap::new();
+    let mut conflicts: Vec<PathBuf> = Vec::new();
+    let workdir = util::working_dir();
+
+    for path in all_paths {
+        let base_hash = base_items.get(&path);
+        let their_hash = their_items.get(&path);
+        let our_hash = our_items.get(&path);
+
+        match (base_hash, their_hash, our_hash) {
+            // No change from base - keep ours
+            (Some(b), Some(t), Some(o)) if b == t => {
+                merged_items.insert(path, *o);
+            }
+            // No change from base - keep theirs (which equals base equals ours)
+            (Some(b), Some(t), Some(o)) if b == o => {
+                merged_items.insert(path, *t);
+            }
+            // Both changed to same value
+            (_, Some(t), Some(o)) if t == o => {
+                merged_items.insert(path, *t);
+            }
+            // Both changed differently - CONFLICT
+            (Some(_b), Some(t), Some(o)) if t != o => {
+                // Write conflict markers to working directory
+                let their_content = Blob::load(t).data;
+                let our_content = Blob::load(o).data;
+
+                let conflict_content = format!(
+                    "<<<<<<< HEAD\n{}\n=======\n{}\n>>>>>>> {}\n",
+                    String::from_utf8_lossy(&our_content),
+                    String::from_utf8_lossy(&their_content),
+                    &commit_to_replay_id.to_string()[..7]
+                );
+
+                let file_path = workdir.join(&path);
+                if let Some(parent) = file_path.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                let _ = fs::write(&file_path, conflict_content);
+
+                conflicts.push(path);
+            }
+            // Theirs added, ours doesn't have - use theirs
+            (None, Some(t), None) => {
+                merged_items.insert(path, *t);
+            }
+            // Ours added, theirs doesn't have - keep ours
+            (None, None, Some(o)) => {
+                merged_items.insert(path, *o);
+            }
+            // Both added differently - CONFLICT
+            (None, Some(t), Some(o)) if t != o => {
+                let their_content = Blob::load(t).data;
+                let our_content = Blob::load(o).data;
+
+                let conflict_content = format!(
+                    "<<<<<<< HEAD\n{}\n=======\n{}\n>>>>>>> {}\n",
+                    String::from_utf8_lossy(&our_content),
+                    String::from_utf8_lossy(&their_content),
+                    &commit_to_replay_id.to_string()[..7]
+                );
+
+                let file_path = workdir.join(&path);
+                if let Some(parent) = file_path.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                let _ = fs::write(&file_path, conflict_content);
+
+                conflicts.push(path);
+            }
+            // Theirs deleted, ours unchanged - delete
+            (Some(b), None, Some(o)) if b == o => {
+                // File deleted in theirs, don't include
+            }
+            // Ours deleted, theirs unchanged - keep deleted
+            (Some(b), Some(t), None) if b == t => {
+                // File deleted in ours, don't include
+            }
+            // Theirs deleted, ours modified - CONFLICT (delete/modify)
+            (Some(_b), None, Some(o)) => {
+                let our_content = Blob::load(o).data;
+                let conflict_content = format!(
+                    "<<<<<<< HEAD\n{}\n=======\n>>>>>>> {} (deleted)\n",
+                    String::from_utf8_lossy(&our_content),
+                    &commit_to_replay_id.to_string()[..7]
+                );
+
+                let file_path = workdir.join(&path);
+                if let Some(parent) = file_path.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                let _ = fs::write(&file_path, conflict_content);
+
+                conflicts.push(path);
+            }
+            // Ours deleted, theirs modified - CONFLICT (modify/delete)
+            (Some(_b), Some(t), None) => {
+                let their_content = Blob::load(t).data;
+                let conflict_content = format!(
+                    "<<<<<<< HEAD (deleted)\n=======\n{}\n>>>>>>> {}\n",
+                    String::from_utf8_lossy(&their_content),
+                    &commit_to_replay_id.to_string()[..7]
+                );
+
+                let file_path = workdir.join(&path);
+                if let Some(parent) = file_path.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                let _ = fs::write(&file_path, conflict_content);
+
+                conflicts.push(path);
+            }
+            // Both deleted - nothing to do
+            (Some(_), None, None) => {}
+            // Catch-all for any other case
+            _ => {
+                if let Some(t) = their_hash {
+                    merged_items.insert(path, *t);
+                } else if let Some(o) = our_hash {
+                    merged_items.insert(path, *o);
+                }
+            }
+        }
+    }
+
+    if !conflicts.is_empty() {
+        // Update index with conflict entries
+        let index_file = path::index();
+        let mut index = git_internal::internal::index::Index::new();
+
+        // Add non-conflicting files at stage 0
+        for (path, hash) in &merged_items {
+            let blob = Blob::load(hash);
+            let entry = git_internal::internal::index::IndexEntry::new_from_blob(
+                path.to_string_lossy().to_string(),
+                *hash,
+                blob.data.len() as u32,
+            );
+            index.add(entry);
+        }
+
+        // Add conflicting files at stages 1, 2, 3
+        for path in &conflicts {
+            let path_str = path.to_string_lossy().to_string();
+
+            // Stage 1: base version
+            if let Some(base_hash) = base_items.get(path) {
+                let blob = Blob::load(base_hash);
+                let mut entry = git_internal::internal::index::IndexEntry::new_from_blob(
+                    path_str.clone(),
+                    *base_hash,
+                    blob.data.len() as u32,
+                );
+                entry.flags.stage = 1;
+                index.add(entry);
+            }
+
+            // Stage 2: ours version
+            if let Some(our_hash) = our_items.get(path) {
+                let blob = Blob::load(our_hash);
+                let mut entry = git_internal::internal::index::IndexEntry::new_from_blob(
+                    path_str.clone(),
+                    *our_hash,
+                    blob.data.len() as u32,
+                );
+                entry.flags.stage = 2;
+                index.add(entry);
+            }
+
+            // Stage 3: theirs version
+            if let Some(their_hash) = their_items.get(path) {
+                let blob = Blob::load(their_hash);
+                let mut entry = git_internal::internal::index::IndexEntry::new_from_blob(
+                    path_str.clone(),
+                    *their_hash,
+                    blob.data.len() as u32,
+                );
+                entry.flags.stage = 3;
+                index.add(entry);
+            }
+        }
+
+        let _ = index.save(&index_file);
+
+        // Update working directory for non-conflicting paths so users can see clean changes.
+        let mut tracked_paths: HashSet<PathBuf> = HashSet::new();
+        tracked_paths.extend(base_items.keys().cloned());
+        tracked_paths.extend(their_items.keys().cloned());
+        tracked_paths.extend(our_items.keys().cloned());
+
+        let conflict_set: HashSet<PathBuf> = conflicts.iter().cloned().collect();
+
+        for (path, hash) in &merged_items {
+            let blob = Blob::load(hash);
+            let target_path = workdir.join(path);
+            if let Some(parent) = target_path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let _ = fs::write(&target_path, &blob.data);
+        }
+
+        for path in tracked_paths {
+            if conflict_set.contains(&path) || merged_items.contains_key(&path) {
+                continue;
+            }
+            let full_path = workdir.join(&path);
+            if full_path.exists() {
+                let _ = fs::remove_file(&full_path);
+            }
+        }
+
+        return ReplayResult::Conflict(conflicts);
+    }
+
+    // No conflicts - create the merged tree and commit
+    let new_tree_id = match create_tree_from_items_map(&merged_items) {
+        Ok(id) => id,
+        Err(e) => {
+            return ReplayResult::Conflict(vec![PathBuf::from(format!("tree creation: {}", e))]);
+        }
+    };
+
+    let new_commit =
+        Commit::from_tree_id(new_tree_id, vec![*new_parent_id], &commit_to_replay.message);
+
+    if let Err(e) = save_object(&new_commit, &new_commit.id) {
+        return ReplayResult::Conflict(vec![PathBuf::from(format!("commit save: {}", e))]);
+    }
+
+    // Update index and working directory
+    let index_file = path::index();
+    let mut index = git_internal::internal::index::Index::new();
+    let new_tree: Tree = load_object(&new_tree_id).unwrap();
+    let _ = rebuild_index_from_tree(&new_tree, &mut index, "");
+    let _ = index.save(&index_file);
+    let _ = reset_workdir_to_index(&index);
+
+    ReplayResult::Success(new_commit.id)
+}
+
 /// Replay a single commit on top of a new parent commit
 ///
 /// This function performs a three-way merge to apply the changes from one commit
@@ -258,6 +1223,7 @@ async fn resolve_branch_or_commit(reference: &str) -> Result<ObjectHash, String>
 /// - Ours: The new parent commit (where we want to apply the changes)
 ///
 /// The result is a new commit with the same changes but a different parent.
+#[allow(dead_code)]
 async fn replay_commit(
     commit_to_replay_id: &ObjectHash,
     new_parent_id: &ObjectHash,
@@ -303,9 +1269,6 @@ async fn replay_commit(
             merged_items.remove(&path);
         }
     }
-    // TODO: Implement proper three-way merge with conflict detection
-    // Currently using simplified logic that always takes "theirs" changes
-    // without checking for conflicts with "ours" changes
 
     // Create a new tree with the merged content
     let new_tree_id = create_tree_from_items_map(&merged_items)?;
