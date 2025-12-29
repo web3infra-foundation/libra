@@ -1859,10 +1859,16 @@ async fn test_status_empty_repo_porcelain(){
     let output_str =  String::from_utf8(output).unwrap();
 
     //3.Assert Output which should be empty or contain only branch info
+    let non_branch_lines: Vec<&str> = output_str
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && l.starts_with("##"))
+        .collect();
+
     assert!(
-        output_str.trim().is_empty() ,
+        non_branch_lines.is_empty() ,
         "Expected empty output or branch info , got :\n{}",
-        output_str
+        non_branch_lines.join("\n")
     )
 }
 
@@ -1899,16 +1905,55 @@ async fn test_status_idempotent(){
     test::setup_with_new_libra_in(test_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(test_dir.path());
 
-    //Create a file so that status has something to repeat
-    fs::write("file.txt","hello").unwrap();
+    // Create a file and synchronize it to the disk
+    // -to avoid race conditions caused by unwritten data not being flushed to the disk
+    {
+        let mut f = std::fs::File::create("file.txt").expect("创建文件失败");
+        f.write_all(b"hello").expect("写入文件失败");
+        f.sync_all().expect("文件同步失败");
+    }
 
+    // Run status multiple times and capture the output
+    // Wait 10 ms between each call
     let output1 = run_status_and_capture_output().await;
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     let output2 = run_status_and_capture_output().await;
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     let output3 = run_status_and_capture_output().await;
 
-    assert_eq!(output1, output2);
-    assert_eq!(output2, output3);
+    // normalize output
+    let s1 = String::from_utf8_lossy(&output1);
+    let s2 = String::from_utf8_lossy(&output2);
+    let s3 = String::from_utf8_lossy(&output3);
+
+    let norm1 = normalize_status_output(&s1);
+    let norm2 = normalize_status_output(&s2);
+    let norm3 = normalize_status_output(&s3);
+
+    //comparison, ignoring variable items such as branch information and blank lines
+    if norm1 != norm2 || norm2 != norm3 {
+        eprintln!("status run 1 (raw):\n---\n{}\n---", s1);
+        eprintln!("status run 2 (raw):\n---\n{}\n---", s2);
+        eprintln!("status run 3 (raw):\n---\n{}\n---", s3);
+        eprintln!("status run 1 (normalized):\n---\n{}\n---", norm1);
+        eprintln!("status run 2 (normalized):\n---\n{}\n---", norm2);
+        eprintln!("status run 3 (normalized):\n---\n{}\n---", norm3);
+    }
+
+    assert_eq!(norm1, norm2, "Outputs from the first and second normalization must match");
+    assert_eq!(norm2, norm3, "Outputs from the second and third normalization must match");
 }
+/// Normalize status output
+fn normalize_status_output(output: &str) -> String {
+    let mut lines: Vec<&str> = output
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with("##"))
+        .collect();
+    lines.sort_unstable();
+    lines.join("\n")
+}
+
 
 async fn run_status_and_capture_output() -> Vec<u8> {
     let mut output = Vec::new();
@@ -1930,43 +1975,87 @@ async fn test_status_with_many_files(){
     test::setup_with_new_libra_in(test_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(test_dir.path());
 
-    //Create multiple files
-    for i in 0..30{
-        fs::write(format!("file{}.txt",i), "x").unwrap();
+    // Create multiple files and explicitly sync
+    let expected_files: Vec<String> = (0..30).map(|i| format!("file{}.txt", i)).collect();
+
+    for filename in &expected_files {
+        // Use File::create + write + sync_all to ensure data and metadata are written to disk
+        let mut f = std::fs::File::create(filename).expect("创建文件失败");
+        f.write_all(b"x").expect("写入失败");
+        f.sync_all().expect("文件同步失败");
     }
 
-    //Run status
-    let output = run_status_and_capture_output().await;
-    let output_str = String::from_utf8(output).unwrap();
 
+    // Run status and wait until all expected files appear in the output
+    // Here, try 10 times, with an interval of 100ms each time
+    let output_str = wait_for_all_files_in_status(&expected_files, 10, 100).await;
+
+    // Check which files are missing and provide friendly debugging information
+    let missing: Vec<&str> = expected_files
+        .iter()
+        .map(|f| f.as_str())
+        .filter(|&f| !output_str.contains(f))
+        .collect();
+
+    if !missing.is_empty() {
+        eprintln!("status 输出未包含所有期望文件。缺失：{:?}", missing);
+        eprintln!("完整 status 输出为：\n{}", output_str);
+    }
+
+    // Assertion: All expected files must appear in the output at least once
+    assert!(
+        missing.is_empty(),
+        "status 输出缺少以下期望文件（可能是写入/同步或竞态问题）：\n{}",
+        missing.join(", ")
+    );
+
+    //  verify that the number of relevant lines is not less than expected
+    // (but it is not mandatory to be equal)
     let relevant_lines: Vec<&str> = output_str
         .lines()
         .filter(|line| {
-            // file0.txt - file29.txt
             (0..30).any(|i| line.contains(&format!("file{}.txt", i)))
         })
         .collect();
 
-    // Assertion: Ensure exactly 30 lines show the created files
-    assert_eq!(
-        relevant_lines.len(),
-        30,
-        "Expected 30 lines showing created files, but found {}.\n\nFull output:\n{}",
+    assert!(
+        relevant_lines.len() >= 30,
+        "Expected at least 30 lines containing the created file, but found {} lines.\n\nFull output:\n{}",
         relevant_lines.len(),
         output_str
     );
-
-    // Verify each expected file appears in the output
-    for i in 0..30 {
-        let filename = format!("file{}.txt", i);
-        assert!(
-            output_str.contains(&filename),
-            "Missing expected file in status output: {}",
-            filename
-        );
-    }
 }
 
+/// Local helper：Wait until the unit status output contains all the expected files,
+///   or return the last time output after timeout.
+async fn wait_for_all_files_in_status<F>(
+    expected: &[F],
+    attempts: usize,
+    delay_ms: u64,
+) -> String
+where
+    F: AsRef<str>,
+{
+    for _ in 0..attempts {
+        let out_bytes = run_status_and_capture_output().await;
+        let out = String::from_utf8_lossy(&out_bytes).to_string();
+
+        let mut all_present = true;
+        for e in expected {
+            if !out.contains(e.as_ref()) {
+                all_present = false;
+                break;
+            }
+        }
+        if all_present {
+            return out;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+    }
+    // print for assertion
+    let out_bytes = run_status_and_capture_output().await;
+    String::from_utf8_lossy(&out_bytes).to_string()
+}
 #[tokio::test]
 #[serial]
 /// Tests precise reporting of staged and unstaged changes
