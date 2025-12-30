@@ -47,7 +47,7 @@ rust_library(
         "//third-party/rust/crates/rkyv_derive/0.7.45:rkyv_derive",
         "//third-party/rust/crates/seahash/4.1.0:seahash",
         "//third-party/rust/crates/tinyvec/1.10.0:tinyvec",
-        "//third-party/rust/crates/uuid/1.18.1:uuid",
+        "//third-party/rust/crates/uuid/1.19.0:uuid",
     ],
 )
 
