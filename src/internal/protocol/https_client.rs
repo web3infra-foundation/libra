@@ -8,9 +8,11 @@ use reqwest::{Body, RequestBuilder, Response, StatusCode, header::CONTENT_TYPE};
 use url::Url;
 
 use super::{
-    DiscRef, DiscoveryResult, FetchStream, ProtocolClient, generate_upload_pack_content,
+    DiscoveryResult, FetchStream, ProtocolClient, generate_upload_pack_content,
     parse_discovered_references,
 };
+#[cfg(test)]
+use super::DiscRef;
 use crate::{command::ask_basic_auth, git_protocol::ServiceType};
 
 /// A Git protocol client that communicates with a Git server over HTTPS.
