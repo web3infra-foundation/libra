@@ -73,7 +73,7 @@ struct ParsedIdxV2 {
 
 /// Returns the path to the directory containing test pack files
 fn packs_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../git-internal/tests/data/packs")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("./tests/data/packs")
 }
 
 /// Finds a pack file in the test packs directory by its prefix
