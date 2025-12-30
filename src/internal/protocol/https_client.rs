@@ -8,7 +8,8 @@ use reqwest::{Body, RequestBuilder, Response, StatusCode, header::CONTENT_TYPE};
 use url::Url;
 
 use super::{
-    DiscRef, FetchStream, ProtocolClient, generate_upload_pack_content, parse_discovered_references,
+    DiscRef, DiscoveryResult, FetchStream, ProtocolClient, generate_upload_pack_content,
+    parse_discovered_references,
 };
 use crate::{command::ask_basic_auth, git_protocol::ServiceType};
 
@@ -93,7 +94,7 @@ impl HttpsClient {
     pub async fn discovery_reference(
         &self,
         service: ServiceType,
-    ) -> Result<Vec<DiscRef>, GitError> {
+    ) -> Result<DiscoveryResult, GitError> {
         let service_name = service.to_string();
         let url = self
             .url
@@ -124,9 +125,15 @@ impl HttpsClient {
             .ok_or_else(|| GitError::NetworkError("Missing Content-Type header".to_string()))?
             .to_str()
             .map_err(|e| GitError::NetworkError(format!("Invalid Content-Type header: {}", e)))?;
-        if content_type != format!("application/x-{service_name}-advertisement") {
+        let expected = format!("application/x-{service_name}-advertisement");
+        let content_type = content_type
+            .split(';')
+            .next()
+            .unwrap_or(content_type)
+            .trim();
+        if content_type != expected {
             return Err(GitError::NetworkError(format!(
-                "Content-type must be `application/x-{service_name}-advertisement`, but got: {content_type}"
+                "Content-type must be `{expected}`, but got: {content_type}"
             )));
         }
 
@@ -209,14 +216,14 @@ mod tests {
         let test_repo = "https://github.com/web3infra-foundation/mega.git/";
 
         let client = HttpsClient::from_url(&Url::parse(test_repo).unwrap());
-        let refs = client.discovery_reference(UploadPack).await;
-        if let Err(e) = refs {
+        let discovery = client.discovery_reference(UploadPack).await;
+        if let Err(e) = discovery {
             tracing::error!("{:?}", e);
             panic!();
         } else {
-            let refs = refs.unwrap();
-            println!("refs count: {:?}", refs.len());
-            println!("example: {:?}", refs[1]);
+            let discovery = discovery.unwrap();
+            println!("refs count: {:?}", discovery.refs.len());
+            println!("example: {:?}", discovery.refs.get(1));
         }
     }
 
@@ -227,8 +234,9 @@ mod tests {
 
         let test_repo = "https://github.com/web3infra-foundation/mega/";
         let client = HttpsClient::from_url(&Url::parse(test_repo).unwrap());
-        let refs = client.discovery_reference(UploadPack).await.unwrap();
-        let refs: Vec<DiscRef> = refs
+        let discovery = client.discovery_reference(UploadPack).await.unwrap();
+        let refs: Vec<DiscRef> = discovery
+            .refs
             .iter()
             .filter(|r| r._ref.starts_with("refs/heads"))
             .cloned()

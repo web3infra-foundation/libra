@@ -11,7 +11,7 @@ use std::{
 use clap::Parser;
 use git_internal::{
     errors::GitError,
-    hash::{ObjectHash, get_hash_kind},
+    hash::{HashKind, ObjectHash, get_hash_kind},
     internal::object::commit::Commit,
 };
 use indicatif::ProgressBar;
@@ -32,8 +32,8 @@ use crate::{
         db::get_db_conn_instance,
         head::Head,
         protocol::{
-            DiscRef, FetchStream, ProtocolClient, https_client::HttpsClient,
-            local_client::LocalClient,
+            DiscoveryResult, FetchStream, ProtocolClient, git_client::GitClient,
+            https_client::HttpsClient, local_client::LocalClient, set_wire_hash_kind,
         },
         reflog::{HEAD, Reflog, ReflogAction, ReflogContext, ReflogError},
     },
@@ -42,13 +42,14 @@ use crate::{
 
 const DEFAULT_REMOTE: &str = "origin";
 
-enum RemoteClient {
+pub(crate) enum RemoteClient {
     Http(HttpsClient),
     Local(LocalClient),
+    Git(GitClient),
 }
 
 impl RemoteClient {
-    fn from_spec(spec: &str) -> Result<Self, String> {
+    pub(crate) fn from_spec(spec: &str) -> Result<Self, String> {
         if let Ok(mut url) = Url::parse(spec) {
             // Convert Windows path like "D:\test\1" to "file:///d:/test/1"
             if url.scheme().len() == 1 {
@@ -65,6 +66,12 @@ impl RemoteClient {
                         .map_err(|e| format!("invalid local repository '{}': {}", spec, e))?;
                     Ok(Self::Local(client))
                 }
+                "git" => {
+                    if url.host_str().is_none() {
+                        return Err(format!("invalid git url '{spec}': missing host"));
+                    }
+                    Ok(Self::Git(GitClient::from_url(&url)))
+                }
                 other => Err(format!("unsupported remote scheme '{other}'")),
             }
         } else {
@@ -80,10 +87,14 @@ impl RemoteClient {
         }
     }
 
-    async fn discovery_reference(&self, service: ServiceType) -> Result<Vec<DiscRef>, GitError> {
+    pub(crate) async fn discovery_reference(
+        &self,
+        service: ServiceType,
+    ) -> Result<DiscoveryResult, GitError> {
         match self {
             RemoteClient::Http(client) => client.discovery_reference(service).await,
             RemoteClient::Local(client) => client.discovery_reference(service).await,
+            RemoteClient::Git(client) => client.discovery_reference(service).await,
         }
     }
 
@@ -95,6 +106,7 @@ impl RemoteClient {
         match self {
             RemoteClient::Http(client) => client.fetch_objects(have, want).await,
             RemoteClient::Local(client) => client.fetch_objects(have, want).await,
+            RemoteClient::Git(client) => client.fetch_objects(have, want).await,
         }
     }
 }
@@ -174,13 +186,23 @@ pub async fn fetch_repository(
         }
     };
 
-    let mut refs = match remote_client.discovery_reference(UploadPack).await {
-        Ok(refs) => refs,
+    let discovery = match remote_client.discovery_reference(UploadPack).await {
+        Ok(result) => result,
         Err(e) => {
             eprintln!("fatal: {e}");
             return;
         }
     };
+    let local_kind = get_hash_kind();
+    if discovery.hash_kind != local_kind {
+        eprintln!(
+            "fatal: remote object format '{}' does not match local '{}'",
+            discovery.hash_kind, local_kind
+        );
+        return;
+    }
+    set_wire_hash_kind(discovery.hash_kind);
+    let mut refs = discovery.refs;
 
     if refs.is_empty() {
         tracing::warn!("fetch empty, no refs found");
@@ -304,10 +326,14 @@ pub async fn fetch_repository(
 
     if let Some(pack_file) = pack_file {
         /* build .idx file from PACK */
+        let index_version = match get_hash_kind() {
+            HashKind::Sha1 => None,
+            HashKind::Sha256 => Some(2),
+        };
         index_pack::execute(IndexPackArgs {
             pack_file,
             index_file: None,
-            index_version: None,
+            index_version,
         });
     }
 

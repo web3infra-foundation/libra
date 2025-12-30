@@ -16,9 +16,9 @@ use git_internal::{
     internal::{
         metadata::{EntryMeta, MetaAttached},
         pack::{
+            Pack,
             entry::Entry,
             pack_index::{IdxBuilder, IndexEntry},
-            Pack,
         },
     },
 };
@@ -198,7 +198,9 @@ fn write_idx_v2_sync(
 /// Build index file for pack file, version 2
 pub fn build_index_v2(pack_file: &str, index_file: &str) -> Result<(), GitError> {
     let pack_path = PathBuf::from(pack_file);
-    let tmp_path = pack_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let tmp_path = pack_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
     let pack_file = std::fs::File::open(pack_file)?;
     let mut pack_reader = std::io::BufReader::new(pack_file);
     let idx_entries = Arc::new(Mutex::new(Vec::new()));
@@ -246,9 +248,9 @@ pub fn build_index_v2(pack_file: &str, index_file: &str) -> Result<(), GitError>
     if tokio::runtime::Handle::try_current().is_ok() {
         let handle =
             std::thread::spawn(move || write_idx_v2_sync(index_path, idx_entries, pack_hash));
-        return handle.join().map_err(|_| {
-            GitError::PackEncodeError("idx writer thread panicked".to_string())
-        })?;
+        return handle
+            .join()
+            .map_err(|_| GitError::PackEncodeError("idx writer thread panicked".to_string()))?;
     }
 
     write_idx_v2_sync(index_path, idx_entries, pack_hash)

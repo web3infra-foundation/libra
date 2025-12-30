@@ -14,7 +14,7 @@ use git_internal::{
     internal::{
         metadata::{EntryMeta, MetaAttached},
         object::blob::Blob,
-        pack::{encode::PackEncoder, entry::Entry, Pack},
+        pack::{Pack, encode::PackEncoder, entry::Entry},
     },
     utils::HashAlgorithm,
 };
@@ -70,7 +70,6 @@ struct ParsedIdxV2 {
     idx_hash: Vec<u8>,
     idx_hash_basis_len: usize,
 }
-
 
 /// Returns the path to the directory containing test pack files
 fn packs_dir() -> PathBuf {
@@ -186,10 +185,7 @@ fn parse_idx_v1(bytes: &[u8]) -> ParsedIdxV1 {
     const ENTRY_SIZE: usize = 4 + 20;
     const TRAILER_SIZE: usize = 20 + 20;
     let mut cursor = 0usize;
-    assert!(
-        bytes.len() >= 256 * 4 + TRAILER_SIZE,
-        "idx v1 is too short"
-    );
+    assert!(bytes.len() >= 256 * 4 + TRAILER_SIZE, "idx v1 is too short");
 
     let mut fanout = [0u32; 256];
     for i in 0..256 {
@@ -320,7 +316,11 @@ fn parse_idx_v2(bytes: &[u8], kind: HashKind) -> ParsedIdxV2 {
             let idx = (raw & 0x7FFF_FFFF) as usize;
             large_offsets[idx]
         };
-        entries.push(ParsedIdxEntryV2 { hash, crc32, offset });
+        entries.push(ParsedIdxEntryV2 {
+            hash,
+            crc32,
+            offset,
+        });
     }
 
     ParsedIdxV2 {
@@ -501,7 +501,7 @@ fn assert_index_v2_for_pack(prefix: &str, kind: HashKind) -> Result<(), GitError
 
     assert_index_v2_matches_pack(&pack_path, &index_path, kind, prefix)
 }
- 
+
 #[test]
 fn build_index_v1_small_pack_roundtrip() -> Result<(), GitError> {
     assert_index_v1_for_pack("small-sha1")
