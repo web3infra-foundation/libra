@@ -580,9 +580,6 @@ async fn test_rebase_with_conflict_and_abort() {
     })
     .await;
 
-    // Save the original feature branch HEAD
-    let _original_feature_head = Head::current_commit().await.unwrap();
-
     // 3. Switch to master and make a conflicting modification
     switch::execute(SwitchArgs {
         branch: Some("master".to_string()),

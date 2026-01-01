@@ -611,7 +611,7 @@ async fn finalize_rebase(state: &RebaseState) {
     }
 
     // Reset the working directory and index to match the final state
-    // This ensures the workspace reflects the rebased commits
+    // This ensures that the workspace reflects the rebased commits
     let final_commit: Commit = load_object(&state.current_head).unwrap();
     let final_tree: Tree = load_object(&final_commit.tree_id).unwrap();
 
@@ -958,19 +958,27 @@ fn create_tree_from_index(
     create_tree_from_items_map(&items)
 }
 
-fn write_conflict_file(workdir: &Path, path: &Path, content: &str) -> Result<(), String> {
+fn write_workdir_file(workdir: &Path, path: &Path, content: &[u8]) -> Result<(), String> {
     let file_path = workdir.join(path);
     if let Some(parent) = file_path.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| format!("failed to create directory {}: {}", parent.display(), e))?;
     }
-    fs::write(&file_path, content).map_err(|e| {
-        format!(
-            "failed to write conflict file {}: {}",
-            file_path.display(),
-            e
-        )
-    })
+    fs::write(&file_path, content)
+        .map_err(|e| format!("failed to write {}: {}", file_path.display(), e))
+}
+
+fn write_conflict_file(workdir: &Path, path: &Path, content: &str) -> Result<(), String> {
+    write_workdir_file(workdir, path, content.as_bytes())
+        .map_err(|e| format!("conflict file: {}", e))
+}
+
+fn conflict_marker_eol() -> &'static str {
+    if cfg!(windows) {
+        "\r\n"
+    } else {
+        "\n"
+    }
 }
 
 /// Resolve a branch name or commit reference to a ObjectHash hash
@@ -986,6 +994,16 @@ async fn resolve_branch_or_commit(reference: &str) -> Result<ObjectHash, String>
 ///
 /// This function performs a three-way merge to apply the changes from one commit
 /// onto a different base commit, with proper conflict detection.
+///
+/// The three points of the merge are:
+/// - Base: The original parent of the commit being replayed
+/// - Theirs: The commit being replayed (contains the changes to apply)
+/// - Ours: The new parent commit (where we want to apply the changes)
+///
+/// For each path, it compares the content in these three trees and constructs
+/// a merged tree. If both `ours` and `theirs` modify the same path in
+/// incompatible ways relative to `base`, the function reports a conflict
+/// and leaves resolution to the caller.
 async fn replay_commit_with_conflict_detection(
     commit_to_replay_id: &ObjectHash,
     new_parent_id: &ObjectHash,
@@ -1037,6 +1055,7 @@ async fn replay_commit_with_conflict_detection(
     let mut conflicts: Vec<PathBuf> = Vec::new();
     let workdir = util::working_dir();
     let commit_abbrev = commit_to_replay_id.to_string();
+    let marker_eol = conflict_marker_eol();
 
     for path in all_paths {
         let base_hash = base_items.get(&path);
@@ -1063,7 +1082,7 @@ async fn replay_commit_with_conflict_detection(
                 let our_content = Blob::load(o).data;
 
                 let conflict_content = format!(
-                    "<<<<<<< HEAD\n{}\n=======\n{}\n>>>>>>> {}\n",
+                    "<<<<<<< HEAD{marker_eol}{}{marker_eol}======={marker_eol}{}{marker_eol}>>>>>>> {}{marker_eol}",
                     String::from_utf8_lossy(&our_content),
                     String::from_utf8_lossy(&their_content),
                     &commit_abbrev[..7]
@@ -1089,7 +1108,7 @@ async fn replay_commit_with_conflict_detection(
                 let our_content = Blob::load(o).data;
 
                 let conflict_content = format!(
-                    "<<<<<<< HEAD\n{}\n=======\n{}\n>>>>>>> {}\n",
+                    "<<<<<<< HEAD{marker_eol}{}{marker_eol}======={marker_eol}{}{marker_eol}>>>>>>> {}{marker_eol}",
                     String::from_utf8_lossy(&our_content),
                     String::from_utf8_lossy(&their_content),
                     &commit_abbrev[..7]
@@ -1113,7 +1132,7 @@ async fn replay_commit_with_conflict_detection(
             (Some(_b), None, Some(o)) => {
                 let our_content = Blob::load(o).data;
                 let conflict_content = format!(
-                    "<<<<<<< HEAD\n{}\n=======\n>>>>>>> {} (deleted)\n",
+                    "<<<<<<< HEAD{marker_eol}{}{marker_eol}======={marker_eol}>>>>>>> {} (deleted){marker_eol}",
                     String::from_utf8_lossy(&our_content),
                     &commit_abbrev[..7]
                 );
@@ -1128,7 +1147,7 @@ async fn replay_commit_with_conflict_detection(
             (Some(_b), Some(t), None) => {
                 let their_content = Blob::load(t).data;
                 let conflict_content = format!(
-                    "<<<<<<< HEAD (deleted)\n=======\n{}\n>>>>>>> {}\n",
+                    "<<<<<<< HEAD (deleted){marker_eol}======={marker_eol}{}{marker_eol}>>>>>>> {}{marker_eol}",
                     String::from_utf8_lossy(&their_content),
                     &commit_abbrev[..7]
                 );
@@ -1226,11 +1245,12 @@ async fn replay_commit_with_conflict_detection(
 
         for (path, hash) in &merged_items {
             let blob = Blob::load(hash);
-            let target_path = workdir.join(path);
-            if let Some(parent) = target_path.parent() {
-                let _ = fs::create_dir_all(parent);
+            if let Err(e) = write_workdir_file(&workdir, path, &blob.data) {
+                return ReplayResult::Conflict {
+                    paths: conflicts,
+                    message: Some(e),
+                };
             }
-            let _ = fs::write(&target_path, &blob.data);
         }
 
         for path in tracked_paths {
@@ -1239,7 +1259,16 @@ async fn replay_commit_with_conflict_detection(
             }
             let full_path = workdir.join(&path);
             if full_path.exists() {
-                let _ = fs::remove_file(&full_path);
+                if let Err(e) = fs::remove_file(&full_path) {
+                    return ReplayResult::Conflict {
+                        paths: conflicts,
+                        message: Some(format!(
+                            "failed to remove {}: {}",
+                            full_path.display(),
+                            e
+                        )),
+                    };
+                }
             }
         }
 
@@ -1277,72 +1306,6 @@ async fn replay_commit_with_conflict_detection(
     }
 
     ReplayResult::Success(new_commit.id)
-}
-
-/// Replay a single commit on top of a new parent commit
-///
-/// This function performs a three-way merge to apply the changes from one commit
-/// onto a different base commit. The three points of the merge are:
-/// - Base: The original parent of the commit being replayed
-/// - Theirs: The commit being replayed (contains the changes to apply)
-/// - Ours: The new parent commit (where we want to apply the changes)
-///
-/// The result is a new commit with the same changes but a different parent.
-#[allow(dead_code)]
-async fn replay_commit(
-    commit_to_replay_id: &ObjectHash,
-    new_parent_id: &ObjectHash,
-) -> Result<ObjectHash, String> {
-    let commit_to_replay: Commit = load_object(commit_to_replay_id).map_err(|e| e.to_string())?;
-    let original_parent_id = commit_to_replay
-        .parent_commit_ids
-        .first()
-        .ok_or_else(|| "commit to replay has no parents".to_string())?;
-
-    // Load the three trees needed for the three-way merge
-    // Base tree: state before the original commit
-    let base_tree: Tree = load_object(
-        &load_object::<Commit>(original_parent_id)
-            .map_err(|e| e.to_string())?
-            .tree_id,
-    )
-    .map_err(|e| e.to_string())?;
-
-    // Their tree: state after the original commit (the changes we want to apply)
-    let their_tree: Tree = load_object(&commit_to_replay.tree_id).map_err(|e| e.to_string())?;
-
-    // Our tree: current state of the new parent (where we apply changes)
-    let our_tree: Tree = load_object(
-        &load_object::<Commit>(new_parent_id)
-            .map_err(|e| e.to_string())?
-            .tree_id,
-    )
-    .map_err(|e| e.to_string())?;
-
-    // Calculate what changed between base and their trees
-    let diff = diff_trees(&their_tree, &base_tree);
-    let mut merged_items: HashMap<PathBuf, ObjectHash> =
-        our_tree.get_plain_items().into_iter().collect();
-
-    // Apply the changes to our tree
-    for (path, their_hash, _base_hash) in diff {
-        if let Some(hash) = their_hash {
-            // File was added or modified: use the new content
-            merged_items.insert(path, hash);
-        } else {
-            // File was deleted: remove it from our tree
-            merged_items.remove(&path);
-        }
-    }
-
-    // Create a new tree with the merged content
-    let new_tree_id = create_tree_from_items_map(&merged_items)?;
-
-    // Create new commit with the same message but different parent and tree
-    let new_commit =
-        Commit::from_tree_id(new_tree_id, vec![*new_parent_id], &commit_to_replay.message);
-    save_object(&new_commit, &new_commit.id).map_err(|e| e.to_string())?;
-    Ok(new_commit.id)
 }
 
 /// Find the merge base (common ancestor) of two commits
