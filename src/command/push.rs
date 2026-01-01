@@ -656,6 +656,42 @@ mod test {
     }
 
     #[test]
+    /// Tests parsing of --dry-run/-n argument for push command.
+    /// Verifies dry_run flag is correctly set with various argument combinations.
+    fn test_parse_dry_run_args() {
+        // --dry-run long flag
+        let args = vec!["push", "--dry-run", "origin", "master"];
+        let args = PushArgs::parse_from(args);
+        assert!(args.dry_run);
+        assert_eq!(args.repository, Some("origin".to_string()));
+        assert_eq!(args.refspec, Some("master".to_string()));
+
+        // -n short flag
+        let args = vec!["push", "-n", "origin", "master"];
+        let args = PushArgs::parse_from(args);
+        assert!(args.dry_run);
+
+        // Without repository (use default)
+        let args = vec!["push", "--dry-run"];
+        let args = PushArgs::parse_from(args);
+        assert!(args.dry_run);
+        assert_eq!(args.repository, None);
+
+        // Combined with other flags
+        let args = vec!["push", "-n", "-f", "origin", "master"];
+        let args = PushArgs::parse_from(args);
+        assert!(args.dry_run);
+        assert!(args.force);
+
+        // Combined with --force and -u
+        let args = vec!["push", "--dry-run", "--force", "-u", "origin", "master"];
+        let args = PushArgs::parse_from(args);
+        assert!(args.dry_run);
+        assert!(args.force);
+        assert!(args.set_upstream);
+    }
+
+    #[test]
     /// Tests failure cases for push command argument parsing with invalid parameter combinations.
     /// Verifies that missing required parameters are properly detected as errors.
     fn test_parse_args_fail() {
