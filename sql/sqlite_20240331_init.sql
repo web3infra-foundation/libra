@@ -28,6 +28,16 @@ CREATE TABLE IF NOT EXISTS `reflog` (
     `action`          TEXT NOT NULL,
     `message`         TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS `rebase_state` (
+    `id`           INTEGER PRIMARY KEY AUTOINCREMENT,
+    `head_name`    TEXT NOT NULL,
+    `onto`         TEXT NOT NULL,
+    `orig_head`    TEXT NOT NULL,
+    `current_head` TEXT NOT NULL,
+    `todo`         TEXT NOT NULL,
+    `done`         TEXT NOT NULL,
+    `stopped_sha`  TEXT
+);
 --  (name, kind, remote) as unique key when remote is not null
 CREATE UNIQUE INDEX idx_name_kind_remote ON `reference`(`name`, `kind`, `remote`)
 WHERE `remote` IS NOT NULL;

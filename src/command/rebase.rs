@@ -3,20 +3,20 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fs,
-    io::{BufRead, BufReader},
     path::{Path, PathBuf},
     str::FromStr,
 };
 
+use anyhow::Context;
 use clap::Parser;
 use git_internal::{
     hash::ObjectHash,
     internal::object::{blob::Blob, commit::Commit, tree::Tree},
 };
-use sea_orm::TransactionTrait;
+use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait, Value};
 
 use crate::{
-    command::{load_object, save_object},
+    command::{load_object, save_object, status},
     internal::{
         branch::Branch,
         db::get_db_conn_instance,
@@ -25,12 +25,13 @@ use crate::{
         reflog::{ReflogAction, ReflogContext, ReflogError, with_reflog},
     },
     utils::{
+        ignore::IgnorePolicy,
         object_ext::{BlobExt, TreeExt},
         path, util,
     },
 };
 
-/// Rebase state stored in .libra/rebase-merge/
+/// Rebase state stored in the repo database (legacy .libra/rebase-merge/ is migrated on demand)
 #[derive(Debug, Clone)]
 pub struct RebaseState {
     /// Original branch name being rebased
@@ -50,67 +51,257 @@ pub struct RebaseState {
 }
 
 impl RebaseState {
-    /// Get the path to the rebase-merge directory
-    pub fn rebase_dir() -> PathBuf {
+    /// Get the path to the legacy rebase-merge directory
+    fn legacy_rebase_dir() -> PathBuf {
         util::storage_path().join("rebase-merge")
     }
 
     /// Check if a rebase is in progress
-    pub fn is_in_progress() -> bool {
-        Self::rebase_dir().exists()
-    }
-
-    /// Save rebase state to .libra/rebase-merge/
-    pub fn save(&self) -> Result<(), String> {
-        let dir = Self::rebase_dir();
-        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-
-        // Save head-name
-        fs::write(
-            dir.join("head-name"),
-            format!("refs/heads/{}", self.head_name),
-        )
-        .map_err(|e| e.to_string())?;
-
-        // Save onto
-        fs::write(dir.join("onto"), self.onto.to_string()).map_err(|e| e.to_string())?;
-
-        // Save orig-head
-        fs::write(dir.join("orig-head"), self.orig_head.to_string()).map_err(|e| e.to_string())?;
-
-        // Save current-head
-        fs::write(dir.join("current-head"), self.current_head.to_string())
-            .map_err(|e| e.to_string())?;
-
-        // Save todo (one commit per line)
-        let todo_content: String = self.todo.iter().map(|h| h.to_string() + "\n").collect();
-        fs::write(dir.join("todo"), todo_content).map_err(|e| e.to_string())?;
-
-        // Save done (one commit per line)
-        let done_content: String = self.done.iter().map(|h| h.to_string() + "\n").collect();
-        fs::write(dir.join("done"), done_content).map_err(|e| e.to_string())?;
-
-        // Save stopped-sha if present
-        if let Some(stopped) = &self.stopped_sha {
-            fs::write(dir.join("stopped-sha"), stopped.to_string()).map_err(|e| e.to_string())?;
-        } else {
-            let stopped_path = dir.join("stopped-sha");
-            if stopped_path.exists() {
-                fs::remove_file(stopped_path).map_err(|e| e.to_string())?;
-            }
+    pub async fn is_in_progress() -> Result<bool, String> {
+        let db = get_db_conn_instance().await;
+        Self::ensure_rebase_state_table_exists(db).await?;
+        if Self::has_state_in_db(db).await? {
+            return Ok(true);
         }
 
+        if Self::legacy_rebase_dir().exists() {
+            return Self::migrate_legacy_state(db)
+                .await
+                .map(|state| state.is_some());
+        }
+        Ok(false)
+    }
+
+    /// Save rebase state to the database
+    pub async fn save(&self) -> Result<(), String> {
+        let db = get_db_conn_instance().await;
+        Self::ensure_rebase_state_table_exists(db).await?;
+        Self::save_with_conn(db, self).await
+    }
+
+    /// Load rebase state from the database (migrates legacy files if present)
+    pub async fn load() -> Result<Self, String> {
+        let db = get_db_conn_instance().await;
+        Self::ensure_rebase_state_table_exists(db).await?;
+        if let Some(state) = Self::load_from_db(db).await? {
+            return Ok(state);
+        }
+
+        if let Some(state) = Self::migrate_legacy_state(db).await? {
+            return Ok(state);
+        }
+
+        Err("No rebase in progress".to_string())
+    }
+
+    /// Remove the rebase state from the database (and any legacy state on disk)
+    pub async fn cleanup() -> Result<(), String> {
+        let db = get_db_conn_instance().await;
+        Self::ensure_rebase_state_table_exists(db).await?;
+        Self::clear_state_in_db(db).await?;
+
+        let legacy_dir = Self::legacy_rebase_dir();
+        if legacy_dir.exists() {
+            fs::remove_dir_all(&legacy_dir).map_err(|e| e.to_string())?;
+        }
         Ok(())
     }
 
-    /// Load rebase state from .libra/rebase-merge/
-    pub fn load() -> Result<Self, String> {
-        let dir = Self::rebase_dir();
+    async fn ensure_rebase_state_table_exists<C: ConnectionTrait>(
+        db: &C,
+    ) -> Result<(), String> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            r#"
+                SELECT COUNT(*)
+                FROM sqlite_master
+                WHERE type='table' AND name=?;
+            "#,
+            ["rebase_state".into()],
+        );
+
+        if let Some(result) = db
+            .query_one(stmt)
+            .await
+            .map_err(|e| format!("failed to check rebase_state table: {e}"))?
+        {
+            let count: i64 = result.try_get_by_index(0).unwrap_or(0);
+            if count > 0 {
+                return Ok(());
+            }
+        }
+
+        let create_table_stmt = Statement::from_string(
+            DbBackend::Sqlite,
+            r#"
+                CREATE TABLE IF NOT EXISTS `rebase_state` (
+                    `id`           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    `head_name`    TEXT NOT NULL,
+                    `onto`         TEXT NOT NULL,
+                    `orig_head`    TEXT NOT NULL,
+                    `current_head` TEXT NOT NULL,
+                    `todo`         TEXT NOT NULL,
+                    `done`         TEXT NOT NULL,
+                    `stopped_sha`  TEXT
+                );
+            "#
+            .to_string(),
+        );
+
+        db.execute(create_table_stmt)
+            .await
+            .map_err(|e| format!("failed to create rebase_state table: {e}"))?;
+        Ok(())
+    }
+
+    async fn has_state_in_db<C: ConnectionTrait>(db: &C) -> Result<bool, String> {
+        let stmt = Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT 1 FROM rebase_state LIMIT 1".to_string(),
+        );
+        let row = db
+            .query_one(stmt)
+            .await
+            .map_err(|e| format!("failed to query rebase_state: {e}"))?;
+        Ok(row.is_some())
+    }
+
+    async fn load_from_db<C: ConnectionTrait>(db: &C) -> Result<Option<Self>, String> {
+        let stmt = Statement::from_string(
+            DbBackend::Sqlite,
+            r#"
+                SELECT head_name, onto, orig_head, current_head, todo, done, stopped_sha
+                FROM rebase_state
+                LIMIT 1
+            "#
+            .to_string(),
+        );
+        let row = db
+            .query_one(stmt)
+            .await
+            .map_err(|e| format!("failed to load rebase_state: {e}"))?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let head_name: String = row
+            .try_get_by_index(0)
+            .map_err(|e| format!("invalid head_name: {e}"))?;
+        let onto_str: String = row
+            .try_get_by_index(1)
+            .map_err(|e| format!("invalid onto: {e}"))?;
+        let orig_head_str: String = row
+            .try_get_by_index(2)
+            .map_err(|e| format!("invalid orig_head: {e}"))?;
+        let current_head_str: String = row
+            .try_get_by_index(3)
+            .map_err(|e| format!("invalid current_head: {e}"))?;
+        let todo_str: String = row
+            .try_get_by_index(4)
+            .map_err(|e| format!("invalid todo: {e}"))?;
+        let done_str: String = row
+            .try_get_by_index(5)
+            .map_err(|e| format!("invalid done: {e}"))?;
+        let stopped_str: Option<String> = row
+            .try_get_by_index(6)
+            .map_err(|e| format!("invalid stopped_sha: {e}"))?;
+
+        let onto =
+            ObjectHash::from_str(onto_str.trim()).map_err(|e| format!("Invalid onto hash: {e}"))?;
+        let orig_head = ObjectHash::from_str(orig_head_str.trim())
+            .map_err(|e| format!("Invalid orig_head hash: {e}"))?;
+        let current_head = ObjectHash::from_str(current_head_str.trim())
+            .map_err(|e| format!("Invalid current_head hash: {e}"))?;
+        let todo = VecDeque::from(Self::parse_hash_list(&todo_str)?);
+        let done = Self::parse_hash_list(&done_str)?;
+        let stopped_sha = match stopped_str {
+            Some(s) if !s.trim().is_empty() => Some(
+                ObjectHash::from_str(s.trim())
+                    .map_err(|e| format!("Invalid stopped_sha hash: {e}"))?,
+            ),
+            _ => None,
+        };
+
+        Ok(Some(RebaseState {
+            head_name,
+            onto,
+            orig_head,
+            todo,
+            done,
+            stopped_sha,
+            current_head,
+        }))
+    }
+
+    async fn save_with_conn<C: ConnectionTrait>(db: &C, state: &RebaseState) -> Result<(), String> {
+        let delete_stmt =
+            Statement::from_string(DbBackend::Sqlite, "DELETE FROM rebase_state".to_string());
+        db.execute(delete_stmt)
+            .await
+            .map_err(|e| format!("failed to clear existing rebase_state: {e}"))?;
+
+        let todo = Self::format_hash_list(state.todo.iter().cloned());
+        let done = Self::format_hash_list(state.done.iter().cloned());
+        let stopped_value = match &state.stopped_sha {
+            Some(sha) => sha.to_string().into(),
+            None => Value::String(None),
+        };
+
+        let insert_stmt = Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            r#"
+                INSERT INTO rebase_state
+                (head_name, onto, orig_head, current_head, todo, done, stopped_sha)
+                VALUES (?, ?, ?, ?, ?, ?, ?);
+            "#,
+            [
+                state.head_name.clone().into(),
+                state.onto.to_string().into(),
+                state.orig_head.to_string().into(),
+                state.current_head.to_string().into(),
+                todo.into(),
+                done.into(),
+                stopped_value,
+            ],
+        );
+
+        db.execute(insert_stmt)
+            .await
+            .map_err(|e| format!("failed to save rebase_state: {e}"))?;
+        Ok(())
+    }
+
+    async fn clear_state_in_db<C: ConnectionTrait>(db: &C) -> Result<(), String> {
+        let stmt =
+            Statement::from_string(DbBackend::Sqlite, "DELETE FROM rebase_state".to_string());
+        db.execute(stmt)
+            .await
+            .map_err(|e| format!("failed to clear rebase_state: {e}"))?;
+        Ok(())
+    }
+
+    async fn migrate_legacy_state<C: ConnectionTrait>(
+        db: &C,
+    ) -> Result<Option<Self>, String> {
+        let legacy_dir = Self::legacy_rebase_dir();
+        if !legacy_dir.exists() {
+            return Ok(None);
+        }
+
+        let state = Self::load_from_legacy_dir()?;
+        Self::save_with_conn(db, &state).await?;
+        if let Err(e) = fs::remove_dir_all(&legacy_dir) {
+            eprintln!("warning: failed to remove legacy rebase state: {e}");
+        }
+        Ok(Some(state))
+    }
+
+    fn load_from_legacy_dir() -> Result<Self, String> {
+        let dir = Self::legacy_rebase_dir();
         if !dir.exists() {
             return Err("No rebase in progress".to_string());
         }
 
-        // Load head-name
         let head_name_raw = fs::read_to_string(dir.join("head-name"))
             .map_err(|e| format!("Failed to read head-name: {}", e))?;
         let head_name = head_name_raw
@@ -119,31 +310,27 @@ impl RebaseState {
             .unwrap_or(head_name_raw.trim())
             .to_string();
 
-        // Load onto
         let onto_str = fs::read_to_string(dir.join("onto"))
             .map_err(|e| format!("Failed to read onto: {}", e))?;
         let onto = ObjectHash::from_str(onto_str.trim())
             .map_err(|e| format!("Invalid onto hash: {}", e))?;
 
-        // Load orig-head
         let orig_head_str = fs::read_to_string(dir.join("orig-head"))
             .map_err(|e| format!("Failed to read orig-head: {}", e))?;
         let orig_head = ObjectHash::from_str(orig_head_str.trim())
             .map_err(|e| format!("Invalid orig-head hash: {}", e))?;
 
-        // Load current-head
         let current_head_str = fs::read_to_string(dir.join("current-head"))
             .map_err(|e| format!("Failed to read current-head: {}", e))?;
         let current_head = ObjectHash::from_str(current_head_str.trim())
             .map_err(|e| format!("Invalid current-head hash: {}", e))?;
 
-        // Load todo
-        let todo = VecDeque::from(Self::load_commit_list(&dir.join("todo"))?);
+        let todo_content = fs::read_to_string(dir.join("todo")).unwrap_or_default();
+        let todo = VecDeque::from(Self::parse_hash_list(&todo_content)?);
 
-        // Load done
-        let done = Self::load_commit_list(&dir.join("done"))?;
+        let done_content = fs::read_to_string(dir.join("done")).unwrap_or_default();
+        let done = Self::parse_hash_list(&done_content)?;
 
-        // Load stopped-sha if present
         let stopped_sha = if dir.join("stopped-sha").exists() {
             let stopped_str = fs::read_to_string(dir.join("stopped-sha"))
                 .map_err(|e| format!("Failed to read stopped-sha: {}", e))?;
@@ -166,24 +353,9 @@ impl RebaseState {
         })
     }
 
-    /// Remove the rebase state directory
-    pub fn cleanup() -> Result<(), String> {
-        let dir = Self::rebase_dir();
-        if dir.exists() {
-            fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
-        }
-        Ok(())
-    }
-
-    fn load_commit_list(path: &Path) -> Result<Vec<ObjectHash>, String> {
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
-        let file = fs::File::open(path).map_err(|e| e.to_string())?;
-        let reader = BufReader::new(file);
+    fn parse_hash_list(content: &str) -> Result<Vec<ObjectHash>, String> {
         let mut commits = Vec::new();
-        for line in reader.lines() {
-            let line = line.map_err(|e| e.to_string())?;
+        for line in content.lines() {
             let trimmed = line.trim();
             if !trimmed.is_empty() {
                 let hash = ObjectHash::from_str(trimmed)
@@ -193,13 +365,38 @@ impl RebaseState {
         }
         Ok(commits)
     }
+
+    fn format_hash_list(list: impl IntoIterator<Item = ObjectHash>) -> String {
+        let mut out = String::new();
+        for (idx, hash) in list.into_iter().enumerate() {
+            if idx > 0 {
+                out.push('\n');
+            }
+            out.push_str(&hash.to_string());
+        }
+        out
+    }
 }
 
-/// Result of attempting to replay a commit
+/// Result of attempting to replay a commit.
+///
+/// This enum intentionally uses `Conflict` to represent both true merge conflicts and
+/// non-conflict failures that should stop the rebase. Callers must examine `message` to
+/// distinguish between them and decide whether to prompt for manual resolution or abort.
 pub enum ReplayResult {
-    /// Commit was successfully replayed, contains the new commit hash
+    /// Commit was successfully replayed; contains the new commit hash.
     Success(ObjectHash),
-    /// Conflict occurred, contains list of conflicting file paths and an optional error message
+    /// A replay failure occurred.
+    ///
+    /// - `paths` lists files that are in a conflicted state and require manual resolution.
+    ///   This is empty when the replay failed for a non-conflict reason (e.g. tree/index
+    ///   errors), in which case `message` should be present.
+    /// - `message` carries a human-readable error describing a non-conflict failure, or
+    ///   is `None` when the failure is a merge conflict that can be resolved by the user.
+    ///
+    /// Callers should treat `paths.is_empty()` + `message.is_some()` as a hard error and
+    /// abort the rebase, while `paths` with conflicts should surface guidance for resolving
+    /// those files before retrying.
     Conflict {
         paths: Vec<PathBuf>,
         message: Option<String>,
@@ -274,12 +471,19 @@ pub async fn execute(args: RebaseArgs) {
     }
 
     // Check if rebase is already in progress
-    if RebaseState::is_in_progress() {
-        eprintln!("fatal: rebase already in progress");
-        eprintln!("hint: use 'libra rebase --continue' to continue rebasing");
-        eprintln!("hint: use 'libra rebase --abort' to abort and restore the original branch");
-        eprintln!("hint: use 'libra rebase --skip' to skip this commit");
-        return;
+    match RebaseState::is_in_progress().await {
+        Ok(true) => {
+            eprintln!("fatal: rebase already in progress");
+            eprintln!("hint: use 'libra rebase --continue' to continue rebasing");
+            eprintln!("hint: use 'libra rebase --abort' to abort and restore the original branch");
+            eprintln!("hint: use 'libra rebase --skip' to skip this commit");
+            return;
+        }
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!("fatal: failed to check rebase state: {e}");
+            return;
+        }
     }
 
     let upstream = match args.upstream {
@@ -336,6 +540,38 @@ async fn start_rebase(upstream: &str) {
 
     // Check if rebase is actually needed
     if base_id == head_to_rebase_id {
+        let upstream_commit: Commit = match load_object(&upstream_id) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("fatal: failed to load upstream commit: {:?}", e);
+                return;
+            }
+        };
+        let upstream_tree: Tree = match load_object(&upstream_commit.tree_id) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("fatal: failed to load upstream tree: {:?}", e);
+                return;
+            }
+        };
+
+        let index_file = path::index();
+        let current_index = match git_internal::internal::index::Index::load(&index_file) {
+            Ok(index) => index,
+            Err(e) => {
+                eprintln!("fatal: failed to load index: {e}");
+                return;
+            }
+        };
+        let mut index = git_internal::internal::index::Index::new();
+        if let Err(e) = rebuild_index_from_tree(&upstream_tree, &mut index, "") {
+            eprintln!("fatal: failed to rebuild index: {}", e);
+            return;
+        }
+        if !fast_forward_guard(&index).await {
+            return;
+        }
+
         let fast_forward_action = ReflogAction::Rebase {
             state: "fast-forward".to_string(),
             details: format!("moving {} to {}", current_branch_name, upstream),
@@ -371,32 +607,11 @@ async fn start_rebase(upstream: &str) {
             return;
         }
 
-        let upstream_commit: Commit = match load_object(&upstream_id) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("fatal: failed to load upstream commit: {:?}", e);
-                return;
-            }
-        };
-        let upstream_tree: Tree = match load_object(&upstream_commit.tree_id) {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!("fatal: failed to load upstream tree: {:?}", e);
-                return;
-            }
-        };
-
-        let index_file = path::index();
-        let mut index = git_internal::internal::index::Index::new();
-        if let Err(e) = rebuild_index_from_tree(&upstream_tree, &mut index, "") {
-            eprintln!("fatal: failed to rebuild index: {}", e);
-            return;
-        }
         if let Err(e) = index.save(&index_file) {
             eprintln!("fatal: failed to save index: {:?}", e);
             return;
         }
-        if let Err(e) = reset_workdir_to_index(&index) {
+        if let Err(e) = reset_workdir_tracked_only(&current_index, &index) {
             eprintln!("fatal: failed to reset working directory: {}", e);
             return;
         }
@@ -463,7 +678,7 @@ async fn start_rebase(upstream: &str) {
         current_head: upstream_id,
     };
 
-    if let Err(e) = state.save() {
+    if let Err(e) = state.save().await {
         eprintln!("fatal: failed to save rebase state: {}", e);
         return;
     }
@@ -518,14 +733,14 @@ async fn continue_replay(state: &mut RebaseState, branch_name: &str, upstream_di
                 );
 
                 // Save state after each successful commit
-                if let Err(e) = state.save() {
+                if let Err(e) = state.save().await {
                     eprintln!("warning: failed to save rebase state: {}", e);
                 }
             }
             ReplayResult::Conflict { paths, message } => {
                 // Save state with stopped_sha
                 state.stopped_sha = Some(commit_id);
-                if let Err(e) = state.save() {
+                if let Err(e) = state.save().await {
                     eprintln!("fatal: failed to save rebase state: {}", e);
                 }
 
@@ -562,11 +777,13 @@ async fn continue_replay(state: &mut RebaseState, branch_name: &str, upstream_di
     }
 
     // All commits replayed successfully - finalize
-    finalize_rebase(state).await;
+    if let Err(e) = finalize_rebase(state).await {
+        eprintln!("fatal: failed to finalize rebase: {e}");
+    }
 }
 
 /// Finalize rebase after all commits are replayed
-async fn finalize_rebase(state: &RebaseState) {
+async fn finalize_rebase(state: &RebaseState) -> anyhow::Result<()> {
     let db = get_db_conn_instance().await;
     let final_commit_id = state.current_head;
 
@@ -604,25 +821,33 @@ async fn finalize_rebase(state: &RebaseState) {
     )
     .await
     {
-        eprintln!("fatal: failed to finalize rebase: {e}");
         // Attempt to restore HEAD to a safe state
         Head::update_with_conn(db, Head::Detached(state.onto), None).await;
-        return;
+        return Err(e).context("failed to record reflog for rebase finish");
     }
 
     // Reset the working directory and index to match the final state
     // This ensures that the workspace reflects the rebased commits
-    let final_commit: Commit = load_object(&state.current_head).unwrap();
-    let final_tree: Tree = load_object(&final_commit.tree_id).unwrap();
+    let final_commit: Commit =
+        load_object(&state.current_head).context("failed to load final commit for rebase")?;
+    let final_tree: Tree =
+        load_object(&final_commit.tree_id).context("failed to load final tree for rebase")?;
 
     let index_file = path::index();
     let mut index = git_internal::internal::index::Index::new();
-    rebuild_index_from_tree(&final_tree, &mut index, "").unwrap();
-    index.save(&index_file).unwrap();
-    reset_workdir_to_index(&index).unwrap();
+    rebuild_index_from_tree(&final_tree, &mut index, "")
+        .map_err(|e| anyhow::anyhow!(e))
+        .context("failed to rebuild index from final tree")?;
+    index
+        .save(&index_file)
+        .map_err(|e| anyhow::anyhow!(e))
+        .context("failed to save index after rebase")?;
+    reset_workdir_to_index(&index)
+        .map_err(|e| anyhow::anyhow!(e))
+        .context("failed to reset working directory after rebase")?;
 
     // Clean up rebase state
-    if let Err(e) = RebaseState::cleanup() {
+    if let Err(e) = RebaseState::cleanup().await {
         eprintln!("warning: failed to clean up rebase state: {}", e);
     }
 
@@ -631,16 +856,24 @@ async fn finalize_rebase(state: &RebaseState) {
         state.head_name,
         &state.onto.to_string()[..7]
     );
+    Ok(())
 }
 
 /// Continue a rebase after conflict resolution
 async fn rebase_continue() {
-    if !RebaseState::is_in_progress() {
-        eprintln!("fatal: no rebase in progress");
-        return;
+    match RebaseState::is_in_progress().await {
+        Ok(true) => {}
+        Ok(false) => {
+            eprintln!("fatal: no rebase in progress");
+            return;
+        }
+        Err(e) => {
+            eprintln!("fatal: failed to check rebase state: {e}");
+            return;
+        }
     }
 
-    let mut state = match RebaseState::load() {
+    let mut state = match RebaseState::load().await {
         Ok(s) => s,
         Err(e) => {
             eprintln!("fatal: failed to load rebase state: {}", e);
@@ -654,7 +887,9 @@ async fn rebase_continue() {
         None => {
             // No conflict, just continue with remaining commits
             if state.todo.is_empty() {
-                finalize_rebase(&state).await;
+                if let Err(e) = finalize_rebase(&state).await {
+                    eprintln!("fatal: failed to finalize rebase: {e}");
+                }
             } else {
                 let head_name = state.head_name.clone();
                 let onto_display = state.onto.to_string()[..7].to_string();
@@ -726,13 +961,15 @@ async fn rebase_continue() {
     let db = get_db_conn_instance().await;
     Head::update_with_conn(db, Head::Detached(state.current_head), None).await;
 
-    if let Err(e) = state.save() {
+    if let Err(e) = state.save().await {
         eprintln!("warning: failed to save state: {}", e);
     }
 
     // Continue with remaining commits
     if state.todo.is_empty() {
-        finalize_rebase(&state).await;
+        if let Err(e) = finalize_rebase(&state).await {
+            eprintln!("fatal: failed to finalize rebase: {e}");
+        }
     } else {
         let head_name = state.head_name.clone();
         let onto_display = state.onto.to_string()[..7].to_string();
@@ -742,12 +979,19 @@ async fn rebase_continue() {
 
 /// Abort the current rebase and restore the original state
 async fn rebase_abort() {
-    if !RebaseState::is_in_progress() {
-        eprintln!("fatal: no rebase in progress");
-        return;
+    match RebaseState::is_in_progress().await {
+        Ok(true) => {}
+        Ok(false) => {
+            eprintln!("fatal: no rebase in progress");
+            return;
+        }
+        Err(e) => {
+            eprintln!("fatal: failed to check rebase state: {e}");
+            return;
+        }
     }
 
-    let state = match RebaseState::load() {
+    let state = match RebaseState::load().await {
         Ok(s) => s,
         Err(e) => {
             eprintln!("fatal: failed to load rebase state: {}", e);
@@ -820,7 +1064,7 @@ async fn rebase_abort() {
     }
 
     // Clean up rebase state
-    if let Err(e) = RebaseState::cleanup() {
+    if let Err(e) = RebaseState::cleanup().await {
         eprintln!("warning: failed to clean up rebase state: {}", e);
     }
 
@@ -829,12 +1073,19 @@ async fn rebase_abort() {
 
 /// Skip the current commit and continue with the next
 async fn rebase_skip() {
-    if !RebaseState::is_in_progress() {
-        eprintln!("fatal: no rebase in progress");
-        return;
+    match RebaseState::is_in_progress().await {
+        Ok(true) => {}
+        Ok(false) => {
+            eprintln!("fatal: no rebase in progress");
+            return;
+        }
+        Err(e) => {
+            eprintln!("fatal: failed to check rebase state: {e}");
+            return;
+        }
     }
 
-    let mut state = match RebaseState::load() {
+    let mut state = match RebaseState::load().await {
         Ok(s) => s,
         Err(e) => {
             eprintln!("fatal: failed to load rebase state: {}", e);
@@ -859,19 +1110,26 @@ async fn rebase_skip() {
         }
     };
 
-    let original_commit: Commit = match load_object(&skipped_sha) {
-        Ok(c) => c,
-        Err(_) => {
-            eprintln!("warning: could not load skipped commit");
-            Commit::from_tree_id(ObjectHash::default(), vec![], "unknown")
+    let skipped_message = match load_object::<Commit>(&skipped_sha) {
+        Ok(c) => Some(c.message),
+        Err(e) => {
+            eprintln!("warning: could not load skipped commit: {:?}", e);
+            None
         }
     };
 
-    println!(
-        "Skipped: {} {}",
-        &skipped_sha.to_string()[..7],
-        original_commit.message.lines().next().unwrap_or("")
-    );
+    if let Some(message) = skipped_message.as_deref() {
+        println!(
+            "Skipped: {} {}",
+            &skipped_sha.to_string()[..7],
+            message.lines().next().unwrap_or("")
+        );
+    } else {
+        println!(
+            "Skipped: {} (message unavailable)",
+            &skipped_sha.to_string()[..7]
+        );
+    }
 
     // Remove the commit from todo
     state.todo.pop_front();
@@ -908,13 +1166,15 @@ async fn rebase_skip() {
         return;
     }
 
-    if let Err(e) = state.save() {
+    if let Err(e) = state.save().await {
         eprintln!("warning: failed to save state: {}", e);
     }
 
     // Continue with remaining commits
     if state.todo.is_empty() {
-        finalize_rebase(&state).await;
+        if let Err(e) = finalize_rebase(&state).await {
+            eprintln!("fatal: failed to finalize rebase: {e}");
+        }
     } else {
         let head_name = state.head_name.clone();
         let onto_display = state.onto.to_string()[..7].to_string();
@@ -974,11 +1234,222 @@ fn write_conflict_file(workdir: &Path, path: &Path, content: &str) -> Result<(),
 }
 
 fn conflict_marker_eol() -> &'static str {
-    if cfg!(windows) {
-        "\r\n"
-    } else {
-        "\n"
+    if cfg!(windows) { "\r\n" } else { "\n" }
+}
+
+fn try_utf8(content: &[u8]) -> Option<&str> {
+    std::str::from_utf8(content).ok()
+}
+
+fn collect_tree_items_and_paths<'a>(
+    trees: impl IntoIterator<Item = &'a Tree>,
+) -> (Vec<HashMap<PathBuf, ObjectHash>>, HashSet<PathBuf>) {
+    let mut items = Vec::new();
+    let mut all_paths = HashSet::new();
+    for tree in trees {
+        let map: HashMap<PathBuf, ObjectHash> = tree.get_plain_items().into_iter().collect();
+        all_paths.extend(map.keys().cloned());
+        items.push(map);
     }
+    (items, all_paths)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::{HashMap, HashSet},
+        path::PathBuf,
+    };
+
+    use git_internal::{
+        hash::ObjectHash,
+        internal::object::tree::{Tree, TreeItem, TreeItemMode},
+    };
+
+    use super::{classify_relative_to_base, collect_tree_items_and_paths, resolve_three_way};
+
+    #[test]
+    fn collect_tree_items_and_paths_unions_paths_and_preserves_items() {
+        let a_hash = ObjectHash::new(&[1; 20]);
+        let b_hash = ObjectHash::new(&[2; 20]);
+        let b2_hash = ObjectHash::new(&[3; 20]);
+        let c_hash = ObjectHash::new(&[4; 20]);
+
+        let tree1 = Tree::from_tree_items(vec![
+            TreeItem::new(TreeItemMode::Blob, a_hash, "a.txt".to_string()),
+            TreeItem::new(TreeItemMode::Blob, b_hash, "b.txt".to_string()),
+        ])
+        .expect("tree1");
+
+        let tree2 = Tree::from_tree_items(vec![
+            TreeItem::new(TreeItemMode::Blob, b2_hash, "b.txt".to_string()),
+            TreeItem::new(TreeItemMode::Blob, c_hash, "c.txt".to_string()),
+        ])
+        .expect("tree2");
+
+        let (items, all_paths) = collect_tree_items_and_paths([&tree1, &tree2]);
+        assert_eq!(items.len(), 2);
+
+        let expected_first: HashMap<PathBuf, ObjectHash> = HashMap::from([
+            (PathBuf::from("a.txt"), a_hash),
+            (PathBuf::from("b.txt"), b_hash),
+        ]);
+        let expected_second: HashMap<PathBuf, ObjectHash> = HashMap::from([
+            (PathBuf::from("b.txt"), b2_hash),
+            (PathBuf::from("c.txt"), c_hash),
+        ]);
+        assert_eq!(items[0], expected_first);
+        assert_eq!(items[1], expected_second);
+
+        let expected_paths: HashSet<PathBuf> = HashSet::from([
+            PathBuf::from("a.txt"),
+            PathBuf::from("b.txt"),
+            PathBuf::from("c.txt"),
+        ]);
+        assert_eq!(all_paths, expected_paths);
+    }
+
+    #[test]
+    fn classify_relative_to_base_tracks_state() {
+        let base = ObjectHash::new(&[1; 20]);
+        let same = base;
+        let modified = ObjectHash::new(&[2; 20]);
+
+        match classify_relative_to_base(Some(&base), Some(&same)) {
+            super::RelativeState::Same(hash) => assert_eq!(hash, base),
+            other => panic!("expected Same, got {:?}", other),
+        }
+
+        match classify_relative_to_base(Some(&base), Some(&modified)) {
+            super::RelativeState::Modified(hash) => assert_eq!(hash, modified),
+            other => panic!("expected Modified, got {:?}", other),
+        }
+
+        match classify_relative_to_base(Some(&base), None) {
+            super::RelativeState::Deleted => {}
+            other => panic!("expected Deleted, got {:?}", other),
+        }
+
+        match classify_relative_to_base(None, Some(&modified)) {
+            super::RelativeState::Added(hash) => assert_eq!(hash, modified),
+            other => panic!("expected Added, got {:?}", other),
+        }
+
+        match classify_relative_to_base(None, None) {
+            super::RelativeState::Missing => {}
+            other => panic!("expected Missing, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn resolve_three_way_merges_and_conflicts() {
+        let base = ObjectHash::new(&[1; 20]);
+        let ours = ObjectHash::new(&[2; 20]);
+        let theirs = ObjectHash::new(&[3; 20]);
+
+        match resolve_three_way(Some(&base), Some(&base), Some(&base)) {
+            super::MergeResolution::Use(hash) => assert_eq!(hash, base),
+            other => panic!("expected Use(base), got {:?}", other),
+        }
+
+        match resolve_three_way(Some(&base), Some(&base), Some(&ours)) {
+            super::MergeResolution::Use(hash) => assert_eq!(hash, ours),
+            other => panic!("expected Use(ours), got {:?}", other),
+        }
+
+        match resolve_three_way(Some(&base), Some(&theirs), Some(&base)) {
+            super::MergeResolution::Use(hash) => assert_eq!(hash, theirs),
+            other => panic!("expected Use(theirs), got {:?}", other),
+        }
+
+        match resolve_three_way(Some(&base), Some(&theirs), Some(&ours)) {
+            super::MergeResolution::Conflict(super::ConflictKind::BothChanged {
+                ours: o,
+                theirs: t,
+            }) => {
+                assert_eq!(o, ours);
+                assert_eq!(t, theirs);
+            }
+            other => panic!("expected BothChanged conflict, got {:?}", other),
+        }
+
+        match resolve_three_way(None, Some(&theirs), Some(&ours)) {
+            super::MergeResolution::Conflict(super::ConflictKind::BothChanged {
+                ours: o,
+                theirs: t,
+            }) => {
+                assert_eq!(o, ours);
+                assert_eq!(t, theirs);
+            }
+            other => panic!("expected BothChanged conflict (add/add), got {:?}", other),
+        }
+
+        match resolve_three_way(Some(&base), None, Some(&ours)) {
+            super::MergeResolution::Conflict(super::ConflictKind::OursModifiedTheirsDeleted {
+                ours: o,
+            }) => assert_eq!(o, ours),
+            other => panic!(
+                "expected ours-modified/theirs-deleted conflict, got {:?}",
+                other
+            ),
+        }
+
+        match resolve_three_way(Some(&base), Some(&theirs), None) {
+            super::MergeResolution::Conflict(super::ConflictKind::TheirsModifiedOursDeleted {
+                theirs: t,
+            }) => assert_eq!(t, theirs),
+            other => panic!(
+                "expected theirs-modified/ours-deleted conflict, got {:?}",
+                other
+            ),
+        }
+    }
+}
+
+async fn fast_forward_guard(new_index: &git_internal::internal::index::Index) -> bool {
+    let unstaged = status::changes_to_be_staged_with_policy(IgnorePolicy::Respect);
+    if !unstaged.modified.is_empty() || !unstaged.deleted.is_empty() {
+        status::execute(status::StatusArgs::default()).await;
+        eprintln!("fatal: unstaged changes, can't fast-forward rebase");
+        return false;
+    }
+
+    let staged = status::changes_to_be_committed().await;
+    if !staged.new.is_empty() || !staged.modified.is_empty() || !staged.deleted.is_empty() {
+        status::execute(status::StatusArgs::default()).await;
+        eprintln!("fatal: uncommitted changes, can't fast-forward rebase");
+        return false;
+    }
+
+    if let Some(conflict) = untracked_overwrite_path(&unstaged.new, new_index) {
+        eprintln!(
+            "fatal: untracked working tree file would be overwritten by rebase: {}",
+            conflict.display()
+        );
+        eprintln!("hint: move or remove it before you rebase.");
+        return false;
+    }
+
+    true
+}
+
+fn untracked_overwrite_path(
+    untracked: &[PathBuf],
+    new_index: &git_internal::internal::index::Index,
+) -> Option<PathBuf> {
+    let new_tracked = new_index.tracked_files();
+    for untracked_path in untracked {
+        for tracked_path in &new_tracked {
+            if paths_conflict(untracked_path, tracked_path) {
+                return Some(untracked_path.clone());
+            }
+        }
+    }
+    None
+}
+
+fn paths_conflict(left: &Path, right: &Path) -> bool {
+    left == right || left.starts_with(right) || right.starts_with(left)
 }
 
 /// Resolve a branch name or commit reference to a ObjectHash hash
@@ -988,6 +1459,140 @@ fn conflict_marker_eol() -> &'static str {
 /// This allows the rebase command to work with both branch names and commit hashes.
 async fn resolve_branch_or_commit(reference: &str) -> Result<ObjectHash, String> {
     util::get_commit_base(reference).await
+}
+
+#[derive(Debug, Copy, Clone)]
+enum MergeResolution {
+    Use(ObjectHash),
+    Delete,
+    Conflict(ConflictKind),
+}
+
+#[derive(Debug, Copy, Clone)]
+enum ConflictKind {
+    BothChanged {
+        ours: ObjectHash,
+        theirs: ObjectHash,
+    },
+    OursModifiedTheirsDeleted {
+        ours: ObjectHash,
+    },
+    TheirsModifiedOursDeleted {
+        theirs: ObjectHash,
+    },
+}
+
+#[derive(Debug, Copy, Clone)]
+enum RelativeState {
+    Same(ObjectHash),
+    Modified(ObjectHash),
+    Deleted,
+    Added(ObjectHash),
+    Missing,
+}
+
+fn classify_relative_to_base(
+    base: Option<&ObjectHash>,
+    side: Option<&ObjectHash>,
+) -> RelativeState {
+    match (base, side) {
+        (Some(b), Some(s)) if b == s => RelativeState::Same(*s),
+        (Some(_), Some(s)) => RelativeState::Modified(*s),
+        (Some(_), None) => RelativeState::Deleted,
+        (None, Some(s)) => RelativeState::Added(*s),
+        (None, None) => RelativeState::Missing,
+    }
+}
+
+fn resolve_three_way(
+    base: Option<&ObjectHash>,
+    theirs: Option<&ObjectHash>,
+    ours: Option<&ObjectHash>,
+) -> MergeResolution {
+    let base_present = base.is_some();
+    let theirs_state = classify_relative_to_base(base, theirs);
+    let ours_state = classify_relative_to_base(base, ours);
+
+    match (base_present, ours_state, theirs_state) {
+        (false, RelativeState::Missing, RelativeState::Missing) => MergeResolution::Delete,
+        (false, RelativeState::Added(o), RelativeState::Missing) => MergeResolution::Use(o),
+        (false, RelativeState::Missing, RelativeState::Added(t)) => MergeResolution::Use(t),
+        (false, RelativeState::Added(o), RelativeState::Added(t)) => {
+            if o == t {
+                MergeResolution::Use(t)
+            } else {
+                MergeResolution::Conflict(ConflictKind::BothChanged { ours: o, theirs: t })
+            }
+        }
+        (true, RelativeState::Same(o), RelativeState::Same(_)) => MergeResolution::Use(o),
+        (true, RelativeState::Same(_), RelativeState::Modified(t)) => MergeResolution::Use(t),
+        (true, RelativeState::Modified(o), RelativeState::Same(_)) => MergeResolution::Use(o),
+        (true, RelativeState::Modified(o), RelativeState::Modified(t)) => {
+            if o == t {
+                MergeResolution::Use(t)
+            } else {
+                MergeResolution::Conflict(ConflictKind::BothChanged { ours: o, theirs: t })
+            }
+        }
+        (true, RelativeState::Deleted, RelativeState::Same(_)) => MergeResolution::Delete,
+        (true, RelativeState::Same(_), RelativeState::Deleted) => MergeResolution::Delete,
+        (true, RelativeState::Deleted, RelativeState::Deleted) => MergeResolution::Delete,
+        (true, RelativeState::Deleted, RelativeState::Modified(t)) => {
+            MergeResolution::Conflict(ConflictKind::TheirsModifiedOursDeleted { theirs: t })
+        }
+        (true, RelativeState::Modified(o), RelativeState::Deleted) => {
+            MergeResolution::Conflict(ConflictKind::OursModifiedTheirsDeleted { ours: o })
+        }
+        _ => {
+            debug_assert!(false, "unexpected three-way merge state");
+            MergeResolution::Delete
+        }
+    }
+}
+
+fn write_conflict_markers(
+    workdir: &Path,
+    path: &Path,
+    marker_eol: &str,
+    commit_abbrev: &str,
+    kind: ConflictKind,
+) -> Result<(), String> {
+    match kind {
+        ConflictKind::BothChanged { ours, theirs } => {
+            let our_content = Blob::load(&ours).data;
+            let their_content = Blob::load(&theirs).data;
+            if let (Some(our_text), Some(their_text)) =
+                (try_utf8(&our_content), try_utf8(&their_content))
+            {
+                let conflict_content = format!(
+                    "<<<<<<< HEAD{marker_eol}{}{marker_eol}======={marker_eol}{}{marker_eol}>>>>>>> {}{marker_eol}",
+                    our_text, their_text, commit_abbrev
+                );
+                write_conflict_file(workdir, path, &conflict_content)?;
+            }
+        }
+        ConflictKind::OursModifiedTheirsDeleted { ours } => {
+            let our_content = Blob::load(&ours).data;
+            if let Some(our_text) = try_utf8(&our_content) {
+                let conflict_content = format!(
+                    "<<<<<<< HEAD{marker_eol}{}{marker_eol}======={marker_eol}>>>>>>> {} (deleted){marker_eol}",
+                    our_text, commit_abbrev
+                );
+                write_conflict_file(workdir, path, &conflict_content)?;
+            }
+        }
+        ConflictKind::TheirsModifiedOursDeleted { theirs } => {
+            let their_content = Blob::load(&theirs).data;
+            if let Some(their_text) = try_utf8(&their_content) {
+                let conflict_content = format!(
+                    "<<<<<<< HEAD (deleted){marker_eol}======={marker_eol}{}{marker_eol}>>>>>>> {}{marker_eol}",
+                    their_text, commit_abbrev
+                );
+                write_conflict_file(workdir, path, &conflict_content)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Replay a single commit with conflict detection
@@ -1036,25 +1641,18 @@ async fn replay_commit_with_conflict_detection(
             Err(e) => return ReplayResult::error(format!("our tree: {}", e)),
         };
 
-    // Get all items from each tree
-    let base_items: HashMap<PathBuf, ObjectHash> =
-        base_tree.get_plain_items().into_iter().collect();
-    let their_items: HashMap<PathBuf, ObjectHash> =
-        their_tree.get_plain_items().into_iter().collect();
-    let our_items: HashMap<PathBuf, ObjectHash> = our_tree.get_plain_items().into_iter().collect();
-
-    // Collect all paths
-    let all_paths: HashSet<PathBuf> = base_items
-        .keys()
-        .chain(their_items.keys())
-        .chain(our_items.keys())
-        .cloned()
-        .collect();
+    // Get all items from each tree and a union of their paths.
+    let (tree_items, all_paths) =
+        collect_tree_items_and_paths([&base_tree, &their_tree, &our_tree]);
+    let base_items = &tree_items[0];
+    let their_items = &tree_items[1];
+    let our_items = &tree_items[2];
 
     let mut merged_items: HashMap<PathBuf, ObjectHash> = HashMap::new();
     let mut conflicts: Vec<PathBuf> = Vec::new();
     let workdir = util::working_dir();
     let commit_abbrev = commit_to_replay_id.to_string();
+    let commit_short = &commit_abbrev[..7];
     let marker_eol = conflict_marker_eol();
 
     for path in all_paths {
@@ -1062,111 +1660,18 @@ async fn replay_commit_with_conflict_detection(
         let their_hash = their_items.get(&path);
         let our_hash = our_items.get(&path);
 
-        match (base_hash, their_hash, our_hash) {
-            // No change from base - keep ours
-            (Some(b), Some(t), Some(o)) if b == t => {
-                merged_items.insert(path, *o);
+        match resolve_three_way(base_hash, their_hash, our_hash) {
+            MergeResolution::Use(hash) => {
+                merged_items.insert(path, hash);
             }
-            // No change from base - keep theirs (which equals base equals ours)
-            (Some(b), Some(t), Some(o)) if b == o => {
-                merged_items.insert(path, *t);
-            }
-            // Both changed to same value
-            (_, Some(t), Some(o)) if t == o => {
-                merged_items.insert(path, *t);
-            }
-            // Both changed differently - CONFLICT
-            (Some(_b), Some(t), Some(o)) if t != o => {
-                // Write conflict markers to working directory
-                let their_content = Blob::load(t).data;
-                let our_content = Blob::load(o).data;
-
-                let conflict_content = format!(
-                    "<<<<<<< HEAD{marker_eol}{}{marker_eol}======={marker_eol}{}{marker_eol}>>>>>>> {}{marker_eol}",
-                    String::from_utf8_lossy(&our_content),
-                    String::from_utf8_lossy(&their_content),
-                    &commit_abbrev[..7]
-                );
-
-                if let Err(e) = write_conflict_file(&workdir, &path, &conflict_content) {
+            MergeResolution::Delete => {}
+            MergeResolution::Conflict(kind) => {
+                if let Err(e) =
+                    write_conflict_markers(&workdir, &path, marker_eol, commit_short, kind)
+                {
                     return ReplayResult::error(e);
                 }
-
                 conflicts.push(path);
-            }
-            // Theirs added, ours doesn't have - use theirs
-            (None, Some(t), None) => {
-                merged_items.insert(path, *t);
-            }
-            // Ours added, theirs doesn't have - keep ours
-            (None, None, Some(o)) => {
-                merged_items.insert(path, *o);
-            }
-            // Both added differently - CONFLICT
-            (None, Some(t), Some(o)) if t != o => {
-                let their_content = Blob::load(t).data;
-                let our_content = Blob::load(o).data;
-
-                let conflict_content = format!(
-                    "<<<<<<< HEAD{marker_eol}{}{marker_eol}======={marker_eol}{}{marker_eol}>>>>>>> {}{marker_eol}",
-                    String::from_utf8_lossy(&our_content),
-                    String::from_utf8_lossy(&their_content),
-                    &commit_abbrev[..7]
-                );
-
-                if let Err(e) = write_conflict_file(&workdir, &path, &conflict_content) {
-                    return ReplayResult::error(e);
-                }
-
-                conflicts.push(path);
-            }
-            // Theirs deleted, ours unchanged - delete
-            (Some(b), None, Some(o)) if b == o => {
-                // File deleted in theirs, don't include
-            }
-            // Ours deleted, theirs unchanged - keep deleted
-            (Some(b), Some(t), None) if b == t => {
-                // File deleted in ours, don't include
-            }
-            // Theirs deleted, ours modified - CONFLICT (delete/modify)
-            (Some(_b), None, Some(o)) => {
-                let our_content = Blob::load(o).data;
-                let conflict_content = format!(
-                    "<<<<<<< HEAD{marker_eol}{}{marker_eol}======={marker_eol}>>>>>>> {} (deleted){marker_eol}",
-                    String::from_utf8_lossy(&our_content),
-                    &commit_abbrev[..7]
-                );
-
-                if let Err(e) = write_conflict_file(&workdir, &path, &conflict_content) {
-                    return ReplayResult::error(e);
-                }
-
-                conflicts.push(path);
-            }
-            // Ours deleted, theirs modified - CONFLICT (modify/delete)
-            (Some(_b), Some(t), None) => {
-                let their_content = Blob::load(t).data;
-                let conflict_content = format!(
-                    "<<<<<<< HEAD (deleted){marker_eol}======={marker_eol}{}{marker_eol}>>>>>>> {}{marker_eol}",
-                    String::from_utf8_lossy(&their_content),
-                    &commit_abbrev[..7]
-                );
-
-                if let Err(e) = write_conflict_file(&workdir, &path, &conflict_content) {
-                    return ReplayResult::error(e);
-                }
-
-                conflicts.push(path);
-            }
-            // Both deleted - nothing to do
-            (Some(_), None, None) => {}
-            // Catch-all for any other case
-            _ => {
-                if let Some(t) = their_hash {
-                    merged_items.insert(path, *t);
-                } else if let Some(o) = our_hash {
-                    merged_items.insert(path, *o);
-                }
             }
         }
     }
@@ -1258,17 +1763,14 @@ async fn replay_commit_with_conflict_detection(
                 continue;
             }
             let full_path = workdir.join(&path);
-            if full_path.exists() {
-                if let Err(e) = fs::remove_file(&full_path) {
-                    return ReplayResult::Conflict {
-                        paths: conflicts,
-                        message: Some(format!(
-                            "failed to remove {}: {}",
-                            full_path.display(),
-                            e
-                        )),
-                    };
-                }
+            if !full_path.exists() {
+                continue;
+            }
+            if let Err(e) = fs::remove_file(&full_path) {
+                return ReplayResult::Conflict {
+                    paths: conflicts,
+                    message: Some(format!("failed to remove {}: {}", full_path.display(), e)),
+                };
             }
         }
 
@@ -1390,34 +1892,6 @@ async fn collect_commits_to_replay(
     Ok(commits)
 }
 
-/// Compute the differences between two tree objects
-///
-/// This function compares two trees and returns a list of all files that
-/// differ between them. Each difference is represented as a tuple containing:
-/// - PathBuf: The file path that differs
-/// - Option<ObjectHash>: The file hash in the "theirs" tree (None if deleted)
-/// - Option<ObjectHash>: The file hash in the "base" tree (None if newly added)
-///
-/// This is used to determine what changes need to be applied during replay.
-fn diff_trees(
-    theirs: &Tree,
-    base: &Tree,
-) -> Vec<(PathBuf, Option<ObjectHash>, Option<ObjectHash>)> {
-    let their_items: HashMap<_, _> = theirs.get_plain_items().into_iter().collect();
-    let base_items: HashMap<_, _> = base.get_plain_items().into_iter().collect();
-    let all_paths: HashSet<_> = their_items.keys().chain(base_items.keys()).collect();
-    let mut diffs = Vec::new();
-
-    for path in all_paths {
-        let their_hash = their_items.get(path).cloned();
-        let base_hash = base_items.get(path).cloned();
-        if their_hash != base_hash {
-            diffs.push((path.clone(), their_hash, base_hash));
-        }
-    }
-    diffs
-}
-
 /// Create a tree object from a flat map of file paths to content hashes
 ///
 /// This function takes a HashMap of file paths and their content hashes,
@@ -1535,6 +2009,39 @@ fn reset_workdir_to_index(index: &git_internal::internal::index::Index) -> Resul
             // TODO: Handle large files efficiently (streaming)
         }
     }
+    Ok(())
+}
+
+/// Reset the working directory to match the new index state without touching untracked files.
+fn reset_workdir_tracked_only(
+    current_index: &git_internal::internal::index::Index,
+    new_index: &git_internal::internal::index::Index,
+) -> Result<(), String> {
+    let workdir = util::working_dir();
+    let new_tracked_paths: HashSet<_> = new_index.tracked_files().into_iter().collect();
+
+    for path_buf in current_index.tracked_files() {
+        if !new_tracked_paths.contains(&path_buf) {
+            let full_path = workdir.join(path_buf);
+            if full_path.exists() {
+                fs::remove_file(&full_path).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+
+    for path_buf in new_index.tracked_files() {
+        let path_str = path_buf.to_str().unwrap();
+        if let Some(entry) = new_index.get(path_str, 0) {
+            let blob = git_internal::internal::object::blob::Blob::load(&entry.hash);
+            let target_path = workdir.join(path_str);
+
+            if let Some(parent) = target_path.parent() {
+                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            fs::write(&target_path, &blob.data).map_err(|e| e.to_string())?;
+        }
+    }
+
     Ok(())
 }
 

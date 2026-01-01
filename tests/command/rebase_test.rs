@@ -4,14 +4,33 @@
 use std::fs;
 
 use libra::command::rebase::{RebaseArgs, execute};
+use libra::common_utils::parse_commit_msg;
 use serial_test::serial;
 use tempfile::tempdir;
 
 use super::*;
 
+fn commit_messages_from_head(start: &ObjectHash, max: usize) -> Vec<String> {
+    let mut messages = Vec::new();
+    let mut current = Some(*start);
+    while let Some(hash) = current {
+        let commit = load_object::<Commit>(&hash).unwrap();
+        let (message, _) = parse_commit_msg(&commit.message);
+        messages.push(message.trim().to_string());
+
+        current = commit.parent_commit_ids.first().copied();
+        if messages.len() >= max {
+            break;
+        }
+    }
+    messages
+}
+
 #[tokio::test]
 #[serial]
 async fn test_basic_rebase() {
+    use libra::internal::head::Head;
+
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
     let _guard = ChangeDirGuard::new(temp_path.path());
@@ -200,7 +219,18 @@ async fn test_basic_rebase() {
         "master_change"
     );
 
-    println!("Basic rebase test passed successfully!");
+    let head_commit = Head::current_commit().await.expect("expected HEAD commit");
+    let messages = commit_messages_from_head(&head_commit, 5);
+    assert_eq!(
+        messages,
+        vec![
+            "F2: Add feature_b.txt on feature branch",
+            "F1: Add feature_a.txt on feature branch",
+            "C3: Add master_only.txt on master",
+            "C2: Modify file.txt on master",
+            "C1: Add file.txt on master"
+        ]
+    );
 }
 
 #[tokio::test]
@@ -279,13 +309,13 @@ async fn test_rebase_already_up_to_date() {
     .await;
 
     // Should complete without errors (already up to date)
-    println!("Already up-to-date rebase test passed!");
 }
 
 #[tokio::test]
 #[serial]
-async fn test_rebase_abort() {
+async fn test_rebase_abort_when_no_rebase_in_progress() {
     use libra::command::rebase::RebaseState;
+    use libra::internal::head::Head;
 
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
@@ -400,6 +430,13 @@ async fn test_rebase_abort() {
     })
     .await;
 
+    let head_before_abort = Head::current_commit().await.expect("expected HEAD commit");
+    let messages_before_abort = commit_messages_from_head(&head_before_abort, 3);
+    assert_eq!(
+        messages_before_abort,
+        vec!["Feature commit", "Master commit", "Initial commit"]
+    );
+
     // Rebase should complete (no conflict in this case)
     // But let's test abort when no rebase is in progress
     execute(RebaseArgs {
@@ -410,9 +447,16 @@ async fn test_rebase_abort() {
     })
     .await;
 
+    let head_after_abort = Head::current_commit().await.expect("expected HEAD commit");
+    assert_eq!(
+        head_after_abort, head_before_abort,
+        "Abort without rebase should not move HEAD"
+    );
+    let messages_after_abort = commit_messages_from_head(&head_after_abort, 3);
+    assert_eq!(messages_after_abort, messages_before_abort);
+
     // Should handle gracefully (no rebase in progress)
-    assert!(!RebaseState::is_in_progress());
-    println!("Rebase abort test passed!");
+    assert!(!RebaseState::is_in_progress().await.expect("failed to query rebase state"));
 }
 
 #[tokio::test]
@@ -458,7 +502,6 @@ async fn test_rebase_continue_no_rebase() {
     .await;
 
     // Should handle gracefully (outputs error message)
-    println!("Rebase continue (no rebase in progress) test passed!");
 }
 
 #[tokio::test]
@@ -504,7 +547,6 @@ async fn test_rebase_skip_no_rebase() {
     .await;
 
     // Should handle gracefully (outputs error message)
-    println!("Rebase skip (no rebase in progress) test passed!");
 }
 
 #[tokio::test]
@@ -631,7 +673,7 @@ async fn test_rebase_with_conflict_and_abort() {
 
     // 5. Rebase should be in progress (conflict should have stopped it)
     assert!(
-        RebaseState::is_in_progress(),
+        RebaseState::is_in_progress().await.expect("failed to query rebase state"),
         "Expected conflict to stop rebase"
     );
 
@@ -653,7 +695,7 @@ async fn test_rebase_with_conflict_and_abort() {
 
     // 7. Verify rebase is no longer in progress
     assert!(
-        !RebaseState::is_in_progress(),
+        !RebaseState::is_in_progress().await.expect("failed to query rebase state"),
         "Rebase should not be in progress after abort"
     );
 
@@ -670,7 +712,154 @@ async fn test_rebase_with_conflict_and_abort() {
         "File should be restored to feature branch content after abort"
     );
 
-    println!("Rebase with conflict and abort test passed!");
+    let head_commit = Head::current_commit().await.expect("expected HEAD commit");
+    let messages = commit_messages_from_head(&head_commit, 2);
+    assert_eq!(
+        messages,
+        vec!["Feature modifies conflict.txt", "Base commit"]
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_rebase_binary_conflict_skips_markers() {
+    use libra::command::rebase::RebaseState;
+
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    let file_path = temp_path.path().join("binary.bin");
+    let base_bytes = vec![0x00, 0xFF, 0x01, 0x02];
+    let feature_bytes = vec![0x10, 0xFF, 0x20, 0x21];
+    let master_bytes = vec![0x30, 0xFF, 0x40, 0x41];
+
+    // 1. Base commit on master with binary content
+    fs::write(&file_path, &base_bytes).unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["binary.bin".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("Base binary".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+    })
+    .await;
+
+    // 2. Feature branch modifies binary content
+    switch::execute(SwitchArgs {
+        branch: None,
+        create: Some("feature".to_string()),
+        detach: false,
+    })
+    .await;
+    fs::write(&file_path, &feature_bytes).unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["binary.bin".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("Feature binary".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+    })
+    .await;
+
+    // 3. Master modifies binary content differently
+    switch::execute(SwitchArgs {
+        branch: Some("master".to_string()),
+        create: None,
+        detach: false,
+    })
+    .await;
+    fs::write(&file_path, &master_bytes).unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["binary.bin".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("Master binary".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+    })
+    .await;
+
+    // 4. Rebase feature onto master (should conflict)
+    switch::execute(SwitchArgs {
+        branch: Some("feature".to_string()),
+        create: None,
+        detach: false,
+    })
+    .await;
+    execute(RebaseArgs {
+        upstream: Some("master".to_string()),
+        continue_rebase: false,
+        abort: false,
+        skip: false,
+    })
+    .await;
+
+    assert!(
+        RebaseState::is_in_progress().await.expect("failed to query rebase state"),
+        "Expected conflict to stop rebase"
+    );
+
+    // Binary conflict should not get marker text; keep feature bytes as-is.
+    let current = fs::read(&file_path).unwrap();
+    assert_eq!(current, feature_bytes, "Binary content should be unchanged");
+
+    // Cleanup: abort rebase
+    execute(RebaseArgs {
+        upstream: None,
+        continue_rebase: false,
+        abort: true,
+        skip: false,
+    })
+    .await;
+    assert!(
+        !RebaseState::is_in_progress().await.expect("failed to query rebase state"),
+        "Rebase should not be in progress after abort"
+    );
 }
 
 #[tokio::test]
@@ -828,7 +1017,7 @@ async fn test_rebase_with_conflict_and_skip() {
 
     // 5. Rebase should stop due to conflict; skip the conflicting commit
     assert!(
-        RebaseState::is_in_progress(),
+        RebaseState::is_in_progress().await.expect("failed to query rebase state"),
         "Expected conflict to stop rebase"
     );
 
@@ -842,14 +1031,13 @@ async fn test_rebase_with_conflict_and_skip() {
 
     // After skip, rebase should complete and apply the non-conflicting commit
     assert!(
-        !RebaseState::is_in_progress(),
+        !RebaseState::is_in_progress().await.expect("failed to query rebase state"),
         "Rebase should complete after skip"
     );
     assert!(
         temp_path.path().join("feature_only.txt").exists(),
         "feature_only.txt should exist after skip and continue"
     );
-    println!("Rebase with conflict and skip test passed!");
 }
 
 #[tokio::test]
@@ -976,7 +1164,7 @@ async fn test_rebase_with_conflict_and_continue() {
 
     // 5. Rebase should stop due to conflict, resolve it and continue
     assert!(
-        RebaseState::is_in_progress(),
+        RebaseState::is_in_progress().await.expect("failed to query rebase state"),
         "Expected conflict to stop rebase"
     );
 
@@ -1011,7 +1199,7 @@ async fn test_rebase_with_conflict_and_continue() {
 
     // Verify rebase completed
     assert!(
-        !RebaseState::is_in_progress(),
+        !RebaseState::is_in_progress().await.expect("failed to query rebase state"),
         "Rebase should be complete after continue"
     );
 
@@ -1027,8 +1215,6 @@ async fn test_rebase_with_conflict_and_continue() {
         Head::Branch(name) => assert_eq!(name, "feature", "Should be on feature branch"),
         _ => panic!("Should be on a branch after rebase"),
     }
-
-    println!("Rebase with conflict and continue test passed!");
 }
 
 #[tokio::test]
@@ -1213,7 +1399,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
 
     // 5. Handle conflicts - skip the first conflicting commit
     assert!(
-        RebaseState::is_in_progress(),
+        RebaseState::is_in_progress().await.expect("failed to query rebase state"),
         "Expected conflict to stop rebase"
     );
 
@@ -1228,7 +1414,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
 
     // The remaining commits (F2 and F3) should apply without conflict
     assert!(
-        !RebaseState::is_in_progress(),
+        !RebaseState::is_in_progress().await.expect("failed to query rebase state"),
         "Rebase should complete after skip"
     );
 
@@ -1251,8 +1437,6 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         file3_content, "feature3",
         "file3 should have feature's content from F3"
     );
-
-    println!("Rebase multiple commits with partial conflict test passed!");
 }
 
 #[tokio::test]
@@ -1374,26 +1558,19 @@ async fn test_rebase_state_persistence() {
 
     // 5. Check state persistence
     assert!(
-        RebaseState::is_in_progress(),
+        RebaseState::is_in_progress().await.expect("failed to query rebase state"),
         "Expected conflict to stop rebase"
     );
 
-    // Verify state files exist
+    // Verify legacy state files are not created
     let rebase_dir = temp_path.path().join(".libra/rebase-merge");
-    assert!(rebase_dir.exists(), "rebase-merge directory should exist");
     assert!(
-        rebase_dir.join("head-name").exists(),
-        "head-name file should exist"
+        !rebase_dir.exists(),
+        "legacy rebase-merge directory should not be created"
     );
-    assert!(rebase_dir.join("onto").exists(), "onto file should exist");
-    assert!(
-        rebase_dir.join("orig-head").exists(),
-        "orig-head file should exist"
-    );
-    assert!(rebase_dir.join("todo").exists(), "todo file should exist");
 
     // Load and verify state
-    let state = RebaseState::load().expect("Should be able to load state");
+    let state = RebaseState::load().await.expect("Should be able to load state");
     assert_eq!(state.head_name, "feature", "head_name should be 'feature'");
     assert!(
         state.stopped_sha.is_some(),
@@ -1411,15 +1588,13 @@ async fn test_rebase_state_persistence() {
 
     // Verify state is cleaned up
     assert!(
-        !RebaseState::is_in_progress(),
+        !RebaseState::is_in_progress().await.expect("failed to query rebase state"),
         "Rebase state should be cleaned up after abort"
     );
     assert!(
         !rebase_dir.exists(),
-        "rebase-merge directory should be removed after abort"
+        "legacy rebase-merge directory should not exist after abort"
     );
-
-    println!("Rebase state persistence test passed!");
 }
 
 #[tokio::test]
@@ -1529,6 +1704,226 @@ async fn test_rebase_fast_forward_branch_behind() {
 
     let content = fs::read_to_string(temp_path.path().join("file.txt")).unwrap();
     assert_eq!(content, "master-advance");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_rebase_fast_forward_blocks_dirty_workdir() {
+    use libra::internal::head::Head;
+
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    // Base commit on master
+    fs::write(temp_path.path().join("file.txt"), "base").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["file.txt".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("Base commit".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+    })
+    .await;
+
+    // Create feature branch at base
+    switch::execute(SwitchArgs {
+        branch: None,
+        create: Some("feature".to_string()),
+        detach: false,
+    })
+    .await;
+
+    // Advance master by one commit
+    switch::execute(SwitchArgs {
+        branch: Some("master".to_string()),
+        create: None,
+        detach: false,
+    })
+    .await;
+
+    fs::write(temp_path.path().join("file.txt"), "master-advance").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["file.txt".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("Advance master".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+    })
+    .await;
+
+    // Switch to feature and introduce a dirty tracked file
+    switch::execute(SwitchArgs {
+        branch: Some("feature".to_string()),
+        create: None,
+        detach: false,
+    })
+    .await;
+
+    let feature_head = Head::current_commit().await.unwrap();
+    fs::write(temp_path.path().join("file.txt"), "local-modification").unwrap();
+
+    execute(RebaseArgs {
+        upstream: Some("master".to_string()),
+        continue_rebase: false,
+        abort: false,
+        skip: false,
+    })
+    .await;
+
+    match Head::current().await {
+        Head::Branch(name) => assert_eq!(name, "feature", "Should stay on feature branch"),
+        _ => panic!("Should be on a branch after failed fast-forward"),
+    }
+
+    let feature_head_after = Head::current_commit().await.unwrap();
+    assert_eq!(
+        feature_head_after, feature_head,
+        "Feature should not move with dirty workdir"
+    );
+
+    let content = fs::read_to_string(temp_path.path().join("file.txt")).unwrap();
+    assert_eq!(content, "local-modification");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
+    use libra::internal::head::Head;
+
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    // Base commit on master
+    fs::write(temp_path.path().join("base.txt"), "base").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["base.txt".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("Base commit".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+    })
+    .await;
+
+    // Create feature branch at base
+    switch::execute(SwitchArgs {
+        branch: None,
+        create: Some("feature".to_string()),
+        detach: false,
+    })
+    .await;
+
+    // Advance master with a new file that will conflict with untracked
+    switch::execute(SwitchArgs {
+        branch: Some("master".to_string()),
+        create: None,
+        detach: false,
+    })
+    .await;
+
+    fs::write(temp_path.path().join("new.txt"), "master-content").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["new.txt".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("Add new.txt".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+    })
+    .await;
+
+    // Switch to feature and create untracked file that would be overwritten
+    switch::execute(SwitchArgs {
+        branch: Some("feature".to_string()),
+        create: None,
+        detach: false,
+    })
+    .await;
+
+    let feature_head = Head::current_commit().await.unwrap();
+    fs::write(temp_path.path().join("new.txt"), "local-untracked").unwrap();
+
+    execute(RebaseArgs {
+        upstream: Some("master".to_string()),
+        continue_rebase: false,
+        abort: false,
+        skip: false,
+    })
+    .await;
+
+    match Head::current().await {
+        Head::Branch(name) => assert_eq!(name, "feature", "Should stay on feature branch"),
+        _ => panic!("Should be on a branch after failed fast-forward"),
+    }
+
+    let feature_head_after = Head::current_commit().await.unwrap();
+    assert_eq!(
+        feature_head_after, feature_head,
+        "Feature should not move when untracked would be overwritten"
+    );
+
+    let content = fs::read_to_string(temp_path.path().join("new.txt")).unwrap();
+    assert_eq!(content, "local-untracked");
 }
 
 #[tokio::test]
@@ -1651,7 +2046,7 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
     .await;
 
     assert!(
-        RebaseState::is_in_progress(),
+        RebaseState::is_in_progress().await.expect("failed to query rebase state"),
         "Expected conflict to stop rebase"
     );
 
@@ -1790,7 +2185,7 @@ async fn test_rebase_continue_requires_resolution() {
     .await;
 
     assert!(
-        RebaseState::is_in_progress(),
+        RebaseState::is_in_progress().await.expect("failed to query rebase state"),
         "Expected conflict to stop rebase"
     );
 
@@ -1806,7 +2201,7 @@ async fn test_rebase_continue_requires_resolution() {
     .await;
 
     assert!(
-        RebaseState::is_in_progress(),
+        RebaseState::is_in_progress().await.expect("failed to query rebase state"),
         "Rebase should remain in progress after unresolved continue"
     );
     let head_after = Head::current_commit().await.unwrap();
