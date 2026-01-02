@@ -55,6 +55,10 @@ pub struct PushArgs {
     /// force push to remote repository
     #[clap(long, short = 'f')]
     pub force: bool,
+
+    /// Do everything except actually send the updates
+    #[clap(long, short = 'n')]
+    pub dry_run: bool,
 }
 
 pub async fn execute(args: PushArgs) {
@@ -174,6 +178,33 @@ pub async fn execute(args: PushArgs) {
             "{}",
             "warning: this may overwrite remote commits, use with caution".yellow()
         );
+    }
+
+    // Handle dry-run mode: show what would be pushed without actually pushing
+    if args.dry_run {
+        println!("To {}", repo_url);
+        if remote_hash == ObjectHash::default().to_string() {
+            // New branch
+            println!(" * [new branch]      {} -> {}", branch, branch);
+        } else {
+            // Update existing branch
+            let remote_short = &remote_hash[..7];
+            let local_short = &commit_hash[..7];
+            if !can_fast_forward && args.force {
+                // Force push uses + and ...
+                println!(
+                    " + {}...{} {} -> {} (forced update)",
+                    remote_short, local_short, branch, branch
+                );
+            } else {
+                // Normal push uses space and ..
+                println!(
+                    "   {}..{}  {} -> {}",
+                    remote_short, local_short, branch, branch
+                );
+            }
+        }
+        return;
     }
 
     let mut data = BytesMut::new();
@@ -554,6 +585,7 @@ mod test {
         assert_eq!(args.refspec, None);
         assert!(!args.set_upstream);
         assert!(!args.force);
+        assert!(!args.dry_run);
 
         let args = vec!["push", "origin", "master"];
         let args = PushArgs::parse_from(args);
@@ -561,6 +593,7 @@ mod test {
         assert_eq!(args.refspec, Some("master".to_string()));
         assert!(!args.set_upstream);
         assert!(!args.force);
+        assert!(!args.dry_run);
 
         let args = vec!["push", "-u", "origin", "master"];
         let args = PushArgs::parse_from(args);
@@ -575,6 +608,7 @@ mod test {
         assert_eq!(args.refspec, Some("master".to_string()));
         assert!(!args.set_upstream);
         assert!(args.force);
+        assert!(!args.dry_run);
 
         let args = vec!["push", "-f", "origin", "master"];
         let args = PushArgs::parse_from(args);
@@ -582,6 +616,43 @@ mod test {
         assert_eq!(args.refspec, Some("master".to_string()));
         assert!(!args.set_upstream);
         assert!(args.force);
+        assert!(!args.dry_run);
+    }
+
+    #[test]
+    /// Tests parsing of --dry-run/-n argument for push command.
+    /// Verifies dry_run flag is correctly set with various argument combinations.
+    fn test_parse_dry_run_args() {
+        // --dry-run long flag
+        let args = vec!["push", "--dry-run", "origin", "master"];
+        let args = PushArgs::parse_from(args);
+        assert!(args.dry_run);
+        assert_eq!(args.repository, Some("origin".to_string()));
+        assert_eq!(args.refspec, Some("master".to_string()));
+
+        // -n short flag
+        let args = vec!["push", "-n", "origin", "master"];
+        let args = PushArgs::parse_from(args);
+        assert!(args.dry_run);
+
+        // Without repository (use default)
+        let args = vec!["push", "--dry-run"];
+        let args = PushArgs::parse_from(args);
+        assert!(args.dry_run);
+        assert_eq!(args.repository, None);
+
+        // Combined with other flags
+        let args = vec!["push", "-n", "-f", "origin", "master"];
+        let args = PushArgs::parse_from(args);
+        assert!(args.dry_run);
+        assert!(args.force);
+
+        // Combined with --force and -u
+        let args = vec!["push", "--dry-run", "--force", "-u", "origin", "master"];
+        let args = PushArgs::parse_from(args);
+        assert!(args.dry_run);
+        assert!(args.force);
+        assert!(args.set_upstream);
     }
 
     #[test]
