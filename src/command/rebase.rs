@@ -1,6 +1,7 @@
 //! Rebase implementation that parses onto/branch arguments, replays commits onto a new base, handles conflicts, and updates branch refs.
 
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet, VecDeque},
     fs,
     path::{Path, PathBuf},
@@ -31,7 +32,7 @@ use crate::{
     },
 };
 
-/// Rebase state stored in the repo database (legacy .libra/rebase-merge/ is migrated on demand)
+/// Rebase state stored in the repo database
 #[derive(Debug, Clone)]
 pub struct RebaseState {
     /// Original branch name being rebased
@@ -107,9 +108,7 @@ impl RebaseState {
         Ok(())
     }
 
-    async fn ensure_rebase_state_table_exists<C: ConnectionTrait>(
-        db: &C,
-    ) -> Result<(), String> {
+    async fn ensure_rebase_state_table_exists<C: ConnectionTrait>(db: &C) -> Result<(), String> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Sqlite,
             r#"
@@ -280,9 +279,7 @@ impl RebaseState {
         Ok(())
     }
 
-    async fn migrate_legacy_state<C: ConnectionTrait>(
-        db: &C,
-    ) -> Result<Option<Self>, String> {
+    async fn migrate_legacy_state<C: ConnectionTrait>(db: &C) -> Result<Option<Self>, String> {
         let legacy_dir = Self::legacy_rebase_dir();
         if !legacy_dir.exists() {
             return Ok(None);
@@ -568,7 +565,7 @@ async fn start_rebase(upstream: &str) {
             eprintln!("fatal: failed to rebuild index: {}", e);
             return;
         }
-        if !fast_forward_guard(&index).await {
+        if !rebase_worktree_guard(&index, "fast-forward rebase").await {
             return;
         }
 
@@ -635,6 +632,30 @@ async fn start_rebase(upstream: &str) {
             return;
         }
     };
+
+    let upstream_commit: Commit = match load_object(&upstream_id) {
+        Ok(commit) => commit,
+        Err(e) => {
+            eprintln!("fatal: failed to load upstream commit: {:?}", e);
+            return;
+        }
+    };
+    let upstream_tree: Tree = match load_object(&upstream_commit.tree_id) {
+        Ok(tree) => tree,
+        Err(e) => {
+            eprintln!("fatal: failed to load upstream tree: {:?}", e);
+            return;
+        }
+    };
+    let mut guard_index = git_internal::internal::index::Index::new();
+    if let Err(e) = rebuild_index_from_tree(&upstream_tree, &mut guard_index, "") {
+        eprintln!("fatal: failed to rebuild index: {}", e);
+        return;
+    }
+    if !rebase_worktree_guard(&guard_index, "rebase").await {
+        return;
+    }
+
     println!("Found common ancestor: {}", &base_id.to_string()[..7]);
     println!(
         "Rebasing {} commits from '{}' onto '{}'...",
@@ -834,6 +855,9 @@ async fn finalize_rebase(state: &RebaseState) -> anyhow::Result<()> {
         load_object(&final_commit.tree_id).context("failed to load final tree for rebase")?;
 
     let index_file = path::index();
+    let current_index = git_internal::internal::index::Index::load(&index_file)
+        .map_err(|e| anyhow::anyhow!(e))
+        .context("failed to load current index before rebase finish")?;
     let mut index = git_internal::internal::index::Index::new();
     rebuild_index_from_tree(&final_tree, &mut index, "")
         .map_err(|e| anyhow::anyhow!(e))
@@ -842,7 +866,7 @@ async fn finalize_rebase(state: &RebaseState) -> anyhow::Result<()> {
         .save(&index_file)
         .map_err(|e| anyhow::anyhow!(e))
         .context("failed to save index after rebase")?;
-    reset_workdir_to_index(&index)
+    reset_workdir_tracked_only(&current_index, &index)
         .map_err(|e| anyhow::anyhow!(e))
         .context("failed to reset working directory after rebase")?;
 
@@ -1049,6 +1073,13 @@ async fn rebase_abort() {
     };
 
     let index_file = path::index();
+    let current_index = match git_internal::internal::index::Index::load(&index_file) {
+        Ok(idx) => idx,
+        Err(e) => {
+            eprintln!("fatal: failed to load current index: {:?}", e);
+            return;
+        }
+    };
     let mut index = git_internal::internal::index::Index::new();
     if let Err(e) = rebuild_index_from_tree(&orig_tree, &mut index, "") {
         eprintln!("fatal: failed to rebuild index: {}", e);
@@ -1058,7 +1089,7 @@ async fn rebase_abort() {
         eprintln!("fatal: failed to save index: {:?}", e);
         return;
     }
-    if let Err(e) = reset_workdir_to_index(&index) {
+    if let Err(e) = reset_workdir_tracked_only(&current_index, &index) {
         eprintln!("fatal: failed to reset working directory: {}", e);
         return;
     }
@@ -1152,6 +1183,13 @@ async fn rebase_skip() {
     };
 
     let index_file = path::index();
+    let current_index = match git_internal::internal::index::Index::load(&index_file) {
+        Ok(idx) => idx,
+        Err(e) => {
+            eprintln!("fatal: failed to load current index: {:?}", e);
+            return;
+        }
+    };
     let mut index = git_internal::internal::index::Index::new();
     if let Err(e) = rebuild_index_from_tree(&current_tree, &mut index, "") {
         eprintln!("fatal: failed to rebuild index: {}", e);
@@ -1161,7 +1199,7 @@ async fn rebase_skip() {
         eprintln!("fatal: failed to save index: {:?}", e);
         return;
     }
-    if let Err(e) = reset_workdir_to_index(&index) {
+    if let Err(e) = reset_workdir_tracked_only(&current_index, &index) {
         eprintln!("fatal: failed to reset working directory: {}", e);
         return;
     }
@@ -1237,8 +1275,11 @@ fn conflict_marker_eol() -> &'static str {
     if cfg!(windows) { "\r\n" } else { "\n" }
 }
 
-fn try_utf8(content: &[u8]) -> Option<&str> {
-    std::str::from_utf8(content).ok()
+fn conflict_payload(content: &[u8]) -> Cow<'_, str> {
+    match std::str::from_utf8(content) {
+        Ok(text) => Cow::Borrowed(text),
+        Err(_) => Cow::Owned(format!("[binary content, {} bytes]", content.len())),
+    }
 }
 
 fn collect_tree_items_and_paths<'a>(
@@ -1406,18 +1447,21 @@ mod tests {
     }
 }
 
-async fn fast_forward_guard(new_index: &git_internal::internal::index::Index) -> bool {
+async fn rebase_worktree_guard(
+    new_index: &git_internal::internal::index::Index,
+    action: &str,
+) -> bool {
     let unstaged = status::changes_to_be_staged_with_policy(IgnorePolicy::Respect);
     if !unstaged.modified.is_empty() || !unstaged.deleted.is_empty() {
         status::execute(status::StatusArgs::default()).await;
-        eprintln!("fatal: unstaged changes, can't fast-forward rebase");
+        eprintln!("fatal: unstaged changes, can't {action}");
         return false;
     }
 
     let staged = status::changes_to_be_committed().await;
     if !staged.new.is_empty() || !staged.modified.is_empty() || !staged.deleted.is_empty() {
         status::execute(status::StatusArgs::default()).await;
-        eprintln!("fatal: uncommitted changes, can't fast-forward rebase");
+        eprintln!("fatal: uncommitted changes, can't {action}");
         return false;
     }
 
@@ -1561,35 +1605,31 @@ fn write_conflict_markers(
         ConflictKind::BothChanged { ours, theirs } => {
             let our_content = Blob::load(&ours).data;
             let their_content = Blob::load(&theirs).data;
-            if let (Some(our_text), Some(their_text)) =
-                (try_utf8(&our_content), try_utf8(&their_content))
-            {
-                let conflict_content = format!(
-                    "<<<<<<< HEAD{marker_eol}{}{marker_eol}======={marker_eol}{}{marker_eol}>>>>>>> {}{marker_eol}",
-                    our_text, their_text, commit_abbrev
-                );
-                write_conflict_file(workdir, path, &conflict_content)?;
-            }
+            let our_text = conflict_payload(&our_content);
+            let their_text = conflict_payload(&their_content);
+            let conflict_content = format!(
+                "<<<<<<< HEAD{marker_eol}{}{marker_eol}======={marker_eol}{}{marker_eol}>>>>>>> {}{marker_eol}",
+                our_text, their_text, commit_abbrev
+            );
+            write_conflict_file(workdir, path, &conflict_content)?;
         }
         ConflictKind::OursModifiedTheirsDeleted { ours } => {
             let our_content = Blob::load(&ours).data;
-            if let Some(our_text) = try_utf8(&our_content) {
-                let conflict_content = format!(
-                    "<<<<<<< HEAD{marker_eol}{}{marker_eol}======={marker_eol}>>>>>>> {} (deleted){marker_eol}",
-                    our_text, commit_abbrev
-                );
-                write_conflict_file(workdir, path, &conflict_content)?;
-            }
+            let our_text = conflict_payload(&our_content);
+            let conflict_content = format!(
+                "<<<<<<< HEAD{marker_eol}{}{marker_eol}======={marker_eol}>>>>>>> {} (deleted){marker_eol}",
+                our_text, commit_abbrev
+            );
+            write_conflict_file(workdir, path, &conflict_content)?;
         }
         ConflictKind::TheirsModifiedOursDeleted { theirs } => {
             let their_content = Blob::load(&theirs).data;
-            if let Some(their_text) = try_utf8(&their_content) {
-                let conflict_content = format!(
-                    "<<<<<<< HEAD (deleted){marker_eol}======={marker_eol}{}{marker_eol}>>>>>>> {}{marker_eol}",
-                    their_text, commit_abbrev
-                );
-                write_conflict_file(workdir, path, &conflict_content)?;
-            }
+            let their_text = conflict_payload(&their_content);
+            let conflict_content = format!(
+                "<<<<<<< HEAD (deleted){marker_eol}======={marker_eol}{}{marker_eol}>>>>>>> {}{marker_eol}",
+                their_text, commit_abbrev
+            );
+            write_conflict_file(workdir, path, &conflict_content)?;
         }
     }
     Ok(())
@@ -1792,6 +1832,10 @@ async fn replay_commit_with_conflict_detection(
 
     // Update index and working directory
     let index_file = path::index();
+    let current_index = match git_internal::internal::index::Index::load(&index_file) {
+        Ok(idx) => idx,
+        Err(e) => return ReplayResult::error(format!("index load: {:?}", e)),
+    };
     let mut index = git_internal::internal::index::Index::new();
     let new_tree: Tree = match load_object(&new_tree_id) {
         Ok(tree) => tree,
@@ -1803,7 +1847,7 @@ async fn replay_commit_with_conflict_detection(
     if let Err(e) = index.save(&index_file) {
         return ReplayResult::error(format!("index save: {}", e));
     }
-    if let Err(e) = reset_workdir_to_index(&index) {
+    if let Err(e) = reset_workdir_tracked_only(&current_index, &index) {
         return ReplayResult::error(format!("workdir reset: {}", e));
     }
 
@@ -1965,51 +2009,6 @@ fn build_tree_recursively(
     let tree = Tree::from_tree_items(current_items).map_err(|e| e.to_string())?;
     save_object(&tree, &tree.id).map_err(|e| e.to_string())?;
     Ok(tree.id)
-}
-
-/// Reset the working directory to match the given index state
-///
-/// This function synchronizes the working directory with the index by:
-/// 1. Removing any files that exist in the working directory but not in the index
-/// 2. Writing out all files that are tracked in the index to the working directory
-/// 3. Creating necessary parent directories as needed
-///
-/// This ensures the working directory reflects the final rebased state.
-fn reset_workdir_to_index(index: &git_internal::internal::index::Index) -> Result<(), String> {
-    let workdir = util::working_dir();
-    let tracked_paths = index.tracked_files();
-    let index_files_set: HashSet<_> = tracked_paths.iter().collect();
-
-    // Remove files that are no longer tracked
-    let all_files_in_workdir = util::list_workdir_files().unwrap_or_default();
-    for path_from_root in all_files_in_workdir {
-        if !index_files_set.contains(&path_from_root) {
-            let full_path = workdir.join(path_from_root);
-            if full_path.exists() {
-                fs::remove_file(&full_path).map_err(|e| e.to_string())?;
-                // TODO: Implement atomic file operations with rollback capability
-                // TODO: Handle directory cleanup when all files are removed
-            }
-        }
-    }
-
-    // Write out all tracked files
-    for path_buf in &tracked_paths {
-        let path_str = path_buf.to_string_lossy();
-        if let Some(entry) = index.get(&path_str, 0) {
-            let blob = git_internal::internal::object::blob::Blob::load(&entry.hash);
-            let target_path = workdir.join(&*path_str);
-
-            // Create parent directories if needed
-            if let Some(parent) = target_path.parent() {
-                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-            }
-            fs::write(&target_path, &blob.data).map_err(|e| e.to_string())?;
-            // TODO: Preserve file permissions and timestamps
-            // TODO: Handle large files efficiently (streaming)
-        }
-    }
-    Ok(())
 }
 
 /// Reset the working directory to match the new index state without touching untracked files.

@@ -235,6 +235,139 @@ async fn test_basic_rebase() {
 
 #[tokio::test]
 #[serial]
+async fn test_rebase_preserves_untracked_files() {
+    use libra::internal::head::Head;
+
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    // Base commit on master
+    fs::write(temp_path.path().join("file.txt"), "base").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["file.txt".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("Base commit".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+    })
+    .await;
+
+    // Create feature branch and add a commit
+    switch::execute(SwitchArgs {
+        branch: None,
+        create: Some("feature".to_string()),
+        detach: false,
+    })
+    .await;
+
+    fs::write(temp_path.path().join("feature.txt"), "feature").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["feature.txt".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("Feature commit".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+    })
+    .await;
+
+    // Advance master to force a real rebase
+    switch::execute(SwitchArgs {
+        branch: Some("master".to_string()),
+        create: None,
+        detach: false,
+    })
+    .await;
+
+    fs::write(temp_path.path().join("file.txt"), "base\nmaster").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["file.txt".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("Advance master".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+    })
+    .await;
+
+    // Switch back to feature and create an untracked file
+    switch::execute(SwitchArgs {
+        branch: Some("feature".to_string()),
+        create: None,
+        detach: false,
+    })
+    .await;
+
+    let feature_head_before = Head::current_commit().await.unwrap();
+    fs::write(temp_path.path().join("notes.txt"), "keep me").unwrap();
+
+    execute(RebaseArgs {
+        upstream: Some("master".to_string()),
+        continue_rebase: false,
+        abort: false,
+        skip: false,
+    })
+    .await;
+
+    let feature_head_after = Head::current_commit().await.unwrap();
+    assert_ne!(
+        feature_head_after, feature_head_before,
+        "Rebase should move feature HEAD"
+    );
+
+    let file_contents = fs::read_to_string(temp_path.path().join("file.txt")).unwrap();
+    assert_eq!(file_contents, "base\nmaster");
+
+    let notes_contents = fs::read_to_string(temp_path.path().join("notes.txt")).unwrap();
+    assert_eq!(notes_contents, "keep me");
+}
+
+#[tokio::test]
+#[serial]
 async fn test_rebase_already_up_to_date() {
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
@@ -456,7 +589,11 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
     assert_eq!(messages_after_abort, messages_before_abort);
 
     // Should handle gracefully (no rebase in progress)
-    assert!(!RebaseState::is_in_progress().await.expect("failed to query rebase state"));
+    assert!(
+        !RebaseState::is_in_progress()
+            .await
+            .expect("failed to query rebase state")
+    );
 }
 
 #[tokio::test]
@@ -673,7 +810,9 @@ async fn test_rebase_with_conflict_and_abort() {
 
     // 5. Rebase should be in progress (conflict should have stopped it)
     assert!(
-        RebaseState::is_in_progress().await.expect("failed to query rebase state"),
+        RebaseState::is_in_progress()
+            .await
+            .expect("failed to query rebase state"),
         "Expected conflict to stop rebase"
     );
 
@@ -695,7 +834,9 @@ async fn test_rebase_with_conflict_and_abort() {
 
     // 7. Verify rebase is no longer in progress
     assert!(
-        !RebaseState::is_in_progress().await.expect("failed to query rebase state"),
+        !RebaseState::is_in_progress()
+            .await
+            .expect("failed to query rebase state"),
         "Rebase should not be in progress after abort"
     );
 
@@ -722,7 +863,7 @@ async fn test_rebase_with_conflict_and_abort() {
 
 #[tokio::test]
 #[serial]
-async fn test_rebase_binary_conflict_skips_markers() {
+async fn test_rebase_binary_conflict_writes_markers() {
     use libra::command::rebase::RebaseState;
 
     let temp_path = tempdir().unwrap();
@@ -840,13 +981,22 @@ async fn test_rebase_binary_conflict_skips_markers() {
     .await;
 
     assert!(
-        RebaseState::is_in_progress().await.expect("failed to query rebase state"),
+        RebaseState::is_in_progress()
+            .await
+            .expect("failed to query rebase state"),
         "Expected conflict to stop rebase"
     );
 
-    // Binary conflict should not get marker text; keep feature bytes as-is.
-    let current = fs::read(&file_path).unwrap();
-    assert_eq!(current, feature_bytes, "Binary content should be unchanged");
+    // Binary conflict should still write conflict markers for resolution.
+    let current = fs::read_to_string(&file_path).unwrap();
+    assert!(
+        current.contains("<<<<<<< HEAD"),
+        "Expected conflict markers in binary conflict file"
+    );
+    assert!(
+        current.contains("[binary content, 4 bytes]"),
+        "Expected binary placeholder content"
+    );
 
     // Cleanup: abort rebase
     execute(RebaseArgs {
@@ -857,7 +1007,9 @@ async fn test_rebase_binary_conflict_skips_markers() {
     })
     .await;
     assert!(
-        !RebaseState::is_in_progress().await.expect("failed to query rebase state"),
+        !RebaseState::is_in_progress()
+            .await
+            .expect("failed to query rebase state"),
         "Rebase should not be in progress after abort"
     );
 }
@@ -1017,7 +1169,9 @@ async fn test_rebase_with_conflict_and_skip() {
 
     // 5. Rebase should stop due to conflict; skip the conflicting commit
     assert!(
-        RebaseState::is_in_progress().await.expect("failed to query rebase state"),
+        RebaseState::is_in_progress()
+            .await
+            .expect("failed to query rebase state"),
         "Expected conflict to stop rebase"
     );
 
@@ -1031,7 +1185,9 @@ async fn test_rebase_with_conflict_and_skip() {
 
     // After skip, rebase should complete and apply the non-conflicting commit
     assert!(
-        !RebaseState::is_in_progress().await.expect("failed to query rebase state"),
+        !RebaseState::is_in_progress()
+            .await
+            .expect("failed to query rebase state"),
         "Rebase should complete after skip"
     );
     assert!(
@@ -1164,7 +1320,9 @@ async fn test_rebase_with_conflict_and_continue() {
 
     // 5. Rebase should stop due to conflict, resolve it and continue
     assert!(
-        RebaseState::is_in_progress().await.expect("failed to query rebase state"),
+        RebaseState::is_in_progress()
+            .await
+            .expect("failed to query rebase state"),
         "Expected conflict to stop rebase"
     );
 
@@ -1199,7 +1357,9 @@ async fn test_rebase_with_conflict_and_continue() {
 
     // Verify rebase completed
     assert!(
-        !RebaseState::is_in_progress().await.expect("failed to query rebase state"),
+        !RebaseState::is_in_progress()
+            .await
+            .expect("failed to query rebase state"),
         "Rebase should be complete after continue"
     );
 
@@ -1399,7 +1559,9 @@ async fn test_rebase_multiple_commits_partial_conflict() {
 
     // 5. Handle conflicts - skip the first conflicting commit
     assert!(
-        RebaseState::is_in_progress().await.expect("failed to query rebase state"),
+        RebaseState::is_in_progress()
+            .await
+            .expect("failed to query rebase state"),
         "Expected conflict to stop rebase"
     );
 
@@ -1414,7 +1576,9 @@ async fn test_rebase_multiple_commits_partial_conflict() {
 
     // The remaining commits (F2 and F3) should apply without conflict
     assert!(
-        !RebaseState::is_in_progress().await.expect("failed to query rebase state"),
+        !RebaseState::is_in_progress()
+            .await
+            .expect("failed to query rebase state"),
         "Rebase should complete after skip"
     );
 
@@ -1558,7 +1722,9 @@ async fn test_rebase_state_persistence() {
 
     // 5. Check state persistence
     assert!(
-        RebaseState::is_in_progress().await.expect("failed to query rebase state"),
+        RebaseState::is_in_progress()
+            .await
+            .expect("failed to query rebase state"),
         "Expected conflict to stop rebase"
     );
 
@@ -1570,7 +1736,9 @@ async fn test_rebase_state_persistence() {
     );
 
     // Load and verify state
-    let state = RebaseState::load().await.expect("Should be able to load state");
+    let state = RebaseState::load()
+        .await
+        .expect("Should be able to load state");
     assert_eq!(state.head_name, "feature", "head_name should be 'feature'");
     assert!(
         state.stopped_sha.is_some(),
@@ -1588,7 +1756,9 @@ async fn test_rebase_state_persistence() {
 
     // Verify state is cleaned up
     assert!(
-        !RebaseState::is_in_progress().await.expect("failed to query rebase state"),
+        !RebaseState::is_in_progress()
+            .await
+            .expect("failed to query rebase state"),
         "Rebase state should be cleaned up after abort"
     );
     assert!(
@@ -1928,6 +2098,148 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
 
 #[tokio::test]
 #[serial]
+async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
+    use libra::command::rebase::RebaseState;
+    use libra::internal::head::Head;
+
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    // Base commit on master
+    fs::write(temp_path.path().join("file.txt"), "base").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["file.txt".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("Base commit".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+    })
+    .await;
+
+    // Create feature branch and add a commit
+    switch::execute(SwitchArgs {
+        branch: None,
+        create: Some("feature".to_string()),
+        detach: false,
+    })
+    .await;
+
+    fs::write(temp_path.path().join("file.txt"), "feature").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["file.txt".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("Feature commit".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+    })
+    .await;
+
+    // Advance master to force a non-fast-forward rebase
+    switch::execute(SwitchArgs {
+        branch: Some("master".to_string()),
+        create: None,
+        detach: false,
+    })
+    .await;
+
+    fs::write(temp_path.path().join("file.txt"), "master").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["file.txt".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("Advance master".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+    })
+    .await;
+
+    // Switch back to feature and introduce a dirty tracked file
+    switch::execute(SwitchArgs {
+        branch: Some("feature".to_string()),
+        create: None,
+        detach: false,
+    })
+    .await;
+
+    let feature_head = Head::current_commit().await.unwrap();
+    fs::write(temp_path.path().join("file.txt"), "dirty").unwrap();
+
+    execute(RebaseArgs {
+        upstream: Some("master".to_string()),
+        continue_rebase: false,
+        abort: false,
+        skip: false,
+    })
+    .await;
+
+    match Head::current().await {
+        Head::Branch(name) => assert_eq!(name, "feature", "Should stay on feature branch"),
+        _ => panic!("Should be on a branch after failed rebase"),
+    }
+
+    let feature_head_after = Head::current_commit().await.unwrap();
+    assert_eq!(
+        feature_head_after, feature_head,
+        "Feature should not move with dirty workdir"
+    );
+
+    let content = fs::read_to_string(temp_path.path().join("file.txt")).unwrap();
+    assert_eq!(content, "dirty");
+
+    assert!(
+        !RebaseState::is_in_progress()
+            .await
+            .expect("failed to query rebase state")
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
     use libra::command::rebase::RebaseState;
 
@@ -2046,7 +2358,9 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
     .await;
 
     assert!(
-        RebaseState::is_in_progress().await.expect("failed to query rebase state"),
+        RebaseState::is_in_progress()
+            .await
+            .expect("failed to query rebase state"),
         "Expected conflict to stop rebase"
     );
 
@@ -2185,7 +2499,9 @@ async fn test_rebase_continue_requires_resolution() {
     .await;
 
     assert!(
-        RebaseState::is_in_progress().await.expect("failed to query rebase state"),
+        RebaseState::is_in_progress()
+            .await
+            .expect("failed to query rebase state"),
         "Expected conflict to stop rebase"
     );
 
@@ -2201,7 +2517,9 @@ async fn test_rebase_continue_requires_resolution() {
     .await;
 
     assert!(
-        RebaseState::is_in_progress().await.expect("failed to query rebase state"),
+        RebaseState::is_in_progress()
+            .await
+            .expect("failed to query rebase state"),
         "Rebase should remain in progress after unresolved continue"
     );
     let head_after = Head::current_commit().await.unwrap();
