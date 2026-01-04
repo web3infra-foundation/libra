@@ -1688,11 +1688,15 @@ async fn replay_commit_with_conflict_detection(
     let our_items = &tree_items[2];
 
     let mut merged_items: HashMap<PathBuf, ObjectHash> = HashMap::new();
-    let mut conflicts: Vec<PathBuf> = Vec::new();
+    let mut conflict_items: Vec<(PathBuf, ConflictKind)> = Vec::new();
     let workdir = util::working_dir();
     let commit_abbrev = commit_to_replay_id.to_string();
     let commit_short = &commit_abbrev[..7];
     let marker_eol = conflict_marker_eol();
+    let untracked_paths = match worktree::untracked_workdir_paths(&current_index) {
+        Ok(paths) => paths,
+        Err(e) => return ReplayResult::error(format!("untracked workdir: {e}")),
+    };
 
     for path in all_paths {
         let base_hash = base_items.get(&path);
@@ -1705,17 +1709,43 @@ async fn replay_commit_with_conflict_detection(
             }
             MergeResolution::Delete => {}
             MergeResolution::Conflict(kind) => {
-                if let Err(e) =
-                    write_conflict_markers(&workdir, &path, marker_eol, commit_short, kind)
-                {
-                    return ReplayResult::error(e);
-                }
-                conflicts.push(path);
+                conflict_items.push((path, kind));
             }
         }
     }
 
+    let conflicts: Vec<PathBuf> = conflict_items
+        .iter()
+        .map(|(path, _)| path.clone())
+        .collect();
+
     if !conflicts.is_empty() {
+        let mut untracked_conflict = None;
+        for untracked in &untracked_paths {
+            for path in conflicts.iter().chain(merged_items.keys()) {
+                if worktree::paths_conflict(untracked, path) {
+                    untracked_conflict = Some(untracked.clone());
+                    break;
+                }
+            }
+            if untracked_conflict.is_some() {
+                break;
+            }
+        }
+        if let Some(conflict) = untracked_conflict {
+            return ReplayResult::error(format!(
+                "untracked working tree file would be overwritten by rebase: {}",
+                conflict.display()
+            ));
+        }
+
+        for (path, kind) in &conflict_items {
+            if let Err(e) = write_conflict_markers(&workdir, path, marker_eol, commit_short, *kind)
+            {
+                return ReplayResult::error(e);
+            }
+        }
+
         // Update index with conflict entries
         let index_file = path::index();
         let mut index = git_internal::internal::index::Index::new();

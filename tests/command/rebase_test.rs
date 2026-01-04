@@ -2559,6 +2559,161 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
 
 #[tokio::test]
 #[serial]
+async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
+    use libra::command::rebase::RebaseState;
+
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    // Base commit on master
+    fs::write(temp_path.path().join("conflict.txt"), "base").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["conflict.txt".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("Base".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+    })
+    .await;
+
+    // Feature commit adds a file and changes conflict.txt
+    switch::execute(SwitchArgs {
+        branch: None,
+        create: Some("feature".to_string()),
+        detach: false,
+    })
+    .await;
+
+    fs::write(temp_path.path().join("conflict.txt"), "feature").unwrap();
+    fs::write(temp_path.path().join("new.txt"), "added").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["conflict.txt".to_string(), "new.txt".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("Feature adds new.txt".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+    })
+    .await;
+
+    // Remove the file so HEAD no longer tracks it.
+    fs::remove_file(temp_path.path().join("new.txt")).unwrap();
+    commit::execute(CommitArgs {
+        message: Some("Feature removes new.txt".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: true,
+    })
+    .await;
+
+    // Master conflicting change
+    switch::execute(SwitchArgs {
+        branch: Some("master".to_string()),
+        create: None,
+        detach: false,
+    })
+    .await;
+
+    fs::write(temp_path.path().join("conflict.txt"), "master").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["conflict.txt".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("Master conflict".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+    })
+    .await;
+
+    // Rebase feature onto master with an untracked file at the added path.
+    switch::execute(SwitchArgs {
+        branch: Some("feature".to_string()),
+        create: None,
+        detach: false,
+    })
+    .await;
+
+    fs::write(temp_path.path().join("new.txt"), "keep me").unwrap();
+
+    execute(RebaseArgs {
+        upstream: Some("master".to_string()),
+        continue_rebase: false,
+        abort: false,
+        skip: false,
+    })
+    .await;
+
+    let new_content = fs::read_to_string(temp_path.path().join("new.txt")).unwrap();
+    assert_eq!(new_content, "keep me");
+
+    assert!(
+        RebaseState::is_in_progress()
+            .await
+            .expect("failed to query rebase state"),
+        "Expected rebase to stop for untracked overwrite"
+    );
+
+    // Clean up
+    execute(RebaseArgs {
+        upstream: None,
+        continue_rebase: false,
+        abort: true,
+        skip: false,
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
 async fn test_rebase_continue_requires_resolution() {
     use libra::command::rebase::RebaseState;
     use libra::internal::head::Head;
