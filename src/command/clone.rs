@@ -4,13 +4,14 @@ use std::{cell::Cell, env, fs, path::PathBuf};
 
 use clap::Parser;
 use colored::Colorize;
-use git_internal::hash::{ObjectHash, get_hash_kind};
+use git_internal::hash::{HashKind, ObjectHash, get_hash_kind};
 use scopeguard::defer;
 use sea_orm::DatabaseTransaction;
 
 use super::fetch::{self};
 use crate::{
     command::{self, branch, restore::RestoreArgs},
+    git_protocol::ServiceType::UploadPack,
     internal::{
         branch::Branch,
         config::{Config, RemoteConfig},
@@ -50,6 +51,11 @@ pub async fn execute(args: CloneArgs) {
 
     /* create local path */
     let local_path = PathBuf::from(local_path);
+    let local_path = if local_path.is_absolute() {
+        local_path
+    } else {
+        util::cur_dir().join(&local_path)
+    };
     {
         if local_path.exists() && !util::is_empty_dir(&local_path) {
             eprintln!(
@@ -90,6 +96,33 @@ pub async fn execute(args: CloneArgs) {
         );
         return;
     }
+    // discovery references
+    let remote_client = match fetch::RemoteClient::from_spec(&remote_repo) {
+        Ok(client) => client,
+        Err(e) => {
+            eprintln!("fatal: {e}");
+            return;
+        }
+    };
+    // fetch discovery result
+    let discovery = match remote_client.discovery_reference(UploadPack).await {
+        Ok(result) => result,
+        Err(e) => {
+            eprintln!("fatal: {e}");
+            return;
+        }
+    };
+    // initialize local repository‘s object database
+    let object_format = match discovery.hash_kind {
+        HashKind::Sha1 => "sha1".to_string(),
+        HashKind::Sha256 => "sha256".to_string(),
+    };
+    // adjust remote repo path for local client
+    let remote_repo = match &remote_client {
+        fetch::RemoteClient::Http(_) => remote_repo,
+        fetch::RemoteClient::Local(client) => client.repo_path().to_string_lossy().to_string(),
+        fetch::RemoteClient::Git(_) => remote_repo,
+    };
 
     // CAUTION: change [current_dir] to the repo directory
     env::set_current_dir(&local_path).unwrap();
@@ -100,7 +133,7 @@ pub async fn execute(args: CloneArgs) {
         quiet: false,
         template: None,
         shared: None,
-        object_format: None,
+        object_format: Some(object_format),
     };
     command::init::execute(init_args).await;
 

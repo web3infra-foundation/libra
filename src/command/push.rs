@@ -11,7 +11,7 @@ use bytes::BytesMut;
 use clap::Parser;
 use colored::Colorize;
 use git_internal::{
-    hash::{ObjectHash, get_hash_kind},
+    hash::{HashKind, ObjectHash, get_hash_kind},
     internal::{
         metadata::{EntryMeta, MetaAttached},
         object::{
@@ -34,7 +34,10 @@ use crate::{
         config::Config,
         db::get_db_conn_instance,
         head::Head,
-        protocol::{ProtocolClient, https_client::HttpsClient, lfs_client::LFSClient},
+        protocol::{
+            ProtocolClient, get_wire_hash_kind, https_client::HttpsClient, lfs_client::LFSClient,
+            set_wire_hash_kind,
+        },
         reflog::{Reflog, ReflogAction, ReflogContext, ReflogError},
     },
     utils::object_ext::{BlobExt, CommitExt, TreeExt},
@@ -125,13 +128,23 @@ pub async fn execute(args: PushArgs) {
     }
 
     let client = HttpsClient::from_url(&url);
-    let refs = match client.discovery_reference(ReceivePack).await {
-        Ok(refs) => refs,
+    let discovery = match client.discovery_reference(ReceivePack).await {
+        Ok(result) => result,
         Err(e) => {
             eprintln!("fatal: {e}");
             return;
         }
     };
+    let local_kind = get_hash_kind();
+    if discovery.hash_kind != local_kind {
+        eprintln!(
+            "fatal: remote object format '{}' does not match local '{}'",
+            discovery.hash_kind, local_kind
+        );
+        return;
+    }
+    set_wire_hash_kind(discovery.hash_kind);
+    let refs = discovery.refs;
 
     let tracked_branch = Config::get("branch", Some(&branch), "merge")
         .await // New branch may not have tracking branch
@@ -141,19 +154,20 @@ pub async fn execute(args: PushArgs) {
     // [0; 20] if new branch
     let remote_hash = tracked_ref
         .map(|r| r._hash.clone())
-        .unwrap_or(ObjectHash::default().to_string());
+        .unwrap_or(ObjectHash::zero_str(get_hash_kind()));
     if remote_hash == commit_hash {
         println!("Everything up-to-date");
         return;
     }
 
     // Check if remote is ancestor of local (for fast-forward check)
-    let remote_sha1 = ObjectHash::from_str(&remote_hash).unwrap();
-    let local_sha1 = ObjectHash::from_str(&commit_hash).unwrap();
-    let can_fast_forward = if remote_sha1 == ObjectHash::default() {
+    let remote_oid = ObjectHash::from_str(&remote_hash).unwrap();
+    let local_oid = ObjectHash::from_str(&commit_hash).unwrap();
+    let zero_oid = zero_object_hash();
+    let can_fast_forward = if remote_oid == zero_oid {
         true // New branch, always fast-forwardable
     } else {
-        is_ancestor(&remote_sha1, &local_sha1)
+        is_ancestor(&remote_oid, &local_oid)
     };
 
     // If remote has commits that local doesn't have and force is not specified, reject push
@@ -208,9 +222,14 @@ pub async fn execute(args: PushArgs) {
     }
 
     let mut data = BytesMut::new();
+    let mut capabilities = vec!["report-status"];
+    if get_wire_hash_kind() == HashKind::Sha256 {
+        capabilities.push("object-format=sha256");
+    }
+    let capability = capabilities.join(" ");
     add_pkt_line_string(
         &mut data,
-        format!("{remote_hash} {commit_hash} {tracked_branch}\0report-status\n"),
+        format!("{remote_hash} {commit_hash} {tracked_branch}\0{capability}\n"),
     );
     data.extend_from_slice(b"0000");
     tracing::debug!("{:?}", data);
@@ -337,7 +356,8 @@ async fn update_remote_tracking(remote_tracking_branch: &str, commit_hash: &str)
 
 /// collect all commits from `commit_id` to root commit
 fn collect_history_commits(commit_id: &ObjectHash) -> HashSet<ObjectHash> {
-    if commit_id == &ObjectHash::default() {
+    let zero_oid = zero_object_hash();
+    if commit_id == &zero_oid {
         // 0000...0000 means not exist
         return HashSet::new();
     }
@@ -365,7 +385,8 @@ fn incremental_objs(local_ref: ObjectHash, remote_ref: ObjectHash) -> HashSet<En
     tracing::debug!("local_ref: {}, remote_ref: {}", local_ref, remote_ref);
 
     // just fast-forward optimization
-    if remote_ref != ObjectHash::default() {
+    let zero_oid = zero_object_hash();
+    if remote_ref != zero_oid {
         // remote exists
         let mut commit = match Commit::try_load(&local_ref) {
             Some(c) => c,
@@ -476,6 +497,11 @@ fn incremental_objs(local_ref: ObjectHash, remote_ref: ObjectHash) -> HashSet<En
 
     println!("Counting objects: {} done.", objs.len());
     objs
+}
+
+fn zero_object_hash() -> ObjectHash {
+    ObjectHash::from_bytes(&vec![0u8; get_hash_kind().size()])
+        .expect("zero hash should match hash kind size")
 }
 
 /// Check if `ancestor` is an ancestor of `descendant` using breadth-first search.

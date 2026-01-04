@@ -47,7 +47,7 @@ rust_library(
     visibility = ["PUBLIC"],
     deps = [
         "//third-party/rust/crates/bytes/1.11.0:bytes",
-        "//third-party/rust/crates/libc/0.2.177:libc",
+        "//third-party/rust/crates/libc/0.2.178:libc",
         "//third-party/rust/crates/mio/1.1.0:mio",
         "//third-party/rust/crates/pin-project-lite/0.2.16:pin-project-lite",
         "//third-party/rust/crates/signal-hook-registry/1.4.7:signal-hook-registry",

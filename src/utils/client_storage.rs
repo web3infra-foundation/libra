@@ -13,7 +13,7 @@ use byteorder::{BigEndian, ReadBytesExt};
 use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 use git_internal::{
     errors::GitError,
-    hash::ObjectHash,
+    hash::{HashKind, ObjectHash, get_hash_kind},
     internal::{
         object::{commit::Commit, types::ObjectType},
         pack::{Pack, cache_object::CacheObject},
@@ -37,6 +37,9 @@ static PACK_OBJ_CACHE: Lazy<Mutex<LruCache<String, CacheObject>>> = Lazy::new(||
 
 static PACK_FILE_CACHE: Lazy<Mutex<HashMap<String, Vec<u8>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+
+// IDX file magic number
+const IDX_MAGIC: [u8; 4] = [0xFF, 0x74, 0x4F, 0x63];
 
 #[derive(Default)]
 pub struct ClientStorage {
@@ -364,6 +367,13 @@ impl ClientStorage {
     }
 }
 const FANOUT: u64 = 256 * 4;
+
+// IDX version
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdxVersion {
+    V1,
+    V2,
+}
 // TODO refactor to `PackReader`
 impl ClientStorage {
     /// List all .pack files in `pack` directory
@@ -388,10 +398,34 @@ impl ClientStorage {
         let packs = self.list_all_packs();
         let mut idxs = Vec::new();
         for pack in packs {
+            // corresponding .idx file
             let idx = pack.with_extension("idx");
-            if !idx.exists() {
-                command::index_pack::build_index_v1(pack.to_str().unwrap(), idx.to_str().unwrap())
+            // check if .idx exists & version
+            let want_v2 = get_hash_kind() == HashKind::Sha256;
+            let needs_rebuild = if idx.exists() {
+                if want_v2 {
+                    !matches!(Self::read_idx_version_path(&idx), Ok(IdxVersion::V2))
+                } else {
+                    false
+                }
+            } else {
+                true
+            };
+            // build .idx if not exists or version mismatch
+            if needs_rebuild {
+                if want_v2 {
+                    command::index_pack::build_index_v2(
+                        pack.to_str().unwrap(),
+                        idx.to_str().unwrap(),
+                    )
                     .unwrap();
+                } else {
+                    command::index_pack::build_index_v1(
+                        pack.to_str().unwrap(),
+                        idx.to_str().unwrap(),
+                    )
+                    .unwrap();
+                }
             }
             idxs.push(idx);
         }
@@ -413,38 +447,93 @@ impl ClientStorage {
 
         Ok(None)
     }
+    /// Read .idx file version
+    fn read_idx_version(file: &mut fs::File) -> Result<IdxVersion, io::Error> {
+        let mut header = [0u8; 4];
+        file.read_exact(&mut header)?;
+        if header == IDX_MAGIC {
+            let mut version_buf = [0u8; 4];
+            file.read_exact(&mut version_buf)?;
+            let version = u32::from_be_bytes(version_buf);
+            // check version,only support v2 now
+            if version != 2 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("unsupported pack index version {version}"),
+                ));
+            }
+            Ok(IdxVersion::V2)
+        } else {
+            file.seek(io::SeekFrom::Start(0))?;
+            Ok(IdxVersion::V1)
+        }
+    }
 
-    fn read_idx_fanout(idx_file: &Path) -> Result<[u32; 256], io::Error> {
+    /// Read .idx file version by path
+    fn read_idx_version_path(idx_file: &Path) -> Result<IdxVersion, io::Error> {
         let mut idx_file = fs::File::open(idx_file)?;
-        // const FANOUT: usize = 256 * 4;
+        Self::read_idx_version(&mut idx_file)
+    }
+
+    /// Read .idx fanout
+    fn read_idx_fanout(idx_file: &Path) -> Result<(IdxVersion, [u32; 256]), io::Error> {
+        let mut idx_file = fs::File::open(idx_file)?;
+        let version = Self::read_idx_version(&mut idx_file)?;
+        let fanout_offset = match version {
+            IdxVersion::V1 => 0,
+            IdxVersion::V2 => 8,
+        };
+        idx_file.seek(io::SeekFrom::Start(fanout_offset))?;
         let mut fanout: [u32; 256] = [0; 256]; // 256 * 4 bytes
         let mut buf = [0; 4];
         fanout.iter_mut().for_each(|x| {
             idx_file.read_exact(&mut buf).unwrap();
             *x = u32::from_be_bytes(buf);
         });
-        Ok(fanout)
+        Ok((version, fanout))
     }
 
     /// List all objects hash in .idx file
     fn list_idx_objects(idx_file: &Path) -> Result<Vec<ObjectHash>, io::Error> {
-        let fanout: [u32; 256] = Self::read_idx_fanout(idx_file)?; // TODO param change to `&mut File`, to auto seek
+        let (version, fanout) = Self::read_idx_fanout(idx_file)?; // TODO param change to `&mut File`, to auto seek
         let mut idx_file = fs::File::open(idx_file)?;
-        idx_file.seek(io::SeekFrom::Start(FANOUT))?; // important!
+        let object_count = fanout[255] as u64;
+        let hash_size = get_hash_kind().size() as u64;
+
+        let names_offset = match version {
+            IdxVersion::V1 => FANOUT,
+            IdxVersion::V2 => FANOUT + 8,
+        };
+        idx_file.seek(io::SeekFrom::Start(names_offset))?;
 
         let mut objs = Vec::new();
-        for _ in 0..fanout[255] {
-            let _offset = idx_file.read_u32::<BigEndian>()?;
-            let hash = read_sha(&mut idx_file)?;
-
-            objs.push(hash);
+        match version {
+            IdxVersion::V1 => {
+                if hash_size != 20 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "pack index v1 only supports sha1",
+                    ));
+                }
+                for _ in 0..object_count {
+                    let _offset = idx_file.read_u32::<BigEndian>()?;
+                    let hash = read_sha(&mut idx_file)?;
+                    objs.push(hash);
+                }
+            }
+            IdxVersion::V2 => {
+                for _ in 0..object_count {
+                    let hash = read_sha(&mut idx_file)?;
+                    objs.push(hash);
+                }
+            }
         }
         Ok(objs)
     }
 
     /// Read object `offset` from .idx file by `hash`
     fn read_idx(idx_file: &Path, obj_id: &ObjectHash) -> Result<Option<u64>, io::Error> {
-        let fanout: [u32; 256] = Self::read_idx_fanout(idx_file)?;
+        let (version, fanout) = Self::read_idx_fanout(idx_file)?;
         let mut idx_file = fs::File::open(idx_file)?;
 
         let first_byte = obj_id.as_ref()[0];
@@ -454,18 +543,58 @@ impl ClientStorage {
             fanout[first_byte as usize - 1] as usize
         };
         let end = fanout[first_byte as usize] as usize;
+        let object_count = fanout[255] as u64;
+        let hash_size = get_hash_kind().size() as u64;
 
-        idx_file.seek(io::SeekFrom::Start(FANOUT + 24 * start as u64))?;
-        for _ in start..end {
-            let offset = idx_file.read_u32::<BigEndian>()?;
-            let hash = read_sha(&mut idx_file)?;
+        match version {
+            IdxVersion::V1 => {
+                if hash_size != 20 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "pack index v1 only supports sha1",
+                    ));
+                }
+                idx_file.seek(io::SeekFrom::Start(FANOUT + 24 * start as u64))?;
+                for _ in start..end {
+                    let offset = idx_file.read_u32::<BigEndian>()?;
+                    let hash = read_sha(&mut idx_file)?;
 
-            if &hash == obj_id {
-                return Ok(Some(offset as u64));
+                    if &hash == obj_id {
+                        return Ok(Some(offset as u64));
+                    }
+                }
+                Ok(None)
+            }
+            IdxVersion::V2 => {
+                let names_offset = FANOUT + 8;
+                idx_file.seek(io::SeekFrom::Start(names_offset + hash_size * start as u64))?;
+                let mut found_index = None;
+                for i in start..end {
+                    let hash = read_sha(&mut idx_file)?;
+                    if &hash == obj_id {
+                        found_index = Some(i as u64);
+                        break;
+                    }
+                }
+                let Some(index) = found_index else {
+                    return Ok(None);
+                };
+
+                let crc_offset = names_offset + object_count * hash_size;
+                let offsets_offset = crc_offset + object_count * 4;
+                idx_file.seek(io::SeekFrom::Start(offsets_offset + index * 4))?;
+                let offset = idx_file.read_u32::<BigEndian>()?;
+                if offset & 0x8000_0000 != 0 {
+                    let large_index = (offset & 0x7fff_ffff) as u64;
+                    let large_offsets_offset = offsets_offset + object_count * 4;
+                    idx_file.seek(io::SeekFrom::Start(large_offsets_offset + large_index * 8))?;
+                    let large_offset = idx_file.read_u64::<BigEndian>()?;
+                    Ok(Some(large_offset))
+                } else {
+                    Ok(Some(offset as u64))
+                }
             }
         }
-
-        Ok(None)
     }
 
     /// Get object from pack by .idx file
@@ -548,13 +677,121 @@ impl ClientStorage {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf};
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
-    use git_internal::internal::object::{ObjectTrait, blob::Blob, types::ObjectType};
+    use git_internal::{
+        errors::GitError,
+        hash::{HashKind, get_hash_kind, set_hash_kind, set_hash_kind_for_test},
+        internal::{
+            metadata::{EntryMeta, MetaAttached},
+            object::{ObjectTrait, blob::Blob, types::ObjectType},
+            pack::{encode::PackEncoder, entry::Entry},
+        },
+    };
     use serial_test::serial;
+    use tempfile::tempdir;
+    use tokio::sync::mpsc;
 
-    use super::ClientStorage;
+    use super::{ClientStorage, IdxVersion};
     use crate::utils::test;
+
+    async fn encode_entries_to_pack_bytes(entries: Vec<Entry>) -> Result<Vec<u8>, GitError> {
+        assert!(!entries.is_empty(), "encode requires at least one entry");
+        let (pack_tx, mut pack_rx) = mpsc::channel::<Vec<u8>>(128);
+        let (entry_tx, entry_rx) = mpsc::channel::<MetaAttached<Entry, EntryMeta>>(entries.len());
+        let mut encoder = PackEncoder::new(entries.len(), 0, pack_tx);
+        let kind = get_hash_kind();
+        let encode_handle = tokio::spawn(async move {
+            set_hash_kind(kind);
+            encoder.encode(entry_rx).await
+        });
+
+        for entry in entries {
+            entry_tx
+                .send(MetaAttached {
+                    inner: entry,
+                    meta: EntryMeta::new(),
+                })
+                .await
+                .map_err(|e| GitError::PackEncodeError(format!("send entry failed: {e}")))?;
+        }
+        drop(entry_tx);
+
+        let mut pack_bytes = Vec::new();
+        while let Some(chunk) = pack_rx.recv().await {
+            pack_bytes.extend_from_slice(&chunk);
+        }
+
+        let encode_result = encode_handle
+            .await
+            .map_err(|e| GitError::PackEncodeError(format!("pack encoder task join error: {e}")))?;
+        encode_result?;
+        Ok(pack_bytes)
+    }
+
+    fn build_pack_bytes(entries: Vec<Entry>) -> Result<Vec<u8>, GitError> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        rt.block_on(encode_entries_to_pack_bytes(entries))
+    }
+
+    fn write_pack_to_objects(
+        pack_bytes: &[u8],
+        label: &str,
+    ) -> Result<(tempfile::TempDir, PathBuf, PathBuf), GitError> {
+        let dir = tempdir()?;
+        let objects_dir = dir.path().join("objects");
+        let pack_dir = objects_dir.join("pack");
+        fs::create_dir_all(&pack_dir)?;
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let pack_path = pack_dir.join(format!("client-storage-{label}-{unique}.pack"));
+        fs::write(&pack_path, pack_bytes)?;
+        Ok((dir, objects_dir, pack_path))
+    }
+
+    #[test]
+    fn client_storage_reads_pack_sha1_with_v1_idx() -> Result<(), GitError> {
+        let _guard = set_hash_kind_for_test(HashKind::Sha1);
+        let blob = Blob::from_content("client-storage-sha1");
+        let pack_bytes = build_pack_bytes(vec![Entry::from(blob.clone())])?;
+        let (_tmp, objects_dir, pack_path) = write_pack_to_objects(&pack_bytes, "sha1")?;
+
+        let storage = ClientStorage::init(objects_dir);
+        let data = storage.get(&blob.id)?;
+        assert_eq!(data, blob.data);
+
+        let idx_path = pack_path.with_extension("idx");
+        assert!(idx_path.exists(), "idx file not created");
+        let version = ClientStorage::read_idx_version_path(&idx_path)?;
+        assert_eq!(version, IdxVersion::V1);
+        Ok(())
+    }
+
+    #[test]
+    fn client_storage_reads_pack_sha256_with_v2_idx() -> Result<(), GitError> {
+        let _guard = set_hash_kind_for_test(HashKind::Sha256);
+        let blob = Blob::from_content("client-storage-sha256");
+        let pack_bytes = build_pack_bytes(vec![Entry::from(blob.clone())])?;
+        let (_tmp, objects_dir, pack_path) = write_pack_to_objects(&pack_bytes, "sha256")?;
+
+        let storage = ClientStorage::init(objects_dir);
+        let data = storage.get(&blob.id)?;
+        assert_eq!(data, blob.data);
+
+        let idx_path = pack_path.with_extension("idx");
+        assert!(idx_path.exists(), "idx file not created");
+        let version = ClientStorage::read_idx_version_path(&idx_path)?;
+        assert_eq!(version, IdxVersion::V2);
+        Ok(())
+    }
 
     #[test]
     #[ignore]

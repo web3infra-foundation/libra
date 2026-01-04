@@ -225,6 +225,7 @@ impl Branch {
 
 #[cfg(test)]
 mod tests {
+    use git_internal::hash::{HashKind, get_hash_kind, set_hash_kind_for_test};
     use serial_test::serial;
     use tempfile::tempdir;
 
@@ -234,11 +235,12 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_search_branch() {
+        let _guard = set_hash_kind_for_test(HashKind::Sha256);
         let temp_path = tempdir().unwrap();
         test::setup_with_new_libra_in(temp_path.path()).await;
         let _guard = test::ChangeDirGuard::new(temp_path.path());
 
-        let commit_hash = ObjectHash::default().to_string();
+        let commit_hash = ObjectHash::zero_str(get_hash_kind()).to_string();
         Branch::update_branch("upstream/origin/master", &commit_hash, None).await; // should match
         Branch::update_branch("origin/master", &commit_hash, Some("upstream")).await; // should match
         Branch::update_branch("master", &commit_hash, Some("upstream/origin")).await; // should match

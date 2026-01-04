@@ -13,7 +13,8 @@ use tokio::{io::AsyncWriteExt, process::Command};
 use url::Url;
 
 use super::{
-    DiscRef, FetchStream, ProtocolClient, generate_upload_pack_content, parse_discovered_references,
+    DiscoveryResult, FetchStream, ProtocolClient, generate_upload_pack_content,
+    parse_discovered_references,
 };
 use crate::git_protocol::ServiceType;
 
@@ -66,7 +67,7 @@ impl LocalClient {
     pub async fn discovery_reference(
         &self,
         service: ServiceType,
-    ) -> Result<Vec<DiscRef>, GitError> {
+    ) -> Result<DiscoveryResult, GitError> {
         if service != ServiceType::UploadPack {
             return Err(GitError::NetworkError(
                 "Unsupported service type for local protocol".to_string(),
@@ -170,7 +171,7 @@ mod tests {
             .discovery_reference(ServiceType::UploadPack)
             .await
             .unwrap();
-        assert!(refs.is_empty());
+        assert!(refs.refs.is_empty());
     }
 
     #[tokio::test]
@@ -261,7 +262,7 @@ mod tests {
             .discovery_reference(ServiceType::UploadPack)
             .await
             .unwrap();
-        assert!(!refs.is_empty());
+        assert!(!refs.refs.is_empty());
 
         let want = vec![head];
         let have = Vec::new();

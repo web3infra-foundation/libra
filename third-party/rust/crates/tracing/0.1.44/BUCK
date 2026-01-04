@@ -5,10 +5,10 @@ load("@buckal//:wrapper.bzl", "buildscript_run", "rust_binary", "rust_library")
 
 http_archive(
     name = "tracing-vendor",
-    urls = ["https://static.crates.io/crates/tracing/tracing-0.1.43.crate"],
-    sha256 = "2d15d90a0b5c19378952d479dc858407149d7bb45a14de0142f6c534b16fc647",
+    urls = ["https://static.crates.io/crates/tracing/tracing-0.1.44.crate"],
+    sha256 = "63e71662fa4b2a2c3a26f570f037eb95bb1f85397f3cd8076caed2f026a6d100",
     type = "tar.gz",
-    strip_prefix = "tracing-0.1.43",
+    strip_prefix = "tracing-0.1.44",
     out = "vendor",
 )
 
@@ -36,6 +36,6 @@ rust_library(
         "//third-party/rust/crates/log/0.4.28:log",
         "//third-party/rust/crates/pin-project-lite/0.2.16:pin-project-lite",
         "//third-party/rust/crates/tracing-attributes/0.1.31:tracing-attributes",
-        "//third-party/rust/crates/tracing-core/0.1.35:tracing-core",
+        "//third-party/rust/crates/tracing-core/0.1.36:tracing-core",
     ],
 )

@@ -2,11 +2,6 @@
 
 use regex::Regex;
 
-pub const ZERO_ID: &str = match std::str::from_utf8(&[b'0'; 40]) {
-    Ok(s) => s,
-    Err(_) => panic!("can't get ZERO_ID"),
-};
-
 /// Format commit message with GPG signature<br>
 /// There must be a `blank line`(\n) before `message`, or remote unpack failed.<br>
 /// If there is `GPG signature`,
