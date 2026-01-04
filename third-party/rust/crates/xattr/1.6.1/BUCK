@@ -29,5 +29,5 @@ rust_library(
     ],
     rustc_flags = ["@$(location :xattr-manifest[env_flags])"],
     visibility = ["PUBLIC"],
-    deps = ["//third-party/rust/crates/rustix/1.1.2:rustix"],
+    deps = ["//third-party/rust/crates/rustix/1.1.3:rustix"],
 )

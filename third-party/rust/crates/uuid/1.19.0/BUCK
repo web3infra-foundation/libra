@@ -5,10 +5,10 @@ load("@buckal//:wrapper.bzl", "buildscript_run", "rust_binary", "rust_library")
 
 http_archive(
     name = "uuid-vendor",
-    urls = ["https://static.crates.io/crates/uuid/uuid-1.18.1.crate"],
-    sha256 = "2f87b8aa10b915a06587d0dec516c282ff295b475d94abf425d62b57710070a2",
+    urls = ["https://static.crates.io/crates/uuid/uuid-1.19.0.crate"],
+    sha256 = "e2e054861b4bd027cd373e18e8d8d8e6548085000e41290d95ce0c373a654b4a",
     type = "tar.gz",
-    strip_prefix = "uuid-1.18.1",
+    strip_prefix = "uuid-1.19.0",
     out = "vendor",
 )
 
@@ -22,7 +22,7 @@ rust_library(
     srcs = [":uuid-vendor"],
     crate = "uuid",
     crate_root = "vendor/src/lib.rs",
-    edition = "2018",
+    edition = "2021",
     features = [
         "default",
         "rng",
@@ -34,6 +34,6 @@ rust_library(
     visibility = ["PUBLIC"],
     deps = [
         "//third-party/rust/crates/getrandom/0.3.4:getrandom",
-        "//third-party/rust/crates/serde/1.0.228:serde",
+        "//third-party/rust/crates/serde_core/1.0.228:serde_core",
     ],
 )
