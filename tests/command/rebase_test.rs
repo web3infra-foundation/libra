@@ -665,9 +665,7 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         all: false,
     })
     .await;
-    let orig_head = Head::current_commit()
-        .await
-        .expect("expected feature HEAD");
+    let orig_head = Head::current_commit().await.expect("expected feature HEAD");
 
     // Advance master to force a rebase
     switch::execute(SwitchArgs {
@@ -700,9 +698,7 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         all: false,
     })
     .await;
-    let master_head = Head::current_commit()
-        .await
-        .expect("expected master HEAD");
+    let master_head = Head::current_commit().await.expect("expected master HEAD");
 
     // Rebase feature onto master
     switch::execute(SwitchArgs {
@@ -719,9 +715,7 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
     })
     .await;
 
-    let rebased_head = Head::current_commit()
-        .await
-        .expect("expected rebased HEAD");
+    let rebased_head = Head::current_commit().await.expect("expected rebased HEAD");
     assert_ne!(
         rebased_head, orig_head,
         "rebase should rewrite the feature tip"
@@ -767,9 +761,7 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         branch_after_abort.commit, orig_head,
         "abort should restore branch ref to orig_head"
     );
-    let head_after_abort = Head::current_commit()
-        .await
-        .expect("expected HEAD commit");
+    let head_after_abort = Head::current_commit().await.expect("expected HEAD commit");
     assert_eq!(
         head_after_abort, orig_head,
         "abort should restore HEAD to orig_head"
