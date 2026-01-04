@@ -598,6 +598,183 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
 
 #[tokio::test]
 #[serial]
+async fn test_rebase_abort_restores_branch_after_finalize_failure() {
+    use std::collections::VecDeque;
+
+    use libra::command::rebase::RebaseState;
+    use libra::internal::{branch::Branch, head::Head};
+
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    // Create base commit on master
+    fs::write(temp_path.path().join("base.txt"), "base").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["base.txt".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("Base commit".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+    })
+    .await;
+
+    // Create feature branch and commit
+    switch::execute(SwitchArgs {
+        branch: None,
+        create: Some("feature".to_string()),
+        detach: false,
+    })
+    .await;
+    fs::write(temp_path.path().join("feature.txt"), "feature").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["feature.txt".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("Feature commit".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+    })
+    .await;
+    let orig_head = Head::current_commit().await.expect("expected feature HEAD");
+
+    // Advance master to force a rebase
+    switch::execute(SwitchArgs {
+        branch: Some("master".to_string()),
+        create: None,
+        detach: false,
+    })
+    .await;
+    fs::write(temp_path.path().join("master.txt"), "master").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["master.txt".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("Master commit".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+    })
+    .await;
+    let master_head = Head::current_commit().await.expect("expected master HEAD");
+
+    // Rebase feature onto master
+    switch::execute(SwitchArgs {
+        branch: Some("feature".to_string()),
+        create: None,
+        detach: false,
+    })
+    .await;
+    execute(RebaseArgs {
+        upstream: Some("master".to_string()),
+        continue_rebase: false,
+        abort: false,
+        skip: false,
+    })
+    .await;
+
+    let rebased_head = Head::current_commit().await.expect("expected rebased HEAD");
+    assert_ne!(
+        rebased_head, orig_head,
+        "rebase should rewrite the feature tip"
+    );
+    let branch_after_rebase = Branch::find_branch("feature", None)
+        .await
+        .expect("feature branch should exist");
+    assert_eq!(branch_after_rebase.commit, rebased_head);
+
+    // Simulate a failed finalize: branch already moved, but rebase state still exists.
+    let state = RebaseState {
+        head_name: "feature".to_string(),
+        onto: master_head,
+        orig_head,
+        todo: VecDeque::new(),
+        done: Vec::new(),
+        stopped_sha: None,
+        current_head: rebased_head,
+    };
+    state
+        .save()
+        .await
+        .expect("failed to save simulated rebase state");
+    assert!(
+        RebaseState::is_in_progress()
+            .await
+            .expect("failed to query rebase state")
+    );
+
+    // Abort should restore the original branch ref.
+    execute(RebaseArgs {
+        upstream: None,
+        continue_rebase: false,
+        abort: true,
+        skip: false,
+    })
+    .await;
+
+    let branch_after_abort = Branch::find_branch("feature", None)
+        .await
+        .expect("feature branch should exist");
+    assert_eq!(
+        branch_after_abort.commit, orig_head,
+        "abort should restore branch ref to orig_head"
+    );
+    let head_after_abort = Head::current_commit().await.expect("expected HEAD commit");
+    assert_eq!(
+        head_after_abort, orig_head,
+        "abort should restore HEAD to orig_head"
+    );
+    assert!(
+        !RebaseState::is_in_progress()
+            .await
+            .expect("failed to query rebase state")
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_rebase_continue_no_rebase() {
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
@@ -2368,6 +2545,161 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
     assert_eq!(
         clean_content, "feature-clean",
         "Non-conflicting file should be updated in workdir"
+    );
+
+    // Clean up
+    execute(RebaseArgs {
+        upstream: None,
+        continue_rebase: false,
+        abort: true,
+        skip: false,
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
+    use libra::command::rebase::RebaseState;
+
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    // Base commit on master
+    fs::write(temp_path.path().join("conflict.txt"), "base").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["conflict.txt".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("Base".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+    })
+    .await;
+
+    // Feature commit adds a file and changes conflict.txt
+    switch::execute(SwitchArgs {
+        branch: None,
+        create: Some("feature".to_string()),
+        detach: false,
+    })
+    .await;
+
+    fs::write(temp_path.path().join("conflict.txt"), "feature").unwrap();
+    fs::write(temp_path.path().join("new.txt"), "added").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["conflict.txt".to_string(), "new.txt".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("Feature adds new.txt".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+    })
+    .await;
+
+    // Remove the file so HEAD no longer tracks it.
+    fs::remove_file(temp_path.path().join("new.txt")).unwrap();
+    commit::execute(CommitArgs {
+        message: Some("Feature removes new.txt".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: true,
+    })
+    .await;
+
+    // Master conflicting change
+    switch::execute(SwitchArgs {
+        branch: Some("master".to_string()),
+        create: None,
+        detach: false,
+    })
+    .await;
+
+    fs::write(temp_path.path().join("conflict.txt"), "master").unwrap();
+    add::execute(AddArgs {
+        pathspec: vec!["conflict.txt".to_string()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("Master conflict".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+    })
+    .await;
+
+    // Rebase feature onto master with an untracked file at the added path.
+    switch::execute(SwitchArgs {
+        branch: Some("feature".to_string()),
+        create: None,
+        detach: false,
+    })
+    .await;
+
+    fs::write(temp_path.path().join("new.txt"), "keep me").unwrap();
+
+    execute(RebaseArgs {
+        upstream: Some("master".to_string()),
+        continue_rebase: false,
+        abort: false,
+        skip: false,
+    })
+    .await;
+
+    let new_content = fs::read_to_string(temp_path.path().join("new.txt")).unwrap();
+    assert_eq!(new_content, "keep me");
+
+    assert!(
+        RebaseState::is_in_progress()
+            .await
+            .expect("failed to query rebase state"),
+        "Expected rebase to stop for untracked overwrite"
     );
 
     // Clean up

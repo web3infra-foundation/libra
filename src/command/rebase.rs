@@ -28,7 +28,7 @@ use crate::{
     utils::{
         ignore::IgnorePolicy,
         object_ext::{BlobExt, TreeExt},
-        path, util,
+        path, util, worktree,
     },
 };
 
@@ -1038,22 +1038,34 @@ async fn rebase_abort() {
 
     let branch_name_cloned = state.head_name.clone();
     let orig_head = state.orig_head;
-    if let Err(e) = with_reflog(
+    let orig_head_str = orig_head.to_string();
+    let orig_head_str_for_txn = orig_head_str.clone();
+    let reflog_result = with_reflog(
         abort_context,
         move |txn: &sea_orm::DatabaseTransaction| {
             Box::pin(async move {
+                Branch::update_branch_with_conn(
+                    txn,
+                    &branch_name_cloned,
+                    &orig_head_str_for_txn,
+                    None,
+                )
+                .await;
                 Head::update_with_conn(txn, Head::Branch(branch_name_cloned), None).await;
                 Ok(())
             })
         },
         true,
     )
-    .await
-    {
-        eprintln!("warning: failed to record reflog: {e}");
-        // Continue anyway
+    .await;
+    match reflog_result {
+        Ok(()) => {}
+        Err(e) => {
+            eprintln!("warning: failed to record reflog: {e}");
+            // Continue anyway; ensure branch ref is corrected.
+            Branch::update_branch_with_conn(db, &state.head_name, &orig_head_str, None).await;
+        }
     }
-
     Head::update_with_conn(db, Head::Branch(state.head_name.clone()), None).await;
 
     // Reset working directory to original HEAD
@@ -1465,7 +1477,7 @@ async fn rebase_worktree_guard(
         return false;
     }
 
-    if let Some(conflict) = untracked_overwrite_path(&unstaged.new, new_index) {
+    if let Some(conflict) = worktree::untracked_overwrite_path(&unstaged.new, new_index) {
         eprintln!(
             "fatal: untracked working tree file would be overwritten by rebase: {}",
             conflict.display()
@@ -1475,25 +1487,6 @@ async fn rebase_worktree_guard(
     }
 
     true
-}
-
-fn untracked_overwrite_path(
-    untracked: &[PathBuf],
-    new_index: &git_internal::internal::index::Index,
-) -> Option<PathBuf> {
-    let new_tracked = new_index.tracked_files();
-    for untracked_path in untracked {
-        for tracked_path in &new_tracked {
-            if paths_conflict(untracked_path, tracked_path) {
-                return Some(untracked_path.clone());
-            }
-        }
-    }
-    None
-}
-
-fn paths_conflict(left: &Path, right: &Path) -> bool {
-    left == right || left.starts_with(right) || right.starts_with(left)
 }
 
 /// Resolve a branch name or commit reference to a ObjectHash hash
@@ -1653,6 +1646,12 @@ async fn replay_commit_with_conflict_detection(
     commit_to_replay_id: &ObjectHash,
     new_parent_id: &ObjectHash,
 ) -> ReplayResult {
+    let index_file = path::index();
+    let current_index = match git_internal::internal::index::Index::load(&index_file) {
+        Ok(idx) => idx,
+        Err(e) => return ReplayResult::error(format!("index load: {:?}", e)),
+    };
+
     let commit_to_replay: Commit = match load_object(commit_to_replay_id) {
         Ok(c) => c,
         Err(e) => return ReplayResult::error(format!("error: {}", e)),
@@ -1689,11 +1688,15 @@ async fn replay_commit_with_conflict_detection(
     let our_items = &tree_items[2];
 
     let mut merged_items: HashMap<PathBuf, ObjectHash> = HashMap::new();
-    let mut conflicts: Vec<PathBuf> = Vec::new();
+    let mut conflict_items: Vec<(PathBuf, ConflictKind)> = Vec::new();
     let workdir = util::working_dir();
     let commit_abbrev = commit_to_replay_id.to_string();
     let commit_short = &commit_abbrev[..7];
     let marker_eol = conflict_marker_eol();
+    let untracked_paths = match worktree::untracked_workdir_paths(&current_index) {
+        Ok(paths) => paths,
+        Err(e) => return ReplayResult::error(format!("untracked workdir: {e}")),
+    };
 
     for path in all_paths {
         let base_hash = base_items.get(&path);
@@ -1706,17 +1709,43 @@ async fn replay_commit_with_conflict_detection(
             }
             MergeResolution::Delete => {}
             MergeResolution::Conflict(kind) => {
-                if let Err(e) =
-                    write_conflict_markers(&workdir, &path, marker_eol, commit_short, kind)
-                {
-                    return ReplayResult::error(e);
-                }
-                conflicts.push(path);
+                conflict_items.push((path, kind));
             }
         }
     }
 
+    let conflicts: Vec<PathBuf> = conflict_items
+        .iter()
+        .map(|(path, _)| path.clone())
+        .collect();
+
     if !conflicts.is_empty() {
+        let mut untracked_conflict = None;
+        for untracked in &untracked_paths {
+            for path in conflicts.iter().chain(merged_items.keys()) {
+                if worktree::paths_conflict(untracked, path) {
+                    untracked_conflict = Some(untracked.clone());
+                    break;
+                }
+            }
+            if untracked_conflict.is_some() {
+                break;
+            }
+        }
+        if let Some(conflict) = untracked_conflict {
+            return ReplayResult::error(format!(
+                "untracked working tree file would be overwritten by rebase: {}",
+                conflict.display()
+            ));
+        }
+
+        for (path, kind) in &conflict_items {
+            if let Err(e) = write_conflict_markers(&workdir, path, marker_eol, commit_short, *kind)
+            {
+                return ReplayResult::error(e);
+            }
+        }
+
         // Update index with conflict entries
         let index_file = path::index();
         let mut index = git_internal::internal::index::Index::new();
@@ -1782,6 +1811,7 @@ async fn replay_commit_with_conflict_detection(
 
         // Update working directory for non-conflicting paths so users can see clean changes.
         let mut tracked_paths: HashSet<PathBuf> = HashSet::new();
+        tracked_paths.extend(current_index.tracked_files());
         tracked_paths.extend(base_items.keys().cloned());
         tracked_paths.extend(their_items.keys().cloned());
         tracked_paths.extend(our_items.keys().cloned());
@@ -1831,11 +1861,6 @@ async fn replay_commit_with_conflict_detection(
     }
 
     // Update index and working directory
-    let index_file = path::index();
-    let current_index = match git_internal::internal::index::Index::load(&index_file) {
-        Ok(idx) => idx,
-        Err(e) => return ReplayResult::error(format!("index load: {:?}", e)),
-    };
     let mut index = git_internal::internal::index::Index::new();
     let new_tree: Tree = match load_object(&new_tree_id) {
         Ok(tree) => tree,
@@ -2011,12 +2036,19 @@ fn build_tree_recursively(
     Ok(tree.id)
 }
 
-/// Reset the working directory to match the new index state without touching untracked files.
+/// Reset the working directory to match the new index state without overwriting untracked files.
 fn reset_workdir_tracked_only(
     current_index: &git_internal::internal::index::Index,
     new_index: &git_internal::internal::index::Index,
 ) -> Result<(), String> {
     let workdir = util::working_dir();
+    let untracked_paths = worktree::untracked_workdir_paths(current_index)?;
+    if let Some(conflict) = worktree::untracked_overwrite_path(&untracked_paths, new_index) {
+        return Err(format!(
+            "untracked working tree file would be overwritten: {}",
+            conflict.display()
+        ));
+    }
     let new_tracked_paths: HashSet<_> = new_index.tracked_files().into_iter().collect();
 
     for path_buf in current_index.tracked_files() {
