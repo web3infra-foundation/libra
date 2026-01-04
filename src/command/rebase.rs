@@ -26,7 +26,7 @@ use crate::{
         reflog::{ReflogAction, ReflogContext, ReflogError, with_reflog},
     },
     utils::{
-        ignore::IgnorePolicy,
+        ignore::{self, IgnorePolicy},
         object_ext::{BlobExt, TreeExt},
         path, util,
     },
@@ -1653,6 +1653,12 @@ async fn replay_commit_with_conflict_detection(
     commit_to_replay_id: &ObjectHash,
     new_parent_id: &ObjectHash,
 ) -> ReplayResult {
+    let index_file = path::index();
+    let current_index = match git_internal::internal::index::Index::load(&index_file) {
+        Ok(idx) => idx,
+        Err(e) => return ReplayResult::error(format!("index load: {:?}", e)),
+    };
+
     let commit_to_replay: Commit = match load_object(commit_to_replay_id) {
         Ok(c) => c,
         Err(e) => return ReplayResult::error(format!("error: {}", e)),
@@ -1782,6 +1788,7 @@ async fn replay_commit_with_conflict_detection(
 
         // Update working directory for non-conflicting paths so users can see clean changes.
         let mut tracked_paths: HashSet<PathBuf> = HashSet::new();
+        tracked_paths.extend(current_index.tracked_files());
         tracked_paths.extend(base_items.keys().cloned());
         tracked_paths.extend(their_items.keys().cloned());
         tracked_paths.extend(our_items.keys().cloned());
@@ -1831,11 +1838,6 @@ async fn replay_commit_with_conflict_detection(
     }
 
     // Update index and working directory
-    let index_file = path::index();
-    let current_index = match git_internal::internal::index::Index::load(&index_file) {
-        Ok(idx) => idx,
-        Err(e) => return ReplayResult::error(format!("index load: {:?}", e)),
-    };
     let mut index = git_internal::internal::index::Index::new();
     let new_tree: Tree = match load_object(&new_tree_id) {
         Ok(tree) => tree,
@@ -2011,12 +2013,19 @@ fn build_tree_recursively(
     Ok(tree.id)
 }
 
-/// Reset the working directory to match the new index state without touching untracked files.
+/// Reset the working directory to match the new index state without overwriting untracked files.
 fn reset_workdir_tracked_only(
     current_index: &git_internal::internal::index::Index,
     new_index: &git_internal::internal::index::Index,
 ) -> Result<(), String> {
     let workdir = util::working_dir();
+    let untracked_paths = untracked_workdir_paths(current_index)?;
+    if let Some(conflict) = untracked_overwrite_path(&untracked_paths, new_index) {
+        return Err(format!(
+            "untracked working tree file would be overwritten: {}",
+            conflict.display()
+        ));
+    }
     let new_tracked_paths: HashSet<_> = new_index.tracked_files().into_iter().collect();
 
     for path_buf in current_index.tracked_files() {
@@ -2042,6 +2051,28 @@ fn reset_workdir_tracked_only(
     }
 
     Ok(())
+}
+
+fn untracked_workdir_paths(
+    current_index: &git_internal::internal::index::Index,
+) -> Result<Vec<PathBuf>, String> {
+    let workdir_files = util::list_workdir_files().map_err(|e| e.to_string())?;
+    let visible_files =
+        ignore::filter_workdir_paths(workdir_files, IgnorePolicy::Respect, current_index);
+    let mut untracked = Vec::new();
+    for path in visible_files {
+        let path_str = path
+            .to_str()
+            .ok_or_else(|| format!("path {:?} is not valid UTF-8", path))?;
+        if !index_has_any_stage(current_index, path_str) {
+            untracked.push(path);
+        }
+    }
+    Ok(untracked)
+}
+
+fn index_has_any_stage(index: &git_internal::internal::index::Index, path: &str) -> bool {
+    (0..=3).any(|stage| index.tracked(path, stage))
 }
 
 /// Rebuild an index from a tree object by recursively adding all files

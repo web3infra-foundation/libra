@@ -28,6 +28,7 @@ use crate::{
         reflog::{ReflogAction, ReflogContext, with_reflog},
     },
     utils::{
+        ignore::{self, IgnorePolicy},
         object_ext::{BlobExt, TreeExt},
         path, util,
     },
@@ -381,9 +382,16 @@ fn build_tree_recursively(
     Ok(tree.id)
 }
 
-/// Reset the working directory to match the new index state without touching untracked files.
+/// Reset the working directory to match the new index state without overwriting untracked files.
 fn reset_workdir_tracked_only(current_index: &Index, new_index: &Index) -> Result<(), String> {
     let workdir = util::working_dir();
+    let untracked_paths = untracked_workdir_paths(current_index)?;
+    if let Some(conflict) = untracked_overwrite_path(&untracked_paths, new_index) {
+        return Err(format!(
+            "untracked working tree file would be overwritten: {}",
+            conflict.display()
+        ));
+    }
     let new_tracked_paths: HashSet<_> = new_index.tracked_files().into_iter().collect();
 
     for path_buf in current_index.tracked_files() {
@@ -407,6 +415,42 @@ fn reset_workdir_tracked_only(current_index: &Index, new_index: &Index) -> Resul
         }
     }
     Ok(())
+}
+
+fn untracked_workdir_paths(current_index: &Index) -> Result<Vec<PathBuf>, String> {
+    let workdir_files = util::list_workdir_files().map_err(|e| e.to_string())?;
+    let visible_files =
+        ignore::filter_workdir_paths(workdir_files, IgnorePolicy::Respect, current_index);
+    let mut untracked = Vec::new();
+    for path in visible_files {
+        let path_str = path
+            .to_str()
+            .ok_or_else(|| format!("path {:?} is not valid UTF-8", path))?;
+        if !index_has_any_stage(current_index, path_str) {
+            untracked.push(path);
+        }
+    }
+    Ok(untracked)
+}
+
+fn index_has_any_stage(index: &Index, path: &str) -> bool {
+    (0..=3).any(|stage| index.tracked(path, stage))
+}
+
+fn untracked_overwrite_path(untracked: &[PathBuf], new_index: &Index) -> Option<PathBuf> {
+    let new_tracked = new_index.tracked_files();
+    for untracked_path in untracked {
+        for tracked_path in &new_tracked {
+            if paths_conflict(untracked_path, tracked_path) {
+                return Some(untracked_path.clone());
+            }
+        }
+    }
+    None
+}
+
+fn paths_conflict(left: &Path, right: &Path) -> bool {
+    left == right || left.starts_with(right) || right.starts_with(left)
 }
 
 /// Resolve a commit reference (like "HEAD", branch name, or ObjectHash) to a ObjectHash hash
