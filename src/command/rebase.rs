@@ -1038,22 +1038,34 @@ async fn rebase_abort() {
 
     let branch_name_cloned = state.head_name.clone();
     let orig_head = state.orig_head;
-    if let Err(e) = with_reflog(
+    let orig_head_str = orig_head.to_string();
+    let orig_head_str_for_txn = orig_head_str.clone();
+    let reflog_result = with_reflog(
         abort_context,
         move |txn: &sea_orm::DatabaseTransaction| {
             Box::pin(async move {
+                Branch::update_branch_with_conn(
+                    txn,
+                    &branch_name_cloned,
+                    &orig_head_str_for_txn,
+                    None,
+                )
+                .await;
                 Head::update_with_conn(txn, Head::Branch(branch_name_cloned), None).await;
                 Ok(())
             })
         },
         true,
     )
-    .await
-    {
-        eprintln!("warning: failed to record reflog: {e}");
-        // Continue anyway
+    .await;
+    match reflog_result {
+        Ok(()) => {}
+        Err(e) => {
+            eprintln!("warning: failed to record reflog: {e}");
+            // Continue anyway; ensure branch ref is corrected.
+            Branch::update_branch_with_conn(db, &state.head_name, &orig_head_str, None).await;
+        }
     }
-
     Head::update_with_conn(db, Head::Branch(state.head_name.clone()), None).await;
 
     // Reset working directory to original HEAD
