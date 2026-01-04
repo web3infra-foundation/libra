@@ -149,6 +149,8 @@ async fn cherry_pick_single_commit(
         .map_err(|e| format!("failed to load commit tree: {e}"))?;
 
     let index_file = path::index();
+    let current_index =
+        Index::load(&index_file).map_err(|e| format!("failed to load current index: {e}"))?;
     let mut index =
         Index::load(&index_file).map_err(|e| format!("failed to load current index: {e}"))?;
 
@@ -179,7 +181,7 @@ async fn cherry_pick_single_commit(
     index
         .save(&index_file)
         .map_err(|e| format!("failed to save index: {e}"))?;
-    reset_workdir_to_index(&index)?;
+    reset_workdir_tracked_only(&current_index, &index)?;
 
     if args.no_commit {
         Ok(None)
@@ -379,31 +381,23 @@ fn build_tree_recursively(
     Ok(tree.id)
 }
 
-/// Reset the working directory to match the current index state
-///
-/// This function synchronizes the working directory with the index by:
-/// 1. Removing any files that exist in the working directory but not in the index
-/// 2. Writing out all files that are tracked in the index to the working directory
-/// 3. Creating necessary parent directories as needed
-///
-/// This ensures that after cherry-picking, the working directory reflects the
-/// merged state that was applied to the index.
-fn reset_workdir_to_index(index: &Index) -> Result<(), String> {
+/// Reset the working directory to match the new index state without touching untracked files.
+fn reset_workdir_tracked_only(current_index: &Index, new_index: &Index) -> Result<(), String> {
     let workdir = util::working_dir();
-    let tracked_paths = index.tracked_files();
-    let index_files_set: HashSet<_> = tracked_paths.iter().collect();
-    let all_files_in_workdir = util::list_workdir_files().unwrap_or_default();
-    for path_from_root in all_files_in_workdir {
-        if !index_files_set.contains(&path_from_root) {
-            let full_path = workdir.join(path_from_root);
+    let new_tracked_paths: HashSet<_> = new_index.tracked_files().into_iter().collect();
+
+    for path_buf in current_index.tracked_files() {
+        if !new_tracked_paths.contains(&path_buf) {
+            let full_path = workdir.join(path_buf);
             if full_path.exists() {
                 fs::remove_file(&full_path).map_err(|e| e.to_string())?;
             }
         }
     }
-    for path_buf in &tracked_paths {
+
+    for path_buf in new_index.tracked_files() {
         let path_str = path_buf.to_str().unwrap();
-        if let Some(entry) = index.get(path_str, 0) {
+        if let Some(entry) = new_index.get(path_str, 0) {
             let blob = git_internal::internal::object::blob::Blob::load(&entry.hash);
             let target_path = workdir.join(path_str);
             if let Some(parent) = target_path.parent() {
