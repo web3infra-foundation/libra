@@ -10,3 +10,4 @@ pub mod path_ext;
 pub mod test;
 pub mod tree;
 pub mod util;
+pub mod worktree;

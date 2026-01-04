@@ -29,7 +29,7 @@ use crate::{
     },
     utils::{
         object_ext::{BlobExt, TreeExt},
-        path, util,
+        path, util, worktree,
     },
 };
 
@@ -381,9 +381,16 @@ fn build_tree_recursively(
     Ok(tree.id)
 }
 
-/// Reset the working directory to match the new index state without touching untracked files.
+/// Reset the working directory to match the new index state without overwriting untracked files.
 fn reset_workdir_tracked_only(current_index: &Index, new_index: &Index) -> Result<(), String> {
     let workdir = util::working_dir();
+    let untracked_paths = worktree::untracked_workdir_paths(current_index)?;
+    if let Some(conflict) = worktree::untracked_overwrite_path(&untracked_paths, new_index) {
+        return Err(format!(
+            "untracked working tree file would be overwritten: {}",
+            conflict.display()
+        ));
+    }
     let new_tracked_paths: HashSet<_> = new_index.tracked_files().into_iter().collect();
 
     for path_buf in current_index.tracked_files() {
