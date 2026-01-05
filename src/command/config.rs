@@ -23,8 +23,8 @@ impl ConfigScope {
             }
             ConfigScope::Global => {
                 // Use ~/.libra/config.db for global configuration
-                if let Some(home_dir) = dirs::home_dir() {
-                    let global_config_dir = home_dir.join(".libra");
+                if let Ok(home_dir) = std::env::var("HOME") {
+                    let global_config_dir = PathBuf::from(home_dir).join(".libra");
                     Some(global_config_dir.join("config.db"))
                 } else {
                     eprintln!("warning: could not determine home directory for global config");
@@ -47,12 +47,12 @@ impl ConfigScope {
             }
             ConfigScope::Global => {
                 if let Some(config_path) = self.get_config_path() {
-                    if let Some(parent_dir) = config_path.parent() {
-                        if !parent_dir.exists() {
-                            std::fs::create_dir_all(parent_dir).map_err(|e| {
-                                format!("Failed to create global config directory: {}", e)
-                            })?;
-                        }
+                    if let Some(parent_dir) = config_path.parent()
+                        && !parent_dir.exists()
+                    {
+                        std::fs::create_dir_all(parent_dir).map_err(|e| {
+                            format!("Failed to create global config directory: {}", e)
+                        })?;
                     }
 
                     if !config_path.exists() {
@@ -70,15 +70,15 @@ impl ConfigScope {
             }
             ConfigScope::System => {
                 if let Some(config_path) = self.get_config_path() {
-                    if let Some(parent_dir) = config_path.parent() {
-                        if !parent_dir.exists() {
-                            std::fs::create_dir_all(parent_dir).map_err(|e| {
-                                format!(
-                                    "Failed to create system config directory (may need sudo): {}",
-                                    e
-                                )
-                            })?;
-                        }
+                    if let Some(parent_dir) = config_path.parent()
+                        && !parent_dir.exists()
+                    {
+                        std::fs::create_dir_all(parent_dir).map_err(|e| {
+                            format!(
+                                "Failed to create system config directory (may need sudo): {}",
+                                e
+                            )
+                        })?;
                     }
 
                     if !config_path.exists() {
@@ -404,18 +404,16 @@ async fn set_config(key: &Key, value: &str, scope: ConfigScope) {
                 {
                     eprintln!("error: {}", e);
                 }
-            } else {
-                if let Err(e) = ScopedConfig::insert(
-                    scope,
-                    &key.configuration,
-                    key.name.as_deref(),
-                    &key.key,
-                    value,
-                )
-                .await
-                {
-                    eprintln!("error: {}", e);
-                }
+            } else if let Err(e) = ScopedConfig::insert(
+                scope,
+                &key.configuration,
+                key.name.as_deref(),
+                &key.key,
+                value,
+            )
+            .await
+            {
+                eprintln!("error: {}", e);
             }
         }
         Err(e) => {
