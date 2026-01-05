@@ -30,6 +30,9 @@ async fn setup_user_identity() {
         unset: false,
         unset_all: false,
         list: false,
+        local: false,
+        global: false,
+        system: false,
         name_only: false,
         default: None,
     })
@@ -43,6 +46,9 @@ async fn setup_user_identity() {
         unset: false,
         unset_all: false,
         list: false,
+        local: false,
+        global: false,
+        system: false,
         name_only: false,
         default: None,
     })
