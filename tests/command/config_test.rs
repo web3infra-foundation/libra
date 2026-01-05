@@ -5,6 +5,7 @@ use serial_test::serial;
 use tempfile::tempdir;
 
 use super::*;
+
 #[tokio::test]
 #[serial]
 async fn test_config_get_failed() {
@@ -19,6 +20,9 @@ async fn test_config_get_failed() {
         unset: false,
         unset_all: false,
         list: false,
+        local: false,
+        global: false,
+        system: false,
         key: Some("user.name".to_string()),
         valuepattern: Some("value".to_string()),
         default: Some("erasernoob".to_string()),
@@ -45,6 +49,9 @@ async fn test_config_get_all() {
         unset: false,
         unset_all: false,
         list: false,
+        local: false,
+        global: false,
+        system: false,
         key: Some("user.name".to_string()),
         valuepattern: Some("erasernoob".to_string()),
         default: None,
@@ -59,6 +66,9 @@ async fn test_config_get_all() {
         unset: false,
         unset_all: false,
         list: false,
+        local: false,
+        global: false,
+        system: false,
         key: Some("user.name".to_string()),
         valuepattern: None,
         default: None,
@@ -84,6 +94,9 @@ async fn test_config_get_all_with_default() {
         unset: false,
         unset_all: false,
         list: false,
+        local: false,
+        global: false,
+        system: false,
         key: Some("user.name".to_string()),
         valuepattern: Some("value".to_string()),
         default: Some("erasernoob".to_string()),
@@ -110,6 +123,9 @@ async fn test_config_get() {
         unset: false,
         unset_all: false,
         list: false,
+        local: false,
+        global: false,
+        system: false,
         key: Some("user.name".to_string()),
         valuepattern: Some("erasernoob".to_string()),
         default: None,
@@ -124,6 +140,9 @@ async fn test_config_get() {
         unset: false,
         unset_all: false,
         list: false,
+        local: false,
+        global: false,
+        system: false,
         key: Some("user.name".to_string()),
         valuepattern: None,
         default: None,
@@ -148,6 +167,9 @@ async fn test_config_get_with_default() {
         unset: false,
         unset_all: false,
         list: false,
+        local: false,
+        global: false,
+        system: false,
         key: Some("user.name".to_string()),
         valuepattern: None,
         default: Some("erasernoob".to_string()),
@@ -174,6 +196,9 @@ async fn test_config_list() {
         unset: false,
         unset_all: false,
         list: false,
+        local: false,
+        global: false,
+        system: false,
         key: Some("user.name".to_string()),
         valuepattern: Some("erasernoob".to_string()),
         default: None,
@@ -188,6 +213,9 @@ async fn test_config_list() {
         unset: false,
         unset_all: false,
         list: false,
+        local: false,
+        global: false,
+        system: false,
         key: Some("user.email".to_string()),
         valuepattern: Some("erasernoob@example.com".to_string()),
         default: None,
@@ -203,6 +231,9 @@ async fn test_config_list() {
         unset: false,
         unset_all: false,
         list: true,
+        local: false,
+        global: false,
+        system: false,
         key: None,
         valuepattern: None,
         default: None,
@@ -230,6 +261,9 @@ async fn test_config_list_name_only() {
         unset: false,
         unset_all: false,
         list: false,
+        local: false,
+        global: false,
+        system: false,
         key: Some("user.name".to_string()),
         valuepattern: Some("erasernoob".to_string()),
         default: None,
@@ -244,6 +278,9 @@ async fn test_config_list_name_only() {
         unset: false,
         unset_all: false,
         list: false,
+        local: false,
+        global: false,
+        system: false,
         key: Some("user.email".to_string()),
         valuepattern: Some("erasernoob@example.com".to_string()),
         default: None,
@@ -259,6 +296,9 @@ async fn test_config_list_name_only() {
         unset: false,
         unset_all: false,
         list: true,
+        local: false,
+        global: false,
+        system: false,
         key: None,
         valuepattern: None,
         default: None,
@@ -285,10 +325,122 @@ async fn test_config_list_name_only_without_list() {
         unset: false,
         unset_all: false,
         list: false,
+        local: false,
+        global: false,
+        system: false,
         key: None,
         valuepattern: None,
         default: None,
         name_only: true,
     };
     assert!(args.validate().is_err());
+}
+
+// New tests for scope functionality
+#[tokio::test]
+#[serial]
+async fn test_config_scope_local_default() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    let args = config::ConfigArgs {
+        add: false,
+        get: false,
+        get_all: false,
+        unset: false,
+        unset_all: false,
+        list: false,
+        local: false, // No scope specified, should default to local
+        global: false,
+        system: false,
+        key: Some("user.name".to_string()),
+        valuepattern: Some("test_user".to_string()),
+        default: None,
+        name_only: false,
+    };
+
+    assert_eq!(args.get_scope(), config::ConfigScope::Local);
+    config::execute(args).await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_scope_global() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    let args = config::ConfigArgs {
+        add: false,
+        get: false,
+        get_all: false,
+        unset: false,
+        unset_all: false,
+        list: false,
+        local: false,
+        global: true,
+        system: false,
+        key: Some("user.name".to_string()),
+        valuepattern: Some("global_user".to_string()),
+        default: None,
+        name_only: false,
+    };
+
+    assert_eq!(args.get_scope(), config::ConfigScope::Global);
+    config::execute(args).await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_scope_system() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    let args = config::ConfigArgs {
+        add: false,
+        get: false,
+        get_all: false,
+        unset: false,
+        unset_all: false,
+        list: false,
+        local: false,
+        global: false,
+        system: true,
+        key: Some("user.name".to_string()),
+        valuepattern: Some("system_user".to_string()),
+        default: None,
+        name_only: false,
+    };
+
+    assert_eq!(args.get_scope(), config::ConfigScope::System);
+    config::execute(args).await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_scope_explicit_local() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    let args = config::ConfigArgs {
+        add: false,
+        get: false,
+        get_all: false,
+        unset: false,
+        unset_all: false,
+        list: false,
+        local: true,
+        global: false,
+        system: false,
+        key: Some("user.name".to_string()),
+        valuepattern: Some("local_user".to_string()),
+        default: None,
+        name_only: false,
+    };
+
+    assert_eq!(args.get_scope(), config::ConfigScope::Local);
+    config::execute(args).await;
 }
