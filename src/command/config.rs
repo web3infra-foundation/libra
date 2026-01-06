@@ -6,15 +6,71 @@ use clap::Parser;
 
 use crate::internal::config;
 
+/// Configuration scope that determines where configuration values are stored and retrieved from.
+///
+/// This enum defines the three levels of configuration storage, following Git's configuration
+/// hierarchy model. Each scope has its own database file and isolation boundaries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigScope {
+    /// Repository-specific configuration stored in the current repository's `.libra` directory.
+    ///
+    /// This is the default scope when no explicit scope is specified. Configuration values
+    /// set at this level only affect the current repository and are stored in:
+    /// - `<repository>/.libra/libra.db`
+    ///
+    /// Local configuration has the highest precedence and overrides global and system settings.
     Local,
+
+    /// User-specific configuration stored in the user's home directory.
+    ///
+    /// Configuration values set at this level affect all repositories for the current user
+    /// and are stored in:
+    /// - Unix/Linux/macOS: `~/.libra/config.db`
+    /// - Windows: `%USERPROFILE%\.libra\config.db`
+    ///
+    /// Global configuration has medium precedence and overrides system settings but is
+    /// overridden by local settings.
     Global,
+
+    /// System-wide configuration stored in a system directory.
+    ///
+    /// Configuration values set at this level affect all users and repositories on the system.
+    /// Requires administrative privileges to modify and is stored in:
+    /// - Unix/Linux/macOS: `/etc/libra/config.db`
+    /// - Windows: `%PROGRAMDATA%\libra\config.db`
+    ///
+    /// System configuration has the lowest precedence and is overridden by both global
+    /// and local settings.
     System,
 }
 
 impl ConfigScope {
-    /// Get the configuration file path for this scope
+    /// Get the configuration file path for this scope.
+    ///
+    /// Returns the absolute path where the configuration database should be stored
+    /// for this scope. The path is platform-specific and follows standard conventions:
+    ///
+    /// # Returns
+    ///
+    /// - `Some(PathBuf)` - The path to the configuration database file
+    /// - `None` - For Local scope (uses repository database) or if home directory cannot be determined
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use libra::command::config::ConfigScope;
+    ///
+    /// // Local scope returns None (uses repository database)
+    /// assert_eq!(ConfigScope::Local.get_config_path(), None);
+    ///
+    /// // Global scope returns path in user's home directory
+    /// let global_path = ConfigScope::Global.get_config_path();
+    /// // Will be Some(~/.libra/config.db) on Unix systems
+    ///
+    /// // System scope returns path in system directory
+    /// let system_path = ConfigScope::System.get_config_path();
+    /// // Will be Some(/etc/libra/config.db) on Unix systems
+    /// ```
     pub fn get_config_path(&self) -> Option<PathBuf> {
         match self {
             ConfigScope::Local => {
@@ -23,22 +79,68 @@ impl ConfigScope {
             }
             ConfigScope::Global => {
                 // Use ~/.libra/config.db for global configuration
-                if let Ok(home_dir) = std::env::var("HOME") {
-                    let global_config_dir = PathBuf::from(home_dir).join(".libra");
+                if let Some(home_dir) = dirs::home_dir() {
+                    let global_config_dir = home_dir.join(".libra");
                     Some(global_config_dir.join("config.db"))
                 } else {
-                    eprintln!("warning: could not determine home directory for global config");
+                    // Don't print warning here, let the caller handle the error
                     None
                 }
             }
             ConfigScope::System => {
-                // Use /etc/libra/config.db for system configuration
-                Some(PathBuf::from("/etc/libra/config.db"))
+                // Use system-wide configuration directory
+                #[cfg(unix)]
+                {
+                    Some(PathBuf::from("/etc/libra/config.db"))
+                }
+                #[cfg(windows)]
+                {
+                    // Use PROGRAMDATA on Windows
+                    std::env::var_os("PROGRAMDATA")
+                        .map(|path| PathBuf::from(path).join("libra").join("config.db"))
+                }
+                #[cfg(not(any(unix, windows)))]
+                {
+                    None // Unsupported platform
+                }
             }
         }
     }
 
-    /// Ensure the configuration directory and database exist for this scope
+    /// Ensure the configuration directory and database exist for this scope.
+    ///
+    /// Creates the necessary directory structure and initializes the configuration database
+    /// if it doesn't already exist. This method handles the setup required before any
+    /// configuration operations can be performed.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())` - Configuration database is ready for use
+    /// - `Err(String)` - Failed to create directory or database, with error description
+    ///
+    /// # Errors
+    ///
+    /// This method can fail in several scenarios:
+    /// - Insufficient permissions to create directories or files
+    /// - Disk space issues
+    /// - Invalid or inaccessible paths
+    /// - Database initialization failures
+    ///
+    /// For System scope, this typically requires administrative privileges.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use libra::command::config::ConfigScope;
+    ///
+    /// # async fn example() -> Result<(), String> {
+    /// // Ensure global config is ready
+    /// ConfigScope::Global.ensure_config_exists().await?;
+    ///
+    /// // Now we can safely perform config operations
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn ensure_config_exists(&self) -> Result<(), String> {
         match self {
             ConfigScope::Local => {
@@ -57,7 +159,8 @@ impl ConfigScope {
 
                     if !config_path.exists() {
                         // Create the global config database
-                        crate::internal::db::create_database(config_path.to_str().unwrap())
+                        let config_path_str = config_path.to_string_lossy();
+                        crate::internal::db::create_database(&config_path_str)
                             .await
                             .map_err(|e| {
                                 format!("Failed to create global config database: {}", e)
@@ -65,7 +168,10 @@ impl ConfigScope {
                     }
                     Ok(())
                 } else {
-                    Err("Could not determine global config path".to_string())
+                    Err(
+                        "Could not determine global config path: home directory not available"
+                            .to_string(),
+                    )
                 }
             }
             ConfigScope::System => {
@@ -83,7 +189,8 @@ impl ConfigScope {
 
                     if !config_path.exists() {
                         // Create the system config database
-                        crate::internal::db::create_database(config_path.to_str().unwrap())
+                        let config_path_str = config_path.to_string_lossy();
+                        crate::internal::db::create_database(&config_path_str)
                             .await
                             .map_err(|e| {
                                 format!(
@@ -101,6 +208,28 @@ impl ConfigScope {
     }
 }
 
+/// Command-line arguments for the config command.
+///
+/// This structure defines all the possible options and flags that can be used with
+/// the config command, following Git's config command interface closely.
+///
+/// # Scope Selection
+///
+/// Only one scope flag should be specified at a time:
+/// - `--local`: Repository-specific configuration (default)
+/// - `--global`: User-specific configuration  
+/// - `--system`: System-wide configuration
+///
+/// # Operation Modes
+///
+/// The command supports several mutually exclusive operation modes:
+/// - `--add`: Add a new configuration entry (allows duplicates)
+/// - `--get`: Get the first matching configuration value
+/// - `--get-all`: Get all matching configuration values
+/// - `--unset`: Remove the first matching configuration entry
+/// - `--unset-all`: Remove all matching configuration entries
+/// - `--list`: List all configuration entries
+/// - Default (no mode): Set configuration value (update if exists, create if not)
 #[derive(Parser, Debug)]
 pub struct ConfigArgs {
     /// Add a configuration entry to database
@@ -160,7 +289,31 @@ impl ConfigArgs {
         Ok(())
     }
 
-    /// Get the configuration scope from the command line arguments
+    /// Get the configuration scope from the command line arguments.
+    ///
+    /// Determines which configuration scope should be used based on the scope flags.
+    /// If no explicit scope is specified, defaults to Local scope.
+    ///
+    /// # Returns
+    ///
+    /// - `ConfigScope::Local` - Default when no scope flags are set, or when `--local` is specified
+    /// - `ConfigScope::Global` - When `--global` flag is specified
+    /// - `ConfigScope::System` - When `--system` flag is specified
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use libra::command::config::{ConfigArgs, ConfigScope};
+    ///
+    /// let args = ConfigArgs {
+    ///     global: true,
+    ///     system: false,
+    ///     local: false,
+    ///     // ... other fields
+    /// };
+    ///
+    /// assert_eq!(args.get_scope(), ConfigScope::Global);
+    /// ```
     pub fn get_scope(&self) -> ConfigScope {
         if self.global {
             ConfigScope::Global
@@ -188,7 +341,8 @@ impl ScopedConfig {
                 scope.ensure_config_exists().await?;
 
                 if let Some(config_path) = scope.get_config_path() {
-                    crate::internal::db::establish_connection(config_path.to_str().unwrap())
+                    let config_path_str = config_path.to_string_lossy();
+                    crate::internal::db::establish_connection(&config_path_str)
                         .await
                         .map_err(|e| {
                             format!(
@@ -295,20 +449,24 @@ pub struct Key {
 }
 
 pub async fn execute(args: ConfigArgs) {
-    if let Err(e) = args.validate() {
+    if let Err(e) = execute_impl(args).await {
         eprintln!("error: {e}");
-        return;
     }
+}
+
+/// Internal implementation that returns Result for better error handling
+async fn execute_impl(args: ConfigArgs) -> Result<(), String> {
+    args.validate()?;
 
     let scope = args.get_scope();
 
     if args.list {
-        list_config(args.name_only, scope).await;
+        list_config(args.name_only, scope).await
     } else {
         let origin_key = args.key.unwrap();
         let key: Key = parse_key(origin_key).await;
         if args.add {
-            add_config(&key, &args.valuepattern.unwrap(), scope).await;
+            add_config(&key, &args.valuepattern.unwrap(), scope).await
         } else if args.get {
             get_config(
                 &key,
@@ -316,7 +474,7 @@ pub async fn execute(args: ConfigArgs) {
                 args.valuepattern.as_deref(),
                 scope,
             )
-            .await;
+            .await
         } else if args.get_all {
             get_all_config(
                 &key,
@@ -324,14 +482,14 @@ pub async fn execute(args: ConfigArgs) {
                 args.valuepattern.as_deref(),
                 scope,
             )
-            .await;
+            .await
         } else if args.unset {
-            unset_config(&key, args.valuepattern.as_deref(), scope).await;
+            unset_config(&key, args.valuepattern.as_deref(), scope).await
         } else if args.unset_all {
-            unset_all_config(&key, args.valuepattern.as_deref(), scope).await;
+            unset_all_config(&key, args.valuepattern.as_deref(), scope).await
         } else {
             // If none of the above flags are present, then default to setting a config
-            set_config(&key, &args.valuepattern.unwrap(), scope).await;
+            set_config(&key, &args.valuepattern.unwrap(), scope).await
         }
     }
 }
@@ -363,8 +521,8 @@ async fn parse_key(mut origin_key: String) -> Key {
 }
 
 /// Add a configuration entry by the given key and value (create new one no matter old one is present or not)
-async fn add_config(key: &Key, value: &str, scope: ConfigScope) {
-    if let Err(e) = ScopedConfig::insert(
+async fn add_config(key: &Key, value: &str, scope: ConfigScope) -> Result<(), String> {
+    ScopedConfig::insert(
         scope,
         &key.configuration,
         key.name.as_deref(),
@@ -372,53 +530,41 @@ async fn add_config(key: &Key, value: &str, scope: ConfigScope) {
         value,
     )
     .await
-    {
-        eprintln!("error: {}", e);
-    }
 }
 
 /// Set a configuration entry by the given key and value (if old one is present, overwrites its value, otherwise create new one)
-async fn set_config(key: &Key, value: &str, scope: ConfigScope) {
+async fn set_config(key: &Key, value: &str, scope: ConfigScope) -> Result<(), String> {
     // First, check whether given key has multiple values
-    match ScopedConfig::get_all(scope, &key.configuration, key.name.as_deref(), &key.key).await {
-        Ok(values) => {
-            if values.len() >= 2 {
-                eprintln!(
-                    "warning: {}.{} has multiple values",
-                    &key.configuration,
-                    match &key.name {
-                        Some(str) => str.to_string() + ".",
-                        None => "".to_string(),
-                    } + &key.key
-                );
-                eprintln!("error: cannot overwrite multiple values with a single value");
-            } else if values.len() == 1 {
-                if let Err(e) = ScopedConfig::update(
-                    scope,
-                    &key.configuration,
-                    key.name.as_deref(),
-                    &key.key,
-                    value,
-                )
-                .await
-                {
-                    eprintln!("error: {}", e);
-                }
-            } else if let Err(e) = ScopedConfig::insert(
-                scope,
-                &key.configuration,
-                key.name.as_deref(),
-                &key.key,
-                value,
-            )
-            .await
-            {
-                eprintln!("error: {}", e);
-            }
-        }
-        Err(e) => {
-            eprintln!("error: {}", e);
-        }
+    let values =
+        ScopedConfig::get_all(scope, &key.configuration, key.name.as_deref(), &key.key).await?;
+
+    if values.len() >= 2 {
+        return Err(format!(
+            "warning: {}.{} has multiple values\nerror: cannot overwrite multiple values with a single value",
+            &key.configuration,
+            match &key.name {
+                Some(str) => str.to_string() + ".",
+                None => "".to_string(),
+            } + &key.key
+        ));
+    } else if values.len() == 1 {
+        ScopedConfig::update(
+            scope,
+            &key.configuration,
+            key.name.as_deref(),
+            &key.key,
+            value,
+        )
+        .await
+    } else {
+        ScopedConfig::insert(
+            scope,
+            &key.configuration,
+            key.name.as_deref(),
+            &key.key,
+            value,
+        )
+        .await
     }
 }
 
@@ -428,28 +574,25 @@ async fn get_config(
     default: Option<&str>,
     valuepattern: Option<&str>,
     scope: ConfigScope,
-) {
-    match ScopedConfig::get(scope, &key.configuration, key.name.as_deref(), &key.key).await {
-        Ok(value) => {
-            if let Some(v) = value {
-                if let Some(vp) = valuepattern {
-                    // if value pattern is present, check it
-                    if v.contains(vp) {
-                        println!("{v}");
-                    }
-                } else {
-                    // if value pattern is not present, just print it
-                    println!("{v}");
-                }
-            } else if let Some(default_value) = default {
-                // if value is not exits just return the default value if it's present
-                println!("{default_value}");
+) -> Result<(), String> {
+    let value = ScopedConfig::get(scope, &key.configuration, key.name.as_deref(), &key.key).await?;
+
+    if let Some(v) = value {
+        if let Some(vp) = valuepattern {
+            // if value pattern is present, check it
+            if v.contains(vp) {
+                println!("{v}");
             }
+        } else {
+            // if value pattern is not present, just print it
+            println!("{v}");
         }
-        Err(e) => {
-            eprintln!("error: {}", e);
-        }
+    } else if let Some(default_value) = default {
+        // if value is not exits just return the default value if it's present
+        println!("{default_value}");
     }
+
+    Ok(())
 }
 
 /// Get all the configurations by the given key and value pattern
@@ -458,37 +601,39 @@ async fn get_all_config(
     default: Option<&str>,
     valuepattern: Option<&str>,
     scope: ConfigScope,
-) {
-    match ScopedConfig::get_all(scope, &key.configuration, key.name.as_deref(), &key.key).await {
-        Ok(values) => {
-            let mut matched_any = false;
-            for value in values {
-                if let Some(vp) = valuepattern {
-                    // for each value, check if it matches the pattern
-                    if value.contains(vp) {
-                        println!("{value}");
-                        matched_any = true;
-                    }
-                } else {
-                    // print all if value pattern is not present
-                    matched_any = true;
-                    println!("{value}");
-                }
+) -> Result<(), String> {
+    let values =
+        ScopedConfig::get_all(scope, &key.configuration, key.name.as_deref(), &key.key).await?;
+
+    let mut matched_any = false;
+    for value in values {
+        if let Some(vp) = valuepattern {
+            // for each value, check if it matches the pattern
+            if value.contains(vp) {
+                println!("{value}");
+                matched_any = true;
             }
-            if !matched_any && let Some(default_value) = default {
-                // if no value matches the pattern, print the default value if it's present
-                println!("{default_value}");
-            }
-        }
-        Err(e) => {
-            eprintln!("error: {}", e);
+        } else {
+            // print all if value pattern is not present
+            matched_any = true;
+            println!("{value}");
         }
     }
+    if !matched_any && let Some(default_value) = default {
+        // if no value matches the pattern, print the default value if it's present
+        println!("{default_value}");
+    }
+
+    Ok(())
 }
 
 /// Remove one configuration by given key and value pattern
-async fn unset_config(key: &Key, valuepattern: Option<&str>, scope: ConfigScope) {
-    if let Err(e) = ScopedConfig::remove_config(
+async fn unset_config(
+    key: &Key,
+    valuepattern: Option<&str>,
+    scope: ConfigScope,
+) -> Result<(), String> {
+    ScopedConfig::remove_config(
         scope,
         &key.configuration,
         key.name.as_deref(),
@@ -497,14 +642,15 @@ async fn unset_config(key: &Key, valuepattern: Option<&str>, scope: ConfigScope)
         false,
     )
     .await
-    {
-        eprintln!("error: {}", e);
-    }
 }
 
 /// Remove all configurations by given key and value pattern
-async fn unset_all_config(key: &Key, valuepattern: Option<&str>, scope: ConfigScope) {
-    if let Err(e) = ScopedConfig::remove_config(
+async fn unset_all_config(
+    key: &Key,
+    valuepattern: Option<&str>,
+    scope: ConfigScope,
+) -> Result<(), String> {
+    ScopedConfig::remove_config(
         scope,
         &key.configuration,
         key.name.as_deref(),
@@ -513,27 +659,21 @@ async fn unset_all_config(key: &Key, valuepattern: Option<&str>, scope: ConfigSc
         true,
     )
     .await
-    {
-        eprintln!("error: {}", e);
-    }
 }
 
 /// List all configurations
-async fn list_config(name_only: bool, scope: ConfigScope) {
-    match ScopedConfig::list_all(scope).await {
-        Ok(configurations) => {
-            for (key, value) in configurations {
-                // If name_only is set, only print the key string
-                // Otherwise, print the key=value pair
-                if name_only {
-                    println!("{key}");
-                } else {
-                    println!("{key}={value}");
-                }
-            }
-        }
-        Err(e) => {
-            eprintln!("error: {}", e);
+async fn list_config(name_only: bool, scope: ConfigScope) -> Result<(), String> {
+    let configurations = ScopedConfig::list_all(scope).await?;
+
+    for (key, value) in configurations {
+        // If name_only is set, only print the key string
+        // Otherwise, print the key=value pair
+        if name_only {
+            println!("{key}");
+        } else {
+            println!("{key}={value}");
         }
     }
+
+    Ok(())
 }
