@@ -217,7 +217,7 @@ impl ConfigScope {
 ///
 /// Only one scope flag should be specified at a time:
 /// - `--local`: Repository-specific configuration (default)
-/// - `--global`: User-specific configuration  
+/// - `--global`: User-specific configuration
 /// - `--system`: System-wide configuration
 ///
 /// # Operation Modes
@@ -306,10 +306,19 @@ impl ConfigArgs {
     /// use libra::command::config::{ConfigArgs, ConfigScope};
     ///
     /// let args = ConfigArgs {
+    ///     add: false,
+    ///     get: false,
+    ///     get_all: false,
+    ///     unset: false,
+    ///     unset_all: false,
+    ///     list: false,
+    ///     name_only: false,
+    ///     local: false,
     ///     global: true,
     ///     system: false,
-    ///     local: false,
-    ///     // ... other fields
+    ///     key: None,
+    ///     valuepattern: None,
+    ///     default: None,
     /// };
     ///
     /// assert_eq!(args.get_scope(), ConfigScope::Global);
@@ -539,14 +548,14 @@ async fn set_config(key: &Key, value: &str, scope: ConfigScope) -> Result<(), St
         ScopedConfig::get_all(scope, &key.configuration, key.name.as_deref(), &key.key).await?;
 
     if values.len() >= 2 {
-        return Err(format!(
+        Err(format!(
             "warning: {}.{} has multiple values\nerror: cannot overwrite multiple values with a single value",
             &key.configuration,
             match &key.name {
                 Some(str) => str.to_string() + ".",
                 None => "".to_string(),
             } + &key.key
-        ));
+        ))
     } else if values.len() == 1 {
         ScopedConfig::update(
             scope,
