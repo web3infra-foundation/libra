@@ -114,8 +114,14 @@ impl ConfigScope {
                 }
                 #[cfg(windows)]
                 {
-                    std::env::var_os("PROGRAMDATA")
-                        .map(|path| PathBuf::from(path).join("libra").join("config.db"))
+                    std::env::var_os("PROGRAMDATA").and_then(|path| {
+                        let base = PathBuf::from(path);
+                        if !base.is_absolute() {
+                            // Reject non-absolute PROGRAMDATA values
+                            return None;
+                        }
+                        Some(base.join("libra").join("config.db"))
+                    })
                 }
                 #[cfg(not(any(unix, windows)))]
                 {
@@ -681,7 +687,7 @@ async fn get_config(
             println!("{v}");
         }
     } else if let Some(default_value) = default {
-        // if value is not exits just return the default value if it's present
+        // if value does not exist just return the default value if it's present
         println!("{default_value}");
     }
 
