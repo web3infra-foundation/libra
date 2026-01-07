@@ -6,6 +6,51 @@ use tempfile::tempdir;
 
 use super::*;
 
+/// Guard for temporarily setting an environment variable during a test and restoring it on drop.
+///
+/// # Safety
+/// Modifying environment variables is process-global state. These tests are all annotated with
+/// `#[serial]`, ensuring no concurrent mutation happens across tests.
+struct EnvVarGuard {
+    key: &'static str,
+    original: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &std::ffi::OsStr) -> Self {
+        let original = std::env::var_os(key);
+        // SAFETY: test is #[serial], so no concurrent env access/mutation across tests.
+        unsafe { std::env::set_var(key, value) };
+        Self { key, original }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        // SAFETY: test is #[serial], so no concurrent env access/mutation across tests.
+        match &self.original {
+            Some(v) => unsafe { std::env::set_var(self.key, v) },
+            None => unsafe { std::env::remove_var(self.key) },
+        }
+    }
+}
+
+/// Sets `LIBRA_CONFIG_GLOBAL_DB` and `LIBRA_CONFIG_SYSTEM_DB` to point at temp files for isolation.
+///
+/// This prevents tests from touching real host paths like `~/.libra/config.db` or `/etc/libra/config.db`.
+struct ScopedConfigPathGuard {
+    _global: EnvVarGuard,
+    _system: EnvVarGuard,
+}
+
+impl ScopedConfigPathGuard {
+    fn new(global_db_path: &std::path::Path, system_db_path: &std::path::Path) -> Self {
+        let _global = EnvVarGuard::set("LIBRA_CONFIG_GLOBAL_DB", global_db_path.as_os_str());
+        let _system = EnvVarGuard::set("LIBRA_CONFIG_SYSTEM_DB", system_db_path.as_os_str());
+        Self { _global, _system }
+    }
+}
+
 #[tokio::test]
 #[serial]
 async fn test_config_get_failed() {
@@ -28,7 +73,13 @@ async fn test_config_get_failed() {
         default: Some("erasernoob".to_string()),
         name_only: false,
     };
-    config::execute(args).await;
+
+    // `execute()` prints errors and returns (), so assert on `validate()` directly.
+    let err = args.validate().unwrap_err();
+    assert_eq!(
+        err,
+        "default value is only valid when get (get_all) is set".to_string()
+    );
 }
 
 #[tokio::test]
@@ -392,13 +443,13 @@ async fn test_config_scope_global() {
     test::setup_with_new_libra_in(temp_path.path()).await;
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
-    // Check if we can determine the home directory for global config
-    if dirs::home_dir().is_none() {
-        println!(
-            "Skipping global config test: cannot determine home directory in test environment"
-        );
-        return;
-    }
+    // Isolate global/system DB paths to temp files (no host pollution).
+    let global_db_dir = tempdir().unwrap();
+    let system_db_dir = tempdir().unwrap();
+    let _scoped = ScopedConfigPathGuard::new(
+        &global_db_dir.path().join("global_config.db"),
+        &system_db_dir.path().join("system_config.db"),
+    );
 
     // Set a value in global scope
     let set_args = config::ConfigArgs {
@@ -418,20 +469,7 @@ async fn test_config_scope_global() {
     };
 
     assert_eq!(set_args.get_scope(), config::ConfigScope::Global);
-
-    // Try to execute global config operation, skip if it fails due to environment issues
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        tokio::runtime::Handle::current().block_on(async {
-            config::execute(set_args).await;
-        })
-    }));
-
-    if result.is_err() {
-        println!(
-            "Skipping global config test: failed to create global config (likely permission/environment issue)"
-        );
-        return;
-    }
+    config::execute(set_args).await;
 
     // Verify the value was written to global scope by reading it back
     let read_global_args = config::ConfigArgs {
@@ -480,6 +518,14 @@ async fn test_config_scope_system() {
     test::setup_with_new_libra_in(temp_path.path()).await;
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
+    // Isolate global/system DB paths to temp files (no host pollution).
+    let global_db_dir = tempdir().unwrap();
+    let system_db_dir = tempdir().unwrap();
+    let _scoped = ScopedConfigPathGuard::new(
+        &global_db_dir.path().join("global_config.db"),
+        &system_db_dir.path().join("system_config.db"),
+    );
+
     let args = config::ConfigArgs {
         add: false,
         get: false,
@@ -496,21 +542,8 @@ async fn test_config_scope_system() {
         name_only: false,
     };
 
-    // Test that the scope detection works correctly
     assert_eq!(args.get_scope(), config::ConfigScope::System);
-
-    // Test that get_config_path returns the expected system path
-    let system_path = config::ConfigScope::System.get_config_path();
-    assert!(system_path.is_some());
-    assert_eq!(
-        system_path.unwrap(),
-        std::path::PathBuf::from("/etc/libra/config.db")
-    );
-
-    // Skip actual execution for system scope in tests to avoid permission issues
-    // System scope requires writing to /etc/libra/config.db which needs root permissions
-    // and will fail in CI environments and non-root test runs
-    println!("Skipping system config execution in test environment to avoid touching /etc/libra");
+    config::execute(args).await;
 }
 
 #[tokio::test]
@@ -567,13 +600,13 @@ async fn test_config_scope_isolation() {
     test::setup_with_new_libra_in(temp_path.path()).await;
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
-    // Check if we can determine the home directory for global config
-    if dirs::home_dir().is_none() {
-        println!(
-            "Skipping scope isolation test: cannot determine home directory in test environment"
-        );
-        return;
-    }
+    // Isolate global/system DB paths to temp files (no host pollution).
+    let global_db_dir = tempdir().unwrap();
+    let system_db_dir = tempdir().unwrap();
+    let _scoped = ScopedConfigPathGuard::new(
+        &global_db_dir.path().join("global_config.db"),
+        &system_db_dir.path().join("system_config.db"),
+    );
 
     // Set the same key with different values in different scopes
     let local_args = config::ConfigArgs {
@@ -609,35 +642,7 @@ async fn test_config_scope_isolation() {
         name_only: false,
     };
 
-    // Try to execute global config operation, skip if it fails due to environment issues
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        tokio::runtime::Handle::current().block_on(async {
-            config::execute(global_args).await;
-        })
-    }));
-
-    if result.is_err() {
-        println!("Skipping global part of isolation test: failed to create global config");
-        // Still test local scope isolation
-        let read_local_args = config::ConfigArgs {
-            add: false,
-            get: true,
-            get_all: false,
-            unset: false,
-            unset_all: false,
-            list: false,
-            local: true,
-            global: false,
-            system: false,
-            key: Some("test.isolation".to_string()),
-            valuepattern: None,
-            default: None,
-            name_only: false,
-        };
-        println!("Reading from local scope:");
-        config::execute(read_local_args).await;
-        return;
-    }
+    config::execute(global_args).await;
 
     // Verify that each scope returns its own value
     let read_local_args = config::ConfigArgs {

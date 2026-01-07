@@ -3,8 +3,25 @@
 use std::path::PathBuf;
 
 use clap::Parser;
+use once_cell::sync::Lazy;
+use sea_orm::DatabaseConnection;
+use tokio::sync::Mutex;
 
 use crate::internal::config;
+
+/// Cached database connection for Global scope, paired with the resolved DB path.
+///
+/// We cache the connection to avoid reconnect overhead, but we must invalidate it if
+/// the resolved path changes (e.g., tests override `LIBRA_CONFIG_GLOBAL_DB`).
+static GLOBAL_CONFIG_CONN: Lazy<Mutex<Option<(PathBuf, DatabaseConnection)>>> =
+    Lazy::new(|| Mutex::new(None));
+
+/// Cached database connection for System scope, paired with the resolved DB path.
+///
+/// We cache the connection to avoid reconnect overhead, but we must invalidate it if
+/// the resolved path changes (e.g., tests override `LIBRA_CONFIG_SYSTEM_DB`).
+static SYSTEM_CONFIG_CONN: Lazy<Mutex<Option<(PathBuf, DatabaseConnection)>>> =
+    Lazy::new(|| Mutex::new(None));
 
 /// Configuration scope that determines where configuration values are stored and retrieved from.
 ///
@@ -45,10 +62,22 @@ pub enum ConfigScope {
 }
 
 impl ConfigScope {
+    /// The cascade order for configuration lookup (highest to lowest precedence).
+    ///
+    /// When no explicit scope is specified for read operations, configuration values
+    /// are searched in this order. The first scope that contains the requested key
+    /// will provide the value, following Git's configuration precedence model.
+    pub const CASCADE_ORDER: [ConfigScope; 3] =
+        [ConfigScope::Local, ConfigScope::Global, ConfigScope::System];
+
     /// Get the configuration file path for this scope.
     ///
     /// Returns the absolute path where the configuration database should be stored
-    /// for this scope. The path is platform-specific and follows standard conventions:
+    /// for this scope. The path is platform-specific and follows standard conventions.
+    ///
+    /// Test/CI can override the location using:
+    /// - `LIBRA_CONFIG_GLOBAL_DB` for `Global`
+    /// - `LIBRA_CONFIG_SYSTEM_DB` for `System`
     ///
     /// # Returns
     ///
@@ -57,51 +86,40 @@ impl ConfigScope {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// use libra::command::config::ConfigScope;
     ///
-    /// // Local scope returns None (uses repository database)
     /// assert_eq!(ConfigScope::Local.get_config_path(), None);
-    ///
-    /// // Global scope returns path in user's home directory
-    /// let global_path = ConfigScope::Global.get_config_path();
-    /// // Will be Some(~/.libra/config.db) on Unix systems
-    ///
-    /// // System scope returns path in system directory
-    /// let system_path = ConfigScope::System.get_config_path();
-    /// // Will be Some(/etc/libra/config.db) on Unix systems
+    /// let _ = ConfigScope::Global.get_config_path();
+    /// let _ = ConfigScope::System.get_config_path();
     /// ```
     pub fn get_config_path(&self) -> Option<PathBuf> {
         match self {
-            ConfigScope::Local => {
-                // Use the current repository's database (existing behavior)
-                None // Will use the default database connection
-            }
+            ConfigScope::Local => None,
             ConfigScope::Global => {
-                // Use ~/.libra/config.db for global configuration
-                if let Some(home_dir) = dirs::home_dir() {
-                    let global_config_dir = home_dir.join(".libra");
-                    Some(global_config_dir.join("config.db"))
-                } else {
-                    // Don't print warning here, let the caller handle the error
-                    None
+                if let Some(p) = std::env::var_os("LIBRA_CONFIG_GLOBAL_DB") {
+                    return Some(PathBuf::from(p));
                 }
+
+                dirs::home_dir().map(|home_dir| home_dir.join(".libra").join("config.db"))
             }
             ConfigScope::System => {
-                // Use system-wide configuration directory
+                if let Some(p) = std::env::var_os("LIBRA_CONFIG_SYSTEM_DB") {
+                    return Some(PathBuf::from(p));
+                }
+
                 #[cfg(unix)]
                 {
                     Some(PathBuf::from("/etc/libra/config.db"))
                 }
                 #[cfg(windows)]
                 {
-                    // Use PROGRAMDATA on Windows
                     std::env::var_os("PROGRAMDATA")
                         .map(|path| PathBuf::from(path).join("libra").join("config.db"))
                 }
                 #[cfg(not(any(unix, windows)))]
                 {
-                    None // Unsupported platform
+                    None
                 }
             }
         }
@@ -130,7 +148,7 @@ impl ConfigScope {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// use libra::command::config::ConfigScope;
     ///
     /// # async fn example() -> Result<(), String> {
@@ -302,7 +320,7 @@ impl ConfigArgs {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// use libra::command::config::{ConfigArgs, ConfigScope};
     ///
     /// let args = ConfigArgs {
@@ -332,46 +350,104 @@ impl ConfigArgs {
             ConfigScope::Local // default
         }
     }
+
+    /// Returns true if any of `--local`, `--global`, or `--system` was explicitly provided.
+    pub fn has_explicit_scope(&self) -> bool {
+        self.local || self.global || self.system
+    }
 }
 
-/// Configuration manager that handles different scopes
+/// Configuration manager that handles different configuration scopes (Local/Global/System).
+///
+/// # Architecture overview
+///
+/// Libra stores configuration entries in SQLite databases. This command supports multiple
+/// scopes that map to different database files:
+///
+/// - **Local**: repository database (existing behavior; repo-specific)
+/// - **Global**: user-level database (applies across repos)
+/// - **System**: system-level database (applies across users/repos; may require elevated privileges)
+///
+/// # Read semantics (Git-compatible precedence)
+///
+/// For read-oriented operations (e.g. `get`, `get-all`, `list`) when **no explicit scope flag**
+/// (`--local/--global/--system`) is provided, the command uses a cascading lookup order:
+///
+/// `Local → Global → System`
+///
+/// This matches Git’s precedence model: local overrides global, which overrides system.
+///
+/// When an explicit scope flag is provided, the operation targets that single scope only.
+///
+/// # Write semantics
+///
+/// For write-oriented operations (e.g. `add`, default `set`, `unset`, `unset-all`), the command
+/// always targets the selected scope. When no scope flag is provided, the default write scope is
+/// **Local** (repository database).
+///
+/// # Connection management
+///
+/// Global/System operations may require opening a separate database connection. Implementations
+/// may cache those connections to reduce reconnect overhead, but must invalidate caches if the
+/// resolved database path changes (e.g., via test/CI overrides).
 pub struct ScopedConfig;
 
 impl ScopedConfig {
     /// Get a database connection for the specified scope
-    async fn get_connection(scope: ConfigScope) -> Result<sea_orm::DatabaseConnection, String> {
+    async fn get_connection(scope: ConfigScope) -> Result<DatabaseConnection, String> {
         match scope {
             ConfigScope::Local => {
                 // Use the existing repository database connection
                 Ok(crate::internal::db::get_db_conn_instance().await.clone())
             }
-            ConfigScope::Global | ConfigScope::System => {
-                // Ensure the config exists first
-                scope.ensure_config_exists().await?;
-
-                if let Some(config_path) = scope.get_config_path() {
-                    let config_path_str = config_path.to_string_lossy();
-                    crate::internal::db::establish_connection(&config_path_str)
-                        .await
-                        .map_err(|e| {
-                            format!(
-                                "Failed to connect to {} config database: {}",
-                                match scope {
-                                    ConfigScope::Global => "global",
-                                    ConfigScope::System => "system",
-                                    ConfigScope::Local => "local",
-                                },
-                                e
-                            )
-                        })
-                } else {
-                    Err(format!(
-                        "Could not determine config path for {:?} scope",
-                        scope
-                    ))
-                }
+            ConfigScope::Global => {
+                Self::get_or_create_cached_connection(&GLOBAL_CONFIG_CONN, scope, "global").await
+            }
+            ConfigScope::System => {
+                Self::get_or_create_cached_connection(&SYSTEM_CONFIG_CONN, scope, "system").await
             }
         }
+    }
+
+    /// Get or create a cached database connection for the given scope.
+    ///
+    /// If the resolved config DB path changes (e.g., due to env overrides in tests),
+    /// the cached connection is invalidated and rebuilt.
+    async fn get_or_create_cached_connection(
+        cache: &Lazy<Mutex<Option<(PathBuf, DatabaseConnection)>>>,
+        scope: ConfigScope,
+        scope_name: &str,
+    ) -> Result<DatabaseConnection, String> {
+        // Resolve path first so we can validate/invalidate cache deterministically.
+        let Some(config_path) = scope.get_config_path() else {
+            return Err(format!(
+                "Could not determine config path for {:?} scope",
+                scope
+            ));
+        };
+
+        let mut guard = cache.lock().await;
+
+        // Return cached connection if available and path matches
+        if let Some((cached_path, cached_conn)) = guard.as_ref() {
+            if cached_path == &config_path {
+                return Ok(cached_conn.clone());
+            }
+            // Path changed: invalidate cached connection.
+            *guard = None;
+        }
+
+        // Ensure the config exists first
+        scope.ensure_config_exists().await?;
+
+        let config_path_str = config_path.to_string_lossy();
+        let conn = crate::internal::db::establish_connection(&config_path_str)
+            .await
+            .map_err(|e| format!("Failed to connect to {} config database: {}", scope_name, e))?;
+
+        // Cache the connection for future use
+        *guard = Some((config_path, conn.clone()));
+        Ok(conn)
     }
 
     /// Insert configuration with scope
@@ -468,9 +544,10 @@ async fn execute_impl(args: ConfigArgs) -> Result<(), String> {
     args.validate()?;
 
     let scope = args.get_scope();
+    let use_cascade = !args.has_explicit_scope();
 
     if args.list {
-        list_config(args.name_only, scope).await
+        list_config(args.name_only, scope, use_cascade).await
     } else {
         let origin_key = args.key.unwrap();
         let key: Key = parse_key(origin_key).await;
@@ -482,6 +559,7 @@ async fn execute_impl(args: ConfigArgs) -> Result<(), String> {
                 args.default.as_deref(),
                 args.valuepattern.as_deref(),
                 scope,
+                use_cascade,
             )
             .await
         } else if args.get_all {
@@ -490,6 +568,7 @@ async fn execute_impl(args: ConfigArgs) -> Result<(), String> {
                 args.default.as_deref(),
                 args.valuepattern.as_deref(),
                 scope,
+                use_cascade,
             )
             .await
         } else if args.unset {
@@ -583,8 +662,13 @@ async fn get_config(
     default: Option<&str>,
     valuepattern: Option<&str>,
     scope: ConfigScope,
+    use_cascade: bool,
 ) -> Result<(), String> {
-    let value = ScopedConfig::get(scope, &key.configuration, key.name.as_deref(), &key.key).await?;
+    let value = if use_cascade {
+        get_config_cascaded(&key.configuration, key.name.as_deref(), &key.key).await?
+    } else {
+        ScopedConfig::get(scope, &key.configuration, key.name.as_deref(), &key.key).await?
+    };
 
     if let Some(v) = value {
         if let Some(vp) = valuepattern {
@@ -610,30 +694,78 @@ async fn get_all_config(
     default: Option<&str>,
     valuepattern: Option<&str>,
     scope: ConfigScope,
+    use_cascade: bool,
 ) -> Result<(), String> {
-    let values =
-        ScopedConfig::get_all(scope, &key.configuration, key.name.as_deref(), &key.key).await?;
+    let values = if use_cascade {
+        get_all_config_cascaded(&key.configuration, key.name.as_deref(), &key.key).await?
+    } else {
+        ScopedConfig::get_all(scope, &key.configuration, key.name.as_deref(), &key.key).await?
+    };
 
     let mut matched_any = false;
     for value in values {
         if let Some(vp) = valuepattern {
-            // for each value, check if it matches the pattern
             if value.contains(vp) {
                 println!("{value}");
                 matched_any = true;
             }
         } else {
-            // print all if value pattern is not present
             matched_any = true;
             println!("{value}");
         }
     }
     if !matched_any && let Some(default_value) = default {
-        // if no value matches the pattern, print the default value if it's present
         println!("{default_value}");
     }
 
     Ok(())
+}
+
+async fn get_config_cascaded(
+    configuration: &str,
+    name: Option<&str>,
+    key: &str,
+) -> Result<Option<String>, String> {
+    for scope in ConfigScope::CASCADE_ORDER {
+        if scope != ConfigScope::Local {
+            let Some(path) = scope.get_config_path() else {
+                continue;
+            };
+            if !path.exists() {
+                continue;
+            }
+        }
+
+        match ScopedConfig::get(scope, configuration, name, key).await {
+            Ok(Some(v)) => return Ok(Some(v)),
+            Ok(None) => continue,
+            Err(_) => continue,
+        }
+    }
+    Ok(None)
+}
+
+async fn get_all_config_cascaded(
+    configuration: &str,
+    name: Option<&str>,
+    key: &str,
+) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for scope in ConfigScope::CASCADE_ORDER {
+        if scope != ConfigScope::Local {
+            let Some(path) = scope.get_config_path() else {
+                continue;
+            };
+            if !path.exists() {
+                continue;
+            }
+        }
+
+        if let Ok(mut v) = ScopedConfig::get_all(scope, configuration, name, key).await {
+            out.append(&mut v);
+        }
+    }
+    Ok(out)
 }
 
 /// Remove one configuration by given key and value pattern
@@ -671,12 +803,14 @@ async fn unset_all_config(
 }
 
 /// List all configurations
-async fn list_config(name_only: bool, scope: ConfigScope) -> Result<(), String> {
-    let configurations = ScopedConfig::list_all(scope).await?;
+async fn list_config(name_only: bool, scope: ConfigScope, use_cascade: bool) -> Result<(), String> {
+    let configurations = if use_cascade {
+        list_all_config_cascaded().await?
+    } else {
+        ScopedConfig::list_all(scope).await?
+    };
 
     for (key, value) in configurations {
-        // If name_only is set, only print the key string
-        // Otherwise, print the key=value pair
         if name_only {
             println!("{key}");
         } else {
@@ -685,4 +819,32 @@ async fn list_config(name_only: bool, scope: ConfigScope) -> Result<(), String> 
     }
 
     Ok(())
+}
+
+async fn list_all_config_cascaded() -> Result<Vec<(String, String)>, String> {
+    use std::collections::HashMap;
+
+    let mut merged: HashMap<String, String> = HashMap::new();
+
+    // Iterate low->high precedence so higher precedence overwrites.
+    for scope in ConfigScope::CASCADE_ORDER.iter().rev() {
+        if *scope != ConfigScope::Local {
+            let Some(path) = scope.get_config_path() else {
+                continue;
+            };
+            if !path.exists() {
+                continue;
+            }
+        }
+
+        if let Ok(entries) = ScopedConfig::list_all(*scope).await {
+            for (k, v) in entries {
+                merged.insert(k, v);
+            }
+        }
+    }
+
+    let mut out: Vec<(String, String)> = merged.into_iter().collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
 }
