@@ -44,17 +44,23 @@ async fn test_reflog_show_with_filters() {
 
     // Test with combined filters
     let args = reflog::ReflogArgs::parse_from([
-        "reflog", "show",
-        "--grep", "Test",
-        "--since", "1 day ago"
+        "reflog",
+        "show",
+        "--grep",
+        "Test",
+        "--since",
+        "1 day ago",
     ]);
     reflog::execute(args).await;
 
     // Test with --pretty flag
     let args = reflog::ReflogArgs::parse_from([
-        "reflog", "show",
-        "--since", "1 day ago",
-        "--pretty", "oneline"
+        "reflog",
+        "show",
+        "--since",
+        "1 day ago",
+        "--pretty",
+        "oneline",
     ]);
     reflog::execute(args).await;
 }
@@ -81,10 +87,7 @@ async fn test_reflog_show_invalid_date() {
     commit::execute(commit_args).await;
 
     // Test with invalid date format - should show error message
-    let args = reflog::ReflogArgs::parse_from([
-        "reflog", "show",
-        "--since", "invalid-date-format"
-    ]);
+    let args = reflog::ReflogArgs::parse_from(["reflog", "show", "--since", "invalid-date-format"]);
     reflog::execute(args).await; // Should print error but not panic
 }
 
@@ -112,10 +115,7 @@ async fn test_reflog_show_with_author_filter() {
     }
 
     // Test with --author filter (should work without error)
-    let args = reflog::ReflogArgs::parse_from([
-        "reflog", "show",
-        "--author", "test"
-    ]);
+    let args = reflog::ReflogArgs::parse_from(["reflog", "show", "--author", "test"]);
     reflog::execute(args).await; // Should complete without panic
 }
 
@@ -143,17 +143,11 @@ async fn test_reflog_show_with_number_limit() {
     }
 
     // Test with -n limit (should work without error)
-    let args = reflog::ReflogArgs::parse_from([
-        "reflog", "show",
-        "-n", "3"
-    ]);
+    let args = reflog::ReflogArgs::parse_from(["reflog", "show", "-n", "3"]);
     reflog::execute(args).await; // Should complete without panic
 
     // Test with --number limit
-    let args = reflog::ReflogArgs::parse_from([
-        "reflog", "show",
-        "--number", "2"
-    ]);
+    let args = reflog::ReflogArgs::parse_from(["reflog", "show", "--number", "2"]);
     reflog::execute(args).await; // Should complete without panic
 }
 
@@ -181,19 +175,19 @@ async fn test_reflog_show_with_combined_filters() {
     }
 
     // Test with combined filters: author + number
-    let args = reflog::ReflogArgs::parse_from([
-        "reflog", "show",
-        "--author", "test",
-        "-n", "2"
-    ]);
+    let args = reflog::ReflogArgs::parse_from(["reflog", "show", "--author", "test", "-n", "2"]);
     reflog::execute(args).await; // Should complete without panic
 
     // Test with combined filters: since + author + number
     let args = reflog::ReflogArgs::parse_from([
-        "reflog", "show",
-        "--since", "1 day ago",
-        "--author", "test",
-        "--number", "5"
+        "reflog",
+        "show",
+        "--since",
+        "1 day ago",
+        "--author",
+        "test",
+        "--number",
+        "5",
     ]);
     reflog::execute(args).await; // Should complete without panic
 }
@@ -222,25 +216,15 @@ async fn test_reflog_show_with_patch() {
     }
 
     // Test with --patch flag (should work without error)
-    let args = reflog::ReflogArgs::parse_from([
-        "reflog", "show",
-        "--patch"
-    ]);
+    let args = reflog::ReflogArgs::parse_from(["reflog", "show", "--patch"]);
     reflog::execute(args).await; // Should complete without panic
 
     // Test with -p shorthand
-    let args = reflog::ReflogArgs::parse_from([
-        "reflog", "show",
-        "-p"
-    ]);
+    let args = reflog::ReflogArgs::parse_from(["reflog", "show", "-p"]);
     reflog::execute(args).await; // Should complete without panic
 
     // Test with patch and number limit
-    let args = reflog::ReflogArgs::parse_from([
-        "reflog", "show",
-        "--patch",
-        "-n", "2"
-    ]);
+    let args = reflog::ReflogArgs::parse_from(["reflog", "show", "--patch", "-n", "2"]);
     reflog::execute(args).await; // Should complete without panic
 }
 
@@ -268,17 +252,10 @@ async fn test_reflog_show_with_stat() {
     }
 
     // Test with --stat flag (should work without error)
-    let args = reflog::ReflogArgs::parse_from([
-        "reflog", "show",
-        "--stat"
-    ]);
+    let args = reflog::ReflogArgs::parse_from(["reflog", "show", "--stat"]);
     reflog::execute(args).await; // Should complete without panic
 
     // Test with stat and number limit
-    let args = reflog::ReflogArgs::parse_from([
-        "reflog", "show",
-        "--stat",
-        "-n", "2"
-    ]);
+    let args = reflog::ReflogArgs::parse_from(["reflog", "show", "--stat", "-n", "2"]);
     reflog::execute(args).await; // Should complete without panic
 }

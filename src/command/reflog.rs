@@ -76,16 +76,36 @@ enum Subcommands {
 
 pub async fn execute(args: ReflogArgs) {
     match args.command {
-        Subcommands::Show { ref_name, pretty, since, until, grep, author, number, patch, stat } => {
-            handle_show(&ref_name, pretty, since, until, grep, author, number, patch, stat).await
-        },
+        Subcommands::Show {
+            ref_name,
+            pretty,
+            since,
+            until,
+            grep,
+            author,
+            number,
+            patch,
+            stat,
+        } => {
+            let options = ReflogShowOptions {
+                pretty,
+                since,
+                until,
+                grep,
+                author,
+                number,
+                patch,
+                stat,
+            };
+            handle_show(&ref_name, options).await
+        }
         Subcommands::Delete { selectors } => handle_delete(&selectors).await,
         Subcommands::Exists { ref_name } => handle_exists(&ref_name).await,
     }
 }
 
-async fn handle_show(
-    ref_name: &str,
+/// Options for reflog show command
+struct ReflogShowOptions {
     pretty: FormatterKind,
     since: Option<String>,
     until: Option<String>,
@@ -94,11 +114,18 @@ async fn handle_show(
     number: Option<usize>,
     patch: bool,
     stat: bool,
-) {
+}
+
+async fn handle_show(ref_name: &str, options: ReflogShowOptions) {
     let db = get_db_conn_instance().await;
 
     // Parse date filters
-    let since_ts = match since.as_deref().map(crate::internal::log::date_parser::parse_date).transpose() {
+    let since_ts = match options
+        .since
+        .as_deref()
+        .map(crate::internal::log::date_parser::parse_date)
+        .transpose()
+    {
         Ok(ts) => ts,
         Err(e) => {
             eprintln!("fatal: invalid --since date: {e}");
@@ -106,7 +133,12 @@ async fn handle_show(
         }
     };
 
-    let until_ts = match until.as_deref().map(crate::internal::log::date_parser::parse_date).transpose() {
+    let until_ts = match options
+        .until
+        .as_deref()
+        .map(crate::internal::log::date_parser::parse_date)
+        .transpose()
+    {
         Ok(ts) => ts,
         Err(e) => {
             eprintln!("fatal: invalid --until date: {e}");
@@ -124,20 +156,18 @@ async fn handle_show(
     };
 
     // Apply filters
-    let filter = ReflogFilter::new(since_ts, until_ts, grep, author);
-    let filtered_logs: Vec<_> = logs.into_iter()
-        .filter(|log| filter.passes(log))
-        .collect();
+    let filter = ReflogFilter::new(since_ts, until_ts, options.grep, options.author);
+    let filtered_logs: Vec<_> = logs.into_iter().filter(|log| filter.passes(log)).collect();
 
     // Apply number limit
-    let max_output = number.unwrap_or(filtered_logs.len());
+    let max_output = options.number.unwrap_or(filtered_logs.len());
     let limited_logs = &filtered_logs[..filtered_logs.len().min(max_output)];
 
     let formatter = ReflogFormatter {
         logs: limited_logs,
-        kind: pretty,
-        patch,
-        stat,
+        kind: options.pretty,
+        patch: options.patch,
+        stat: options.stat,
     };
 
     #[cfg(unix)]
@@ -297,11 +327,15 @@ impl ReflogFilter {
         // Time filters
         let ts = entry.timestamp;
 
-        if let Some(since) = self.since && ts < since {
+        if let Some(since) = self.since
+            && ts < since
+        {
             return false;
         }
 
-        if let Some(until) = self.until && ts > until {
+        if let Some(until) = self.until
+            && ts > until
+        {
             return false;
         }
 
@@ -406,23 +440,22 @@ impl Display for ReflogFormatter<'_> {
 
                 // Append diff or stat output if requested
                 if self.patch {
-                    if let Ok(patch_output) = generate_diff_sync(&commit) {
-                        if !patch_output.is_empty() {
-                            if !output.ends_with('\n') {
-                                output.push('\n');
-                            }
-                            output.push_str(&patch_output);
+                    if let Ok(patch_output) = generate_diff_sync(&commit)
+                        && !patch_output.is_empty()
+                    {
+                        if !output.ends_with('\n') {
+                            output.push('\n');
                         }
+                        output.push_str(&patch_output);
                     }
-                } else if self.stat {
-                    if let Ok(stat_output) = generate_stat_sync(&commit) {
-                        if !stat_output.is_empty() {
-                            if !output.ends_with('\n') {
-                                output.push('\n');
-                            }
-                            output.push_str(&stat_output);
-                        }
+                } else if self.stat
+                    && let Ok(stat_output) = generate_stat_sync(&commit)
+                    && !stat_output.is_empty()
+                {
+                    if !output.ends_with('\n') {
+                        output.push('\n');
                     }
+                    output.push_str(&stat_output);
                 }
 
                 output
@@ -448,8 +481,11 @@ fn format_datetime(timestamp: i64) -> String {
 
 /// Synchronous wrapper for generating diff output
 fn generate_diff_sync(commit: &Commit) -> Result<String, Box<dyn std::error::Error>> {
-    use git_internal::internal::object::{tree::Tree, blob::Blob};
-    use git_internal::Diff;
+    use git_internal::{
+        Diff,
+        internal::object::{blob::Blob, tree::Tree},
+    };
+
     use crate::utils::object_ext::TreeExt;
 
     // new_blobs from commit tree
@@ -493,8 +529,11 @@ fn generate_diff_sync(commit: &Commit) -> Result<String, Box<dyn std::error::Err
 
 /// Synchronous wrapper for generating stat output
 fn generate_stat_sync(commit: &Commit) -> Result<String, Box<dyn std::error::Error>> {
-    use git_internal::internal::object::{tree::Tree, blob::Blob};
-    use git_internal::Diff;
+    use git_internal::{
+        Diff,
+        internal::object::{blob::Blob, tree::Tree},
+    };
+
     use crate::utils::object_ext::TreeExt;
 
     // new_blobs from commit tree
@@ -557,19 +596,35 @@ fn generate_stat_sync(commit: &Commit) -> Result<String, Box<dyn std::error::Err
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use clap::Parser;
+
+    use super::*;
 
     #[test]
     fn test_show_args_with_filters() {
         let args = ReflogArgs::parse_from([
-            "reflog", "show",
-            "--since", "2024-01-01",
-            "--until", "2024-12-31",
-            "--grep", "commit"
+            "reflog",
+            "show",
+            "--since",
+            "2024-01-01",
+            "--until",
+            "2024-12-31",
+            "--grep",
+            "commit",
         ]);
 
-        if let Subcommands::Show { ref_name, pretty: _, since, until, grep, author: _, number: _, patch: _, stat: _ } = args.command {
+        if let Subcommands::Show {
+            ref_name,
+            pretty: _,
+            since,
+            until,
+            grep,
+            author: _,
+            number: _,
+            patch: _,
+            stat: _,
+        } = args.command
+        {
             assert_eq!(ref_name, "HEAD");
             assert_eq!(since.as_deref(), Some("2024-01-01"));
             assert_eq!(until.as_deref(), Some("2024-12-31"));
@@ -667,7 +722,7 @@ mod tests {
             Some(1_700_000_000),
             Some(1_750_000_000),
             Some("feature".to_string()),
-            None
+            None,
         );
         assert!(filter.passes(&entry));
 
@@ -675,7 +730,7 @@ mod tests {
             Some(1_730_000_000),
             Some(1_750_000_000),
             Some("feature".to_string()),
-            None
+            None,
         );
         assert!(!filter.passes(&entry));
     }
