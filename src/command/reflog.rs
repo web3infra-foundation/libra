@@ -40,6 +40,15 @@ enum Subcommands {
         #[arg(long = "pretty")]
         #[clap(default_value_t = FormatterKind::default())]
         pretty: FormatterKind,
+        /// Show reflog entries newer than date
+        #[arg(long)]
+        since: Option<String>,
+        /// Show reflog entries older than date
+        #[arg(long)]
+        until: Option<String>,
+        /// Filter reflog entries by message pattern
+        #[arg(long)]
+        grep: Option<String>,
     },
     /// clear the reflog record of the specified branch.
     Delete {
@@ -55,14 +64,39 @@ enum Subcommands {
 
 pub async fn execute(args: ReflogArgs) {
     match args.command {
-        Subcommands::Show { ref_name, pretty } => handle_show(&ref_name, pretty).await,
+        Subcommands::Show { ref_name, pretty, since, until, grep } => {
+            handle_show(&ref_name, pretty, since, until, grep).await
+        },
         Subcommands::Delete { selectors } => handle_delete(&selectors).await,
         Subcommands::Exists { ref_name } => handle_exists(&ref_name).await,
     }
 }
 
-async fn handle_show(ref_name: &str, pretty: FormatterKind) {
+async fn handle_show(
+    ref_name: &str,
+    pretty: FormatterKind,
+    since: Option<String>,
+    until: Option<String>,
+    grep: Option<String>,
+) {
     let db = get_db_conn_instance().await;
+
+    // Parse date filters
+    let since_ts = match since.as_deref().map(crate::internal::log::date_parser::parse_date).transpose() {
+        Ok(ts) => ts,
+        Err(e) => {
+            eprintln!("fatal: invalid --since date: {e}");
+            return;
+        }
+    };
+
+    let until_ts = match until.as_deref().map(crate::internal::log::date_parser::parse_date).transpose() {
+        Ok(ts) => ts,
+        Err(e) => {
+            eprintln!("fatal: invalid --until date: {e}");
+            return;
+        }
+    };
 
     let ref_name = parse_ref_name(ref_name).await;
     let logs = match Reflog::find_all(db, &ref_name).await {
@@ -73,8 +107,14 @@ async fn handle_show(ref_name: &str, pretty: FormatterKind) {
         }
     };
 
+    // Apply filters
+    let filter = ReflogFilter::new(since_ts, until_ts, grep);
+    let filtered_logs: Vec<_> = logs.into_iter()
+        .filter(|log| filter.passes(log))
+        .collect();
+
     let formatter = ReflogFormatter {
-        logs: &logs,
+        logs: &filtered_logs,
         kind: pretty,
     };
 
@@ -206,6 +246,48 @@ fn parse_reflog_selector(selector: &str) -> Option<(&str, usize)> {
     None
 }
 
+/// Filter for reflog entries based on time and message patterns
+struct ReflogFilter {
+    since: Option<i64>,
+    until: Option<i64>,
+    grep: Option<String>,
+}
+
+impl ReflogFilter {
+    /// Create a new filter from optional parameters
+    fn new(since: Option<i64>, until: Option<i64>, grep: Option<String>) -> Self {
+        Self {
+            since,
+            until,
+            grep: grep.map(|s| s.to_lowercase()),
+        }
+    }
+
+    /// Check if a reflog entry passes all filters
+    fn passes(&self, entry: &Model) -> bool {
+        // Time filters
+        let ts = entry.timestamp;
+
+        if let Some(since) = self.since && ts < since {
+            return false;
+        }
+
+        if let Some(until) = self.until && ts > until {
+            return false;
+        }
+
+        // Message filter (matches both action and message fields)
+        if let Some(grep_pattern) = &self.grep {
+            let full_message = format!("{}: {}", entry.action, entry.message);
+            if !full_message.to_lowercase().contains(grep_pattern) {
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
 #[derive(Debug, Copy, Clone, Default)]
 enum FormatterKind {
     #[default]
@@ -296,4 +378,128 @@ fn format_datetime(timestamp: i64) -> String {
 
     let git_format = "%a %b %d %H:%M:%S %Y %z";
     local.format(git_format).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_show_args_with_filters() {
+        let args = ReflogArgs::parse_from([
+            "reflog", "show",
+            "--since", "2024-01-01",
+            "--until", "2024-12-31",
+            "--grep", "commit"
+        ]);
+
+        if let Subcommands::Show { ref_name, pretty: _, since, until, grep } = args.command {
+            assert_eq!(ref_name, "HEAD");
+            assert_eq!(since.as_deref(), Some("2024-01-01"));
+            assert_eq!(until.as_deref(), Some("2024-12-31"));
+            assert_eq!(grep.as_deref(), Some("commit"));
+        } else {
+            panic!("Expected Show subcommand");
+        }
+    }
+
+    #[test]
+    fn test_reflog_filter_time() {
+        let entry1 = Model {
+            id: 1,
+            ref_name: "HEAD".to_string(),
+            old_oid: "abc".to_string(),
+            new_oid: "def".to_string(),
+            timestamp: 1_700_000_000,
+            committer_name: "Test".to_string(),
+            committer_email: "test@test.com".to_string(),
+            action: "commit".to_string(),
+            message: "Test message".to_string(),
+        };
+
+        let entry2 = Model {
+            id: 2,
+            ref_name: "HEAD".to_string(),
+            old_oid: "def".to_string(),
+            new_oid: "ghi".to_string(),
+            timestamp: 1_750_000_000,
+            committer_name: "Test".to_string(),
+            committer_email: "test@test.com".to_string(),
+            action: "commit".to_string(),
+            message: "Another message".to_string(),
+        };
+
+        let filter = ReflogFilter::new(Some(1_720_000_000), None, None);
+        assert!(!filter.passes(&entry1));
+        assert!(filter.passes(&entry2));
+
+        let filter = ReflogFilter::new(None, Some(1_730_000_000), None);
+        assert!(filter.passes(&entry1));
+        assert!(!filter.passes(&entry2));
+    }
+
+    #[test]
+    fn test_reflog_filter_grep() {
+        let entry1 = Model {
+            id: 1,
+            ref_name: "HEAD".to_string(),
+            old_oid: "abc".to_string(),
+            new_oid: "def".to_string(),
+            timestamp: 1_700_000_000,
+            committer_name: "Test".to_string(),
+            committer_email: "test@test.com".to_string(),
+            action: "commit".to_string(),
+            message: "Add feature".to_string(),
+        };
+
+        let entry2 = Model {
+            id: 2,
+            ref_name: "HEAD".to_string(),
+            old_oid: "def".to_string(),
+            new_oid: "ghi".to_string(),
+            timestamp: 1_750_000_000,
+            committer_name: "Test".to_string(),
+            committer_email: "test@test.com".to_string(),
+            action: "merge".to_string(),
+            message: "Merge branch".to_string(),
+        };
+
+        let filter = ReflogFilter::new(None, None, Some("COMMIT".to_string()));
+        assert!(filter.passes(&entry1));
+        assert!(!filter.passes(&entry2));
+
+        let filter = ReflogFilter::new(None, None, Some("merge".to_string()));
+        assert!(!filter.passes(&entry1));
+        assert!(filter.passes(&entry2));
+    }
+
+    #[test]
+    fn test_reflog_filter_combined() {
+        let entry = Model {
+            id: 1,
+            ref_name: "HEAD".to_string(),
+            old_oid: "abc".to_string(),
+            new_oid: "def".to_string(),
+            timestamp: 1_725_000_000,
+            committer_name: "Test".to_string(),
+            committer_email: "test@test.com".to_string(),
+            action: "commit".to_string(),
+            message: "Add feature".to_string(),
+        };
+
+        let filter = ReflogFilter::new(
+            Some(1_700_000_000),
+            Some(1_750_000_000),
+            Some("feature".to_string())
+        );
+        assert!(filter.passes(&entry));
+
+        let filter = ReflogFilter::new(
+            Some(1_730_000_000),
+            Some(1_750_000_000),
+            Some("feature".to_string())
+        );
+        assert!(!filter.passes(&entry));
+    }
 }
