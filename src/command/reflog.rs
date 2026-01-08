@@ -55,6 +55,12 @@ enum Subcommands {
         /// Limit the number of output
         #[clap(short, long)]
         number: Option<usize>,
+        /// Show diffs for each reflog entry
+        #[clap(short = 'p', long = "patch")]
+        patch: bool,
+        /// Show diffstat for each reflog entry
+        #[arg(long)]
+        stat: bool,
     },
     /// clear the reflog record of the specified branch.
     Delete {
@@ -70,8 +76,8 @@ enum Subcommands {
 
 pub async fn execute(args: ReflogArgs) {
     match args.command {
-        Subcommands::Show { ref_name, pretty, since, until, grep, author, number } => {
-            handle_show(&ref_name, pretty, since, until, grep, author, number).await
+        Subcommands::Show { ref_name, pretty, since, until, grep, author, number, patch, stat } => {
+            handle_show(&ref_name, pretty, since, until, grep, author, number, patch, stat).await
         },
         Subcommands::Delete { selectors } => handle_delete(&selectors).await,
         Subcommands::Exists { ref_name } => handle_exists(&ref_name).await,
@@ -86,6 +92,8 @@ async fn handle_show(
     grep: Option<String>,
     author: Option<String>,
     number: Option<usize>,
+    patch: bool,
+    stat: bool,
 ) {
     let db = get_db_conn_instance().await;
 
@@ -128,6 +136,8 @@ async fn handle_show(
     let formatter = ReflogFormatter {
         logs: limited_logs,
         kind: pretty,
+        patch,
+        stat,
     };
 
     #[cfg(unix)]
@@ -354,6 +364,8 @@ impl From<String> for FormatterKind {
 struct ReflogFormatter<'a> {
     logs: &'a [Model],
     kind: FormatterKind,
+    patch: bool,
+    stat: bool,
 }
 
 impl Display for ReflogFormatter<'_> {
@@ -373,7 +385,7 @@ impl Display for ReflogFormatter<'_> {
                 let commit_msg = &commit.message.trim();
                 let datetime = format_datetime(log.timestamp);
 
-                match self.kind {
+                let mut output = match self.kind {
                     FormatterKind::Oneline => format!(
                         "{} {head}: {full_msg}",
                         new_oid.to_string().bright_magenta(),
@@ -390,7 +402,30 @@ impl Display for ReflogFormatter<'_> {
                         "{}\nReflog: {head} ({author})\nReflog message: {full_msg}\nAuthor: {author}\nCommit: {committer}\n\n  {commit_msg}\n",
                         format!("commit {new_oid}").bright_magenta(),
                     ),
+                };
+
+                // Append diff or stat output if requested
+                if self.patch {
+                    if let Ok(patch_output) = generate_diff_sync(&commit) {
+                        if !patch_output.is_empty() {
+                            if !output.ends_with('\n') {
+                                output.push('\n');
+                            }
+                            output.push_str(&patch_output);
+                        }
+                    }
+                } else if self.stat {
+                    if let Ok(stat_output) = generate_stat_sync(&commit) {
+                        if !stat_output.is_empty() {
+                            if !output.ends_with('\n') {
+                                output.push('\n');
+                            }
+                            output.push_str(&stat_output);
+                        }
+                    }
                 }
+
+                output
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -411,6 +446,115 @@ fn format_datetime(timestamp: i64) -> String {
     local.format(git_format).to_string()
 }
 
+/// Synchronous wrapper for generating diff output
+fn generate_diff_sync(commit: &Commit) -> Result<String, Box<dyn std::error::Error>> {
+    use git_internal::internal::object::{tree::Tree, blob::Blob};
+    use git_internal::Diff;
+    use crate::utils::object_ext::TreeExt;
+
+    // new_blobs from commit tree
+    let tree = load_object::<Tree>(&commit.tree_id)?;
+    let new_blobs: Vec<(std::path::PathBuf, ObjectHash)> = tree.get_plain_items();
+
+    // old_blobs from first parent if exists
+    let old_blobs: Vec<(std::path::PathBuf, ObjectHash)> = if !commit.parent_commit_ids.is_empty() {
+        let parent = &commit.parent_commit_ids[0];
+        let parent_hash = ObjectHash::from_str(&parent.to_string())?;
+        let parent_commit = load_object::<Commit>(&parent_hash)?;
+        let parent_tree = load_object::<Tree>(&parent_commit.tree_id)?;
+        parent_tree.get_plain_items()
+    } else {
+        Vec::new()
+    };
+
+    let read_content = |_file: &std::path::PathBuf, hash: &ObjectHash| -> Vec<u8> {
+        load_object::<Blob>(hash)
+            .map(|blob| blob.data)
+            .unwrap_or_default()
+    };
+
+    let diffs = Diff::diff(
+        old_blobs,
+        new_blobs,
+        Vec::new(), // No path filters for reflog
+        read_content,
+    );
+
+    let mut diff_output = String::new();
+    for diff in diffs {
+        diff_output.push_str(&format!("--- a/{}\n", diff.path));
+        diff_output.push_str(&format!("+++ b/{}\n", diff.path));
+        diff_output.push_str(&diff.data);
+        diff_output.push('\n');
+    }
+
+    Ok(diff_output)
+}
+
+/// Synchronous wrapper for generating stat output
+fn generate_stat_sync(commit: &Commit) -> Result<String, Box<dyn std::error::Error>> {
+    use git_internal::internal::object::{tree::Tree, blob::Blob};
+    use git_internal::Diff;
+    use crate::utils::object_ext::TreeExt;
+
+    // new_blobs from commit tree
+    let tree = load_object::<Tree>(&commit.tree_id)?;
+    let new_blobs: Vec<(std::path::PathBuf, ObjectHash)> = tree.get_plain_items();
+
+    // old_blobs from first parent if exists
+    let old_blobs: Vec<(std::path::PathBuf, ObjectHash)> = if !commit.parent_commit_ids.is_empty() {
+        let parent = &commit.parent_commit_ids[0];
+        let parent_hash = ObjectHash::from_str(&parent.to_string())?;
+        let parent_commit = load_object::<Commit>(&parent_hash)?;
+        let parent_tree = load_object::<Tree>(&parent_commit.tree_id)?;
+        parent_tree.get_plain_items()
+    } else {
+        Vec::new()
+    };
+
+    let read_content = |_file: &std::path::PathBuf, hash: &ObjectHash| -> Vec<u8> {
+        load_object::<Blob>(hash)
+            .map(|blob| blob.data)
+            .unwrap_or_default()
+    };
+
+    let diffs = Diff::diff(
+        old_blobs,
+        new_blobs,
+        Vec::new(), // No path filters for reflog
+        read_content,
+    );
+
+    if diffs.is_empty() {
+        return Ok(String::new());
+    }
+
+    let mut additions = 0;
+    let mut deletions = 0;
+
+    for diff in &diffs {
+        for line in diff.data.lines() {
+            if line.starts_with('+') && !line.starts_with("+++") {
+                additions += 1;
+            } else if line.starts_with('-') && !line.starts_with("---") {
+                deletions += 1;
+            }
+        }
+    }
+
+    let stat_output = format!(
+        " {} file{} changed, {} insertion{}(+), {} deletion{}(-)\n",
+        diffs.len(),
+        if diffs.len() != 1 { "s" } else { "" },
+        additions,
+        if additions != 1 { "s" } else { "" },
+        deletions,
+        if deletions != 1 { "s" } else { "" }
+    );
+
+    Ok(stat_output)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,7 +569,7 @@ mod tests {
             "--grep", "commit"
         ]);
 
-        if let Subcommands::Show { ref_name, pretty: _, since, until, grep, author: _, number: _ } = args.command {
+        if let Subcommands::Show { ref_name, pretty: _, since, until, grep, author: _, number: _, patch: _, stat: _ } = args.command {
             assert_eq!(ref_name, "HEAD");
             assert_eq!(since.as_deref(), Some("2024-01-01"));
             assert_eq!(until.as_deref(), Some("2024-12-31"));

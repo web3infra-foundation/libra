@@ -197,3 +197,88 @@ async fn test_reflog_show_with_combined_filters() {
     ]);
     reflog::execute(args).await; // Should complete without panic
 }
+
+#[tokio::test]
+#[serial]
+async fn test_reflog_show_with_patch() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    // Create commits with file changes
+    for i in 1..=3 {
+        let commit_args = commit::CommitArgs {
+            message: Some(format!("Test commit {}", i)),
+            file: None,
+            allow_empty: true,
+            conventional: false,
+            amend: false,
+            no_edit: false,
+            signoff: false,
+            disable_pre: true,
+            all: false,
+        };
+        commit::execute(commit_args).await;
+    }
+
+    // Test with --patch flag (should work without error)
+    let args = reflog::ReflogArgs::parse_from([
+        "reflog", "show",
+        "--patch"
+    ]);
+    reflog::execute(args).await; // Should complete without panic
+
+    // Test with -p shorthand
+    let args = reflog::ReflogArgs::parse_from([
+        "reflog", "show",
+        "-p"
+    ]);
+    reflog::execute(args).await; // Should complete without panic
+
+    // Test with patch and number limit
+    let args = reflog::ReflogArgs::parse_from([
+        "reflog", "show",
+        "--patch",
+        "-n", "2"
+    ]);
+    reflog::execute(args).await; // Should complete without panic
+}
+
+#[tokio::test]
+#[serial]
+async fn test_reflog_show_with_stat() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    // Create commits
+    for i in 1..=3 {
+        let commit_args = commit::CommitArgs {
+            message: Some(format!("Test commit {}", i)),
+            file: None,
+            allow_empty: true,
+            conventional: false,
+            amend: false,
+            no_edit: false,
+            signoff: false,
+            disable_pre: true,
+            all: false,
+        };
+        commit::execute(commit_args).await;
+    }
+
+    // Test with --stat flag (should work without error)
+    let args = reflog::ReflogArgs::parse_from([
+        "reflog", "show",
+        "--stat"
+    ]);
+    reflog::execute(args).await; // Should complete without panic
+
+    // Test with stat and number limit
+    let args = reflog::ReflogArgs::parse_from([
+        "reflog", "show",
+        "--stat",
+        "-n", "2"
+    ]);
+    reflog::execute(args).await; // Should complete without panic
+}
