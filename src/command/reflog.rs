@@ -49,6 +49,12 @@ enum Subcommands {
         /// Filter reflog entries by message pattern
         #[arg(long)]
         grep: Option<String>,
+        /// Filter reflog entries by committer name or email
+        #[arg(long)]
+        author: Option<String>,
+        /// Limit the number of output
+        #[clap(short, long)]
+        number: Option<usize>,
     },
     /// clear the reflog record of the specified branch.
     Delete {
@@ -64,8 +70,8 @@ enum Subcommands {
 
 pub async fn execute(args: ReflogArgs) {
     match args.command {
-        Subcommands::Show { ref_name, pretty, since, until, grep } => {
-            handle_show(&ref_name, pretty, since, until, grep).await
+        Subcommands::Show { ref_name, pretty, since, until, grep, author, number } => {
+            handle_show(&ref_name, pretty, since, until, grep, author, number).await
         },
         Subcommands::Delete { selectors } => handle_delete(&selectors).await,
         Subcommands::Exists { ref_name } => handle_exists(&ref_name).await,
@@ -78,6 +84,8 @@ async fn handle_show(
     since: Option<String>,
     until: Option<String>,
     grep: Option<String>,
+    author: Option<String>,
+    number: Option<usize>,
 ) {
     let db = get_db_conn_instance().await;
 
@@ -108,13 +116,17 @@ async fn handle_show(
     };
 
     // Apply filters
-    let filter = ReflogFilter::new(since_ts, until_ts, grep);
+    let filter = ReflogFilter::new(since_ts, until_ts, grep, author);
     let filtered_logs: Vec<_> = logs.into_iter()
         .filter(|log| filter.passes(log))
         .collect();
 
+    // Apply number limit
+    let max_output = number.unwrap_or(filtered_logs.len());
+    let limited_logs = &filtered_logs[..filtered_logs.len().min(max_output)];
+
     let formatter = ReflogFormatter {
-        logs: &filtered_logs,
+        logs: limited_logs,
         kind: pretty,
     };
 
@@ -251,15 +263,22 @@ struct ReflogFilter {
     since: Option<i64>,
     until: Option<i64>,
     grep: Option<String>,
+    author: Option<String>,
 }
 
 impl ReflogFilter {
     /// Create a new filter from optional parameters
-    fn new(since: Option<i64>, until: Option<i64>, grep: Option<String>) -> Self {
+    fn new(
+        since: Option<i64>,
+        until: Option<i64>,
+        grep: Option<String>,
+        author: Option<String>,
+    ) -> Self {
         Self {
             since,
             until,
             grep: grep.map(|s| s.to_lowercase()),
+            author: author.map(|s| s.to_lowercase()),
         }
     }
 
@@ -280,6 +299,18 @@ impl ReflogFilter {
         if let Some(grep_pattern) = &self.grep {
             let full_message = format!("{}: {}", entry.action, entry.message);
             if !full_message.to_lowercase().contains(grep_pattern) {
+                return false;
+            }
+        }
+
+        // Author filter (matches committer_name or committer_email)
+        if let Some(author_filter) = &self.author {
+            let committer = format!(
+                "{} <{}>",
+                entry.committer_name.to_lowercase(),
+                entry.committer_email.to_lowercase()
+            );
+            if !committer.contains(author_filter) {
                 return false;
             }
         }
@@ -321,7 +352,7 @@ impl From<String> for FormatterKind {
 }
 
 struct ReflogFormatter<'a> {
-    logs: &'a Vec<Model>,
+    logs: &'a [Model],
     kind: FormatterKind,
 }
 
@@ -394,7 +425,7 @@ mod tests {
             "--grep", "commit"
         ]);
 
-        if let Subcommands::Show { ref_name, pretty: _, since, until, grep } = args.command {
+        if let Subcommands::Show { ref_name, pretty: _, since, until, grep, author: _, number: _ } = args.command {
             assert_eq!(ref_name, "HEAD");
             assert_eq!(since.as_deref(), Some("2024-01-01"));
             assert_eq!(until.as_deref(), Some("2024-12-31"));
@@ -430,11 +461,11 @@ mod tests {
             message: "Another message".to_string(),
         };
 
-        let filter = ReflogFilter::new(Some(1_720_000_000), None, None);
+        let filter = ReflogFilter::new(Some(1_720_000_000), None, None, None);
         assert!(!filter.passes(&entry1));
         assert!(filter.passes(&entry2));
 
-        let filter = ReflogFilter::new(None, Some(1_730_000_000), None);
+        let filter = ReflogFilter::new(None, Some(1_730_000_000), None, None);
         assert!(filter.passes(&entry1));
         assert!(!filter.passes(&entry2));
     }
@@ -465,11 +496,11 @@ mod tests {
             message: "Merge branch".to_string(),
         };
 
-        let filter = ReflogFilter::new(None, None, Some("COMMIT".to_string()));
+        let filter = ReflogFilter::new(None, None, Some("COMMIT".to_string()), None);
         assert!(filter.passes(&entry1));
         assert!(!filter.passes(&entry2));
 
-        let filter = ReflogFilter::new(None, None, Some("merge".to_string()));
+        let filter = ReflogFilter::new(None, None, Some("merge".to_string()), None);
         assert!(!filter.passes(&entry1));
         assert!(filter.passes(&entry2));
     }
@@ -491,15 +522,58 @@ mod tests {
         let filter = ReflogFilter::new(
             Some(1_700_000_000),
             Some(1_750_000_000),
-            Some("feature".to_string())
+            Some("feature".to_string()),
+            None
         );
         assert!(filter.passes(&entry));
 
         let filter = ReflogFilter::new(
             Some(1_730_000_000),
             Some(1_750_000_000),
-            Some("feature".to_string())
+            Some("feature".to_string()),
+            None
         );
         assert!(!filter.passes(&entry));
+    }
+
+    #[test]
+    fn test_reflog_filter_author() {
+        let entry1 = Model {
+            id: 1,
+            ref_name: "HEAD".to_string(),
+            old_oid: "abc".to_string(),
+            new_oid: "def".to_string(),
+            timestamp: 1_700_000_000,
+            committer_name: "Alice".to_string(),
+            committer_email: "alice@example.com".to_string(),
+            action: "commit".to_string(),
+            message: "Test message".to_string(),
+        };
+
+        let entry2 = Model {
+            id: 2,
+            ref_name: "HEAD".to_string(),
+            old_oid: "def".to_string(),
+            new_oid: "ghi".to_string(),
+            timestamp: 1_750_000_000,
+            committer_name: "Bob".to_string(),
+            committer_email: "bob@example.com".to_string(),
+            action: "commit".to_string(),
+            message: "Another message".to_string(),
+        };
+
+        // Test author filtering by name
+        let filter = ReflogFilter::new(None, None, None, Some("alice".to_string()));
+        assert!(filter.passes(&entry1));
+        assert!(!filter.passes(&entry2));
+
+        // Test author filtering by email
+        let filter = ReflogFilter::new(None, None, None, Some("bob@example".to_string()));
+        assert!(!filter.passes(&entry1));
+        assert!(filter.passes(&entry2));
+
+        // Test case-insensitive matching
+        let filter = ReflogFilter::new(None, None, None, Some("ALICE".to_string()));
+        assert!(filter.passes(&entry1));
     }
 }
