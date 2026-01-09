@@ -155,9 +155,15 @@ async fn handle_show(ref_name: &str, options: ReflogShowOptions) {
         }
     };
 
+    // Preserve original indices before filtering
+    let logs_with_index: Vec<_> = logs.into_iter().enumerate().collect();
+
     // Apply filters
     let filter = ReflogFilter::new(since_ts, until_ts, options.grep, options.author);
-    let filtered_logs: Vec<_> = logs.into_iter().filter(|log| filter.passes(log)).collect();
+    let filtered_logs: Vec<_> = logs_with_index
+        .into_iter()
+        .filter(|(_, log)| filter.passes(log))
+        .collect();
 
     // Apply number limit
     let max_output = options.number.unwrap_or(filtered_logs.len());
@@ -396,7 +402,7 @@ impl From<String> for FormatterKind {
 }
 
 struct ReflogFormatter<'a> {
-    logs: &'a [Model],
+    logs: &'a [(usize, Model)],
     kind: FormatterKind,
     patch: bool,
     stat: bool,
@@ -406,7 +412,6 @@ impl Display for ReflogFormatter<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let all = self.logs
             .iter()
-            .enumerate()
             .map(|(idx, log)| {
                 let head = format!("HEAD@{{{idx}}}");
                 let new_oid = &log.new_oid[..7];
