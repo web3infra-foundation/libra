@@ -37,6 +37,7 @@ use crate::{
 };
 
 #[derive(Parser, Debug, Default)]
+
 pub struct CommitArgs {
     #[arg(short, long, required_unless_present_any(["file", "no_edit"]))]
     pub message: Option<String>,
@@ -67,8 +68,11 @@ pub struct CommitArgs {
     #[arg(long)]
     pub disable_pre: bool,
 
-    /// Automatically stage tracked files that have been modified or deleted
-    #[arg(short = 'a', long)]
+    /// skip pre-commit hook verification (bypass commit pre-checks)
+    #[arg(long, short = 'n')]
+    pub no_verify: bool,
+
+    #[arg(long, short = 'a')]
     pub all: bool,
 }
 
@@ -88,7 +92,7 @@ pub async fn execute(args: CommitArgs) {
     }
 
     // run pre commit hook
-    if !args.disable_pre {
+    if !args.no_verify && !args.disable_pre {
         let hooks_dir = path::hooks();
 
         #[cfg(not(target_os = "windows"))]

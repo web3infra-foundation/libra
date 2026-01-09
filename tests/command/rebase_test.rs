@@ -57,6 +57,7 @@ async fn test_basic_rebase() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        no_verify: false,
         all: false,
     })
     .await;
@@ -82,6 +83,7 @@ async fn test_basic_rebase() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        no_verify: false,
         all: false,
     })
     .await;
@@ -116,6 +118,7 @@ async fn test_basic_rebase() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        no_verify: false,
         all: false,
     })
     .await;
@@ -141,6 +144,7 @@ async fn test_basic_rebase() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        no_verify: false,
         all: false,
     })
     .await;
@@ -174,6 +178,7 @@ async fn test_basic_rebase() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        no_verify: false,
         all: false,
     })
     .await;
@@ -395,6 +400,7 @@ async fn test_rebase_already_up_to_date() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        no_verify: false,
         all: false,
     })
     .await;
@@ -420,6 +426,7 @@ async fn test_rebase_already_up_to_date() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        no_verify: false,
         all: false,
     })
     .await;

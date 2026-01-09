@@ -24,6 +24,7 @@ async fn test_branch() {
         no_edit: false,
         signoff: false,
         disable_pre: true,
+        no_verify: false,
         all: false,
     };
     commit::execute(commit_args).await;
@@ -38,6 +39,7 @@ async fn test_branch() {
         no_edit: false,
         signoff: false,
         disable_pre: true,
+        no_verify: false,
         all: false,
     };
     commit::execute(commit_args).await;
@@ -133,6 +135,7 @@ async fn test_create_branch_from_remote() {
         amend: false,
         signoff: false,
         disable_pre: true,
+        no_verify: false,
         all: false,
     };
     commit::execute(args).await;
@@ -177,6 +180,7 @@ async fn test_invalid_branch_name() {
         amend: false,
         signoff: false,
         disable_pre: true,
+        no_verify: false,
         all: false,
     };
     commit::execute(args).await;

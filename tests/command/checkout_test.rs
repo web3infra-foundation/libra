@@ -88,6 +88,7 @@ async fn test_checkout_module_functions() {
         amend: false,
         signoff: false,
         disable_pre: true,
+        no_verify: false,
         all: false,
     };
     commit::execute(commit_args).await;

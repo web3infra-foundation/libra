@@ -37,6 +37,7 @@ async fn setup_standard_repo(
         amend: false,
         signoff: false,
         disable_pre: true,
+        no_verify: false,
         all: false,
     })
     .await;
@@ -75,6 +76,7 @@ async fn setup_standard_repo(
         amend: false,
         signoff: false,
         disable_pre: true,
+        no_verify: false,
         all: false,
     })
     .await;
@@ -113,6 +115,7 @@ async fn setup_standard_repo(
         amend: false,
         signoff: false,
         disable_pre: true,
+        no_verify: false,
         all: false,
     })
     .await;
@@ -151,6 +154,7 @@ async fn setup_standard_repo(
         amend: false,
         signoff: false,
         disable_pre: true,
+        no_verify: false,
         all: false,
     })
     .await;

@@ -206,6 +206,7 @@ async fn test_log_patch_no_pathspec() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        no_verify: false,
         all: false,
     })
     .await;
@@ -232,6 +233,7 @@ async fn test_log_patch_no_pathspec() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        no_verify: false,
         all: false,
     })
     .await;
@@ -326,6 +328,7 @@ async fn test_log_patch_with_pathspec() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        no_verify: false,
         all: false,
     })
     .await;

@@ -50,6 +50,7 @@ async fn test_basic_cherry_pick() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        no_verify: false,
         all: false,
     })
     .await;
@@ -87,6 +88,7 @@ async fn test_basic_cherry_pick() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        no_verify: false,
         all: false,
     })
     .await;
@@ -119,6 +121,7 @@ async fn test_basic_cherry_pick() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        no_verify: false,
         all: false,
     })
     .await;
@@ -253,6 +256,7 @@ async fn test_cherry_pick_with_commit() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        no_verify: false,
         all: false,
     })
     .await;
@@ -286,6 +290,7 @@ async fn test_cherry_pick_with_commit() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        no_verify: false,
         all: false,
     })
     .await;
@@ -366,6 +371,7 @@ async fn test_cherry_pick_multiple_commits() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        no_verify: false,
         all: false,
     })
     .await;
@@ -400,6 +406,7 @@ async fn test_cherry_pick_multiple_commits() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        no_verify: false,
         all: false,
     })
     .await;
@@ -427,6 +434,7 @@ async fn test_cherry_pick_multiple_commits() {
         amend: false,
         signoff: false,
         disable_pre: false,
+        no_verify: false,
         all: false,
     })
     .await;

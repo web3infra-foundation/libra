@@ -25,6 +25,7 @@ async fn test_execute_commit_with_empty_index_fail() {
         amend: false,
         signoff: false,
         disable_pre: true,
+        no_verify: false,
         all: false,
     };
     commit::execute(args).await;
@@ -51,6 +52,7 @@ async fn test_execute_commit() {
             amend: false,
             signoff: false,
             disable_pre: true,
+            no_verify: false,
             all: false,
         };
         commit::execute(args).await;
@@ -80,6 +82,7 @@ async fn test_execute_commit() {
             amend: true,
             signoff: false,
             disable_pre: true,
+            no_verify: false,
             all: false,
         };
         commit::execute(args).await;
@@ -127,6 +130,7 @@ async fn test_execute_commit() {
             amend: false,
             signoff: false,
             disable_pre: true,
+            no_verify: false,
             all: false,
         };
         commit::execute(args).await;
@@ -159,6 +163,7 @@ async fn test_execute_commit() {
             amend: true,
             signoff: false,
             disable_pre: true,
+            no_verify: false,
             all: false,
         };
         commit::execute(args).await;
