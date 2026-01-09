@@ -53,10 +53,12 @@ pub struct CommitArgs {
     pub disable_pre: bool,
 
     /// skip pre-commit hook verification (bypass commit pre-checks)
-    #[arg(long, short = 'n')] 
+    #[arg(long, short = 'n')]
     pub no_verify: bool,
-}
 
+    #[arg(long, short = 'a')] 
+    pub all: bool,
+}
 
 pub async fn execute(args: CommitArgs) {
     /* check args */
