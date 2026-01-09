@@ -49,10 +49,10 @@ enum Subcommands {
         /// Filter reflog entries by message pattern
         #[arg(long)]
         grep: Option<String>,
-        /// Filter reflog entries by committer name or email
+        /// Filter reflog entries by author (matches reflog committer name or email)
         #[arg(long)]
         author: Option<String>,
-        /// Limit the number of output
+        /// Limit the number of output entries
         #[clap(short, long)]
         number: Option<usize>,
         /// Show diffs for each reflog entry
@@ -443,17 +443,19 @@ impl Display for ReflogFormatter<'_> {
                     ),
                 };
 
-                // Append diff or stat output if requested
-                if self.patch {
-                    if let Ok(patch_output) = generate_diff_sync(&commit)
-                        && !patch_output.is_empty()
-                    {
-                        if !output.ends_with('\n') {
-                            output.push('\n');
-                        }
-                        output.push_str(&patch_output);
+                // Append diff output if requested
+                if self.patch
+                    && let Ok(patch_output) = generate_diff_sync(&commit)
+                    && !patch_output.is_empty()
+                {
+                    if !output.ends_with('\n') {
+                        output.push('\n');
                     }
-                } else if self.stat
+                    output.push_str(&patch_output);
+                }
+
+                // Append stat output if requested
+                if self.stat
                     && let Ok(stat_output) = generate_stat_sync(&commit)
                     && !stat_output.is_empty()
                 {
@@ -539,7 +541,7 @@ fn generate_stat_sync(commit: &Commit) -> Result<String, Box<dyn std::error::Err
         internal::object::{blob::Blob, tree::Tree},
     };
 
-    use crate::utils::object_ext::TreeExt;
+    use crate::{command::log::FileStat, utils::object_ext::TreeExt};
 
     // new_blobs from commit tree
     let tree = load_object::<Tree>(&commit.tree_id)?;
@@ -569,34 +571,29 @@ fn generate_stat_sync(commit: &Commit) -> Result<String, Box<dyn std::error::Err
         read_content,
     );
 
-    if diffs.is_empty() {
-        return Ok(String::new());
-    }
-
-    let mut additions = 0;
-    let mut deletions = 0;
-
-    for diff in &diffs {
-        for line in diff.data.lines() {
+    // Compute per-file statistics
+    let mut stats = Vec::new();
+    for diff_item in diffs {
+        let mut insertions = 0;
+        let mut deletions = 0;
+        for line in diff_item.data.lines() {
             if line.starts_with('+') && !line.starts_with("+++") {
-                additions += 1;
+                insertions += 1;
             } else if line.starts_with('-') && !line.starts_with("---") {
                 deletions += 1;
             }
         }
+        if insertions > 0 || deletions > 0 {
+            stats.push(FileStat {
+                path: diff_item.path,
+                insertions,
+                deletions,
+            });
+        }
     }
 
-    let stat_output = format!(
-        " {} file{} changed, {} insertion{}(+), {} deletion{}(-)\n",
-        diffs.len(),
-        if diffs.len() != 1 { "s" } else { "" },
-        additions,
-        if additions != 1 { "s" } else { "" },
-        deletions,
-        if deletions != 1 { "s" } else { "" }
-    );
-
-    Ok(stat_output)
+    // Use log module's formatting function for consistent output
+    Ok(crate::command::log::format_stat_output(&stats))
 }
 
 #[cfg(test)]
