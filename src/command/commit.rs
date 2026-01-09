@@ -56,7 +56,7 @@ pub struct CommitArgs {
     #[arg(long, short = 'n')]
     pub no_verify: bool,
 
-    #[arg(long, short = 'a')] 
+    #[arg(long, short = 'a')]
     pub all: bool,
 }
 
@@ -70,7 +70,7 @@ pub async fn execute(args: CommitArgs) {
     }
 
     // run pre commit hook
-    if !args.disable_pre && !args.no_verify {
+    if !args.no_verify && !args.disable_pre {
         let hooks_dir = path::hooks();
 
         #[cfg(not(target_os = "windows"))]
