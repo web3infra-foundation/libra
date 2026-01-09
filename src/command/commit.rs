@@ -24,6 +24,7 @@ use sea_orm::ConnectionTrait;
 use std::process::Command;
 
 #[derive(Parser, Debug, Default)]
+
 pub struct CommitArgs {
     #[arg(short, long, required_unless_present("file"))]
     pub message: Option<String>,
@@ -50,7 +51,12 @@ pub struct CommitArgs {
 
     #[arg(long)]
     pub disable_pre: bool,
+
+    /// skip pre-commit hook verification (bypass commit pre-checks)
+    #[arg(long, short = 'n')] 
+    pub no_verify: bool,
 }
+
 
 pub async fn execute(args: CommitArgs) {
     /* check args */
@@ -62,7 +68,7 @@ pub async fn execute(args: CommitArgs) {
     }
 
     // run pre commit hook
-    if !args.disable_pre {
+    if !args.disable_pre && !args.no_verify {
         let hooks_dir = path::hooks();
 
         #[cfg(not(target_os = "windows"))]
