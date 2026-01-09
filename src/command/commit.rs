@@ -515,6 +515,7 @@ mod test {
             no_edit: true,
             signoff: false,
             disable_pre: false,
+            no_verify: false,
             all: false,
         };
         fn message_and_file_are_none(args: &CommitArgs) -> Option<String> {
