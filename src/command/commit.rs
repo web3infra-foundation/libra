@@ -1,36 +1,49 @@
-use super::save_object;
-use std::process::Stdio;
-use std::str::FromStr;
-use std::{collections::HashSet, path::PathBuf};
+//! Commit command that collects staged changes, builds tree and commit objects, validates messages (including GPG), and updates HEAD/refs.
 
-const EMPTY_TREE_HASH: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+use std::{
+    collections::HashSet,
+    path::PathBuf,
+    process::{Command, Stdio},
+    str::FromStr,
+};
 
-use crate::command::load_object;
-use crate::common_utils::{check_conventional_commits_message, format_commit_msg};
-use crate::internal::branch::Branch;
-use crate::internal::config::Config as UserConfig;
-use crate::internal::head::Head;
-use crate::internal::reflog::{ReflogAction, ReflogContext, with_reflog};
-use crate::utils::client_storage::ClientStorage;
-use crate::utils::path;
-use crate::utils::util;
 use clap::Parser;
-use git_internal::hash::SHA1;
-use git_internal::internal::index::Index;
-use git_internal::internal::object::ObjectTrait;
-use git_internal::internal::object::commit::Commit;
-use git_internal::internal::object::tree::{Tree, TreeItem, TreeItemMode};
+use git_internal::{
+    hash::{ObjectHash, get_hash_kind},
+    internal::{
+        index::{Index, IndexEntry},
+        object::{
+            ObjectTrait,
+            blob::Blob,
+            commit::Commit,
+            tree::{Tree, TreeItem, TreeItemMode},
+            types::ObjectType,
+        },
+    },
+};
 use sea_orm::ConnectionTrait;
-use std::process::Command;
+
+use super::save_object;
+use crate::{
+    command::{load_object, status},
+    common_utils::{check_conventional_commits_message, format_commit_msg},
+    internal::{
+        branch::Branch,
+        config::Config as UserConfig,
+        head::Head,
+        reflog::{ReflogAction, ReflogContext, with_reflog},
+    },
+    utils::{client_storage::ClientStorage, lfs, object_ext::BlobExt, path, util},
+};
 
 #[derive(Parser, Debug, Default)]
 
 pub struct CommitArgs {
-    #[arg(short, long, required_unless_present("file"))]
+    #[arg(short, long, required_unless_present_any(["file", "no_edit"]))]
     pub message: Option<String>,
 
     /// read message from file
-    #[arg(short = 'F', long, required_unless_present("message"))]
+    #[arg(short = 'F', long, required_unless_present_any(["message", "no_edit"]))]
     pub file: Option<String>,
 
     /// allow commit with empty index
@@ -45,6 +58,9 @@ pub struct CommitArgs {
     #[arg(long)]
     pub amend: bool,
 
+    /// use the message from the original commit when amending
+    #[arg(long, requires = "amend",conflicts_with_all(["message", "file"]))]
+    pub no_edit: bool,
     /// add signed-off-by line at the end of the commit message
     #[arg(short = 's', long)]
     pub signoff: bool,
@@ -62,10 +78,16 @@ pub struct CommitArgs {
 
 pub async fn execute(args: CommitArgs) {
     /* check args */
+    let auto_stage_applied = if args.all {
+        // Mimic `git commit -a` by staging tracked modifications/deletions first
+        auto_stage_tracked_changes()
+    } else {
+        false
+    };
     let index = Index::load(path::index()).unwrap();
     let storage = ClientStorage::init(path::objects());
     let tracked_entries = index.tracked_entries(0);
-    if tracked_entries.is_empty() && !args.allow_empty {
+    if tracked_entries.is_empty() && !args.allow_empty && !auto_stage_applied {
         panic!("fatal: no changes added to commit, use --allow-empty to override");
     }
 
@@ -120,9 +142,75 @@ pub async fn execute(args: CommitArgs) {
         },
         //no commit message, which is not supposed to happen
         (None, None) => {
-            panic!("fatal: no commit message provided")
+            if !args.no_edit {
+                panic!("fatal: no commit message provided")
+            } else {
+                //its ok to use "" because no_edit is True ,
+                //and we will use the message from the original commit
+                // message wont be used by amend
+                "".to_string()
+            }
         }
     };
+    /* Create tree */
+    let tree = create_tree(&index, &storage, "".into()).await;
+
+    /* Create & save commit objects */
+    let parents_commit_ids = get_parents_ids().await;
+
+    // Amend commits are only supported for a single parent commit.
+    if args.amend {
+        if parents_commit_ids.len() > 1 {
+            panic!("fatal: --amend is not supported for merge commits with multiple parents");
+        }
+        let parent_commit = load_object::<Commit>(&parents_commit_ids[0]).unwrap_or_else(|_| {
+            panic!(
+                "fatal: not a valid object name: '{}'",
+                parents_commit_ids[0]
+            )
+        });
+        let grandpa_commit_id = parent_commit.parent_commit_ids;
+        // if no_edit is True, use parent commit message;else use commit message from args
+        let final_message = if args.no_edit {
+            parent_commit.message.clone()
+        } else {
+            message.clone()
+        };
+        //Prepare commit message
+        let commit_message = if args.signoff {
+            // get user
+            let user_name = UserConfig::get("user", None, "name")
+                .await
+                .unwrap_or_else(|| "unknown".to_string());
+            let user_email = UserConfig::get("user", None, "email")
+                .await
+                .unwrap_or_else(|| "unknown".to_string());
+
+            // get sign line
+            let signoff_line = format!("Signed-off-by: {user_name} <{user_email}>");
+            format!("{}\n\n{signoff_line}", final_message)
+        } else {
+            final_message.clone()
+        };
+
+        // check format(if needed)
+        if args.conventional && !check_conventional_commits_message(&commit_message) {
+            panic!("fatal: commit message does not follow conventional commits");
+        }
+        let commit = Commit::from_tree_id(
+            tree.id,
+            grandpa_commit_id,
+            &format_commit_msg(&final_message, None),
+        );
+
+        storage
+            .put(&commit.id, &commit.to_data().unwrap(), commit.get_type())
+            .unwrap();
+
+        /* update HEAD */
+        update_head_and_reflog(&commit.id.to_string(), &commit_message).await;
+        return;
+    }
 
     //Prepare commit message
     let commit_message = if args.signoff {
@@ -144,39 +232,6 @@ pub async fn execute(args: CommitArgs) {
     // check format(if needed)
     if args.conventional && !check_conventional_commits_message(&commit_message) {
         panic!("fatal: commit message does not follow conventional commits");
-    }
-
-    /* Create tree */
-    let tree = create_tree(&index, &storage, "".into()).await;
-
-    /* Create & save commit objects */
-    let parents_commit_ids = get_parents_ids().await;
-
-    // Amend commits are only supported for a single parent commit.
-    if args.amend {
-        if parents_commit_ids.len() > 1 {
-            panic!("fatal: --amend is not supported for merge commits with multiple parents");
-        }
-        let parent_commit = load_object::<Commit>(&parents_commit_ids[0]).unwrap_or_else(|_| {
-            panic!(
-                "fatal: not a valid object name: '{}'",
-                parents_commit_ids[0]
-            )
-        });
-        let grandpa_commit_id = parent_commit.parent_commit_ids;
-        let commit = Commit::from_tree_id(
-            tree.id,
-            grandpa_commit_id,
-            &format_commit_msg(&message, None),
-        );
-
-        storage
-            .put(&commit.id, &commit.to_data().unwrap(), commit.get_type())
-            .unwrap();
-
-        /* update HEAD */
-        update_head_and_reflog(&commit.id.to_string(), &commit_message).await;
-        return;
     }
 
     // There must be a `blank line`(\n) before `message`, or remote unpack failed
@@ -259,7 +314,8 @@ pub async fn create_tree(index: &Index, storage: &ClientStorage, current_root: P
     let tree = {
         // `from_tree_items` can't create empty tree, so use `from_bytes` instead
         if tree_items.is_empty() {
-            Tree::from_bytes(&[], SHA1::from_str(EMPTY_TREE_HASH).unwrap()).unwrap()
+            let empty_id = ObjectHash::from_type_and_data(ObjectType::Tree, &[]);
+            Tree::from_bytes(&[], empty_id).unwrap()
         } else {
             Tree::from_tree_items(tree_items).unwrap()
         }
@@ -269,8 +325,53 @@ pub async fn create_tree(index: &Index, storage: &ClientStorage, current_root: P
     tree
 }
 
+fn auto_stage_tracked_changes() -> bool {
+    let pending = status::changes_to_be_staged();
+    if pending.modified.is_empty() && pending.deleted.is_empty() {
+        return false;
+    }
+
+    let index_path = path::index();
+    let mut index = Index::load(&index_path).unwrap();
+    let workdir = util::working_dir();
+    let mut touched = false;
+
+    for file in pending.modified {
+        let abs = util::workdir_to_absolute(&file);
+        if !abs.exists() {
+            continue;
+        }
+        // Refresh blob IDs for modified tracked files before updating the index
+        let blob = blob_from_file(&abs);
+        blob.save();
+        index.update(IndexEntry::new_from_file(&file, blob.id, &workdir).unwrap());
+        touched = true;
+    }
+
+    for file in pending.deleted {
+        if let Some(path) = file.to_str() {
+            // Drop entries that disappeared from the working tree
+            index.remove(path, 0);
+            touched = true;
+        }
+    }
+
+    if touched {
+        index.save(&index_path).unwrap();
+    }
+    touched
+}
+
+fn blob_from_file(path: impl AsRef<std::path::Path>) -> Blob {
+    if lfs::is_lfs_tracked(&path) {
+        Blob::from_lfs_file(path)
+    } else {
+        Blob::from_file(path)
+    }
+}
+
 /// get current head commit id as parent, if in branch, get branch's commit id, if detached head, get head's commit id
-async fn get_parents_ids() -> Vec<SHA1> {
+async fn get_parents_ids() -> Vec<ObjectHash> {
     // let current_commit_id = reference::Model::current_commit_hash(db).await.unwrap();
     let current_commit_id = Head::current_commit().await;
     match current_commit_id {
@@ -289,7 +390,7 @@ async fn update_head<C: ConnectionTrait>(db: &C, commit_id: &str) {
         }
         // None => {
         Head::Detached(_) => {
-            let head = Head::Detached(SHA1::from_str(commit_id).unwrap());
+            let head = Head::Detached(ObjectHash::from_str(commit_id).unwrap());
             Head::update_with_conn(db, head, None).await;
         }
     }
@@ -315,8 +416,8 @@ async fn update_head_and_reflog(commit_id: &str, commit_message: &str) {
 async fn new_reflog_context(commit_id: &str, message: &str) -> ReflogContext {
     let old_oid = Head::current_commit()
         .await
-        .unwrap_or(SHA1::from_bytes(&[0; 20]))
-        ._to_string();
+        .unwrap_or(ObjectHash::from_bytes(&vec![0u8; get_hash_kind().size()]).unwrap())
+        .to_string();
     let new_oid = commit_id.to_string();
     let action = ReflogAction::Commit {
         message: message.to_string(),
@@ -332,7 +433,6 @@ async fn new_reflog_context(commit_id: &str, message: &str) -> ReflogContext {
 mod test {
     use std::env;
 
-    use crate::utils::test::*;
     use git_internal::internal::object::{ObjectTrait, signature::Signature};
     use serial_test::serial;
     use tempfile::tempdir;
@@ -342,6 +442,7 @@ mod test {
     };
 
     use super::*;
+    use crate::utils::test::*;
 
     #[test]
     ///Testing basic parameter parsing functionality.
@@ -363,10 +464,13 @@ mod test {
 
         let args = CommitArgs::try_parse_from(["commit", "-m", "init", "--amend"]);
         assert!(args.is_ok());
-
+        //failed
+        let args = CommitArgs::try_parse_from(["commit", "--amend", "--no-edit"]);
+        assert!(args.is_ok());
+        let args = CommitArgs::try_parse_from(["commit", "--no-edit"]);
+        assert!(args.is_err(), "--no-edit requires --amend");
         let args = CommitArgs::try_parse_from(["commit", "-m", "init", "--allow-empty", "--amend"]);
         assert!(args.is_ok());
-
         let args = CommitArgs::try_parse_from(["commit", "-m", "init", "-s"]);
         assert!(args.is_ok());
         assert!(args.unwrap().signoff);
@@ -375,6 +479,24 @@ mod test {
         assert!(args.is_ok());
         assert!(args.unwrap().signoff);
 
+        let args = CommitArgs::try_parse_from(["commit", "-m", "init", "-a"]);
+        assert!(args.is_ok());
+        assert!(args.unwrap().all);
+
+        let args = CommitArgs::try_parse_from(["commit", "-m", "init", "--all"]);
+        assert!(args.is_ok());
+        assert!(args.unwrap().all);
+
+        let args = CommitArgs::try_parse_from(["commit", "-m", "init", "--amend", "--no-edit"]);
+        assert!(
+            args.is_err(),
+            "--no-edit conflicts with --message and --file"
+        );
+        let args = CommitArgs::try_parse_from(["commit", "-F", "init", "--amend", "--no-edit"]);
+        assert!(
+            args.is_err(),
+            "--no-edit conflicts with --message and --file"
+        );
         let args = CommitArgs::try_parse_from(["commit", "-m", "init", "--amend", "--signoff"]);
         assert!(args.is_ok());
         let args = args.unwrap();
@@ -384,6 +506,37 @@ mod test {
         let args = CommitArgs::try_parse_from(["commit", "-F", "unreachable_file"]);
         assert!(args.is_ok());
         assert!(args.unwrap().file.is_some());
+    }
+
+    #[test]
+    fn test_commit_message() {
+        let args = CommitArgs {
+            message: None,
+            file: None,
+            allow_empty: false,
+            conventional: false,
+            amend: true,
+            no_edit: true,
+            signoff: false,
+            disable_pre: false,
+            all: false,
+        };
+        fn message_and_file_are_none(args: &CommitArgs) -> Option<String> {
+            let message = match (&args.message, &args.file) {
+                (Some(msg), _) => Some(msg.clone()),
+                (None, Some(file)) => Some(file.clone()),
+                (None, None) => {
+                    if args.no_edit {
+                        Some("".to_string())
+                    } else {
+                        None
+                    }
+                }
+            };
+            message
+        }
+        let message = message_and_file_are_none(&args);
+        assert_eq!(message, Some("".to_string()));
     }
 
     #[tokio::test]
@@ -438,7 +591,8 @@ mod test {
             };
 
             // Mock commit
-            let commit = Commit::new(author, commiter, SHA1([0; 20]), Vec::new(), &content);
+            let zero = ObjectHash::from_bytes(&vec![0u8; get_hash_kind().size()]).unwrap();
+            let commit = Commit::new(author, commiter, zero, Vec::new(), &content);
 
             // Commit to data
             let commit_data = commit.to_data().unwrap();

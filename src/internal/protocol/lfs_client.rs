@@ -1,25 +1,32 @@
-use crate::command;
-use crate::internal::config::Config;
-use crate::internal::protocol::ProtocolClient;
-use crate::internal::protocol::https_client::BasicAuth;
-use crate::lfs_structs::{
-    Action, BatchRequest, ChunkDownloadObject, FetchchunkResponse, LockList, LockListQuery,
-    LockRequest, ObjectError, Operation, Ref, RequestObject, ResponseObject, UnlockRequest,
-    VerifiableLockList, VerifiableLockRequest,
-};
-use crate::utils::{lfs, util};
+//! LFS protocol client that negotiates batch/lock/verify endpoints, uploads or downloads objects in chunks with hashing, and caches auth endpoints.
+
+use std::{collections::HashSet, path::Path};
+
 use anyhow::anyhow;
 use futures_util::StreamExt;
-use git_internal::internal::object::types::ObjectType;
-use git_internal::internal::pack::entry::Entry;
+use git_internal::internal::{object::types::ObjectType, pack::entry::Entry};
 use reqwest::{Client, StatusCode};
 use ring::digest::{Context, SHA256};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use std::path::Path;
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
-use tokio::sync::OnceCell;
+use tokio::{
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
+    sync::OnceCell,
+};
 use url::Url;
+
+use crate::{
+    command,
+    internal::{
+        config::Config,
+        protocol::{ProtocolClient, https_client::BasicAuth},
+    },
+    lfs_structs::{
+        Action, BatchRequest, ChunkDownloadObject, FetchchunkResponse, LockList, LockListQuery,
+        LockRequest, ObjectError, Operation, Ref, RequestObject, ResponseObject, UnlockRequest,
+        VerifiableLockList, VerifiableLockRequest,
+    },
+    utils::{lfs, util},
+};
 
 #[derive(Debug)]
 pub struct LFSClient {
@@ -630,8 +637,6 @@ impl LFSClient {
 
 #[cfg(test)]
 mod tests {
-    use crate::utils;
-
     use super::*;
     #[test]
     fn test_request_vars() {
@@ -675,16 +680,30 @@ mod tests {
     #[tokio::test]
     #[ignore] // need to start local mega server
     async fn test_push_object() {
-        let file_map = git_internal::test_utils::setup_lfs_file().await;
-        let file = file_map
-            .get("git-2d187177923cd618a75da6c6db45bb89d92bd504.pack")
-            .unwrap();
-        let client = LFSClient::from_url(&Url::parse("http://localhost:8000").unwrap());
-        let oid = utils::lfs::calc_lfs_file_hash(file).unwrap();
+        use tempfile::tempdir;
 
-        match client.push_object(&oid, file).await {
+        use crate::utils::lfs;
+
+        // Create a temporary directory and test file
+        let temp_dir = tempdir().unwrap();
+        let test_file = temp_dir
+            .path()
+            .join("git-2d187177923cd618a75da6c6db45bb89d92bd504.pack");
+
+        // Write test content (simulating a pack file)
+        let test_content = b"Sample pack file content for LFS push testing";
+        std::fs::write(&test_file, test_content).unwrap();
+
+        // Create client and calculate OID
+        let client = LFSClient::from_url(&Url::parse("http://localhost:8000").unwrap());
+        let oid = lfs::calc_lfs_file_hash(&test_file).unwrap();
+
+        // Test push
+        match client.push_object(&oid, &test_file).await {
             Ok(_) => println!("Pushed successfully."),
             Err(err) => eprintln!("Push failed: {err:?}"),
         }
+
+        // temp_dir automatically cleans up when dropped
     }
 }

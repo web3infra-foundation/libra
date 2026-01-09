@@ -1,7 +1,11 @@
+//! Tests branch subcommand for creation, listing, deletion, and switching logic.
+
 #![cfg(test)]
-use super::*;
+use libra::internal::config::Config;
 use serial_test::serial;
 use tempfile::tempdir;
+
+use super::*;
 #[tokio::test]
 #[serial]
 /// Tests core branch management functionality including creation and listing.
@@ -17,6 +21,7 @@ async fn test_branch() {
         allow_empty: true,
         conventional: false,
         amend: false,
+        no_edit: false,
         signoff: false,
         disable_pre: true,
         no_verify: false,
@@ -31,6 +36,7 @@ async fn test_branch() {
         allow_empty: true,
         conventional: false,
         amend: false,
+        no_edit: false,
         signoff: false,
         disable_pre: true,
         no_verify: false,
@@ -49,7 +55,9 @@ async fn test_branch() {
             delete: None,
             set_upstream_to: None,
             show_current: false,
+            rename: vec![],
             remotes: false,
+            all: false,
         };
         execute(args).await;
 
@@ -76,7 +84,9 @@ async fn test_branch() {
             delete: None,
             set_upstream_to: None,
             show_current: false,
+            rename: vec![],
             remotes: false,
+            all: false,
         };
         execute(args).await;
         let second_branch = Branch::find_branch(&second_branch_name, None)
@@ -95,7 +105,9 @@ async fn test_branch() {
         delete: None,
         set_upstream_to: None,
         show_current: true,
+        rename: vec![],
         remotes: false,
+        all: false,
     };
     execute(args).await;
 
@@ -119,6 +131,7 @@ async fn test_create_branch_from_remote() {
         file: None,
         allow_empty: true,
         conventional: false,
+        no_edit: false,
         amend: false,
         signoff: false,
         disable_pre: true,
@@ -137,7 +150,9 @@ async fn test_create_branch_from_remote() {
         delete: None,
         set_upstream_to: None,
         show_current: false,
+        rename: vec![],
         remotes: false,
+        all: false,
     };
     execute(args).await;
 
@@ -161,6 +176,7 @@ async fn test_invalid_branch_name() {
         file: None,
         allow_empty: true,
         conventional: false,
+        no_edit: false,
         amend: false,
         signoff: false,
         disable_pre: true,
@@ -176,10 +192,292 @@ async fn test_invalid_branch_name() {
         delete: None,
         set_upstream_to: None,
         show_current: false,
+        rename: vec![],
         remotes: false,
+        all: false,
     };
     execute(args).await;
 
     let branch = Branch::find_branch("@{mega}", None).await;
     assert!(branch.is_none(), "invalid branch should not be created");
+}
+
+#[tokio::test]
+#[serial]
+/// Tests branch renaming functionality.
+/// Verifies that branches can be renamed and HEAD is updated when renaming current branch.
+async fn test_branch_rename() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+    test::init_debug_logger();
+
+    // Create initial commit
+    let args = CommitArgs {
+        message: Some("first".to_string()),
+        file: None,
+        allow_empty: true,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+    };
+    commit::execute(args).await;
+    let commit_id_1 = Head::current_commit().await.unwrap();
+
+    // Create a test branch
+    let args = BranchArgs {
+        new_branch: Some("old_name".to_string()),
+        commit_hash: None,
+        list: false,
+        delete: None,
+        set_upstream_to: None,
+        show_current: false,
+        rename: vec![],
+        remotes: false,
+        all: false,
+    };
+    execute(args).await;
+
+    // Verify old branch exists
+    let old_branch = Branch::find_branch("old_name", None).await;
+    assert!(old_branch.is_some(), "old branch should exist");
+    assert_eq!(old_branch.unwrap().commit, commit_id_1);
+
+    // Rename branch from old_name to new_name
+    let args = BranchArgs {
+        new_branch: None,
+        commit_hash: None,
+        list: false,
+        delete: None,
+        set_upstream_to: None,
+        show_current: false,
+        rename: vec!["old_name".to_string(), "new_name".to_string()],
+        remotes: false,
+        all: false,
+    };
+    execute(args).await;
+
+    // Verify old branch no longer exists
+    let old_branch = Branch::find_branch("old_name", None).await;
+    assert!(
+        old_branch.is_none(),
+        "old branch should not exist after rename"
+    );
+
+    // Verify new branch exists with same commit
+    let new_branch = Branch::find_branch("new_name", None).await;
+    assert!(new_branch.is_some(), "new branch should exist");
+    assert_eq!(new_branch.unwrap().commit, commit_id_1);
+}
+
+#[tokio::test]
+#[serial]
+/// Tests renaming the current branch.
+/// Verifies that HEAD is updated when renaming the current branch.
+async fn test_rename_current_branch() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+    test::init_debug_logger();
+
+    // Create initial commit
+    let args = CommitArgs {
+        message: Some("first".to_string()),
+        file: None,
+        allow_empty: true,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+    };
+    commit::execute(args).await;
+    let commit_id = Head::current_commit().await.unwrap();
+
+    // Verify we're on master branch
+    match Head::current().await {
+        Head::Branch(name) => assert_eq!(name, "master"),
+        _ => panic!("should be on a branch"),
+    }
+
+    // Rename current branch (master) to main using single argument
+    let args = BranchArgs {
+        new_branch: None,
+        commit_hash: None,
+        list: false,
+        delete: None,
+        set_upstream_to: None,
+        show_current: false,
+        rename: vec!["main".to_string()],
+        remotes: false,
+        all: false,
+    };
+    execute(args).await;
+
+    // Verify HEAD is now on 'main'
+    match Head::current().await {
+        Head::Branch(name) => assert_eq!(name, "main"),
+        _ => panic!("should be on a branch"),
+    }
+
+    // Verify old branch no longer exists
+    let old_branch = Branch::find_branch("master", None).await;
+    assert!(
+        old_branch.is_none(),
+        "master branch should not exist after rename"
+    );
+
+    // Verify new branch exists with same commit
+    let new_branch = Branch::find_branch("main", None).await;
+    assert!(new_branch.is_some(), "main branch should exist");
+    assert_eq!(new_branch.unwrap().commit, commit_id);
+}
+
+#[tokio::test]
+#[serial]
+/// Tests that renaming to an existing branch name fails.
+async fn test_rename_to_existing_branch() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+    test::init_debug_logger();
+
+    // Create initial commit
+    let args = CommitArgs {
+        message: Some("first".to_string()),
+        file: None,
+        allow_empty: true,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+    };
+    commit::execute(args).await;
+
+    // Create two branches
+    let args = BranchArgs {
+        new_branch: Some("branch1".to_string()),
+        commit_hash: None,
+        list: false,
+        delete: None,
+        set_upstream_to: None,
+        show_current: false,
+        rename: vec![],
+        remotes: false,
+        all: false,
+    };
+    execute(args).await;
+
+    let args = BranchArgs {
+        new_branch: Some("branch2".to_string()),
+        commit_hash: None,
+        list: false,
+        delete: None,
+        set_upstream_to: None,
+        show_current: false,
+        rename: vec![],
+        remotes: false,
+        all: false,
+    };
+    execute(args).await;
+
+    // Try to rename branch1 to branch2 (should fail)
+    let args = BranchArgs {
+        new_branch: None,
+        commit_hash: None,
+        list: false,
+        delete: None,
+        set_upstream_to: None,
+        show_current: false,
+        rename: vec!["branch1".to_string(), "branch2".to_string()],
+        remotes: false,
+        all: false,
+    };
+    execute(args).await;
+
+    // Verify both branches still exist
+    assert!(Branch::find_branch("branch1", None).await.is_some());
+    assert!(Branch::find_branch("branch2", None).await.is_some());
+}
+
+#[tokio::test]
+#[serial]
+/// Tests listing all branches (local + remote).
+async fn test_list_all_branches() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+    test::init_debug_logger();
+
+    // Create initial commit
+    let args = CommitArgs {
+        message: Some("initial commit".to_string()),
+        file: None,
+        allow_empty: true,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+    };
+    commit::execute(args).await;
+
+    // Create local branch
+    let args = BranchArgs {
+        new_branch: Some("feature_branch".to_string()),
+        commit_hash: None,
+        list: false,
+        delete: None,
+        set_upstream_to: None,
+        show_current: false,
+        rename: vec![],
+        remotes: false,
+        all: false,
+    };
+    execute(args).await;
+
+    Config::insert(
+        "remote",
+        Some("origin"),
+        "url",
+        "https://example.com/repo.git",
+    )
+    .await;
+
+    // Create remote branch
+    let hash = Head::current_commit().await.unwrap();
+    Branch::update_branch("remote_branch", &hash.to_string(), Some("origin")).await;
+
+    // Test -a parameter - just call execute, don't try to capture output
+    let args = BranchArgs {
+        new_branch: None,
+        commit_hash: None,
+        list: false,
+        delete: None,
+        set_upstream_to: None,
+        show_current: false,
+        rename: vec![],
+        remotes: false,
+        all: true,
+    };
+    execute(args).await; // This will print to stdout, which is fine for tests
+
+    // Verify branches exist
+    assert!(
+        Branch::find_branch("master", None).await.is_some()
+            || Branch::find_branch("main", None).await.is_some()
+    );
+    assert!(Branch::find_branch("feature_branch", None).await.is_some());
+    assert!(
+        Branch::find_branch("remote_branch", Some("origin"))
+            .await
+            .is_some()
+    );
 }

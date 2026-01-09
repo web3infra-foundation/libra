@@ -1,18 +1,18 @@
+//! Branch store utilities to find/create/update/delete branch refs in the database with transaction-safe helpers and commit resolution.
+
 use std::str::FromStr;
 
-use sea_orm::ActiveValue::Set;
-use sea_orm::{ActiveModelTrait, ConnectionTrait};
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+use git_internal::hash::ObjectHash;
+use sea_orm::{
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter,
+};
 
-use git_internal::hash::SHA1;
-
-use crate::internal::db::get_db_conn_instance;
-use crate::internal::model::reference;
+use crate::internal::{db::get_db_conn_instance, model::reference};
 
 #[derive(Debug)]
 pub struct Branch {
     pub name: String,
-    pub commit: SHA1,
+    pub commit: ObjectHash,
     pub remote: Option<String>,
 }
 
@@ -79,7 +79,7 @@ impl Branch {
             .iter()
             .map(|branch| Branch {
                 name: branch.name.as_ref().unwrap().clone(),
-                commit: SHA1::from_str(branch.commit.as_ref().unwrap()).unwrap(),
+                commit: ObjectHash::from_str(branch.commit.as_ref().unwrap()).unwrap(),
                 remote: branch.remote.clone(),
             })
             .collect()
@@ -119,7 +119,7 @@ impl Branch {
         match branch {
             Some(branch) => Some(Branch {
                 name: branch.name.as_ref().unwrap().clone(),
-                commit: SHA1::from_str(branch.commit.as_ref().unwrap()).unwrap(),
+                commit: ObjectHash::from_str(branch.commit.as_ref().unwrap()).unwrap(),
                 remote: branch.remote.clone(),
             }),
             None => None,
@@ -225,20 +225,22 @@ impl Branch {
 
 #[cfg(test)]
 mod tests {
-    use crate::utils::test;
+    use git_internal::hash::{HashKind, get_hash_kind, set_hash_kind_for_test};
     use serial_test::serial;
     use tempfile::tempdir;
 
     use super::*;
+    use crate::utils::test;
 
     #[tokio::test]
     #[serial]
     async fn test_search_branch() {
+        let _guard = set_hash_kind_for_test(HashKind::Sha256);
         let temp_path = tempdir().unwrap();
         test::setup_with_new_libra_in(temp_path.path()).await;
         let _guard = test::ChangeDirGuard::new(temp_path.path());
 
-        let commit_hash = SHA1::default().to_string();
+        let commit_hash = ObjectHash::zero_str(get_hash_kind()).to_string();
         Branch::update_branch("upstream/origin/master", &commit_hash, None).await; // should match
         Branch::update_branch("origin/master", &commit_hash, Some("upstream")).await; // should match
         Branch::update_branch("master", &commit_hash, Some("upstream/origin")).await; // should match

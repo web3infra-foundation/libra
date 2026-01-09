@@ -1,6 +1,11 @@
+//! Tests for remote subcommands validating add/list/show behavior and URL mutation scenarios.
+
+use libra::{
+    command::remote::{self, RemoteCmds},
+    internal::config::Config,
+};
+
 use super::*;
-use libra::command::remote::{self, RemoteCmds};
-use libra::internal::config::Config;
 
 #[tokio::test]
 #[serial]
@@ -110,4 +115,161 @@ async fn test_remote_rename_conflict_returns_error() {
     // Attempt to rename into the existing target and expect failure.
     let result = Config::rename_remote("origin", "upstream").await;
     assert!(result.is_err(), "rename into existing name should fail");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_remote_set_url_add_appends_fetch_url() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    // initial url
+    remote::execute(RemoteCmds::Add {
+        name: "origin".into(),
+        url: "https://example.com/repo.git".into(),
+    })
+    .await;
+
+    // append a second fetch URL with --add
+    remote::execute(RemoteCmds::SetUrl {
+        add: true,
+        delete: false,
+        push: false,
+        all: false,
+        name: "origin".into(),
+        value: "https://mirror.example.com/repo.git".into(),
+    })
+    .await;
+
+    let urls = Config::get_all("remote", Some("origin"), "url").await;
+    assert_eq!(urls.len(), 2, "should have two fetch urls after --add");
+    assert!(urls.contains(&"https://example.com/repo.git".to_string()));
+    assert!(urls.contains(&"https://mirror.example.com/repo.git".to_string()));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_remote_set_url_delete_removes_matching_url() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    remote::execute(RemoteCmds::Add {
+        name: "origin".into(),
+        url: "https://example.com/repo.git".into(),
+    })
+    .await;
+    remote::execute(RemoteCmds::SetUrl {
+        add: true,
+        delete: false,
+        push: false,
+        all: false,
+        name: "origin".into(),
+        value: "https://mirror.example.com/repo.git".into(),
+    })
+    .await;
+
+    // delete the mirror url using --delete
+    remote::execute(RemoteCmds::SetUrl {
+        add: false,
+        delete: true,
+        push: false,
+        all: false,
+        name: "origin".into(),
+        value: "mirror.example.com".into(),
+    })
+    .await;
+
+    let urls = Config::get_all("remote", Some("origin"), "url").await;
+    assert_eq!(urls.len(), 1, "should have one fetch url after --delete");
+    assert_eq!(urls[0], "https://example.com/repo.git");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_remote_set_url_push_and_get_pushurl_entries() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    remote::execute(RemoteCmds::Add {
+        name: "origin".into(),
+        url: "https://example.com/repo.git".into(),
+    })
+    .await;
+
+    // add a pushurl entry
+    remote::execute(RemoteCmds::SetUrl {
+        add: true,
+        delete: false,
+        push: true,
+        all: false,
+        name: "origin".into(),
+        value: "ssh://git@example.com/repo.git".into(),
+    })
+    .await;
+
+    let pushurls = Config::get_all("remote", Some("origin"), "pushurl").await;
+    assert_eq!(
+        pushurls.len(),
+        1,
+        "should have one pushurl after --add --push"
+    );
+    assert_eq!(pushurls[0], "ssh://git@example.com/repo.git");
+
+    // Calling get-url --push should prefer pushurl entries (we don't capture stdout here,
+    // but ensure the command runs without panic)
+    remote::execute(RemoteCmds::GetUrl {
+        push: true,
+        all: false,
+        name: "origin".into(),
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_remote_set_url_all_replaces_all_fetch_urls() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    remote::execute(RemoteCmds::Add {
+        name: "origin".into(),
+        url: "https://one.example/repo.git".into(),
+    })
+    .await;
+    remote::execute(RemoteCmds::SetUrl {
+        add: true,
+        delete: false,
+        push: false,
+        all: false,
+        name: "origin".into(),
+        value: "https://two.example/repo.git".into(),
+    })
+    .await;
+
+    // Replace all fetch urls with a single new one
+    remote::execute(RemoteCmds::SetUrl {
+        add: false,
+        delete: false,
+        push: false,
+        all: true,
+        name: "origin".into(),
+        value: "https://replaced.example/repo.git".into(),
+    })
+    .await;
+
+    let urls = Config::get_all("remote", Some("origin"), "url").await;
+    assert_eq!(urls.len(), 1, "--all should leave exactly one fetch url");
+    assert_eq!(urls[0], "https://replaced.example/repo.git");
+
+    // get-url --all should run without panicking even when printing multiple/single entries
+    remote::execute(RemoteCmds::GetUrl {
+        push: false,
+        all: true,
+        name: "origin".into(),
+    })
+    .await;
 }

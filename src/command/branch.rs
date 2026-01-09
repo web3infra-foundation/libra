@@ -1,12 +1,19 @@
-use crate::{
-    command::get_target_commit,
-    internal::{branch::Branch, config::Config, head::Head},
-};
+//! Branch management utilities for creating, deleting, listing, and switching branches while handling upstream metadata.
+
 use clap::Parser;
 use colored::Colorize;
 use git_internal::internal::object::commit::Commit;
 
-use crate::command::load_object;
+use crate::{
+    command::{get_target_commit, load_object},
+    internal::{branch::Branch, config::Config, head::Head},
+};
+
+pub enum BranchListMode {
+    Local,
+    Remote,
+    All,
+}
 
 #[derive(Parser, Debug)]
 pub struct BranchArgs {
@@ -34,9 +41,17 @@ pub struct BranchArgs {
     #[clap(long, group = "sub")]
     pub show_current: bool,
 
+    /// Rename a branch. With one argument, renames the current branch. With two arguments, renames OLD_BRANCH to NEW_BRANCH.
+    #[clap(short = 'm', long = "move", group = "sub", value_names = ["OLD_BRANCH", "NEW_BRANCH"], num_args = 1..=2)]
+    pub rename: Vec<String>,
+
     /// show remote branches
     #[clap(short, long)] // TODO limit to required `list` option, even in default
     pub remotes: bool,
+
+    /// show all branches (includes local and remote)
+    #[clap(short, long, group = "sub")]
+    pub all: bool,
 }
 pub async fn execute(args: BranchArgs) {
     if args.new_branch.is_some() {
@@ -52,9 +67,18 @@ pub async fn execute(args: BranchArgs) {
                 eprintln!("fatal: HEAD is detached");
             }
         };
-    } else if args.list {
+    } else if !args.rename.is_empty() {
+        rename_branch(args.rename).await;
+    } else if args.list || args.all || args.remotes {
         // default behavior
-        list_branches(args.remotes).await;
+        let mode = if args.all {
+            BranchListMode::All
+        } else if args.remotes {
+            BranchListMode::Remote
+        } else {
+            BranchListMode::Local
+        };
+        list_branches(mode).await;
     } else {
         panic!("should not reach here")
     }
@@ -135,6 +159,66 @@ async fn delete_branch(branch_name: String) {
     Branch::delete_branch(&branch_name, None).await;
 }
 
+async fn rename_branch(args: Vec<String>) {
+    let (old_name, new_name) = match args.len() {
+        1 => {
+            // rename current branch
+            let head = Head::current().await;
+            match head {
+                Head::Branch(name) => (name, args[0].clone()),
+                Head::Detached(_) => {
+                    eprintln!("fatal: HEAD is detached");
+                    return;
+                }
+            }
+        }
+        2 => (args[0].clone(), args[1].clone()),
+        _ => {
+            eprintln!("fatal: too many arguments");
+            return;
+        }
+    };
+
+    if !is_valid_git_branch_name(&new_name) {
+        eprintln!("fatal: invalid branch name: {new_name}");
+        return;
+    }
+
+    // check if old branch exists
+    let old_branch = Branch::find_branch(&old_name, None).await;
+    if old_branch.is_none() {
+        eprintln!("fatal: branch '{old_name}' not found");
+        return;
+    }
+
+    // check if new branch name already exists
+    let new_branch_exists = Branch::find_branch(&new_name, None).await;
+    if new_branch_exists.is_some() {
+        eprintln!("fatal: A branch named '{new_name}' already exists.");
+        return;
+    }
+
+    let old_branch = old_branch.unwrap();
+    let commit_hash = old_branch.commit.to_string();
+
+    // create new branch with the same commit
+    Branch::update_branch(&new_name, &commit_hash, None).await;
+
+    // update HEAD if renaming current branch
+    let head = Head::current().await;
+    if let Head::Branch(name) = head
+        && name == old_name
+    {
+        let new_head = Head::Branch(new_name.clone());
+        Head::update(new_head, None).await;
+    }
+
+    // delete old branch
+    Branch::delete_branch(&old_name, None).await;
+
+    println!("Renamed branch '{old_name}' to '{new_name}'");
+}
+
 async fn show_current_branch() {
     // let head = reference::Model::current_head(&db).await.unwrap();
     let head = Head::current().await;
@@ -147,43 +231,89 @@ async fn show_current_branch() {
         }
     }
 }
-
-pub async fn list_branches(remotes: bool) {
-    let branches = match remotes {
-        true => {
-            // list all remote branches
-            let remote_configs = Config::all_remote_configs().await;
-            let mut branches = vec![];
-            for remote in remote_configs {
-                let remote_branches = Branch::list_branches(Some(&remote.name)).await;
-                branches.extend(remote_branches);
-            }
-            branches
-        }
-        false => Branch::list_branches(None).await,
-    };
-
+async fn display_head_state() -> String {
     let head = Head::current().await;
     if let Head::Detached(commit) = head {
         let s = "HEAD detached at  ".to_string() + &commit.to_string()[..8];
         let s = s.green();
         println!("{s}");
     };
-    let head_name = match head {
+    match head {
         Head::Branch(name) => name,
         Head::Detached(_) => "".to_string(),
-    };
-    for branch in branches {
-        let name = branch
-            .remote
-            .map(|remote| remote + "/" + &branch.name)
-            .unwrap_or_else(|| branch.name.clone());
+    }
+}
 
-        if head_name == name {
+fn format_branch_name(branch: &Branch) -> String {
+    branch
+        .remote
+        .as_ref()
+        .map(|remote| format!("{}/{}", remote, branch.name))
+        .unwrap_or_else(|| branch.name.clone())
+        .red()
+        .to_string()
+}
+
+fn display_branches(branches: Vec<Branch>, head_name: &str, is_remote: bool) {
+    let branches_sorted = {
+        let mut sorted_branches = branches;
+        sorted_branches.sort_by(|a, b| {
+            if a.name == head_name {
+                std::cmp::Ordering::Less
+            } else if b.name == head_name {
+                std::cmp::Ordering::Greater
+            } else {
+                a.name.cmp(&b.name)
+            }
+        });
+        sorted_branches
+    };
+
+    for branch in branches_sorted {
+        let name = if is_remote {
+            format_branch_name(&branch)
+        } else {
+            branch.name.clone()
+        };
+
+        if head_name == branch.name {
             println!("* {}", name.green());
         } else {
-            println!("  {name}");
-        };
+            println!("  {}", name);
+        }
+    }
+}
+pub async fn list_branches(mode: BranchListMode) {
+    let head_name = display_head_state().await;
+
+    match mode {
+        BranchListMode::Local => {
+            let branches = Branch::list_branches(None).await;
+            display_branches(branches, &head_name, false);
+        }
+
+        BranchListMode::Remote => {
+            let remote_configs = Config::all_remote_configs().await;
+            let mut branches = vec![];
+            for remote in remote_configs {
+                let remote_branches = Branch::list_branches(Some(&remote.name)).await;
+                branches.extend(remote_branches);
+            }
+            display_branches(branches, &head_name, true);
+        }
+
+        BranchListMode::All => {
+            let branches = Branch::list_branches(None).await;
+            display_branches(branches, &head_name, false);
+
+            let remote_configs = Config::all_remote_configs().await;
+            let mut remote_branches = vec![];
+            for remote in remote_configs {
+                let remote_branches_for_remote = Branch::list_branches(Some(&remote.name)).await;
+                remote_branches.extend(remote_branches_for_remote);
+            }
+            display_branches(remote_branches, &head_name, true);
+        }
     }
 }
 

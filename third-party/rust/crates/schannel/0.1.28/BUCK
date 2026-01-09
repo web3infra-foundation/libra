@@ -25,5 +25,5 @@ rust_library(
     edition = "2018",
     rustc_flags = ["@$(location :schannel-manifest[env_flags])"],
     visibility = ["PUBLIC"],
-    deps = ["//third-party/rust/crates/windows-sys/0.61.0:windows-sys"],
+    deps = ["//third-party/rust/crates/windows-sys/0.61.2:windows-sys"],
 )

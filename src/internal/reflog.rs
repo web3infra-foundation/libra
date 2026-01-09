@@ -1,18 +1,26 @@
-use crate::internal::config;
-use crate::internal::db::get_db_conn_instance;
-use crate::internal::head::Head;
-use crate::internal::model::reflog;
-use crate::internal::model::reflog::{ActiveModel, Model};
-use git_internal::hash::SHA1;
-use sea_orm::{
-    ActiveModelTrait, DatabaseTransaction, EntityTrait, QueryFilter, QueryOrder, Set,
-    TransactionTrait,
+//! Reflog persistence layer that writes formatted entries, queries by ref name, and enforces transaction-safe patterns for updates.
+
+use std::{
+    fmt::{Debug, Display, Formatter},
+    future::Future,
+    pin::Pin,
+    time::{SystemTime, UNIX_EPOCH},
 };
-use sea_orm::{ColumnTrait, ConnectionTrait, DbBackend, DbErr, Statement, TransactionError};
-use std::fmt::{Debug, Display, Formatter};
-use std::future::Future;
-use std::pin::Pin;
-use std::time::{SystemTime, UNIX_EPOCH};
+
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseTransaction, DbBackend, DbErr,
+    EntityTrait, QueryFilter, QueryOrder, Set, Statement, TransactionError, TransactionTrait,
+};
+
+use crate::internal::{
+    config,
+    db::get_db_conn_instance,
+    head::Head,
+    model::{
+        reflog,
+        reflog::{ActiveModel, Model},
+    },
+};
 
 pub const HEAD: &str = "HEAD";
 
@@ -49,6 +57,8 @@ impl From<TransactionError<DbErr>> for ReflogError {
         ReflogError::TransactionError(err)
     }
 }
+
+impl std::error::Error for ReflogError {}
 impl Display for ReflogContext {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match &self.action {
@@ -72,6 +82,7 @@ impl Display for ReflogContext {
             ),
             ReflogAction::Fetch => write!(f, "fast-forward"),
             ReflogAction::Pull => write!(f, "fast-forward"),
+            ReflogAction::Push => write!(f, "push"),
             ReflogAction::Rebase { state, details } => write!(f, "({state}) {details}"),
             ReflogAction::Clone { from } => write!(f, "from {from}"),
         }
@@ -89,6 +100,7 @@ pub enum ReflogAction {
     Rebase { state: String, details: String },
     Fetch,
     Pull,
+    Push,
     Clone { from: String },
 }
 
@@ -105,6 +117,7 @@ pub enum ReflogActionKind {
     Fetch,
     // pull is a combination of `fetch` and `merge`, maybe we don't need to do anything...
     Pull,
+    Push,
     Clone,
 }
 
@@ -120,6 +133,7 @@ impl Display for ReflogActionKind {
             Self::Rebase => write!(f, "rebase"),
             Self::Fetch => write!(f, "fetch"),
             Self::Pull => write!(f, "pull"),
+            Self::Push => write!(f, "push"),
             Self::Clone => write!(f, "clone"),
         }
     }
@@ -138,6 +152,7 @@ impl ReflogAction {
             Self::Rebase { .. } => ReflogActionKind::Rebase,
             Self::Checkout { .. } => ReflogActionKind::Checkout,
             Self::Fetch => ReflogActionKind::Fetch,
+            Self::Push => ReflogActionKind::Push,
         }
     }
 }
@@ -360,8 +375,4 @@ async fn ensure_reflog_table_exists<C: ConnectionTrait>(db: &C) -> Result<(), Re
 
     db.execute(create_index_stmt).await?;
     Ok(())
-}
-
-pub fn zero_sha1() -> SHA1 {
-    SHA1::from_bytes(&[0; 20])
 }

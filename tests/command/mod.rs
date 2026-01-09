@@ -1,31 +1,34 @@
-use git_internal::hash::SHA1;
-use git_internal::internal::object::commit::Commit;
-use git_internal::internal::object::tree::Tree;
-use libra::command::branch::BranchArgs;
-use libra::command::branch::execute;
-use libra::command::get_target_commit;
-use libra::command::init::InitArgs;
-use libra::command::init::init;
-use libra::command::log::{LogArgs, get_reachable_commits};
-use libra::command::save_object;
-use libra::command::status::{changes_to_be_committed, changes_to_be_staged};
-use libra::command::switch::{self, SwitchArgs};
-use libra::command::{
-    add::{self, AddArgs},
-    load_object,
-    remove::{self, RemoveArgs},
+//! Shared test utilities and re-exports for the command integration test suite.
+
+use std::path::Path;
+
+use git_internal::{
+    hash::ObjectHash,
+    internal::object::{commit::Commit, tree::Tree},
 };
-use libra::common_utils::format_commit_msg;
-use libra::internal::branch::Branch;
-use libra::internal::head::Head;
 use libra::{
-    command::commit::{self, CommitArgs},
+    command::{
+        add::{self, AddArgs},
+        branch::{BranchArgs, execute},
+        calc_file_blob_hash,
+        commit::{self, CommitArgs},
+        get_target_commit,
+        init::{InitArgs, init},
+        load_object,
+        log::{LogArgs, get_reachable_commits},
+        remove::{self, RemoveArgs},
+        save_object,
+        status::{changes_to_be_committed, changes_to_be_staged},
+        switch::{self, SwitchArgs},
+    },
+    common_utils::format_commit_msg,
+    internal::{branch::Branch, head::Head},
     utils::test::{self, ChangeDirGuard},
 };
 use serial_test::serial;
-use std::path::Path;
 use tempfile::tempdir;
 mod add_test;
+mod blame_test;
 mod branch_test;
 mod checkout_test;
 mod cherry_pick_test;
@@ -49,3 +52,4 @@ mod restore_test;
 mod revert_test;
 mod status_test;
 mod switch_test;
+mod tag_test;

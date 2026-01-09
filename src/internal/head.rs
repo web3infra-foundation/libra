@@ -1,18 +1,17 @@
+//! HEAD management backed by the database, supporting local and remote heads, detached states, and transaction-safe query/update helpers.
+
 use std::str::FromStr;
 
-use sea_orm::ActiveValue::Set;
-use sea_orm::ConnectionTrait;
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter};
+use git_internal::hash::ObjectHash;
+use sea_orm::{
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter,
+};
 
-use git_internal::hash::SHA1;
-
-use crate::internal::branch::Branch;
-use crate::internal::db::get_db_conn_instance;
-use crate::internal::model::reference;
+use crate::internal::{branch::Branch, db::get_db_conn_instance, model::reference};
 
 #[derive(Debug, Clone)]
 pub enum Head {
-    Detached(SHA1),
+    Detached(ObjectHash),
     Branch(String),
 }
 
@@ -74,7 +73,7 @@ impl Head {
             Some(name) => Head::Branch(name),
             None => {
                 let commit_hash = head.commit.expect("detached head without commit");
-                Head::Detached(SHA1::from_str(commit_hash.as_str()).unwrap())
+                Head::Detached(ObjectHash::from_str(commit_hash.as_str()).unwrap())
             }
         }
     }
@@ -93,7 +92,7 @@ impl Head {
                 Some(name) => Head::Branch(name),
                 None => {
                     let commit_hash = head.commit.expect("detached head without commit");
-                    Head::Detached(SHA1::from_str(commit_hash.as_str()).unwrap())
+                    Head::Detached(ObjectHash::from_str(commit_hash.as_str()).unwrap())
                 }
             }),
             None => None,
@@ -105,7 +104,7 @@ impl Head {
         Self::remote_current_with_conn(db_conn, remote).await
     }
 
-    pub async fn current_commit_with_conn<C>(db: &C) -> Option<SHA1>
+    pub async fn current_commit_with_conn<C>(db: &C) -> Option<ObjectHash>
     where
         C: ConnectionTrait,
     {
@@ -119,7 +118,7 @@ impl Head {
     }
 
     /// get the commit hash of current head, return `None` if no commit
-    pub async fn current_commit() -> Option<SHA1> {
+    pub async fn current_commit() -> Option<ObjectHash> {
         let db_conn = get_db_conn_instance().await;
         Self::current_commit_with_conn(db_conn).await
     }

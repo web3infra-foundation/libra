@@ -1,12 +1,33 @@
-//! This is the main entry point for the Libra.
-//! It includes the definition of the CLI and the main function.
-//!
-//!
-use crate::command;
-use crate::utils;
-use clap::{Parser, Subcommand};
-use git_internal::errors::GitError;
+//! CLI entry for Libra, defining clap subcommands, setting the hash algorithm from config, and dispatching each command handler.
 
+use clap::{Parser, Subcommand};
+use git_internal::{
+    errors::GitError,
+    hash::{HashKind, set_hash_kind},
+};
+
+use crate::{command, utils};
+/// Reads the repository's configuration and sets the global hash kind.
+/// This must be called for any command that operates within an existing repository.
+async fn set_local_hash_kind() -> Result<(), GitError> {
+    // Use the public API from the `config` module to get the configuration value.
+    let object_format = crate::internal::config::Config::get("core", None, "objectformat")
+        .await
+        .unwrap_or_else(|| "sha1".to_string());
+
+    let hash_kind = match object_format.as_str() {
+        "sha1" => HashKind::Sha1,
+        "sha256" => HashKind::Sha256,
+        _ => {
+            return Err(GitError::InvalidHashValue(format!(
+                "unsupported object format: '{}'",
+                object_format
+            )));
+        }
+    };
+    set_hash_kind(hash_kind);
+    Ok(())
+}
 // The Cli struct represents the root of the command line interface.
 #[derive(Parser, Debug)]
 #[command(
@@ -74,8 +95,10 @@ enum Commands {
     Fetch(command::fetch::FetchArgs),
     #[command(about = "Fetch from and integrate with another repository or a local branch")]
     Pull(command::pull::PullArgs),
-    #[command(about = "Show different between files")]
+    #[command(about = "Show differences between files")]
     Diff(command::diff::DiffArgs),
+    #[command(about = "Show author and history of each line of a file")]
+    Blame(command::blame::BlameArgs),
     #[command(about = "Revert some existing commits")]
     Revert(command::revert::RevertArgs),
     #[command(subcommand, about = "Manage set of tracked repositories")]
@@ -143,17 +166,25 @@ pub async fn parse_async(args: Option<&[&str]>) -> Result<(), GitError> {
         None => Cli::parse(),
     };
     // TODO: try check repo before parsing
-    if let Commands::Init(_) = args.command {
-    } else if let Commands::Clone(_) = args.command {
-    } else if !utils::util::check_repo_exist() {
-        return Err(GitError::RepoNotFound);
+    // For commands that don't initialize a repo, set the hash kind first.
+    match args.command {
+        Commands::Init(_) | Commands::Clone(_) => {}
+        _ => {
+            if !utils::util::check_repo_exist() {
+                return Err(GitError::RepoNotFound);
+            }
+            set_local_hash_kind().await?;
+        }
     }
     // parse the command and execute the corresponding function with it's args
     match args.command {
-        Commands::Init(args) => command::init::execute(args).await,
-        Commands::Clone(args) => command::clone::execute(args).await,
+        Commands::Init(args) => {
+            command::init::execute(args).await;
+            set_local_hash_kind().await?; // set hash kind after init
+        }
+        Commands::Clone(args) => command::clone::execute(args).await, //clone will use init internally,so we don't need to set hash kind here again
         Commands::Add(args) => command::add::execute(args).await,
-        Commands::Rm(args) => command::remove::execute(args).unwrap(),
+        Commands::Rm(args) => command::remove::execute(args).await,
         Commands::Restore(args) => command::restore::execute(args).await,
         Commands::Status(args) => command::status::execute(args).await,
         Commands::Stash(cmd) => command::stash::execute(cmd).await,
@@ -172,6 +203,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> Result<(), GitError> {
         Commands::IndexPack(args) => command::index_pack::execute(args),
         Commands::Fetch(args) => command::fetch::execute(args).await,
         Commands::Diff(args) => command::diff::execute(args).await,
+        Commands::Blame(args) => command::blame::execute(args).await,
         Commands::Revert(args) => command::revert::execute(args).await,
         Commands::Remote(cmd) => command::remote::execute(cmd).await,
         Commands::Pull(args) => command::pull::execute(args).await,

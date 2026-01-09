@@ -28,6 +28,6 @@ rust_library(
     deps = [
         "//third-party/rust/crates/byteorder/1.5.0:byteorder",
         "//third-party/rust/crates/fnv/1.0.7:fnv",
-        "//third-party/rust/crates/uuid/1.18.1:uuid",
+        "//third-party/rust/crates/uuid/1.19.0:uuid",
     ],
 )

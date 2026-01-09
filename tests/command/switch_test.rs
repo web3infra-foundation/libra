@@ -1,6 +1,7 @@
+//! Tests switch command for branch creation, switching, and dirty-state checks.
+
 use git_internal::internal::index::Index;
-use libra::utils::client_storage::ClientStorage;
-use libra::utils::path;
+use libra::utils::{client_storage::ClientStorage, path};
 
 use super::*;
 
@@ -42,6 +43,7 @@ async fn test_switch_function() {
             file: None,
             allow_empty: true,
             conventional: false,
+            no_edit: false,
             amend: false,
             signoff: false,
             disable_pre: true,
@@ -88,6 +90,7 @@ async fn test_switch_function() {
             file: None,
             allow_empty: true,
             conventional: false,
+            no_edit: false,
             amend: false,
             signoff: false,
             disable_pre: true,
@@ -168,6 +171,7 @@ async fn test_detach_head_basic() {
             file: None,
             allow_empty: true,
             conventional: false,
+            no_edit: false,
             amend: false,
             signoff: false,
             disable_pre: true,
@@ -211,6 +215,7 @@ async fn test_detach_head_basic() {
             file: None,
             allow_empty: true,
             conventional: false,
+            no_edit: false,
             amend: false,
             signoff: false,
             disable_pre: true,

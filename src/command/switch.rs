@@ -1,16 +1,20 @@
+//! Switch command to change branches safely, validating clean state, handling creation, and delegating checkout behavior to restore logic.
+
 use clap::Parser;
-use git_internal::hash::SHA1;
+use git_internal::hash::ObjectHash;
 
 use super::{
     restore::{self, RestoreArgs},
     status,
 };
-use crate::command::status::StatusArgs;
-use crate::internal::db::get_db_conn_instance;
-use crate::internal::reflog::{ReflogAction, ReflogContext, with_reflog};
 use crate::{
-    command::branch,
-    internal::{branch::Branch, head::Head},
+    command::{branch, status::StatusArgs},
+    internal::{
+        branch::Branch,
+        db::get_db_conn_instance,
+        head::Head,
+        reflog::{ReflogAction, ReflogContext, with_reflog},
+    },
     utils::util::{self, get_commit_base},
 };
 
@@ -43,8 +47,8 @@ pub async fn execute(args: SwitchArgs) {
         None => match args.detach {
             true => {
                 let commit_base = get_commit_base(&args.branch.unwrap()).await;
-                if commit_base.is_err() {
-                    eprintln!("{:?}", commit_base.unwrap_err());
+                if let Err(e) = commit_base {
+                    eprintln!("{:?}", e);
                     return;
                 }
                 switch_to_commit(commit_base.unwrap()).await;
@@ -73,7 +77,7 @@ pub async fn check_status() -> bool {
 }
 
 /// change the working directory to the version of commit_hash
-async fn switch_to_commit(commit_hash: SHA1) {
+async fn switch_to_commit(commit_hash: ObjectHash) {
     let db = get_db_conn_instance().await;
 
     let old_head_commit = Head::current_commit_with_conn(db)
@@ -179,7 +183,7 @@ async fn switch_to_branch(branch_name: String) {
     println!("Switched to branch '{}'", target_branch.name);
 }
 
-async fn restore_to_commit(commit_id: SHA1) {
+async fn restore_to_commit(commit_id: ObjectHash) {
     let restore_args = RestoreArgs {
         worktree: true,
         staged: true,
@@ -191,13 +195,14 @@ async fn restore_to_commit(commit_id: SHA1) {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use super::*;
     use crate::command::restore::RestoreArgs;
-    use std::str::FromStr;
     #[test]
     /// Test parsing RestoreArgs from command-line style arguments
     fn test_parse_from() {
-        let commit_id = SHA1::from_str("0cb5eb6281e1c0df48a70716869686c694706189").unwrap();
+        let commit_id = ObjectHash::from_str("0cb5eb6281e1c0df48a70716869686c694706189").unwrap();
         let restore_args = RestoreArgs::parse_from([
             "restore", // important, the first will be ignored
             "--worktree",

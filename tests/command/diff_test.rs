@@ -1,9 +1,11 @@
-use super::*;
-use std::fs;
-use std::io::Write;
+//! Tests diff command across commits, stage, and working tree with algorithm and pathspec options.
+
+use std::{fs, io::Write};
 
 use clap::Parser;
 use libra::command::diff::{self, DiffArgs};
+
+use super::*;
 
 /// Helper function to create a file with content.
 fn create_file(path: &str, content: &str) {
@@ -23,6 +25,20 @@ fn modify_file(path: &str, content: &str) {
 
 #[tokio::test]
 #[serial]
+/// Tests diff command immediately after libra init (empty repository scenario).
+/// This tests the edge case where there are no commits and no staged changes.
+async fn test_diff_after_init() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = ChangeDirGuard::new(test_dir.path());
+
+    let args = DiffArgs::parse_from(["diff"]);
+
+    diff::execute(args).await;
+}
+
+#[tokio::test]
+#[serial]
 /// Tests the basic diff functionality between working directory and HEAD.
 async fn test_basic_diff() {
     let test_dir = tempdir().unwrap();
@@ -37,6 +53,7 @@ async fn test_basic_diff() {
         all: false,
         update: false,
         refresh: false,
+        force: false,
         verbose: false,
         dry_run: false,
         ignore_errors: false,
@@ -49,6 +66,7 @@ async fn test_basic_diff() {
         file: None,
         allow_empty: false,
         conventional: false,
+        no_edit: false,
         amend: false,
         signoff: false,
         disable_pre: false,
@@ -83,6 +101,7 @@ async fn test_diff_staged() {
         all: false,
         update: false,
         refresh: false,
+        force: false,
         verbose: false,
         dry_run: false,
         ignore_errors: false,
@@ -95,6 +114,7 @@ async fn test_diff_staged() {
         file: None,
         allow_empty: false,
         conventional: false,
+        no_edit: false,
         amend: false,
         signoff: false,
         disable_pre: false,
@@ -111,6 +131,7 @@ async fn test_diff_staged() {
         all: false,
         update: false,
         refresh: false,
+        force: false,
         verbose: false,
         dry_run: false,
         ignore_errors: false,
@@ -146,6 +167,7 @@ async fn test_diff_between_commits() {
         all: false,
         update: false,
         refresh: false,
+        force: false,
         verbose: false,
         dry_run: false,
         ignore_errors: false,
@@ -157,6 +179,7 @@ async fn test_diff_between_commits() {
         file: None,
         allow_empty: false,
         conventional: false,
+        no_edit: false,
         amend: false,
         signoff: false,
         disable_pre: false,
@@ -176,6 +199,7 @@ async fn test_diff_between_commits() {
         all: false,
         update: false,
         refresh: false,
+        force: false,
         verbose: false,
         dry_run: false,
         ignore_errors: false,
@@ -187,6 +211,7 @@ async fn test_diff_between_commits() {
         file: None,
         allow_empty: false,
         conventional: false,
+        no_edit: false,
         amend: false,
         signoff: false,
         disable_pre: false,
@@ -230,6 +255,7 @@ async fn test_diff_with_pathspec() {
         all: false,
         update: false,
         refresh: false,
+        force: false,
         verbose: false,
         dry_run: false,
         ignore_errors: false,
@@ -241,6 +267,7 @@ async fn test_diff_with_pathspec() {
         file: None,
         allow_empty: false,
         conventional: false,
+        no_edit: false,
         amend: false,
         signoff: false,
         disable_pre: false,
@@ -276,6 +303,7 @@ async fn test_diff_output_to_file() {
         all: false,
         update: false,
         refresh: false,
+        force: false,
         verbose: false,
         dry_run: false,
         ignore_errors: false,
@@ -287,6 +315,7 @@ async fn test_diff_output_to_file() {
         file: None,
         allow_empty: false,
         conventional: false,
+        no_edit: false,
         amend: false,
         signoff: false,
         disable_pre: false,
@@ -338,6 +367,7 @@ async fn test_diff_algorithms() {
         all: false,
         update: false,
         refresh: false,
+        force: false,
         verbose: false,
         dry_run: false,
         ignore_errors: false,
@@ -349,6 +379,7 @@ async fn test_diff_algorithms() {
         file: None,
         allow_empty: false,
         conventional: false,
+        no_edit: false,
         amend: false,
         signoff: false,
         disable_pre: false,

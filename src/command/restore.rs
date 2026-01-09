@@ -1,20 +1,31 @@
-use crate::command::calc_file_blob_hash;
-use crate::internal::branch::Branch;
-use crate::internal::head::Head;
-use crate::internal::protocol::lfs_client::LFSClient;
-use crate::utils::object_ext::{BlobExt, CommitExt, TreeExt};
-use crate::utils::path_ext::PathExt;
-use crate::utils::{lfs, path, util};
+//! Implements restore flows to reset files or entire trees from commits or the index, respecting pathspecs and staged vs worktree targets.
+
+use std::{
+    collections::{HashMap, HashSet},
+    fs, io,
+    path::PathBuf,
+};
+
 use clap::Parser;
-use git_internal::hash::SHA1;
-use git_internal::internal::index::{Index, IndexEntry};
-use git_internal::internal::object::blob::Blob;
-use git_internal::internal::object::commit::Commit;
-use git_internal::internal::object::tree::Tree;
-use git_internal::internal::object::types::ObjectType;
-use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
-use std::{fs, io};
+use git_internal::{
+    hash::ObjectHash,
+    internal::{
+        index::{Index, IndexEntry},
+        object::{blob::Blob, commit::Commit, tree::Tree, types::ObjectType},
+    },
+};
+
+use crate::{
+    command::calc_file_blob_hash,
+    internal::{branch::Branch, head::Head, protocol::lfs_client::LFSClient},
+    utils::{
+        lfs,
+        object_ext::{BlobExt, CommitExt, TreeExt},
+        path,
+        path_ext::PathExt,
+        util,
+    },
+};
 
 #[derive(Parser, Debug)]
 pub struct RestoreArgs {
@@ -53,7 +64,7 @@ pub async fn execute(args: RestoreArgs) {
     }
 
     let storage = util::objects_storage();
-    let target_commit: Option<SHA1> = match source {
+    let target_commit: Option<ObjectHash> = match source {
         None => {
             assert!(!staged); // pre-processed ↑
             None // Index
@@ -80,7 +91,7 @@ pub async fn execute(args: RestoreArgs) {
     };
 
     // to workdir path
-    let target_blobs: Vec<(PathBuf, SHA1)> = {
+    let target_blobs: Vec<(PathBuf, ObjectHash)> = {
         match (source.as_ref(), target_commit) {
             (None, _) => {
                 // only this situation, restore from [Index]
@@ -128,8 +139,8 @@ pub async fn execute(args: RestoreArgs) {
 
 /// to HashMap
 /// - `blobs`: to workdir
-fn preprocess_blobs(blobs: &[(PathBuf, SHA1)]) -> HashMap<PathBuf, SHA1> {
-    // TODO maybe can be HashMap<&PathBuf, &SHA1>
+fn preprocess_blobs(blobs: &[(PathBuf, ObjectHash)]) -> HashMap<PathBuf, ObjectHash> {
+    // TODO maybe can be HashMap<&PathBuf, &ObjectHash>
     blobs
         .iter()
         .map(|(path, hash)| (path.clone(), *hash))
@@ -139,7 +150,7 @@ fn preprocess_blobs(blobs: &[(PathBuf, SHA1)]) -> HashMap<PathBuf, SHA1> {
 /// Restore a blob to file.
 /// If blob is an LFS pointer, download the actual file from LFS server.
 /// - `path` : to workdir
-async fn restore_to_file(hash: &SHA1, path: &PathBuf) -> io::Result<()> {
+async fn restore_to_file(hash: &ObjectHash, path: &PathBuf) -> io::Result<()> {
     let blob = Blob::load(hash);
     let path_abs = util::workdir_to_absolute(path);
     if let Some(parent) = path_abs.parent() {
@@ -176,7 +187,7 @@ async fn restore_to_file(hash: &SHA1, path: &PathBuf) -> io::Result<()> {
 /// - target_blobs: to workdir path
 fn get_worktree_deleted_files_in_filters(
     filters: &Vec<PathBuf>,
-    target_blobs: &HashMap<PathBuf, SHA1>,
+    target_blobs: &HashMap<PathBuf, ObjectHash>,
 ) -> HashSet<PathBuf> {
     target_blobs // to workdir
         .iter()
@@ -191,7 +202,7 @@ fn get_worktree_deleted_files_in_filters(
 /// Restore the worktree
 /// - `filter`: abs or relative to current (user input)
 /// - `target_blobs`: to workdir path
-pub async fn restore_worktree(filter: &Vec<PathBuf>, target_blobs: &[(PathBuf, SHA1)]) {
+pub async fn restore_worktree(filter: &Vec<PathBuf>, target_blobs: &[(PathBuf, ObjectHash)]) {
     let target_blobs = preprocess_blobs(target_blobs);
     let deleted_files = get_worktree_deleted_files_in_filters(filter, &target_blobs);
 
@@ -262,7 +273,7 @@ pub async fn restore_worktree(filter: &Vec<PathBuf>, target_blobs: &[(PathBuf, S
 fn get_index_deleted_files_in_filters(
     index: &Index,
     filters: &Vec<PathBuf>,
-    target_blobs: &HashMap<PathBuf, SHA1>,
+    target_blobs: &HashMap<PathBuf, ObjectHash>,
 ) -> HashSet<PathBuf> {
     target_blobs
         .iter()
@@ -276,7 +287,7 @@ fn get_index_deleted_files_in_filters(
         .collect() // HashSet auto deduplication
 }
 
-pub fn restore_index(filter: &Vec<PathBuf>, target_blobs: &[(PathBuf, SHA1)]) {
+pub fn restore_index(filter: &Vec<PathBuf>, target_blobs: &[(PathBuf, ObjectHash)]) {
     let target_blobs = preprocess_blobs(target_blobs);
 
     let idx_file = path::index();

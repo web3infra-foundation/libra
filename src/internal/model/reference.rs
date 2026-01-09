@@ -1,3 +1,5 @@
+//! SeaORM model for reference rows storing branch, tag, or HEAD names with target commits and optional remotes.
+
 use sea_orm::entity::prelude::*;
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
 #[sea_orm(table_name = "reference")]

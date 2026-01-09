@@ -1,9 +1,17 @@
-use super::*;
-use libra::command::cherry_pick;
+//! Tests cherry-pick scenarios that apply commits and verify results or conflicts.
+
+use std::{fs, path::PathBuf};
+
+use libra::{
+    command::{
+        add, cherry_pick, cherry_pick::CherryPickArgs, commit, init, switch, switch::SwitchArgs,
+    },
+    internal::head::Head,
+};
 use serial_test::serial;
-use std::fs;
-use std::path::PathBuf;
 use tempfile::tempdir;
+
+use super::*;
 
 /// Test basic cherry-pick functionality
 /// This test follows the workflow:
@@ -30,6 +38,7 @@ async fn test_basic_cherry_pick() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -37,6 +46,7 @@ async fn test_basic_cherry_pick() {
         file: None,
         allow_empty: false,
         conventional: false,
+        no_edit: false,
         amend: false,
         signoff: false,
         disable_pre: false,
@@ -66,6 +76,7 @@ async fn test_basic_cherry_pick() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -73,6 +84,7 @@ async fn test_basic_cherry_pick() {
         file: None,
         allow_empty: false,
         conventional: false,
+        no_edit: false,
         amend: false,
         signoff: false,
         disable_pre: false,
@@ -97,6 +109,7 @@ async fn test_basic_cherry_pick() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -104,6 +117,7 @@ async fn test_basic_cherry_pick() {
         file: None,
         allow_empty: false,
         conventional: false,
+        no_edit: false,
         amend: false,
         signoff: false,
         disable_pre: false,
@@ -230,6 +244,7 @@ async fn test_cherry_pick_with_commit() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -237,6 +252,7 @@ async fn test_cherry_pick_with_commit() {
         file: None,
         allow_empty: false,
         conventional: false,
+        no_edit: false,
         amend: false,
         signoff: false,
         disable_pre: false,
@@ -262,6 +278,7 @@ async fn test_cherry_pick_with_commit() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -269,6 +286,7 @@ async fn test_cherry_pick_with_commit() {
         file: None,
         allow_empty: false,
         conventional: false,
+        no_edit: false,
         amend: false,
         signoff: false,
         disable_pre: false,
@@ -341,6 +359,7 @@ async fn test_cherry_pick_multiple_commits() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -348,6 +367,7 @@ async fn test_cherry_pick_multiple_commits() {
         file: None,
         allow_empty: false,
         conventional: false,
+        no_edit: false,
         amend: false,
         signoff: false,
         disable_pre: false,
@@ -374,6 +394,7 @@ async fn test_cherry_pick_multiple_commits() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -381,6 +402,7 @@ async fn test_cherry_pick_multiple_commits() {
         file: None,
         allow_empty: false,
         conventional: false,
+        no_edit: false,
         amend: false,
         signoff: false,
         disable_pre: false,
@@ -400,6 +422,7 @@ async fn test_cherry_pick_multiple_commits() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -407,6 +430,7 @@ async fn test_cherry_pick_multiple_commits() {
         file: None,
         allow_empty: false,
         conventional: false,
+        no_edit: false,
         amend: false,
         signoff: false,
         disable_pre: false,
@@ -471,4 +495,127 @@ async fn test_cherry_pick_errors() {
     .await;
 
     println!("Error handling test completed");
+}
+
+#[tokio::test]
+#[serial]
+/// Verify cherry-pick behavior under SHA-256: accepts 64-hex commit ids, rejects SHA-1 length.
+async fn test_cherry_pick_sha256_hash_handling() {
+    let temp_path = tempdir().unwrap();
+    test::setup_clean_testing_env_in(temp_path.path());
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    // init repo with sha256
+    init::init(init::InitArgs {
+        bare: false,
+        initial_branch: Some("main".to_string()),
+        repo_directory: temp_path.path().to_str().unwrap().to_string(),
+        quiet: true,
+        template: None,
+        shared: None,
+        object_format: Some("sha256".to_string()),
+    })
+    .await
+    .unwrap();
+
+    // base commit on main
+    fs::write("base.txt", "base").unwrap();
+    add::execute(add::AddArgs {
+        pathspec: vec!["base.txt".into()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(commit::CommitArgs {
+        message: Some("base".into()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+    })
+    .await;
+
+    // feature branch with one commit
+    switch::execute(SwitchArgs {
+        branch: None,
+        create: Some("feature".into()),
+        detach: false,
+    })
+    .await;
+    fs::write("feature.txt", "feature").unwrap();
+    add::execute(add::AddArgs {
+        pathspec: vec!["feature.txt".into()],
+        all: false,
+        update: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+        refresh: false,
+        force: false,
+    })
+    .await;
+    commit::execute(commit::CommitArgs {
+        message: Some("feature".into()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+    })
+    .await;
+    let feature_commit = Head::current_commit().await.expect("need feature commit");
+    assert_eq!(feature_commit.to_string().len(), 64);
+
+    // back to main
+    switch::execute(SwitchArgs {
+        branch: Some("main".into()),
+        create: None,
+        detach: false,
+    })
+    .await;
+    let head_before = Head::current_commit().await.unwrap();
+
+    // attempt cherry-pick with SHA-1 length hash: should no-op and not create file
+    cherry_pick::execute(CherryPickArgs {
+        commits: vec!["4b825dc642cb6eb9a060e54bf8d69288fbee4904".into()],
+        no_commit: false,
+    })
+    .await;
+    let head_after_invalid = Head::current_commit().await.unwrap();
+    assert_eq!(
+        head_before, head_after_invalid,
+        "invalid hash must not advance HEAD"
+    );
+    assert!(
+        !PathBuf::from("feature.txt").exists(),
+        "invalid hash must not apply changes"
+    );
+
+    // cherry-pick with valid SHA-256 commit should succeed
+    cherry_pick::execute(CherryPickArgs {
+        commits: vec![feature_commit.to_string()],
+        no_commit: false,
+    })
+    .await;
+    let head_after_valid = Head::current_commit().await.unwrap();
+    assert_ne!(
+        head_before, head_after_valid,
+        "valid cherry-pick should create new commit"
+    );
+    assert!(
+        PathBuf::from("feature.txt").exists(),
+        "feature.txt should be present after valid cherry-pick"
+    );
 }

@@ -1,17 +1,23 @@
-use crate::utils::path_ext::PathExt;
-use crate::utils::{path, util};
+//! LFS helpers to detect tracked files from attributes, compute SHA256 OIDs, build request payloads/headers, and stream uploads or downloads.
+
+use std::{
+    fs,
+    fs::File,
+    io,
+    io::{BufRead, BufReader, Read},
+    path::{Path, PathBuf},
+};
+
 use git_internal::internal::index::Index;
 use ignore::{Match, gitignore::GitignoreBuilder};
 use lazy_static::lazy_static;
 use regex::Regex;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue};
 use ring::digest::{Context, SHA256};
-use std::fs::File;
-use std::io::{BufRead, BufReader, Read};
-use std::path::{Path, PathBuf};
-use std::{fs, io};
 use url::Url;
 use wax::Pattern;
+
+use crate::utils::{path, path_ext::PathExt, util};
 
 lazy_static! {
     static ref LFS_PATTERNS: Vec<String> = { // cache
@@ -270,22 +276,35 @@ pub fn extract_lfs_patterns(file_path: &str) -> io::Result<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::utils::test;
     use serial_test::serial;
+
+    use super::*;
 
     #[tokio::test]
     #[serial]
-    #[ignore]
     async fn test_generate_pointer_file() {
-        test::reset_working_dir();
-        let file_map = git_internal::test_utils::setup_lfs_file().await;
-        let path = file_map
-            .get("git-2d187177923cd618a75da6c6db45bb89d92bd504.pack")
-            .unwrap();
+        use tempfile::tempdir;
 
-        let (pointer, _oid) = generate_pointer_file(path);
-        print!("{pointer}");
+        // Create a temporary directory
+        let temp_dir = tempdir().unwrap();
+        let test_file_path = temp_dir.path().join("test-lfs-file.bin");
+
+        // Write test content
+        let test_content = b"This is test content for LFS pointer generation.\nMultiple lines.";
+        std::fs::write(&test_file_path, test_content).unwrap();
+
+        // Generate the pointer file
+        let (pointer, oid) = generate_pointer_file(&test_file_path);
+
+        // Verify pointer format
+        assert!(pointer.starts_with(&format!("version {LFS_VERSION}\n")));
+        assert!(pointer.contains(&format!("oid {LFS_HASH_ALGO}:{oid}")));
+        assert!(pointer.contains(&format!("size {}\n", test_content.len())));
+        assert_eq!(oid.len(), 64);
+
+        println!("Generated pointer:\n{}", pointer);
+
+        // temp_dir automatically cleans up when dropped
     }
 
     #[test]

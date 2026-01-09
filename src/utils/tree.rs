@@ -1,10 +1,17 @@
-use std::collections::HashMap;
-use std::path::Path;
+//! Tree helpers for converting index entries into git trees and recursively enumerating tree contents with modes and paths.
 
-use git_internal::errors::GitError;
-use git_internal::internal::index::Index;
-use git_internal::internal::object::ObjectTrait;
-use git_internal::internal::object::tree::{Tree, TreeItem, TreeItemMode};
+use std::{collections::HashMap, path::Path};
+
+use git_internal::{
+    errors::GitError,
+    internal::{
+        index::Index,
+        object::{
+            ObjectTrait,
+            tree::{Tree, TreeItem, TreeItemMode},
+        },
+    },
+};
 
 use crate::utils::object;
 

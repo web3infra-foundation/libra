@@ -1,19 +1,25 @@
-use super::fetch::{self};
-use crate::command::restore::RestoreArgs;
-use crate::command::{self, branch};
-use crate::internal::branch::Branch;
-use crate::internal::config::{Config, RemoteConfig};
-use crate::internal::head::Head;
-use crate::internal::reflog::{ReflogAction, ReflogContext, with_reflog, zero_sha1};
-use crate::utils::path_ext::PathExt;
-use crate::utils::util;
+//! Supports cloning repositories by parsing URLs, fetching objects via protocol clients, checking out the working tree, and writing initial refs/config.
+
+use std::{cell::Cell, env, fs, path::PathBuf};
+
 use clap::Parser;
 use colored::Colorize;
+use git_internal::hash::{HashKind, ObjectHash, get_hash_kind};
 use scopeguard::defer;
 use sea_orm::DatabaseTransaction;
-use std::cell::Cell;
-use std::path::PathBuf;
-use std::{env, fs};
+
+use super::fetch::{self};
+use crate::{
+    command::{self, branch, restore::RestoreArgs},
+    git_protocol::ServiceType::UploadPack,
+    internal::{
+        branch::Branch,
+        config::{Config, RemoteConfig},
+        head::Head,
+        reflog::{ReflogAction, ReflogContext, with_reflog},
+    },
+    utils::{path_ext::PathExt, util},
+};
 
 #[derive(Parser, Debug)]
 pub struct CloneArgs {
@@ -23,9 +29,13 @@ pub struct CloneArgs {
     /// The local path to clone the repository to
     pub local_path: Option<String>,
 
-    /// The branch to clone
+    /// Checkout <BRANCH> instead of the remote's HEAD
     #[clap(short = 'b', long, required = false)]
     pub branch: Option<String>,
+
+    /// Clone only one branch, HEAD or --branch
+    #[clap(long)]
+    pub single_branch: bool,
 }
 
 pub async fn execute(args: CloneArgs) {
@@ -41,6 +51,11 @@ pub async fn execute(args: CloneArgs) {
 
     /* create local path */
     let local_path = PathBuf::from(local_path);
+    let local_path = if local_path.is_absolute() {
+        local_path
+    } else {
+        util::cur_dir().join(&local_path)
+    };
     {
         if local_path.exists() && !util::is_empty_dir(&local_path) {
             eprintln!(
@@ -81,6 +96,33 @@ pub async fn execute(args: CloneArgs) {
         );
         return;
     }
+    // discovery references
+    let remote_client = match fetch::RemoteClient::from_spec(&remote_repo) {
+        Ok(client) => client,
+        Err(e) => {
+            eprintln!("fatal: {e}");
+            return;
+        }
+    };
+    // fetch discovery result
+    let discovery = match remote_client.discovery_reference(UploadPack).await {
+        Ok(result) => result,
+        Err(e) => {
+            eprintln!("fatal: {e}");
+            return;
+        }
+    };
+    // initialize local repository‘s object database
+    let object_format = match discovery.hash_kind {
+        HashKind::Sha1 => "sha1".to_string(),
+        HashKind::Sha256 => "sha256".to_string(),
+    };
+    // adjust remote repo path for local client
+    let remote_repo = match &remote_client {
+        fetch::RemoteClient::Http(_) => remote_repo,
+        fetch::RemoteClient::Local(client) => client.repo_path().to_string_lossy().to_string(),
+        fetch::RemoteClient::Git(_) => remote_repo,
+    };
 
     // CAUTION: change [current_dir] to the repo directory
     env::set_current_dir(&local_path).unwrap();
@@ -91,7 +133,7 @@ pub async fn execute(args: CloneArgs) {
         quiet: false,
         template: None,
         shared: None,
-        object_format: None,
+        object_format: Some(object_format),
     };
     command::init::execute(init_args).await;
 
@@ -100,7 +142,12 @@ pub async fn execute(args: CloneArgs) {
         name: "origin".to_string(),
         url: remote_repo.clone(),
     };
-    fetch::fetch_repository(remote_config.clone(), args.branch.clone()).await;
+    fetch::fetch_repository(
+        remote_config.clone(),
+        args.branch.clone(),
+        args.single_branch,
+    )
+    .await;
 
     /* setup */
     if let Err(e) = setup_repository(remote_config, args.branch.clone()).await {
@@ -145,7 +192,7 @@ async fn setup_repository(
 
         let context = ReflogContext {
             // In a clone, there is no "old" oid. A zero-hash is the standard representation.
-            old_oid: zero_sha1().to_string(),
+            old_oid: ObjectHash::zero_str(get_hash_kind()).to_string(),
             new_oid: origin_branch.commit.to_string(),
             action,
         };

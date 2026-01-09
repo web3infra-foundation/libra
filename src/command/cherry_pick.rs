@@ -1,20 +1,37 @@
-use crate::command::{load_object, save_object};
-use crate::common_utils::format_commit_msg;
-use crate::internal::branch::Branch;
-use crate::internal::head::Head;
-use crate::internal::reflog::{ReflogAction, ReflogContext, with_reflog};
-use crate::utils::object_ext::BlobExt;
-use crate::utils::object_ext::TreeExt;
-use crate::utils::{path, util};
+//! Applies commits onto the current branch by replaying their changes into the index/worktree and emitting new commits or conflict notices.
+
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::{Path, PathBuf},
+};
+
 use clap::Parser;
-use git_internal::hash::SHA1;
-use git_internal::internal::index::{Index, IndexEntry};
-use git_internal::internal::object::commit::Commit;
-use git_internal::internal::object::tree::{Tree, TreeItem, TreeItemMode};
+use git_internal::{
+    hash::ObjectHash,
+    internal::{
+        index::{Index, IndexEntry},
+        object::{
+            commit::Commit,
+            tree::{Tree, TreeItem, TreeItemMode},
+        },
+    },
+};
 use sea_orm::ConnectionTrait;
-use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::path::{Path, PathBuf};
+
+use crate::{
+    command::{load_object, save_object},
+    common_utils::format_commit_msg,
+    internal::{
+        branch::Branch,
+        head::Head,
+        reflog::{ReflogAction, ReflogContext, with_reflog},
+    },
+    utils::{
+        object_ext::{BlobExt, TreeExt},
+        path, util, worktree,
+    },
+};
 
 /// Arguments for the cherry-pick command
 #[derive(Parser, Debug)]
@@ -34,7 +51,7 @@ pub struct CherryPickArgs {
 /// This is useful for selectively applying commits from one branch to another without merging.
 ///
 /// The process involves:
-/// 1. Resolving commit references to SHA1 hashes
+/// 1. Resolving commit references to ObjectHash hashes
 /// 2. For each commit, performing a three-way merge to apply changes
 /// 3. Creating new commits with the same changes and the current HEAD as the parent
 ///    TODO: Now, it will apply the picked commits exactly as they are,
@@ -103,11 +120,11 @@ pub async fn execute(args: CherryPickArgs) {
 /// 3. Applies the resulting changes to the index and working directory
 /// 4. Optionally creates a new commit with the applied changes
 ///
-/// Returns the SHA1 of the new commit if created, or None if --no-commit was used
+/// Returns the ObjectHash of the new commit if created, or None if --no-commit was used
 async fn cherry_pick_single_commit(
-    commit_id: &SHA1,
+    commit_id: &ObjectHash,
     args: &CherryPickArgs,
-) -> Result<Option<SHA1>, String> {
+) -> Result<Option<ObjectHash>, String> {
     let commit_to_pick: Commit =
         load_object(commit_id).map_err(|e| format!("failed to load commit: {e}"))?;
 
@@ -132,6 +149,8 @@ async fn cherry_pick_single_commit(
         .map_err(|e| format!("failed to load commit tree: {e}"))?;
 
     let index_file = path::index();
+    let current_index =
+        Index::load(&index_file).map_err(|e| format!("failed to load current index: {e}"))?;
     let mut index =
         Index::load(&index_file).map_err(|e| format!("failed to load current index: {e}"))?;
 
@@ -162,7 +181,7 @@ async fn cherry_pick_single_commit(
     index
         .save(&index_file)
         .map_err(|e| format!("failed to save index: {e}"))?;
-    reset_workdir_to_index(&index)?;
+    reset_workdir_tracked_only(&current_index, &index)?;
 
     if args.no_commit {
         Ok(None)
@@ -185,8 +204,8 @@ async fn cherry_pick_single_commit(
 /// 4. Updates the HEAD reference to point to the new commit
 async fn create_cherry_pick_commit(
     original_commit: &Commit,
-    parent_id: &SHA1,
-) -> Result<SHA1, String> {
+    parent_id: &ObjectHash,
+) -> Result<ObjectHash, String> {
     let index = Index::load(path::index()).map_err(|e| format!("failed to load index: {e}"))?;
 
     // Create tree from current index state
@@ -236,11 +255,14 @@ async fn create_cherry_pick_commit(
 /// This function compares two tree objects and returns a list of differences.
 /// Each difference is represented as a tuple containing:
 /// - PathBuf: The file path
-/// - Option<SHA1>: The hash in the "theirs" tree (None if deleted)
-/// - Option<SHA1>: The hash in the "base" tree (None if newly added)
+/// - Option<ObjectHash>: The hash in the "theirs" tree (None if deleted)
+/// - Option<ObjectHash>: The hash in the "base" tree (None if newly added)
 ///
 /// This is used to determine what changes need to be applied when cherry-picking.
-fn diff_trees(theirs: &Tree, base: &Tree) -> Vec<(PathBuf, Option<SHA1>, Option<SHA1>)> {
+fn diff_trees(
+    theirs: &Tree,
+    base: &Tree,
+) -> Vec<(PathBuf, Option<ObjectHash>, Option<ObjectHash>)> {
     let mut diffs = Vec::new();
     let their_items: HashMap<_, _> = theirs.get_plain_items().into_iter().collect();
     let base_items: HashMap<_, _> = base.get_plain_items().into_iter().collect();
@@ -265,7 +287,7 @@ fn diff_trees(theirs: &Tree, base: &Tree) -> Vec<(PathBuf, Option<SHA1>, Option<
 /// 3. Adds the entry to the index (overwriting any existing entry with the same path)
 ///
 /// This is used when applying cherry-pick changes to update the index state.
-fn update_index_entry(index: &mut Index, path: &Path, hash: SHA1) {
+fn update_index_entry(index: &mut Index, path: &Path, hash: ObjectHash) {
     let blob = git_internal::internal::object::blob::Blob::load(&hash);
     let entry = IndexEntry::new_from_blob(
         path.to_str().unwrap().to_string(),
@@ -285,8 +307,8 @@ fn update_index_entry(index: &mut Index, path: &Path, hash: SHA1) {
 /// This is a reusable utility function that can be used in commit.rs and revert.rs
 /// as well, since creating trees from index state is a common operation.
 ///
-/// Returns the SHA1 hash of the root tree object.
-fn create_tree_from_index(index: &Index) -> Result<SHA1, String> {
+/// Returns the ObjectHash hash of the root tree object.
+fn create_tree_from_index(index: &Index) -> Result<ObjectHash, String> {
     // Path -> TreeItem mapping
     let mut entries_map: HashMap<PathBuf, Vec<TreeItem>> = HashMap::new();
     for path_buf in index.tracked_files() {
@@ -328,7 +350,7 @@ fn create_tree_from_index(index: &Index) -> Result<SHA1, String> {
 fn build_tree_recursively(
     current_path: &Path,
     entries_map: &mut HashMap<PathBuf, Vec<TreeItem>>,
-) -> Result<SHA1, String> {
+) -> Result<ObjectHash, String> {
     let mut current_items = entries_map.remove(current_path).unwrap_or_default();
 
     // Find all subdirectories and build them recursively
@@ -359,31 +381,30 @@ fn build_tree_recursively(
     Ok(tree.id)
 }
 
-/// Reset the working directory to match the current index state
-///
-/// This function synchronizes the working directory with the index by:
-/// 1. Removing any files that exist in the working directory but not in the index
-/// 2. Writing out all files that are tracked in the index to the working directory
-/// 3. Creating necessary parent directories as needed
-///
-/// This ensures that after cherry-picking, the working directory reflects the
-/// merged state that was applied to the index.
-fn reset_workdir_to_index(index: &Index) -> Result<(), String> {
+/// Reset the working directory to match the new index state without overwriting untracked files.
+fn reset_workdir_tracked_only(current_index: &Index, new_index: &Index) -> Result<(), String> {
     let workdir = util::working_dir();
-    let tracked_paths = index.tracked_files();
-    let index_files_set: HashSet<_> = tracked_paths.iter().collect();
-    let all_files_in_workdir = util::list_workdir_files().unwrap_or_default();
-    for path_from_root in all_files_in_workdir {
-        if !index_files_set.contains(&path_from_root) {
-            let full_path = workdir.join(path_from_root);
+    let untracked_paths = worktree::untracked_workdir_paths(current_index)?;
+    if let Some(conflict) = worktree::untracked_overwrite_path(&untracked_paths, new_index) {
+        return Err(format!(
+            "untracked working tree file would be overwritten: {}",
+            conflict.display()
+        ));
+    }
+    let new_tracked_paths: HashSet<_> = new_index.tracked_files().into_iter().collect();
+
+    for path_buf in current_index.tracked_files() {
+        if !new_tracked_paths.contains(&path_buf) {
+            let full_path = workdir.join(path_buf);
             if full_path.exists() {
                 fs::remove_file(&full_path).map_err(|e| e.to_string())?;
             }
         }
     }
-    for path_buf in &tracked_paths {
+
+    for path_buf in new_index.tracked_files() {
         let path_str = path_buf.to_str().unwrap();
-        if let Some(entry) = index.get(path_str, 0) {
+        if let Some(entry) = new_index.get(path_str, 0) {
             let blob = git_internal::internal::object::blob::Blob::load(&entry.hash);
             let target_path = workdir.join(path_str);
             if let Some(parent) = target_path.parent() {
@@ -395,15 +416,15 @@ fn reset_workdir_to_index(index: &Index) -> Result<(), String> {
     Ok(())
 }
 
-/// Resolve a commit reference (like "HEAD", branch name, or SHA1) to a SHA1 hash
+/// Resolve a commit reference (like "HEAD", branch name, or ObjectHash) to a ObjectHash hash
 ///
 /// This function uses the utility function to convert various commit references
-/// into their corresponding SHA1 hashes. It supports:
-/// - Full SHA1 hashes
-/// - Abbreviated SHA1 hashes  
+/// into their corresponding ObjectHash hashes. It supports:
+/// - Full ObjectHash hashes
+/// - Abbreviated ObjectHash hashes  
 /// - Branch names
 /// - Special references like "HEAD"
-async fn resolve_commit(reference: &str) -> Result<SHA1, String> {
+async fn resolve_commit(reference: &str) -> Result<ObjectHash, String> {
     util::get_commit_base(reference).await
 }
 

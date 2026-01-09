@@ -1,3 +1,5 @@
+//! SeaORM entity for configuration key/value rows representing scoped repository settings.
+
 use sea_orm::entity::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]

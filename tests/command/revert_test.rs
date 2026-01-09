@@ -1,9 +1,12 @@
-use super::*;
+//! Tests revert command for reversing commits with and without auto-commit.
+
+use std::{fs, path::PathBuf};
+
 use libra::command::revert;
 use serial_test::serial;
-use std::fs;
-use std::path::PathBuf;
 use tempfile::tempdir;
+
+use super::*;
 
 /// Test basic revert functionality with file additions, modifications, and deletions
 /// This test follows the workflow:
@@ -31,6 +34,7 @@ async fn test_basic_revert() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -38,6 +42,7 @@ async fn test_basic_revert() {
         file: None,
         allow_empty: false,
         conventional: false,
+        no_edit: false,
         amend: false,
         signoff: false,
         disable_pre: false,
@@ -57,6 +62,7 @@ async fn test_basic_revert() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -64,6 +70,7 @@ async fn test_basic_revert() {
         file: None,
         allow_empty: false,
         conventional: false,
+        no_edit: false,
         amend: false,
         signoff: false,
         disable_pre: false,
@@ -84,6 +91,7 @@ async fn test_basic_revert() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -91,6 +99,7 @@ async fn test_basic_revert() {
         file: None,
         allow_empty: false,
         conventional: false,
+        no_edit: false,
         amend: false,
         signoff: false,
         disable_pre: false,
@@ -185,6 +194,7 @@ async fn test_revert_no_commit() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -192,6 +202,7 @@ async fn test_revert_no_commit() {
         file: None,
         allow_empty: false,
         conventional: false,
+        no_edit: false,
         amend: false,
         signoff: false,
         disable_pre: false,
@@ -209,6 +220,7 @@ async fn test_revert_no_commit() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -216,6 +228,7 @@ async fn test_revert_no_commit() {
         file: None,
         allow_empty: false,
         conventional: false,
+        no_edit: false,
         amend: false,
         signoff: false,
         disable_pre: false,
@@ -244,6 +257,7 @@ async fn test_revert_no_commit() {
         file: None,
         allow_empty: false,
         conventional: false,
+        no_edit: false,
         amend: false,
         signoff: false,
         disable_pre: false,
@@ -274,6 +288,7 @@ async fn test_revert_root_commit() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -281,6 +296,7 @@ async fn test_revert_root_commit() {
         file: None,
         allow_empty: false,
         conventional: false,
+        no_edit: false,
         amend: false,
         signoff: false,
         disable_pre: false,

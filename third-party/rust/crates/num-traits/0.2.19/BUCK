@@ -27,7 +27,6 @@ rust_library(
         "OUT_DIR": "$(location :num-traits-build-script-run[out_dir])",
     },
     features = [
-        "default",
         "i128",
         "libm",
         "std",
@@ -47,7 +46,6 @@ rust_binary(
     crate_root = "vendor/build.rs",
     edition = "2021",
     features = [
-        "default",
         "i128",
         "libm",
         "std",
@@ -63,7 +61,6 @@ buildscript_run(
     buildscript_rule = ":num-traits-build-script-build",
     env_srcs = [":num-traits-manifest[env_dict]"],
     features = [
-        "default",
         "i128",
         "libm",
         "std",

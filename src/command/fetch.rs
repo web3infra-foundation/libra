@@ -1,47 +1,61 @@
-use crate::git_protocol::ServiceType::{self, UploadPack};
+//! Fetch command to negotiate with remotes, download pack data, update remote-tracking refs, and honor prune/depth options.
+
+use std::{
+    collections::HashSet,
+    fs, io,
+    io::{Error as IoError, Write},
+    time::Instant,
+    vec,
+};
+
 use clap::Parser;
-use git_internal::hash::SHA1;
-use git_internal::internal::object::commit::Commit;
+use git_internal::{
+    errors::GitError,
+    hash::{HashKind, ObjectHash, get_hash_kind},
+    internal::object::commit::Commit,
+};
 use indicatif::ProgressBar;
 use sea_orm::TransactionTrait;
-use std::io;
-use std::time::Instant;
-use std::vec;
-use std::{collections::HashSet, fs, io::Write};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio_util::io::StreamReader;
+use url::Url;
 
-use crate::command::load_object;
-use crate::internal::db::get_db_conn_instance;
-use crate::internal::reflog::{HEAD, Reflog, ReflogAction, ReflogContext, ReflogError, zero_sha1};
-use crate::utils::util;
 use crate::{
-    command::index_pack::{self, IndexPackArgs},
+    command::{
+        index_pack::{self, IndexPackArgs},
+        load_object,
+    },
+    git_protocol::ServiceType::{self, UploadPack},
     internal::{
         branch::Branch,
         config::{Config, RemoteConfig},
+        db::get_db_conn_instance,
         head::Head,
         protocol::{
-            DiscRef, FetchStream, ProtocolClient, https_client::HttpsClient,
-            local_client::LocalClient,
+            DiscoveryResult, FetchStream, ProtocolClient, git_client::GitClient,
+            https_client::HttpsClient, local_client::LocalClient, set_wire_hash_kind,
         },
+        reflog::{HEAD, Reflog, ReflogAction, ReflogContext, ReflogError},
     },
-    utils::{self, path_ext::PathExt},
+    utils::{self, path_ext::PathExt, util},
 };
-use git_internal::errors::GitError;
-use std::io::Error as IoError;
-use url::Url;
 
 const DEFAULT_REMOTE: &str = "origin";
 
-enum RemoteClient {
+pub(crate) enum RemoteClient {
     Http(HttpsClient),
     Local(LocalClient),
+    Git(GitClient),
 }
 
 impl RemoteClient {
-    fn from_spec(spec: &str) -> Result<Self, String> {
-        if let Ok(url) = Url::parse(spec) {
+    pub(crate) fn from_spec(spec: &str) -> Result<Self, String> {
+        if let Ok(mut url) = Url::parse(spec) {
+            // Convert Windows path like "D:\test\1" to "file:///d:/test/1"
+            if url.scheme().len() == 1 {
+                url = Url::parse(&format!("file:///{}:{}", url.scheme(), url.path()))
+                    .map_err(|_| format!("invalid Windows file url: {spec}"))?;
+            }
             match url.scheme() {
                 "http" | "https" => Ok(Self::Http(HttpsClient::from_url(&url))),
                 "file" => {
@@ -51,6 +65,12 @@ impl RemoteClient {
                     let client = LocalClient::from_path(path)
                         .map_err(|e| format!("invalid local repository '{}': {}", spec, e))?;
                     Ok(Self::Local(client))
+                }
+                "git" => {
+                    if url.host_str().is_none() {
+                        return Err(format!("invalid git url '{spec}': missing host"));
+                    }
+                    Ok(Self::Git(GitClient::from_url(&url)))
                 }
                 other => Err(format!("unsupported remote scheme '{other}'")),
             }
@@ -67,10 +87,14 @@ impl RemoteClient {
         }
     }
 
-    async fn discovery_reference(&self, service: ServiceType) -> Result<Vec<DiscRef>, GitError> {
+    pub(crate) async fn discovery_reference(
+        &self,
+        service: ServiceType,
+    ) -> Result<DiscoveryResult, GitError> {
         match self {
             RemoteClient::Http(client) => client.discovery_reference(service).await,
             RemoteClient::Local(client) => client.discovery_reference(service).await,
+            RemoteClient::Git(client) => client.discovery_reference(service).await,
         }
     }
 
@@ -82,6 +106,7 @@ impl RemoteClient {
         match self {
             RemoteClient::Http(client) => client.fetch_objects(have, want).await,
             RemoteClient::Local(client) => client.fetch_objects(have, want).await,
+            RemoteClient::Git(client) => client.fetch_objects(have, want).await,
         }
     }
 }
@@ -106,7 +131,7 @@ pub async fn execute(args: FetchArgs) {
     if args.all {
         let remotes = Config::all_remote_configs().await;
         let tasks = remotes.into_iter().map(|remote| async move {
-            fetch_repository(remote, None).await;
+            fetch_repository(remote, None, false).await;
         });
         futures::future::join_all(tasks).await;
     } else {
@@ -125,7 +150,7 @@ pub async fn execute(args: FetchArgs) {
         };
         let remote_config = Config::remote_config(&remote).await;
         match remote_config {
-            Some(remote_config) => fetch_repository(remote_config, args.refspec).await,
+            Some(remote_config) => fetch_repository(remote_config, args.refspec, false).await,
             None => {
                 tracing::error!("remote config '{}' not found", remote);
                 eprintln!("fatal: '{remote}' does not appear to be a libra repository");
@@ -136,7 +161,12 @@ pub async fn execute(args: FetchArgs) {
 
 /// Fetch from remote repository
 /// - `branch` is optional, if `None`, fetch all branches
-pub async fn fetch_repository(remote_config: RemoteConfig, branch: Option<String>) {
+/// - 'single_branch' is bool, if `true`, fetch only the specified branch
+pub async fn fetch_repository(
+    remote_config: RemoteConfig,
+    branch: Option<String>,
+    single_branch: bool,
+) {
     println!(
         "fetching from {}{}",
         remote_config.name,
@@ -156,13 +186,23 @@ pub async fn fetch_repository(remote_config: RemoteConfig, branch: Option<String
         }
     };
 
-    let mut refs = match remote_client.discovery_reference(UploadPack).await {
-        Ok(refs) => refs,
+    let discovery = match remote_client.discovery_reference(UploadPack).await {
+        Ok(result) => result,
         Err(e) => {
             eprintln!("fatal: {e}");
             return;
         }
     };
+    let local_kind = get_hash_kind();
+    if discovery.hash_kind != local_kind {
+        eprintln!(
+            "fatal: remote object format '{}' does not match local '{}'",
+            discovery.hash_kind, local_kind
+        );
+        return;
+    }
+    set_wire_hash_kind(discovery.hash_kind);
+    let mut refs = discovery.refs;
 
     if refs.is_empty() {
         tracing::warn!("fetch empty, no refs found");
@@ -184,7 +224,10 @@ pub async fn fetch_repository(remote_config: RemoteConfig, branch: Option<String
         } else {
             branch.to_owned()
         };
-        refs.retain(|r| r._ref == branch);
+        // remove other branches
+        if single_branch {
+            refs.retain(|r| r._ref == branch);
+        }
 
         if refs.is_empty() {
             eprintln!("fatal: '{branch}' not found in remote");
@@ -253,19 +296,20 @@ pub async fn fetch_repository(remote_config: RemoteConfig, branch: Option<String
     bar.finish();
 
     /* save pack file */
-    let pack_file = if pack_data.len() < 20 {
+    let hash_len = get_hash_kind().size();
+    let pack_file = if pack_data.len() < hash_len {
         tracing::debug!("No pack data returned from remote");
         None
     } else {
-        let payload_len = pack_data.len() - 20;
-        let hash = SHA1::new(&pack_data[..payload_len]);
+        let payload_len = pack_data.len() - hash_len;
+        let hash = ObjectHash::new(&pack_data[..payload_len]);
 
-        let checksum = SHA1::from_bytes(&pack_data[payload_len..]);
+        let checksum = ObjectHash::from_bytes(&pack_data[payload_len..]).unwrap();
         assert_eq!(hash, checksum);
         let checksum = checksum.to_string();
         println!("checksum: {checksum}");
 
-        if pack_data.len() > 32 {
+        if pack_data.len() > 12 + hash_len {
             // 12 header + 20 hash
             let pack_file = utils::path::objects()
                 .join("pack")
@@ -282,10 +326,14 @@ pub async fn fetch_repository(remote_config: RemoteConfig, branch: Option<String
 
     if let Some(pack_file) = pack_file {
         /* build .idx file from PACK */
+        let index_version = match get_hash_kind() {
+            HashKind::Sha1 => None,
+            HashKind::Sha256 => Some(2),
+        };
         index_pack::execute(IndexPackArgs {
             pack_file,
             index_file: None,
-            index_version: None,
+            index_version,
         });
     }
 
@@ -313,7 +361,9 @@ pub async fn fetch_repository(remote_config: RemoteConfig, branch: Option<String
                     // Get the old OID *before* updating the branch
                     let old_oid = Branch::find_branch_with_conn(txn, &full_ref_name, None)
                         .await
-                        .map_or(zero_sha1().to_string(), |b| b.commit.to_string());
+                        .map_or(ObjectHash::zero_str(get_hash_kind()), |b| {
+                            b.commit.to_string()
+                        });
 
                     // Update the branch pointer
                     Branch::update_branch_with_conn(txn, &full_ref_name, &r._hash, None).await;
@@ -365,7 +415,7 @@ async fn current_have() -> Vec<String> {
     #[derive(PartialEq, Eq, PartialOrd, Ord)]
     struct QueueItem {
         priority: usize,
-        commit: SHA1,
+        commit: ObjectHash,
     }
     let mut c_pending = std::collections::BinaryHeap::new();
     let mut inserted = HashSet::new();

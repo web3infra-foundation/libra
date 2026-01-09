@@ -1,21 +1,24 @@
-use git_internal::hash::SHA1;
-use git_internal::internal::object::types::ObjectType;
+//! Core utility toolbox for repo detection, path conversion, ignore checking, storage access, hashing helpers, and miscellaneous formatting/time utilities.
+
+use std::{
+    collections::HashSet,
+    env, fs, io,
+    io::Write,
+    path::{Path, PathBuf},
+};
+
+use git_internal::{
+    hash::ObjectHash,
+    internal::object::{commit::Commit, types::ObjectType},
+};
+use ignore::{Match, gitignore::Gitignore};
 use indicatif::{ProgressBar, ProgressStyle};
 use path_absolutize::*;
-use std::collections::HashSet;
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::{env, fs, io};
 
-use crate::utils::client_storage::ClientStorage;
-use crate::utils::path;
-use crate::utils::path_ext::PathExt;
-
-use ignore::{Match, gitignore::Gitignore};
-
-use crate::internal::branch::Branch;
-use crate::internal::head::Head;
-use crate::internal::tag;
+use crate::{
+    internal::{branch::Branch, head::Head, tag},
+    utils::{client_storage::ClientStorage, path, path_ext::PathExt},
+};
 
 pub const ROOT_DIR: &str = ".libra";
 pub const DATABASE: &str = "libra.db";
@@ -32,7 +35,30 @@ pub const ATTRIBUTES: &str = ".libra_attributes";
 ///
 /// A `PathBuf` representing the current working directory.
 pub fn cur_dir() -> PathBuf {
-    env::current_dir().unwrap()
+    match env::current_dir() {
+        Ok(dir) => dir,
+        Err(_) => {
+            // Fallback 1: use PWD if present and valid
+            if let Ok(pwd) = env::var("PWD") {
+                let p = PathBuf::from(&pwd);
+                if p.exists() && p.is_dir() {
+                    return p;
+                }
+            }
+
+            // Fallback 2: directory of the current executable if available
+            if let Ok(exec) = env::current_exe()
+                && let Some(parent) = exec.parent()
+                && parent.exists()
+                && parent.is_dir()
+            {
+                return parent.to_path_buf();
+            }
+
+            // Fallback 3: root directory to ensure a stable, existing path
+            PathBuf::from("/")
+        }
+    }
 }
 
 /// Try to get the storage path of the repository, which is the path of the `.libra` directory
@@ -40,11 +66,18 @@ pub fn cur_dir() -> PathBuf {
 pub fn try_get_storage_path(path: Option<PathBuf>) -> Result<PathBuf, io::Error> {
     let mut path = path.clone().unwrap_or_else(cur_dir);
     let orig = path.clone();
+
     loop {
-        let libra = path.join(ROOT_DIR);
-        if libra.exists() {
-            return Ok(libra);
+        let standard_repo = path.join(ROOT_DIR);
+        if standard_repo.exists() {
+            return Ok(standard_repo);
         }
+
+        // Bare repository: database and objects live in the repository root without `.libra`
+        if path.join(DATABASE).exists() && path.join("objects").exists() {
+            return Ok(path);
+        }
+
         if !path.pop() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
@@ -154,12 +187,16 @@ where
     P: AsRef<Path>,
     B: AsRef<Path>,
 {
-    // × crate `PathAbs` is NOT good enough
-    // 1. `PathAbs::new` can not handle `.` or `./`, all return ""
-    // 2. `PathAbs::new` generate prefix: '\\?\' on Windows
-    // So, we replace it with `path_absolutize` √
-    let path_abs = path.as_ref().absolutize().unwrap();
-    let base_abs = base.as_ref().absolutize().unwrap();
+    // Use safe absolutize that tolerates invalid current directory on some Linux/CI envs
+    let path_abs = match path.as_ref().absolutize() {
+        Ok(p) => p.into_owned(),
+        Err(_) => cur_dir().join(path.as_ref()),
+    };
+    let base_abs = match base.as_ref().absolutize() {
+        Ok(b) => b.into_owned(),
+        Err(_) => cur_dir().join(base.as_ref()),
+    };
+
     if let Some(rel_path) = pathdiff::diff_paths(path_abs, base_abs) {
         if rel_path.to_string_lossy() == "" {
             PathBuf::from(".")
@@ -296,14 +333,14 @@ pub fn path_to_string(path: &Path) -> String {
     path.to_string_lossy().to_string()
 }
 
-/// Resolve a string to a commit SHA1.
+/// Resolve a string to a commit ObjectHash.
 /// The string can be a branch name, a tag name, or a commit hash prefix.
 /// Order of resolution:
 /// 1. HEAD
 /// 2. Local Branch
 /// 3. Tag
 /// 4. Commit hash prefix
-pub async fn get_commit_base(name: &str) -> Result<SHA1, String> {
+pub async fn get_commit_base(name: &str) -> Result<ObjectHash, String> {
     // 1. Check for HEAD
     if name.to_uppercase() == "HEAD" {
         if let Some(commit_id) = Head::current_commit().await {
@@ -403,9 +440,15 @@ pub fn default_progress_bar(len: u64) -> ProgressBar {
     progress_bar
 }
 
-/// Check each directory level from `work_dir` to `target_file` to see if there is a `.gitignore` file that matches `target_file`.
+/// Check each directory level from `work_dir` to `target_file` to see if there is a `.libraignore`
+/// file that matches `target_file`.
 ///
-/// Assume `target_file` is `in work_dir`.
+/// Low-level helper historically used by status/add flows. Prefer the higher-level wrappers in
+/// `crate::utils::ignore::{should_ignore, filter_workdir_paths}` so that ignore policies and index
+/// awareness stay consistent. Call this directly only when you explicitly need raw `.libraignore`
+/// parsing.
+///
+/// Assume `target_file` is in `work_dir`.
 pub fn check_gitignore(work_dir: &PathBuf, target_file: &PathBuf) -> bool {
     assert!(target_file.starts_with(work_dir));
     let mut dir = target_file.clone();
@@ -452,8 +495,9 @@ pub fn check_gitignore(work_dir: &PathBuf, target_file: &PathBuf) -> bool {
     false
 }
 
-use crate::internal::config::Config;
 use git_internal::internal::object::signature::{Signature, SignatureType};
+
+use crate::internal::config::Config;
 
 pub async fn create_signatures() -> (Signature, Signature) {
     let user_name = Config::get("user", None, "name")
@@ -468,21 +512,70 @@ pub async fn create_signatures() -> (Signature, Signature) {
     (author, committer)
 }
 
+/// Compute the minimum prefix length at which all commit IDs are uniquely identifiable.
+///
+/// This function inspects the textual object IDs of all `commits` and searches for the
+/// smallest prefix length `len` such that the first `len` characters of every commit ID
+/// are pairwise distinct. The search range is from `7` (inclusive) up to the maximum
+/// hash string length present in `commits` (inclusive).
+///
+/// Return value semantics:
+/// - If `commits` is empty or contains only a single commit, this returns `7`. In these
+///   cases, there is no ambiguity, and the conventional minimal prefix length is used.
+/// - Otherwise, it returns the smallest `len >= 7` for which all commit ID prefixes of
+///   length `len` are unique.
+/// - If no such `len` exists before the end of the hash strings, the full hash length
+///   (i.e., the maximum ID length observed) is returned.
+///
+/// This is useful for producing short, Git-style abbreviated IDs that remain unambiguous
+/// across the given set of reachable commits.
+pub fn get_min_unique_hash_length(commits: &[Commit]) -> usize {
+    // Get all commit IDs.
+    let hashes: Vec<String> = commits.iter().map(|commit| commit.id.to_string()).collect();
+    // If there is no commit or only one commit, return 7.
+    if hashes.is_empty() || hashes.len() == 1 {
+        7
+    } else {
+        // Get the maximum length of all commit IDs.
+        let max_length = hashes.iter().map(|h| h.len()).max().unwrap_or(0);
+        (7..=max_length)
+            .find(|&len| {
+                let mut prefixes = HashSet::new();
+                hashes
+                    .iter()
+                    .all(|hash| prefixes.insert(hash.get(0..len).unwrap_or(hash)))
+            })
+            .unwrap_or(max_length) // Worst case: use full hash length
+    }
+}
+
 #[cfg(test)]
 mod test {
+    use std::{env, path::PathBuf};
+
+    use serial_test::serial;
+    use tempfile::tempdir;
+
     use super::*;
     use crate::utils::test;
-    use serial_test::serial;
-    use std::env;
-    use std::path::PathBuf;
-    use tempfile::tempdir;
 
     #[test]
     ///Test get current directory success.
     fn cur_dir_returns_current_directory() {
-        let expected = env::current_dir().unwrap();
-        let actual = cur_dir();
-        assert_eq!(actual, expected);
+        match env::current_dir() {
+            Ok(expected) => {
+                let actual = cur_dir();
+                assert_eq!(actual, expected);
+            }
+            Err(_) => {
+                // On some Linux/CI environments, current_dir can fail if the working
+                // directory was removed. In that case, ensure cur_dir still returns
+                // a stable, existing directory via its fallback logic.
+                let actual = cur_dir();
+                assert!(actual.exists(), "cur_dir should return an existing path");
+                assert!(actual.is_dir(), "cur_dir should point to a directory");
+            }
+        }
     }
 
     #[test]

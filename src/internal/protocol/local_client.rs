@@ -1,16 +1,22 @@
-use super::{
-    DiscRef, FetchStream, ProtocolClient, generate_upload_pack_content, parse_discovered_references,
+//! Local protocol client using filesystem paths to run upload-pack/receive-pack locally and stream pack data over async pipes.
+
+use std::{
+    env,
+    io::Error as IoError,
+    path::{Path, PathBuf},
 };
-use crate::git_protocol::ServiceType;
+
 use bytes::Bytes;
 use futures_util::stream::{self, StreamExt};
 use git_internal::errors::GitError;
-use std::env;
-use std::io::Error as IoError;
-use std::path::{Path, PathBuf};
-use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
+use tokio::{io::AsyncWriteExt, process::Command};
 use url::Url;
+
+use super::{
+    DiscoveryResult, FetchStream, ProtocolClient, generate_upload_pack_content,
+    parse_discovered_references,
+};
+use crate::git_protocol::ServiceType;
 
 #[derive(Debug, Clone)]
 pub struct LocalClient {
@@ -61,7 +67,7 @@ impl LocalClient {
     pub async fn discovery_reference(
         &self,
         service: ServiceType,
-    ) -> Result<Vec<DiscRef>, GitError> {
+    ) -> Result<DiscoveryResult, GitError> {
         if service != ServiceType::UploadPack {
             return Err(GitError::NetworkError(
                 "Unsupported service type for local protocol".to_string(),
@@ -130,13 +136,14 @@ impl LocalClient {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::git_protocol::ServiceType;
-    use std::ffi::OsStr;
-    use std::process::Command as StdCommand;
+    use std::{ffi::OsStr, process::Command as StdCommand};
+
     use tempfile::tempdir;
     use tokio::io::AsyncReadExt;
     use tokio_util::io::StreamReader;
+
+    use super::*;
+    use crate::git_protocol::ServiceType;
 
     fn run_git<I, S>(cwd: Option<&Path>, args: I) -> StdCommand
     where
@@ -164,7 +171,7 @@ mod tests {
             .discovery_reference(ServiceType::UploadPack)
             .await
             .unwrap();
-        assert!(refs.is_empty());
+        assert!(refs.refs.is_empty());
     }
 
     #[tokio::test]
@@ -255,7 +262,7 @@ mod tests {
             .discovery_reference(ServiceType::UploadPack)
             .await
             .unwrap();
-        assert!(!refs.is_empty());
+        assert!(!refs.refs.is_empty());
 
         let want = vec![head];
         let have = Vec::new();

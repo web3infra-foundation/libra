@@ -26,19 +26,16 @@ rust_library(
     env = {
         "OUT_DIR": "$(location :quinn-udp-build-script-run[out_dir])",
     },
-    features = [
-        "log",
-        "tracing",
-    ],
+    features = ["tracing"],
     rustc_flags = [
         "@$(location :quinn-udp-build-script-run[rustc_flags])",
         "@$(location :quinn-udp-manifest[env_flags])",
     ],
     visibility = ["PUBLIC"],
     deps = [
-        "//third-party/rust/crates/libc/0.2.175:libc",
-        "//third-party/rust/crates/socket2/0.6.0:socket2",
-        "//third-party/rust/crates/tracing/0.1.41:tracing",
+        "//third-party/rust/crates/libc/0.2.178:libc",
+        "//third-party/rust/crates/socket2/0.6.1:socket2",
+        "//third-party/rust/crates/tracing/0.1.44:tracing",
     ],
 )
 
@@ -48,10 +45,7 @@ rust_binary(
     crate = "build_script_build",
     crate_root = "vendor/build.rs",
     edition = "2021",
-    features = [
-        "log",
-        "tracing",
-    ],
+    features = ["tracing"],
     rustc_flags = ["@$(location :quinn-udp-manifest[env_flags])"],
     visibility = [],
     deps = ["//third-party/rust/crates/cfg_aliases/0.2.1:cfg_aliases"],
@@ -62,10 +56,7 @@ buildscript_run(
     package_name = "quinn-udp",
     buildscript_rule = ":quinn-udp-build-script-build",
     env_srcs = [":quinn-udp-manifest[env_dict]"],
-    features = [
-        "log",
-        "tracing",
-    ],
+    features = ["tracing"],
     version = "0.5.14",
     manifest_dir = ":quinn-udp-vendor",
     visibility = ["PUBLIC"],

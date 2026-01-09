@@ -27,11 +27,11 @@ rust_library(
     proc_macro = True,
     visibility = ["PUBLIC"],
     deps = [
-        "//third-party/rust/crates/proc-macro2/1.0.101:proc-macro2",
-        "//third-party/rust/crates/quote/1.0.40:quote",
-        "//third-party/rust/crates/regex-syntax/0.8.6:regex-syntax",
-        "//third-party/rust/crates/regex/1.11.2:regex",
+        "//third-party/rust/crates/proc-macro2/1.0.103:proc-macro2",
+        "//third-party/rust/crates/quote/1.0.42:quote",
+        "//third-party/rust/crates/regex-syntax/0.8.8:regex-syntax",
+        "//third-party/rust/crates/regex/1.12.2:regex",
         "//third-party/rust/crates/structmeta/0.3.0:structmeta",
-        "//third-party/rust/crates/syn/2.0.106:syn",
+        "//third-party/rust/crates/syn/2.0.111:syn",
     ],
 )

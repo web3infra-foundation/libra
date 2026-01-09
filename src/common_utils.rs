@@ -1,9 +1,6 @@
-use regex::Regex;
+//! Common helpers for formatting commit messages, parsing embedded GPG signatures, and validating Conventional Commit styles.
 
-pub const ZERO_ID: &str = match std::str::from_utf8(&[b'0'; 40]) {
-    Ok(s) => s,
-    Err(_) => panic!("can't get ZERO_ID"),
-};
+use regex::Regex;
 
 /// Format commit message with GPG signature<br>
 /// There must be a `blank line`(\n) before `message`, or remote unpack failed.<br>

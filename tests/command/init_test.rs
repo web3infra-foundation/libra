@@ -1,8 +1,12 @@
-use super::*;
-use libra::internal::model::config;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+//! Tests init command creating repository layout, configs, and database tables.
+
 // use std::fs::File;
 use std::fs;
+
+use libra::internal::model::config;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+use super::*;
 
 pub fn verify_init(base_dir: &Path) {
     // List of subdirectories to verify
@@ -54,6 +58,7 @@ async fn test_init() {
 /// Test the init function with a template directory
 async fn test_init_template() {
     use std::fs;
+
     use tempfile::tempdir;
 
     // Create a temporary target directory for the new repo
@@ -521,7 +526,7 @@ async fn test_init_with_invalid_shared_mode() {
 
 #[tokio::test]
 #[serial]
-/// Test init with a valid object format ('sha1')
+/// Test init with a valid object format ('sha1' and 'sha256' are supported)
 async fn test_init_with_valid_object_format_sha1() {
     let target_dir = tempdir().unwrap().keep();
     let args = InitArgs {
@@ -557,23 +562,37 @@ async fn test_init_with_valid_object_format_sha1() {
 
 #[tokio::test]
 #[serial]
-/// Test init with an unsupported but valid object format ('sha256')
-async fn test_init_with_unsupported_object_format_sha256() {
+/// Test init with a valid object format ('sha256') and verify it's saved to config.
+async fn test_init_with_valid_object_format_sha256() {
     let target_dir = tempdir().unwrap().keep();
     let args = InitArgs {
         bare: false,
         initial_branch: None,
         repo_directory: target_dir.to_str().unwrap().to_string(),
-        quiet: false,
+        quiet: true, // Use quiet to reduce test output noise
         template: None,
         shared: None,
         object_format: Some("sha256".to_string()),
     };
-    // This should fail with a specific error
+    // This should succeed
     let result = init(args).await;
-    let err = result.unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-    assert!(err.to_string().contains("not supported yet"));
+    assert!(
+        result.is_ok(),
+        "init with --object-format sha256 should succeed"
+    );
+
+    // Verify that the config file contains the correct object format
+    let db_path = target_dir.join(".libra/libra.db");
+    let conn = sea_orm::Database::connect(format!("sqlite://{}", db_path.to_str().unwrap()))
+        .await
+        .unwrap();
+    let config_entry = config::Entity::find()
+        .filter(config::Column::Configuration.eq("core"))
+        .filter(config::Column::Key.eq("objectformat"))
+        .one(&conn)
+        .await
+        .unwrap();
+    assert_eq!(config_entry.unwrap().value, "sha256");
 }
 
 #[tokio::test]
@@ -594,5 +613,5 @@ async fn test_init_with_invalid_object_format() {
     let result = init(args).await;
     let err = result.unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-    assert!(err.to_string().contains("invalid object format"));
+    assert!(err.to_string().contains("unsupported object format"));
 }

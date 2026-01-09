@@ -1,7 +1,10 @@
-use crate::internal::tag;
+//! Manages tags by resolving target commits, creating lightweight or annotated tag objects, storing refs, and listing existing tags.
+
 use clap::Parser;
 use git_internal::internal::object::types::ObjectType;
 use sea_orm::sqlx::types::chrono;
+
+use crate::internal::{tag, tag::TagObject};
 
 #[derive(Parser, Debug)]
 #[command(about = "Create, list, delete, or verify a tag object")]
@@ -24,11 +27,16 @@ pub struct TagArgs {
 
     #[clap(short, long, group = "action")]
     pub force: bool,
+
+    /// Number of annotation lines to display when listing tags (0 for tag names only)
+    #[clap(short, long)]
+    pub n_lines: Option<usize>,
 }
 
 pub async fn execute(args: TagArgs) {
-    if args.list {
-        list_tags().await;
+    if args.list || args.n_lines.is_some() {
+        let show_lines = args.n_lines.unwrap_or(0);
+        list_tags(show_lines).await;
         return;
     }
 
@@ -38,10 +46,11 @@ pub async fn execute(args: TagArgs) {
         } else if args.message.is_some() {
             create_tag(&name, args.message, args.force).await;
         } else {
+            create_tag(&name, None, args.force).await;
             show_tag(&name).await;
         }
     } else {
-        list_tags().await;
+        list_tags(0).await;
     }
 }
 
@@ -52,15 +61,57 @@ async fn create_tag(tag_name: &str, message: Option<String>, force: bool) {
     }
 }
 
-async fn list_tags() {
-    match tag::list().await {
-        Ok(tags) => {
-            for tag in tags {
-                println!("{}", tag.name);
-            }
-        }
+async fn list_tags(show_lines: usize) {
+    match render_tags(show_lines).await {
+        Ok(s) => print!("{}", s),
         Err(e) => eprintln!("fatal: {}", e),
     }
+}
+
+pub async fn render_tags(show_lines: usize) -> Result<String, anyhow::Error> {
+    let tags = tag::list().await?;
+    let mut output = String::new();
+    let extract_message = |msg: &str| {
+        msg.trim()
+            .lines()
+            .map(|line| line.trim())
+            .filter(|line| !line.is_empty())
+            .take(show_lines)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    for tag in tags {
+        if show_lines == 0 {
+            output.push_str(&format!("{}\n", tag.name));
+            continue;
+        }
+
+        let show_message = match &tag.object {
+            TagObject::Tag(git_internal) => extract_message(&git_internal.message),
+            TagObject::Commit(commit) => extract_message(&commit.message),
+            _ => String::new(),
+        };
+
+        let lines: Vec<&str> = show_message.lines().collect();
+
+        if lines.is_empty() {
+            // lightweight tag
+            output.push_str(&format!("{:<20}\n", tag.name));
+        } else {
+            for (i, line) in lines.iter().enumerate() {
+                if i == 0 {
+                    // print first line
+                    output.push_str(&format!("{:<20} {}\n", tag.name, line));
+                } else {
+                    // print subsequent lines: use empty string with 20 characters width alignment to match the indentation
+                    output.push_str(&format!("{:<20} {}\n", "", line));
+                }
+            }
+        }
+    }
+
+    Ok(output)
 }
 
 async fn delete_tag(tag_name: &str) {
@@ -100,13 +151,14 @@ async fn show_tag(tag_name: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::cli::parse_async;
-    use crate::internal::tag;
+    use std::fs;
+
     use git_internal::internal::object::types::ObjectType;
     use serial_test::serial;
-    use std::fs;
     use tempfile::tempdir;
+
+    use super::*;
+    use crate::{cli::parse_async, internal::tag};
 
     async fn setup_repo_with_commit() -> tempfile::TempDir {
         let temp_dir = tempdir().unwrap();

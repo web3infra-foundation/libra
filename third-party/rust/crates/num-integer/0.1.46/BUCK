@@ -24,7 +24,6 @@ rust_library(
     crate_root = "vendor/src/lib.rs",
     edition = "2018",
     features = [
-        "default",
         "i128",
         "std",
     ],

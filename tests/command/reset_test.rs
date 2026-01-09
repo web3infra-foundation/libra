@@ -1,11 +1,19 @@
-use super::*;
-use libra::command::branch::{self, BranchArgs};
-use libra::command::reset::{self, ResetArgs};
-use libra::command::status::changes_to_be_staged;
+//! Tests reset command modes (soft/mixed/hard) and resulting state changes.
+
 use std::fs;
 
+use libra::command::{
+    branch::{self, BranchArgs},
+    reset::{self, ResetArgs},
+    status::changes_to_be_staged,
+};
+
+use super::*;
+
 /// Setup a standard test repository with 4 commits and branches
-async fn setup_standard_repo(temp_path: &std::path::Path) -> (SHA1, SHA1, SHA1, SHA1) {
+async fn setup_standard_repo(
+    temp_path: &std::path::Path,
+) -> (ObjectHash, ObjectHash, ObjectHash, ObjectHash) {
     test::setup_with_new_libra_in(temp_path).await;
 
     fs::write("1.txt", "content 1").unwrap();
@@ -17,6 +25,7 @@ async fn setup_standard_repo(temp_path: &std::path::Path) -> (SHA1, SHA1, SHA1, 
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -24,6 +33,7 @@ async fn setup_standard_repo(temp_path: &std::path::Path) -> (SHA1, SHA1, SHA1, 
         file: None,
         allow_empty: false,
         conventional: false,
+        no_edit: false,
         amend: false,
         signoff: false,
         disable_pre: true,
@@ -39,7 +49,9 @@ async fn setup_standard_repo(temp_path: &std::path::Path) -> (SHA1, SHA1, SHA1, 
         delete: None,
         set_upstream_to: None,
         show_current: false,
+        rename: vec![],
         remotes: false,
+        all: false,
     })
     .await;
 
@@ -52,6 +64,7 @@ async fn setup_standard_repo(temp_path: &std::path::Path) -> (SHA1, SHA1, SHA1, 
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -59,6 +72,7 @@ async fn setup_standard_repo(temp_path: &std::path::Path) -> (SHA1, SHA1, SHA1, 
         file: None,
         allow_empty: false,
         conventional: false,
+        no_edit: false,
         amend: false,
         signoff: false,
         disable_pre: true,
@@ -74,7 +88,9 @@ async fn setup_standard_repo(temp_path: &std::path::Path) -> (SHA1, SHA1, SHA1, 
         delete: None,
         set_upstream_to: None,
         show_current: false,
+        rename: vec![],
         remotes: false,
+        all: false,
     })
     .await;
 
@@ -87,6 +103,7 @@ async fn setup_standard_repo(temp_path: &std::path::Path) -> (SHA1, SHA1, SHA1, 
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -94,6 +111,7 @@ async fn setup_standard_repo(temp_path: &std::path::Path) -> (SHA1, SHA1, SHA1, 
         file: None,
         allow_empty: false,
         conventional: false,
+        no_edit: false,
         amend: false,
         signoff: false,
         disable_pre: true,
@@ -109,7 +127,9 @@ async fn setup_standard_repo(temp_path: &std::path::Path) -> (SHA1, SHA1, SHA1, 
         delete: None,
         set_upstream_to: None,
         show_current: false,
+        rename: vec![],
         remotes: false,
+        all: false,
     })
     .await;
 
@@ -122,6 +142,7 @@ async fn setup_standard_repo(temp_path: &std::path::Path) -> (SHA1, SHA1, SHA1, 
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
     commit::execute(CommitArgs {
@@ -129,6 +150,7 @@ async fn setup_standard_repo(temp_path: &std::path::Path) -> (SHA1, SHA1, SHA1, 
         file: None,
         allow_empty: false,
         conventional: false,
+        no_edit: false,
         amend: false,
         signoff: false,
         disable_pre: true,
@@ -144,7 +166,9 @@ async fn setup_standard_repo(temp_path: &std::path::Path) -> (SHA1, SHA1, SHA1, 
         delete: None,
         set_upstream_to: None,
         show_current: false,
+        rename: vec![],
         remotes: false,
+        all: false,
     })
     .await;
 
@@ -166,6 +190,7 @@ async fn setup_test_state() {
         dry_run: false,
         ignore_errors: false,
         refresh: false,
+        force: false,
     })
     .await;
 }

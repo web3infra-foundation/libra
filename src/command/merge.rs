@@ -1,14 +1,22 @@
+//! Merge command orchestration that resolves base/target commits, performs recursive merge, stages results, and updates refs or surfaces conflicts.
+
 use clap::Parser;
-use git_internal::internal::object::commit::Commit;
+use git_internal::{
+    hash::{ObjectHash, get_hash_kind},
+    internal::object::commit::Commit,
+};
 
 use super::{
     get_target_commit, load_object, log,
     restore::{self, RestoreArgs},
 };
-use crate::internal::db::get_db_conn_instance;
-use crate::internal::reflog::{ReflogAction, ReflogContext, with_reflog, zero_sha1};
 use crate::{
-    internal::{branch::Branch, head::Head},
+    internal::{
+        branch::Branch,
+        db::get_db_conn_instance,
+        head::Head,
+        reflog::{ReflogAction, ReflogContext, with_reflog},
+    },
     utils::util,
 };
 
@@ -105,7 +113,9 @@ async fn merge_ff(target_commit: Commit, target_branch_name: &str) {
     let context = ReflogContext {
         // If there was no previous commit, this is an initial commit merge (e.g., on an empty branch).
         // Use the zero-hash in that case.
-        old_oid: old_oid_opt.map_or(zero_sha1().to_string(), |id| id.to_string()),
+        old_oid: old_oid_opt.map_or(ObjectHash::zero_str(get_hash_kind()).to_string(), |id| {
+            id.to_string()
+        }),
         new_oid: target_commit.id.to_string(),
         action,
     };

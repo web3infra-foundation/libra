@@ -23,11 +23,6 @@ rust_library(
     crate = "itertools",
     crate_root = "vendor/src/lib.rs",
     edition = "2018",
-    features = [
-        "default",
-        "use_alloc",
-        "use_std",
-    ],
     rustc_flags = ["@$(location :itertools-manifest[env_flags])"],
     visibility = ["PUBLIC"],
     deps = ["//third-party/rust/crates/either/1.15.0:either"],

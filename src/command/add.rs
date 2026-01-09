@@ -1,11 +1,17 @@
-use crate::command::status;
-use crate::utils::object_ext::BlobExt;
-use clap::Parser;
-use git_internal::internal::index::{Index, IndexEntry};
-use git_internal::internal::object::blob::Blob;
+//! Stages changes for commit by parsing pathspecs and modes, respecting ignore policy, refreshing index entries, and writing blob objects.
+
 use std::path::{Path, PathBuf};
 
-use crate::utils::{lfs, path, util};
+use clap::Parser;
+use git_internal::internal::{
+    index::{Index, IndexEntry},
+    object::blob::Blob,
+};
+
+use crate::{
+    command::status,
+    utils::{ignore::IgnorePolicy, lfs, object_ext::BlobExt, path, util},
+};
 
 #[derive(Parser, Debug)]
 pub struct AddArgs {
@@ -36,6 +42,10 @@ pub struct AddArgs {
     #[clap(short, long)]
     pub verbose: bool,
 
+    /// allow adding otherwise ignored files
+    #[clap(short = 'f', long)]
+    pub force: bool,
+
     /// dry run
     #[clap(short, long)]
     pub dry_run: bool,
@@ -63,7 +73,13 @@ pub async fn execute(args: AddArgs) {
     }
 
     // index vs worktree
-    let mut changes = status::changes_to_be_staged(); // to workdir
+    let policy = if args.force {
+        IgnorePolicy::IncludeIgnored
+    } else {
+        IgnorePolicy::Respect
+    };
+
+    let mut changes = status::changes_to_be_staged_with_policy(policy); // to workdir
     // filter paths to fit `pathspec` that user inputs
     changes.new = util::filter_to_fit_paths(&changes.new, &paths);
     // if `--all` & <pathspec> is given, it will update `index` as well, so no need to filter `deleted` & `modified`

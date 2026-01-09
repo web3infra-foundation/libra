@@ -1,9 +1,14 @@
+//! Handles checkout-style flows to show the current branch, switch to existing branches, or create and switch to a new one using restore utilities.
+
 use clap::Parser;
-use git_internal::hash::SHA1;
+use git_internal::hash::ObjectHash;
 
 use crate::{
-    command::restore::{self, RestoreArgs},
-    command::{branch, pull, switch},
+    command::{
+        branch, pull,
+        restore::{self, RestoreArgs},
+        switch,
+    },
     internal::{branch::Branch, head::Head},
     utils::util,
 };
@@ -107,7 +112,7 @@ async fn check_and_switch_branch(branch_name: &str) {
     }
 }
 
-async fn restore_to_commit(commit_id: SHA1) {
+async fn restore_to_commit(commit_id: ObjectHash) {
     let restore_args = RestoreArgs {
         worktree: true,
         staged: true,

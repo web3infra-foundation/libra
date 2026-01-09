@@ -33,10 +33,10 @@ rust_library(
     rustc_flags = ["@$(location :security-framework-manifest[env_flags])"],
     visibility = ["PUBLIC"],
     deps = [
-        "//third-party/rust/crates/bitflags/2.9.4:bitflags",
+        "//third-party/rust/crates/bitflags/2.10.0:bitflags",
         "//third-party/rust/crates/core-foundation-sys/0.8.7:core-foundation-sys",
         "//third-party/rust/crates/core-foundation/0.9.4:core-foundation",
-        "//third-party/rust/crates/libc/0.2.175:libc",
+        "//third-party/rust/crates/libc/0.2.178:libc",
         "//third-party/rust/crates/security-framework-sys/2.15.0:security-framework-sys",
     ],
 )

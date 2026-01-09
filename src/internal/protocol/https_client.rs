@@ -1,16 +1,19 @@
-use super::{
-    DiscRef, FetchStream, ProtocolClient, generate_upload_pack_content, parse_discovered_references,
-};
-use crate::command::ask_basic_auth;
-use crate::git_protocol::ServiceType;
+//! HTTPS smart protocol client that discovers refs, negotiates upload-pack/receive-pack, streams pack data, and supports basic authentication.
+
+use std::{io::Error as IoError, ops::Deref, sync::Mutex};
+
 use futures_util::{StreamExt, TryStreamExt};
 use git_internal::errors::GitError;
-use reqwest::header::CONTENT_TYPE;
-use reqwest::{Body, RequestBuilder, Response, StatusCode};
-use std::io::Error as IoError;
-use std::ops::Deref;
-use std::sync::Mutex;
+use reqwest::{Body, RequestBuilder, Response, StatusCode, header::CONTENT_TYPE};
 use url::Url;
+
+#[cfg(test)]
+use super::DiscRef;
+use super::{
+    DiscoveryResult, FetchStream, ProtocolClient, generate_upload_pack_content,
+    parse_discovered_references,
+};
+use crate::{command::ask_basic_auth, git_protocol::ServiceType};
 
 /// A Git protocol client that communicates with a Git server over HTTPS.
 /// Only support `SmartProtocol` now, see [http-protocol](https://www.git-scm.com/docs/http-protocol) for protocol details.
@@ -93,7 +96,7 @@ impl HttpsClient {
     pub async fn discovery_reference(
         &self,
         service: ServiceType,
-    ) -> Result<Vec<DiscRef>, GitError> {
+    ) -> Result<DiscoveryResult, GitError> {
         let service_name = service.to_string();
         let url = self
             .url
@@ -124,9 +127,15 @@ impl HttpsClient {
             .ok_or_else(|| GitError::NetworkError("Missing Content-Type header".to_string()))?
             .to_str()
             .map_err(|e| GitError::NetworkError(format!("Invalid Content-Type header: {}", e)))?;
-        if content_type != format!("application/x-{service_name}-advertisement") {
+        let expected = format!("application/x-{service_name}-advertisement");
+        let content_type = content_type
+            .split(';')
+            .next()
+            .unwrap_or(content_type)
+            .trim();
+        if content_type != expected {
             return Err(GitError::NetworkError(format!(
-                "Content-type must be `application/x-{service_name}-advertisement`, but got: {content_type}"
+                "Content-type must be `{expected}`, but got: {content_type}"
             )));
         }
 
@@ -193,13 +202,13 @@ impl HttpsClient {
 #[cfg(test)]
 mod tests {
 
-    use crate::git_protocol::ServiceType::UploadPack;
-    use crate::utils::test::init_debug_logger;
-    use crate::utils::test::init_logger;
-    use tokio::io::AsyncReadExt;
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
+    use crate::{
+        git_protocol::ServiceType::UploadPack,
+        utils::test::{init_debug_logger, init_logger},
+    };
 
     #[tokio::test]
     #[ignore] // This test requires network connectivity
@@ -209,14 +218,14 @@ mod tests {
         let test_repo = "https://github.com/web3infra-foundation/mega.git/";
 
         let client = HttpsClient::from_url(&Url::parse(test_repo).unwrap());
-        let refs = client.discovery_reference(UploadPack).await;
-        if refs.is_err() {
-            tracing::error!("{:?}", refs.err().unwrap());
+        let discovery = client.discovery_reference(UploadPack).await;
+        if let Err(e) = discovery {
+            tracing::error!("{:?}", e);
             panic!();
         } else {
-            let refs = refs.unwrap();
-            println!("refs count: {:?}", refs.len());
-            println!("example: {:?}", refs[1]);
+            let discovery = discovery.unwrap();
+            println!("refs count: {:?}", discovery.refs.len());
+            println!("example: {:?}", discovery.refs.get(1));
         }
     }
 
@@ -227,8 +236,9 @@ mod tests {
 
         let test_repo = "https://github.com/web3infra-foundation/mega/";
         let client = HttpsClient::from_url(&Url::parse(test_repo).unwrap());
-        let refs = client.discovery_reference(UploadPack).await.unwrap();
-        let refs: Vec<DiscRef> = refs
+        let discovery = client.discovery_reference(UploadPack).await.unwrap();
+        let refs: Vec<DiscRef> = discovery
+            .refs
             .iter()
             .filter(|r| r._ref.starts_with("refs/heads"))
             .cloned()

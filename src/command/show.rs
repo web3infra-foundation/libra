@@ -1,22 +1,23 @@
-//! Show 命令实现
+//! Show command that resolves object IDs and prints commit, tree, blob, or ref details with formatting suitable for diffable objects.
+
+use std::{path::PathBuf, str::FromStr};
 
 use clap::Parser;
 use colored::Colorize;
-use git_internal::hash::SHA1;
-use git_internal::internal::object::blob::Blob;
-use git_internal::internal::object::commit::Commit;
-use git_internal::internal::object::tree::Tree;
-use git_internal::internal::object::types::ObjectType;
-use std::path::PathBuf;
-use std::str::FromStr;
+use git_internal::{
+    hash::ObjectHash,
+    internal::object::{blob::Blob, commit::Commit, tree::Tree, types::ObjectType},
+};
 
-use crate::command::load_object;
-use crate::command::log::{generate_diff, get_changed_files_for_commit};
-use crate::common_utils::parse_commit_msg;
-use crate::internal::tag;
-use crate::utils::client_storage::ClientStorage;
-use crate::utils::path;
-use crate::utils::{object_ext::TreeExt, util};
+use crate::{
+    command::{
+        load_object,
+        log::{ChangeType, generate_diff, get_changed_files_for_commit},
+    },
+    common_utils::parse_commit_msg,
+    internal::tag,
+    utils::{client_storage::ClientStorage, object_ext::TreeExt, path, util},
+};
 
 /// 显示各种类型的对象
 #[derive(Parser, Debug)]
@@ -63,7 +64,7 @@ pub async fn execute(args: ShowArgs) {
     }
 
     // 尝试解析为直接的哈希值
-    if let Ok(hash) = SHA1::from_str(object_ref) {
+    if let Ok(hash) = ObjectHash::from_str(object_ref) {
         show_object_by_hash(&hash, &args).await;
         return;
     }
@@ -74,7 +75,7 @@ pub async fn execute(args: ShowArgs) {
 
 /// 通过哈希值显示对象（自动检测类型）
 fn show_object_by_hash<'a>(
-    hash: &'a SHA1,
+    hash: &'a ObjectHash,
     args: &'a ShowArgs,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
     Box::pin(async move {
@@ -102,7 +103,7 @@ fn show_object_by_hash<'a>(
 }
 
 /// 显示提交及其详细信息和差异
-async fn show_commit(commit_hash: &SHA1, args: &ShowArgs) {
+async fn show_commit(commit_hash: &ObjectHash, args: &ShowArgs) {
     // 加载提交对象
     let commit = match load_object::<Commit>(commit_hash) {
         Ok(c) => c,
@@ -124,11 +125,11 @@ async fn show_commit(commit_hash: &SHA1, args: &ShowArgs) {
             show_diffstat(&commit, paths.clone()).await;
         } else if args.name_only {
             // 仅显示改变的文件名
-            let changed_files = get_changed_files_for_commit(&commit, paths).await;
+            let changed_files = get_changed_files_for_commit(&commit, &paths).await;
             if !changed_files.is_empty() {
                 println!();
                 for file in changed_files {
-                    println!("{}", file);
+                    println!("{}", file.path.display());
                 }
             }
         } else {
@@ -143,7 +144,7 @@ async fn show_commit(commit_hash: &SHA1, args: &ShowArgs) {
 }
 
 /// 显示标签对象
-async fn show_tag_by_hash(hash: &SHA1, args: &ShowArgs) {
+async fn show_tag_by_hash(hash: &ObjectHash, args: &ShowArgs) {
     match tag::load_object_trait(hash).await {
         Ok(tag::TagObject::Tag(tag_obj)) => {
             // 显示标签信息
@@ -180,7 +181,7 @@ async fn show_tag_by_hash(hash: &SHA1, args: &ShowArgs) {
 }
 
 /// 显示树对象
-async fn show_tree(hash: &SHA1) {
+async fn show_tree(hash: &ObjectHash) {
     let tree = match load_object::<Tree>(hash) {
         Ok(t) => t,
         Err(e) => {
@@ -200,7 +201,7 @@ async fn show_tree(hash: &SHA1) {
 }
 
 /// 显示二进制对象
-async fn show_blob(hash: &SHA1) {
+async fn show_blob(hash: &ObjectHash) {
     let blob = match load_object::<Blob>(hash) {
         Ok(b) => b,
         Err(e) => {
@@ -290,7 +291,7 @@ fn display_commit_info(commit: &Commit, args: &ShowArgs) {
 
 /// 显示差异统计（更改摘要）
 async fn show_diffstat(commit: &Commit, paths: Vec<PathBuf>) {
-    let changed_files = get_changed_files_for_commit(commit, paths).await;
+    let changed_files = get_changed_files_for_commit(commit, &paths).await;
 
     if changed_files.is_empty() {
         return;
@@ -301,29 +302,28 @@ async fn show_diffstat(commit: &Commit, paths: Vec<PathBuf>) {
     // 统计更改
     let mut additions = 0;
     let mut deletions = 0;
-    let mut files_changed = 0;
 
-    for file in &changed_files {
-        files_changed += 1;
-        // 解析状态前缀（A/M/D）
-        if file.starts_with('A') {
-            additions += 1;
-        } else if file.starts_with('D') {
-            deletions += 1;
-        } else if file.starts_with('M') {
-            // 对于修改的文件，我们需要计算实际的行更改
-            // 为了简单起见，只是计数为两者
-            additions += 1;
-            deletions += 1;
+    for change in &changed_files {
+        match change.status {
+            ChangeType::Added => additions += 1,
+            ChangeType::Deleted => deletions += 1,
+            ChangeType::Modified => {
+                additions += 1;
+                deletions += 1;
+            }
         }
-        println!("{}", file);
+        let status = match change.status {
+            ChangeType::Added => "A",
+            ChangeType::Modified => "M",
+            ChangeType::Deleted => "D",
+        };
+        println!("{}  {}", status, change.path.display());
     }
 
-    println!();
     println!(
-        "{} file{} changed, {} insertion{}(+), {} deletion{}(-)",
-        files_changed,
-        if files_changed != 1 { "s" } else { "" },
+        "\n{} file{} changed, {} insertion{}(+), {} deletion{}(-)",
+        changed_files.len(),
+        if changed_files.len() != 1 { "s" } else { "" },
         additions,
         if additions != 1 { "s" } else { "" },
         deletions,
