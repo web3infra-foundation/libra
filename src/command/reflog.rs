@@ -40,6 +40,27 @@ enum Subcommands {
         #[arg(long = "pretty")]
         #[clap(default_value_t = FormatterKind::default())]
         pretty: FormatterKind,
+        /// Show reflog entries newer than date
+        #[arg(long)]
+        since: Option<String>,
+        /// Show reflog entries older than date
+        #[arg(long)]
+        until: Option<String>,
+        /// Filter reflog entries by message pattern
+        #[arg(long)]
+        grep: Option<String>,
+        /// Filter reflog entries by author (matches reflog committer name or email)
+        #[arg(long)]
+        author: Option<String>,
+        /// Limit the number of output entries
+        #[clap(short, long)]
+        number: Option<usize>,
+        /// Show diffs for each reflog entry
+        #[clap(short = 'p', long = "patch")]
+        patch: bool,
+        /// Show diffstat for each reflog entry
+        #[arg(long)]
+        stat: bool,
     },
     /// clear the reflog record of the specified branch.
     Delete {
@@ -55,14 +76,75 @@ enum Subcommands {
 
 pub async fn execute(args: ReflogArgs) {
     match args.command {
-        Subcommands::Show { ref_name, pretty } => handle_show(&ref_name, pretty).await,
+        Subcommands::Show {
+            ref_name,
+            pretty,
+            since,
+            until,
+            grep,
+            author,
+            number,
+            patch,
+            stat,
+        } => {
+            let options = ReflogShowOptions {
+                pretty,
+                since,
+                until,
+                grep,
+                author,
+                number,
+                patch,
+                stat,
+            };
+            handle_show(&ref_name, options).await
+        }
         Subcommands::Delete { selectors } => handle_delete(&selectors).await,
         Subcommands::Exists { ref_name } => handle_exists(&ref_name).await,
     }
 }
 
-async fn handle_show(ref_name: &str, pretty: FormatterKind) {
+/// Options for reflog show command
+struct ReflogShowOptions {
+    pretty: FormatterKind,
+    since: Option<String>,
+    until: Option<String>,
+    grep: Option<String>,
+    author: Option<String>,
+    number: Option<usize>,
+    patch: bool,
+    stat: bool,
+}
+
+async fn handle_show(ref_name: &str, options: ReflogShowOptions) {
     let db = get_db_conn_instance().await;
+
+    // Parse date filters
+    let since_ts = match options
+        .since
+        .as_deref()
+        .map(crate::internal::log::date_parser::parse_date)
+        .transpose()
+    {
+        Ok(ts) => ts,
+        Err(e) => {
+            eprintln!("fatal: invalid --since date: {e}");
+            return;
+        }
+    };
+
+    let until_ts = match options
+        .until
+        .as_deref()
+        .map(crate::internal::log::date_parser::parse_date)
+        .transpose()
+    {
+        Ok(ts) => ts,
+        Err(e) => {
+            eprintln!("fatal: invalid --until date: {e}");
+            return;
+        }
+    };
 
     let ref_name = parse_ref_name(ref_name).await;
     let logs = match Reflog::find_all(db, &ref_name).await {
@@ -73,9 +155,25 @@ async fn handle_show(ref_name: &str, pretty: FormatterKind) {
         }
     };
 
+    // Preserve original indices before filtering
+    let logs_with_index: Vec<_> = logs.into_iter().enumerate().collect();
+
+    // Apply filters
+    let filter = ReflogFilter::new(since_ts, until_ts, options.grep, options.author);
+    let filtered_logs: Vec<_> = logs_with_index
+        .into_iter()
+        .filter(|(_, log)| filter.passes(log))
+        .collect();
+
+    // Apply number limit
+    let max_output = options.number.unwrap_or(filtered_logs.len());
+    let limited_logs = &filtered_logs[..filtered_logs.len().min(max_output)];
+
     let formatter = ReflogFormatter {
-        logs: &logs,
-        kind: pretty,
+        logs: limited_logs,
+        kind: options.pretty,
+        patch: options.patch,
+        stat: options.stat,
     };
 
     #[cfg(unix)]
@@ -206,6 +304,71 @@ fn parse_reflog_selector(selector: &str) -> Option<(&str, usize)> {
     None
 }
 
+/// Filter for reflog entries based on time and message patterns
+struct ReflogFilter {
+    since: Option<i64>,
+    until: Option<i64>,
+    grep: Option<String>,
+    author: Option<String>,
+}
+
+impl ReflogFilter {
+    /// Create a new filter from optional parameters
+    fn new(
+        since: Option<i64>,
+        until: Option<i64>,
+        grep: Option<String>,
+        author: Option<String>,
+    ) -> Self {
+        Self {
+            since,
+            until,
+            grep: grep.map(|s| s.to_lowercase()),
+            author: author.map(|s| s.to_lowercase()),
+        }
+    }
+
+    /// Check if a reflog entry passes all filters
+    fn passes(&self, entry: &Model) -> bool {
+        // Time filters
+        let ts = entry.timestamp;
+
+        if let Some(since) = self.since
+            && ts < since
+        {
+            return false;
+        }
+
+        if let Some(until) = self.until
+            && ts > until
+        {
+            return false;
+        }
+
+        // Message filter (matches both action and message fields)
+        if let Some(grep_pattern) = &self.grep {
+            let full_message = format!("{}: {}", entry.action, entry.message);
+            if !full_message.to_lowercase().contains(grep_pattern) {
+                return false;
+            }
+        }
+
+        // Author filter (matches committer_name or committer_email)
+        if let Some(author_filter) = &self.author {
+            let committer = format!(
+                "{} <{}>",
+                entry.committer_name.to_lowercase(),
+                entry.committer_email.to_lowercase()
+            );
+            if !committer.contains(author_filter) {
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
 #[derive(Debug, Copy, Clone, Default)]
 enum FormatterKind {
     #[default]
@@ -239,15 +402,16 @@ impl From<String> for FormatterKind {
 }
 
 struct ReflogFormatter<'a> {
-    logs: &'a Vec<Model>,
+    logs: &'a [(usize, Model)],
     kind: FormatterKind,
+    patch: bool,
+    stat: bool,
 }
 
 impl Display for ReflogFormatter<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let all = self.logs
             .iter()
-            .enumerate()
             .map(|(idx, log)| {
                 let head = format!("HEAD@{{{idx}}}");
                 let new_oid = &log.new_oid[..7];
@@ -260,7 +424,7 @@ impl Display for ReflogFormatter<'_> {
                 let commit_msg = &commit.message.trim();
                 let datetime = format_datetime(log.timestamp);
 
-                match self.kind {
+                let mut output = match self.kind {
                     FormatterKind::Oneline => format!(
                         "{} {head}: {full_msg}",
                         new_oid.to_string().bright_magenta(),
@@ -277,7 +441,31 @@ impl Display for ReflogFormatter<'_> {
                         "{}\nReflog: {head} ({author})\nReflog message: {full_msg}\nAuthor: {author}\nCommit: {committer}\n\n  {commit_msg}\n",
                         format!("commit {new_oid}").bright_magenta(),
                     ),
+                };
+
+                // Append diff output if requested
+                if self.patch
+                    && let Ok(patch_output) = generate_diff_sync(&commit)
+                    && !patch_output.is_empty()
+                {
+                    if !output.ends_with('\n') {
+                        output.push('\n');
+                    }
+                    output.push_str(&patch_output);
                 }
+
+                // Append stat output if requested
+                if self.stat
+                    && let Ok(stat_output) = generate_stat_sync(&commit)
+                    && !stat_output.is_empty()
+                {
+                    if !output.ends_with('\n') {
+                        output.push('\n');
+                    }
+                    output.push_str(&stat_output);
+                }
+
+                output
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -296,4 +484,297 @@ fn format_datetime(timestamp: i64) -> String {
 
     let git_format = "%a %b %d %H:%M:%S %Y %z";
     local.format(git_format).to_string()
+}
+
+/// Synchronous wrapper for generating diff output
+fn generate_diff_sync(commit: &Commit) -> Result<String, Box<dyn std::error::Error>> {
+    use git_internal::{
+        Diff,
+        internal::object::{blob::Blob, tree::Tree},
+    };
+
+    use crate::utils::object_ext::TreeExt;
+
+    // new_blobs from commit tree
+    let tree = load_object::<Tree>(&commit.tree_id)?;
+    let new_blobs: Vec<(std::path::PathBuf, ObjectHash)> = tree.get_plain_items();
+
+    // old_blobs from first parent if exists
+    let old_blobs: Vec<(std::path::PathBuf, ObjectHash)> = if !commit.parent_commit_ids.is_empty() {
+        let parent = &commit.parent_commit_ids[0];
+        let parent_hash = ObjectHash::from_str(&parent.to_string())?;
+        let parent_commit = load_object::<Commit>(&parent_hash)?;
+        let parent_tree = load_object::<Tree>(&parent_commit.tree_id)?;
+        parent_tree.get_plain_items()
+    } else {
+        Vec::new()
+    };
+
+    let read_content = |_file: &std::path::PathBuf, hash: &ObjectHash| -> Vec<u8> {
+        load_object::<Blob>(hash)
+            .map(|blob| blob.data)
+            .unwrap_or_default()
+    };
+
+    let diffs = Diff::diff(
+        old_blobs,
+        new_blobs,
+        Vec::new(), // No path filters for reflog
+        read_content,
+    );
+
+    let mut diff_output = String::new();
+    for diff in diffs {
+        diff_output.push_str(&format!("--- a/{}\n", diff.path));
+        diff_output.push_str(&format!("+++ b/{}\n", diff.path));
+        diff_output.push_str(&diff.data);
+        diff_output.push('\n');
+    }
+
+    Ok(diff_output)
+}
+
+/// Synchronous wrapper for generating stat output
+fn generate_stat_sync(commit: &Commit) -> Result<String, Box<dyn std::error::Error>> {
+    use git_internal::{
+        Diff,
+        internal::object::{blob::Blob, tree::Tree},
+    };
+
+    use crate::{command::log::FileStat, utils::object_ext::TreeExt};
+
+    // new_blobs from commit tree
+    let tree = load_object::<Tree>(&commit.tree_id)?;
+    let new_blobs: Vec<(std::path::PathBuf, ObjectHash)> = tree.get_plain_items();
+
+    // old_blobs from first parent if exists
+    let old_blobs: Vec<(std::path::PathBuf, ObjectHash)> = if !commit.parent_commit_ids.is_empty() {
+        let parent = &commit.parent_commit_ids[0];
+        let parent_hash = ObjectHash::from_str(&parent.to_string())?;
+        let parent_commit = load_object::<Commit>(&parent_hash)?;
+        let parent_tree = load_object::<Tree>(&parent_commit.tree_id)?;
+        parent_tree.get_plain_items()
+    } else {
+        Vec::new()
+    };
+
+    let read_content = |_file: &std::path::PathBuf, hash: &ObjectHash| -> Vec<u8> {
+        load_object::<Blob>(hash)
+            .map(|blob| blob.data)
+            .unwrap_or_default()
+    };
+
+    let diffs = Diff::diff(
+        old_blobs,
+        new_blobs,
+        Vec::new(), // No path filters for reflog
+        read_content,
+    );
+
+    // Compute per-file statistics
+    let mut stats = Vec::new();
+    for diff_item in diffs {
+        let mut insertions = 0;
+        let mut deletions = 0;
+        for line in diff_item.data.lines() {
+            if line.starts_with('+') && !line.starts_with("+++") {
+                insertions += 1;
+            } else if line.starts_with('-') && !line.starts_with("---") {
+                deletions += 1;
+            }
+        }
+        if insertions > 0 || deletions > 0 {
+            stats.push(FileStat {
+                path: diff_item.path,
+                insertions,
+                deletions,
+            });
+        }
+    }
+
+    // Use log module's formatting function for consistent output
+    Ok(crate::command::log::format_stat_output(&stats))
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+
+    #[test]
+    fn test_show_args_with_filters() {
+        let args = ReflogArgs::parse_from([
+            "reflog",
+            "show",
+            "--since",
+            "2024-01-01",
+            "--until",
+            "2024-12-31",
+            "--grep",
+            "commit",
+        ]);
+
+        if let Subcommands::Show {
+            ref_name,
+            pretty: _,
+            since,
+            until,
+            grep,
+            author: _,
+            number: _,
+            patch: _,
+            stat: _,
+        } = args.command
+        {
+            assert_eq!(ref_name, "HEAD");
+            assert_eq!(since.as_deref(), Some("2024-01-01"));
+            assert_eq!(until.as_deref(), Some("2024-12-31"));
+            assert_eq!(grep.as_deref(), Some("commit"));
+        } else {
+            panic!("Expected Show subcommand");
+        }
+    }
+
+    #[test]
+    fn test_reflog_filter_time() {
+        let entry1 = Model {
+            id: 1,
+            ref_name: "HEAD".to_string(),
+            old_oid: "abc".to_string(),
+            new_oid: "def".to_string(),
+            timestamp: 1_700_000_000,
+            committer_name: "Test".to_string(),
+            committer_email: "test@test.com".to_string(),
+            action: "commit".to_string(),
+            message: "Test message".to_string(),
+        };
+
+        let entry2 = Model {
+            id: 2,
+            ref_name: "HEAD".to_string(),
+            old_oid: "def".to_string(),
+            new_oid: "ghi".to_string(),
+            timestamp: 1_750_000_000,
+            committer_name: "Test".to_string(),
+            committer_email: "test@test.com".to_string(),
+            action: "commit".to_string(),
+            message: "Another message".to_string(),
+        };
+
+        let filter = ReflogFilter::new(Some(1_720_000_000), None, None, None);
+        assert!(!filter.passes(&entry1));
+        assert!(filter.passes(&entry2));
+
+        let filter = ReflogFilter::new(None, Some(1_730_000_000), None, None);
+        assert!(filter.passes(&entry1));
+        assert!(!filter.passes(&entry2));
+    }
+
+    #[test]
+    fn test_reflog_filter_grep() {
+        let entry1 = Model {
+            id: 1,
+            ref_name: "HEAD".to_string(),
+            old_oid: "abc".to_string(),
+            new_oid: "def".to_string(),
+            timestamp: 1_700_000_000,
+            committer_name: "Test".to_string(),
+            committer_email: "test@test.com".to_string(),
+            action: "commit".to_string(),
+            message: "Add feature".to_string(),
+        };
+
+        let entry2 = Model {
+            id: 2,
+            ref_name: "HEAD".to_string(),
+            old_oid: "def".to_string(),
+            new_oid: "ghi".to_string(),
+            timestamp: 1_750_000_000,
+            committer_name: "Test".to_string(),
+            committer_email: "test@test.com".to_string(),
+            action: "merge".to_string(),
+            message: "Merge branch".to_string(),
+        };
+
+        let filter = ReflogFilter::new(None, None, Some("COMMIT".to_string()), None);
+        assert!(filter.passes(&entry1));
+        assert!(!filter.passes(&entry2));
+
+        let filter = ReflogFilter::new(None, None, Some("merge".to_string()), None);
+        assert!(!filter.passes(&entry1));
+        assert!(filter.passes(&entry2));
+    }
+
+    #[test]
+    fn test_reflog_filter_combined() {
+        let entry = Model {
+            id: 1,
+            ref_name: "HEAD".to_string(),
+            old_oid: "abc".to_string(),
+            new_oid: "def".to_string(),
+            timestamp: 1_725_000_000,
+            committer_name: "Test".to_string(),
+            committer_email: "test@test.com".to_string(),
+            action: "commit".to_string(),
+            message: "Add feature".to_string(),
+        };
+
+        let filter = ReflogFilter::new(
+            Some(1_700_000_000),
+            Some(1_750_000_000),
+            Some("feature".to_string()),
+            None,
+        );
+        assert!(filter.passes(&entry));
+
+        let filter = ReflogFilter::new(
+            Some(1_730_000_000),
+            Some(1_750_000_000),
+            Some("feature".to_string()),
+            None,
+        );
+        assert!(!filter.passes(&entry));
+    }
+
+    #[test]
+    fn test_reflog_filter_author() {
+        let entry1 = Model {
+            id: 1,
+            ref_name: "HEAD".to_string(),
+            old_oid: "abc".to_string(),
+            new_oid: "def".to_string(),
+            timestamp: 1_700_000_000,
+            committer_name: "Alice".to_string(),
+            committer_email: "alice@example.com".to_string(),
+            action: "commit".to_string(),
+            message: "Test message".to_string(),
+        };
+
+        let entry2 = Model {
+            id: 2,
+            ref_name: "HEAD".to_string(),
+            old_oid: "def".to_string(),
+            new_oid: "ghi".to_string(),
+            timestamp: 1_750_000_000,
+            committer_name: "Bob".to_string(),
+            committer_email: "bob@example.com".to_string(),
+            action: "commit".to_string(),
+            message: "Another message".to_string(),
+        };
+
+        // Test author filtering by name
+        let filter = ReflogFilter::new(None, None, None, Some("alice".to_string()));
+        assert!(filter.passes(&entry1));
+        assert!(!filter.passes(&entry2));
+
+        // Test author filtering by email
+        let filter = ReflogFilter::new(None, None, None, Some("bob@example".to_string()));
+        assert!(!filter.passes(&entry1));
+        assert!(filter.passes(&entry2));
+
+        // Test case-insensitive matching
+        let filter = ReflogFilter::new(None, None, None, Some("ALICE".to_string()));
+        assert!(filter.passes(&entry1));
+    }
 }
