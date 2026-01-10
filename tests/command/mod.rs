@@ -45,6 +45,7 @@ mod merge_test;
 mod pull_test;
 mod push_test;
 mod rebase_test;
+mod reflog_test;
 mod remote_test;
 mod remove_test;
 mod reset_test;
