@@ -70,6 +70,10 @@ pub struct CommitArgs {
     /// Automatically stage tracked files that have been modified or deleted
     #[arg(short = 'a', long)]
     pub all: bool,
+
+    /// Skip all pre-commit and commit-msg hooks/validations (align with Git --no-verify)
+    #[arg(long = "no-verify")]
+    pub no_verify: bool,
 }
 
 pub async fn execute(args: CommitArgs) {
@@ -88,7 +92,7 @@ pub async fn execute(args: CommitArgs) {
     }
 
     // run pre commit hook
-    if !args.disable_pre {
+    if !args.disable_pre && !args.no_verify {
         let hooks_dir = path::hooks();
 
         #[cfg(not(target_os = "windows"))]
@@ -190,7 +194,10 @@ pub async fn execute(args: CommitArgs) {
         };
 
         // check format(if needed)
-        if args.conventional && !check_conventional_commits_message(&commit_message) {
+        if args.conventional
+            && !args.no_verify
+            && !check_conventional_commits_message(&commit_message)
+        {
             panic!("fatal: commit message does not follow conventional commits");
         }
         let commit = Commit::from_tree_id(
@@ -226,7 +233,8 @@ pub async fn execute(args: CommitArgs) {
     };
 
     // check format(if needed)
-    if args.conventional && !check_conventional_commits_message(&commit_message) {
+    if args.conventional && !args.no_verify && !check_conventional_commits_message(&commit_message)
+    {
         panic!("fatal: commit message does not follow conventional commits");
     }
 
@@ -502,6 +510,16 @@ mod test {
         let args = CommitArgs::try_parse_from(["commit", "-F", "unreachable_file"]);
         assert!(args.is_ok());
         assert!(args.unwrap().file.is_some());
+
+        let args = CommitArgs::try_parse_from(["commit", "-m", "init", "--no-verify"]);
+        assert!(args.is_ok(), "--no-verify should be a valid parameter");
+
+        let args =
+            CommitArgs::try_parse_from(["commit", "-m", "init", "--conventional", "--no-verify"]);
+        assert!(args.is_ok(), "--no-verify should work with --conventional");
+
+        let args = CommitArgs::try_parse_from(["commit", "-m", "init", "--amend", "--no-verify"]);
+        assert!(args.is_ok(), "--no-verify should work with --amend");
     }
 
     #[test]
@@ -516,6 +534,7 @@ mod test {
             signoff: false,
             disable_pre: false,
             all: false,
+            no_verify: false,
         };
         fn message_and_file_are_none(args: &CommitArgs) -> Option<String> {
             let message = match (&args.message, &args.file) {
