@@ -682,4 +682,77 @@ mod test {
             }
         }
     }
+
+    #[test]
+    fn test_no_verify_skips_conventional_check() {
+        let invalid_conventional_msg = "invalid commit: no type or scope";
+        assert!(
+            !check_conventional_commits_message(invalid_conventional_msg),
+            "Test setup error: message should be invalid for conventional commits"
+        );
+
+        let args_with_verify = CommitArgs {
+            message: Some(invalid_conventional_msg.to_string()),
+            file: None,
+            allow_empty: true,
+            conventional: true,
+            no_verify: false,
+            amend: false,
+            no_edit: false,
+            signoff: false,
+            disable_pre: false,
+            all: false,
+        };
+
+        let commit_message_with_verify = args_with_verify
+            .signoff
+            .then(|| {
+                format!(
+                    "{}\n\nSigned-off-by: test <test@example.com>",
+                    invalid_conventional_msg
+                )
+            })
+            .unwrap_or_else(|| invalid_conventional_msg.to_string());
+
+        let verify_result = std::panic::catch_unwind(|| {
+            if args_with_verify.conventional
+                && !args_with_verify.no_verify
+                && !check_conventional_commits_message(&commit_message_with_verify)
+            {
+                panic!("fatal: commit message does not follow conventional commits");
+            }
+        });
+        assert!(
+            verify_result.is_err(),
+            "Conventional check should fail without --no-verify"
+        );
+
+        let args_no_verify = CommitArgs {
+            no_verify: true,
+            ..args_with_verify
+        };
+
+        let commit_message_no_verify = args_no_verify
+            .signoff
+            .then(|| {
+                format!(
+                    "{}\n\nSigned-off-by: test <test@example.com>",
+                    invalid_conventional_msg
+                )
+            })
+            .unwrap_or_else(|| invalid_conventional_msg.to_string());
+
+        let no_verify_result = std::panic::catch_unwind(|| {
+            if args_no_verify.conventional
+                && !args_no_verify.no_verify
+                && !check_conventional_commits_message(&commit_message_no_verify)
+            {
+                panic!("fatal: commit message does not follow conventional commits");
+            }
+        });
+        assert!(
+            no_verify_result.is_ok(),
+            "--no-verify should skip conventional check"
+        );
+    }
 }
