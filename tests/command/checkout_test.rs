@@ -89,6 +89,7 @@ async fn test_checkout_module_functions() {
         signoff: false,
         disable_pre: true,
         all: false,
+        no_verify: false,
     };
     commit::execute(commit_args).await;
 
@@ -133,6 +134,7 @@ async fn test_checkout_module_functions_sha256() {
         signoff: false,
         disable_pre: true,
         all: false,
+        no_verify: false,
     };
     commit::execute(commit_args).await;
 
@@ -191,6 +193,7 @@ async fn checkout_restore_rejects_sha1_hash_in_sha256_repo() {
         signoff: false,
         disable_pre: true,
         all: true,
+        no_verify: false,
     })
     .await;
 

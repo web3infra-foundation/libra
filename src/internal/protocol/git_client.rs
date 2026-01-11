@@ -5,8 +5,10 @@ use std::io::Error as IoError;
 use bytes::{Bytes, BytesMut};
 use futures_util::stream::{self, StreamExt};
 use git_internal::errors::GitError;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 use url::Url;
 
 use super::{

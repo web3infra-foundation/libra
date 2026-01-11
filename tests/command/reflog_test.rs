@@ -38,6 +38,7 @@ async fn test_reflog_show_with_filters() {
             signoff: false,
             disable_pre: true,
             all: false,
+            no_verify: false,
         };
         commit::execute(commit_args).await;
     }
@@ -104,6 +105,7 @@ async fn test_reflog_show_invalid_date() {
         signoff: false,
         disable_pre: true,
         all: false,
+        no_verify: false,
     };
     commit::execute(commit_args).await;
 
@@ -131,6 +133,7 @@ async fn test_reflog_show_with_author_filter() {
             signoff: false,
             disable_pre: true,
             all: false,
+            no_verify: false,
         };
         commit::execute(commit_args).await;
     }
@@ -178,6 +181,7 @@ async fn test_reflog_show_with_number_limit() {
             signoff: false,
             disable_pre: true,
             all: false,
+            no_verify: false,
         };
         commit::execute(commit_args).await;
     }
@@ -225,6 +229,7 @@ async fn test_reflog_show_with_combined_filters() {
             signoff: false,
             disable_pre: true,
             all: false,
+            no_verify: false,
         };
         commit::execute(commit_args).await;
     }
@@ -281,6 +286,7 @@ async fn test_reflog_show_with_patch() {
             signoff: false,
             disable_pre: true,
             all: false,
+            no_verify: false,
         };
         commit::execute(commit_args).await;
     }
@@ -317,6 +323,7 @@ async fn test_reflog_show_with_stat() {
             signoff: false,
             disable_pre: true,
             all: false,
+            no_verify: false,
         };
         commit::execute(commit_args).await;
     }
