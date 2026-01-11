@@ -3,8 +3,10 @@
 #![cfg(test)]
 use std::fs;
 
-use libra::command::rebase::{RebaseArgs, execute};
-use libra::common_utils::parse_commit_msg;
+use libra::{
+    command::rebase::{RebaseArgs, execute},
+    common_utils::parse_commit_msg,
+};
 use serial_test::serial;
 use tempfile::tempdir;
 
@@ -58,6 +60,7 @@ async fn test_basic_rebase() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -83,6 +86,7 @@ async fn test_basic_rebase() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -117,6 +121,7 @@ async fn test_basic_rebase() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -142,6 +147,7 @@ async fn test_basic_rebase() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -175,6 +181,7 @@ async fn test_basic_rebase() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -265,6 +272,7 @@ async fn test_rebase_preserves_untracked_files() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -298,6 +306,7 @@ async fn test_rebase_preserves_untracked_files() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -331,6 +340,7 @@ async fn test_rebase_preserves_untracked_files() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -396,6 +406,7 @@ async fn test_rebase_already_up_to_date() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -421,6 +432,7 @@ async fn test_rebase_already_up_to_date() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -447,8 +459,7 @@ async fn test_rebase_already_up_to_date() {
 #[tokio::test]
 #[serial]
 async fn test_rebase_abort_when_no_rebase_in_progress() {
-    use libra::command::rebase::RebaseState;
-    use libra::internal::head::Head;
+    use libra::{command::rebase::RebaseState, internal::head::Head};
 
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
@@ -477,6 +488,7 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -510,6 +522,7 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -543,6 +556,7 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -601,8 +615,10 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
 async fn test_rebase_abort_restores_branch_after_finalize_failure() {
     use std::collections::VecDeque;
 
-    use libra::command::rebase::RebaseState;
-    use libra::internal::{branch::Branch, head::Head};
+    use libra::{
+        command::rebase::RebaseState,
+        internal::{branch::Branch, head::Head},
+    };
 
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
@@ -631,6 +647,7 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -663,6 +680,7 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
     let orig_head = Head::current_commit().await.expect("expected feature HEAD");
@@ -696,6 +714,7 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
     let master_head = Head::current_commit().await.expect("expected master HEAD");
@@ -803,6 +822,7 @@ async fn test_rebase_continue_no_rebase() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -848,6 +868,7 @@ async fn test_rebase_skip_no_rebase() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -866,8 +887,7 @@ async fn test_rebase_skip_no_rebase() {
 #[tokio::test]
 #[serial]
 async fn test_rebase_with_conflict_and_abort() {
-    use libra::command::rebase::RebaseState;
-    use libra::internal::head::Head;
+    use libra::{command::rebase::RebaseState, internal::head::Head};
 
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
@@ -896,6 +916,7 @@ async fn test_rebase_with_conflict_and_abort() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -933,6 +954,7 @@ async fn test_rebase_with_conflict_and_abort() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -966,6 +988,7 @@ async fn test_rebase_with_conflict_and_abort() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -1075,6 +1098,7 @@ async fn test_rebase_binary_conflict_writes_markers() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -1107,6 +1131,7 @@ async fn test_rebase_binary_conflict_writes_markers() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -1139,6 +1164,7 @@ async fn test_rebase_binary_conflict_writes_markers() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -1224,6 +1250,7 @@ async fn test_rebase_with_conflict_and_skip() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -1262,6 +1289,7 @@ async fn test_rebase_with_conflict_and_skip() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -1292,6 +1320,7 @@ async fn test_rebase_with_conflict_and_skip() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -1325,6 +1354,7 @@ async fn test_rebase_with_conflict_and_skip() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -1376,8 +1406,7 @@ async fn test_rebase_with_conflict_and_skip() {
 #[tokio::test]
 #[serial]
 async fn test_rebase_with_conflict_and_continue() {
-    use libra::command::rebase::RebaseState;
-    use libra::internal::head::Head;
+    use libra::{command::rebase::RebaseState, internal::head::Head};
 
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
@@ -1406,6 +1435,7 @@ async fn test_rebase_with_conflict_and_continue() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -1443,6 +1473,7 @@ async fn test_rebase_with_conflict_and_continue() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -1476,6 +1507,7 @@ async fn test_rebase_with_conflict_and_continue() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -1592,6 +1624,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -1626,6 +1659,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -1656,6 +1690,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -1682,6 +1717,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -1715,6 +1751,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -1812,6 +1849,7 @@ async fn test_rebase_state_persistence() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -1845,6 +1883,7 @@ async fn test_rebase_state_persistence() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -1878,6 +1917,7 @@ async fn test_rebase_state_persistence() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -1976,6 +2016,7 @@ async fn test_rebase_fast_forward_branch_behind() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -2017,6 +2058,7 @@ async fn test_rebase_fast_forward_branch_behind() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -2085,6 +2127,7 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -2126,6 +2169,7 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -2195,6 +2239,7 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -2236,6 +2281,7 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -2276,8 +2322,7 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
 #[tokio::test]
 #[serial]
 async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
-    use libra::command::rebase::RebaseState;
-    use libra::internal::head::Head;
+    use libra::{command::rebase::RebaseState, internal::head::Head};
 
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
@@ -2306,6 +2351,7 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -2339,6 +2385,7 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -2372,6 +2419,7 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -2448,6 +2496,7 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -2482,6 +2531,7 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -2515,6 +2565,7 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -2589,6 +2640,7 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -2623,6 +2675,7 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -2638,6 +2691,7 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         signoff: false,
         disable_pre: false,
         all: true,
+        no_verify: false,
     })
     .await;
 
@@ -2671,6 +2725,7 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -2715,8 +2770,7 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
 #[tokio::test]
 #[serial]
 async fn test_rebase_continue_requires_resolution() {
-    use libra::command::rebase::RebaseState;
-    use libra::internal::head::Head;
+    use libra::{command::rebase::RebaseState, internal::head::Head};
 
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
@@ -2745,6 +2799,7 @@ async fn test_rebase_continue_requires_resolution() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -2778,6 +2833,7 @@ async fn test_rebase_continue_requires_resolution() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -2811,6 +2867,7 @@ async fn test_rebase_continue_requires_resolution() {
         signoff: false,
         disable_pre: false,
         all: false,
+        no_verify: false,
     })
     .await;
 

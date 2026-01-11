@@ -26,6 +26,7 @@ async fn test_execute_commit_with_empty_index_fail() {
         signoff: false,
         disable_pre: true,
         all: false,
+        no_verify: false,
     };
     commit::execute(args).await;
 }
@@ -52,6 +53,7 @@ async fn test_execute_commit() {
             signoff: false,
             disable_pre: true,
             all: false,
+            no_verify: false,
         };
         commit::execute(args).await;
 
@@ -81,6 +83,7 @@ async fn test_execute_commit() {
             signoff: false,
             disable_pre: true,
             all: false,
+            no_verify: false,
         };
         commit::execute(args).await;
 
@@ -128,6 +131,7 @@ async fn test_execute_commit() {
             signoff: false,
             disable_pre: true,
             all: false,
+            no_verify: false,
         };
         commit::execute(args).await;
 
@@ -160,6 +164,7 @@ async fn test_execute_commit() {
             signoff: false,
             disable_pre: true,
             all: false,
+            no_verify: false,
         };
         commit::execute(args).await;
 
@@ -212,6 +217,7 @@ async fn test_commit_with_all_flag_stages_tracked_changes() {
         signoff: false,
         disable_pre: true,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -228,6 +234,7 @@ async fn test_commit_with_all_flag_stages_tracked_changes() {
         signoff: false,
         disable_pre: true,
         all: true,
+        no_verify: false,
     })
     .await;
 
@@ -280,6 +287,7 @@ async fn test_commit_with_all_flag_records_deletions() {
         signoff: false,
         disable_pre: true,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -296,6 +304,7 @@ async fn test_commit_with_all_flag_records_deletions() {
         signoff: false,
         disable_pre: true,
         all: true,
+        no_verify: false,
     })
     .await;
 
@@ -364,6 +373,7 @@ async fn test_commit_sha256() {
         signoff: false,
         disable_pre: true,
         all: false,
+        no_verify: false,
     })
     .await;
 
@@ -386,6 +396,7 @@ async fn test_commit_sha256() {
         signoff: false,
         disable_pre: true,
         all: false,
+        no_verify: false,
     })
     .await;
 
