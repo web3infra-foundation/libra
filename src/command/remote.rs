@@ -1,14 +1,16 @@
 //! Manages remotes by listing, showing, adding, and updating URLs and associated fetch/push metadata.
 
 use std::collections::HashSet;
-use crate::git_protocol::ServiceType::UploadPack;
+
 use clap::Subcommand;
 use git_internal::hash::get_hash_kind;
 
 
-use crate::{
-    command::fetch::RemoteClient, 
-    internal::{branch::Branch, config::Config, protocol::set_wire_hash_kind}
+use crate::command::fetch::RemoteClient;
+use crate::internal::{
+    branch::Branch,
+    config::Config,
+    protocol::set_wire_hash_kind,
 };
 
 #[derive(Subcommand, Debug)]
@@ -215,112 +217,86 @@ async fn show_remote_verbose(remote: &str) {
     }
 }
 
-
 async fn prune_remote(name: &str, dry_run: bool) {
-    //first check if the remote exists
-    let remote_config = match Config::remote_config(name).await {
-        Some(remote_config) => remote_config,
-        None => {
-            eprintln!("fatal: No such remote: {name}");
-            return;
-        }
+    // Check if the remote exists
+    let Some(remote_config) = Config::remote_config(name).await else {
+        eprintln!("fatal: No such remote: {}", name);
+        return;
     };
 
-    //Get remote client
-    let remote_client = match RemoteClient::from_spec(&remote_config.url) {
-        Ok(remote_client) => remote_client,
-        Err(e) => {
-            eprintln!("fatal: {e}");
-            return;
-        }
+    // Get remote client
+    let Ok(remote_client) = RemoteClient::from_spec(&remote_config.url) else {
+        eprintln!("fatal: Failed to create remote client");
+        return;
     };
 
-    //Discover remote references
-    let discovery = match remote_client.
-    discovery_reference(UploadPack).await {
-        Ok(discovery) => discovery,
-        Err(e) => {
-            eprintln!("fatal: {e}");
-            return;
-        }
+    // Discover remote references
+    let Ok(discovery) = remote_client
+        .discovery_reference(crate::git_protocol::ServiceType::UploadPack)
+        .await
+    else {
+        eprintln!("fatal: Failed to discover remote references");
+        return;
     };
 
+    // Verify hash kind compatibility
     let local_kind = get_hash_kind();
-    
     if discovery.hash_kind != local_kind {
-        eprintln!("fatal: remote object format '{}' does not match local '{}'", discovery.hash_kind, local_kind);
+        eprintln!(
+            "fatal: remote object format '{}' does not match local '{}'",
+            discovery.hash_kind, local_kind
+        );
         return;
     }
 
     set_wire_hash_kind(discovery.hash_kind);
 
-       // Get remote branch names from discovery (accept multiple namespaces like refs/heads/*, refs/mr/*)
+    // Get remote branch names from discovery (format: refs/heads/branch_name)
     let remote_branch_names: HashSet<String> = discovery
         .refs
         .iter()
-        .filter_map(|r| {
-            // Accept both heads and mr namespaces
-        let s = r._ref.as_str();
-        if s.starts_with("refs/heads/") || s.starts_with("refs/mr/") {
-            // strip_prefix 返回 Option<&str>，filter_map 会自动丢掉 None
-            s.strip_prefix("refs/").map(|x| x.to_string())
-        } else {
-            None
-        }
-        })
+        .filter_map(|r| r._ref.strip_prefix("refs/heads/").map(String::from))
         .collect();
-    
-    //Get local remote-tracking branches (format: "refs/remotes/{remote}/branch_name")
-    // Note: remote-tracking branches have remote=None in the database, so we need to
-    // list all branches with remote=None and filter by name prefix
+
+    // Get local remote-tracking branches (format: "refs/remotes/{remote}/branch_name")
     let all_branches = Branch::list_branches(None).await;
     let prefix = format!("refs/remotes/{}/", name);
     let local_remote_branches: Vec<_> = all_branches
         .into_iter()
         .filter(|b| b.name.starts_with(&prefix))
         .collect();
-    
-    //Find stale branches (local branches that are not in the remote)
 
+    // Find and prune stale branches
     let mut pruned_count = 0;
+    let head_ref = format!("refs/remotes/{}/HEAD", name);
 
     for local_branch in &local_remote_branches {
+
+        // Skip HEAD reference
+        if local_branch.name == head_ref {
+            continue;
+        }
         // Extract branch name from "refs/remotes/{remote}/branch_name"
-        let branch_name = if let Some(stripped) = local_branch.name.strip_prefix(&prefix) {
-            stripped
-        } else {
-            // Skip if format doesn't match expected pattern
+        let Some(branch_name) = local_branch.name.strip_prefix(&prefix) else {
             continue;
         };
 
-        //check if this branch still exists on remote
+        // Check if this branch still exists on remote
         if !remote_branch_names.contains(branch_name) {
             if dry_run {
                 println!(" * [would prune] {}/{}", name, branch_name);
-            }
-            else {
-                //Delete the stale remote-tracking remote
+            } else {
                 Branch::delete_branch(&local_branch.name, None).await;
                 println!(" * [pruned] {}/{}", name, branch_name);
             }
             pruned_count += 1;
         }
     }
-    
-    if pruned_count == 0 {
-        if !dry_run {
-            println!("Everything up-to-date");
-        }
-    } else if dry_run {
-        println!("
-        \nWould prune {} stale remote-tracking branch(es).",
-        pruned_count
-    );
-    } else {
-        println!(
-            "\nPruned {} stale remote-tracking branch(es).", 
-            pruned_count
-        );
-    }
 
+    // Print summary
+    match pruned_count {
+        0 => println!("Everything up-to-date"),
+        n if dry_run => println!("\nWould prune {} stale remote-tracking branch(es).", n),
+        n => println!("\nPruned {} stale remote-tracking branch(es).", n),
+    }
 }

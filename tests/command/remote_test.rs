@@ -294,7 +294,7 @@ async fn test_remote_prune_removes_stale_branches() {
         Command::new("git")
             .args(["init", "--bare", remote_dir.to_str().unwrap()])
             .status()
-            .expect("failed to init bare remote")
+            .unwrap_or_else(|e| panic!("failed to init bare remote: {}", e))
             .success()
     );
 
@@ -303,7 +303,7 @@ async fn test_remote_prune_removes_stale_branches() {
         Command::new("git")
             .args(["init", work_dir.to_str().unwrap()])
             .status()
-            .expect("failed to init working repo")
+            .unwrap_or_else(|e| panic!("failed to init working repo: {}", e))
             .success()
     );
 
@@ -312,7 +312,7 @@ async fn test_remote_prune_removes_stale_branches() {
             .current_dir(&work_dir)
             .args(["config", "user.name", "Libra Tester"])
             .status()
-            .expect("failed to set user.name")
+            .unwrap_or_else(|e| panic!("failed to set user.name: {}", e))
             .success()
     );
     assert!(
@@ -320,18 +320,18 @@ async fn test_remote_prune_removes_stale_branches() {
             .current_dir(&work_dir)
             .args(["config", "user.email", "tester@example.com"])
             .status()
-            .expect("failed to set user.email")
+            .unwrap_or_else(|e| panic!("failed to set user.email: {}", e))
             .success()
     );
 
     // Create initial commit
-    fs::write(work_dir.join("README.md"), "hello libra").expect("failed to write README");
+    fs::write(work_dir.join("README.md"), "hello libra").unwrap_or_else(|e| panic!("failed to write README: {}", e));
     assert!(
         Command::new("git")
             .current_dir(&work_dir)
             .args(["add", "README.md"])
             .status()
-            .expect("failed to add README")
+            .unwrap_or_else(|e| panic!("failed to add README: {}", e))
             .success()
     );
     assert!(
@@ -339,7 +339,7 @@ async fn test_remote_prune_removes_stale_branches() {
             .current_dir(&work_dir)
             .args(["commit", "-m", "initial commit"])
             .status()
-            .expect("failed to commit")
+            .unwrap_or_else(|e| panic!("failed to commit: {}", e))
             .success()
     );
 
@@ -349,10 +349,10 @@ async fn test_remote_prune_removes_stale_branches() {
             .current_dir(&work_dir)
             .args(["rev-parse", "--abbrev-ref", "HEAD"])
             .output()
-            .expect("failed to read current branch")
+            .unwrap_or_else(|e| panic!("failed to read current branch: {}", e))
             .stdout,
     )
-    .expect("branch name not utf8")
+    .unwrap_or_else(|e| panic!("branch name not utf8: {}", e))
     .trim()
     .to_string();
 
@@ -362,7 +362,7 @@ async fn test_remote_prune_removes_stale_branches() {
             .current_dir(&work_dir)
             .args(["remote", "add", "origin", remote_dir.to_str().unwrap()])
             .status()
-            .expect("failed to add origin remote")
+            .unwrap_or_else(|e| panic!("failed to add origin remote: {}", e))
             .success()
     );
     assert!(
@@ -374,7 +374,7 @@ async fn test_remote_prune_removes_stale_branches() {
                 &format!("HEAD:refs/heads/{}", current_branch),
             ])
             .status()
-            .expect("failed to push to remote")
+            .unwrap_or_else(|e| panic!("failed to push to remote: {}", e))
             .success()
     );
 
@@ -386,7 +386,7 @@ async fn test_remote_prune_removes_stale_branches() {
                 .current_dir(&work_dir)
                 .args(["checkout", "-b", branch_name])
                 .status()
-                .expect(&format!("failed to create branch {}", branch_name))
+                .unwrap_or_else(|e| panic!("failed to create branch {}: {}", branch_name, e))
                 .success()
         );
         assert!(
@@ -394,14 +394,14 @@ async fn test_remote_prune_removes_stale_branches() {
                 .current_dir(&work_dir)
                 .args(["push", "origin", branch_name])
                 .status()
-                .expect(&format!("failed to push branch {}", branch_name))
+                .unwrap_or_else(|e| panic!("failed to push branch {}: {}", branch_name, e))
                 .success()
         );
     }
 
     // Initialize a fresh Libra repository to fetch into
     let repo_dir = temp_root.path().join("libra_repo");
-    fs::create_dir_all(&repo_dir).expect("failed to create repo dir");
+    fs::create_dir_all(&repo_dir).unwrap_or_else(|e| panic!("failed to create repo dir: {}", e));
     test::setup_with_new_libra_in(&repo_dir).await;
     let _guard = test::ChangeDirGuard::new(&repo_dir);
 
@@ -437,7 +437,7 @@ async fn test_remote_prune_removes_stale_branches() {
                 .current_dir(remote_dir.to_str().unwrap())
                 .args(["update-ref", "-d", &format!("refs/heads/{}", branch_name)])
                 .status()
-                .expect(&format!("failed to delete branch {}", branch_name))
+                .unwrap_or_else(|e| panic!("failed to delete branch {}: {}", branch_name, e))
                 .success()
         );
     }
@@ -480,7 +480,7 @@ async fn test_remote_prune_dry_run_previews_changes() {
         Command::new("git")
             .args(["init", "--bare", remote_dir.to_str().unwrap()])
             .status()
-            .expect("failed to init bare remote")
+            .unwrap_or_else(|e| panic!("failed to init bare remote: {}", e))
             .success()
     );
 
@@ -489,7 +489,7 @@ async fn test_remote_prune_dry_run_previews_changes() {
         Command::new("git")
             .args(["init", work_dir.to_str().unwrap()])
             .status()
-            .expect("failed to init working repo")
+            .unwrap_or_else(|e| panic!("failed to init working repo: {}", e))
             .success()
     );
 
@@ -498,7 +498,7 @@ async fn test_remote_prune_dry_run_previews_changes() {
             .current_dir(&work_dir)
             .args(["config", "user.name", "goodfylink"])
             .status()
-            .expect("failed to set user.name")
+            .unwrap_or_else(|e| panic!("failed to set user.name: {}", e))
             .success()
     );
     assert!(
@@ -506,18 +506,18 @@ async fn test_remote_prune_dry_run_previews_changes() {
             .current_dir(&work_dir)
             .args(["config", "user.email", "tester@example.com"])
             .status()
-            .expect("failed to set user.email")
+            .unwrap_or_else(|e| panic!("failed to set user.email: {}", e))
             .success()
     );
 
     // Create initial commit
-    fs::write(work_dir.join("README.md"), "hello libra").expect("failed to write README");
+    fs::write(work_dir.join("README.md"), "hello libra").unwrap_or_else(|e| panic!("failed to write README: {}", e));
     assert!(
         Command::new("git")
             .current_dir(&work_dir)
             .args(["add", "README.md"])
             .status()
-            .expect("failed to add README")
+            .unwrap_or_else(|e| panic!("failed to add README: {}", e))
             .success()
     );
     assert!(
@@ -525,7 +525,7 @@ async fn test_remote_prune_dry_run_previews_changes() {
             .current_dir(&work_dir)
             .args(["commit", "-m", "initial commit"])
             .status()
-            .expect("failed to commit")
+            .unwrap_or_else(|e| panic!("failed to commit: {}", e))
             .success()
     );
 
@@ -535,10 +535,10 @@ async fn test_remote_prune_dry_run_previews_changes() {
             .current_dir(&work_dir)
             .args(["rev-parse", "--abbrev-ref", "HEAD"])
             .output()
-            .expect("failed to read current branch")
+            .unwrap_or_else(|e| panic!("failed to read current branch: {}", e))
             .stdout,
     )
-    .expect("branch name not utf8")
+    .unwrap_or_else(|e| panic!("branch name not utf8: {}", e))
     .trim()
     .to_string();
 
@@ -548,7 +548,7 @@ async fn test_remote_prune_dry_run_previews_changes() {
             .current_dir(&work_dir)
             .args(["remote", "add", "origin", remote_dir.to_str().unwrap()])
             .status()
-            .expect("failed to add origin remote")
+            .unwrap_or_else(|e| panic!("failed to add origin remote: {}", e))
             .success()
     );
     assert!(
@@ -560,7 +560,7 @@ async fn test_remote_prune_dry_run_previews_changes() {
                 &format!("HEAD:refs/heads/{}", current_branch),
             ])
             .status()
-            .expect("failed to push to remote")
+            .unwrap_or_else(|e| panic!("failed to push to remote: {}", e))
             .success()
     );
 
@@ -571,7 +571,7 @@ async fn test_remote_prune_dry_run_previews_changes() {
             .current_dir(&work_dir)
             .args(["checkout", "-b", branch_name])
             .status()
-            .expect("failed to create branch")
+            .unwrap_or_else(|e| panic!("failed to create branch: {}", e))
             .success()
     );
     assert!(
@@ -579,13 +579,13 @@ async fn test_remote_prune_dry_run_previews_changes() {
             .current_dir(&work_dir)
             .args(["push", "origin", branch_name])
             .status()
-            .expect("failed to push branch")
+            .unwrap_or_else(|e| panic!("failed to push branch: {}", e))
             .success()
     );
 
     // Initialize a fresh Libra repository to fetch into
     let repo_dir = temp_root.path().join("libra_repo");
-    fs::create_dir_all(&repo_dir).expect("failed to create repo dir");
+    fs::create_dir_all(&repo_dir).unwrap_or_else(|e| panic!("failed to create repo dir: {}", e));
     test::setup_with_new_libra_in(&repo_dir).await;
     let _guard = test::ChangeDirGuard::new(&repo_dir);
 
@@ -616,7 +616,7 @@ async fn test_remote_prune_dry_run_previews_changes() {
             .current_dir(remote_dir.to_str().unwrap())
             .args(["update-ref", "-d", &format!("refs/heads/{}", branch_name)])
             .status()
-            .expect("failed to delete branch")
+            .unwrap_or_else(|e| panic!("failed to delete branch {}: {}", branch_name, e))
             .success()
     );
 
