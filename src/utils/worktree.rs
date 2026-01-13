@@ -92,7 +92,7 @@ pub fn untracked_overwrite_path(untracked: &[PathBuf], new_index: &Index) -> Opt
 /// ```
 /// use std::path::Path;
 /// use libra::utils::worktree::paths_conflict;
-/// 
+///
 /// assert!(paths_conflict(Path::new("foo"), Path::new("foo"))); // Identical
 /// assert!(paths_conflict(Path::new("foo"), Path::new("foo/bar"))); // Parent/child
 /// assert!(paths_conflict(Path::new("foo/bar"), Path::new("foo"))); // Child/parent
