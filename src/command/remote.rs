@@ -1,12 +1,15 @@
 //! Manages remotes by listing, showing, adding, and updating URLs and associated fetch/push metadata.
 
 use std::collections::HashSet;
-
+use crate::git_protocol::ServiceType::UploadPack;
 use clap::Subcommand;
 use git_internal::hash::get_hash_kind;
 
 
-use crate::{command::fetch::RemoteClient, internal::{branch::Branch, config::Config, protocol::set_wire_hash_kind}};
+use crate::{
+    command::fetch::RemoteClient, 
+    internal::{branch::Branch, config::Config, protocol::set_wire_hash_kind}
+};
 
 #[derive(Subcommand, Debug)]
 pub enum RemoteCmds {
@@ -233,7 +236,8 @@ async fn prune_remote(name: &str, dry_run: bool) {
     };
 
     //Discover remote references
-    let discovery = match remote_client.discovery_reference(crate::git_protocol::ServiceType::UploadPack).await {
+    let discovery = match remote_client.
+    discovery_reference(UploadPack).await {
         Ok(discovery) => discovery,
         Err(e) => {
             eprintln!("fatal: {e}");
@@ -250,12 +254,19 @@ async fn prune_remote(name: &str, dry_run: bool) {
 
     set_wire_hash_kind(discovery.hash_kind);
 
-    //Get remote branch names from discovery(format: refs/heads/branch_name)
+       // Get remote branch names from discovery (accept multiple namespaces like refs/heads/*, refs/mr/*)
     let remote_branch_names: HashSet<String> = discovery
         .refs
         .iter()
         .filter_map(|r| {
-            r._ref.strip_prefix("refs/heads/").map(|s| s.to_string())
+            // Accept both heads and mr namespaces
+        let s = r._ref.as_str();
+        if s.starts_with("refs/heads/") || s.starts_with("refs/mr/") {
+            // strip_prefix 返回 Option<&str>，filter_map 会自动丢掉 None
+            s.strip_prefix("refs/").map(|x| x.to_string())
+        } else {
+            None
+        }
         })
         .collect();
     
@@ -301,10 +312,15 @@ async fn prune_remote(name: &str, dry_run: bool) {
             println!("Everything up-to-date");
         }
     } else if dry_run {
-        println!("\nWould prune {} stale remote-tracking branch(es).", pruned_count);
+        println!("
+        \nWould prune {} stale remote-tracking branch(es).",
+        pruned_count
+    );
     } else {
-        println!("\nPruned {} stale remote-tracking branch(es).", pruned_count);
+        println!(
+            "\nPruned {} stale remote-tracking branch(es).", 
+            pruned_count
+        );
     }
-
 
 }
