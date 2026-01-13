@@ -325,7 +325,8 @@ async fn test_remote_prune_removes_stale_branches() {
     );
 
     // Create initial commit
-    fs::write(work_dir.join("README.md"), "hello libra").unwrap_or_else(|e| panic!("failed to write README: {}", e));
+    fs::write(work_dir.join("README.md"), "hello libra")
+        .unwrap_or_else(|e| panic!("failed to write README: {}", e));
     assert!(
         Command::new("git")
             .current_dir(&work_dir)
@@ -511,7 +512,8 @@ async fn test_remote_prune_dry_run_previews_changes() {
     );
 
     // Create initial commit
-    fs::write(work_dir.join("README.md"), "hello libra").unwrap_or_else(|e| panic!("failed to write README: {}", e));
+    fs::write(work_dir.join("README.md"), "hello libra")
+        .unwrap_or_else(|e| panic!("failed to write README: {}", e));
     assert!(
         Command::new("git")
             .current_dir(&work_dir)

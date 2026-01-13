@@ -5,13 +5,8 @@ use std::collections::HashSet;
 use clap::Subcommand;
 use git_internal::hash::get_hash_kind;
 
-
 use crate::command::fetch::RemoteClient;
-use crate::internal::{
-    branch::Branch,
-    config::Config,
-    protocol::set_wire_hash_kind,
-};
+use crate::internal::{branch::Branch, config::Config, protocol::set_wire_hash_kind};
 
 #[derive(Subcommand, Debug)]
 pub enum RemoteCmds {
@@ -194,7 +189,7 @@ pub async fn execute(command: RemoteCmds) {
                 Config::remove_config("remote", Some(&name), key, None, false).await;
                 Config::insert("remote", Some(&name), key, &value).await;
             }
-        },
+        }
         RemoteCmds::Prune { name, dry_run } => {
             prune_remote(&name, dry_run).await;
         }
@@ -271,7 +266,6 @@ async fn prune_remote(name: &str, dry_run: bool) {
     let head_ref = format!("refs/remotes/{}/HEAD", name);
 
     for local_branch in &local_remote_branches {
-
         // Skip HEAD reference
         if local_branch.name == head_ref {
             continue;
