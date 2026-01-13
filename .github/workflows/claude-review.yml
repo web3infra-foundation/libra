@@ -1,4 +1,4 @@
-name: Claude Code
+name: Claude Code Review with Progress Tracking
 
 on:
   issue_comment:
@@ -9,6 +9,10 @@ on:
     types: [opened, assigned]
   pull_request_review:
     types: [submitted]
+  pull_request:
+    paths-ignore:
+      - '.github/**'
+      - 'docs/**'
 
 permissions:
   contents: read
@@ -18,12 +22,23 @@ permissions:
 
 jobs:
   claude-review-with-tracking:
-    runs-on: ubuntu-latest      
+    runs-on: ubuntu-latest
+
+    if: |
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'issue_comment' && 
+       github.event.issue.pull_request && 
+       contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review_comment' &&
+       contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review' &&
+       contains(github.event.review.body, '@claude'))
+
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0
 
       - name: PR Review with Progress Tracking
         uses: anthropics/claude-code-action@v1
