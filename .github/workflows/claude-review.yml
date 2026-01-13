@@ -14,14 +14,11 @@ permissions:
   contents: read
   pull-requests: write
   issues: read
+  id-token: write
 
 jobs:
   claude-review-with-tracking:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
-      id-token: write
+    runs-on: ubuntu-latest      
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
