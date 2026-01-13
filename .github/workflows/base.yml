@@ -24,6 +24,11 @@ jobs:
         with:
           submodules: recursive
       
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+
       - name: Run rustfmt
         run: cargo fmt --all --check
 
