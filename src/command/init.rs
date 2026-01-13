@@ -55,9 +55,10 @@ async fn run(args: InitArgs) -> Result<(), GitError> {
         fs::create_dir_all(parent).map_err(|e| GitError::IoError(e))?;
     }
 
-    // 2. Set directory hidden (Windows only) - preserve original implementation
+    // 2. Set directory hidden (Windows only) - hide the internal `.libra` directory for non-bare repos
     if !args.bare {
-        set_dir_hidden(&storage_path.to_string_lossy()).map_err(|e| GitError::IoError(e))?;
+        let libra_dir = storage_path.join(".libra");
+        set_dir_hidden(&libra_dir.to_string_lossy()).map_err(GitError::IoError)?;
     }
 
     // 3. Initialize repository using git-internal (Libra's native implementation)
