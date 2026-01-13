@@ -9,6 +9,24 @@ use crate::utils::{
     util,
 };
 
+/// Returns a list of paths in the working directory that are not tracked in the index.
+///
+/// This function lists all files in the working directory, filters them based on ignore rules
+/// (like .gitignore), and checks if they are present in the index.
+///
+/// # Arguments
+///
+/// * `current_index` - The git index to check against
+///
+/// # Returns
+///
+/// A vector of paths that exist in the working directory but are not tracked in the index.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// * Failed to list working directory files
+/// * A path contains invalid UTF-8
 pub fn untracked_workdir_paths(current_index: &Index) -> Result<Vec<PathBuf>, String> {
     let workdir_files = util::list_workdir_files().map_err(|e| e.to_string())?;
     let visible_files =
@@ -25,10 +43,32 @@ pub fn untracked_workdir_paths(current_index: &Index) -> Result<Vec<PathBuf>, St
     Ok(untracked)
 }
 
+/// Checks if a path is present in the index at any stage (0-3).
 pub fn index_has_any_stage(index: &Index, path: &str) -> bool {
     (0..=3).any(|stage| index.tracked(path, stage))
 }
 
+/// Checks if any untracked files would be overwritten by files in the new index.
+///
+/// Returns the first untracked path that conflicts with a tracked path in the new index.
+///
+/// # Arguments
+///
+/// * `untracked` - List of untracked file paths in the working directory
+/// * `new_index` - The new index to check against
+///
+/// # Returns
+///
+/// The first untracked path that would be overwritten, or `None` if no conflicts exist.
+///
+/// # Example
+///
+/// ```ignore
+/// let untracked = untracked_workdir_paths(&current_index)?;
+/// if let Some(conflicting_path) = untracked_overwrite_path(&untracked, &new_index) {
+///     return Err(format!("Untracked file would be overwritten: {:?}", conflicting_path));
+/// }
+/// ```
 pub fn untracked_overwrite_path(untracked: &[PathBuf], new_index: &Index) -> Option<PathBuf> {
     let new_tracked = new_index.tracked_files();
     for untracked_path in untracked {
@@ -41,6 +81,23 @@ pub fn untracked_overwrite_path(untracked: &[PathBuf], new_index: &Index) -> Opt
     None
 }
 
+/// Determines if two paths conflict with each other.
+///
+/// A conflict occurs if:
+/// - The paths are identical, or
+/// - One path is an ancestor directory of the other (e.g., "foo" conflicts with "foo/bar")
+///
+/// # Examples
+///
+/// ```
+/// use std::path::Path;
+/// use libra::utils::worktree::paths_conflict;
+///
+/// assert!(paths_conflict(Path::new("foo"), Path::new("foo"))); // Identical
+/// assert!(paths_conflict(Path::new("foo"), Path::new("foo/bar"))); // Parent/child
+/// assert!(paths_conflict(Path::new("foo/bar"), Path::new("foo"))); // Child/parent
+/// assert!(!paths_conflict(Path::new("foo"), Path::new("bar"))); // Unrelated
+/// ```
 pub fn paths_conflict(left: &Path, right: &Path) -> bool {
     left == right || left.starts_with(right) || right.starts_with(left)
 }
