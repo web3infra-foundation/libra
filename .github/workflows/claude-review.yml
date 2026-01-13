@@ -24,24 +24,29 @@ jobs:
 
     if: |
           (
-            github.event_name == 'pull_request_target' ||
+            github.event_name == 'pull_request_target' &&
             (
-              (github.event_name == 'issue_comment' || github.event_name == 'pull_request_review_comment') &&
-              contains(github.event.comment.body, '@claude') &&
-              (
-                github.event.comment.author_association == 'OWNER' ||
-                github.event.comment.author_association == 'MEMBER' ||
-                github.event.comment.author_association == 'COLLABORATOR'
-              )
-            ) ||
+              github.event.pull_request.author_association == 'OWNER' ||
+              github.event.pull_request.author_association == 'MEMBER' ||
+              github.event.pull_request.author_association == 'COLLABORATOR'
+            )
+          ) ||
+          (
+            (github.event_name == 'issue_comment' || github.event_name == 'pull_request_review_comment') &&
+            contains(github.event.comment.body, '@claude') &&
             (
-              github.event_name == 'pull_request_review' &&
-              contains(github.event.review.body, '@claude') &&
-              (
-                github.event.review.author_association == 'OWNER' ||
-                github.event.review.author_association == 'MEMBER' ||
-                github.event.review.author_association == 'COLLABORATOR'
-              )
+              github.event.comment.author_association == 'OWNER' ||
+              github.event.comment.author_association == 'MEMBER' ||
+              github.event.comment.author_association == 'COLLABORATOR'
+            )
+          ) ||
+          (
+            github.event_name == 'pull_request_review' &&
+            contains(github.event.review.body, '@claude') &&
+            (
+              github.event.review.author_association == 'OWNER' ||
+              github.event.review.author_association == 'MEMBER' ||
+              github.event.review.author_association == 'COLLABORATOR'
             )
           )
 
