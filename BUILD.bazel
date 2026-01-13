@@ -1,0 +1,43 @@
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
+
+# Core library with git-internal dependencies
+rust_library(
+    name = "libra_command",
+    srcs = glob(["src/command/**/*.rs"]),
+    deps = [
+        "@crates_io//:git_internal",
+        "@crates_io//:sea_orm",
+        "@crates_io//:tokio",
+        "@crates_io//:clap",
+        "@crates_io//:tempfile",
+        "@crates_io//:thiserror",
+    ],
+    edition = "2024",
+    features = [
+        "tokio/rt-multi-thread",
+        "tokio/macros",
+        "sea-orm/sqlx-sqlite",
+        "clap/derive",
+    ],
+)
+
+# Libra binary executable
+rust_binary(
+    name = "libra",
+    srcs = ["src/main.rs"],
+    deps = [":libra_command"],
+    edition = "2024",
+)
+
+# Test suite with tokio support
+rust_test(
+    name = "libra_tests",
+    srcs = glob(["src/command/**/*_test.rs"]),
+    deps = [
+        ":libra_command",
+        "@crates_io//:tempfile",
+        "@crates_io//:tokio",
+    ],
+    edition = "2024",
+    features = ["tokio/test-util"],
+)
