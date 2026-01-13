@@ -182,8 +182,3 @@ mod tests {
         assert!(git_dir.join("libra.db").exists());
     }
 }
-        let result = execute(args).await;
-        assert!(result.is_ok());
-        assert!(git_dir.join("libra.db").exists());
-    }
-}
