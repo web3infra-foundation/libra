@@ -36,17 +36,12 @@ pub struct InitArgs {
 }
 
 /// CLI dispatcher entrypoint for the `init` command (matches cli.rs expected signature)
-pub async fn execute(args: InitArgs) -> Result<(), GitError> {
-    run(args).await
+pub async fn execute(args: InitArgs) {
+    if let Err(err) = run(args).await {
+        eprintln!("init failed: {:?}", err);
+    }
 }
 
-/// CLI dispatcher entrypoint for the `init` command.
-///
-/// This async wrapper matches the signature expected by `src/cli.rs` and
-/// delegates to the synchronous core implementation in [`run`].
-pub async fn execute(args: InitArgs) -> Result<(), Box<dyn std::error::Error>> {
-    run(&args)
-}
 /// Core implementation of the init command using git-internal
 async fn run(args: InitArgs) -> Result<(), GitError> {
     // Determine final storage path (honor separate-git-dir if provided)
