@@ -230,7 +230,10 @@ async fn prune_remote(name: &str, dry_run: bool) {
         .discovery_reference(crate::git_protocol::ServiceType::UploadPack)
         .await
     else {
-        eprintln!("fatal: Failed to discover remote references");
+        eprintln!(
+            "fatal: Failed to discover remote references for '{}' at '{}'",
+            name, remote_config.url
+        );
         return;
     };
 
@@ -250,9 +253,16 @@ async fn prune_remote(name: &str, dry_run: bool) {
     let remote_branch_names: HashSet<String> = discovery
         .refs
         .iter()
-        .filter_map(|r| r._ref.strip_prefix("refs/heads/").map(String::from))
+        .filter_map(|r| {
+            if let Some(branch) = r._ref.strip_prefix("refs/heads/") {
+                Some(String::from(branch))
+            } else if let Some(mr) = r._ref.strip_prefix("refs/mr/") {
+                Some(String::from(mr))
+            } else {
+                None
+            }
+        })
         .collect();
-
     // Get local remote-tracking branches (format: "refs/remotes/{remote}/branch_name")
     let all_branches = Branch::list_branches(None).await;
     let prefix = format!("refs/remotes/{}/", name);

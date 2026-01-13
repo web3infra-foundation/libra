@@ -497,7 +497,7 @@ async fn test_remote_prune_dry_run_previews_changes() {
     assert!(
         Command::new("git")
             .current_dir(&work_dir)
-            .args(["config", "user.name", "goodfylink"])
+            .args(["config", "user.name", "Libra Tester"])
             .status()
             .unwrap_or_else(|e| panic!("failed to set user.name: {}", e))
             .success()
