@@ -10,7 +10,7 @@ on:
   pull_request_review:
     types: [submitted]
   pull_request_target:
-    types: [opened, synchronize, closed]
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: read
@@ -58,7 +58,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0
           ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
 
       - name: Checkout PR Branch (for comments)
