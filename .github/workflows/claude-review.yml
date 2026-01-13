@@ -62,6 +62,7 @@ jobs:
           ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
 
       - name: Checkout PR Branch (for comments)
+        # Checkout the PR branch so Claude can review the actual PR code (not main)
         if: ${{ github.event_name == 'issue_comment' || github.event_name == 'pull_request_review_comment' || github.event_name == 'pull_request_review' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
