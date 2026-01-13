@@ -23,7 +23,7 @@ pub struct InitArgs {
     repo_directory: PathBuf,
 
     /// Initial branch name
-    #[arg(long, default_value = "main", help = "Initial branch name")]
+    #[arg(long, default_value = "master", help = "Initial branch name")]
     initial_branch: String,
 
     /// Quiet mode (suppress non-essential output)
