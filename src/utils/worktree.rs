@@ -48,7 +48,6 @@ pub fn index_has_any_stage(index: &Index, path: &str) -> bool {
     (0..=3).any(|stage| index.tracked(path, stage))
 }
 
-
 /// Checks if any untracked files would be overwritten by files in the new index.
 ///
 /// Returns the first untracked path that conflicts with a tracked path in the new index.
