@@ -21,7 +21,11 @@ permissions:
 jobs:
   claude-review-with-tracking:
     runs-on: ubuntu-latest
-
+    
+    # Only run for:
+    # 1. PRs from trusted users (OWNER/MEMBER/COLLABORATOR)
+    # 2. Comments mentioning @claude from trusted users
+    # 3. PR reviews mentioning @claude from trusted users
     if: |
           (
             github.event_name == 'pull_request_target' &&
@@ -58,7 +62,8 @@ jobs:
           ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
 
       - name: Checkout PR Branch (for comments)
-        if: ${{ github.event_name == 'issue_comment' || github.event_name == 'pull_request_review_comment' }}
+        # Checkout the PR branch so Claude can review the actual PR code (not main)
+        if: ${{ github.event_name == 'issue_comment' || github.event_name == 'pull_request_review_comment' || github.event_name == 'pull_request_review' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
