@@ -9,6 +9,10 @@ use crate::utils::{
     util,
 };
 
+/// Returns a list of paths in the working directory that are not tracked in the index.
+///
+/// This function lists all files in the working directory, filters them based on ignore rules
+/// (like .gitignore), and checks if they are present in the index.
 pub fn untracked_workdir_paths(current_index: &Index) -> Result<Vec<PathBuf>, String> {
     let workdir_files = util::list_workdir_files().map_err(|e| e.to_string())?;
     let visible_files =
@@ -25,10 +29,14 @@ pub fn untracked_workdir_paths(current_index: &Index) -> Result<Vec<PathBuf>, St
     Ok(untracked)
 }
 
+/// Checks if a path is present in the index at any stage (0-3).
 pub fn index_has_any_stage(index: &Index, path: &str) -> bool {
     (0..=3).any(|stage| index.tracked(path, stage))
 }
 
+/// Checks if any untracked files would be overwritten by files in the new index.
+///
+/// Returns the first untracked path that conflicts with a tracked path in the new index.
 pub fn untracked_overwrite_path(untracked: &[PathBuf], new_index: &Index) -> Option<PathBuf> {
     let new_tracked = new_index.tracked_files();
     for untracked_path in untracked {
@@ -41,6 +49,9 @@ pub fn untracked_overwrite_path(untracked: &[PathBuf], new_index: &Index) -> Opt
     None
 }
 
+/// Determines if two paths conflict with each other.
+///
+/// A conflict occurs if the paths are identical, or if one path is a directory containing the other.
 pub fn paths_conflict(left: &Path, right: &Path) -> bool {
     left == right || left.starts_with(right) || right.starts_with(left)
 }
