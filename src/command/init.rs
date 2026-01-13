@@ -1,8 +1,8 @@
 // libra/src/command/init.rs
 use clap::Parser;
 use git_internal::errors::GitError;
-use git_internal::repository::{Repository, RepositoryConfig, RepositoryType};
-use git_internal::storage::sqlite::SqliteStorage;
+use git_internal::internal::repository::{Repository, RepositoryConfig, RepositoryType};
+use git_internal::internal::storage::sqlite::SqliteStorage;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::io;
