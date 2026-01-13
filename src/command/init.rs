@@ -11,27 +11,27 @@ use std::io;
 #[derive(Debug, Parser)]
 pub struct InitArgs {
     /// Create a bare repository (no working directory)
-    #[arg(long, default_value_t = false, help = "Create a bare repository (no working directory)")]
+    #[clap(long, default_value_t = false, help = "Create a bare repository (no working directory)")]
     bare: bool,
 
     /// Path to separate git directory for version control data
-    #[arg(long, required = false, help = "Store version control data in the specified path")]
+    #[clap(long, required = false, help = "Store version control data in the specified path")]
     separate_git_dir: Option<PathBuf>,
 
     /// Repository directory (default: current directory)
-    #[arg(long, default_value = ".", help = "Repository directory path")]
+    #[clap(long, default_value = ".", help = "Repository directory path")]
     repo_directory: PathBuf,
 
     /// Initial branch name
-    #[arg(long, default_value = "master", help = "Initial branch name")]
+    #[clap(long, default_value = "main", help = "Initial branch name")]
     initial_branch: String,
 
     /// Quiet mode (suppress non-essential output)
-    #[arg(long, default_value_t = false, help = "Suppress non-essential output")]
+    #[clap(long, default_value_t = false, help = "Suppress non-essential output")]
     quiet: bool,
 
     /// Object format (SHA-1/SHA-256)
-    #[arg(long, default_value = "sha1", help = "Object hash format (sha1/sha256)")]
+    #[clap(long, default_value = "sha1", help = "Object hash format (sha1/sha256)")]
     object_format: String,
 }
 
