@@ -1,8 +1,12 @@
 //! Manages remotes by listing, showing, adding, and updating URLs and associated fetch/push metadata.
 
-use clap::Subcommand;
+use std::collections::HashSet;
 
-use crate::internal::config::Config;
+use clap::Subcommand;
+use git_internal::hash::get_hash_kind;
+
+
+use crate::{command::fetch::RemoteClient, internal::{branch::Branch, config::Config, protocol::set_wire_hash_kind}};
 
 #[derive(Subcommand, Debug)]
 pub enum RemoteCmds {
@@ -70,6 +74,19 @@ pub enum RemoteCmds {
         name: String,
         /// URL value (or pattern for --delete)
         value: String,
+    },
+
+    /// Delete stale remote-tracking branches
+    ///
+    /// Examples:
+    /// `libra remote prune origin` - prune stale branches for origin
+    /// `libra remote prune --dry-run origin` - preview what would be pruned
+    Prune {
+        /// Remote name
+        name: String,
+        /// Dry run - show what would be pruned without actually deleting
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -172,6 +189,9 @@ pub async fn execute(command: RemoteCmds) {
                 Config::remove_config("remote", Some(&name), key, None, false).await;
                 Config::insert("remote", Some(&name), key, &value).await;
             }
+        },
+        RemoteCmds::Prune { name, dry_run } => {
+            prune_remote(&name, dry_run).await;
         }
     }
 }
@@ -190,4 +210,101 @@ async fn show_remote_verbose(remote: &str) {
     for url in urls {
         println!("{remote} {url} (push)");
     }
+}
+
+
+async fn prune_remote(name: &str, dry_run: bool) {
+    //first check if the remote exists
+    let remote_config = match Config::remote_config(name).await {
+        Some(remote_config) => remote_config,
+        None => {
+            eprintln!("fatal: No such remote: {name}");
+            return;
+        }
+    };
+
+    //Get remote client
+    let remote_client = match RemoteClient::from_spec(&remote_config.url) {
+        Ok(remote_client) => remote_client,
+        Err(e) => {
+            eprintln!("fatal: {e}");
+            return;
+        }
+    };
+
+    //Discover remote references
+    let discovery = match remote_client.discovery_reference(crate::git_protocol::ServiceType::UploadPack).await {
+        Ok(discovery) => discovery,
+        Err(e) => {
+            eprintln!("fatal: {e}");
+            return;
+        }
+    };
+
+    let local_kind = get_hash_kind();
+    
+    if discovery.hash_kind != local_kind {
+        eprintln!("fatal: remote object format '{}' does not match local '{}'", discovery.hash_kind, local_kind);
+        return;
+    }
+
+    set_wire_hash_kind(discovery.hash_kind);
+
+    //Get remote branch names from discovery(format: refs/heads/branch_name)
+    let remote_branch_names: HashSet<String> = discovery
+        .refs
+        .iter()
+        .filter_map(|r| {
+            r._ref.strip_prefix("refs/heads/").map(|s| s.to_string())
+        })
+        .collect();
+    
+    //Get local remote-tracking branches (format: "refs/remotes/{remote}/branch_name")
+    // Note: remote-tracking branches have remote=None in the database, so we need to
+    // list all branches with remote=None and filter by name prefix
+    let all_branches = Branch::list_branches(None).await;
+    let prefix = format!("refs/remotes/{}/", name);
+    let local_remote_branches: Vec<_> = all_branches
+        .into_iter()
+        .filter(|b| b.name.starts_with(&prefix))
+        .collect();
+    
+    //Find stale branches (local branches that are not in the remote)
+
+    let mut pruned_count = 0;
+
+    for local_branch in &local_remote_branches {
+        // Extract branch name from "refs/remotes/{remote}/branch_name"
+        let branch_name = if let Some(stripped) = local_branch.name.strip_prefix(&prefix) {
+            stripped
+        } else {
+            // Skip if format doesn't match expected pattern
+            continue;
+        };
+
+        //check if this branch still exists on remote
+        if !remote_branch_names.contains(branch_name) {
+            if dry_run {
+                println!(" * [would prune] {}/{}", name, branch_name);
+            }
+            else {
+                //Delete the stale remote-tracking remote
+                Branch::delete_branch(&local_branch.name, None).await;
+                println!(" * [pruned] {}/{}", name, branch_name);
+            }
+            pruned_count += 1;
+        }
+    }
+    
+    if pruned_count == 0 {
+        if !dry_run {
+            println!("Everything up-to-date");
+        }
+    } else if dry_run {
+        println!("\nWould prune {} stale remote-tracking branch(es).", pruned_count);
+    } else {
+        println!("\nPruned {} stale remote-tracking branch(es).", pruned_count);
+    }
+
+
 }

@@ -1,8 +1,16 @@
 //! Tests for remote subcommands validating add/list/show behavior and URL mutation scenarios.
 
+use std::{fs, process::Command};
+
 use libra::{
-    command::remote::{self, RemoteCmds},
-    internal::config::Config,
+    command::{
+        fetch,
+        remote::{self, RemoteCmds},
+    },
+    internal::{
+        branch::Branch,
+        config::{Config, RemoteConfig},
+    },
 };
 
 use super::*;
@@ -272,4 +280,387 @@ async fn test_remote_set_url_all_replaces_all_fetch_urls() {
         name: "origin".into(),
     })
     .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_remote_prune_removes_stale_branches() {
+    let temp_root = tempdir().unwrap();
+    let remote_dir = temp_root.path().join("remote.git");
+    let work_dir = temp_root.path().join("workdir");
+
+    // Create a bare Git repository as remote
+    assert!(
+        Command::new("git")
+            .args(["init", "--bare", remote_dir.to_str().unwrap()])
+            .status()
+            .expect("failed to init bare remote")
+            .success()
+    );
+
+    // Create a working Git repository to push branches from
+    assert!(
+        Command::new("git")
+            .args(["init", work_dir.to_str().unwrap()])
+            .status()
+            .expect("failed to init working repo")
+            .success()
+    );
+
+    assert!(
+        Command::new("git")
+            .current_dir(&work_dir)
+            .args(["config", "user.name", "Libra Tester"])
+            .status()
+            .expect("failed to set user.name")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&work_dir)
+            .args(["config", "user.email", "tester@example.com"])
+            .status()
+            .expect("failed to set user.email")
+            .success()
+    );
+
+    // Create initial commit
+    fs::write(work_dir.join("README.md"), "hello libra").expect("failed to write README");
+    assert!(
+        Command::new("git")
+            .current_dir(&work_dir)
+            .args(["add", "README.md"])
+            .status()
+            .expect("failed to add README")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&work_dir)
+            .args(["commit", "-m", "initial commit"])
+            .status()
+            .expect("failed to commit")
+            .success()
+    );
+
+    // Get current branch name
+    let current_branch = String::from_utf8(
+        Command::new("git")
+            .current_dir(&work_dir)
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .output()
+            .expect("failed to read current branch")
+            .stdout,
+    )
+    .expect("branch name not utf8")
+    .trim()
+    .to_string();
+
+    // Add remote and push initial branch
+    assert!(
+        Command::new("git")
+            .current_dir(&work_dir)
+            .args(["remote", "add", "origin", remote_dir.to_str().unwrap()])
+            .status()
+            .expect("failed to add origin remote")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&work_dir)
+            .args([
+                "push",
+                "origin",
+                &format!("HEAD:refs/heads/{}", current_branch),
+            ])
+            .status()
+            .expect("failed to push to remote")
+            .success()
+    );
+
+    // Create and push additional branches
+    let branches_to_create = vec!["feature1", "feature2", "feature3"];
+    for branch_name in &branches_to_create {
+        assert!(
+            Command::new("git")
+                .current_dir(&work_dir)
+                .args(["checkout", "-b", branch_name])
+                .status()
+                .expect(&format!("failed to create branch {}", branch_name))
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .current_dir(&work_dir)
+                .args(["push", "origin", branch_name])
+                .status()
+                .expect(&format!("failed to push branch {}", branch_name))
+                .success()
+        );
+    }
+
+    // Initialize a fresh Libra repository to fetch into
+    let repo_dir = temp_root.path().join("libra_repo");
+    fs::create_dir_all(&repo_dir).expect("failed to create repo dir");
+    test::setup_with_new_libra_in(&repo_dir).await;
+    let _guard = test::ChangeDirGuard::new(&repo_dir);
+
+    let remote_path = remote_dir.to_str().unwrap().to_string();
+    Config::insert("remote", Some("origin"), "url", &remote_path).await;
+
+    // Fetch all branches to create remote-tracking branches
+    fetch::fetch_repository(
+        RemoteConfig {
+            name: "origin".to_string(),
+            url: remote_path.clone(),
+        },
+        None,
+        false,
+    )
+    .await;
+
+    // Verify all remote-tracking branches exist
+    for branch_name in &branches_to_create {
+        let tracked_branch = format!("refs/remotes/origin/{}", branch_name);
+        assert!(
+            Branch::find_branch(&tracked_branch, None).await.is_some(),
+            "remote-tracking branch {} should exist after fetch",
+            tracked_branch
+        );
+    }
+
+    // Delete some branches from remote
+    let branches_to_delete = vec!["feature1", "feature3"];
+    for branch_name in &branches_to_delete {
+        assert!(
+            Command::new("git")
+                .current_dir(remote_dir.to_str().unwrap())
+                .args(["update-ref", "-d", &format!("refs/heads/{}", branch_name)])
+                .status()
+                .expect(&format!("failed to delete branch {}", branch_name))
+                .success()
+        );
+    }
+
+    // Run prune command
+    remote::execute(RemoteCmds::Prune {
+        name: "origin".into(),
+        dry_run: false,
+    })
+    .await;
+
+    // Verify stale branches are pruned
+    for branch_name in &branches_to_delete {
+        let tracked_branch = format!("refs/remotes/origin/{}", branch_name);
+        assert!(
+            Branch::find_branch(&tracked_branch, None).await.is_none(),
+            "stale remote-tracking branch {} should be pruned",
+            tracked_branch
+        );
+    }
+
+    // Verify remaining branches still exist
+    assert!(
+        Branch::find_branch(&format!("refs/remotes/origin/feature2"), None)
+            .await
+            .is_some(),
+        "non-stale remote-tracking branch should still exist"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_remote_prune_dry_run_previews_changes() {
+    let temp_root = tempdir().unwrap();
+    let remote_dir = temp_root.path().join("remote.git");
+    let work_dir = temp_root.path().join("workdir");
+
+    // Create a bare Git repository as remote
+    assert!(
+        Command::new("git")
+            .args(["init", "--bare", remote_dir.to_str().unwrap()])
+            .status()
+            .expect("failed to init bare remote")
+            .success()
+    );
+
+    // Create a working Git repository to push branches from
+    assert!(
+        Command::new("git")
+            .args(["init", work_dir.to_str().unwrap()])
+            .status()
+            .expect("failed to init working repo")
+            .success()
+    );
+
+    assert!(
+        Command::new("git")
+            .current_dir(&work_dir)
+            .args(["config", "user.name", "goodfylink"])
+            .status()
+            .expect("failed to set user.name")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&work_dir)
+            .args(["config", "user.email", "tester@example.com"])
+            .status()
+            .expect("failed to set user.email")
+            .success()
+    );
+
+    // Create initial commit
+    fs::write(work_dir.join("README.md"), "hello libra").expect("failed to write README");
+    assert!(
+        Command::new("git")
+            .current_dir(&work_dir)
+            .args(["add", "README.md"])
+            .status()
+            .expect("failed to add README")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&work_dir)
+            .args(["commit", "-m", "initial commit"])
+            .status()
+            .expect("failed to commit")
+            .success()
+    );
+
+    // Get current branch name
+    let current_branch = String::from_utf8(
+        Command::new("git")
+            .current_dir(&work_dir)
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .output()
+            .expect("failed to read current branch")
+            .stdout,
+    )
+    .expect("branch name not utf8")
+    .trim()
+    .to_string();
+
+    // Add remote and push initial branch
+    assert!(
+        Command::new("git")
+            .current_dir(&work_dir)
+            .args(["remote", "add", "origin", remote_dir.to_str().unwrap()])
+            .status()
+            .expect("failed to add origin remote")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&work_dir)
+            .args([
+                "push",
+                "origin",
+                &format!("HEAD:refs/heads/{}", current_branch),
+            ])
+            .status()
+            .expect("failed to push to remote")
+            .success()
+    );
+
+    // Create and push a branch
+    let branch_name = "stale_branch";
+    assert!(
+        Command::new("git")
+            .current_dir(&work_dir)
+            .args(["checkout", "-b", branch_name])
+            .status()
+            .expect("failed to create branch")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&work_dir)
+            .args(["push", "origin", branch_name])
+            .status()
+            .expect("failed to push branch")
+            .success()
+    );
+
+    // Initialize a fresh Libra repository to fetch into
+    let repo_dir = temp_root.path().join("libra_repo");
+    fs::create_dir_all(&repo_dir).expect("failed to create repo dir");
+    test::setup_with_new_libra_in(&repo_dir).await;
+    let _guard = test::ChangeDirGuard::new(&repo_dir);
+
+    let remote_path = remote_dir.to_str().unwrap().to_string();
+    Config::insert("remote", Some("origin"), "url", &remote_path).await;
+
+    // Fetch to create remote-tracking branch
+    fetch::fetch_repository(
+        RemoteConfig {
+            name: "origin".to_string(),
+            url: remote_path.clone(),
+        },
+        None,
+        false,
+    )
+    .await;
+
+    // Verify remote-tracking branch exists
+    let tracked_branch = format!("refs/remotes/origin/{}", branch_name);
+    assert!(
+        Branch::find_branch(&tracked_branch, None).await.is_some(),
+        "remote-tracking branch should exist after fetch"
+    );
+
+    // Delete branch from remote
+    assert!(
+        Command::new("git")
+            .current_dir(remote_dir.to_str().unwrap())
+            .args(["update-ref", "-d", &format!("refs/heads/{}", branch_name)])
+            .status()
+            .expect("failed to delete branch")
+            .success()
+    );
+
+    // Run prune with --dry-run
+    remote::execute(RemoteCmds::Prune {
+        name: "origin".into(),
+        dry_run: true,
+    })
+    .await;
+
+    // Verify branch still exists (dry-run should not delete)
+    assert!(
+        Branch::find_branch(&tracked_branch, None).await.is_some(),
+        "remote-tracking branch should still exist after dry-run prune"
+    );
+
+    // Now run actual prune
+    remote::execute(RemoteCmds::Prune {
+        name: "origin".into(),
+        dry_run: false,
+    })
+    .await;
+
+    // Verify branch is now deleted
+    assert!(
+        Branch::find_branch(&tracked_branch, None).await.is_none(),
+        "remote-tracking branch should be pruned after actual prune"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_remote_prune_nonexistent_remote_returns_error() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    // Attempt to prune a non-existent remote
+    remote::execute(RemoteCmds::Prune {
+        name: "nonexistent".into(),
+        dry_run: false,
+    })
+    .await;
+
+    // The command should fail gracefully (error is printed to stderr, not returned)
+    // We can't easily test stderr output, but we can verify it doesn't panic
 }
