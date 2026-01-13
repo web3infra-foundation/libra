@@ -31,6 +31,12 @@ pub struct RemoveArgs {
     /// Exit with a zero status even if no files matched.
     #[clap(long)]
     pub ignore_unmatch: bool,
+    /// Read pathspecs from file
+    #[clap(long = "pathspec-from-file")]
+    pub pathspec_from_file: Option<String>,
+    /// Pathspec file is NUL separated
+    #[clap(long = "pathspec-file-nul")]
+    pub pathspec_file_nul: bool,
 }
 
 //  ==============================================
@@ -81,8 +87,45 @@ pub async fn execute(args: RemoveArgs) {
         }
     };
 
-    let dirs = get_dirs(&args.pathspec);
-    match validate_pathspec(&args.pathspec, &index, args.ignore_unmatch) {
+    // Build effective pathspec list
+    let pathspecs: Vec<String> = if let Some(file) = &args.pathspec_from_file {
+        let data = match std::fs::read(file) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("fatal: cannot read pathspec file '{}': {}", file, e);
+                return;
+            }
+        };
+
+        if args.pathspec_file_nul {
+            data.split(|b| *b == b'\0')
+                .filter_map(|s| {
+                    let s = std::str::from_utf8(s).ok()?.trim();
+                    if s.is_empty() {
+                        None
+                    } else {
+                        Some(s.to_string())
+                    }
+                })
+                .collect()
+        } else {
+            data.split(|b| *b == b'\n')
+                .filter_map(|s| {
+                    let s = std::str::from_utf8(s).ok()?.trim();
+                    if s.is_empty() {
+                        None
+                    } else {
+                        Some(s.to_string())
+                    }
+                })
+                .collect()
+        }
+    } else {
+        args.pathspec.clone()
+    };
+
+    let dirs = get_dirs(&pathspecs);
+    match validate_pathspec(&pathspecs, &index, args.ignore_unmatch) {
         Ok(_) => (),
         Err(err) => {
             eprintln!("fatal: {}", err);
@@ -97,7 +140,7 @@ pub async fn execute(args: RemoveArgs) {
     }
 
     // Build the remove list from input paths, handling tracked files and optionally ignoring untracked paths based on the `ignore_unmatch` flag.
-    for path_str in args.pathspec.iter() {
+    for path_str in pathspecs.iter() {
         let path = PathBuf::from(path_str);
         let relative_path = path.to_workdir().to_string_or_panic();
         if dirs.contains(path_str) {

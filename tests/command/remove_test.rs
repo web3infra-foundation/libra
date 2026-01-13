@@ -53,6 +53,8 @@ async fn test_remove_single_file() {
         force: false,
         dry_run: false,
         ignore_unmatch: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     };
     remove::execute(args.clone()).await;
     assert!(
@@ -126,6 +128,8 @@ async fn test_remove_cached() {
         force: false,
         dry_run: false,
         ignore_unmatch: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     };
     remove::execute(args).await;
 
@@ -183,6 +187,8 @@ async fn test_remove_directory_recursive() {
         force: false,
         dry_run: false,
         ignore_unmatch: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     };
     remove::execute(args.clone()).await;
     // Verify the directory and files still exists if force is false
@@ -268,6 +274,8 @@ async fn test_remove_directory_without_recursive() {
         force: false,
         dry_run: false,
         ignore_unmatch: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     };
     remove::execute(args).await;
     // Removing a directory without recursive should fail - the function should handle this internally
@@ -303,6 +311,8 @@ async fn test_remove_untracked_file() {
         force: false,
         dry_run: false,
         ignore_unmatch: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     };
     remove::execute(args.clone()).await;
     // Removing an untracked file should return an error - the function should handle this internally
@@ -353,6 +363,8 @@ async fn test_remove_modified_file() {
         force: true,
         dry_run: false,
         ignore_unmatch: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     };
     remove::execute(args).await;
 
@@ -423,6 +435,8 @@ async fn test_remove_multiple_files() {
         force: false,
         dry_run: false,
         ignore_unmatch: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     };
     remove::execute(args.clone()).await;
     // Verify the specified files were removed
@@ -476,6 +490,8 @@ async fn test_remove_dry_run() {
         force: false,
         dry_run: true,
         ignore_unmatch: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     };
     remove::execute(args).await;
 
@@ -533,6 +549,8 @@ async fn test_remove_dry_run_cached() {
         force: false,
         dry_run: true,
         ignore_unmatch: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     };
     remove::execute(args).await;
 
@@ -584,6 +602,8 @@ async fn test_remove_dry_run_recursive() {
         force: false,
         dry_run: true,
         ignore_unmatch: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     };
     remove::execute(args).await;
 
@@ -646,6 +666,8 @@ async fn test_remove_ignore_unmatch() {
         force: true,
         dry_run: false,
         ignore_unmatch: false,
+        pathspec_from_file: None,
+        pathspec_file_nul: false,
     };
     remove::execute(args.clone()).await;
 
@@ -658,4 +680,140 @@ async fn test_remove_ignore_unmatch() {
 
     assert!(!file1.exists(), "File 1 should be remove");
     assert!(file2.exists(), "File 2 should still exist");
+}
+#[tokio::test]
+#[serial]
+/// Tests rm --pathspec-from-file with newline-separated file
+async fn test_remove_pathspec_from_file_newline() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    // Create files
+    let file1 = create_file("file1.txt", "File 1 content");
+    let file2 = create_file("file2.txt", "File 2 content");
+
+    // Add all files to index
+    add::execute(AddArgs {
+        pathspec: vec![String::from(".")],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+
+    // Create newline-separated pathspec file
+    fs::write("paths.txt", "file1.txt\n").unwrap();
+
+    let args = RemoveArgs {
+        pathspec: vec![], // pathspec comes from file
+        cached: false,
+        recursive: false,
+        force: true,
+        dry_run: false,
+        ignore_unmatch: false,
+        pathspec_from_file: Some(String::from("paths.txt")),
+        pathspec_file_nul: false,
+    };
+
+    remove::execute(args).await;
+
+    assert!(!file1.exists(), "file1.txt should be removed");
+    assert!(file2.exists(), "file2.txt should still exist");
+}
+#[tokio::test]
+#[serial]
+/// Tests rm --pathspec-from-file with NUL-separated file
+async fn test_remove_pathspec_from_file_nul() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    // Create files
+    let file1 = create_file("file1.txt", "File 1 content");
+    let file2 = create_file("file2.txt", "File 2 content");
+
+    // Add all files to index
+    add::execute(AddArgs {
+        pathspec: vec![String::from(".")],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+
+    // Create NUL-separated pathspec file
+    let mut data = Vec::new();
+    data.extend_from_slice(b"file1.txt\0");
+    fs::write("paths.bin", data).unwrap();
+
+    let args = RemoveArgs {
+        pathspec: vec![],
+        cached: false,
+        recursive: false,
+        force: true,
+        dry_run: false,
+        ignore_unmatch: false,
+        pathspec_from_file: Some(String::from("paths.bin")),
+        pathspec_file_nul: true,
+    };
+
+    remove::execute(args).await;
+
+    assert!(!file1.exists(), "file1.txt should be removed");
+    assert!(file2.exists(), "file2.txt should still exist");
+}
+#[tokio::test]
+#[serial]
+/// Tests rm --pathspec-from-file with --ignore-unmatch
+async fn test_remove_pathspec_from_file_ignore_unmatch() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    // Create a file and add it to index
+    let file1 = create_file("file1.txt", "File 1 content");
+
+    add::execute(AddArgs {
+        pathspec: vec![String::from("file1.txt")],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+
+    // Pathspec file contains one valid and one invalid path
+    fs::write("paths.txt", "file1.txt\nnot_exist.txt\n").unwrap();
+
+    let mut args = RemoveArgs {
+        pathspec: vec![],
+        cached: false,
+        recursive: false,
+        force: true,
+        dry_run: false,
+        ignore_unmatch: false,
+        pathspec_from_file: Some(String::from("paths.txt")),
+        pathspec_file_nul: false,
+    };
+
+    // Without --ignore-unmatch: should not remove
+    remove::execute(args.clone()).await;
+    assert!(file1.exists(), "file1.txt should still exist");
+
+    // With --ignore-unmatch: should remove valid file
+    args.ignore_unmatch = true;
+    remove::execute(args).await;
+    assert!(!file1.exists(), "file1.txt should be removed");
 }
