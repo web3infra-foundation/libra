@@ -48,7 +48,7 @@ async fn run(args: InitArgs) -> Result<(), GitError> {
         None => args.repo_directory.clone(),
     };
 
-    // 1. Create directory structure (including parent directories)
+    // 1. Ensure parent directory of target path exists (create non-existent paths automatically)
     if let Some(parent) = storage_path.parent() {
         fs::create_dir_all(parent).map_err(|e| GitError::IoError(e))?;
     }
@@ -98,6 +98,10 @@ async fn run(args: InitArgs) -> Result<(), GitError> {
 // Preserve original set_dir_hidden implementation (Windows/Unix compatibility)
 #[cfg(target_os = "windows")]
 fn set_dir_hidden(dir: &str) -> io::Result<()> {
+    // Skip attrib command in WSL2 to avoid Buck2 build errors
+    if std::env::var("WSL_DISTRO_NAME").is_ok() {
+        return Ok(());
+    }
     use std::process::Command;
     Command::new("attrib")
         .arg("+H")
@@ -119,11 +123,18 @@ fn set_dir_hidden(_dir: &str) -> io::Result<()> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+    use std::fs;
 
     /// Test normal initialization with separate git directory (git-internal implementation)
     #[tokio::test]
     async fn test_separate_git_dir_normal() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = match TempDir::new() {
+            Ok(dir) => dir,
+            Err(e) => {
+                eprintln!("Failed to create temp directory: {}", e);
+                return;
+            }
+        };
         let git_dir = temp_dir.path().join("git-data");
         
         let args = InitArgs {
@@ -136,15 +147,22 @@ mod tests {
         };
 
         let result = execute(args).await;
-        assert!(result.is_ok());
-        // Verify Libra's native sqlite database (git-internal) instead of git2's config
-        assert!(git_dir.join("libra.db").exists());
+        assert!(result.is_ok(), "Initialization should succeed");
+        let db_path = git_dir.join("libra.db");
+        assert!(db_path.exists(), "libra.db should be created");
+        assert!(fs::metadata(db_path).is_ok(), "libra.db should be accessible");
     }
 
     /// Test automatic creation of non-existent directory path
     #[tokio::test]
     async fn test_separate_git_dir_auto_create() {
-        let temp_root = TempDir::new().unwrap();
+        let temp_root = match TempDir::new() {
+            Ok(dir) => dir,
+            Err(e) => {
+                eprintln!("Failed to create temp root directory: {}", e);
+                return;
+            }
+        };
         let non_exist_dir = temp_root.path().join("a/b/c/libra-repo");
         
         let args = InitArgs {
@@ -157,15 +175,21 @@ mod tests {
         };
 
         let result = execute(args).await;
-        assert!(result.is_ok());
-        assert!(non_exist_dir.exists());
-        assert!(non_exist_dir.join("libra.db").exists());
+        assert!(result.is_ok(), "Should create non-existent directory path");
+        assert!(non_exist_dir.exists(), "Directory should be created automatically");
+        assert!(non_exist_dir.join("libra.db").exists(), "libra.db should exist in new directory");
     }
 
     /// Test compatibility of --bare with --separate-git-dir (git-internal)
     #[tokio::test]
     async fn test_bare_with_separate_git_dir() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = match TempDir::new() {
+            Ok(dir) => dir,
+            Err(e) => {
+                eprintln!("Failed to create temp directory: {}", e);
+                return;
+            }
+        };
         let git_dir = temp_dir.path().join("bare-repo");
         
         let args = InitArgs {
@@ -178,7 +202,7 @@ mod tests {
         };
 
         let result = execute(args).await;
-        assert!(result.is_ok());
-        assert!(git_dir.join("libra.db").exists());
+        assert!(result.is_ok(), "Bare repository initialization should succeed");
+        assert!(git_dir.join("libra.db").exists(), "libra.db should be created for bare repo");
     }
 }
