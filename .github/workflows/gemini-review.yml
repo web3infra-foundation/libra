@@ -1,41 +1,132 @@
-name: Gemini AI Code Reviewer
+name: Gemini Code Review with Progress Tracking
+
+# Trigger Gemini review on PR lifecycle events and explicit mentions of @gemini
 
 on:
+  # Trigger when a new issue comment is created (for @gemini mentions)
   issue_comment:
     types: [created]
+  # Trigger when a PR review comment is created/edited/deleted (for @gemini mentions)
+  pull_request_review_comment:
+    types: [created, edited, deleted]
+  # Trigger on new or assigned issues (for future extension or automation)
+  issues:
+    types: [opened, assigned]
+  # Trigger when a PR review is submitted (for @gemini in the review body)
+  pull_request_review:
+    types: [submitted]
+  # Main trigger for PR events, using pull_request_target for elevated permissions
+  pull_request_target:
+    types: [opened, synchronize, reopened]
 
-permissions: write-all
+permissions:
+  # Read repository contents needed for code review
+  contents: read
+  # Allow Gemini to post review comments on pull requests
+  pull-requests: write
+  # Allow Gemini to interact with issues if needed
+  issues: write
+  # Allow this workflow to manage its own actions if required
+  actions: write
 
 jobs:
-  gemini-code-review:
+  gemini-review-with-tracking:
     runs-on: ubuntu-latest
+
+    # Only run for trusted authors or when explicitly mentioned by them
     if: |
-      github.event.issue.pull_request &&
-      contains(github.event.comment.body, '/gemini-review')
+          (
+            github.event_name == 'pull_request_target' &&
+            (
+              github.event.pull_request.author_association == 'OWNER' ||
+              github.event.pull_request.author_association == 'MEMBER' ||
+              github.event.pull_request.author_association == 'COLLABORATOR'
+            )
+          ) ||
+          (
+            (github.event_name == 'issue_comment' || github.event_name == 'pull_request_review_comment') &&
+            contains(github.event.comment.body, '@gemini') &&
+            (
+              github.event.comment.author_association == 'OWNER' ||
+              github.event.comment.author_association == 'MEMBER' ||
+              github.event.comment.author_association == 'COLLABORATOR'
+            )
+          ) ||
+          (
+            github.event_name == 'pull_request_review' &&
+            contains(github.event.review.body, '@gemini') &&
+            (
+              github.event.review.author_association == 'OWNER' ||
+              github.event.review.author_association == 'MEMBER' ||
+              github.event.review.author_association == 'COLLABORATOR'
+            )
+          )
+
     steps:
-      - name: PR Info
-        run: |
-          echo "Comment: ${{ github.event.comment.body }}"
-          echo "Issue Number: ${{ github.event.issue.number }}"
-          echo "Repository: ${{ github.repository }}"
-
-      - name: Checkout Repo
-        uses: actions/checkout@v3
+      # Checkout the repository at the appropriate commit for review
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
+          # Use PR head SHA for pull_request_target, fallback to current SHA otherwise
           fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
 
-      - name: Get PR Details
-        id: pr
-        run: |
-          PR_JSON=$(gh api repos/${{ github.repository }}/pulls/${{ github.event.issue.number }})
-          echo "head_sha=$(echo $PR_JSON | jq -r .head.sha)" >> $GITHUB_OUTPUT
-          echo "base_sha=$(echo $PR_JSON | jq -r .base.sha)" >> $GITHUB_OUTPUT
+      # Handle fork branches for pull_request_target events
+      - name: Setup Fork Remote (for pull_request_target)
+        if: ${{ github.event_name == 'pull_request_target' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER=${{ github.event.pull_request.number }}
+          HEAD_REF="${{ github.event.pull_request.head.ref }}"
+          HEAD_OWNER="${{ github.event.pull_request.head.repo.owner.login }}"
+          HEAD_REPO="${{ github.event.pull_request.head.repo.name }}"
+          CURRENT_OWNER="${{ github.repository_owner }}"
+
+          # For forked PRs, temporarily change origin URL to fork repository
+          # This allows gemini-code-action to fetch the PR branch correctly 
+          if [ "$HEAD_OWNER" != "$CURRENT_OWNER" ]; then
+            echo "PR is from fork: $HEAD_OWNER/$HEAD_REPO"
+            FORK_URL="https://github.com/$HEAD_OWNER/$HEAD_REPO.git"
+            echo "Temporarily changing origin URL to fork: $FORK_URL"
+            git remote set-url origin "$FORK_URL"
+            git fetch origin "$HEAD_REF"
+            git branch "$HEAD_REF" "origin/$HEAD_REF" 2>/dev/null || git branch -f "$HEAD_REF" "origin/$HEAD_REF"
+          fi
+
+      # For comment-driven triggers, ensure we have the correct PR branch checked out
+      - name: Checkout PR Branch (for comments)
+        if: ${{ github.event_name == 'issue_comment' || github.event_name == 'pull_request_review_comment' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER=${{ github.event.issue.number || github.event.pull_request.number }}
+
+          # Fetch PR metadata: head branch name and source repository
+          PR_DATA=$(gh pr view $PR_NUMBER --json headRefName,headRepositoryOwner,headRepository,baseRefName)
+          HEAD_REF=$(echo "$PR_DATA" | jq -r '.headRefName')
+          HEAD_OWNER=$(echo "$PR_DATA" | jq -r '.headRepositoryOwner.login')
+          HEAD_REPO=$(echo "$PR_DATA" | jq -r '.headRepository.name')
+          BASE_BRANCH=$(echo "$PR_DATA" | jq -r '.baseRefName')
+          CURRENT_OWNER="${{ github.repository_owner }}"
+
+          # For forked PRs, temporarily change origin URL to fork repository
+          # This allows gemini-code-action to fetch the PR branch correctly
+          if [ "$HEAD_OWNER" != "$CURRENT_OWNER" ]; then
+            echo "PR is from fork: $HEAD_OWNER/$HEAD_REPO"
+            FORK_URL="https://github.com/$HEAD_OWNER/$HEAD_REPO.git"
+            echo "Temporarily changing origin URL to fork: $FORK_URL"
+            git remote set-url origin "$FORK_URL"
+          fi
+
+          # Fetch and checkout the PR branch
+          git fetch origin "$HEAD_REF"
+          git branch "$HEAD_REF" "origin/$HEAD_REF" 2>/dev/null || git branch -f "$HEAD_REF" "origin/$HEAD_REF"
+          git checkout "$HEAD_REF"
 
       - uses: truongnh1992/gemini-ai-code-reviewer@main
         with:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: gemini-2.5-pro
-          EXCLUDE: "*.md,*.txt,package-lock.json,*.yml,*.yaml"
+          EXCLUDE: "*.md,package-lock.json,*.yml"
