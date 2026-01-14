@@ -71,6 +71,27 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
 
+      # Handle fork branches for pull_request_target events
+      - name: Setup Fork Remote (for pull_request_target)
+        if: ${{ github.event_name == 'pull_request_target' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER=${{ github.event.pull_request.number }}
+          HEAD_REF="${{ github.event.pull_request.head.ref }}"
+          HEAD_OWNER="${{ github.event.pull_request.head.repo.owner.login }}"
+          HEAD_REPO="${{ github.event.pull_request.head.repo.name }}"
+          CURRENT_OWNER="${{ github.repository_owner }}"
+
+          # For forked PRs, add the fork as a remote and create local branch
+          if [ "$HEAD_OWNER" != "$CURRENT_OWNER" ]; then
+            echo "PR is from fork: $HEAD_OWNER/$HEAD_REPO"
+            git remote add fork "https://github.com/$HEAD_OWNER/$HEAD_REPO.git"
+            git fetch fork "$HEAD_REF"
+            # Create local branch pointing to fork branch, so claude-code-action can find it
+            git branch "$HEAD_REF" "fork/$HEAD_REF" 2>/dev/null || git branch -f "$HEAD_REF" "fork/$HEAD_REF"
+          fi
+
       # For comment-driven triggers, ensure we have the correct PR branch checked out
       - name: Checkout PR Branch (for comments)
         if: ${{ github.event_name == 'issue_comment' || github.event_name == 'pull_request_review_comment' }}
@@ -99,7 +120,7 @@ jobs:
             git fetch fork "$HEAD_REF"
             git branch "$HEAD_REF" "fork/$HEAD_REF" 2>/dev/null || git branch -f "$HEAD_REF" "fork/$HEAD_REF"
           fi
-          
+
           # Checkout the PR branch
           git checkout "$HEAD_REF"
 
