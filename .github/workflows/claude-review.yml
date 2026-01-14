@@ -79,6 +79,12 @@ jobs:
         run: |
           PR_NUMBER=${{ github.event.issue.number || github.event.pull_request.number }}
 
+          # Fetch base branch first
+          BASE_BRANCH=$(gh pr view $PR_NUMBER --json baseRefName -q '.baseRefName')
+          if git ls-remote --exit-code origin "refs/heads/$BASE_BRANCH" > /dev/null 2>&1; then
+            git fetch origin "$BASE_BRANCH" || echo "Warning: Failed to fetch base branch '$BASE_BRANCH'"
+          fi
+
           # Fetch PR metadata: head branch name and source repository
           PR_DATA=$(gh pr view $PR_NUMBER --json headRefName,headRepositoryOwner,headRepository)
           HEAD_REF=$(echo "$PR_DATA" | jq -r '.headRefName')
@@ -91,9 +97,11 @@ jobs:
             echo "PR is from fork: $HEAD_OWNER/$HEAD_REPO"
             git remote add fork "https://github.com/$HEAD_OWNER/$HEAD_REPO.git"
             git fetch fork "$HEAD_REF"
-            # Create or update a local branch that tracks the fork branch
             git branch "$HEAD_REF" "fork/$HEAD_REF" 2>/dev/null || git branch -f "$HEAD_REF" "fork/$HEAD_REF"
           fi
+          
+          # Checkout the PR branch
+          git checkout "$HEAD_REF"
 
       # Invoke Claude to perform an automated PR review with progress tracking
       - name: PR Review with Progress Tracking
