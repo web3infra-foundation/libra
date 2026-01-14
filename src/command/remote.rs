@@ -254,13 +254,14 @@ async fn prune_remote(name: &str, dry_run: bool) {
         .refs
         .iter()
         .filter_map(|r| {
-            if let Some(branch) = r._ref.strip_prefix("refs/heads/") {
-                Some(String::from(branch))
-            } else if let Some(mr) = r._ref.strip_prefix("refs/mr/") {
-                Some(String::from(mr))
-            } else {
-                None
-            }
+            r._ref
+                .strip_prefix("refs/heads/")
+                .map(String::from)
+                .or_else(|| {
+                    r._ref
+                        .strip_prefix("refs/mr/")
+                        .map(|mr| format!("mr/{}", mr))
+                })
         })
         .collect();
     // Get local remote-tracking branches (format: "refs/remotes/{remote}/branch_name")
