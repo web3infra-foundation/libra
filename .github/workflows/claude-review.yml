@@ -83,13 +83,15 @@ jobs:
           HEAD_REPO="${{ github.event.pull_request.head.repo.name }}"
           CURRENT_OWNER="${{ github.repository_owner }}"
 
-          # For forked PRs, add the fork as a remote and create local branch
+          # For forked PRs, temporarily change origin URL to fork repository
+          # This allows claude-code-action to fetch the PR branch correctly
           if [ "$HEAD_OWNER" != "$CURRENT_OWNER" ]; then
             echo "PR is from fork: $HEAD_OWNER/$HEAD_REPO"
-            git remote add fork "https://github.com/$HEAD_OWNER/$HEAD_REPO.git"
-            git fetch fork "$HEAD_REF"
-            # Create local branch pointing to fork branch, so claude-code-action can find it
-            git branch "$HEAD_REF" "fork/$HEAD_REF" 2>/dev/null || git branch -f "$HEAD_REF" "fork/$HEAD_REF"
+            FORK_URL="https://github.com/$HEAD_OWNER/$HEAD_REPO.git"
+            echo "Temporarily changing origin URL to fork: $FORK_URL"
+            git remote set-url origin "$FORK_URL"
+            git fetch origin "$HEAD_REF"
+            git branch "$HEAD_REF" "origin/$HEAD_REF" 2>/dev/null || git branch -f "$HEAD_REF" "origin/$HEAD_REF"
           fi
 
       # For comment-driven triggers, ensure we have the correct PR branch checked out
@@ -100,28 +102,26 @@ jobs:
         run: |
           PR_NUMBER=${{ github.event.issue.number || github.event.pull_request.number }}
 
-          # Fetch base branch first
-          BASE_BRANCH=$(gh pr view $PR_NUMBER --json baseRefName -q '.baseRefName')
-          if git ls-remote --exit-code origin "refs/heads/$BASE_BRANCH" > /dev/null 2>&1; then
-            git fetch origin "$BASE_BRANCH" || echo "Warning: Failed to fetch base branch '$BASE_BRANCH'"
-          fi
-
           # Fetch PR metadata: head branch name and source repository
-          PR_DATA=$(gh pr view $PR_NUMBER --json headRefName,headRepositoryOwner,headRepository)
+          PR_DATA=$(gh pr view $PR_NUMBER --json headRefName,headRepositoryOwner,headRepository,baseRefName)
           HEAD_REF=$(echo "$PR_DATA" | jq -r '.headRefName')
           HEAD_OWNER=$(echo "$PR_DATA" | jq -r '.headRepositoryOwner.login')
           HEAD_REPO=$(echo "$PR_DATA" | jq -r '.headRepository.name')
-
-          # For forked PRs, add the fork as a remote and fetch its branch
+          BASE_BRANCH=$(echo "$PR_DATA" | jq -r '.baseRefName')
           CURRENT_OWNER="${{ github.repository_owner }}"
+
+          # For forked PRs, temporarily change origin URL to fork repository
+          # This allows claude-code-action to fetch the PR branch correctly
           if [ "$HEAD_OWNER" != "$CURRENT_OWNER" ]; then
             echo "PR is from fork: $HEAD_OWNER/$HEAD_REPO"
-            git remote add fork "https://github.com/$HEAD_OWNER/$HEAD_REPO.git"
-            git fetch fork "$HEAD_REF"
-            git branch "$HEAD_REF" "fork/$HEAD_REF" 2>/dev/null || git branch -f "$HEAD_REF" "fork/$HEAD_REF"
+            FORK_URL="https://github.com/$HEAD_OWNER/$HEAD_REPO.git"
+            echo "Temporarily changing origin URL to fork: $FORK_URL"
+            git remote set-url origin "$FORK_URL"
           fi
 
-          # Checkout the PR branch
+          # Fetch and checkout the PR branch
+          git fetch origin "$HEAD_REF"
+          git branch "$HEAD_REF" "origin/$HEAD_REF" 2>/dev/null || git branch -f "$HEAD_REF" "origin/$HEAD_REF"
           git checkout "$HEAD_REF"
 
       # Invoke Claude to perform an automated PR review with progress tracking
