@@ -12,7 +12,7 @@ rust_library(
         "@crates_io//:tempfile",
         "@crates_io//:thiserror",
     ],
-    edition = "2024",
+    edition = "2021",
     features = [
         "tokio/rt-multi-thread",
         "tokio/macros",
@@ -26,7 +26,7 @@ rust_binary(
     name = "libra",
     srcs = ["src/main.rs"],
     deps = [":libra_command"],
-    edition = "2024",
+    edition = "2021",
 )
 
 # Test suite with tokio support
@@ -38,6 +38,6 @@ rust_test(
         "@crates_io//:tempfile",
         "@crates_io//:tokio",
     ],
-    edition = "2024",
+    edition = "2021",
     features = ["tokio/test-util"],
 )
