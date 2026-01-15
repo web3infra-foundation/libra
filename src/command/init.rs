@@ -48,9 +48,21 @@ async fn run(args: InitArgs) -> Result<(), GitError> {
         (args.repo_directory.clone(), None)
     } else {
         // Non-bare repo: storage path = <workdir>/.libra (standard layout)
-        let work_dir = args.separate_git_dir.unwrap_or(args.repo_directory.clone());
-        let storage_dir = work_dir.join(".libra");
-        (storage_dir, Some(work_dir))
+        let repo_root = if args.repo_directory.to_string_lossy() == "." {
+        std::env::current_dir().map_err(GitError::IoError)?
+    } else {
+    args.repo_directory.clone()
+};
+
+let (storage_path, working_dir) = if args.bare {
+    (repo_root, None)
+} else {
+   
+       let base = args.separate_git_dir.unwrap_or(repo_root);
+       let storage = base.join(".libra");
+    (storage, Some(base))
+    };
+        fs::create_dir_all(&storage_path).map_err(GitError::IoError)?;
     };
 
     // 1. Ensure parent directory of target path exists (create non-existent paths automatically)
@@ -115,12 +127,18 @@ fn set_dir_hidden(dir: &str) -> io::Result<()> {
         return Ok(());
     }
     use std::process::Command;
-    Command::new("attrib")
+   #[cfg(target_os = "windows")]
+fn set_dir_hidden(dir: &str) -> io::Result<()> {
+    if std::env::var("WSL_DISTRO_NAME").is_ok() {
+        return Ok(());
+    }
+    use std::process::Command;
+    let _ = Command::new("attrib")
         .arg("+H")
         .arg(dir)
-        .spawn()?
-        .wait()?; // Wait for command execution to complete
+        .status(); 
     Ok(())
+}
 }
 
 /// On Unix-like systems, directories starting with a dot are hidden by default
@@ -152,11 +170,11 @@ mod tests {
         
         let args = InitArgs {
             bare: false,
-            separate_git_dir: Some(work_dir.clone()),
+            separate_git_dir: Some(work_dir),
             repo_directory: PathBuf::from("."),
-            initial_branch: "main".to_string(),
+            initial_branch: "main".into(),
             quiet: true,
-            object_format: "sha1".to_string(),
+            object_format: "sha1".into(),
         };
 
         let result = execute(args).await;
