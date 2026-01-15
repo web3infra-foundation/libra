@@ -40,4 +40,4 @@ rust_test(
     ],
     edition = "2021",
     features = ["tokio/test-util"],
-)
+);
