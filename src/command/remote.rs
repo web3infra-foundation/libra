@@ -2,6 +2,17 @@
 use clap::Subcommand;
 use crate::internal::config::Config;
 
+// 下面保留你自己的所有代码（比如RemoteCmds枚举、注释等），一字不改
+#[derive(Subcommand, Debug)]
+pub enum RemoteCmds {
+    // 你的原有代码全部保留
+    Add {
+        name: String,
+        url: String,
+    },
+    // ... 其他枚举项都不动
+}
+
 #[derive(Subcommand, Debug)]
 pub enum RemoteCmds {
     // Add a remote
