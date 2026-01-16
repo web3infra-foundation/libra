@@ -5,8 +5,10 @@ use std::collections::HashSet;
 use clap::Subcommand;
 use git_internal::hash::get_hash_kind;
 
-use crate::command::fetch::RemoteClient;
-use crate::internal::{branch::Branch, config::Config, protocol::set_wire_hash_kind};
+use crate::{
+    command::fetch::RemoteClient,
+    internal::{branch::Branch, config::Config, protocol::set_wire_hash_kind},
+};
 
 #[derive(Subcommand, Debug)]
 pub enum RemoteCmds {
