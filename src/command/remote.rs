@@ -220,21 +220,30 @@ async fn prune_remote(name: &str, dry_run: bool) {
     };
 
     // Get remote client
-    let Ok(remote_client) = RemoteClient::from_spec(&remote_config.url) else {
-        eprintln!("fatal: Failed to create remote client");
-        return;
+    let remote_client = match RemoteClient::from_spec(&remote_config.url) {
+        Ok(client) => client,
+        Err(e) => {
+            eprintln!(
+                "fatal: Failed to create remote client from '{}': {}",
+                remote_config.url, e
+            );
+            return;
+        }
     };
 
     // Discover remote references
-    let Ok(discovery) = remote_client
+    let discovery = match remote_client
         .discovery_reference(crate::git_protocol::ServiceType::UploadPack)
         .await
-    else {
-        eprintln!(
-            "fatal: Failed to discover remote references for '{}' at '{}'",
-            name, remote_config.url
-        );
-        return;
+    {
+        Ok(discovery) => discovery,
+        Err(e) => {
+            eprintln!(
+                "fatal: Failed to discover remote references for '{}' at '{}': {}",
+                name, remote_config.url, e
+            );
+            return;
+        }
     };
 
     // Verify hash kind compatibility
