@@ -48,15 +48,14 @@ jobs:
 - name: Run cargo clippy
   run: cargo clippy -- -D warnings
   
-  redundancy:
-    name: Redundancy Check
-    runs-on: [self-hosted]
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
+51 redundancy:
+52   name: Redundancy Check  # ✅ 缩进2个空格
+53   runs-on: [self-hosted]  # ✅ 缩进2个空格
+54   steps:                  # ✅ 缩进2个空格
+55     - name: Checkout repository  # ✅ 缩进4个空格（steps下的子项）
+56       uses: actions/checkout@v4   # ✅ 缩进4个空格
+57       with:                       # ✅ 缩进4个空格
+58         submodules: recursive     # ✅ 缩进6个空格
 
       - name: Run redundancy check
         run: |
