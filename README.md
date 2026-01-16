@@ -320,7 +320,7 @@ This section is intended to be kept up to date as new flags and commands are imp
 Before submitting a Pull Request, please ensure your code passes the following checks:
 
 ```bash
-Run clippy with all warnings treated as errors (warnings will be treated as errors)
+# Run clippy with all warnings treated as errors (warnings will be treated as errors)
 cargo clippy --all-targets --all-features -- -D warnings
 
 # Check code formatting (requires nightly toolchain)
@@ -337,6 +337,7 @@ cargo +nightly fmt --all
 ```
 
 ### Buck2 Build Requirements
+
 This project builds with Buck2. Please install both Buck2 and cargo-buckal before development:
 
 ```bash
