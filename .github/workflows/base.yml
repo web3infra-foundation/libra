@@ -42,9 +42,12 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Run cargo clippy
-        run: cargo clippy -- -D warnings
-
+      - name: Install Clippy
+  run: rustup component add clippy  
+  
+- name: Run cargo clippy
+  run: cargo clippy -- -D warnings
+  
   redundancy:
     name: Redundancy Check
     runs-on: [self-hosted]
