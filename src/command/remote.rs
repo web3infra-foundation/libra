@@ -1,6 +1,8 @@
 // Manages remotes by listing, showing, adding, and updating URLs and associated fetch/push metadata.
-use clap::Subcommand;
-use crate::internal::config::Config;
+use {
+    clap::Subcommand,
+    crate::internal::config::Config,
+};
 
 #[derive(Subcommand, Debug)]
 pub enum RemoteCmds {
