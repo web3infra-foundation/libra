@@ -1,6 +1,7 @@
 //! Tests init command creating repository layout, configs, and database tables.
 
 // use std::fs::File;
+//
 use std::fs;
 
 use libra::internal::model::config;
@@ -615,3 +616,114 @@ async fn test_init_with_invalid_object_format() {
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     assert!(err.to_string().contains("unsupported object format"));
 }
+
+#[tokio::test]
+#[serial]
+#[cfg(unix)]
+/// Init should fail when the parent directory is not writable (permission denied)
+async fn test_init_fails_when_parent_not_writable() {
+    use std::os::unix::fs::PermissionsExt;
+    use tempfile::tempdir;
+
+    // Create a temporary directory (parent)
+    let dir = tempdir().unwrap();
+    let path = dir.path();
+
+    // Remove write permission from the parent directory
+    let mut perms = std::fs::metadata(path).unwrap().permissions();
+    perms.set_mode(0o555);
+    std::fs::set_permissions(path, perms).unwrap();
+
+    // Attempt to initialize a repo inside a non-writable parent directory
+    let args = InitArgs {
+        bare: false,
+        initial_branch: None,
+        repo_directory: path.join("repo").to_str().unwrap().to_string(),
+        quiet: false,
+        template: None,
+        shared: None,
+        object_format: None,
+    };
+
+    // Expect init to fail with PermissionDenied
+    let err = init(args).await.unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+}
+
+#[tokio::test]
+#[serial]
+/// Init should create a hooks/pre-commit.sh file that is present and readable (non-empty).
+async fn test_init_creates_hooks_and_precommit() {
+    use tempfile::tempdir;
+
+    let target_dir = tempdir().unwrap().keep();
+
+    let args = InitArgs {
+        bare: false,
+        initial_branch: None,
+        repo_directory: target_dir.to_str().unwrap().to_string(),
+        quiet: false,
+        template: None,
+        shared: None,
+        object_format: None,
+    };
+
+    // Run init
+    init(args).await.unwrap();
+
+    // Verify hook exists and is non-empty
+    let hook_path = target_dir.join(".libra/hooks/pre-commit.sh");
+    assert!(
+        hook_path.exists(),
+        "Expected .libra/hooks/pre-commit.sh to exist after init"
+    );
+
+    let meta = std::fs::metadata(&hook_path).expect("failed to stat hook file");
+    assert!(meta.len() > 0, "Expected pre-commit hook to be non-empty");
+
+    let content =
+        std::fs::read_to_string(&hook_path).expect("failed to read pre-commit hook file");
+    assert!(
+        !content.trim().is_empty(),
+        "pre-commit hook content should not be empty"
+    );
+}
+
+#[tokio::test]
+#[serial]
+/// When initial branch is not specified, HEAD should point to a branch (branch name non-empty).
+async fn test_init_sets_head_to_branch_by_default() {
+    use tempfile::tempdir;
+
+    let target_dir = tempdir().unwrap().keep();
+
+    let old_cwd = std::env::current_dir().unwrap();
+    std::env::set_current_dir(&target_dir).unwrap();
+
+    let args = InitArgs {
+        bare: false,
+        initial_branch: None,
+        repo_directory: target_dir.to_str().unwrap().to_string(),
+        quiet: false,
+        template: None,
+        shared: None,
+        object_format: None,
+    };
+
+    // Run init
+    init(args).await.unwrap();
+
+    // Verify HEAD is a branch and non-empty
+    match Head::current().await {
+        Head::Branch(branch_name) => {
+            assert!(
+                !branch_name.is_empty(),
+                "Expected HEAD to point to a non-empty branch name"
+            );
+        }
+        other => panic!("Expected HEAD to be a branch after init, got: {:?}", other),
+    }
+
+    std::env::set_current_dir(old_cwd).unwrap();
+}
+
