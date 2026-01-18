@@ -15,12 +15,12 @@ use super::{Storage, local::LocalStorage, remote::RemoteStorage};
 #[derive(Debug)]
 struct CachedFile {
     path: PathBuf,
+    size: usize,
 }
 
 impl HeapSize for CachedFile {
     fn heap_size(&self) -> usize {
-        // Return 0 so we just limit by count (metadata overhead is small)
-        0
+        self.size
     }
 }
 
@@ -88,7 +88,13 @@ impl Storage for TieredStorage {
 
             let mut lru = self.lru.lock().unwrap();
             // insert returns the evicted value (if any). The CachedFile drop impl will delete the file.
-            let _ = lru.insert(*hash, CachedFile { path });
+            let _ = lru.insert(
+                *hash,
+                CachedFile {
+                    path,
+                    size: data.len(),
+                },
+            );
         }
 
         Ok((data, obj_type))
@@ -119,7 +125,7 @@ impl Storage for TieredStorage {
             let path = self.local.get_obj_path(hash);
 
             let mut lru = self.lru.lock().unwrap();
-            let _ = lru.insert(*hash, CachedFile { path });
+            let _ = lru.insert(*hash, CachedFile { path, size });
         }
 
         Ok(remote_res)

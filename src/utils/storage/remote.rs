@@ -1,8 +1,9 @@
 //! Remote object storage backend for Git objects
-use std::sync::Arc;
+use std::{str::FromStr, sync::Arc};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures::StreamExt;
 use git_internal::{errors::GitError, hash::ObjectHash, internal::object::types::ObjectType};
 use object_store::{ObjectStore, path::Path as ObjectPath};
 
@@ -100,11 +101,38 @@ impl Storage for RemoteStorage {
         self.inner.head(&path).await.is_ok()
     }
 
-    async fn search(&self, _prefix: &str) -> Vec<ObjectHash> {
-        // Prefix search implementation is complex due to "aa/bb..." structure.
-        // A prefix "aabb" maps to "aa/bb".
-        // A prefix "a" maps to "a*".
-        // S3 listing is expensive. For now, return empty as this is mainly used for local maintenance.
-        Vec::new()
+    async fn search(&self, prefix: &str) -> Vec<ObjectHash> {
+        let list_prefix = if prefix.len() >= 2 {
+            // Optimization: Git objects are stored in xx/yyyy...
+            // If we have at least 2 chars, we can narrow down to the directory "xx".
+            // We don't use the full prefix (e.g. "aabb") for the list_prefix because
+            // object_store paths are segment-based, and "aa/bb" is not considered a parent of "aa/bbcc...".
+            // So we list "aa" and filter client-side.
+            ObjectPath::from(&prefix[0..2])
+        } else {
+            // If < 2 chars, we must list the root. This is expensive but necessary for correctness.
+            ObjectPath::from("")
+        };
+
+        let mut results = Vec::new();
+
+        // Use list instead of list_with_delimiter to get all objects under the prefix
+        let mut stream = self.inner.list(Some(&list_prefix));
+
+        while let Some(item) = stream.next().await {
+            if let Ok(meta) = item {
+                // path is like "aa/bbcc..."
+                let path_str = meta.location.to_string();
+                // Remove '/' to get hash "aabbcc..."
+                let hash_str = path_str.replace('/', "");
+
+                if hash_str.starts_with(prefix)
+                    && let Ok(hash) = ObjectHash::from_str(&hash_str)
+                {
+                    results.push(hash);
+                }
+            }
+        }
+        results
     }
 }

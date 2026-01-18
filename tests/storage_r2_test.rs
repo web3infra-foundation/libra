@@ -1,4 +1,4 @@
-use std::{env, sync::Arc};
+use std::{env, str::FromStr, sync::Arc};
 
 use git_internal::internal::object::{ObjectTrait, blob::Blob};
 use libra::utils::{
@@ -90,6 +90,36 @@ async fn test_mock_tiered_storage_logic() {
     // 4. Verify Retrieval
     let (data, _) = tiered.get(&large_blob.id).await.expect("Get large failed");
     assert_eq!(data, large_blob.data);
+}
+
+#[tokio::test]
+async fn test_mock_remote_search() {
+    let memory_store = Arc::new(InMemory::new());
+    let remote_storage = RemoteStorage::new(memory_store);
+
+    // Create "aabbccdd..."
+    let hash_str = "aabbccdd12345678901234567890123456789012";
+    let hash = git_internal::hash::ObjectHash::from_str(hash_str).unwrap();
+    let blob = Blob::from_content("search me");
+
+    remote_storage
+        .put(&hash, &blob.data, blob.get_type())
+        .await
+        .unwrap();
+
+    // Test exact prefix "aabb" -> should match "aa/bb..."
+    let res = remote_storage.search("aabb").await;
+    assert_eq!(res.len(), 1);
+    assert_eq!(res[0], hash);
+
+    // Test short prefix "a" -> should match "aa/..."
+    let res = remote_storage.search("a").await;
+    assert_eq!(res.len(), 1);
+    assert_eq!(res[0], hash);
+
+    // Test non-matching
+    let res = remote_storage.search("ccdd").await;
+    assert!(res.is_empty());
 }
 
 #[tokio::test]
