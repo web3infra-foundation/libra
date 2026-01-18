@@ -1,6 +1,7 @@
 //! Tests init command creating repository layout, configs, and database tables.
 
 // use std::fs::File;
+//
 use std::fs;
 
 use libra::internal::model::config;
@@ -615,3 +616,138 @@ async fn test_init_with_invalid_object_format() {
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     assert!(err.to_string().contains("unsupported object format"));
 }
+
+#[tokio::test]
+#[serial]
+#[cfg(unix)]
+/// Init should fail when the parent directory is not writable (permission denied)
+async fn test_init_fails_when_parent_not_writable() {
+    use std::os::unix::fs::PermissionsExt;
+    use tempfile::tempdir;
+    use std::path::PathBuf;
+
+    // Guard to restore permissions on drop
+    struct PermsRestore {
+        path: PathBuf,
+        mode: u32,
+    }
+    impl Drop for PermsRestore {
+        fn drop(&mut self) {
+            if let Ok(meta) = std::fs::metadata(&self.path) {
+                let mut perms = meta.permissions();
+                let _ = perms.set_mode(self.mode);
+                let _ = std::fs::set_permissions(&self.path, perms);
+            }
+        }
+    }
+
+    let parent = tempdir().unwrap();
+    let parent_path = parent.path().to_path_buf();
+    let target_dir = parent_path.join("repo_no_write");
+
+    std::fs::create_dir_all(&parent_path).unwrap();
+
+    let original_mode = std::fs::metadata(&parent_path)
+        .unwrap()
+        .permissions()
+        .mode();
+
+    let _perm_guard = PermsRestore {
+        path: parent_path.clone(),
+        mode: original_mode,
+    };
+
+    // Remove write permissions (r-x for owner/group/other)
+    let mut perms = std::fs::metadata(&parent_path).unwrap().permissions();
+    perms.set_mode(0o555);
+    std::fs::set_permissions(&parent_path, perms).unwrap();
+
+    let args = InitArgs {
+        bare: false,
+        initial_branch: None,
+        repo_directory: target_dir.to_str().unwrap().to_string(),
+        quiet: false,
+        template: None,
+        shared: None,
+        object_format: None,
+    };
+
+    // Expect PermissionDenied
+    let result = init(args).await;
+    match result {
+        Ok(_) => panic!("Init should fail when parent directory is not writable"),
+        Err(e) => {
+            assert_eq!(
+                e.kind(),
+                std::io::ErrorKind::PermissionDenied,
+                "expected PermissionDenied but got: {:?}",
+                e
+            );
+            println!("Received expected permission error: {:?}", e);
+        }
+    }
+    // _perm_guard restores permissions on drop
+}
+
+#[tokio::test]
+#[serial]
+/// Init should create a hooks/pre-commit.sh file that is present and readable (non-empty).
+async fn test_init_creates_hooks_and_precommit() {
+    use tempfile::tempdir;
+
+    let target_dir = tempdir().unwrap().keep();
+
+    let args = InitArgs {
+        bare: false,
+        initial_branch: None,
+        repo_directory: target_dir.to_str().unwrap().to_string(),
+        quiet: false,
+        template: None,
+        shared: None,
+        object_format: None,
+    };
+
+    // Run init
+    init(args).await.unwrap();
+
+    // Verify hook exists and is non-empty
+    let hook_path = target_dir.join(".libra/hooks/pre-commit.sh");
+    assert!(hook_path.exists(), "Expected .libra/hooks/pre-commit.sh to exist after init");
+
+    let meta = std::fs::metadata(&hook_path).expect("failed to stat hook file");
+    assert!(meta.len() > 0, "Expected pre-commit hook to be non-empty");
+
+    let content = std::fs::read_to_string(&hook_path).expect("failed to read pre-commit hook file");
+    assert!(!content.trim().is_empty(), "pre-commit hook content should not be empty");
+}
+
+#[tokio::test]
+#[serial]
+/// When initial branch is not specified, HEAD should point to a branch (branch name non-empty).
+async fn test_init_sets_head_to_branch_by_default() {
+    use tempfile::tempdir;
+
+    let target_dir = tempdir().unwrap().keep();
+
+    let args = InitArgs {
+        bare: false,
+        initial_branch: None,
+        repo_directory: target_dir.to_str().unwrap().to_string(),
+        quiet: false,
+        template: None,
+        shared: None,
+        object_format: None,
+    };
+
+    // Run init
+    init(args).await.unwrap();
+
+    // Verify HEAD is a branch and non-empty
+    match Head::current().await {
+        Head::Branch(branch_name) => {
+            assert!(!branch_name.is_empty(), "Expected HEAD to point to a non-empty branch name");
+        }
+        other => panic!("Expected HEAD to be a branch after init, got: {:?}", other),
+    }
+}
+
