@@ -30,6 +30,7 @@ rust_library(
         "alloc",
         "default",
         "dev_urandom_fallback",
+        "std",
         "wasm32_unknown_unknown_js",
     ],
     rustc_flags = [
@@ -55,6 +56,7 @@ rust_binary(
         "alloc",
         "default",
         "dev_urandom_fallback",
+        "std",
         "wasm32_unknown_unknown_js",
     ],
     rustc_flags = ["@$(location :ring-manifest[env_flags])"],
@@ -71,6 +73,7 @@ buildscript_run(
         "alloc",
         "default",
         "dev_urandom_fallback",
+        "std",
         "wasm32_unknown_unknown_js",
     ],
     version = "0.17.14",
