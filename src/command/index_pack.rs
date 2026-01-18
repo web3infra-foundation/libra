@@ -197,10 +197,8 @@ fn write_idx_v2_sync(
 
 /// Build index file for pack file, version 2
 pub fn build_index_v2(pack_file: &str, index_file: &str) -> Result<(), GitError> {
-    let pack_path = PathBuf::from(pack_file);
-    let tmp_path = pack_path
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."));
+    // Use system temp dir to avoid DirectoryNotEmpty error if Pack tries to clean up the dir
+    let tmp_path = std::env::temp_dir();
     let pack_file = std::fs::File::open(pack_file)?;
     let mut pack_reader = std::io::BufReader::new(pack_file);
     let idx_entries = Arc::new(Mutex::new(Vec::new()));
