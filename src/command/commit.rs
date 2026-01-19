@@ -87,17 +87,16 @@ fn parse_author(author: &str) -> (String, String) {
     let author = author.trim();
 
     // Try to parse "Name <email>" format
-    // Use find (not rfind) to get the first '<' and '>' which matches Git's behavior
-    if let Some(start_idx) = author.find('<') {
-        if let Some(end_idx) = author[start_idx..].find('>') {
-            let end_idx = start_idx + end_idx;
-            if start_idx < end_idx && end_idx == author.len() - 1 {
-                let name = author[..start_idx].trim().to_string();
-                let email = author[start_idx + 1..end_idx].trim().to_string();
+    if let Some(start_idx) = author.find('<')
+        && let Some(end_idx) = author[start_idx..].find('>')
+    {
+        let end_idx = start_idx + end_idx;
+        if start_idx < end_idx && end_idx == author.len() - 1 {
+            let name = author[..start_idx].trim().to_string();
+            let email = author[start_idx + 1..end_idx].trim().to_string();
 
-                if !name.is_empty() && !email.is_empty() {
-                    return (name, email);
-                }
+            if !name.is_empty() && !email.is_empty() {
+                return (name, email);
             }
         }
     }
@@ -660,7 +659,7 @@ mod test {
             author: None,
         };
         fn message_and_file_are_none(args: &CommitArgs) -> Option<String> {
-            let message = match (&args.message, &args.file) {
+            match (&args.message, &args.file) {
                 (Some(msg), _) => Some(msg.clone()),
                 (None, Some(file)) => Some(file.clone()),
                 (None, None) => {
@@ -670,8 +669,7 @@ mod test {
                         None
                     }
                 }
-            };
-            message
+            }
         }
         let message = message_and_file_are_none(&args);
         assert_eq!(message, Some("".to_string()));
@@ -828,15 +826,14 @@ mod test {
             author: None,
         };
 
-        let commit_message_with_verify = args_with_verify
-            .signoff
-            .then(|| {
-                format!(
-                    "{}\n\nSigned-off-by: test <test@example.com>",
-                    invalid_conventional_msg
-                )
-            })
-            .unwrap_or_else(|| invalid_conventional_msg.to_string());
+        let commit_message_with_verify = if args_with_verify.signoff {
+            format!(
+                "{}\n\nSigned-off-by: test <test@example.com>",
+                invalid_conventional_msg
+            )
+        } else {
+            invalid_conventional_msg.to_string()
+        };
 
         let verify_result = std::panic::catch_unwind(|| {
             if args_with_verify.conventional
@@ -856,15 +853,14 @@ mod test {
             ..args_with_verify
         };
 
-        let commit_message_no_verify = args_no_verify
-            .signoff
-            .then(|| {
-                format!(
-                    "{}\n\nSigned-off-by: test <test@example.com>",
-                    invalid_conventional_msg
-                )
-            })
-            .unwrap_or_else(|| invalid_conventional_msg.to_string());
+        let commit_message_no_verify = if args_no_verify.signoff {
+            format!(
+                "{}\n\nSigned-off-by: test <test@example.com>",
+                invalid_conventional_msg
+            )
+        } else {
+            invalid_conventional_msg.to_string()
+        };
 
         let no_verify_result = std::panic::catch_unwind(|| {
             if args_no_verify.conventional
