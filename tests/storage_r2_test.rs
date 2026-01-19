@@ -9,7 +9,7 @@ use object_store::memory::InMemory;
 use serial_test::serial;
 use tempfile::tempdir;
 
-// Credentials from user input(need )
+// Credentials from user input(need to be set in env)
 const R2_ACCOUNT_ID: &str = "1234";
 const R2_ACCESS_KEY: &str = "12345678";
 const R2_SECRET_KEY: &str = "dbedudygydgwedqudgwedqugwedqugwedqugwedqugwedqugwedqugwedqugwedqug";
@@ -56,8 +56,8 @@ async fn test_mock_tiered_storage_logic() {
     // Small object < 10 bytes -> Local + Remote
     // Large object >= 10 bytes -> Remote + Local LRU
     let threshold = 10;
-    let cache_size = 1024; // Enough for test
-    let tiered = TieredStorage::new(local.clone(), remote, threshold, cache_size);
+    let disk_usage_limit = 1024; // Enough for test
+    let tiered = TieredStorage::new(local.clone(), remote, threshold, disk_usage_limit);
 
     // 2. Test Small Object (Perma Store)
     let small_content = "123"; // 3 bytes < 10
@@ -138,6 +138,7 @@ async fn test_r2_integration_existing_bucket() {
         env::set_var("LIBRA_STORAGE_SECRET_KEY", R2_SECRET_KEY);
         env::set_var("LIBRA_STORAGE_REGION", "auto");
         env::set_var("LIBRA_STORAGE_THRESHOLD", "10"); // Small threshold to force remote storage
+        env::set_var("LIBRA_STORAGE_ALLOW_HTTP", "true"); // For test stability if needed, though R2 is https
     }
 
     let dir = tempdir().unwrap();
@@ -183,6 +184,7 @@ async fn test_r2_integration_new_bucket() {
         env::set_var("LIBRA_STORAGE_SECRET_KEY", R2_SECRET_KEY);
         env::set_var("LIBRA_STORAGE_REGION", "auto");
         env::set_var("LIBRA_STORAGE_THRESHOLD", "10");
+        env::set_var("LIBRA_STORAGE_ALLOW_HTTP", "true");
     }
 
     let dir = tempdir().unwrap();

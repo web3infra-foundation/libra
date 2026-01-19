@@ -6,16 +6,18 @@ pub mod tiered;
 use async_trait::async_trait;
 use git_internal::{errors::GitError, hash::ObjectHash, internal::object::types::ObjectType};
 
-/// Storage backend abstraction interface.
-/// Defines basic object storage operations.
+/// Abstract storage backend interface for Git objects
 #[async_trait]
 pub trait Storage: Send + Sync {
-    /// Get object data by hash (decompressed, no header)
-    /// Returns (Content, Type)
+    /// Retrieve an object by its hash
+    /// Returns the raw decompressed data and the object type.
+    /// If the object is not found, returns `GitError::ObjectNotFound`.
     async fn get(&self, hash: &ObjectHash) -> Result<(Vec<u8>, ObjectType), GitError>;
 
-    /// Put object data
-    /// Returns the path/location of the stored object
+    /// Store an object
+    /// Takes the object hash, raw decompressed data, and object type.
+    /// Returns the storage path or identifier.
+    /// This operation should be idempotent.
     async fn put(
         &self,
         hash: &ObjectHash,
@@ -23,9 +25,12 @@ pub trait Storage: Send + Sync {
         obj_type: ObjectType,
     ) -> Result<String, GitError>;
 
-    /// Check if object exists
+    /// Check if an object exists
+    /// Returns true if the object exists in storage.
     async fn exist(&self, hash: &ObjectHash) -> bool;
 
-    /// List/Search objects by prefix
+    /// Search for objects by hash prefix
+    /// Returns a list of object hashes that match the given prefix.
+    /// Note: Performance may vary significantly between backends (fast locally, potentially slow remotely).
     async fn search(&self, prefix: &str) -> Vec<ObjectHash>;
 }

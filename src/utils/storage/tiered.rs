@@ -41,6 +41,7 @@ pub struct TieredStorage {
     // LRU cache for tracking large files stored locally
     // Key: ObjectHash
     // Value: CachedFile (owns the cleanup responsibility)
+    // Note: This tracks disk usage of cached files, not memory usage of the struct itself.
     lru: Arc<Mutex<LruCache<ObjectHash, CachedFile>>>,
 }
 
@@ -49,13 +50,13 @@ impl TieredStorage {
         local: LocalStorage,
         remote: RemoteStorage,
         threshold: usize,
-        cache_size: usize,
+        disk_usage_limit: usize,
     ) -> Self {
         Self {
             local,
             remote,
             threshold,
-            lru: Arc::new(Mutex::new(LruCache::new(cache_size))),
+            lru: Arc::new(Mutex::new(LruCache::new(disk_usage_limit))),
         }
     }
 }
@@ -140,8 +141,14 @@ impl Storage for TieredStorage {
         self.remote.exist(hash).await
     }
 
-    /// Search for objects by prefix. Only checks local storage since remote may not support listing.
     async fn search(&self, prefix: &str) -> Vec<ObjectHash> {
-        self.local.search(prefix).await
+        let (local_res, remote_res) =
+            futures::future::join(self.local.search(prefix), self.remote.search(prefix)).await;
+
+        let mut results = std::collections::HashSet::new();
+        results.extend(local_res);
+        results.extend(remote_res);
+
+        results.into_iter().collect()
     }
 }

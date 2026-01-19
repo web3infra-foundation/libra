@@ -46,6 +46,12 @@ impl ClientStorage {
         if let Ok(storage_type) = std::env::var("LIBRA_STORAGE_TYPE") {
             let bucket =
                 std::env::var("LIBRA_STORAGE_BUCKET").unwrap_or_else(|_| "libra".to_string());
+            if bucket.is_empty() {
+                eprintln!(
+                    "Error: LIBRA_STORAGE_BUCKET cannot be empty. Falling back to local storage."
+                );
+                return Arc::new(LocalStorage::new(base_path));
+            }
 
             // Build ObjectStore
             let object_store: Arc<dyn object_store::ObjectStore> = match storage_type.as_str() {
@@ -54,23 +60,50 @@ impl ClientStorage {
                         object_store::aws::AmazonS3Builder::new().with_bucket_name(&bucket);
 
                     if let Ok(endpoint) = std::env::var("LIBRA_STORAGE_ENDPOINT") {
+                        if url::Url::parse(&endpoint).is_err() {
+                            eprintln!(
+                                "Error: Invalid LIBRA_STORAGE_ENDPOINT URL: {}. Falling back to local storage.",
+                                endpoint
+                            );
+                            return Arc::new(LocalStorage::new(base_path));
+                        }
                         builder = builder.with_endpoint(endpoint);
                     }
                     if let Ok(region) = std::env::var("LIBRA_STORAGE_REGION") {
                         builder = builder.with_region(region);
                     }
                     if let Ok(key) = std::env::var("LIBRA_STORAGE_ACCESS_KEY") {
+                        if key.is_empty() {
+                            eprintln!(
+                                "Error: LIBRA_STORAGE_ACCESS_KEY cannot be empty. Falling back to local storage."
+                            );
+                            return Arc::new(LocalStorage::new(base_path));
+                        }
                         builder = builder.with_access_key_id(key);
                     }
                     if let Ok(secret) = std::env::var("LIBRA_STORAGE_SECRET_KEY") {
+                        if secret.is_empty() {
+                            eprintln!(
+                                "Error: LIBRA_STORAGE_SECRET_KEY cannot be empty. Falling back to local storage."
+                            );
+                            return Arc::new(LocalStorage::new(base_path));
+                        }
                         builder = builder.with_secret_access_key(secret);
                     }
 
-                    builder = builder.with_allow_http(true);
+                    if std::env::var("LIBRA_STORAGE_ALLOW_HTTP").ok().as_deref() == Some("true") {
+                        builder = builder.with_allow_http(true);
+                    }
 
                     Arc::new(builder.build().expect("Failed to build S3 storage"))
                 }
-                _ => panic!("Unsupported storage type: {}", storage_type),
+                _ => {
+                    eprintln!(
+                        "Error: Unsupported storage type: {}. Falling back to local storage.",
+                        storage_type
+                    );
+                    return Arc::new(LocalStorage::new(base_path));
+                }
             };
 
             let remote = RemoteStorage::new(object_store);
@@ -81,9 +114,18 @@ impl ClientStorage {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(1024 * 1024); // 1MB default
 
-            let cache_size = 200 * 1024 * 1024; // 200MB cache size
+            // Parse cache size (previously hardcoded/magic number)
+            let disk_cache_limit_bytes = std::env::var("LIBRA_STORAGE_CACHE_SIZE")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(200 * 1024 * 1024); // 200MB default
 
-            Arc::new(TieredStorage::new(local, remote, threshold, cache_size))
+            Arc::new(TieredStorage::new(
+                local,
+                remote,
+                threshold,
+                disk_cache_limit_bytes,
+            ))
         } else {
             // Default to local storage
             Arc::new(LocalStorage::new(base_path))

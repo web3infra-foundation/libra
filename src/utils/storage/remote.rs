@@ -34,11 +34,12 @@ impl Storage for RemoteStorage {
     /// Downloads, decompresses, and strips header
     async fn get(&self, hash: &ObjectHash) -> Result<(Vec<u8>, ObjectType), GitError> {
         let path = self.hash_to_path(hash);
-        let result = self
-            .inner
-            .get(&path)
-            .await
-            .map_err(|e| GitError::ObjectNotFound(format!("Remote object not found: {}", e)))?;
+        let result = self.inner.get(&path).await.map_err(|e| match e {
+            object_store::Error::NotFound { .. } => {
+                GitError::ObjectNotFound(format!("Remote object not found: {}", e))
+            }
+            _ => GitError::IOError(std::io::Error::other(e)),
+        })?;
 
         let bytes = result
             .bytes()
