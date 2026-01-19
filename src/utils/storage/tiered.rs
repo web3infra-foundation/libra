@@ -15,12 +15,16 @@ use super::{Storage, local::LocalStorage, remote::RemoteStorage};
 #[derive(Debug)]
 struct CachedFile {
     path: PathBuf,
-    size: usize,
+    /// Size of the file on disk in bytes
+    disk_size: usize,
 }
 
 impl HeapSize for CachedFile {
     fn heap_size(&self) -> usize {
-        self.size
+        // We use the LRU cache to limit disk usage, so we return the file size here.
+        // This is technically "heap size" in the context of the LRU cache (resource size),
+        // even though it tracks disk bytes, not memory bytes.
+        self.disk_size
     }
 }
 
@@ -93,7 +97,7 @@ impl Storage for TieredStorage {
                 *hash,
                 CachedFile {
                     path,
-                    size: data.len(),
+                    disk_size: data.len(),
                 },
             );
         }
@@ -126,7 +130,13 @@ impl Storage for TieredStorage {
             let path = self.local.get_obj_path(hash);
 
             let mut lru = self.lru.lock().unwrap();
-            let _ = lru.insert(*hash, CachedFile { path, size });
+            let _ = lru.insert(
+                *hash,
+                CachedFile {
+                    path,
+                    disk_size: size,
+                },
+            );
         }
 
         Ok(remote_res)
