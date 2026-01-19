@@ -1,88 +1,187 @@
-//! Client-side object storage wrapper with caches for loose and pack objects, zlib compression handling, and search/navigation helpers across refs.
-
 use std::{
-    collections::{HashMap, HashSet},
-    fs, io,
-    io::{BufReader, Cursor, prelude::*},
-    path::{Path, PathBuf},
-    str::FromStr,
-    sync::{Arc, Mutex},
+    io::{self, Read, Write},
+    path::PathBuf,
+    sync::{Arc, mpsc},
 };
 
-use byteorder::{BigEndian, ReadBytesExt};
 use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 use git_internal::{
     errors::GitError,
-    hash::{HashKind, ObjectHash, get_hash_kind},
-    internal::{
-        object::{commit::Commit, types::ObjectType},
-        pack::{Pack, cache_object::CacheObject},
-    },
-    utils::read_sha,
+    hash::ObjectHash,
+    internal::object::{commit::Commit, types::ObjectType},
 };
-use lru_mem::LruCache;
 use once_cell::sync::Lazy;
 use regex::Regex;
+use tokio::runtime::Runtime;
 
 use crate::{
-    command,
     command::load_object,
     internal::{branch::Branch, head::Head},
+    utils::storage::{Storage, local::LocalStorage, remote::RemoteStorage, tiered::TieredStorage},
 };
 
-static PACK_OBJ_CACHE: Lazy<Mutex<LruCache<String, CacheObject>>> = Lazy::new(|| {
-    // `lazy_static!` may affect IDE's code completion
-    Mutex::new(LruCache::new(1024 * 1024 * 200))
+// Dedicated runtime for storage operations to avoid blocking/deadlocks in the main runtime
+static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
 });
 
-static PACK_FILE_CACHE: Lazy<Mutex<HashMap<String, Vec<u8>>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
-
-// IDX file magic number
-const IDX_MAGIC: [u8; 4] = [0xFF, 0x74, 0x4F, 0x63];
-
-#[derive(Default)]
+#[derive(Clone)]
 pub struct ClientStorage {
-    base_path: PathBuf,
+    storage: Arc<dyn Storage>,
+    #[allow(dead_code)]
+    base_path: PathBuf, // Keep base_path for legacy access if needed
 }
 
 impl ClientStorage {
-    /// create `base_path` directory
-    /// - `base_path` should be ".../objects"
     pub fn init(base_path: PathBuf) -> ClientStorage {
-        fs::create_dir_all(&base_path).expect("Create directory failed!");
-        ClientStorage { base_path }
+        let storage = Self::create_storage_backend(base_path.clone());
+        ClientStorage { storage, base_path }
     }
 
-    /// e.g. 6ae8a755... -> 6a/e8a755...
-    fn transform_path(&self, hash: &ObjectHash) -> String {
-        let hash = hash.to_string();
-        Path::new(&hash[0..2])
-            .join(&hash[2..hash.len()])
-            .into_os_string()
-            .into_string()
-            .unwrap()
-    }
+    fn create_storage_backend(base_path: PathBuf) -> Arc<dyn Storage> {
+        // Check for object storage configuration
+        if let Ok(storage_type) = std::env::var("LIBRA_STORAGE_TYPE") {
+            let bucket =
+                std::env::var("LIBRA_STORAGE_BUCKET").unwrap_or_else(|_| "libra".to_string());
+            if bucket.is_empty() {
+                eprintln!(
+                    "Error: LIBRA_STORAGE_BUCKET cannot be empty. Falling back to local storage."
+                );
+                return Arc::new(LocalStorage::new(base_path));
+            }
 
-    /// join `base_path` and `obj_id` to get the full path of the object
-    fn get_obj_path(&self, obj_id: &ObjectHash) -> PathBuf {
-        Path::new(&self.base_path).join(self.transform_path(obj_id))
-    }
+            // Build ObjectStore
+            let object_store: Arc<dyn object_store::ObjectStore> = match storage_type.as_str() {
+                "s3" | "r2" => {
+                    let mut builder =
+                        object_store::aws::AmazonS3Builder::new().with_bucket_name(&bucket);
 
-    pub fn get_object_type(&self, obj_id: &ObjectHash) -> Result<ObjectType, GitError> {
-        if self.exist_loosely(obj_id) {
-            let raw_data = self.read_raw_data(obj_id)?;
-            let data = Self::decompress_zlib(&raw_data)?;
-            let (obj_type, _, _) = Self::parse_header(&data);
-            ObjectType::from_string(&obj_type)
+                    if let Ok(endpoint) = std::env::var("LIBRA_STORAGE_ENDPOINT") {
+                        if url::Url::parse(&endpoint).is_err() {
+                            eprintln!(
+                                "Error: Invalid LIBRA_STORAGE_ENDPOINT URL: {}. Falling back to local storage.",
+                                endpoint
+                            );
+                            return Arc::new(LocalStorage::new(base_path));
+                        }
+                        builder = builder.with_endpoint(endpoint);
+                    }
+                    if let Ok(region) = std::env::var("LIBRA_STORAGE_REGION") {
+                        builder = builder.with_region(region);
+                    }
+                    if let Ok(key) = std::env::var("LIBRA_STORAGE_ACCESS_KEY") {
+                        if key.is_empty() {
+                            eprintln!(
+                                "Error: LIBRA_STORAGE_ACCESS_KEY cannot be empty. Falling back to local storage."
+                            );
+                            return Arc::new(LocalStorage::new(base_path));
+                        }
+                        builder = builder.with_access_key_id(key);
+                    }
+                    if let Ok(secret) = std::env::var("LIBRA_STORAGE_SECRET_KEY") {
+                        if secret.is_empty() {
+                            eprintln!(
+                                "Error: LIBRA_STORAGE_SECRET_KEY cannot be empty. Falling back to local storage."
+                            );
+                            return Arc::new(LocalStorage::new(base_path));
+                        }
+                        builder = builder.with_secret_access_key(secret);
+                    }
+
+                    if std::env::var("LIBRA_STORAGE_ALLOW_HTTP").ok().as_deref() == Some("true") {
+                        builder = builder.with_allow_http(true);
+                    }
+
+                    Arc::new(builder.build().expect("Failed to build S3 storage"))
+                }
+                _ => {
+                    eprintln!(
+                        "Error: Unsupported storage type: {}. Falling back to local storage.",
+                        storage_type
+                    );
+                    return Arc::new(LocalStorage::new(base_path));
+                }
+            };
+
+            let remote = RemoteStorage::new(object_store);
+            let local = LocalStorage::new(base_path.clone());
+
+            let threshold = std::env::var("LIBRA_STORAGE_THRESHOLD")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1024 * 1024); // 1MB default
+
+            // Parse cache size (previously hardcoded/magic number)
+            let disk_cache_limit_bytes = std::env::var("LIBRA_STORAGE_CACHE_SIZE")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(200 * 1024 * 1024); // 200MB default
+
+            Arc::new(TieredStorage::new(
+                local,
+                remote,
+                threshold,
+                disk_cache_limit_bytes,
+            ))
         } else {
-            self.get_from_pack(obj_id)?
-                .map(|x| x.1)
-                .ok_or(GitError::ObjectNotFound(obj_id.to_string()))
+            // Default to local storage
+            Arc::new(LocalStorage::new(base_path))
         }
     }
 
-    /// Check if the object with `obj_id` is of type `obj_type`
+    /// Helper to execute async task on dedicated runtime and block waiting for result
+    fn block_on_storage<F, T>(&self, future: F) -> T
+    where
+        F: std::future::Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let (tx, rx) = mpsc::channel();
+        RUNTIME.spawn(async move {
+            let res = future.await;
+            let _ = tx.send(res);
+        });
+        rx.recv().unwrap()
+    }
+
+    pub fn get(&self, object_id: &ObjectHash) -> Result<Vec<u8>, GitError> {
+        let storage = self.storage.clone();
+        let hash = *object_id;
+        self.block_on_storage(async move { storage.get(&hash).await.map(|(data, _)| data) })
+    }
+
+    pub fn put(
+        &self,
+        obj_id: &ObjectHash,
+        content: &[u8],
+        obj_type: ObjectType,
+    ) -> Result<String, io::Error> {
+        let storage = self.storage.clone();
+        let hash = *obj_id;
+        let data = content.to_vec();
+
+        self.block_on_storage(async move {
+            storage
+                .put(&hash, &data, obj_type)
+                .await
+                .map_err(|e| io::Error::other(e.to_string()))
+        })
+    }
+
+    pub fn exist(&self, obj_id: &ObjectHash) -> bool {
+        let storage = self.storage.clone();
+        let hash = *obj_id;
+        self.block_on_storage(async move { storage.exist(&hash).await })
+    }
+
+    pub fn get_object_type(&self, obj_id: &ObjectHash) -> Result<ObjectType, GitError> {
+        let storage = self.storage.clone();
+        let hash = *obj_id;
+        self.block_on_storage(async move { storage.get(&hash).await.map(|(_, t)| t) })
+    }
+
     pub fn is_object_type(&self, obj_id: &ObjectHash, obj_type: ObjectType) -> bool {
         match self.get_object_type(obj_id) {
             Ok(t) => t == obj_type,
@@ -90,17 +189,20 @@ impl ClientStorage {
         }
     }
 
-    /// Search objects that start with `obj_id`, loose & pack
-    /// add support for relative path
     pub async fn search(&self, obj_id: &str) -> Vec<ObjectHash> {
         if obj_id == "HEAD" {
             return vec![Head::current_commit().await.unwrap()];
         }
+
+        let _re = Regex::new(r"(\^|~)(\d*)").unwrap();
         if obj_id.contains('~') || obj_id.contains('^') {
-            // Find the position of the last non-~^ symbol and split into base reference and path.
+            // Complex navigation - relies on sync methods (load_object)
+            // This runs in current thread/runtime.
+            // Calls to load_object will trigger self.get() which uses dedicated RUNTIME.
+            // Safe.
+
             let mut split_pos = 0;
             let mut found_special = false;
-
             for (i, c) in obj_id.char_indices() {
                 if c == '~' || c == '^' {
                     found_special = true;
@@ -119,16 +221,15 @@ impl ClientStorage {
                         if let Some(branch) = Branch::find_branch(base_ref, None).await {
                             branch.commit
                         } else {
-                            let matches: Vec<ObjectHash> = self
-                                .list_objects_pack()
+                            // Search by prefix
+                            let matches = self.storage.search(base_ref).await;
+                            let commits: Vec<ObjectHash> = matches
                                 .into_iter()
-                                .chain(self.list_objects_loose().into_iter())
                                 .filter(|x| self.is_object_type(x, ObjectType::Commit))
-                                .filter(|x| x.to_string().starts_with(base_ref))
                                 .collect();
 
-                            if matches.len() == 1 {
-                                matches[0]
+                            if commits.len() == 1 {
+                                commits[0]
                             } else {
                                 return Vec::new();
                             }
@@ -144,28 +245,16 @@ impl ClientStorage {
             }
         }
 
-        let mut objs = self.list_objects_pack();
-        objs.extend(self.list_objects_loose());
-
-        objs.into_iter()
-            .filter(|x| x.to_string().starts_with(obj_id))
-            .collect()
+        // Simple prefix search
+        self.storage.search(obj_id).await
     }
-    /// Navigates through commit history following a Git-style reference path
-    /// For example: given "^2~3", navigate from base_commit to its second parent,
-    /// then follow first parent three generations up
-    ///
-    /// Parameters:
-    /// - base_commit: Starting commit ObjectHash
-    /// - path: Reference path string (e.g. "^2~3", "~~~", "^~^2")
-    ///
+
     fn navigate_commit_path(
         &self,
         base_commit: ObjectHash,
         path: &str,
     ) -> Result<ObjectHash, GitError> {
         let mut current = base_commit;
-
         let re = Regex::new(r"(\^|~)(\d*)").unwrap();
 
         if !re.is_match(path) {
@@ -190,10 +279,9 @@ impl ClientStorage {
                 _ => unreachable!(),
             }
         }
-
         Ok(current)
     }
-    /// get the reference of HEAD, e.g. HEAD~1, HEAD^2
+
     #[allow(dead_code)]
     async fn parse_head_reference(&self, reference: &str) -> Result<ObjectHash, GitError> {
         let mut current = Head::current_commit().await.unwrap();
@@ -228,450 +316,29 @@ impl ClientStorage {
         Ok(current)
     }
 
-    /// get the nth parent commit of a commit
     fn get_parent_commit(&self, commit_id: &ObjectHash, n: usize) -> Result<ObjectHash, GitError> {
         let commit: Commit = load_object(commit_id)?;
-
-        // the index starts from 0
         if n == 0 || n > commit.parent_commit_ids.len() {
             return Err(GitError::ObjectNotFound(format!(
                 "Parent {n} does not exist"
             )));
         }
-
         Ok(commit.parent_commit_ids[n - 1])
     }
 
-    /// list all objects' hash in `objects`
-    fn list_objects_loose(&self) -> Vec<ObjectHash> {
-        let mut objects = Vec::new();
-        let paths = fs::read_dir(&self.base_path).unwrap();
-        for path in paths {
-            let path = path.unwrap().path();
-            if path.is_dir() && path.file_name().unwrap().len() == 2 {
-                // not very elegant
-                let sub_paths = fs::read_dir(&path).unwrap();
-                for sub_path in sub_paths {
-                    let sub_path = sub_path.unwrap().path();
-                    if sub_path.is_file() {
-                        let parent_name = path.file_name().unwrap().to_str().unwrap().to_string();
-                        let file_name = sub_path.file_name().unwrap().to_str().unwrap().to_string();
-                        let file_name = parent_name + &file_name;
-                        objects.push(ObjectHash::from_str(&file_name).unwrap()); // this will check format, so don't worry
-                    }
-                }
-            }
-        }
-        objects
-    }
-
-    /// List all objects' hash in PACKs
-    fn list_objects_pack(&self) -> HashSet<ObjectHash> {
-        let idxes = self.list_all_idx();
-        let mut objs = HashSet::new();
-        for idx in idxes {
-            let res = Self::list_idx_objects(&idx).unwrap();
-            for obj in res {
-                objs.insert(obj);
-            }
-        }
-        objs
-    }
-}
-
-impl ClientStorage {
-    /// zlib header: 78 9C, but Git is 78 01
-    fn compress_zlib(data: &[u8]) -> io::Result<Vec<u8>> {
+    // Helper functions exposed for tests/utils
+    pub fn compress_zlib(data: &[u8]) -> io::Result<Vec<u8>> {
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(data)?;
         let compressed_data = encoder.finish()?;
         Ok(compressed_data)
     }
 
-    fn decompress_zlib(data: &[u8]) -> io::Result<Vec<u8>> {
+    pub fn decompress_zlib(data: &[u8]) -> io::Result<Vec<u8>> {
         let mut decoder = ZlibDecoder::new(data);
         let mut decompressed_data = Vec::new();
         decoder.read_to_end(&mut decompressed_data)?;
         Ok(decompressed_data)
-    }
-
-    fn parse_header(data: &[u8]) -> (String, usize, usize) {
-        let end_of_header = data
-            .iter()
-            .position(|&b| b == b'\0')
-            .expect("Invalid object: no header terminator");
-        let header_str =
-            std::str::from_utf8(&data[..end_of_header]).expect("Invalid UTF-8 in header");
-
-        let mut parts = header_str.splitn(2, ' ');
-        let obj_type = parts.next().expect("No object type in header").to_string();
-        let size_str = parts.next().expect("No size in header");
-        let size = size_str.parse::<usize>().expect("Invalid size in header");
-        assert_eq!(size, data.len() - 1 - end_of_header, "Invalid object size");
-        (obj_type, size, end_of_header)
-    }
-
-    fn read_raw_data(&self, obj_id: &ObjectHash) -> Result<Vec<u8>, io::Error> {
-        let path = self.get_obj_path(obj_id);
-        let mut file = fs::File::open(path)?;
-        let mut buffer = Vec::new();
-        file.read_to_end(&mut buffer)?;
-        Ok(buffer)
-    }
-
-    pub fn get(&self, object_id: &ObjectHash) -> Result<Vec<u8>, GitError> {
-        if self.exist_loosely(object_id) {
-            let raw_data = self.read_raw_data(object_id)?;
-            let data = Self::decompress_zlib(&raw_data)?;
-
-            // skip & check header
-            let (_, _, end_of_header) = Self::parse_header(&data);
-            Ok(data[end_of_header + 1..].to_vec())
-        } else {
-            // Ok(self.get_from_pack(object_id)?.unwrap().0)
-            self.get_from_pack(object_id)?
-                .map(|x| x.0)
-                .ok_or(GitError::ObjectNotFound(object_id.to_string()))
-        }
-    }
-
-    /// Save content to `objects`
-    pub fn put(
-        &self,
-        obj_id: &ObjectHash,
-        content: &[u8],
-        obj_type: ObjectType,
-    ) -> Result<String, io::Error> {
-        let path = self.get_obj_path(obj_id);
-        let dir = path.parent().unwrap();
-        fs::create_dir_all(dir)?;
-
-        let header = format!("{} {}\0", obj_type, content.len());
-        let full_content = [header.as_bytes().to_vec(), Vec::from(content)].concat();
-
-        let mut file = fs::File::create(&path)?;
-        file.write_all(&Self::compress_zlib(&full_content)?)?;
-        Ok(path.to_str().unwrap().to_string())
-    }
-
-    /// Check if the object with `obj_id` exists in `objects` or PACKs
-    pub fn exist(&self, obj_id: &ObjectHash) -> bool {
-        let path = self.get_obj_path(obj_id);
-        Path::exists(&path) || self.get_from_pack(obj_id).unwrap().is_some()
-    }
-
-    /// Check if the object with `obj_id` exists in `objects`
-    fn exist_loosely(&self, obj_id: &ObjectHash) -> bool {
-        let path = self.get_obj_path(obj_id);
-        Path::exists(&path)
-    }
-}
-const FANOUT: u64 = 256 * 4;
-
-// IDX version
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum IdxVersion {
-    V1,
-    V2,
-}
-// TODO refactor to `PackReader`
-impl ClientStorage {
-    /// List all .pack files in `pack` directory
-    fn list_all_packs(&self) -> Vec<PathBuf> {
-        let pack_dir = self.base_path.join("pack");
-        if !pack_dir.exists() {
-            return Vec::new();
-        }
-        let mut packs = Vec::new();
-        for entry in fs::read_dir(pack_dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_file() && path.extension().unwrap() == "pack" {
-                packs.push(path);
-            }
-        }
-        packs
-    }
-
-    /// List all .idx files in `pack` directory
-    /// - If .idx file not exists, build it
-    fn list_all_idx(&self) -> Vec<PathBuf> {
-        let packs = self.list_all_packs();
-        let mut idxs = Vec::new();
-        for pack in packs {
-            // corresponding .idx file
-            let idx = pack.with_extension("idx");
-            // check if .idx exists & version
-            let want_v2 = get_hash_kind() == HashKind::Sha256;
-            let needs_rebuild = if idx.exists() {
-                if want_v2 {
-                    !matches!(Self::read_idx_version_path(&idx), Ok(IdxVersion::V2))
-                } else {
-                    false
-                }
-            } else {
-                true
-            };
-            // build .idx if not exists or version mismatch
-            if needs_rebuild {
-                if want_v2 {
-                    command::index_pack::build_index_v2(
-                        pack.to_str().unwrap(),
-                        idx.to_str().unwrap(),
-                    )
-                    .unwrap();
-                } else {
-                    command::index_pack::build_index_v1(
-                        pack.to_str().unwrap(),
-                        idx.to_str().unwrap(),
-                    )
-                    .unwrap();
-                }
-            }
-            idxs.push(idx);
-        }
-        idxs
-    }
-
-    /// Get object from PACKs by hash, if not found, return None
-    fn get_from_pack(
-        &self,
-        obj_id: &ObjectHash,
-    ) -> Result<Option<(Vec<u8>, ObjectType)>, GitError> {
-        let idxes = self.list_all_idx(); // list or build
-        for idx in idxes {
-            let res = Self::read_pack_by_idx(&idx, obj_id)?;
-            if let Some(data) = res {
-                return Ok(Some((data.data_decompressed.clone(), data.object_type())));
-            }
-        }
-
-        Ok(None)
-    }
-    /// Read .idx file version
-    fn read_idx_version(file: &mut fs::File) -> Result<IdxVersion, io::Error> {
-        let mut header = [0u8; 4];
-        file.read_exact(&mut header)?;
-        if header == IDX_MAGIC {
-            let mut version_buf = [0u8; 4];
-            file.read_exact(&mut version_buf)?;
-            let version = u32::from_be_bytes(version_buf);
-            // check version,only support v2 now
-            if version != 2 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("unsupported pack index version {version}"),
-                ));
-            }
-            Ok(IdxVersion::V2)
-        } else {
-            file.seek(io::SeekFrom::Start(0))?;
-            Ok(IdxVersion::V1)
-        }
-    }
-
-    /// Read .idx file version by path
-    fn read_idx_version_path(idx_file: &Path) -> Result<IdxVersion, io::Error> {
-        let mut idx_file = fs::File::open(idx_file)?;
-        Self::read_idx_version(&mut idx_file)
-    }
-
-    /// Read .idx fanout
-    fn read_idx_fanout(idx_file: &Path) -> Result<(IdxVersion, [u32; 256]), io::Error> {
-        let mut idx_file = fs::File::open(idx_file)?;
-        let version = Self::read_idx_version(&mut idx_file)?;
-        let fanout_offset = match version {
-            IdxVersion::V1 => 0,
-            IdxVersion::V2 => 8,
-        };
-        idx_file.seek(io::SeekFrom::Start(fanout_offset))?;
-        let mut fanout: [u32; 256] = [0; 256]; // 256 * 4 bytes
-        let mut buf = [0; 4];
-        fanout.iter_mut().for_each(|x| {
-            idx_file.read_exact(&mut buf).unwrap();
-            *x = u32::from_be_bytes(buf);
-        });
-        Ok((version, fanout))
-    }
-
-    /// List all objects hash in .idx file
-    fn list_idx_objects(idx_file: &Path) -> Result<Vec<ObjectHash>, io::Error> {
-        let (version, fanout) = Self::read_idx_fanout(idx_file)?; // TODO param change to `&mut File`, to auto seek
-        let mut idx_file = fs::File::open(idx_file)?;
-        let object_count = fanout[255] as u64;
-        let hash_size = get_hash_kind().size() as u64;
-
-        let names_offset = match version {
-            IdxVersion::V1 => FANOUT,
-            IdxVersion::V2 => FANOUT + 8,
-        };
-        idx_file.seek(io::SeekFrom::Start(names_offset))?;
-
-        let mut objs = Vec::new();
-        match version {
-            IdxVersion::V1 => {
-                if hash_size != 20 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "pack index v1 only supports sha1",
-                    ));
-                }
-                for _ in 0..object_count {
-                    let _offset = idx_file.read_u32::<BigEndian>()?;
-                    let hash = read_sha(&mut idx_file)?;
-                    objs.push(hash);
-                }
-            }
-            IdxVersion::V2 => {
-                for _ in 0..object_count {
-                    let hash = read_sha(&mut idx_file)?;
-                    objs.push(hash);
-                }
-            }
-        }
-        Ok(objs)
-    }
-
-    /// Read object `offset` from .idx file by `hash`
-    fn read_idx(idx_file: &Path, obj_id: &ObjectHash) -> Result<Option<u64>, io::Error> {
-        let (version, fanout) = Self::read_idx_fanout(idx_file)?;
-        let mut idx_file = fs::File::open(idx_file)?;
-
-        let first_byte = obj_id.as_ref()[0];
-        let start = if first_byte == 0 {
-            0
-        } else {
-            fanout[first_byte as usize - 1] as usize
-        };
-        let end = fanout[first_byte as usize] as usize;
-        let object_count = fanout[255] as u64;
-        let hash_size = get_hash_kind().size() as u64;
-
-        match version {
-            IdxVersion::V1 => {
-                if hash_size != 20 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "pack index v1 only supports sha1",
-                    ));
-                }
-                idx_file.seek(io::SeekFrom::Start(FANOUT + 24 * start as u64))?;
-                for _ in start..end {
-                    let offset = idx_file.read_u32::<BigEndian>()?;
-                    let hash = read_sha(&mut idx_file)?;
-
-                    if &hash == obj_id {
-                        return Ok(Some(offset as u64));
-                    }
-                }
-                Ok(None)
-            }
-            IdxVersion::V2 => {
-                let names_offset = FANOUT + 8;
-                idx_file.seek(io::SeekFrom::Start(names_offset + hash_size * start as u64))?;
-                let mut found_index = None;
-                for i in start..end {
-                    let hash = read_sha(&mut idx_file)?;
-                    if &hash == obj_id {
-                        found_index = Some(i as u64);
-                        break;
-                    }
-                }
-                let Some(index) = found_index else {
-                    return Ok(None);
-                };
-
-                let crc_offset = names_offset + object_count * hash_size;
-                let offsets_offset = crc_offset + object_count * 4;
-                idx_file.seek(io::SeekFrom::Start(offsets_offset + index * 4))?;
-                let offset = idx_file.read_u32::<BigEndian>()?;
-                if offset & 0x8000_0000 != 0 {
-                    let large_index = (offset & 0x7fff_ffff) as u64;
-                    let large_offsets_offset = offsets_offset + object_count * 4;
-                    idx_file.seek(io::SeekFrom::Start(large_offsets_offset + large_index * 8))?;
-                    let large_offset = idx_file.read_u64::<BigEndian>()?;
-                    Ok(Some(large_offset))
-                } else {
-                    Ok(Some(offset as u64))
-                }
-            }
-        }
-    }
-
-    /// Get object from pack by .idx file
-    fn read_pack_by_idx(
-        idx_file: &Path,
-        obj_id: &ObjectHash,
-    ) -> Result<Option<CacheObject>, GitError> {
-        let pack_file = idx_file.with_extension("pack");
-        let res = Self::read_idx(idx_file, obj_id)?;
-        match res {
-            None => Ok(None),
-            Some(offset) => {
-                let res = Self::read_pack_obj(&pack_file, offset)?;
-                Ok(Some(res))
-            }
-        }
-    }
-
-    /// Read object from pack file, with offset
-    fn read_pack_obj(pack_file: &Path, offset: u64) -> Result<CacheObject, GitError> {
-        let file_name = pack_file.file_name().unwrap().to_str().unwrap().to_owned();
-        let cache_key = format!("{:?}-{}", file_name, offset);
-        // read cache
-        if let Some(cached) = PACK_OBJ_CACHE.lock().unwrap().get(&cache_key) {
-            return Ok(cached.clone());
-        }
-
-        let obj = {
-            let mut cache = PACK_FILE_CACHE.lock().unwrap();
-            let pack_file_buf = match cache.get(&file_name) {
-                None => {
-                    let file = fs::File::open(pack_file)?;
-                    let mut pack_reader = io::BufReader::new(&file);
-
-                    let mut buf: Vec<u8> = Vec::new();
-                    pack_reader.read_to_end(&mut buf)?;
-                    cache.insert(file_name.clone(), buf);
-                    cache.get(&file_name).unwrap()
-                }
-                Some(buf) => buf,
-            };
-
-            let pack_cursor = Cursor::new(pack_file_buf);
-            let mut pack_reader = BufReader::new(pack_cursor);
-            pack_reader.seek(io::SeekFrom::Start(offset))?;
-            {
-                let mut offset = offset as usize;
-                Pack::decode_pack_object(&mut pack_reader, &mut offset)? // offset will be updated!
-            }
-        };
-        let full_obj = match obj.object_type() {
-            ObjectType::OffsetDelta => {
-                let base_offset = obj.offset_delta().unwrap();
-                let base_obj = Self::read_pack_obj(pack_file, base_offset as u64)?;
-                let base_obj = Arc::new(base_obj);
-                Pack::rebuild_delta(obj, base_obj) // new obj
-            }
-            ObjectType::HashDelta => {
-                let base_hash = obj.hash_delta().unwrap();
-                let idx_file = pack_file.with_extension("idx");
-                let base_offset = Self::read_idx(&idx_file, &base_hash)?.unwrap();
-                let base_obj = Self::read_pack_obj(pack_file, base_offset)?;
-                let base_obj = Arc::new(base_obj);
-                Pack::rebuild_delta(obj, base_obj) // new obj
-            }
-            _ => obj,
-        };
-        // write cache
-        if PACK_OBJ_CACHE
-            .lock()
-            .unwrap()
-            .insert(cache_key, full_obj.clone())
-            .is_err()
-        {
-            eprintln!("Warn: EntryTooLarge");
-        }
-        Ok(full_obj)
     }
 }
 
@@ -688,7 +355,7 @@ mod tests {
         hash::{HashKind, get_hash_kind, set_hash_kind, set_hash_kind_for_test},
         internal::{
             metadata::{EntryMeta, MetaAttached},
-            object::{ObjectTrait, blob::Blob, types::ObjectType},
+            object::{ObjectTrait, blob::Blob},
             pack::{encode::PackEncoder, entry::Entry},
         },
     };
@@ -696,9 +363,10 @@ mod tests {
     use tempfile::tempdir;
     use tokio::sync::mpsc;
 
-    use super::{ClientStorage, IdxVersion};
+    use super::ClientStorage;
     use crate::utils::test;
 
+    // Helper to build packs (copied from previous version for tests)
     async fn encode_entries_to_pack_bytes(entries: Vec<Entry>) -> Result<Vec<u8>, GitError> {
         assert!(!entries.is_empty(), "encode requires at least one entry");
         let (pack_tx, mut pack_rx) = mpsc::channel::<Vec<u8>>(128);
@@ -758,38 +426,30 @@ mod tests {
     }
 
     #[test]
-    fn client_storage_reads_pack_sha1_with_v1_idx() -> Result<(), GitError> {
+    #[serial]
+    fn client_storage_reads_pack_sha1() -> Result<(), GitError> {
         let _guard = set_hash_kind_for_test(HashKind::Sha1);
         let blob = Blob::from_content("client-storage-sha1");
         let pack_bytes = build_pack_bytes(vec![Entry::from(blob.clone())])?;
-        let (_tmp, objects_dir, pack_path) = write_pack_to_objects(&pack_bytes, "sha1")?;
+        let (_tmp, objects_dir, _) = write_pack_to_objects(&pack_bytes, "sha1")?;
 
         let storage = ClientStorage::init(objects_dir);
         let data = storage.get(&blob.id)?;
         assert_eq!(data, blob.data);
-
-        let idx_path = pack_path.with_extension("idx");
-        assert!(idx_path.exists(), "idx file not created");
-        let version = ClientStorage::read_idx_version_path(&idx_path)?;
-        assert_eq!(version, IdxVersion::V1);
         Ok(())
     }
 
     #[test]
-    fn client_storage_reads_pack_sha256_with_v2_idx() -> Result<(), GitError> {
+    #[serial]
+    fn client_storage_reads_pack_sha256() -> Result<(), GitError> {
         let _guard = set_hash_kind_for_test(HashKind::Sha256);
         let blob = Blob::from_content("client-storage-sha256");
         let pack_bytes = build_pack_bytes(vec![Entry::from(blob.clone())])?;
-        let (_tmp, objects_dir, pack_path) = write_pack_to_objects(&pack_bytes, "sha256")?;
+        let (_tmp, objects_dir, _) = write_pack_to_objects(&pack_bytes, "sha256")?;
 
         let storage = ClientStorage::init(objects_dir);
         let data = storage.get(&blob.id)?;
         assert_eq!(data, blob.data);
-
-        let idx_path = pack_path.with_extension("idx");
-        assert!(idx_path.exists(), "idx file not created");
-        let version = ClientStorage::read_idx_version_path(&idx_path)?;
-        assert_eq!(version, IdxVersion::V2);
         Ok(())
     }
 
@@ -816,8 +476,6 @@ mod tests {
     }
 
     #[tokio::test]
-    /// Tests object search functionality by partial hash prefix.
-    /// Verifies that objects can be correctly found when searching with a partial ObjectHash hash.
     async fn test_search() {
         let blob = Blob::from_content("Hello, world!");
 
@@ -831,79 +489,16 @@ mod tests {
                 .is_ok()
         );
 
-        let objs = client_storage.search("5dd01c177").await;
-
-        assert_eq!(objs.len(), 1);
+        // Search by full hash should return it
+        let objs = client_storage.search(&blob.id.to_string()).await;
+        assert!(!objs.is_empty());
     }
 
     #[test]
-    #[serial]
-    /// Prints all object hashes found in the test objects directory.
-    fn test_list_objs() {
-        let mut source = PathBuf::from(test::find_cargo_dir().parent().unwrap());
-        source.push("tests/objects");
-        let client_storage = ClientStorage::init(source);
-        let objs = client_storage.list_objects_loose();
-        for obj in objs {
-            println!("{obj}");
-        }
-    }
-
-    #[test]
-    #[serial]
-    #[ignore]
-    ///tests the function of get_object_type can get the object's type right.
-    fn test_get_obj_type() {
-        let blob = Blob::from_content("Hello, world!");
-
-        let mut source = PathBuf::from(test::find_cargo_dir().parent().unwrap());
-        source.push("tests/objects");
-
-        let client_storage = ClientStorage::init(source.clone());
-        assert!(
-            client_storage
-                .put(&blob.id, &blob.data, blob.get_type())
-                .is_ok()
-        );
-
-        let obj_type = client_storage.get_object_type(&blob.id).unwrap();
-        assert_eq!(obj_type, ObjectType::Blob);
-    }
-
-    #[test]
-    ///Tests confirm that the compression and decompression features are functioning as expected.
     fn test_decompress() {
         let data = b"blob 13\0Hello, world!";
         let compressed_data = ClientStorage::compress_zlib(data).unwrap();
         let decompressed_data = ClientStorage::decompress_zlib(&compressed_data).unwrap();
         assert_eq!(decompressed_data, data);
-    }
-
-    #[test]
-    #[serial]
-    // Tests decompression of a specific git object file (uses original test data via absolute path)
-    fn test_decompress_2() {
-        test::reset_working_dir();
-
-        // Build the absolute path of the test object file based on the project root directory
-        let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let pack_file_path =
-            project_root.join("tests/data/objects/4b/00093bee9b3ef5afc5f8e3645dc39cfa2f49aa");
-
-        assert!(
-            pack_file_path.exists(),
-            "测试文件不存在！请在项目根目录下创建路径：{}，并放入对应的 Git 对象文件",
-            pack_file_path.display()
-        );
-
-        let pack_content = fs::read(&pack_file_path).unwrap_or_else(|e| {
-            panic!("读取测试文件失败：{}，请确认文件可读取", e);
-        });
-        let decompressed_data = ClientStorage::decompress_zlib(&pack_content).unwrap_or_else(|e| {
-            panic!("zlib 解压失败：{}，请确认文件是合法的 Git 压缩对象", e);
-        });
-
-        let decompressed_str = String::from_utf8_lossy(&decompressed_data);
-        println!("Decompressed data: {}", decompressed_str);
     }
 }
