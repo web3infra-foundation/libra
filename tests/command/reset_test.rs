@@ -39,6 +39,7 @@ async fn setup_standard_repo(
         disable_pre: true,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
     let commit1 = Head::current_commit().await.unwrap();
@@ -78,6 +79,7 @@ async fn setup_standard_repo(
         disable_pre: true,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
     let commit2 = Head::current_commit().await.unwrap();
@@ -117,6 +119,7 @@ async fn setup_standard_repo(
         disable_pre: true,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
     let commit3 = Head::current_commit().await.unwrap();
@@ -156,6 +159,7 @@ async fn setup_standard_repo(
         disable_pre: true,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
     let commit4 = Head::current_commit().await.unwrap();

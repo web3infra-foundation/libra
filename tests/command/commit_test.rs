@@ -27,6 +27,7 @@ async fn test_execute_commit_with_empty_index_fail() {
         disable_pre: true,
         all: false,
         no_verify: false,
+        author: None,
     };
     commit::execute(args).await;
 }
@@ -54,6 +55,7 @@ async fn test_execute_commit() {
             disable_pre: true,
             all: false,
             no_verify: false,
+            author: None,
         };
         commit::execute(args).await;
 
@@ -84,6 +86,7 @@ async fn test_execute_commit() {
             disable_pre: true,
             all: false,
             no_verify: false,
+            author: None,
         };
         commit::execute(args).await;
 
@@ -132,6 +135,7 @@ async fn test_execute_commit() {
             disable_pre: true,
             all: false,
             no_verify: false,
+            author: None,
         };
         commit::execute(args).await;
 
@@ -165,6 +169,7 @@ async fn test_execute_commit() {
             disable_pre: true,
             all: false,
             no_verify: false,
+            author: None,
         };
         commit::execute(args).await;
 
@@ -218,6 +223,7 @@ async fn test_commit_with_all_flag_stages_tracked_changes() {
         disable_pre: true,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -235,6 +241,7 @@ async fn test_commit_with_all_flag_stages_tracked_changes() {
         disable_pre: true,
         all: true,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -288,6 +295,7 @@ async fn test_commit_with_all_flag_records_deletions() {
         disable_pre: true,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -305,6 +313,7 @@ async fn test_commit_with_all_flag_records_deletions() {
         disable_pre: true,
         all: true,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -374,6 +383,7 @@ async fn test_commit_sha256() {
         disable_pre: true,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -397,6 +407,7 @@ async fn test_commit_sha256() {
         disable_pre: true,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -411,4 +422,123 @@ async fn test_commit_sha256() {
         head_commit, amended_commit,
         "Amend should create a new commit"
     );
+}
+
+#[tokio::test]
+#[serial]
+/// Tests that the --author parameter correctly overrides the commit author
+async fn test_commit_with_custom_author() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    // Set default user config using libra's internal config
+    use libra::internal::config::Config;
+    Config::insert("user", None, "name", "Default User").await;
+    Config::insert("user", None, "email", "default@example.com").await;
+
+    // Create a file and add it
+    test::ensure_file("test.txt", Some("test content"));
+    add::execute(AddArgs {
+        pathspec: vec!["test.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        verbose: false,
+        force: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+
+    // Create commit with custom author
+    commit::execute(CommitArgs {
+        message: Some("commit with custom author".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: Some("Custom Author <custom@example.com>".to_string()),
+    })
+    .await;
+
+    // Verify the commit was created with the custom author
+    let head_commit_id = Head::current_commit().await.unwrap();
+    let commit: Commit = load_object(&head_commit_id).unwrap();
+
+    assert_eq!(commit.author.name, "Custom Author");
+    assert_eq!(commit.author.email, "custom@example.com");
+
+    // Committer should still use default user
+    assert_eq!(commit.committer.name, "Default User");
+    assert_eq!(commit.committer.email, "default@example.com");
+
+    assert_eq!(commit.message.trim(), "commit with custom author");
+}
+
+#[tokio::test]
+#[serial]
+/// Tests that the --author parameter works with --amend
+async fn test_commit_amend_with_custom_author() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    // Set default user config
+    use libra::internal::config::Config;
+    Config::insert("user", None, "name", "Default User").await;
+    Config::insert("user", None, "email", "default@example.com").await;
+
+    // Create initial commit with default author
+    commit::execute(CommitArgs {
+        message: Some("initial commit".to_string()),
+        file: None,
+        allow_empty: true,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    })
+    .await;
+
+    let initial_commit_id = Head::current_commit().await.unwrap();
+    let initial_commit: Commit = load_object(&initial_commit_id).unwrap();
+    assert_eq!(initial_commit.author.name, "Default User");
+    assert_eq!(initial_commit.author.email, "default@example.com");
+
+    // Amend with custom author
+    commit::execute(CommitArgs {
+        message: Some("amended with custom author".to_string()),
+        file: None,
+        allow_empty: true,
+        conventional: false,
+        no_edit: false,
+        amend: true,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: Some("Amend Author <amend@example.com>".to_string()),
+    })
+    .await;
+
+    // Verify the amended commit has the new custom author
+    let amended_commit_id = Head::current_commit().await.unwrap();
+    let amended_commit: Commit = load_object(&amended_commit_id).unwrap();
+
+    assert_eq!(amended_commit.author.name, "Amend Author");
+    assert_eq!(amended_commit.author.email, "amend@example.com");
+    assert_eq!(amended_commit.message.trim(), "amended with custom author");
+
+    // Should be a different commit
+    assert_ne!(initial_commit_id, amended_commit_id);
 }

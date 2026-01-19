@@ -72,6 +72,7 @@ async fn test_basic_diff() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -120,6 +121,7 @@ async fn test_diff_staged() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -185,6 +187,7 @@ async fn test_diff_between_commits() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -217,6 +220,7 @@ async fn test_diff_between_commits() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -273,6 +277,7 @@ async fn test_diff_with_pathspec() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -321,6 +326,7 @@ async fn test_diff_output_to_file() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -385,6 +391,7 @@ async fn test_diff_algorithms() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 

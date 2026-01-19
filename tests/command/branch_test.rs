@@ -26,6 +26,7 @@ async fn test_branch() {
         disable_pre: true,
         all: false,
         no_verify: false,
+        author: None,
     };
     commit::execute(commit_args).await;
     let first_commit_id = Branch::find_branch("master", None).await.unwrap().commit;
@@ -41,6 +42,7 @@ async fn test_branch() {
         disable_pre: true,
         all: false,
         no_verify: false,
+        author: None,
     };
     commit::execute(commit_args).await;
     let second_commit_id = Branch::find_branch("master", None).await.unwrap().commit;
@@ -137,6 +139,7 @@ async fn test_create_branch_from_remote() {
         disable_pre: true,
         all: false,
         no_verify: false,
+        author: None,
     };
     commit::execute(args).await;
     let hash = Head::current_commit().await.unwrap();
@@ -182,6 +185,7 @@ async fn test_invalid_branch_name() {
         disable_pre: true,
         all: false,
         no_verify: false,
+        author: None,
     };
     commit::execute(args).await;
 
@@ -224,6 +228,7 @@ async fn test_branch_rename() {
         disable_pre: true,
         all: false,
         no_verify: false,
+        author: None,
     };
     commit::execute(args).await;
     let commit_id_1 = Head::current_commit().await.unwrap();
@@ -296,6 +301,7 @@ async fn test_rename_current_branch() {
         disable_pre: true,
         all: false,
         no_verify: false,
+        author: None,
     };
     commit::execute(args).await;
     let commit_id = Head::current_commit().await.unwrap();
@@ -360,6 +366,7 @@ async fn test_rename_to_existing_branch() {
         disable_pre: true,
         all: false,
         no_verify: false,
+        author: None,
     };
     commit::execute(args).await;
 
@@ -430,6 +437,7 @@ async fn test_list_all_branches() {
         disable_pre: true,
         all: false,
         no_verify: false,
+        author: None,
     };
     commit::execute(args).await;
 

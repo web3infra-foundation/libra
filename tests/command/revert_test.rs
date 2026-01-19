@@ -48,6 +48,7 @@ async fn test_basic_revert() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
     println!("C1: Added 1.txt");
@@ -76,6 +77,7 @@ async fn test_basic_revert() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
     println!("C2: Modified 1.txt");
@@ -105,6 +107,7 @@ async fn test_basic_revert() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
     println!("C3: Removed 1.txt, Added 2.txt");
@@ -208,6 +211,7 @@ async fn test_revert_no_commit() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -234,6 +238,7 @@ async fn test_revert_no_commit() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -263,6 +268,7 @@ async fn test_revert_no_commit() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -302,6 +308,7 @@ async fn test_revert_root_commit() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 

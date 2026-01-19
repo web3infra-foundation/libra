@@ -208,6 +208,7 @@ async fn test_log_patch_no_pathspec() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -235,6 +236,7 @@ async fn test_log_patch_no_pathspec() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -330,6 +332,7 @@ async fn test_log_patch_with_pathspec() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -462,6 +465,7 @@ async fn test_log_stat() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -488,6 +492,7 @@ async fn test_log_stat() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -540,6 +545,7 @@ async fn test_log_stat_with_modifications() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -566,6 +572,7 @@ async fn test_log_stat_with_modifications() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -769,6 +776,7 @@ async fn test_log_graph_simple_chain() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -795,6 +803,7 @@ async fn test_log_graph_simple_chain() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -839,6 +848,7 @@ async fn test_log_stat_and_graph_combined() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
