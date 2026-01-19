@@ -39,7 +39,7 @@ async fn test_reflog_show_with_filters() {
             disable_pre: true,
             all: false,
             no_verify: false,
-        author: None,
+            author: None,
         };
         commit::execute(commit_args).await;
     }
@@ -136,7 +136,7 @@ async fn test_reflog_show_with_author_filter() {
             disable_pre: true,
             all: false,
             no_verify: false,
-        author: None,
+            author: None,
         };
         commit::execute(commit_args).await;
     }
@@ -185,7 +185,7 @@ async fn test_reflog_show_with_number_limit() {
             disable_pre: true,
             all: false,
             no_verify: false,
-        author: None,
+            author: None,
         };
         commit::execute(commit_args).await;
     }
@@ -234,7 +234,7 @@ async fn test_reflog_show_with_combined_filters() {
             disable_pre: true,
             all: false,
             no_verify: false,
-        author: None,
+            author: None,
         };
         commit::execute(commit_args).await;
     }
@@ -292,7 +292,7 @@ async fn test_reflog_show_with_patch() {
             disable_pre: true,
             all: false,
             no_verify: false,
-        author: None,
+            author: None,
         };
         commit::execute(commit_args).await;
     }
@@ -330,7 +330,7 @@ async fn test_reflog_show_with_stat() {
             disable_pre: true,
             all: false,
             no_verify: false,
-        author: None,
+            author: None,
         };
         commit::execute(commit_args).await;
     }

@@ -470,14 +470,14 @@ async fn test_commit_with_custom_author() {
     // Verify the commit was created with the custom author
     let head_commit_id = Head::current_commit().await.unwrap();
     let commit: Commit = load_object(&head_commit_id).unwrap();
-    
+
     assert_eq!(commit.author.name, "Custom Author");
     assert_eq!(commit.author.email, "custom@example.com");
-    
+
     // Committer should still use default user
     assert_eq!(commit.committer.name, "Default User");
     assert_eq!(commit.committer.email, "default@example.com");
-    
+
     assert_eq!(commit.message.trim(), "commit with custom author");
 }
 
@@ -534,11 +534,11 @@ async fn test_commit_amend_with_custom_author() {
     // Verify the amended commit has the new custom author
     let amended_commit_id = Head::current_commit().await.unwrap();
     let amended_commit: Commit = load_object(&amended_commit_id).unwrap();
-    
+
     assert_eq!(amended_commit.author.name, "Amend Author");
     assert_eq!(amended_commit.author.email, "amend@example.com");
     assert_eq!(amended_commit.message.trim(), "amended with custom author");
-    
+
     // Should be a different commit
     assert_ne!(initial_commit_id, amended_commit_id);
 }

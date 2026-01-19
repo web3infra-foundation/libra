@@ -85,7 +85,7 @@ pub struct CommitArgs {
 /// If parsing fails, panic with an error message
 fn parse_author(author: &str) -> (String, String) {
     let author = author.trim();
-    
+
     // Try to parse "Name <email>" format
     // Use find (not rfind) to get the first '<' and '>' which matches Git's behavior
     if let Some(start_idx) = author.find('<') {
@@ -94,15 +94,18 @@ fn parse_author(author: &str) -> (String, String) {
             if start_idx < end_idx && end_idx == author.len() - 1 {
                 let name = author[..start_idx].trim().to_string();
                 let email = author[start_idx + 1..end_idx].trim().to_string();
-                
+
                 if !name.is_empty() && !email.is_empty() {
                     return (name, email);
                 }
             }
         }
     }
-    
-    panic!("fatal: invalid author format '{}'. Expected format: 'Name <email>'", author);
+
+    panic!(
+        "fatal: invalid author format '{}'. Expected format: 'Name <email>'",
+        author
+    );
 }
 
 /// Create author and committer signatures based on the provided arguments
@@ -114,18 +117,26 @@ async fn create_commit_signatures(author_override: Option<&str>) -> (Signature, 
     let default_user_email = UserConfig::get("user", None, "email")
         .await
         .unwrap_or_else(|| "unknown".to_string());
-    
+
     // Create author signature (use override if provided)
     let author = if let Some(author_str) = author_override {
         let (name, email) = parse_author(author_str);
         Signature::new(SignatureType::Author, name, email)
     } else {
-        Signature::new(SignatureType::Author, default_user_name.clone(), default_user_email.clone())
+        Signature::new(
+            SignatureType::Author,
+            default_user_name.clone(),
+            default_user_email.clone(),
+        )
     };
-    
+
     // Committer always uses default user info
-    let committer = Signature::new(SignatureType::Committer, default_user_name, default_user_email);
-    
+    let committer = Signature::new(
+        SignatureType::Committer,
+        default_user_name,
+        default_user_email,
+    );
+
     (author, committer)
 }
 
@@ -579,12 +590,28 @@ mod test {
         let args = CommitArgs::try_parse_from(["commit", "-m", "init", "--amend", "--no-verify"]);
         assert!(args.is_ok(), "--no-verify should work with --amend");
 
-        let args = CommitArgs::try_parse_from(["commit", "-m", "init", "--author", "Test User <test@example.com>"]);
+        let args = CommitArgs::try_parse_from([
+            "commit",
+            "-m",
+            "init",
+            "--author",
+            "Test User <test@example.com>",
+        ]);
         assert!(args.is_ok(), "--author should be a valid parameter");
         let args = args.unwrap();
-        assert_eq!(args.author, Some("Test User <test@example.com>".to_string()));
+        assert_eq!(
+            args.author,
+            Some("Test User <test@example.com>".to_string())
+        );
 
-        let args = CommitArgs::try_parse_from(["commit", "-m", "init", "--author", "Test User <test@example.com>", "--amend"]);
+        let args = CommitArgs::try_parse_from([
+            "commit",
+            "-m",
+            "init",
+            "--author",
+            "Test User <test@example.com>",
+            "--amend",
+        ]);
         assert!(args.is_ok(), "--author should work with --amend");
     }
 
