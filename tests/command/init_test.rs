@@ -623,14 +623,23 @@ async fn test_init_with_invalid_object_format() {
 /// Init should fail when the parent directory is not writable (permission denied)
 async fn test_init_fails_when_parent_not_writable() {
     use std::os::unix::fs::PermissionsExt;
-    use tempfile::tempdir;
+    // Skip test if running as root - root can bypass permission restrictions
+    use std::process::Command;
+    let output = Command::new("id")
+        .arg("-u")
+        .output()
+        .expect("failed to execute id -u");
+    let uid = String::from_utf8(output.stdout).expect("failed to parse uid");
+    if uid.trim() == "0" {
+        return;
+    }
 
-    // Create a temporary directory (parent)
     let dir = tempdir().unwrap();
     let path = dir.path();
 
-    // Remove write permission from the parent directory
-    let mut perms = std::fs::metadata(path).unwrap().permissions();
+    let original_perms = std::fs::metadata(path).unwrap().permissions();
+
+    let mut perms = original_perms.clone();
     perms.set_mode(0o555);
     std::fs::set_permissions(path, perms).unwrap();
 
@@ -648,15 +657,16 @@ async fn test_init_fails_when_parent_not_writable() {
     // Expect init to fail with PermissionDenied
     let err = init(args).await.unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+
+    // Restore original permissions so tempdir can clean up properly
+    std::fs::set_permissions(path, original_perms).unwrap();
 }
 
 #[tokio::test]
 #[serial]
-/// Init should create a hooks/pre-commit.sh file that is present and readable (non-empty).
+/// Init should create a hooks/pre-commit.sh file that is present and non-empty
 async fn test_init_creates_hooks_and_precommit() {
-    use tempfile::tempdir;
-
-    let target_dir = tempdir().unwrap().keep();
+    let target_dir = tempfile::tempdir().unwrap().keep();
 
     let args = InitArgs {
         bare: false,
@@ -668,7 +678,6 @@ async fn test_init_creates_hooks_and_precommit() {
         object_format: None,
     };
 
-    // Run init
     init(args).await.unwrap();
 
     // Verify hook exists and is non-empty
@@ -681,8 +690,7 @@ async fn test_init_creates_hooks_and_precommit() {
     let meta = std::fs::metadata(&hook_path).expect("failed to stat hook file");
     assert!(meta.len() > 0, "Expected pre-commit hook to be non-empty");
 
-    let content =
-        std::fs::read_to_string(&hook_path).expect("failed to read pre-commit hook file");
+    let content = std::fs::read_to_string(&hook_path).expect("failed to read pre-commit hook file");
     assert!(
         !content.trim().is_empty(),
         "pre-commit hook content should not be empty"
@@ -693,12 +701,10 @@ async fn test_init_creates_hooks_and_precommit() {
 #[serial]
 /// When initial branch is not specified, HEAD should point to a branch (branch name non-empty).
 async fn test_init_sets_head_to_branch_by_default() {
-    use tempfile::tempdir;
+    let target_dir = tempfile::tempdir().unwrap().keep();
 
-    let target_dir = tempdir().unwrap().keep();
-
-    let old_cwd = std::env::current_dir().unwrap();
-    std::env::set_current_dir(&target_dir).unwrap();
+    // Use ChangeDirGuard to ensure proper cleanup even on panic
+    let _guard = ChangeDirGuard::new(&target_dir);
 
     let args = InitArgs {
         bare: false,
@@ -710,7 +716,6 @@ async fn test_init_sets_head_to_branch_by_default() {
         object_format: None,
     };
 
-    // Run init
     init(args).await.unwrap();
 
     // Verify HEAD is a branch and non-empty
@@ -723,7 +728,4 @@ async fn test_init_sets_head_to_branch_by_default() {
         }
         other => panic!("Expected HEAD to be a branch after init, got: {:?}", other),
     }
-
-    std::env::set_current_dir(old_cwd).unwrap();
 }
-
