@@ -16,6 +16,7 @@ use git_internal::{
             ObjectTrait,
             blob::Blob,
             commit::Commit,
+            signature::{Signature, SignatureType},
             tree::{Tree, TreeItem, TreeItemMode},
             types::ObjectType,
         },
@@ -74,6 +75,58 @@ pub struct CommitArgs {
     /// Skip all pre-commit and commit-msg hooks/validations (align with Git --no-verify)
     #[arg(long = "no-verify")]
     pub no_verify: bool,
+
+    /// Override the commit author. Specify an explicit author using the standard A U Thor <author@example.com> format.
+    #[arg(long)]
+    pub author: Option<String>,
+}
+
+/// Parse author string in format "Name <email>" and return (name, email)
+/// If parsing fails, panic with an error message
+fn parse_author(author: &str) -> (String, String) {
+    let author = author.trim();
+    
+    // Try to parse "Name <email>" format
+    // Use find (not rfind) to get the first '<' and '>' which matches Git's behavior
+    if let Some(start_idx) = author.find('<') {
+        if let Some(end_idx) = author[start_idx..].find('>') {
+            let end_idx = start_idx + end_idx;
+            if start_idx < end_idx && end_idx == author.len() - 1 {
+                let name = author[..start_idx].trim().to_string();
+                let email = author[start_idx + 1..end_idx].trim().to_string();
+                
+                if !name.is_empty() && !email.is_empty() {
+                    return (name, email);
+                }
+            }
+        }
+    }
+    
+    panic!("fatal: invalid author format '{}'. Expected format: 'Name <email>'", author);
+}
+
+/// Create author and committer signatures based on the provided arguments
+async fn create_commit_signatures(author_override: Option<&str>) -> (Signature, Signature) {
+    // Get default user info
+    let default_user_name = UserConfig::get("user", None, "name")
+        .await
+        .unwrap_or_else(|| "unknown".to_string());
+    let default_user_email = UserConfig::get("user", None, "email")
+        .await
+        .unwrap_or_else(|| "unknown".to_string());
+    
+    // Create author signature (use override if provided)
+    let author = if let Some(author_str) = author_override {
+        let (name, email) = parse_author(author_str);
+        Signature::new(SignatureType::Author, name, email)
+    } else {
+        Signature::new(SignatureType::Author, default_user_name.clone(), default_user_email.clone())
+    };
+    
+    // Committer always uses default user info
+    let committer = Signature::new(SignatureType::Committer, default_user_name, default_user_email);
+    
+    (author, committer)
 }
 
 pub async fn execute(args: CommitArgs) {
@@ -158,6 +211,9 @@ pub async fn execute(args: CommitArgs) {
     /* Create & save commit objects */
     let parents_commit_ids = get_parents_ids().await;
 
+    // Create author and committer signatures (respecting --author override)
+    let (author, committer) = create_commit_signatures(args.author.as_deref()).await;
+
     // Amend commits are only supported for a single parent commit.
     if args.amend {
         if parents_commit_ids.len() > 1 {
@@ -200,7 +256,9 @@ pub async fn execute(args: CommitArgs) {
         {
             panic!("fatal: commit message does not follow conventional commits");
         }
-        let commit = Commit::from_tree_id(
+        let commit = Commit::new(
+            author,
+            committer,
             tree.id,
             grandpa_commit_id,
             &format_commit_msg(&final_message, None),
@@ -239,13 +297,13 @@ pub async fn execute(args: CommitArgs) {
     }
 
     // There must be a `blank line`(\n) before `message`, or remote unpack failed
-    let commit = Commit::from_tree_id(
+    let commit = Commit::new(
+        author,
+        committer,
         tree.id,
         parents_commit_ids,
         &format_commit_msg(&message, None),
     );
-
-    // TODO  default signature created in `from_tree_id`, wait `git config` to set correct user info
 
     storage
         .put(&commit.id, &commit.to_data().unwrap(), commit.get_type())
@@ -520,6 +578,43 @@ mod test {
 
         let args = CommitArgs::try_parse_from(["commit", "-m", "init", "--amend", "--no-verify"]);
         assert!(args.is_ok(), "--no-verify should work with --amend");
+
+        let args = CommitArgs::try_parse_from(["commit", "-m", "init", "--author", "Test User <test@example.com>"]);
+        assert!(args.is_ok(), "--author should be a valid parameter");
+        let args = args.unwrap();
+        assert_eq!(args.author, Some("Test User <test@example.com>".to_string()));
+
+        let args = CommitArgs::try_parse_from(["commit", "-m", "init", "--author", "Test User <test@example.com>", "--amend"]);
+        assert!(args.is_ok(), "--author should work with --amend");
+    }
+
+    #[test]
+    fn test_parse_author() {
+        // Valid author formats
+        let (name, email) = parse_author("John Doe <john@example.com>");
+        assert_eq!(name, "John Doe");
+        assert_eq!(email, "john@example.com");
+
+        let (name, email) = parse_author("  Jane Smith  <jane@test.org>  ");
+        assert_eq!(name, "Jane Smith");
+        assert_eq!(email, "jane@test.org");
+
+        let (name, email) = parse_author("Multi Word Name <multi@word.com>");
+        assert_eq!(name, "Multi Word Name");
+        assert_eq!(email, "multi@word.com");
+
+        // Invalid formats should panic
+        let result = std::panic::catch_unwind(|| parse_author("invalid"));
+        assert!(result.is_err());
+
+        let result = std::panic::catch_unwind(|| parse_author("No Email"));
+        assert!(result.is_err());
+
+        let result = std::panic::catch_unwind(|| parse_author("<noemail@test.com>"));
+        assert!(result.is_err());
+
+        let result = std::panic::catch_unwind(|| parse_author("Name <"));
+        assert!(result.is_err());
     }
 
     #[test]
@@ -535,6 +630,7 @@ mod test {
             disable_pre: false,
             all: false,
             no_verify: false,
+            author: None,
         };
         fn message_and_file_are_none(args: &CommitArgs) -> Option<String> {
             let message = match (&args.message, &args.file) {
@@ -702,6 +798,7 @@ mod test {
             signoff: false,
             disable_pre: false,
             all: false,
+            author: None,
         };
 
         let commit_message_with_verify = args_with_verify

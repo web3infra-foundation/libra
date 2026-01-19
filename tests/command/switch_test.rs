@@ -49,6 +49,7 @@ async fn test_switch_function() {
             disable_pre: true,
             all: false,
             no_verify: false,
+        author: None,
         };
         commit::execute(args).await;
     }
@@ -96,6 +97,7 @@ async fn test_switch_function() {
             disable_pre: true,
             all: false,
             no_verify: false,
+        author: None,
         };
         commit::execute(args).await;
 
@@ -177,6 +179,7 @@ async fn test_detach_head_basic() {
             disable_pre: true,
             all: false,
             no_verify: false,
+        author: None,
         };
         commit::execute(args).await;
     }
@@ -221,6 +224,7 @@ async fn test_detach_head_basic() {
             disable_pre: true,
             all: false,
             no_verify: false,
+        author: None,
         };
         commit::execute(args).await;
     }
