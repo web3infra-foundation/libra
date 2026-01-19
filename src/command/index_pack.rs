@@ -5,6 +5,7 @@ use std::{
     io::Write,
     path::PathBuf,
     sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use byteorder::{BigEndian, WriteBytesExt};
@@ -195,12 +196,35 @@ fn write_idx_v2_sync(
     rt.block_on(write_idx_v2_file(index_file, idx_entries, pack_hash))
 }
 
+struct TempDirGuard {
+    path: PathBuf,
+}
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
 /// Build index file for pack file, version 2
 pub fn build_index_v2(pack_file: &str, index_file: &str) -> Result<(), GitError> {
     let pack_path = PathBuf::from(pack_file);
-    let tmp_path = pack_path
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."));
+    let parent = pack_path.parent().unwrap_or(std::path::Path::new("."));
+
+    // Create unique temp dir in the same filesystem to ensure atomic renames and performance
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let tmp_dir_path = parent.join(format!(".tmp_idx_{}", timestamp));
+    std::fs::create_dir_all(&tmp_dir_path)?;
+
+    // RAII guard to auto-delete on scope exit
+    let _guard = TempDirGuard {
+        path: tmp_dir_path.clone(),
+    };
+
+    let tmp_path = tmp_dir_path;
     let pack_file = std::fs::File::open(pack_file)?;
     let mut pack_reader = std::io::BufReader::new(pack_file);
     let idx_entries = Arc::new(Mutex::new(Vec::new()));
