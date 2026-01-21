@@ -40,7 +40,8 @@ async fn test_init() {
         quiet: false,
         template: None,
         shared: None,
-        object_format: None,
+        object_format: None,ref_format: None,
+        ref_format: None,
     };
     // Run the init function
     init(args).await.unwrap();
@@ -91,6 +92,7 @@ async fn test_init_template() {
         template: Some(template_dir.path().to_str().unwrap().to_string()),
         shared: None,
         object_format: None,
+        ref_format: None,
     };
 
     // Run the init function
@@ -149,7 +151,7 @@ async fn test_init_with_invalid_template_path() {
         quiet: false,
         template: Some(invalid_template_path.to_string()),
         shared: None,
-        object_format: None,
+        object_format: None,ref_format: None,
     };
 
     // Run the init function and expect it to return an error
@@ -184,7 +186,7 @@ async fn test_init_bare() {
         quiet: false,
         template: None,
         shared: None,
-        object_format: None,
+        object_format: None,ref_format: None,
     };
     // Run the init function
     init(args).await.unwrap();
@@ -207,7 +209,7 @@ async fn test_init_bare_with_existing_repo() {
         quiet: false,
         template: None,
         shared: None,
-        object_format: None,
+        object_format: None,ref_format: None,
     };
     init(init_args).await.unwrap(); // Execute init for bare repository
 
@@ -220,7 +222,7 @@ async fn test_init_bare_with_existing_repo() {
             quiet: false,
             template: None,
             shared: None,
-            object_format: None,
+            object_format: None,ref_format: None,
         };
         init(args).await
     };
@@ -247,7 +249,7 @@ async fn test_init_with_initial_branch() {
         quiet: false,
         template: None,
         shared: None,
-        object_format: None,
+        object_format: None,ref_format: None,
     };
     // Run the init function
     init(args).await.unwrap();
@@ -297,7 +299,7 @@ async fn test_invalid_branch_name(branch_name: &str) {
         quiet: false,
         template: None,
         shared: None,
-        object_format: None,
+        object_format: None,ref_format: None,
     };
     // Run the init function
     let result = init(args).await;
@@ -323,7 +325,7 @@ async fn test_init_with_directory() {
         quiet: false,
         template: None,
         shared: None,
-        object_format: None,
+        object_format: None,ref_format: None,
     };
     // Run the init function
     init(args).await.unwrap();
@@ -355,7 +357,7 @@ async fn test_init_with_invalid_directory() {
         quiet: false,
         template: None,
         shared: None,
-        object_format: None,
+        object_format: None,ref_format: None,
     };
     // Run the init function
     let result = init(args).await;
@@ -399,7 +401,7 @@ async fn test_init_with_unauthorized_directory() {
         quiet: false,
         template: None,
         shared: None,
-        object_format: None,
+        object_format: None,ref_format: None,
     };
     // Run the init function
     let result = init(args).await;
@@ -426,7 +428,7 @@ async fn test_init_quiet() {
         quiet: true,
         template: None,
         shared: None,
-        object_format: None,
+        object_format: None,ref_format: None,
     };
     // Run the init function
     init(args).await.unwrap();
@@ -450,7 +452,7 @@ async fn test_valid_shared_mode(shared_mode: &str) {
         quiet: false,
         template: None,
         shared: Some(shared_mode.to_string()),
-        object_format: None,
+        object_format: None,ref_format: None,
     };
     // Run the init function
     init(args).await.unwrap();
@@ -488,7 +490,7 @@ async fn test_invalid_share_mode(shared_mode: &str) {
         quiet: false,
         template: None,
         shared: Some(shared_mode.to_string()),
-        object_format: None,
+        object_format: None,ref_format: None,
     };
 
     let result = init(args).await;
@@ -608,10 +610,68 @@ async fn test_init_with_invalid_object_format() {
         template: None,
         shared: None,
         object_format: Some("md5".to_string()),
+        ref_format: None,
     };
     // This should fail with a generic invalid format error
     let result = init(args).await;
     let err = result.unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     assert!(err.to_string().contains("unsupported object format"));
+}
+
+#[tokio::test]
+#[serial]
+/// Test init with a custom ref format and verify it's saved to config.
+async fn test_init_with_ref_format() {
+    let target_dir = tempdir().unwrap().keep();
+    let args = InitArgs {
+        bare: false,
+        initial_branch: Some("dev".to_string()),
+        repo_directory: target_dir.to_str().unwrap().to_string(),
+        quiet: false,
+        template: None,
+        shared: None,
+        object_format: None,ref_format: None,
+        ref_format: Some(RefFormat::Strict),
+    };
+
+    // Run the init function with strict ref format
+    let result = init(args).await;
+    assert!(result.is_ok(), "init with --ref-format=strict should succeed");
+
+    // Verify that the config contains the initrefformat entry
+    let db_path = target_dir.join(".libra/libra.db");
+    let conn = sea_orm::Database::connect(format!("sqlite://{}", db_path.to_str().unwrap()))
+        .await
+        .unwrap();
+    let config_entry = config::Entity::find()
+        .filter(config::Column::Configuration.eq("core"))
+        .filter(config::Column::Key.eq("initrefformat"))
+        .one(&conn)
+        .await
+        .unwrap();
+    assert_eq!(config_entry.unwrap().value, "strict");
+}
+
+#[tokio::test]
+#[serial]
+/// Test init rejects invalid branch names according to ref format validation
+async fn test_init_with_invalid_ref_format() {
+    let target_dir = tempdir().unwrap().keep();
+    let args = InitArgs {
+        bare: false,
+        initial_branch: Some("invalid branch".to_string()), // contains space
+        repo_directory: target_dir.to_str().unwrap().to_string(),
+        quiet: false,
+        template: None,
+        shared: None,
+        object_format: None,ref_format: None,
+        ref_format: Some(RefFormat::Strict),
+    };
+
+    // This should fail due to invalid branch name
+    let result = init(args).await;
+    let err = result.unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(err.to_string().contains("branch name contains invalid characters"));
 }
