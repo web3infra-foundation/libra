@@ -1467,6 +1467,7 @@ async fn test_status_branch_detached_head() {
         branch: Some(current_commit.to_string()),
         create: None,
         detach: true,
+        track: false,
     })
     .await;
 

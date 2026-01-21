@@ -31,22 +31,47 @@ pub struct SwitchArgs {
     /// Switch to a commit
     #[clap(long, short, action, default_value = "false", group = "sub")]
     pub detach: bool,
+
+    #[clap(
+        long,
+        conflicts_with_all = ["create", "detach"],
+        help = "Set upstream tracking when switching to remote branch"
+    )]
+    pub track: bool,
 }
 
 pub async fn execute(args: SwitchArgs) {
-    // check status
     if check_status().await {
         return;
     }
 
-    match args.create {
+    let SwitchArgs {
+        branch,
+        create,
+        detach,
+        track,
+    } = args;
+
+    if track {
+        let target = match branch {
+            Some(branch) => branch,
+            None => {
+                eprintln!("fatal: missing remote branch name");
+                return;
+            }
+        };
+        switch_to_tracked_remote_branch(target).await;
+        return;
+    }
+
+    match create {
         Some(new_branch_name) => {
-            branch::create_branch(new_branch_name.clone(), args.branch).await;
+            branch::create_branch(new_branch_name.clone(), branch).await;
             switch_to_branch(new_branch_name).await;
         }
-        None => match args.detach {
+        None => match detach {
             true => {
-                let commit_base = get_commit_base(&args.branch.unwrap()).await;
+                let commit_base = get_commit_base(&branch.unwrap()).await;
                 if let Err(e) = commit_base {
                     eprintln!("{:?}", e);
                     return;
@@ -54,7 +79,7 @@ pub async fn execute(args: SwitchArgs) {
                 switch_to_commit(commit_base.unwrap()).await;
             }
             false => {
-                switch_to_branch(args.branch.unwrap()).await;
+                switch_to_branch(branch.unwrap()).await;
             }
         },
     }
@@ -74,6 +99,41 @@ pub async fn check_status() -> bool {
     } else {
         false
     }
+}
+
+async fn switch_to_tracked_remote_branch(target: String) {
+    let lookup = if target.contains('/') {
+        target
+    } else {
+        format!("origin/{target}")
+    };
+
+    let remote_branch = match Branch::search_branch(&lookup)
+        .await
+        .into_iter()
+        .find(|b| b.remote.is_some())
+    {
+        Some(branch) => branch,
+        None => {
+            eprintln!("fatal: remote branch '{lookup}' not found");
+            return;
+        }
+    };
+
+    let remote = remote_branch
+        .remote
+        .clone()
+        .expect("remote branch missing remote");
+    let local_branch = remote_branch.name;
+
+    if Branch::find_branch(&local_branch, None).await.is_some() {
+        eprintln!("fatal: a branch named '{local_branch}' already exists");
+        return;
+    }
+
+    Branch::update_branch(&local_branch, &remote_branch.commit.to_string(), None).await;
+    branch::set_upstream(&local_branch, &format!("{remote}/{local_branch}")).await;
+    switch_to_branch(local_branch).await;
 }
 
 /// change the working directory to the version of commit_hash
