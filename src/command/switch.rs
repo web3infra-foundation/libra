@@ -1,7 +1,7 @@
 //! Switch command to change branches safely, validating clean state, handling creation, and delegating checkout behavior to restore logic.
 
 use clap::Parser;
-use git_internal::hash::ObjectHash;
+use git_internal::hash::{ObjectHash, get_hash_kind};
 
 use super::{
     restore::{self, RestoreArgs},
@@ -102,47 +102,63 @@ pub async fn check_status() -> bool {
 }
 
 async fn switch_to_tracked_remote_branch(target: String) {
-    let lookup = if target.contains('/') {
-        target
+    let (remote_name, remote_branch_name) = if let Some(rest) = target.strip_prefix("refs/remotes/")
+    {
+        match rest.split_once('/') {
+            Some((remote_name, remote_branch_name)) => {
+                (remote_name.to_string(), remote_branch_name.to_string())
+            }
+            None => {
+                eprintln!("fatal: invalid remote branch '{target}'");
+                return;
+            }
+        }
+    } else if let Some((remote_name, remote_branch_name)) = target.split_once('/') {
+        (remote_name.to_string(), remote_branch_name.to_string())
     } else {
-        format!("origin/{target}")
+        ("origin".to_string(), target)
     };
 
-    let remote_branch = match Branch::search_branch(&lookup)
-        .await
-        .into_iter()
-        .find(|b| b.remote.is_some())
-    {
+    let remote_tracking_ref = format!("refs/remotes/{remote_name}/{remote_branch_name}");
+
+    let remote_tracking_branch = match Branch::find_branch(&remote_tracking_ref, None).await {
         Some(branch) => branch,
         None => {
-            eprintln!("fatal: remote branch '{lookup}' not found");
+            eprintln!("fatal: remote branch '{remote_name}/{remote_branch_name}' not found");
             return;
         }
     };
 
-    let remote = remote_branch
-        .remote
-        .clone()
-        .expect("remote branch missing remote");
-    let local_branch = remote_branch.name;
-
-    if Branch::find_branch(&local_branch, None).await.is_some() {
-        eprintln!("fatal: a branch named '{local_branch}' already exists");
+    if Branch::find_branch(&remote_branch_name, None)
+        .await
+        .is_some()
+    {
+        eprintln!("fatal: a branch named '{remote_branch_name}' already exists");
         return;
     }
 
-    Branch::update_branch(&local_branch, &remote_branch.commit.to_string(), None).await;
-    branch::set_upstream(&local_branch, &format!("{remote}/{local_branch}")).await;
-    switch_to_branch(local_branch).await;
+    Branch::update_branch(
+        &remote_branch_name,
+        &remote_tracking_branch.commit.to_string(),
+        None,
+    )
+    .await;
+    branch::set_upstream(
+        &remote_branch_name,
+        &format!("{remote_name}/{remote_branch_name}"),
+    )
+    .await;
+    switch_to_branch(remote_branch_name).await;
 }
 
 /// change the working directory to the version of commit_hash
 async fn switch_to_commit(commit_hash: ObjectHash) {
     let db = get_db_conn_instance().await;
 
-    let old_head_commit = Head::current_commit_with_conn(db)
+    let old_oid = Head::current_commit_with_conn(db)
         .await
-        .expect("Cannot switch: HEAD is unborn.");
+        .map(|oid| oid.to_string())
+        .unwrap_or_else(|| ObjectHash::zero_str(get_hash_kind()).to_string());
 
     let from_ref_name = match Head::current_with_conn(db).await {
         Head::Branch(name) => name,
@@ -154,7 +170,7 @@ async fn switch_to_commit(commit_hash: ObjectHash) {
         to: commit_hash.to_string()[..7].to_string(), // Use short hash for target commit
     };
     let context = ReflogContext {
-        old_oid: old_head_commit.to_string(),
+        old_oid,
         new_oid: commit_hash.to_string(),
         action,
     };
@@ -197,9 +213,10 @@ async fn switch_to_branch(branch_name: String) {
     };
     let target_commit_id = target_branch.commit;
 
-    let old_head_commit = Head::current_commit_with_conn(db)
+    let old_oid = Head::current_commit_with_conn(db)
         .await
-        .expect("Cannot switch: HEAD is unborn.");
+        .map(|oid| oid.to_string())
+        .unwrap_or_else(|| ObjectHash::zero_str(get_hash_kind()).to_string());
 
     let from_ref_name = match Head::current_with_conn(db).await {
         Head::Branch(name) => name,
@@ -216,7 +233,7 @@ async fn switch_to_branch(branch_name: String) {
         to: branch_name.clone(),
     };
     let context = ReflogContext {
-        old_oid: old_head_commit.to_string(),
+        old_oid,
         new_oid: target_commit_id.to_string(),
         action,
     };

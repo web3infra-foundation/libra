@@ -181,7 +181,12 @@ async fn test_switch_track_sets_upstream() {
     commit::execute(args).await;
 
     let master_commit = Head::current_commit().await.unwrap();
-    Branch::update_branch("feature", &master_commit.to_string(), Some("origin")).await;
+    Branch::update_branch(
+        "refs/remotes/origin/feature",
+        &master_commit.to_string(),
+        None,
+    )
+    .await;
 
     let args = SwitchArgs {
         branch: Some("origin/feature".to_string()),
