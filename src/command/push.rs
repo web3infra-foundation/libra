@@ -299,7 +299,7 @@ pub async fn execute(args: PushArgs) {
     println!("{}", "Push success".green());
 
     let remote_tracking_branch = format!("refs/remotes/{}/{}", repository, branch);
-    update_remote_tracking(&remote_tracking_branch, &commit_hash).await;
+    update_remote_tracking(&remote_tracking_branch, &commit_hash, &repository).await;
 
     // set after push success
     if args.set_upstream {
@@ -315,11 +315,17 @@ pub async fn execute(args: PushArgs) {
 /// # Arguments
 /// * `remote_tracking_branch` - The full ref name (e.g., "refs/remotes/origin/master")
 /// * `commit_hash` - The commit hash to update the branch to
+/// * `remote_name` - The name of the remote associated with this tracking branch (e.g., "origin")
 ///
 /// If the transaction fails, an error is printed to stderr.
-async fn update_remote_tracking(remote_tracking_branch: &str, commit_hash: &str) {
+async fn update_remote_tracking(
+    remote_tracking_branch: &str,
+    commit_hash: &str,
+    remote_name: &str,
+) {
     let remote_tracking_branch = remote_tracking_branch.to_string();
     let commit_hash = commit_hash.to_string();
+    let remote_name = remote_name.to_string();
 
     // Update the remote tracking branch with a reflog entry using a transaction
     let db = get_db_conn_instance().await;
@@ -327,15 +333,21 @@ async fn update_remote_tracking(remote_tracking_branch: &str, commit_hash: &str)
         .transaction(|txn| {
             Box::pin(async move {
                 // Get the old OID before updating
-                let old_oid = Branch::find_branch_with_conn(txn, &remote_tracking_branch, None)
-                    .await
-                    .map_or(ObjectHash::zero_str(get_hash_kind()).to_string(), |b| {
-                        b.commit.to_string()
-                    });
+                let old_oid =
+                    Branch::find_branch_with_conn(txn, &remote_tracking_branch, Some(&remote_name))
+                        .await
+                        .map_or(ObjectHash::zero_str(get_hash_kind()).to_string(), |b| {
+                            b.commit.to_string()
+                        });
 
                 // Update the branch
-                Branch::update_branch_with_conn(txn, &remote_tracking_branch, &commit_hash, None)
-                    .await;
+                Branch::update_branch_with_conn(
+                    txn,
+                    &remote_tracking_branch,
+                    &commit_hash,
+                    Some(&remote_name),
+                )
+                .await;
 
                 // Record the reflog
                 let context = ReflogContext {
