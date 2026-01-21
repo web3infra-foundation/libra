@@ -42,6 +42,7 @@ async fn test_init() {
         template: None,
         shared: None,
         object_format: None,
+        ref_format: None,
     };
     // Run the init function
     init(args).await.unwrap();
@@ -92,6 +93,7 @@ async fn test_init_template() {
         template: Some(template_dir.path().to_str().unwrap().to_string()),
         shared: None,
         object_format: None,
+        ref_format: None,
     };
 
     // Run the init function
@@ -151,6 +153,7 @@ async fn test_init_with_invalid_template_path() {
         template: Some(invalid_template_path.to_string()),
         shared: None,
         object_format: None,
+        ref_format: None,
     };
 
     // Run the init function and expect it to return an error
@@ -186,6 +189,7 @@ async fn test_init_bare() {
         template: None,
         shared: None,
         object_format: None,
+        ref_format: None,
     };
     // Run the init function
     init(args).await.unwrap();
@@ -209,6 +213,7 @@ async fn test_init_bare_with_existing_repo() {
         template: None,
         shared: None,
         object_format: None,
+        ref_format: None,
     };
     init(init_args).await.unwrap(); // Execute init for bare repository
 
@@ -222,6 +227,7 @@ async fn test_init_bare_with_existing_repo() {
             template: None,
             shared: None,
             object_format: None,
+        ref_format: None,
         };
         init(args).await
     };
@@ -249,6 +255,7 @@ async fn test_init_with_initial_branch() {
         template: None,
         shared: None,
         object_format: None,
+        ref_format: None,
     };
     // Run the init function
     init(args).await.unwrap();
@@ -299,13 +306,14 @@ async fn test_invalid_branch_name(branch_name: &str) {
         template: None,
         shared: None,
         object_format: None,
+        ref_format: None,
     };
     // Run the init function
     let result = init(args).await;
     // Check for the error
     let err = result.unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput); // Check error type
-    assert!(err.to_string().contains("invalid branch name")); // Check error message contains "invalid branch name"
+    assert!(err.to_string().contains("branch name cannot be") || err.to_string().contains("branch name contains")); // Check error message contains appropriate text
 }
 
 #[tokio::test]
@@ -325,6 +333,7 @@ async fn test_init_with_directory() {
         template: None,
         shared: None,
         object_format: None,
+        ref_format: None,
     };
     // Run the init function
     init(args).await.unwrap();
@@ -357,6 +366,7 @@ async fn test_init_with_invalid_directory() {
         template: None,
         shared: None,
         object_format: None,
+        ref_format: None,
     };
     // Run the init function
     let result = init(args).await;
@@ -401,6 +411,7 @@ async fn test_init_with_unauthorized_directory() {
         template: None,
         shared: None,
         object_format: None,
+        ref_format: None,
     };
     // Run the init function
     let result = init(args).await;
@@ -428,6 +439,7 @@ async fn test_init_quiet() {
         template: None,
         shared: None,
         object_format: None,
+        ref_format: None,
     };
     // Run the init function
     init(args).await.unwrap();
@@ -452,6 +464,7 @@ async fn test_valid_shared_mode(shared_mode: &str) {
         template: None,
         shared: Some(shared_mode.to_string()),
         object_format: None,
+        ref_format: None,
     };
     // Run the init function
     init(args).await.unwrap();
@@ -490,6 +503,7 @@ async fn test_invalid_share_mode(shared_mode: &str) {
         template: None,
         shared: Some(shared_mode.to_string()),
         object_format: None,
+        ref_format: None,
     };
 
     let result = init(args).await;
@@ -538,6 +552,7 @@ async fn test_init_with_valid_object_format_sha1() {
         template: None,
         shared: None,
         object_format: Some("sha1".to_string()),
+        ref_format: None,
     };
     // This should succeed
     let result = init(args).await;
@@ -574,6 +589,7 @@ async fn test_init_with_valid_object_format_sha256() {
         template: None,
         shared: None,
         object_format: Some("sha256".to_string()),
+        ref_format: None,
     };
     // This should succeed
     let result = init(args).await;
@@ -609,6 +625,7 @@ async fn test_init_with_invalid_object_format() {
         template: None,
         shared: None,
         object_format: Some("md5".to_string()),
+        ref_format: None,
     };
     // This should fail with a generic invalid format error
     let result = init(args).await;
