@@ -72,6 +72,7 @@ async fn test_checkout_module_functions() {
         template: None,
         shared: None,
         object_format: None,
+        ref_format: None,
     };
 
     init::init(init_args)
@@ -118,6 +119,7 @@ async fn test_checkout_module_functions_sha256() {
         template: None,
         shared: None,
         object_format: Some("sha256".to_string()),
+        ref_format: None,
     };
 
     init::init(init_args)
@@ -166,6 +168,7 @@ async fn checkout_restore_rejects_sha1_hash_in_sha256_repo() {
         template: None,
         shared: None,
         object_format: Some("sha256".to_string()),
+        ref_format: None,
     })
     .await
     .unwrap();
