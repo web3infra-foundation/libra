@@ -302,7 +302,7 @@ This section documents the compatibility between **Libra**’s CLI and **Git** a
 |  | `-d, --detach` | Yes | Yes | ✅ | - | Detach HEAD |
 |  | `-C, --force-create <branch>` | Yes | No | ⛔ | P1 | Force re‑create branch |
 |  | `--guess / --no-guess` | Yes | No | ⛔ | P2 | Heuristic branch name guessing |
-|  | `--track` | Yes | No | ⛔ | P0 | Auto set upstream when switching to remote branch |
+|  | `--track` | Yes | Yes | ✅ | - | Auto set upstream when switching to remote branch |
 |  | `--merge` | Yes | No | ⛔ | P2 | Merge mode on switch |
 |  | `--conflict=<style>` | Yes | No | ⛔ | P2 | Conflict marker style |
 | `checkout` | `<branch>` | Yes | Yes | ✅ | - | Checkout existing branch |

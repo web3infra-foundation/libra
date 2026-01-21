@@ -60,6 +60,7 @@ async fn test_switch_function() {
             branch: None,
             create: Some("test_branch".to_string()),
             detach: false,
+            track: false,
         };
         switch::execute(args).await;
         let head = Head::current().await;
@@ -105,6 +106,7 @@ async fn test_switch_function() {
             branch: Some(commit_id_str.clone()),
             create: None,
             detach: true,
+            track: false,
         };
         switch::execute(args).await;
         let head = Head::current().await;
@@ -126,6 +128,7 @@ async fn test_switch_function() {
             branch: Some("master".to_string()),
             create: None,
             detach: false,
+            track: false,
         };
         switch::execute(args).await;
         let head = Head::current().await;
@@ -153,6 +156,58 @@ async fn test_parts_of_switch_module_function() {
 
     // Test the switch module funsctions
     // test_check_status().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_switch_track_sets_upstream() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    let args = CommitArgs {
+        message: Some("base".to_string()),
+        file: None,
+        allow_empty: true,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    };
+    commit::execute(args).await;
+
+    let master_commit = Head::current_commit().await.unwrap();
+    Branch::update_branch(
+        "refs/remotes/origin/feature",
+        &master_commit.to_string(),
+        None,
+    )
+    .await;
+
+    let args = SwitchArgs {
+        branch: Some("origin/feature".to_string()),
+        create: None,
+        detach: false,
+        track: true,
+    };
+    switch::execute(args).await;
+
+    let head = Head::current().await;
+    let branch_name = match head {
+        Head::Branch(name) => name,
+        _ => panic!("head not in branch, unreachable"),
+    };
+    assert_eq!(branch_name, "feature");
+
+    let branch_config = libra::internal::config::Config::branch_config("feature")
+        .await
+        .unwrap();
+    assert_eq!(branch_config.remote, "origin");
+    assert_eq!(branch_config.merge, "feature");
 }
 
 #[tokio::test]
@@ -400,6 +455,7 @@ async fn switch_to_detach(branch_test: String) -> String {
         branch: Some(branch_test),
         create: None,
         detach: true,
+        track: false,
     };
     switch::execute(args).await;
     let head = Head::current().await;
@@ -416,6 +472,7 @@ async fn switch_to_branch(branch_test: String) {
         branch: Some(branch_test),
         create: None,
         detach: false,
+        track: false,
     };
     switch::execute(args).await;
 }
