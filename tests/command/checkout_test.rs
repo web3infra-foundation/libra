@@ -73,6 +73,7 @@ async fn test_checkout_module_functions() {
         shared: None,
         object_format: None,
         ref_format: None,
+        object_format: None,ref_format: None,
     };
 
     init::init(init_args)
