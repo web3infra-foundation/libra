@@ -40,7 +40,7 @@ async fn test_init() {
         quiet: false,
         template: None,
         shared: None,
-        object_format: None,
+        object_format: None,ref_format: None,
         ref_format: None,
     };
     // Run the init function
@@ -151,8 +151,7 @@ async fn test_init_with_invalid_template_path() {
         quiet: false,
         template: Some(invalid_template_path.to_string()),
         shared: None,
-        object_format: None,
-        ref_format: None,
+        object_format: None,ref_format: None,
     };
 
     // Run the init function and expect it to return an error
@@ -187,8 +186,7 @@ async fn test_init_bare() {
         quiet: false,
         template: None,
         shared: None,
-        object_format: None,
-        ref_format: None,
+        object_format: None,ref_format: None,
     };
     // Run the init function
     init(args).await.unwrap();
@@ -211,8 +209,7 @@ async fn test_init_bare_with_existing_repo() {
         quiet: false,
         template: None,
         shared: None,
-        object_format: None,
-        ref_format: None,
+        object_format: None,ref_format: None,
     };
     init(init_args).await.unwrap(); // Execute init for bare repository
 
@@ -225,8 +222,7 @@ async fn test_init_bare_with_existing_repo() {
             quiet: false,
             template: None,
             shared: None,
-            object_format: None,
-        ref_format: None,
+            object_format: None,ref_format: None,
         };
         init(args).await
     };
@@ -253,8 +249,7 @@ async fn test_init_with_initial_branch() {
         quiet: false,
         template: None,
         shared: None,
-        object_format: None,
-        ref_format: None,
+        object_format: None,ref_format: None,
     };
     // Run the init function
     init(args).await.unwrap();
@@ -304,8 +299,7 @@ async fn test_invalid_branch_name(branch_name: &str) {
         quiet: false,
         template: None,
         shared: None,
-        object_format: None,
-        ref_format: None,
+        object_format: None,ref_format: None,
     };
     // Run the init function
     let result = init(args).await;
@@ -331,8 +325,7 @@ async fn test_init_with_directory() {
         quiet: false,
         template: None,
         shared: None,
-        object_format: None,
-        ref_format: None,
+        object_format: None,ref_format: None,
     };
     // Run the init function
     init(args).await.unwrap();
@@ -364,8 +357,7 @@ async fn test_init_with_invalid_directory() {
         quiet: false,
         template: None,
         shared: None,
-        object_format: None,
-        ref_format: None,
+        object_format: None,ref_format: None,
     };
     // Run the init function
     let result = init(args).await;
@@ -409,8 +401,7 @@ async fn test_init_with_unauthorized_directory() {
         quiet: false,
         template: None,
         shared: None,
-        object_format: None,
-        ref_format: None,
+        object_format: None,ref_format: None,
     };
     // Run the init function
     let result = init(args).await;
@@ -437,8 +428,7 @@ async fn test_init_quiet() {
         quiet: true,
         template: None,
         shared: None,
-        object_format: None,
-        ref_format: None,
+        object_format: None,ref_format: None,
     };
     // Run the init function
     init(args).await.unwrap();
@@ -462,8 +452,7 @@ async fn test_valid_shared_mode(shared_mode: &str) {
         quiet: false,
         template: None,
         shared: Some(shared_mode.to_string()),
-        object_format: None,
-        ref_format: None,
+        object_format: None,ref_format: None,
     };
     // Run the init function
     init(args).await.unwrap();
@@ -501,8 +490,7 @@ async fn test_invalid_share_mode(shared_mode: &str) {
         quiet: false,
         template: None,
         shared: Some(shared_mode.to_string()),
-        object_format: None,
-        ref_format: None,
+        object_format: None,ref_format: None,
     };
 
     let result = init(args).await;
@@ -645,7 +633,7 @@ async fn test_init_with_ref_format() {
         quiet: false,
         template: None,
         shared: None,
-        object_format: None,
+        object_format: None,ref_format: None,
         ref_format: Some(RefFormat::Strict),
     };
 
@@ -679,7 +667,7 @@ async fn test_init_with_invalid_ref_format() {
         quiet: false,
         template: None,
         shared: None,
-        object_format: None,
+        object_format: None,ref_format: None,
         ref_format: Some(RefFormat::Strict),
     };
 
