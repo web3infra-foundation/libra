@@ -1,5 +1,5 @@
 //! CLI entry for Libra, defining clap subcommands, setting the hash algorithm from config, and dispatching each command handler.
-use std::{env};
+use std::env;
 
 use clap::{Parser, Subcommand};
 use git_internal::{
