@@ -19,7 +19,7 @@ rust_binary(
     srcs = [":libra-vendor"],
     crate = "libra",
     crate_root = "vendor/src/main.rs",
-    edition = "2021",
+    edition = "2024",
     features = ["default"],
     rustc_flags = ["@$(location :libra-manifest[env_flags])"] + select({
         "prelude//os/constraints:windows": select({
@@ -96,7 +96,7 @@ rust_library(
     srcs = [":libra-vendor"],
     crate = "libra",
     crate_root = "vendor/src/lib.rs",
-    edition = "2021",
+    edition = "2024",
     features = ["default"],
     rustc_flags = ["@$(location :libra-manifest[env_flags])"],
     os_deps = {

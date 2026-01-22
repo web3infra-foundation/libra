@@ -26,7 +26,6 @@ pub enum RefFormat {
     Strict,
     /// Filesystem-friendly reference name validation
     Filesystem,
-
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -217,7 +216,6 @@ fn apply_shared(_root_dir: &Path, shared_mode: &str) -> io::Result<()> {
 /// Initialize a new Libra repository
 /// This function creates the necessary directories and files for a new Libra repository.
 /// It also sets up the database and the initial configuration.
-
 /// Validate branch name according to the specified ref format mode
 fn validate_branch_name(branch_name: &str, ref_format: &RefFormat) -> io::Result<()> {
     match ref_format {
@@ -250,7 +248,20 @@ fn validate_strict_branch_name(branch_name: &str) -> io::Result<()> {
     }
 
     // Check for control characters and other invalid characters
-    if branch_name.chars().any(|c| c.is_control() || c == ' ' || c == '~' || c == '^' || c == ':' || c == '\\' || c == '*' || c == '[' || c == '?' || c == '"' || c == '@' || c == '\0') {
+    if branch_name.chars().any(|c| {
+        c.is_control()
+            || c == ' '
+            || c == '~'
+            || c == '^'
+            || c == ':'
+            || c == '\\'
+            || c == '*'
+            || c == '['
+            || c == '?'
+            || c == '"'
+            || c == '@'
+            || c == '\0'
+    }) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "branch name contains invalid characters",
@@ -311,10 +322,16 @@ fn validate_filesystem_branch_name(branch_name: &str) -> io::Result<()> {
 
     // Basic filesystem restrictions
     if branch_name.chars().any(|c| {
-        c.is_control() || 
-        c == '<' || c == '>' || c == ':' || c == '"' || c == '|' || c == '?' || c == '*' || 
-        c == '\0' ||
-        (cfg!(windows) && (c == '\\' || c == '/' || c == '\n' || c == '\r'))
+        c.is_control()
+            || c == '<'
+            || c == '>'
+            || c == ':'
+            || c == '"'
+            || c == '|'
+            || c == '?'
+            || c == '*'
+            || c == '\0'
+            || (cfg!(windows) && (c == '\\' || c == '/' || c == '\n' || c == '\r'))
     }) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -483,24 +500,24 @@ pub async fn init(args: InitArgs) -> io::Result<()> {
 
     // Validate branch name based on ref-format mode
     let ref_format_mode = args.ref_format.as_ref().unwrap_or(&RefFormat::Strict);
-    
+
     // Validate branch name according to the selected ref format
     validate_branch_name(&initial_branch_name, ref_format_mode)?;
 
     // For custom mode, we use refs/heads/%s format, for others we also use refs/heads/%s
     // but with different validation rules applied above
-    let initial_ref_name = format!("refs/heads/{}", initial_branch_name);
+    let _initial_ref_name = format!("refs/heads/{}", initial_branch_name);
 
     // Create HEAD (store the branch name as before; ref format stored in config)
     // Validate branch name based on ref-format mode
     let ref_format_mode = args.ref_format.as_ref().unwrap_or(&RefFormat::Strict);
-    
+
     // Validate branch name according to the selected ref format
     validate_branch_name(&initial_branch_name, ref_format_mode)?;
 
     // For custom mode, we use refs/heads/%s format, for others we also use refs/heads/%s
     // but with different validation rules applied above
-    let initial_ref_name = format!("refs/heads/{}", initial_branch_name);
+    let _initial_ref_name = format!("refs/heads/{}", initial_branch_name);
 
     // Create HEAD (store the branch name as before; ref format stored in config)
     reference::ActiveModel {

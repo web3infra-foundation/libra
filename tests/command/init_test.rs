@@ -313,7 +313,10 @@ async fn test_invalid_branch_name(branch_name: &str) {
     // Check for the error
     let err = result.unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput); // Check error type
-    assert!(err.to_string().contains("branch name cannot be") || err.to_string().contains("branch name contains")); // Check error message contains appropriate text
+    assert!(
+        err.to_string().contains("branch name cannot be")
+            || err.to_string().contains("branch name contains")
+    ); // Check error message contains appropriate text
 }
 
 #[tokio::test]
@@ -463,7 +466,8 @@ async fn test_valid_shared_mode(shared_mode: &str) {
         quiet: false,
         template: None,
         shared: Some(shared_mode.to_string()),
-        object_format: None,ref_format: None,
+        object_format: None,
+        ref_format: None,
     };
     // Run the init function
     init(args).await.unwrap();
@@ -501,7 +505,8 @@ async fn test_invalid_share_mode(shared_mode: &str) {
         quiet: false,
         template: None,
         shared: Some(shared_mode.to_string()),
-        object_format: None,ref_format: None,
+        object_format: None,
+        ref_format: None,
     };
 
     let result = init(args).await;
@@ -650,7 +655,10 @@ async fn test_init_with_ref_format() {
 
     // Run the init function with strict ref format
     let result = init(args).await;
-    assert!(result.is_ok(), "init with --ref-format=strict should succeed");
+    assert!(
+        result.is_ok(),
+        "init with --ref-format=strict should succeed"
+    );
 
     // Verify that the config contains the initrefformat entry
     let db_path = target_dir.join(".libra/libra.db");
@@ -686,5 +694,8 @@ async fn test_init_with_invalid_ref_format() {
     let result = init(args).await;
     let err = result.unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-    assert!(err.to_string().contains("branch name contains invalid characters"));
+    assert!(
+        err.to_string()
+            .contains("branch name contains invalid characters")
+    );
 }
