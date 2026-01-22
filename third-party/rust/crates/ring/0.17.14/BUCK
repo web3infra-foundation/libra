@@ -30,17 +30,20 @@ rust_library(
         "alloc",
         "default",
         "dev_urandom_fallback",
+        "std",
         "wasm32_unknown_unknown_js",
     ],
     rustc_flags = [
         "@$(location :ring-build-script-run[rustc_flags])",
         "@$(location :ring-manifest[env_flags])",
     ],
+    os_deps = {
+        "macos": ["//third-party/rust/crates/libc/0.2.178:libc"],
+    },
     visibility = ["PUBLIC"],
     deps = [
         "//third-party/rust/crates/cfg-if/1.0.4:cfg-if",
         "//third-party/rust/crates/getrandom/0.2.16:getrandom",
-        "//third-party/rust/crates/libc/0.2.178:libc",
         "//third-party/rust/crates/untrusted/0.9.0:untrusted",
     ],
 )
@@ -55,6 +58,7 @@ rust_binary(
         "alloc",
         "default",
         "dev_urandom_fallback",
+        "std",
         "wasm32_unknown_unknown_js",
     ],
     rustc_flags = ["@$(location :ring-manifest[env_flags])"],
@@ -71,6 +75,7 @@ buildscript_run(
         "alloc",
         "default",
         "dev_urandom_fallback",
+        "std",
         "wasm32_unknown_unknown_js",
     ],
     version = "0.17.14",

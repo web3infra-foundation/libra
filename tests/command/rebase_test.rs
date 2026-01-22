@@ -61,6 +61,7 @@ async fn test_basic_rebase() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -87,6 +88,7 @@ async fn test_basic_rebase() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -95,6 +97,7 @@ async fn test_basic_rebase() {
         branch: None,
         create: Some("feature".to_string()),
         detach: false,
+        track: false,
     })
     .await;
 
@@ -122,6 +125,7 @@ async fn test_basic_rebase() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -148,6 +152,7 @@ async fn test_basic_rebase() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -156,6 +161,7 @@ async fn test_basic_rebase() {
         branch: Some("master".to_string()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
 
@@ -182,6 +188,7 @@ async fn test_basic_rebase() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -190,6 +197,7 @@ async fn test_basic_rebase() {
         branch: Some("feature".to_string()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
 
@@ -273,6 +281,7 @@ async fn test_rebase_preserves_untracked_files() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -281,6 +290,7 @@ async fn test_rebase_preserves_untracked_files() {
         branch: None,
         create: Some("feature".to_string()),
         detach: false,
+        track: false,
     })
     .await;
 
@@ -307,6 +317,7 @@ async fn test_rebase_preserves_untracked_files() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -315,6 +326,7 @@ async fn test_rebase_preserves_untracked_files() {
         branch: Some("master".to_string()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
 
@@ -341,6 +353,7 @@ async fn test_rebase_preserves_untracked_files() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -349,6 +362,7 @@ async fn test_rebase_preserves_untracked_files() {
         branch: Some("feature".to_string()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
 
@@ -407,6 +421,7 @@ async fn test_rebase_already_up_to_date() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -433,6 +448,7 @@ async fn test_rebase_already_up_to_date() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -441,6 +457,7 @@ async fn test_rebase_already_up_to_date() {
         branch: None,
         create: Some("feature".to_string()),
         detach: false,
+        track: false,
     })
     .await;
 
@@ -489,6 +506,7 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -497,6 +515,7 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         branch: None,
         create: Some("feature".to_string()),
         detach: false,
+        track: false,
     })
     .await;
 
@@ -523,6 +542,7 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -531,6 +551,7 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         branch: Some("master".to_string()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
 
@@ -557,6 +578,7 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -565,6 +587,7 @@ async fn test_rebase_abort_when_no_rebase_in_progress() {
         branch: Some("feature".to_string()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
 
@@ -648,6 +671,7 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -656,6 +680,7 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         branch: None,
         create: Some("feature".to_string()),
         detach: false,
+        track: false,
     })
     .await;
     fs::write(temp_path.path().join("feature.txt"), "feature").unwrap();
@@ -681,6 +706,7 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
     let orig_head = Head::current_commit().await.expect("expected feature HEAD");
@@ -690,6 +716,7 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         branch: Some("master".to_string()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
     fs::write(temp_path.path().join("master.txt"), "master").unwrap();
@@ -715,6 +742,7 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
     let master_head = Head::current_commit().await.expect("expected master HEAD");
@@ -724,6 +752,7 @@ async fn test_rebase_abort_restores_branch_after_finalize_failure() {
         branch: Some("feature".to_string()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
     execute(RebaseArgs {
@@ -823,6 +852,7 @@ async fn test_rebase_continue_no_rebase() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -869,6 +899,7 @@ async fn test_rebase_skip_no_rebase() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -917,6 +948,7 @@ async fn test_rebase_with_conflict_and_abort() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -925,6 +957,7 @@ async fn test_rebase_with_conflict_and_abort() {
         branch: None,
         create: Some("feature".to_string()),
         detach: false,
+        track: false,
     })
     .await;
 
@@ -955,6 +988,7 @@ async fn test_rebase_with_conflict_and_abort() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -963,6 +997,7 @@ async fn test_rebase_with_conflict_and_abort() {
         branch: Some("master".to_string()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
 
@@ -989,6 +1024,7 @@ async fn test_rebase_with_conflict_and_abort() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -997,6 +1033,7 @@ async fn test_rebase_with_conflict_and_abort() {
         branch: Some("feature".to_string()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
 
@@ -1099,6 +1136,7 @@ async fn test_rebase_binary_conflict_writes_markers() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -1107,6 +1145,7 @@ async fn test_rebase_binary_conflict_writes_markers() {
         branch: None,
         create: Some("feature".to_string()),
         detach: false,
+        track: false,
     })
     .await;
     fs::write(&file_path, &feature_bytes).unwrap();
@@ -1132,6 +1171,7 @@ async fn test_rebase_binary_conflict_writes_markers() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -1140,6 +1180,7 @@ async fn test_rebase_binary_conflict_writes_markers() {
         branch: Some("master".to_string()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
     fs::write(&file_path, &master_bytes).unwrap();
@@ -1165,6 +1206,7 @@ async fn test_rebase_binary_conflict_writes_markers() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -1173,6 +1215,7 @@ async fn test_rebase_binary_conflict_writes_markers() {
         branch: Some("feature".to_string()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
     execute(RebaseArgs {
@@ -1251,6 +1294,7 @@ async fn test_rebase_with_conflict_and_skip() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -1259,6 +1303,7 @@ async fn test_rebase_with_conflict_and_skip() {
         branch: None,
         create: Some("feature".to_string()),
         detach: false,
+        track: false,
     })
     .await;
 
@@ -1290,6 +1335,7 @@ async fn test_rebase_with_conflict_and_skip() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -1321,6 +1367,7 @@ async fn test_rebase_with_conflict_and_skip() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -1329,6 +1376,7 @@ async fn test_rebase_with_conflict_and_skip() {
         branch: Some("master".to_string()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
 
@@ -1355,6 +1403,7 @@ async fn test_rebase_with_conflict_and_skip() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -1363,6 +1412,7 @@ async fn test_rebase_with_conflict_and_skip() {
         branch: Some("feature".to_string()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
 
@@ -1436,6 +1486,7 @@ async fn test_rebase_with_conflict_and_continue() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -1444,6 +1495,7 @@ async fn test_rebase_with_conflict_and_continue() {
         branch: None,
         create: Some("feature".to_string()),
         detach: false,
+        track: false,
     })
     .await;
 
@@ -1474,6 +1526,7 @@ async fn test_rebase_with_conflict_and_continue() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -1482,6 +1535,7 @@ async fn test_rebase_with_conflict_and_continue() {
         branch: Some("master".to_string()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
 
@@ -1508,6 +1562,7 @@ async fn test_rebase_with_conflict_and_continue() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -1516,6 +1571,7 @@ async fn test_rebase_with_conflict_and_continue() {
         branch: Some("feature".to_string()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
 
@@ -1625,6 +1681,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -1633,6 +1690,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         branch: None,
         create: Some("feature".to_string()),
         detach: false,
+        track: false,
     })
     .await;
 
@@ -1660,6 +1718,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -1691,6 +1750,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -1718,6 +1778,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -1726,6 +1787,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         branch: Some("master".to_string()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
 
@@ -1752,6 +1814,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -1760,6 +1823,7 @@ async fn test_rebase_multiple_commits_partial_conflict() {
         branch: Some("feature".to_string()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
 
@@ -1850,6 +1914,7 @@ async fn test_rebase_state_persistence() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -1858,6 +1923,7 @@ async fn test_rebase_state_persistence() {
         branch: None,
         create: Some("feature".to_string()),
         detach: false,
+        track: false,
     })
     .await;
 
@@ -1884,6 +1950,7 @@ async fn test_rebase_state_persistence() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -1892,6 +1959,7 @@ async fn test_rebase_state_persistence() {
         branch: Some("master".to_string()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
 
@@ -1918,6 +1986,7 @@ async fn test_rebase_state_persistence() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -1926,6 +1995,7 @@ async fn test_rebase_state_persistence() {
         branch: Some("feature".to_string()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
 
@@ -2017,6 +2087,7 @@ async fn test_rebase_fast_forward_branch_behind() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -2025,6 +2096,7 @@ async fn test_rebase_fast_forward_branch_behind() {
         branch: None,
         create: Some("feature".to_string()),
         detach: false,
+        track: false,
     })
     .await;
 
@@ -2033,6 +2105,7 @@ async fn test_rebase_fast_forward_branch_behind() {
         branch: Some("master".to_string()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
 
@@ -2059,6 +2132,7 @@ async fn test_rebase_fast_forward_branch_behind() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -2069,6 +2143,7 @@ async fn test_rebase_fast_forward_branch_behind() {
         branch: Some("feature".to_string()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
 
@@ -2128,6 +2203,7 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -2136,6 +2212,7 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
         branch: None,
         create: Some("feature".to_string()),
         detach: false,
+        track: false,
     })
     .await;
 
@@ -2144,6 +2221,7 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
         branch: Some("master".to_string()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
 
@@ -2170,6 +2248,7 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -2178,6 +2257,7 @@ async fn test_rebase_fast_forward_blocks_dirty_workdir() {
         branch: Some("feature".to_string()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
 
@@ -2240,6 +2320,7 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -2248,6 +2329,7 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
         branch: None,
         create: Some("feature".to_string()),
         detach: false,
+        track: false,
     })
     .await;
 
@@ -2256,6 +2338,7 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
         branch: Some("master".to_string()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
 
@@ -2282,6 +2365,7 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -2290,6 +2374,7 @@ async fn test_rebase_fast_forward_blocks_untracked_overwrite() {
         branch: Some("feature".to_string()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
 
@@ -2352,6 +2437,7 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -2360,6 +2446,7 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
         branch: None,
         create: Some("feature".to_string()),
         detach: false,
+        track: false,
     })
     .await;
 
@@ -2386,6 +2473,7 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -2394,6 +2482,7 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
         branch: Some("master".to_string()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
 
@@ -2420,6 +2509,7 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -2428,6 +2518,7 @@ async fn test_rebase_blocks_dirty_workdir_non_fast_forward() {
         branch: Some("feature".to_string()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
 
@@ -2497,6 +2588,7 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -2505,6 +2597,7 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         branch: None,
         create: Some("feature".to_string()),
         detach: false,
+        track: false,
     })
     .await;
 
@@ -2532,6 +2625,7 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -2540,6 +2634,7 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         branch: Some("master".to_string()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
 
@@ -2566,6 +2661,7 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -2574,6 +2670,7 @@ async fn test_rebase_conflict_preserves_non_conflicting_workdir() {
         branch: Some("feature".to_string()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
 
@@ -2641,6 +2738,7 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -2649,6 +2747,7 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         branch: None,
         create: Some("feature".to_string()),
         detach: false,
+        track: false,
     })
     .await;
 
@@ -2676,6 +2775,7 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -2692,6 +2792,7 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         disable_pre: false,
         all: true,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -2700,6 +2801,7 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         branch: Some("master".to_string()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
 
@@ -2726,6 +2828,7 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -2734,6 +2837,7 @@ async fn test_rebase_conflict_does_not_overwrite_untracked_paths() {
         branch: Some("feature".to_string()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
 
@@ -2800,6 +2904,7 @@ async fn test_rebase_continue_requires_resolution() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -2808,6 +2913,7 @@ async fn test_rebase_continue_requires_resolution() {
         branch: None,
         create: Some("feature".to_string()),
         detach: false,
+        track: false,
     })
     .await;
 
@@ -2834,6 +2940,7 @@ async fn test_rebase_continue_requires_resolution() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -2842,6 +2949,7 @@ async fn test_rebase_continue_requires_resolution() {
         branch: Some("master".to_string()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
 
@@ -2868,6 +2976,7 @@ async fn test_rebase_continue_requires_resolution() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -2876,6 +2985,7 @@ async fn test_rebase_continue_requires_resolution() {
         branch: Some("feature".to_string()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
 
