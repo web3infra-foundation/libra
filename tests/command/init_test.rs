@@ -41,7 +41,7 @@ async fn test_init() {
         quiet: false,
         template: None,
         shared: None,
-        object_format: None,ref_format: None,
+        object_format: None,
         ref_format: None,
     };
     // Run the init function
@@ -152,7 +152,8 @@ async fn test_init_with_invalid_template_path() {
         quiet: false,
         template: Some(invalid_template_path.to_string()),
         shared: None,
-        object_format: None,ref_format: None,
+        object_format: None,
+        ref_format: None,
     };
 
     // Run the init function and expect it to return an error
@@ -187,7 +188,8 @@ async fn test_init_bare() {
         quiet: false,
         template: None,
         shared: None,
-        object_format: None,ref_format: None,
+        object_format: None,
+        ref_format: None,
     };
     // Run the init function
     init(args).await.unwrap();
@@ -210,7 +212,8 @@ async fn test_init_bare_with_existing_repo() {
         quiet: false,
         template: None,
         shared: None,
-        object_format: None,ref_format: None,
+        object_format: None,
+        ref_format: None,
     };
     init(init_args).await.unwrap(); // Execute init for bare repository
 
@@ -223,7 +226,8 @@ async fn test_init_bare_with_existing_repo() {
             quiet: false,
             template: None,
             shared: None,
-            object_format: None,ref_format: None,
+            object_format: None,
+            ref_format: None,
         };
         init(args).await
     };
@@ -250,7 +254,8 @@ async fn test_init_with_initial_branch() {
         quiet: false,
         template: None,
         shared: None,
-        object_format: None,ref_format: None,
+        object_format: None,
+        ref_format: None,
     };
     // Run the init function
     init(args).await.unwrap();
@@ -300,7 +305,8 @@ async fn test_invalid_branch_name(branch_name: &str) {
         quiet: false,
         template: None,
         shared: None,
-        object_format: None,ref_format: None,
+        object_format: None,
+        ref_format: None,
     };
     // Run the init function
     let result = init(args).await;
@@ -326,7 +332,8 @@ async fn test_init_with_directory() {
         quiet: false,
         template: None,
         shared: None,
-        object_format: None,ref_format: None,
+        object_format: None,
+        ref_format: None,
     };
     // Run the init function
     init(args).await.unwrap();
@@ -358,7 +365,8 @@ async fn test_init_with_invalid_directory() {
         quiet: false,
         template: None,
         shared: None,
-        object_format: None,ref_format: None,
+        object_format: None,
+        ref_format: None,
     };
     // Run the init function
     let result = init(args).await;
@@ -402,7 +410,8 @@ async fn test_init_with_unauthorized_directory() {
         quiet: false,
         template: None,
         shared: None,
-        object_format: None,ref_format: None,
+        object_format: None,
+        ref_format: None,
     };
     // Run the init function
     let result = init(args).await;
@@ -429,7 +438,8 @@ async fn test_init_quiet() {
         quiet: true,
         template: None,
         shared: None,
-        object_format: None,ref_format: None,
+        object_format: None,
+        ref_format: None,
     };
     // Run the init function
     init(args).await.unwrap();
@@ -630,63 +640,11 @@ async fn test_init_with_ref_format() {
     let args = InitArgs {
         bare: false,
         initial_branch: Some("dev".to_string()),
-#[cfg(unix)]
-/// Init should fail when the parent directory is not writable (permission denied)
-async fn test_init_fails_when_parent_not_writable() {
-    use std::os::unix::fs::PermissionsExt;
-    // Skip test if running as root - root can bypass permission restrictions
-    use std::process::Command;
-    let output = Command::new("id")
-        .arg("-u")
-        .output()
-        .expect("failed to execute id -u");
-    let uid = String::from_utf8(output.stdout).expect("failed to parse uid");
-    if uid.trim() == "0" {
-        return;
-    }
-
-    let dir = tempdir().unwrap();
-    let path = dir.path();
-
-    let original_perms = std::fs::metadata(path).unwrap().permissions();
-
-    let mut perms = original_perms.clone();
-    perms.set_mode(0o555);
-    std::fs::set_permissions(path, perms).unwrap();
-
-    // Attempt to initialize a repo inside a non-writable parent directory
-    let args = InitArgs {
-        bare: false,
-        initial_branch: None,
-        repo_directory: path.join("repo").to_str().unwrap().to_string(),
-        quiet: false,
-        template: None,
-        shared: None,
-        object_format: None,
-    };
-
-    // Expect init to fail with PermissionDenied
-    let err = init(args).await.unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
-
-    // Restore original permissions so tempdir can clean up properly
-    std::fs::set_permissions(path, original_perms).unwrap();
-}
-
-#[tokio::test]
-#[serial]
-/// Init should create a hooks/pre-commit.sh file that is present and non-empty
-async fn test_init_creates_hooks_and_precommit() {
-    let target_dir = tempfile::tempdir().unwrap().keep();
-
-    let args = InitArgs {
-        bare: false,
-        initial_branch: None,
         repo_directory: target_dir.to_str().unwrap().to_string(),
         quiet: false,
         template: None,
         shared: None,
-        object_format: None,ref_format: None,
+        object_format: None,
         ref_format: Some(RefFormat::Strict),
     };
 
@@ -720,7 +678,7 @@ async fn test_init_with_invalid_ref_format() {
         quiet: false,
         template: None,
         shared: None,
-        object_format: None,ref_format: None,
+        object_format: None,
         ref_format: Some(RefFormat::Strict),
     };
 
