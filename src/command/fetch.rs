@@ -12,7 +12,10 @@ use clap::Parser;
 use git_internal::{
     errors::GitError,
     hash::{HashKind, ObjectHash, get_hash_kind},
-    internal::object::commit::Commit,
+    internal::{
+        object::commit::Commit,
+        pack::{Pack, encode::PackEncoder, entry::Entry},
+    },
 };
 use indicatif::ProgressBar;
 use sea_orm::TransactionTrait;

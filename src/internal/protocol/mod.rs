@@ -9,7 +9,10 @@ use git_internal::{
 };
 use url::Url;
 
-use crate::git_protocol::{ServiceType, add_pkt_line_string, read_pkt_line};
+use crate::{
+    git_protocol::{ServiceType, add_pkt_line_string, read_pkt_line},
+    internal::branch::Branch,
+};
 
 pub mod git_client; // to support git server protocol (git://) over TCP
 pub mod https_client;
@@ -207,6 +210,20 @@ pub fn generate_upload_pack_content(have: &[String], want: &[String]) -> Bytes {
     add_pkt_line_string(&mut buf, "done\n".to_string());
 
     buf.freeze()
+}
+
+impl From<Branch> for DiscoveredReference {
+    fn from(branch: Branch) -> Self {
+        let _ref = match branch.remote {
+            Some(remote) => format!("refs/remotes/{}/{}", remote, branch.name),
+            None => format!("refs/heads/{}", branch.name),
+        };
+
+        DiscoveredReference {
+            _hash: branch.commit.to_string(),
+            _ref,
+        }
+    }
 }
 
 #[cfg(test)]
