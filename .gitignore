@@ -30,4 +30,4 @@ buck-out/
 # Generated when moving Windows files to WSL
 *:Zone.Identifier
 
-.libra/
+.libra//buck-out

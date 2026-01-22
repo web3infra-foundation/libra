@@ -160,6 +160,7 @@ async fn setup_repo_with_commit_with(
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -251,6 +252,7 @@ async fn test_force_tag() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -342,6 +344,7 @@ async fn test_annotation_lines_tag() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -379,6 +382,7 @@ async fn test_annotation_lines_tag() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 

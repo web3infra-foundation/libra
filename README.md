@@ -54,6 +54,107 @@ While maintaining compatibility with `Git`, we have made some innovations and ch
 we use an `SQLite` database to manage loosely structured files such as `config`, `HEAD`, and `refs`, 
 achieving unified management.
 
+## Object Storage Configuration
+
+Libra supports using S3-compatible object storage (AWS S3, Cloudflare R2, MinIO, etc.) as an alternative or supplement to local storage. This feature implements a **tiered storage architecture**:
+
+- **Small objects** (< threshold): Stored in both local and remote storage
+- **Large objects** (≥ threshold): Stored in remote storage with local LRU cache
+
+### Environment Variables
+
+Configure object storage by setting these environment variables:
+
+| Variable | Description | Required | Default |
+|----------|-------------|----------|---------|
+| `LIBRA_STORAGE_TYPE` | Storage backend type: `s3` or `r2` | Yes (for S3/R2) | - |
+| `LIBRA_STORAGE_BUCKET` | Bucket name | Yes (for S3/R2) | `libra` |
+| `LIBRA_STORAGE_ENDPOINT` | S3-compatible endpoint URL (required for R2) | Yes (for R2) | (AWS S3 default) |
+| `LIBRA_STORAGE_REGION` | Region for bucket | No | `auto` |
+| `LIBRA_STORAGE_ACCESS_KEY` | Access key ID | Yes (for S3/R2) | - |
+| `LIBRA_STORAGE_SECRET_KEY` | Secret access key | Yes (for S3/R2) | - |
+| `LIBRA_STORAGE_THRESHOLD` | Size threshold in bytes for tiering | No | `1048576` (1MB) |
+| `LIBRA_STORAGE_CACHE_SIZE` | Local cache size limit in bytes | No | `209715200` (200MB) |
+| `LIBRA_STORAGE_ALLOW_HTTP` | Allow HTTP (not HTTPS) connections | No | `false` |
+
+### Usage Examples
+
+#### Local Storage Only (Default)
+
+```bash
+# Simply don't set LIBRA_STORAGE_TYPE
+# Or explicitly unset it if previously set
+unset LIBRA_STORAGE_TYPE
+
+libra init my-repo
+cd my-repo
+# Objects will be stored locally in .git/objects
+```
+
+#### AWS S3
+
+```bash
+export LIBRA_STORAGE_TYPE=s3
+export LIBRA_STORAGE_BUCKET=my-libra-bucket
+export LIBRA_STORAGE_REGION=us-west-2
+export LIBRA_STORAGE_ACCESS_KEY=AKIAIOSFODNN7EXAMPLE
+export LIBRA_STORAGE_SECRET_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+
+libra init my-repo
+cd my-repo
+# Objects will now be stored in S3
+```
+
+#### Cloudflare R2
+
+```bash
+export LIBRA_STORAGE_TYPE=r2
+export LIBRA_STORAGE_BUCKET=my-libra-bucket
+export LIBRA_STORAGE_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com
+export LIBRA_STORAGE_REGION=auto
+export LIBRA_STORAGE_ACCESS_KEY=<r2-access-key>
+export LIBRA_STORAGE_SECRET_KEY=<r2-secret-key>
+
+libra clone <remote-url>
+```
+
+#### MinIO (Local Testing)
+
+```bash
+export LIBRA_STORAGE_TYPE=s3
+export LIBRA_STORAGE_BUCKET=libra-test
+export LIBRA_STORAGE_ENDPOINT=http://localhost:9000
+export LIBRA_STORAGE_ACCESS_KEY=minioadmin
+export LIBRA_STORAGE_SECRET_KEY=minioadmin
+export LIBRA_STORAGE_ALLOW_HTTP=true
+
+libra init test-repo
+```
+
+#### Custom Thresholds
+
+```bash
+# Store objects > 512KB in remote storage
+export LIBRA_STORAGE_THRESHOLD=524288
+
+# Limit local cache to 500MB
+export LIBRA_STORAGE_CACHE_SIZE=524288000
+```
+
+### Behavior
+
+1. **Without object storage configuration**: Libra uses local storage only (default behavior)
+2. **With object storage configuration**: 
+   - Objects smaller than threshold are stored locally and remotely (permanent)
+   - Objects larger than threshold are stored remotely with local LRU cache
+   - Cache eviction happens when local storage exceeds the cache size limit
+
+### Notes
+
+- Bucket will be created automatically if it doesn't exist (requires appropriate permissions)
+- Invalid configuration falls back to local storage with warning messages
+- Object paths follow Git's standard structure: `<first-2-chars>/<remaining-chars>`
+
 ## CLI Compatibility with Git
 
 This section documents the compatibility between **Libra**’s CLI and **Git** at the level of commands and options, and serves as a roadmap for closing gaps.
@@ -201,7 +302,7 @@ This section documents the compatibility between **Libra**’s CLI and **Git** a
 |  | `-d, --detach` | Yes | Yes | ✅ | - | Detach HEAD |
 |  | `-C, --force-create <branch>` | Yes | No | ⛔ | P1 | Force re‑create branch |
 |  | `--guess / --no-guess` | Yes | No | ⛔ | P2 | Heuristic branch name guessing |
-|  | `--track` | Yes | No | ⛔ | P0 | Auto set upstream when switching to remote branch |
+|  | `--track` | Yes | Yes | ✅ | - | Auto set upstream when switching to remote branch |
 |  | `--merge` | Yes | No | ⛔ | P2 | Merge mode on switch |
 |  | `--conflict=<style>` | Yes | No | ⛔ | P2 | Conflict marker style |
 | `checkout` | `<branch>` | Yes | Yes | ✅ | - | Checkout existing branch |

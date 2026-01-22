@@ -52,6 +52,7 @@ async fn test_basic_cherry_pick() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
     println!("C1: Created common ancestor.");
@@ -61,6 +62,7 @@ async fn test_basic_cherry_pick() {
         branch: None,
         create: Some("feature".to_string()),
         detach: false,
+        track: false,
     })
     .await;
     println!("Switched to new branch 'feature'.");
@@ -90,6 +92,7 @@ async fn test_basic_cherry_pick() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
     println!("C2: Added feature_a.txt on feature branch.");
@@ -123,6 +126,7 @@ async fn test_basic_cherry_pick() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
     println!("C3: Added feature_b.txt on feature branch.");
@@ -132,6 +136,7 @@ async fn test_basic_cherry_pick() {
         branch: Some("master".to_string()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
     println!("Switched back to master.");
@@ -258,6 +263,7 @@ async fn test_cherry_pick_with_commit() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -266,6 +272,7 @@ async fn test_cherry_pick_with_commit() {
         branch: None,
         create: Some("feature".to_string()),
         detach: false,
+        track: false,
     })
     .await;
 
@@ -292,6 +299,7 @@ async fn test_cherry_pick_with_commit() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -304,6 +312,7 @@ async fn test_cherry_pick_with_commit() {
         branch: Some("master".to_string()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
 
@@ -373,6 +382,7 @@ async fn test_cherry_pick_multiple_commits() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -381,6 +391,7 @@ async fn test_cherry_pick_multiple_commits() {
         branch: None,
         create: Some("feature".to_string()),
         detach: false,
+        track: false,
     })
     .await;
 
@@ -408,6 +419,7 @@ async fn test_cherry_pick_multiple_commits() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
     let commit1 = Head::current_commit().await.expect("Should have commit1");
@@ -436,6 +448,7 @@ async fn test_cherry_pick_multiple_commits() {
         disable_pre: false,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
     let commit2 = Head::current_commit().await.expect("Should have commit2");
@@ -445,6 +458,7 @@ async fn test_cherry_pick_multiple_commits() {
         branch: Some("master".to_string()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
 
@@ -543,6 +557,7 @@ async fn test_cherry_pick_sha256_hash_handling() {
         disable_pre: true,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
 
@@ -551,6 +566,7 @@ async fn test_cherry_pick_sha256_hash_handling() {
         branch: None,
         create: Some("feature".into()),
         detach: false,
+        track: false,
     })
     .await;
     fs::write("feature.txt", "feature").unwrap();
@@ -576,6 +592,7 @@ async fn test_cherry_pick_sha256_hash_handling() {
         disable_pre: true,
         all: false,
         no_verify: false,
+        author: None,
     })
     .await;
     let feature_commit = Head::current_commit().await.expect("need feature commit");
@@ -586,6 +603,7 @@ async fn test_cherry_pick_sha256_hash_handling() {
         branch: Some("main".into()),
         create: None,
         detach: false,
+        track: false,
     })
     .await;
     let head_before = Head::current_commit().await.unwrap();
