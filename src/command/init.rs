@@ -1,7 +1,7 @@
 //! Initializes a repository by creating .libra storage, seeding HEAD and default refs/config, and preparing the backing database.
 
 use std::{
-    fs,
+    env, fs,
     io::{self, ErrorKind},
     path::Path,
 };
@@ -16,7 +16,7 @@ use crate::{
         db,
         model::{config, reference},
     },
-    utils::util::{DATABASE, ROOT_DIR},
+    utils::util::{DATABASE, ROOT_DIR, cur_dir},
 };
 const DEFAULT_BRANCH: &str = "master";
 
@@ -65,7 +65,11 @@ pub struct InitArgs {
 
 /// Execute the init function
 pub async fn execute(args: InitArgs) {
-    match init(args).await {
+    let target_path = cur_dir().join(Path::new(&args.repo_directory));
+    match init(args)
+        .await
+        .and_then(|_| env::set_current_dir(target_path))
+    {
         Ok(_) => {}
         Err(e) => {
             eprintln!("Error: {e}");
