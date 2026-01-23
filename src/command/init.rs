@@ -369,7 +369,9 @@ fn validate_filesystem_branch_name(branch_name: &str) -> Result<(), InitError> {
             || c == '\0'
             || (cfg!(windows) && (c == '\\' || c == '/' || c == '\n' || c == '\r'))
     }) {
-        return Err(InitError::FilesystemInvalidCharacters(branch_name.to_string()));
+        return Err(InitError::FilesystemInvalidCharacters(
+            branch_name.to_string(),
+        ));
     }
 
     // Cannot be "." or ".."
@@ -493,12 +495,15 @@ pub async fn init(args: InitArgs) -> Result<(), InitError> {
     #[cfg(target_os = "windows")]
     {
         // On Windows, we need to convert the path to a UNC path
-        let database = database.to_str().ok_or_else(|| {
-            InitError::Io(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Invalid database path encoding",
-            ))
-        })?.replace("\\", "/");
+        let database = database
+            .to_str()
+            .ok_or_else(|| {
+                InitError::Io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Invalid database path encoding",
+                ))
+            })?
+            .replace("\\", "/");
         conn = db::create_database(database.as_str()).await?;
     }
 

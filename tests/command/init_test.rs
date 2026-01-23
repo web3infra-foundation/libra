@@ -372,7 +372,12 @@ async fn test_valid_branch_name(branch_name: &str) {
     };
     // Run the init function - should succeed
     let result = init(args).await;
-    assert!(result.is_ok(), "Expected success for valid branch name: {}, got error: {:?}", branch_name, result);
+    assert!(
+        result.is_ok(),
+        "Expected success for valid branch name: {}, got error: {:?}",
+        branch_name,
+        result
+    );
 }
 
 async fn test_invalid_branch_name(branch_name: &str) {
@@ -390,7 +395,11 @@ async fn test_invalid_branch_name(branch_name: &str) {
     // Run the init function
     let result = init(args).await;
     // Check for the error
-    assert!(result.is_err(), "Expected error for invalid branch name: {}", branch_name);
+    assert!(
+        result.is_err(),
+        "Expected error for invalid branch name: {}",
+        branch_name
+    );
     let err = result.unwrap_err();
     // Check that it's a branch name validation error
     match err {
@@ -408,7 +417,10 @@ async fn test_invalid_branch_name(branch_name: &str) {
         | InitError::BranchNameTooLong => {
             // This is expected for invalid branch names
         }
-        _ => panic!("Unexpected error type for invalid branch name '{}': {:?}", branch_name, err),
+        _ => panic!(
+            "Unexpected error type for invalid branch name '{}': {:?}",
+            branch_name, err
+        ),
     }
 }
 
@@ -472,7 +484,11 @@ async fn test_init_with_invalid_directory() {
     match err {
         InitError::Io(io_err) => {
             assert_eq!(io_err.kind(), std::io::ErrorKind::InvalidInput);
-            assert!(io_err.to_string().contains("The target directory is not a directory"));
+            assert!(
+                io_err
+                    .to_string()
+                    .contains("The target directory is not a directory")
+            );
         }
         _ => panic!("Expected Io error, got {:?}", err),
     }
@@ -519,7 +535,11 @@ async fn test_init_with_unauthorized_directory() {
     match err {
         InitError::Io(io_err) => {
             assert_eq!(io_err.kind(), std::io::ErrorKind::PermissionDenied);
-            assert!(io_err.to_string().contains("The target directory is read-only"));
+            assert!(
+                io_err
+                    .to_string()
+                    .contains("The target directory is read-only")
+            );
         }
         _ => panic!("Expected Io error, got {:?}", err),
     }
@@ -802,7 +822,10 @@ async fn test_init_with_invalid_ref_format() {
     let err = result.unwrap_err();
     match err {
         InitError::InvalidCharacters(_) => {
-            assert!(err.to_string().contains("branch name contains invalid characters"));
+            assert!(
+                err.to_string()
+                    .contains("branch name contains invalid characters")
+            );
         }
         _ => panic!("Expected InvalidCharacters error, got {:?}", err),
     }
