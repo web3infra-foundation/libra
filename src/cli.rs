@@ -1,4 +1,5 @@
 //! CLI entry for Libra, defining clap subcommands, setting the hash algorithm from config, and dispatching each command handler.
+use std::env;
 
 use clap::{Parser, Subcommand};
 use git_internal::{
@@ -179,8 +180,10 @@ pub async fn parse_async(args: Option<&[&str]>) -> Result<(), GitError> {
     // parse the command and execute the corresponding function with it's args
     match args.command {
         Commands::Init(args) => {
-            command::init::execute(args).await;
+            let original_dir = utils::util::cur_dir();
+            command::init::execute(args).await; // set working directory as args.repo_directory
             set_local_hash_kind().await?; // set hash kind after init
+            env::set_current_dir(&original_dir)?; // restore working directory as original_dir
         }
         Commands::Clone(args) => command::clone::execute(args).await, //clone will use init internally,so we don't need to set hash kind here again
         Commands::Add(args) => command::add::execute(args).await,
