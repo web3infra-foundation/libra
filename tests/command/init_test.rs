@@ -4,7 +4,10 @@
 //
 use std::fs;
 
-use libra::internal::model::config;
+use libra::{
+    command::init::{InitArgs, InitError},
+    internal::model::config,
+};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
 use super::*;
@@ -234,8 +237,13 @@ async fn test_init_bare_with_existing_repo() {
 
     // Check for the error
     let err = result.await.unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists); // Check error type
-    assert!(err.to_string().contains("Initialization failed")); // Check error message contains "Already initialized"
+    match err {
+        InitError::Io(io_err) => {
+            assert_eq!(io_err.kind(), std::io::ErrorKind::AlreadyExists);
+            assert!(io_err.to_string().contains("Initialization failed"));
+        }
+        _ => panic!("Expected Io error, got {:?}", err),
+    }
 }
 
 #[tokio::test]
@@ -296,6 +304,77 @@ async fn test_init_with_invalid_branch() {
     test_invalid_branch_name(".").await;
 }
 
+#[tokio::test]
+#[serial]
+/// Test the init function with Unicode branch names
+async fn test_init_with_unicode_branch_names() {
+    // Test valid Unicode branch names
+    test_valid_branch_name("feature/🚀-launch").await;
+    test_valid_branch_name("bugfix/🐛-fix").await;
+    test_valid_branch_name("中文分支").await;
+    test_valid_branch_name("русский-ветка").await;
+    test_valid_branch_name("🌟-special").await;
+
+    // Test invalid Unicode branch names (containing control characters)
+    test_invalid_branch_name("branch\x00name").await; // null byte
+    test_invalid_branch_name("branch\x01name").await; // control character
+}
+
+#[tokio::test]
+#[serial]
+/// Test the init function with very long branch names
+async fn test_init_with_long_branch_names() {
+    // Test maximum allowed length (should pass)
+    let max_length_name = "a".repeat(255);
+    test_valid_branch_name(&max_length_name).await;
+
+    // Test too long branch name (should fail)
+    let too_long_name = "a".repeat(256);
+    test_invalid_branch_name(&too_long_name).await;
+}
+
+#[tokio::test]
+#[serial]
+/// Test the init function with filesystem-specific invalid characters
+async fn test_init_with_filesystem_invalid_branch_names() {
+    let args = InitArgs {
+        bare: false,
+        initial_branch: Some("<invalid>".to_string()),
+        repo_directory: tempdir().unwrap().keep().to_str().unwrap().to_string(),
+        quiet: false,
+        template: None,
+        shared: None,
+        object_format: None,
+        ref_format: Some(libra::command::init::RefFormat::Filesystem),
+    };
+    let result = init(args).await;
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    match err {
+        InitError::FilesystemInvalidCharacters(_) => {
+            // Expected for filesystem mode
+        }
+        _ => panic!("Expected FilesystemInvalidCharacters error, got {:?}", err),
+    }
+}
+
+async fn test_valid_branch_name(branch_name: &str) {
+    let target_dir = tempdir().unwrap().keep();
+    let args = InitArgs {
+        bare: false,
+        initial_branch: Some(branch_name.to_string()),
+        repo_directory: target_dir.to_str().unwrap().to_string(),
+        quiet: false,
+        template: None,
+        shared: None,
+        object_format: None,
+        ref_format: None,
+    };
+    // Run the init function - should succeed
+    let result = init(args).await;
+    assert!(result.is_ok(), "Expected success for valid branch name: {}, got error: {:?}", branch_name, result);
+}
+
 async fn test_invalid_branch_name(branch_name: &str) {
     let target_dir = tempdir().unwrap().keep();
     let args = InitArgs {
@@ -311,12 +390,26 @@ async fn test_invalid_branch_name(branch_name: &str) {
     // Run the init function
     let result = init(args).await;
     // Check for the error
+    assert!(result.is_err(), "Expected error for invalid branch name: {}", branch_name);
     let err = result.unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput); // Check error type
-    assert!(
-        err.to_string().contains("branch name cannot be")
-            || err.to_string().contains("branch name contains")
-    ); // Check error message contains appropriate text
+    // Check that it's a branch name validation error
+    match err {
+        InitError::EmptyBranchName
+        | InitError::BranchNameIsHead
+        | InitError::BranchNameIsAt
+        | InitError::InvalidCharacters(_)
+        | InitError::FilesystemInvalidCharacters(_)
+        | InitError::StartsOrEndsWithSlash
+        | InitError::ConsecutiveSlashes
+        | InitError::ContainsDoubleDots
+        | InitError::EndsWithLock
+        | InitError::EndsWithDot
+        | InitError::IsDotOrDoubleDot
+        | InitError::BranchNameTooLong => {
+            // This is expected for invalid branch names
+        }
+        _ => panic!("Unexpected error type for invalid branch name '{}': {:?}", branch_name, err),
+    }
 }
 
 #[tokio::test]
@@ -376,11 +469,13 @@ async fn test_init_with_invalid_directory() {
 
     // Check for the error
     let err = result.unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput); // Check error type
-    assert!(
-        err.to_string()
-            .contains("The target directory is not a directory")
-    ); // Check error message
+    match err {
+        InitError::Io(io_err) => {
+            assert_eq!(io_err.kind(), std::io::ErrorKind::InvalidInput);
+            assert!(io_err.to_string().contains("The target directory is not a directory"));
+        }
+        _ => panic!("Expected Io error, got {:?}", err),
+    }
 }
 
 #[tokio::test]
@@ -421,11 +516,13 @@ async fn test_init_with_unauthorized_directory() {
 
     // Check for the error
     let err = result.unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied); // Check error type
-    assert!(
-        err.to_string()
-            .contains("The target directory is read-only")
-    ); // Check error message
+    match err {
+        InitError::Io(io_err) => {
+            assert_eq!(io_err.kind(), std::io::ErrorKind::PermissionDenied);
+            assert!(io_err.to_string().contains("The target directory is read-only"));
+        }
+        _ => panic!("Expected Io error, got {:?}", err),
+    }
 }
 
 #[tokio::test]
@@ -513,7 +610,12 @@ async fn test_invalid_share_mode(shared_mode: &str) {
     let err = result.unwrap_err();
 
     // Verify the type of error
-    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    match err {
+        InitError::Io(io_err) => {
+            assert_eq!(io_err.kind(), std::io::ErrorKind::InvalidInput);
+        }
+        _ => panic!("Expected Io error, got {:?}", err),
+    }
 }
 
 #[tokio::test]
@@ -633,8 +735,13 @@ async fn test_init_with_invalid_object_format() {
     // This should fail with a generic invalid format error
     let result = init(args).await;
     let err = result.unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-    assert!(err.to_string().contains("unsupported object format"));
+    match err {
+        InitError::Io(io_err) => {
+            assert_eq!(io_err.kind(), std::io::ErrorKind::InvalidInput);
+            assert!(io_err.to_string().contains("unsupported object format"));
+        }
+        _ => panic!("Expected Io error, got {:?}", err),
+    }
 }
 
 #[tokio::test]
@@ -693,9 +800,10 @@ async fn test_init_with_invalid_ref_format() {
     // This should fail due to invalid branch name
     let result = init(args).await;
     let err = result.unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-    assert!(
-        err.to_string()
-            .contains("branch name contains invalid characters")
-    );
+    match err {
+        InitError::InvalidCharacters(_) => {
+            assert!(err.to_string().contains("branch name contains invalid characters"));
+        }
+        _ => panic!("Expected InvalidCharacters error, got {:?}", err),
+    }
 }
