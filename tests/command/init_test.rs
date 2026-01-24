@@ -1,7 +1,6 @@
 use std::fs;
 
 use libra::command::init::{InitArgs, InitError};
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
 
 use super::*;
 
@@ -390,9 +389,9 @@ async fn test_invalid_branch_name(branch_name: &str) {
     let err = result.unwrap_err();
     
     match err {
-        InitError::EmptyBranchName 
-        | InitError::BranchNameIsHead 
-        | InitError::BranchNameIsAt 
+        InitError::EmptyBranchName
+        | InitError::BranchNameIsHead
+        | InitError::BranchNameIsAt
         | InitError::InvalidCharacters(_)
         | InitError::FilesystemInvalidCharacters(_)
         | InitError::StartsOrEndsWithSlash
@@ -722,7 +721,6 @@ async fn test_init_with_invalid_object_format() {
     let result = init(args).await;
     let err = result.unwrap_err();
     
-    // 保存错误消息以供后续检查
     let error_message = err.to_string();
     
     match err {
