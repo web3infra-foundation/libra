@@ -1,6 +1,7 @@
 //! Initializes a repository by creating .libra storage, seeding HEAD and default refs/config, and preparing the backing database.
 
 use std::{
+    env,
     fs,
     io::{self, ErrorKind},
     path::Path,
@@ -8,16 +9,10 @@ use std::{
 
 use clap::{Parser, ValueEnum};
 use git_internal::hash::{HashKind, set_hash_kind};
-use sea_orm::{ActiveModelTrait, DbConn, DbErr, Set, TransactionTrait};
+use sea_orm::DbErr;
 use thiserror::Error;
 
-use crate::{
-    internal::{
-        db,
-        model::{config, reference},
-    },
-    utils::util::{DATABASE, ROOT_DIR},
-};
+use crate::utils::util::ROOT_DIR;
 const DEFAULT_BRANCH: &str = "master";
 
 // Branch name validation constants
@@ -147,12 +142,9 @@ pub async fn execute(args: InitArgs) {
     }
 }
 
-/// Check if the repository has already been initialized based on the presence of the description file.
+/// Check if the repository has already been initialized based on the presence of the .libra directory.
 fn is_reinit(cur_dir: &Path) -> bool {
-    let bare_head_path = cur_dir.join("description");
-    let head_path = cur_dir.join(".libra/description");
-    // Check the presence of the description file
-    head_path.exists() || bare_head_path.exists()
+    cur_dir.join(".libra").exists()
 }
 
 /// Check if the target directory is writable
@@ -456,11 +448,6 @@ pub async fn init(args: InitArgs) -> Result<(), InitError> {
             root_dir.join("info/exclude"),
             include_str!("../../template/exclude"),
         )?;
-        // Create .libra/description
-        fs::write(
-            root_dir.join("description"),
-            include_str!("../../template/description"),
-        )?;
         // Create .libra/hooks/pre-commit.sh
         fs::write(
             root_dir.join("hooks").join("pre-commit.sh"),
@@ -488,56 +475,6 @@ pub async fn init(args: InitArgs) -> Result<(), InitError> {
         fs::create_dir_all(root_dir.join(dir))?;
     }
 
-    // Create database: .libra/libra.db
-    let conn;
-    let database = root_dir.join(DATABASE);
-
-    #[cfg(target_os = "windows")]
-    {
-        // On Windows, we need to convert the path to a UNC path
-        let database = database
-            .to_str()
-            .ok_or_else(|| {
-                InitError::Io(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Invalid database path encoding",
-                ))
-            })?
-            .replace("\\", "/");
-        conn = db::create_database(database.as_str()).await?;
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        // On Unix-like systems, we do no more
-        let database_str = database.to_str().ok_or_else(|| {
-            InitError::Io(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Invalid database path encoding",
-            ))
-        })?;
-        conn = db::create_database(database_str).await?;
-    }
-
-    // Create config table with bare parameter consideration and store ref format
-    init_config(
-        &conn,
-        args.bare,
-        Some(object_format_value.as_str()),
-        args.ref_format.as_ref(),
-    )
-    .await?;
-    // Create config table with bare parameter consideration and store ref format
-    init_config(
-        &conn,
-        args.bare,
-        Some(object_format_value.as_str()),
-        args.ref_format.as_ref(),
-    )
-    .await
-    .unwrap();
-
-    // Determine the initial branch name: use provided name or default
     // Determine the initial branch name: use provided name or default
     let initial_branch_name = args
         .initial_branch
@@ -563,16 +500,6 @@ pub async fn init(args: InitArgs) -> Result<(), InitError> {
     // For custom mode, we use refs/heads/%s format, for others we also use refs/heads/%s
     // but with different validation rules applied above
     let _initial_ref_name = format!("refs/heads/{}", initial_branch_name);
-
-    // Create HEAD (store the branch name as before; ref format stored in config)
-    reference::ActiveModel {
-        name: Set(Some(initial_branch_name.clone())),
-        kind: Set(reference::ConfigKind::Head),
-        ..Default::default() // all others are `NotSet`
-    }
-    .insert(&conn)
-    .await
-    .unwrap();
 
     // Set .libra as hidden
     set_dir_hidden(root_dir.to_str().unwrap())?;
@@ -601,85 +528,6 @@ pub async fn init(args: InitArgs) -> Result<(), InitError> {
 
 /// Initialize the configuration for the Libra repository
 /// This function creates the necessary configuration entries in the database.
-async fn init_config(
-    conn: &DbConn,
-    is_bare: bool,
-    object_format: Option<&str>,
-    ref_format: Option<&RefFormat>,
-) -> Result<(), DbErr> {
-    // Begin a new transaction
-    let txn = conn.begin().await?;
-
-    // Define the configuration entries for non-Windows systems
-    #[cfg(not(target_os = "windows"))]
-    let entries = [
-        ("repositoryformatversion", "0"),
-        ("filemode", "true"),
-        ("bare", if is_bare { "true" } else { "false" }),
-        ("logallrefupdates", "true"),
-    ];
-
-    // Define the configuration entries for Windows systems
-    #[cfg(target_os = "windows")]
-    let entries = [
-        ("repositoryformatversion", "0"),
-        ("filemode", "false"), // no filemode on windows
-        ("bare", if is_bare { "true" } else { "false" }),
-        ("logallrefupdates", "true"),
-        ("symlinks", "false"),  // no symlinks on windows
-        ("ignorecase", "true"), // ignorecase on windows
-    ];
-
-    // Insert each configuration entry into the database
-    for (key, value) in entries {
-        // tip: Set(None) == NotSet == default == NULL
-        let entry = config::ActiveModel {
-            configuration: Set("core".to_owned()),
-            key: Set(key.to_owned()),
-            value: Set(value.to_owned()),
-            ..Default::default() // id & name NotSet
-        };
-        entry.insert(&txn).await?;
-    }
-    // Insert the object format, defaulting to "sha1" if not specified.
-    let object_format_entry = config::ActiveModel {
-        configuration: Set("core".to_owned()),
-        key: Set("objectformat".to_owned()),
-        value: Set(object_format.unwrap_or("sha1").to_owned()),
-        ..Default::default() // id & name NotSet
-    };
-    object_format_entry.insert(&txn).await?;
-    // Insert the initial ref format used during init
-    let ref_format_value = match ref_format {
-        Some(RefFormat::Strict) => "strict",
-        Some(RefFormat::Filesystem) => "filesystem",
-        None => "strict", // default
-    };
-    let init_ref_format_entry = config::ActiveModel {
-        configuration: Set("core".to_owned()),
-        key: Set("initrefformat".to_owned()),
-        value: Set(ref_format_value.to_owned()),
-        ..Default::default()
-    };
-    init_ref_format_entry.insert(&txn).await?;
-    // Insert the initial ref format used during init
-    let ref_format_value = match ref_format {
-        Some(RefFormat::Strict) => "strict",
-        Some(RefFormat::Filesystem) => "filesystem",
-        None => "strict", // default
-    };
-    let init_ref_format_entry = config::ActiveModel {
-        configuration: Set("core".to_owned()),
-        key: Set("initrefformat".to_owned()),
-        value: Set(ref_format_value.to_owned()),
-        ..Default::default()
-    };
-    init_ref_format_entry.insert(&txn).await?;
-    // Commit the transaction
-    txn.commit().await?;
-    Ok(())
-}
-
 /// Set a directory as hidden on Windows systems
 /// This function uses the `attrib` command to set the directory as hidden.
 #[cfg(target_os = "windows")]

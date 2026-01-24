@@ -1,10 +1,5 @@
 //! Runs blame for a file at a given commit by walking trees/diffs, attributing lines to commits, and streaming formatted output.
 
-use std::{
-    io::Write,
-    process::{Command, Stdio},
-};
-
 use chrono::DateTime;
 use clap::Parser;
 use git_internal::{

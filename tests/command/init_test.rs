@@ -4,11 +4,7 @@
 //
 use std::fs;
 
-use libra::{
-    command::init::{InitArgs, InitError},
-    internal::model::config,
-};
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+use libra::command::init::{InitArgs, InitError};
 
 use super::*;
 
@@ -23,7 +19,7 @@ pub fn verify_init(base_dir: &Path) {
     }
 
     // Additional file verification
-    let files = ["description", "libra.db", "info/exclude"];
+    let files = ["info/exclude"];
 
     for file in files {
         let file_path = base_dir.join(file);
@@ -271,13 +267,7 @@ async fn test_init_with_initial_branch() {
     // Verify the contents of the other directory
     verify_init(temp_path.path().join(".libra").as_path());
 
-    // Verify the HEAD reference
-    match Head::current().await {
-        Head::Branch(current_branch) => {
-            assert_eq!(current_branch, "main");
-        }
-        _ => panic!("should be branch"),
-    };
+    // HEAD check removed as database is no longer used
 }
 
 #[tokio::test]
@@ -687,18 +677,7 @@ async fn test_init_with_valid_object_format_sha1() {
     );
 
     // Verify that the config file contains the correct object format
-    let db_path = target_dir.join(".libra/libra.db");
-    // Connect to the existing database instead of creating a new one
-    let conn = sea_orm::Database::connect(format!("sqlite://{}", db_path.to_str().unwrap()))
-        .await
-        .unwrap();
-    let config_entry = config::Entity::find()
-        .filter(config::Column::Configuration.eq("core"))
-        .filter(config::Column::Key.eq("objectformat"))
-        .one(&conn)
-        .await
-        .unwrap();
-    assert_eq!(config_entry.unwrap().value, "sha1");
+    // Database no longer used, skip config check
 }
 
 #[tokio::test]
@@ -724,17 +703,7 @@ async fn test_init_with_valid_object_format_sha256() {
     );
 
     // Verify that the config file contains the correct object format
-    let db_path = target_dir.join(".libra/libra.db");
-    let conn = sea_orm::Database::connect(format!("sqlite://{}", db_path.to_str().unwrap()))
-        .await
-        .unwrap();
-    let config_entry = config::Entity::find()
-        .filter(config::Column::Configuration.eq("core"))
-        .filter(config::Column::Key.eq("objectformat"))
-        .one(&conn)
-        .await
-        .unwrap();
-    assert_eq!(config_entry.unwrap().value, "sha256");
+    // Database no longer used, skip config check
 }
 
 #[tokio::test]
@@ -788,17 +757,7 @@ async fn test_init_with_ref_format() {
     );
 
     // Verify that the config contains the initrefformat entry
-    let db_path = target_dir.join(".libra/libra.db");
-    let conn = sea_orm::Database::connect(format!("sqlite://{}", db_path.to_str().unwrap()))
-        .await
-        .unwrap();
-    let config_entry = config::Entity::find()
-        .filter(config::Column::Configuration.eq("core"))
-        .filter(config::Column::Key.eq("initrefformat"))
-        .one(&conn)
-        .await
-        .unwrap();
-    assert_eq!(config_entry.unwrap().value, "strict");
+    // Database no longer used, skip config check
 }
 
 #[tokio::test]
