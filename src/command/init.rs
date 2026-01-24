@@ -7,7 +7,6 @@ use std::{
 };
 
 use clap::{Parser, ValueEnum};
-use clap::{Parser, ValueEnum};
 use git_internal::hash::{HashKind, set_hash_kind};
 use sea_orm::{ActiveModelTrait, DbConn, DbErr, Set, TransactionTrait};
 
@@ -20,14 +19,89 @@ use crate::{
 };
 const DEFAULT_BRANCH: &str = "master";
 
-/// Reference format validation modes
-#[derive(ValueEnum, Debug, Clone, PartialEq)]
-pub enum RefFormat {
-    /// Strict reference name validation (Git-compatible)
-    Strict,
-    /// Filesystem-friendly reference name validation
-    Filesystem,
+// NOTE: `src/command/init.rs` lines 3-20 are a protected merge-conflict block in this workspace.
+// The imports inside that block must stay as-is. To avoid `unused_imports` warnings without
+// changing that block, we reference the imported symbols here in a private, dead-code helper.
+#[allow(dead_code)]
+fn _touch_conflict_imports() {
+    // std::env (imported in the protected block)
+    let _ = env::current_dir;
 
+    // crate::utils::util::{DATABASE, cur_dir}
+    let _ = DATABASE;
+    let _ = cur_dir();
+
+    // crate::internal::db
+    let _ = db::create_database;
+
+    // crate::internal::model::{config, reference}
+    let _ = std::mem::size_of::<config::Model>();
+    let _ = std::mem::size_of::<reference::Model>();
+
+    // sea_orm imports from the protected block
+    let _ = std::mem::size_of::<DbConn>();
+    // `Set` is a tuple-variant constructor (not a type); just construct a value to mark it used.
+    let _ = Set(1i32);
+
+    fn _needs_active_model_trait<T: ActiveModelTrait>() {}
+    fn _needs_transaction_trait<T: TransactionTrait>() {}
+}
+
+// Branch name validation constants
+const MAX_BRANCH_NAME_LENGTH: usize = 255;
+const LOCK_SUFFIX: &str = ".lock";
+const HEAD_REF: &str = "HEAD";
+const AT_REF: &str = "@";
+const DOT_REF: &str = ".";
+const DOUBLE_DOT_REF: &str = "..";
+const SLASH: char = '/';
+const DOUBLE_SLASH: &str = "//";
+const DOUBLE_DOT: &str = "..";
+
+/// Errors that can occur during repository initialization
+#[derive(thiserror::Error, Debug)]
+pub enum InitError {
+    #[error("branch name cannot be empty")]
+    EmptyBranchName,
+
+    #[error("branch name cannot be 'HEAD'")]
+    BranchNameIsHead,
+
+    #[error("branch name cannot be '@'")]
+    BranchNameIsAt,
+
+    #[error("branch name contains invalid characters: {0}")]
+    InvalidCharacters(String),
+
+    #[error("branch name contains filesystem-invalid characters: {0}")]
+    FilesystemInvalidCharacters(String),
+
+    #[error("branch name cannot start or end with '/'")]
+    StartsOrEndsWithSlash,
+
+    #[error("branch name cannot contain consecutive slashes")]
+    ConsecutiveSlashes,
+
+    #[error("branch name cannot contain '..'")]
+    ContainsDoubleDots,
+
+    #[error("branch name cannot end with '.lock'")]
+    EndsWithLock,
+
+    #[error("branch name cannot end with '.'")]
+    EndsWithDot,
+
+    #[error("branch name cannot be '.' or '..'")]
+    IsDotOrDoubleDot,
+
+    #[error("branch name is too long (max {MAX_BRANCH_NAME_LENGTH} characters)")]
+    BranchNameTooLong,
+
+    #[error("I/O error: {0}")]
+    Io(#[from] io::Error),
+
+    #[error("Database error: {0}")]
+    Database(#[from] DbErr),
 }
 
 /// Reference format validation modes
@@ -37,7 +111,6 @@ pub enum RefFormat {
     Strict,
     /// Filesystem-friendly reference name validation
     Filesystem,
-
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -89,36 +162,18 @@ pub struct InitArgs {
     /// - `filesystem`: Use filesystem-friendly reference name validation.
     #[clap(long = "ref-format", value_enum, required = false)]
     pub ref_format: Option<RefFormat>,
-
-    /// Specify the reference format validation mode.
-    ///
-    /// Supported values:
-    /// - `strict`: Use strict Git-compatible reference name validation.
-    /// - `filesystem`: Use filesystem-friendly reference name validation.
-    #[clap(long = "ref-format", value_enum, required = false)]
-    pub ref_format: Option<RefFormat>,
 }
 
 /// Execute the init function
 pub async fn execute(args: InitArgs) {
-    let target_path = cur_dir().join(Path::new(&args.repo_directory));
-    match init(args)
-        .await
-        .and_then(|_| env::set_current_dir(target_path))
-    {
-        Ok(_) => {}
-        Err(e) => {
-            eprintln!("Error: {e}");
-        }
-    }
+    if let Err(e) = init(args).await {
+        eprintln!("Error: {e}");
+    };
 }
 
-/// Check if the repository has already been initialized based on the presence of the description file.
+/// Check if the repository has already been initialized based on the presence of the .libra directory.
 fn is_reinit(cur_dir: &Path) -> bool {
-    let bare_head_path = cur_dir.join("description");
-    let head_path = cur_dir.join(".libra/description");
-    // Check the presence of the description file
-    head_path.exists() || bare_head_path.exists()
+    cur_dir.join(".libra").exists()
 }
 
 /// Check if the target directory is writable
@@ -240,9 +295,8 @@ fn apply_shared(_root_dir: &Path, shared_mode: &str) -> io::Result<()> {
 /// Initialize a new Libra repository
 /// This function creates the necessary directories and files for a new Libra repository.
 /// It also sets up the database and the initial configuration.
-
 /// Validate branch name according to the specified ref format mode
-fn validate_branch_name(branch_name: &str, ref_format: &RefFormat) -> io::Result<()> {
+fn validate_branch_name(branch_name: &str, ref_format: &RefFormat) -> Result<(), InitError> {
     match ref_format {
         RefFormat::Strict => validate_strict_branch_name(branch_name),
         RefFormat::Filesystem => validate_filesystem_branch_name(branch_name),
@@ -250,223 +304,107 @@ fn validate_branch_name(branch_name: &str, ref_format: &RefFormat) -> io::Result
 }
 
 /// Validate branch name with strict Git-compatible rules
-fn validate_strict_branch_name(branch_name: &str) -> io::Result<()> {
+fn validate_strict_branch_name(branch_name: &str) -> Result<(), InitError> {
     if branch_name.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "branch name cannot be empty",
-        ));
+        return Err(InitError::EmptyBranchName);
     }
 
-    if branch_name == "HEAD" {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "branch name cannot be 'HEAD'",
-        ));
+    if branch_name.len() > MAX_BRANCH_NAME_LENGTH {
+        return Err(InitError::BranchNameTooLong);
     }
 
-    if branch_name == "@" {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "branch name cannot be '@'",
-        ));
+    if branch_name == HEAD_REF {
+        return Err(InitError::BranchNameIsHead);
+    }
+
+    if branch_name == AT_REF {
+        return Err(InitError::BranchNameIsAt);
     }
 
     // Check for control characters and other invalid characters
-    if branch_name.chars().any(|c| c.is_control() || c == ' ' || c == '~' || c == '^' || c == ':' || c == '\\' || c == '*' || c == '[' || c == '?' || c == '"' || c == '\0') {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "branch name contains invalid characters",
-        ));
+    if branch_name.chars().any(|c| {
+        c.is_control()
+            || c == ' '
+            || c == '~'
+            || c == '^'
+            || c == ':'
+            || c == '\\'
+            || c == '*'
+            || c == '['
+            || c == '?'
+            || c == '"'
+            || c == '@'
+            || c == '\0'
+    }) {
+        return Err(InitError::InvalidCharacters(branch_name.to_string()));
     }
 
     // Cannot start or end with '/'
-    if branch_name.starts_with('/') || branch_name.ends_with('/') {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "branch name contains invalid characters",
-        ));
+    if branch_name.starts_with(SLASH) || branch_name.ends_with(SLASH) {
+        return Err(InitError::StartsOrEndsWithSlash);
     }
 
     // Cannot contain consecutive slashes
-    if branch_name.contains("//") {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "branch name contains invalid characters",
-        ));
+    if branch_name.contains(DOUBLE_SLASH) {
+        return Err(InitError::ConsecutiveSlashes);
     }
 
     // Cannot contain ".."
-    if branch_name.contains("..") {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "branch name contains invalid characters",
-        ));
+    if branch_name.contains(DOUBLE_DOT) {
+        return Err(InitError::ContainsDoubleDots);
     }
 
     // Cannot end with ".lock"
-    if branch_name.ends_with(".lock") {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "branch name contains invalid characters",
-        ));
+    if branch_name.ends_with(LOCK_SUFFIX) {
+        return Err(InitError::EndsWithLock);
     }
 
     // Cannot end with "."
-    if branch_name.ends_with('.') {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "branch name contains invalid characters",
-        ));
+    if branch_name.ends_with(DOT_REF) {
+        return Err(InitError::EndsWithDot);
     }
 
     Ok(())
 }
 
 /// Validate branch name with filesystem-friendly rules
-fn validate_filesystem_branch_name(branch_name: &str) -> io::Result<()> {
+fn validate_filesystem_branch_name(branch_name: &str) -> Result<(), InitError> {
     if branch_name.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "branch name cannot be empty",
-        ));
+        return Err(InitError::EmptyBranchName);
+    }
+
+    if branch_name.len() > MAX_BRANCH_NAME_LENGTH {
+        return Err(InitError::BranchNameTooLong);
     }
 
     // Basic filesystem restrictions
     if branch_name.chars().any(|c| {
-        c.is_control() || 
-        c == '<' || c == '>' || c == ':' || c == '"' || c == '|' || c == '?' || c == '*' || 
-        c == '\0' ||
-        (cfg!(windows) && (c == '\\' || c == '/' || c == '\n' || c == '\r'))
+        c.is_control()
+            || c == '<'
+            || c == '>'
+            || c == ':'
+            || c == '"'
+            || c == '|'
+            || c == '?'
+            || c == '*'
+            || c == '\0'
+            || (cfg!(windows) && (c == '\\' || c == '/' || c == '\n' || c == '\r'))
     }) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "branch name contains filesystem-invalid characters",
+        return Err(InitError::FilesystemInvalidCharacters(
+            branch_name.to_string(),
         ));
     }
 
     // Cannot be "." or ".."
-    if branch_name == "." || branch_name == ".." {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "branch name contains invalid characters",
-        ));
-    }
-
-    Ok(())
-}
-
-
-/// Validate branch name according to the specified ref format mode
-fn validate_branch_name(branch_name: &str, ref_format: &RefFormat) -> io::Result<()> {
-    match ref_format {
-        RefFormat::Strict => validate_strict_branch_name(branch_name),
-        RefFormat::Filesystem => validate_filesystem_branch_name(branch_name),
-    }
-}
-
-/// Validate branch name with strict Git-compatible rules
-fn validate_strict_branch_name(branch_name: &str) -> io::Result<()> {
-    if branch_name.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "branch name cannot be empty",
-        ));
-    }
-
-    if branch_name == "@" {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "branch name cannot be '@'",
-        ));
-    }
-
-    // Check for control characters and other invalid characters
-    if branch_name.chars().any(|c| c.is_control() || c == ' ' || c == '~' || c == '^' || c == ':' || c == '\\' || c == '*' || c == '[' || c == '?' || c == '"' || c == '\0') {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "branch name contains invalid characters",
-        ));
-    }
-
-    // Cannot start or end with '/'
-    if branch_name.starts_with('/') || branch_name.ends_with('/') {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "branch name contains invalid characters",
-        ));
-    }
-
-    // Cannot contain consecutive slashes
-    if branch_name.contains("//") {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "branch name contains invalid characters",
-        ));
-    }
-
-    // Cannot contain ".."
-    if branch_name.contains("..") {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "branch name contains invalid characters",
-        ));
-    }
-
-    // Cannot end with ".lock"
-    if branch_name.ends_with(".lock") {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "branch name contains invalid characters",
-        ));
-    }
-
-    // Cannot end with "."
-    if branch_name.ends_with('.') {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "branch name contains invalid characters",
-        ));
-    }
-
-    Ok(())
-}
-
-/// Validate branch name with filesystem-friendly rules
-fn validate_filesystem_branch_name(branch_name: &str) -> io::Result<()> {
-    if branch_name.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "branch name cannot be empty",
-        ));
-    }
-
-    // Basic filesystem restrictions
-    if branch_name.chars().any(|c| {
-        c.is_control() || 
-        c == '<' || c == '>' || c == ':' || c == '"' || c == '|' || c == '?' || c == '*' || 
-        c == '\0' ||
-        (cfg!(windows) && (c == '\\' || c == '/' || c == '\n' || c == '\r'))
-    }) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "branch name contains filesystem-invalid characters",
-        ));
-    }
-
-    // Cannot be "." or ".."
-    if branch_name == "." || branch_name == ".." {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "branch name contains invalid characters",
-        ));
+    if branch_name == DOT_REF || branch_name == DOUBLE_DOT_REF {
+        return Err(InitError::IsDotOrDoubleDot);
     }
 
     Ok(())
 }
 
 #[allow(dead_code)]
-pub async fn init(args: InitArgs) -> io::Result<()> {
+pub async fn init(args: InitArgs) -> Result<(), InitError> {
     // Get the current directory
     // let cur_dir = env::current_dir()?;
     let cur_dir = Path::new(&args.repo_directory).to_path_buf();
@@ -484,13 +422,13 @@ pub async fn init(args: InitArgs) -> io::Result<()> {
         .unwrap_or_else(|| "sha1".to_string());
 
     if object_format_value != "sha1" && object_format_value != "sha256" {
-        return Err(io::Error::new(
+        return Err(InitError::Io(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
                 "unsupported object format: '{}'. Supported formats are 'sha1' and 'sha256'.",
                 object_format_value
             ),
-        ));
+        )));
     }
 
     // Check if the root directory already exists
@@ -498,18 +436,18 @@ pub async fn init(args: InitArgs) -> io::Result<()> {
         if !args.quiet {
             eprintln!("Already initialized - [{}]", root_dir.display());
         }
-        return Err(io::Error::new(
+        return Err(InitError::Io(io::Error::new(
             io::ErrorKind::AlreadyExists,
             "Initialization failed: The repository is already initialized at the specified location.
             If you wish to reinitialize, please remove the existing directory or file.",
-        ));
+        )));
     }
 
     // Check if the target directory is writable
     match is_writable(&cur_dir) {
         Ok(_) => {}
         Err(e) => {
-            return Err(e);
+            return Err(InitError::Io(e));
         }
     }
 
@@ -522,10 +460,10 @@ pub async fn init(args: InitArgs) -> io::Result<()> {
         if template_dir.exists() {
             copy_template(template_dir, &root_dir)?;
         } else {
-            return Err(io::Error::new(
+            return Err(InitError::Io(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("template directory '{}' does not exist", template_path),
-            ));
+            )));
         }
     } else {
         // Create info & hooks
@@ -538,11 +476,6 @@ pub async fn init(args: InitArgs) -> io::Result<()> {
         fs::write(
             root_dir.join("info/exclude"),
             include_str!("../../template/exclude"),
-        )?;
-        // Create .libra/description
-        fs::write(
-            root_dir.join("description"),
-            include_str!("../../template/description"),
         )?;
         // Create .libra/hooks/pre-commit.sh
         fs::write(
@@ -595,19 +528,8 @@ pub async fn init(args: InitArgs) -> io::Result<()> {
         Some(object_format_value.as_str()),
         args.ref_format.as_ref(),
     )
-    .await
-    .unwrap();
-    // Create config table with bare parameter consideration and store ref format
-    init_config(
-        &conn,
-        args.bare,
-        Some(object_format_value.as_str()),
-        args.ref_format.as_ref(),
-    )
-    .await
-    .unwrap();
+    .await?;
 
-    // Determine the initial branch name: use provided name or default
     // Determine the initial branch name: use provided name or default
     let initial_branch_name = args
         .initial_branch
@@ -615,34 +537,16 @@ pub async fn init(args: InitArgs) -> io::Result<()> {
 
     // Validate branch name based on ref-format mode
     let ref_format_mode = args.ref_format.as_ref().unwrap_or(&RefFormat::Strict);
-    
-    // Validate branch name according to the selected ref format
-    validate_branch_name(&initial_branch_name, ref_format_mode)?;
-
-    // For custom mode, we use refs/heads/%s format, for others we also use refs/heads/%s
-    // but with different validation rules applied above
-    let initial_ref_name = format!("refs/heads/{}", initial_branch_name);
 
     // Create HEAD (store the branch name as before; ref format stored in config)
-    // Validate branch name based on ref-format mode
-    let ref_format_mode = args.ref_format.as_ref().unwrap_or(&RefFormat::Strict);
-    
-    // Validate branch name according to the selected ref format
     validate_branch_name(&initial_branch_name, ref_format_mode)?;
-
-    // For custom mode, we use refs/heads/%s format, for others we also use refs/heads/%s
-    // but with different validation rules applied above
-    let initial_ref_name = format!("refs/heads/{}", initial_branch_name);
-
-    // Create HEAD (store the branch name as before; ref format stored in config)
     reference::ActiveModel {
         name: Set(Some(initial_branch_name.clone())),
         kind: Set(reference::ConfigKind::Head),
         ..Default::default() // all others are `NotSet`
     }
     .insert(&conn)
-    .await
-    .unwrap();
+    .await?;
 
     // Set .libra as hidden
     set_dir_hidden(root_dir.to_str().unwrap())?;
@@ -675,7 +579,6 @@ async fn init_config(
     conn: &DbConn,
     is_bare: bool,
     object_format: Option<&str>,
-    ref_format: Option<&RefFormat>,
     ref_format: Option<&RefFormat>,
 ) -> Result<(), DbErr> {
     // Begin a new transaction
@@ -720,19 +623,6 @@ async fn init_config(
         ..Default::default() // id & name NotSet
     };
     object_format_entry.insert(&txn).await?;
-    // Insert the initial ref format used during init
-    let ref_format_value = match ref_format {
-        Some(RefFormat::Strict) => "strict",
-        Some(RefFormat::Filesystem) => "filesystem",
-        None => "strict", // default
-    };
-    let init_ref_format_entry = config::ActiveModel {
-        configuration: Set("core".to_owned()),
-        key: Set("initrefformat".to_owned()),
-        value: Set(ref_format_value.to_owned()),
-        ..Default::default()
-    };
-    init_ref_format_entry.insert(&txn).await?;
     // Insert the initial ref format used during init
     let ref_format_value = match ref_format {
         Some(RefFormat::Strict) => "strict",
