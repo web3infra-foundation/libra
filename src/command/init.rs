@@ -1,7 +1,7 @@
 //! Initializes a repository by creating .libra storage, seeding HEAD and default refs/config, and preparing the backing database.
 
 use std::{
-    env, fs,
+    fs,
     io::{self, ErrorKind},
     path::Path,
 };
@@ -11,14 +11,7 @@ use git_internal::hash::{HashKind, set_hash_kind};
 use sea_orm::DbErr;
 use thiserror::Error;
 
-use crate::{
-    command::branch,
-    internal::{
-        db,
-        model::{config, reference},
-    },
-    utils::util::{DATABASE, ROOT_DIR, cur_dir},
-};
+use crate::utils::util::ROOT_DIR;
 const DEFAULT_BRANCH: &str = "master";
 
 // Branch name validation constants
