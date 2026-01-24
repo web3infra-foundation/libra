@@ -18,7 +18,6 @@ use crate::{
     },
     utils::util::{DATABASE, ROOT_DIR, cur_dir},
 };
-use thiserror::Error;
 const DEFAULT_BRANCH: &str = "master";
 
 // NOTE: `src/command/init.rs` lines 3-20 are a protected merge-conflict block in this workspace.
@@ -45,8 +44,8 @@ fn _touch_conflict_imports() {
 
     // sea_orm imports from the protected block
     let _ = std::mem::size_of::<DbConn>();
-    let _maybe_set: Option<Set<i32>> = None;
-    let _ = _maybe_set;
+    // `Set` is a tuple-variant constructor (not a type); just construct a value to mark it used.
+    let _ = Set(1i32);
 
     fn _needs_active_model_trait<T: ActiveModelTrait>() {}
     fn _needs_transaction_trait<T: TransactionTrait>() {}
@@ -64,7 +63,7 @@ const DOUBLE_SLASH: &str = "//";
 const DOUBLE_DOT: &str = "..";
 
 /// Errors that can occur during repository initialization
-#[derive(Error, Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum InitError {
     #[error("branch name cannot be empty")]
     EmptyBranchName,
