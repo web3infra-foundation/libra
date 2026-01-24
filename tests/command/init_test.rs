@@ -738,9 +738,6 @@ async fn test_init_with_ref_format() {
 /// Test init rejects invalid branch names according to ref format validation
 async fn test_init_with_invalid_ref_format() {
     let target_dir = tempdir().unwrap().keep();
-/// Test init rejects invalid branch names according to ref format validation
-async fn test_init_with_invalid_ref_format() {
-    let target_dir = tempdir().unwrap().keep();
     let args = InitArgs {
         bare: false,
         initial_branch: Some("invalid branch".to_string()), // contains space
