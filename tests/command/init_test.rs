@@ -404,9 +404,12 @@ async fn test_invalid_branch_name(branch_name: &str) {
         _ => panic!("Unexpected error type: {:?}", err),
     }
     
+    // Updated assertion to include new error message formats
     assert!(
         err.to_string().contains("branch name cannot be")
             || err.to_string().contains("branch name contains")
+            || err.to_string().contains("branch name is too long")
+            || err.to_string().contains("Invalid branch name")
     ); // Check error message contains appropriate text
 }
 
