@@ -5,6 +5,9 @@
 use std::fs;
 
 use libra::command::init::{InitArgs, InitError};
+use libra::internal::model::config::{Entity, Column};  // 添加这行
+use libra::internal::model::config;                     // 添加这行
+use sea_orm::{DbConn, DbErr};   
 
 use super::*;
 
@@ -92,7 +95,6 @@ async fn test_init_template() {
         template: Some(template_dir.path().to_str().unwrap().to_string()),
         shared: None,
         object_format: None,
-        ref_format: None,
         ref_format: None,
     };
 
@@ -227,7 +229,7 @@ async fn test_init_bare_with_existing_repo() {
             template: None,
             shared: None,
             object_format: None,
-        ref_format: None,
+            ref_format: None,
         };
         init(args).await
     };
@@ -392,7 +394,24 @@ async fn test_invalid_branch_name(branch_name: &str) {
         branch_name
     );
     let err = result.unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput); // Check error type
+    
+    match err {
+        InitError::EmptyBranchName 
+        | InitError::BranchNameIsHead 
+        | InitError::BranchNameIsAt 
+        | InitError::InvalidCharacters(_)
+        | InitError::FilesystemInvalidCharacters(_)
+        | InitError::StartsOrEndsWithSlash
+        | InitError::ConsecutiveSlashes
+        | InitError::ContainsDoubleDots
+        | InitError::EndsWithLock
+        | InitError::EndsWithDot
+        | InitError::IsDotOrDoubleDot
+        | InitError::BranchNameTooLong => {
+        }
+        _ => panic!("Unexpected error type: {:?}", err),
+    }
+    
     assert!(
         err.to_string().contains("branch name cannot be")
             || err.to_string().contains("branch name contains")
@@ -705,15 +724,28 @@ async fn test_init_with_invalid_object_format() {
         shared: None,
         object_format: Some("md5".to_string()),
         ref_format: None,
-        ref_format: None,
     };
     // This should fail with a generic invalid format error
     let result = init(args).await;
     let err = result.unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-    assert!(err.to_string().contains("unsupported object format"));
+    
+    // 保存错误消息以供后续检查
+    let error_message = err.to_string();
+    
+    match err {
+        InitError::Io(io_err) => {
+            assert_eq!(io_err.kind(), std::io::ErrorKind::InvalidInput);
+        }
+        _ => panic!("Expected Io error, got {:?}", err),
+    }
+    
+    assert!(error_message.contains("unsupported object format"));
 }
 
+// 在文件顶部添加必要的导入
+use sea_orm::{EntityTrait, QueryFilter, QuerySelect, ColumnTrait};
+
+// 修改测试函数中的相关代码段
 #[tokio::test]
 #[serial]
 /// Test init with a custom ref format and verify it's saved to config.
@@ -742,12 +774,17 @@ async fn test_init_with_ref_format() {
     let conn = sea_orm::Database::connect(format!("sqlite://{}", db_path.to_str().unwrap()))
         .await
         .unwrap();
-    let config_entry = config::Entity::find()
+    
+    use libra::internal::model::config;
+    use sea_orm::{EntityTrait, QueryFilter, ColumnTrait};
+    
+    let config_entry: Option<config::Model> = config::Entity::find()
         .filter(config::Column::Configuration.eq("core"))
         .filter(config::Column::Key.eq("initrefformat"))
         .one(&conn)
         .await
         .unwrap();
+        
     assert_eq!(config_entry.unwrap().value, "strict");
 }
 
