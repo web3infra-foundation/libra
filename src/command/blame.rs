@@ -1,5 +1,11 @@
 //! Runs blame for a file at a given commit by walking trees/diffs, attributing lines to commits, and streaming formatted output.
 
+#[cfg(unix)]
+use std::{
+    io::Write,
+    process::{Command, Stdio},
+};
+
 use chrono::DateTime;
 use clap::Parser;
 use git_internal::{
@@ -191,9 +197,6 @@ pub async fn execute(args: BlameArgs) {
 
     #[cfg(unix)]
     {
-        use std::io::Write;
-        use std::process::{Command, Stdio};
-
         match Command::new("less")
             .arg("-R") // Allow ANSI colors
             .arg("-F") // Quit if output fits on one screen
