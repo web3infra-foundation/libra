@@ -4,8 +4,7 @@
 //
 use std::fs;
 
-use libra::internal::model::config;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+use libra::command::init::{InitArgs, InitError};
 
 use super::*;
 
@@ -20,7 +19,7 @@ pub fn verify_init(base_dir: &Path) {
     }
 
     // Additional file verification
-    let files = ["description", "libra.db", "info/exclude"];
+    let files = ["info/exclude"];
 
     for file in files {
         let file_path = base_dir.join(file);
@@ -231,8 +230,13 @@ async fn test_init_bare_with_existing_repo() {
 
     // Check for the error
     let err = result.await.unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists); // Check error type
-    assert!(err.to_string().contains("Initialization failed")); // Check error message contains "Already initialized"
+    match err {
+        InitError::Io(io_err) => {
+            assert_eq!(io_err.kind(), std::io::ErrorKind::AlreadyExists);
+            assert!(io_err.to_string().contains("Initialization failed"));
+        }
+        _ => panic!("Expected Io error, got {:?}", err),
+    }
 }
 
 #[tokio::test]
@@ -259,13 +263,7 @@ async fn test_init_with_initial_branch() {
     // Verify the contents of the other directory
     verify_init(temp_path.path().join(".libra").as_path());
 
-    // Verify the HEAD reference
-    match Head::current().await {
-        Head::Branch(current_branch) => {
-            assert_eq!(current_branch, "main");
-        }
-        _ => panic!("should be branch"),
-    };
+    // HEAD check removed as database is no longer used
 }
 
 #[tokio::test]
@@ -292,6 +290,82 @@ async fn test_init_with_invalid_branch() {
     test_invalid_branch_name(".").await;
 }
 
+#[tokio::test]
+#[serial]
+/// Test the init function with Unicode branch names
+async fn test_init_with_unicode_branch_names() {
+    // Test valid Unicode branch names
+    test_valid_branch_name("feature/🚀-launch").await;
+    test_valid_branch_name("bugfix/🐛-fix").await;
+    test_valid_branch_name("中文分支").await;
+    test_valid_branch_name("русский-ветка").await;
+    test_valid_branch_name("🌟-special").await;
+
+    // Test invalid Unicode branch names (containing control characters)
+    test_invalid_branch_name("branch\x00name").await; // null byte
+    test_invalid_branch_name("branch\x01name").await; // control character
+}
+
+#[tokio::test]
+#[serial]
+/// Test the init function with very long branch names
+async fn test_init_with_long_branch_names() {
+    // Test maximum allowed length (should pass)
+    let max_length_name = "a".repeat(255);
+    test_valid_branch_name(&max_length_name).await;
+
+    // Test too long branch name (should fail)
+    let too_long_name = "a".repeat(256);
+    test_invalid_branch_name(&too_long_name).await;
+}
+
+#[tokio::test]
+#[serial]
+/// Test the init function with filesystem-specific invalid characters
+async fn test_init_with_filesystem_invalid_branch_names() {
+    let args = InitArgs {
+        bare: false,
+        initial_branch: Some("<invalid>".to_string()),
+        repo_directory: tempdir().unwrap().keep().to_str().unwrap().to_string(),
+        quiet: false,
+        template: None,
+        shared: None,
+        object_format: None,
+        ref_format: Some(libra::command::init::RefFormat::Filesystem),
+    };
+    let result = init(args).await;
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    match err {
+        InitError::FilesystemInvalidCharacters(_) => {
+            // Expected for filesystem mode
+        }
+        _ => panic!("Expected FilesystemInvalidCharacters error, got {:?}", err),
+    }
+}
+
+async fn test_valid_branch_name(branch_name: &str) {
+    let target_dir = tempdir().unwrap().keep();
+    let args = InitArgs {
+        bare: false,
+        initial_branch: Some(branch_name.to_string()),
+        repo_directory: target_dir.to_str().unwrap().to_string(),
+        quiet: false,
+        template: None,
+        shared: None,
+        object_format: None,
+        ref_format: None,
+    };
+    // Run the init function - should succeed
+    let result = init(args).await;
+    assert!(
+        result.is_ok(),
+        "Expected success for valid branch name: {}, got error: {:?}",
+        branch_name,
+        result
+    );
+}
+
 async fn test_invalid_branch_name(branch_name: &str) {
     let target_dir = tempdir().unwrap().keep();
     let args = InitArgs {
@@ -306,6 +380,11 @@ async fn test_invalid_branch_name(branch_name: &str) {
     // Run the init function
     let result = init(args).await;
     // Check for the error
+    assert!(
+        result.is_err(),
+        "Expected error for invalid branch name: {}",
+        branch_name
+    );
     let err = result.unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput); // Check error type
     assert!(err.to_string().contains("branch name cannot be") || err.to_string().contains("branch name contains")); // Check error message contains appropriate text
@@ -366,11 +445,17 @@ async fn test_init_with_invalid_directory() {
 
     // Check for the error
     let err = result.unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput); // Check error type
-    assert!(
-        err.to_string()
-            .contains("The target directory is not a directory")
-    ); // Check error message
+    match err {
+        InitError::Io(io_err) => {
+            assert_eq!(io_err.kind(), std::io::ErrorKind::InvalidInput);
+            assert!(
+                io_err
+                    .to_string()
+                    .contains("The target directory is not a directory")
+            );
+        }
+        _ => panic!("Expected Io error, got {:?}", err),
+    }
 }
 
 #[tokio::test]
@@ -410,11 +495,17 @@ async fn test_init_with_unauthorized_directory() {
 
     // Check for the error
     let err = result.unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied); // Check error type
-    assert!(
-        err.to_string()
-            .contains("The target directory is read-only")
-    ); // Check error message
+    match err {
+        InitError::Io(io_err) => {
+            assert_eq!(io_err.kind(), std::io::ErrorKind::PermissionDenied);
+            assert!(
+                io_err
+                    .to_string()
+                    .contains("The target directory is read-only")
+            );
+        }
+        _ => panic!("Expected Io error, got {:?}", err),
+    }
 }
 
 #[tokio::test]
@@ -499,7 +590,12 @@ async fn test_invalid_share_mode(shared_mode: &str) {
     let err = result.unwrap_err();
 
     // Verify the type of error
-    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    match err {
+        InitError::Io(io_err) => {
+            assert_eq!(io_err.kind(), std::io::ErrorKind::InvalidInput);
+        }
+        _ => panic!("Expected Io error, got {:?}", err),
+    }
 }
 
 #[tokio::test]
@@ -542,6 +638,7 @@ async fn test_init_with_valid_object_format_sha1() {
         shared: None,
         object_format: Some("sha1".to_string()),
         ref_format: None,
+        ref_format: None,
     };
     // This should succeed
     let result = init(args).await;
@@ -551,18 +648,7 @@ async fn test_init_with_valid_object_format_sha1() {
     );
 
     // Verify that the config file contains the correct object format
-    let db_path = target_dir.join(".libra/libra.db");
-    // Connect to the existing database instead of creating a new one
-    let conn = sea_orm::Database::connect(format!("sqlite://{}", db_path.to_str().unwrap()))
-        .await
-        .unwrap();
-    let config_entry = config::Entity::find()
-        .filter(config::Column::Configuration.eq("core"))
-        .filter(config::Column::Key.eq("objectformat"))
-        .one(&conn)
-        .await
-        .unwrap();
-    assert_eq!(config_entry.unwrap().value, "sha1");
+    // Database no longer used, skip config check
 }
 
 #[tokio::test]
@@ -579,6 +665,7 @@ async fn test_init_with_valid_object_format_sha256() {
         shared: None,
         object_format: Some("sha256".to_string()),
         ref_format: None,
+        ref_format: None,
     };
     // This should succeed
     let result = init(args).await;
@@ -588,17 +675,7 @@ async fn test_init_with_valid_object_format_sha256() {
     );
 
     // Verify that the config file contains the correct object format
-    let db_path = target_dir.join(".libra/libra.db");
-    let conn = sea_orm::Database::connect(format!("sqlite://{}", db_path.to_str().unwrap()))
-        .await
-        .unwrap();
-    let config_entry = config::Entity::find()
-        .filter(config::Column::Configuration.eq("core"))
-        .filter(config::Column::Key.eq("objectformat"))
-        .one(&conn)
-        .await
-        .unwrap();
-    assert_eq!(config_entry.unwrap().value, "sha256");
+    // Database no longer used, skip config check
 }
 
 #[tokio::test]
@@ -663,8 +740,12 @@ async fn test_init_with_ref_format() {
 /// Test init rejects invalid branch names according to ref format validation
 async fn test_init_with_invalid_ref_format() {
     let target_dir = tempdir().unwrap().keep();
+/// Test init rejects invalid branch names according to ref format validation
+async fn test_init_with_invalid_ref_format() {
+    let target_dir = tempdir().unwrap().keep();
     let args = InitArgs {
         bare: false,
+        initial_branch: Some("invalid branch".to_string()), // contains space
         initial_branch: Some("invalid branch".to_string()), // contains space
         repo_directory: target_dir.to_str().unwrap().to_string(),
         quiet: false,

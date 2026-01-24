@@ -1,5 +1,6 @@
 //! Runs blame for a file at a given commit by walking trees/diffs, attributing lines to commits, and streaming formatted output.
 
+#[cfg(unix)]
 use std::{
     io::Write,
     process::{Command, Stdio},
