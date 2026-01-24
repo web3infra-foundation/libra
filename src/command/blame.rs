@@ -191,6 +191,9 @@ pub async fn execute(args: BlameArgs) {
 
     #[cfg(unix)]
     {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
         match Command::new("less")
             .arg("-R") // Allow ANSI colors
             .arg("-F") // Quit if output fits on one screen
