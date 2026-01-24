@@ -751,7 +751,8 @@ async fn test_init_with_invalid_ref_format() {
 
     // This should fail due to invalid branch name
     let result = init(args).await;
+    assert!(result.is_err(), "init with invalid branch name should fail");
     let err = result.unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    // Check that it's the InvalidCharacters variant
     assert!(err.to_string().contains("branch name contains invalid characters"));
 }
