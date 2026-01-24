@@ -1,6 +1,7 @@
 //! Initializes a repository by creating .libra storage, seeding HEAD and default refs/config, and preparing the backing database.
 
 use std::{
+    env,
     fs,
     io::{self, ErrorKind},
     path::Path,
