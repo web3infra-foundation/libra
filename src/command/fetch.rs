@@ -359,14 +359,24 @@ pub async fn fetch_repository(
                     }
 
                     // Get the old OID *before* updating the branch
-                    let old_oid = Branch::find_branch_with_conn(txn, &full_ref_name, None)
-                        .await
-                        .map_or(ObjectHash::zero_str(get_hash_kind()), |b| {
-                            b.commit.to_string()
-                        });
+                    let old_oid = Branch::find_branch_with_conn(
+                        txn,
+                        &full_ref_name,
+                        Some(&remote_config.name),
+                    )
+                    .await
+                    .map_or(ObjectHash::zero_str(get_hash_kind()), |b| {
+                        b.commit.to_string()
+                    });
 
                     // Update the branch pointer
-                    Branch::update_branch_with_conn(txn, &full_ref_name, &r._hash, None).await;
+                    Branch::update_branch_with_conn(
+                        txn,
+                        &full_ref_name,
+                        &r._hash,
+                        Some(&remote_config.name),
+                    )
+                    .await;
 
                     // Prepare and insert the reflog entry for this specific remote-tracking branch
                     let context = ReflogContext {
