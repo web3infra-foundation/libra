@@ -761,10 +761,17 @@ async fn test_init_with_ref_format() {
     let conn = sea_orm::Database::connect(format!("sqlite://{}", db_path.to_str().unwrap()))
         .await
         .unwrap();
+<<<<<<<<< Temporary merge branch 1
+    
+    use libra::internal::model::config;
+    use sea_orm::{EntityTrait, QueryFilter, ColumnTrait};
+    
+=========
 
     use libra::internal::model::config;
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
+>>>>>>>>> Temporary merge branch 2
     let config_entry: Option<config::Model> = config::Entity::find()
         .filter(config::Column::Configuration.eq("core"))
         .filter(config::Column::Key.eq("initrefformat"))
