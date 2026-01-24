@@ -276,16 +276,12 @@ async fn prune_remote(name: &str, dry_run: bool) {
         })
         .collect();
     // Get local remote-tracking branches (format: "refs/remotes/{remote}/branch_name")
-    let all_branches = Branch::list_branches(None).await;
-    let prefix = format!("refs/remotes/{}/", name);
-    let local_remote_branches: Vec<_> = all_branches
-        .into_iter()
-        .filter(|b| b.name.starts_with(&prefix))
-        .collect();
+    let local_remote_branches = Branch::list_branches(Some(name)).await;
 
     // Find and prune stale branches
     let mut pruned_count = 0;
     let head_ref = format!("refs/remotes/{}/HEAD", name);
+    let prefix = format!("refs/remotes/{}/", name);
 
     for local_branch in &local_remote_branches {
         // Skip HEAD reference
@@ -302,7 +298,7 @@ async fn prune_remote(name: &str, dry_run: bool) {
             if dry_run {
                 println!(" * [would prune] {}/{}", name, branch_name);
             } else {
-                Branch::delete_branch(&local_branch.name, None).await;
+                Branch::delete_branch(&local_branch.name, Some(name)).await;
                 println!(" * [pruned] {}/{}", name, branch_name);
             }
             pruned_count += 1;
