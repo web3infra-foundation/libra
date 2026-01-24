@@ -638,7 +638,6 @@ async fn test_init_with_valid_object_format_sha1() {
         shared: None,
         object_format: Some("sha1".to_string()),
         ref_format: None,
-        ref_format: None,
     };
     // This should succeed
     let result = init(args).await;
@@ -664,7 +663,6 @@ async fn test_init_with_valid_object_format_sha256() {
         template: None,
         shared: None,
         object_format: Some("sha256".to_string()),
-        ref_format: None,
         ref_format: None,
     };
     // This should succeed
@@ -737,6 +735,9 @@ async fn test_init_with_ref_format() {
 
 #[tokio::test]
 #[serial]
+/// Test init rejects invalid branch names according to ref format validation
+async fn test_init_with_invalid_ref_format() {
+    let target_dir = tempdir().unwrap().keep();
 /// Test init rejects invalid branch names according to ref format validation
 async fn test_init_with_invalid_ref_format() {
     let target_dir = tempdir().unwrap().keep();
