@@ -153,15 +153,16 @@ impl HttpsClient {
     /// `have` is the list of objects' hashes that the client already has, and `want` is the list of objects that the client wants.
     /// Obtain the `want` references from the `discovery_reference` method.<br>
     /// If the returned stream is empty, it may be due to incorrect refs or an incorrect format.
-    // TODO support some necessary options
+    /// `depth` is optional, if `Some(n)`, create a shallow clone with history truncated to n commits.
     pub async fn fetch_objects(
         &self,
         have: &[String],
         want: &[String],
+        depth: Option<usize>,
     ) -> Result<FetchStream, IoError> {
         // POST $GIT_URL/git-upload-pack HTTP/1.0
         let url = self.url.join("git-upload-pack").unwrap();
-        let body = generate_upload_pack_content(have, want);
+        let body = generate_upload_pack_content(have, want, depth);
         tracing::debug!("fetch_objects with body: {:?}", body);
 
         let res = BasicAuth::send(|| async {
@@ -248,7 +249,7 @@ mod tests {
         let want: Vec<String> = refs.iter().map(|r| r._hash.clone()).collect();
 
         let have = vec!["81a162e7b725bbad2adfe01879fd57e0119406b9".to_string()];
-        let mut result_stream = client.fetch_objects(&have, &want).await.unwrap();
+        let mut result_stream = client.fetch_objects(&have, &want, None).await.unwrap();
 
         let mut buffer = vec![];
         while let Some(item) = result_stream.next().await {
@@ -285,7 +286,7 @@ mod tests {
         let have = vec!["1c05d7f7dd70e38150bfd2d5fb8fb969e2eb9851".to_string()];
         // **want MUST change to one of the refs in the remote repo, such as `refs/heads/main` before running the test**
         let want = vec!["6b4e69962dbbc75e80d5263cc5c81571669db9bc".to_string()];
-        let body = generate_upload_pack_content(&have, &want);
+        let body = generate_upload_pack_content(&have, &want, None);
         tracing::info!("upload-pack content: {:?}", body);
         let mut cmd = tokio::process::Command::new("/usr/bin/git-upload-pack");
         cmd.arg("..");

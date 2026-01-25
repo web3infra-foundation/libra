@@ -97,13 +97,14 @@ impl GitClient {
         &self,
         have: &[String],
         want: &[String],
+        depth: Option<usize>,
     ) -> Result<FetchStream, IoError> {
         let mut stream = self.open_stream().await?;
         let request = self.build_service_request(ServiceType::UploadPack);
         stream.write_all(&request).await?;
         self.read_advertisement(&mut stream).await?;
 
-        let body = generate_upload_pack_content(have, want);
+        let body = generate_upload_pack_content(have, want, depth);
         stream.write_all(&body).await?;
         stream.flush().await?;
 

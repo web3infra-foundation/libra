@@ -36,6 +36,10 @@ pub struct CloneArgs {
     /// Clone only one branch, HEAD or --branch
     #[clap(long)]
     pub single_branch: bool,
+
+    /// Create a shallow clone with a history truncated to the specified number of commits
+    #[clap(long, value_name = "DEPTH")]
+    pub depth: Option<usize>,
 }
 
 pub async fn execute(args: CloneArgs) {
@@ -146,6 +150,7 @@ pub async fn execute(args: CloneArgs) {
         remote_config.clone(),
         args.branch.clone(),
         args.single_branch,
+        args.depth,
     )
     .await;
 

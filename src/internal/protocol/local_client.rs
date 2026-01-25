@@ -98,8 +98,9 @@ impl LocalClient {
         &self,
         have: &[String],
         want: &[String],
+        depth: Option<usize>,
     ) -> Result<FetchStream, IoError> {
-        let body = generate_upload_pack_content(have, want);
+        let body = generate_upload_pack_content(have, want, depth);
         let mut child = Command::new("git-upload-pack");
         child.arg("--stateless-rpc");
         child.arg(&self.repo_path);
@@ -266,7 +267,7 @@ mod tests {
 
         let want = vec![head];
         let have = Vec::new();
-        let stream = client.fetch_objects(&have, &want).await.unwrap();
+        let stream = client.fetch_objects(&have, &want, None).await.unwrap();
         let mut reader = StreamReader::new(stream);
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf).await.unwrap();
