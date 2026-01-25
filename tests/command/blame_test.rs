@@ -26,6 +26,7 @@ async fn setup_repo_with_hash(
         template: None,
         shared: None,
         object_format: Some(object_format.to_string()),
+        ref_format: None,
     })
     .await
     .unwrap();

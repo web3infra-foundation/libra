@@ -108,6 +108,7 @@ pub async fn setup_with_new_libra_in(temp_path: impl AsRef<Path>) {
         template: None,
         shared: None,
         object_format: None,
+        ref_format: None,
     };
     command::init::init(args).await.unwrap();
 }
