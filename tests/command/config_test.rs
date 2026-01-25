@@ -744,7 +744,9 @@ async fn test_config_windows_system_path() {
         let original_programdata = std::env::var_os("PROGRAMDATA");
 
         // Test with PROGRAMDATA set
-        std::env::set_var("PROGRAMDATA", "C:\\ProgramData");
+        unsafe {
+            std::env::set_var("PROGRAMDATA", "C:\\ProgramData");
+        }
         let system_path = config::ConfigScope::System.get_config_path();
         assert!(system_path.is_some());
         assert_eq!(
@@ -753,15 +755,21 @@ async fn test_config_windows_system_path() {
         );
 
         // Test with PROGRAMDATA unset
-        std::env::remove_var("PROGRAMDATA");
+        unsafe {
+            std::env::remove_var("PROGRAMDATA");
+        }
         let system_path_none = config::ConfigScope::System.get_config_path();
         assert_eq!(system_path_none, None);
 
         // Restore original PROGRAMDATA
         if let Some(original) = original_programdata {
-            std::env::set_var("PROGRAMDATA", original);
+            unsafe {
+                std::env::set_var("PROGRAMDATA", original);
+            }
         } else {
-            std::env::remove_var("PROGRAMDATA");
+            unsafe {
+                std::env::remove_var("PROGRAMDATA");
+            }
         }
     }
 

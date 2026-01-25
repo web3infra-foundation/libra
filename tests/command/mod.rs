@@ -13,7 +13,7 @@ use libra::{
         calc_file_blob_hash,
         commit::{self, CommitArgs},
         get_target_commit,
-        init::{InitArgs, init},
+        init::{InitArgs, RefFormat, init},
         load_object,
         log::{LogArgs, get_reachable_commits},
         remove::{self, RemoveArgs},
