@@ -417,6 +417,7 @@ async fn test_remote_prune_removes_stale_branches() {
         },
         None,
         false,
+        None,
     )
     .await;
 
@@ -606,6 +607,7 @@ async fn test_remote_prune_dry_run_previews_changes() {
         },
         None,
         false,
+        None,
     )
     .await;
 
