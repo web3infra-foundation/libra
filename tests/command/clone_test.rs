@@ -19,6 +19,7 @@ async fn test_clone_branch() {
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
         branch: Some("dev".to_string()),
         single_branch: false,
+        depth: None,
     })
     .await;
 
@@ -50,6 +51,7 @@ async fn test_clone_branch_single_branch() {
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
         branch: Some("dev".to_string()),
         single_branch: true,
+        depth: None,
     })
     .await;
 
@@ -83,6 +85,7 @@ async fn test_clone_default_branch() {
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
         branch: None,
         single_branch: false,
+        depth: None,
     })
     .await;
 
@@ -114,6 +117,7 @@ async fn test_clone_default_branch_single_branch() {
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
         branch: None,
         single_branch: true,
+        depth: None,
     })
     .await;
 
@@ -147,6 +151,7 @@ async fn test_clone_empty_repo() {
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
         branch: None,
         single_branch: false,
+        depth: None,
     })
     .await;
 
@@ -180,6 +185,7 @@ async fn test_clone_to_existing_empty_dir() {
         local_path: Some(repo_path.to_str().unwrap().to_string()),
         branch: Some("dev".to_string()),
         single_branch: false,
+        depth: None,
     })
     .await;
 
@@ -216,6 +222,7 @@ async fn test_clone_to_existing_dir() {
         local_path: Some(repo_path.to_str().unwrap().to_string()),
         branch: Some("dev".to_string()),
         single_branch: false,
+        depth: None,
     })
     .await;
 
@@ -250,6 +257,7 @@ async fn test_clone_to_dir_with_existing_file_name() {
         local_path: Some(conflict_path.to_str().unwrap().to_string()),
         branch: Some("dev".to_string()),
         single_branch: false,
+        depth: None,
     })
     .await;
 
@@ -269,4 +277,68 @@ async fn test_clone_to_dir_with_existing_file_name() {
         content, "test",
         "pre-existing file content should remain unchanged"
     );
+}
+
+#[tokio::test]
+#[serial]
+#[ignore]
+/// Test the clone command with --depth parameter for shallow clone
+async fn test_clone_with_depth() {
+    let temp_path = tempdir().unwrap();
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    let remote_url = "https://gitee.com/pikady/mega-libra-clone-branch-test.git".to_string();
+
+    command::clone::execute(CloneArgs {
+        remote_repo: remote_url,
+        local_path: Some(temp_path.path().to_str().unwrap().to_string()),
+        branch: None,
+        single_branch: false,
+        depth: Some(1),
+    })
+    .await;
+
+    // Verify that the `.libra` directory exists
+    let libra_dir = temp_path.path().join(".libra");
+    assert!(libra_dir.exists(), ".libra directory should exist");
+
+    // Verify the Head reference
+    match Head::current().await {
+        Head::Branch(current_branch) => {
+            assert_eq!(current_branch, "master");
+        }
+        _ => panic!("should be branch"),
+    };
+}
+
+#[tokio::test]
+#[serial]
+#[ignore]
+/// Test the clone command with --depth and --branch parameters
+async fn test_clone_with_depth_and_branch() {
+    let temp_path = tempdir().unwrap();
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    let remote_url = "https://gitee.com/pikady/mega-libra-clone-branch-test.git".to_string();
+
+    command::clone::execute(CloneArgs {
+        remote_repo: remote_url,
+        local_path: Some(temp_path.path().to_str().unwrap().to_string()),
+        branch: Some("dev".to_string()),
+        single_branch: true,
+        depth: Some(5),
+    })
+    .await;
+
+    // Verify that the `.libra` directory exists
+    let libra_dir = temp_path.path().join(".libra");
+    assert!(libra_dir.exists(), ".libra directory should exist");
+
+    // Verify the Head reference
+    match Head::current().await {
+        Head::Branch(current_branch) => {
+            assert_eq!(current_branch, "dev");
+        }
+        _ => panic!("should be branch"),
+    };
 }

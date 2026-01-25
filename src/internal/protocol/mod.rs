@@ -179,7 +179,11 @@ pub fn parse_discovered_references(
     })
 }
 
-pub fn generate_upload_pack_content(have: &[String], want: &[String]) -> Bytes {
+pub fn generate_upload_pack_content(
+    have: &[String],
+    want: &[String],
+    depth: Option<usize>,
+) -> Bytes {
     let mut buf = BytesMut::new();
     let mut write_first_line = false;
 
@@ -199,6 +203,12 @@ pub fn generate_upload_pack_content(have: &[String], want: &[String]) -> Bytes {
             add_pkt_line_string(&mut buf, format!("want {w}\n").to_string());
         }
     }
+
+    // Add deepen line if depth is specified
+    if let Some(d) = depth {
+        add_pkt_line_string(&mut buf, format!("deepen {d}\n").to_string());
+    }
+
     buf.extend(b"0000");
     for h in have {
         add_pkt_line_string(&mut buf, format!("have {h}\n").to_string());

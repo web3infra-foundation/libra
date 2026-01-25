@@ -246,6 +246,7 @@ async fn test_fetch_local_repository() {
         },
         None,
         false,
+        None,
     )
     .await;
 
