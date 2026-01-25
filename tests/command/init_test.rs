@@ -1,4 +1,4 @@
-//! Initializes a repository by creating .libra storage, seeding HEAD and default refs/config, and preparing the backing database.
+//! Initializes a repository by creating .libra storage, seeding HEAD and default refs, and preparing the backing database.
 
 use std::{
     fs,
@@ -8,10 +8,11 @@ use std::{
 
 use clap::{Parser, ValueEnum};
 use git_internal::hash::{HashKind, set_hash_kind};
-use libra::{internal::model::{config, reference}, utils::util::{DATABASE, ROOT_DIR}};
-use sea_orm::{ActiveModelTrait, DbConn, DbErr, Set, TransactionTrait};
-
-
+use libra::{
+    internal::model::{config, reference},
+    utils::util::{DATABASE, ROOT_DIR},
+};
+use sea_orm::{ActiveModelTrait, ConnectionTrait, Database, DbBackend, DbConn, DbErr, Set, Statement, TransactionTrait};
 const DEFAULT_BRANCH: &str = "master";
 
 /// Reference format validation modes
@@ -452,23 +453,17 @@ pub async fn init(args: InitArgs) -> io::Result<()> {
     }
 
     // Create database: .libra/libra.db
-    let conn;
-    let database = root_dir.join(DATABASE);
-
+    let database_path = root_dir.join(DATABASE);
+    
     #[cfg(target_os = "windows")]
-    {
-        // On Windows, we need to convert the path to a UNC path
-
-        use libra::internal::db;
-        let database = database.to_str().unwrap().replace("\\", "/");
-        conn = db::create_database(database.as_str()).await?;
-    }
-
+    let database_url = format!("sqlite://{}?mode=rwc", database_path.to_str().unwrap().replace("\\", "/"));
+    
     #[cfg(not(target_os = "windows"))]
-    {
-        // On Unix-like systems, we do no more
-        conn = db::create_database(database.to_str().unwrap()).await?;
-    }
+    let database_url = format!("sqlite://{}", database_path.to_str().unwrap());
+
+    let conn = Database::connect(&database_url)
+    .await
+    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to connect to database: {}", e)))?;
 
     // Create config table with bare parameter consideration and store ref format
     init_config(
@@ -478,18 +473,8 @@ pub async fn init(args: InitArgs) -> io::Result<()> {
         args.ref_format.as_ref(),
     )
     .await
-    .unwrap();
-    // Create config table with bare parameter consideration and store ref format
-    init_config(
-        &conn,
-        args.bare,
-        Some(object_format_value.as_str()),
-        args.ref_format.as_ref(),
-    )
-    .await
-    .unwrap();
+    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to initialize config: {}", e)))?;
 
-    // Determine the initial branch name: use provided name or default
     // Determine the initial branch name: use provided name or default
     let initial_branch_name = args
         .initial_branch
@@ -506,25 +491,14 @@ pub async fn init(args: InitArgs) -> io::Result<()> {
     let _initial_ref_name = format!("refs/heads/{}", initial_branch_name);
 
     // Create HEAD (store the branch name as before; ref format stored in config)
-    // Validate branch name based on ref-format mode
-    let ref_format_mode = args.ref_format.as_ref().unwrap_or(&RefFormat::Strict);
-
-    // Validate branch name according to the selected ref format
-    validate_branch_name(&initial_branch_name, ref_format_mode)?;
-
-    // For custom mode, we use refs/heads/%s format, for others we also use refs/heads/%s
-    // but with different validation rules applied above
-    let _initial_ref_name = format!("refs/heads/{}", initial_branch_name);
-
-    // Create HEAD (store the branch name as before; ref format stored in config)
-    reference::ActiveModel {
+    let head_reference = reference::ActiveModel {
         name: Set(Some(initial_branch_name.clone())),
         kind: Set(reference::ConfigKind::Head),
         ..Default::default() // all others are `NotSet`
-    }
-    .insert(&conn)
-    .await
-    .unwrap();
+    };
+    head_reference.insert(&conn)
+        .await
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to insert HEAD reference: {}", e)))?;
 
     // Set .libra as hidden
     set_dir_hidden(root_dir.to_str().unwrap())?;
@@ -614,19 +588,7 @@ async fn init_config(
         ..Default::default()
     };
     init_ref_format_entry.insert(&txn).await?;
-    // Insert the initial ref format used during init
-    let ref_format_value = match ref_format {
-        Some(RefFormat::Strict) => "strict",
-        Some(RefFormat::Filesystem) => "filesystem",
-        None => "strict", // default
-    };
-    let init_ref_format_entry = config::ActiveModel {
-        configuration: Set("core".to_owned()),
-        key: Set("initrefformat".to_owned()),
-        value: Set(ref_format_value.to_owned()),
-        ..Default::default()
-    };
-    init_ref_format_entry.insert(&txn).await?;
+    
     // Commit the transaction
     txn.commit().await?;
     Ok(())
