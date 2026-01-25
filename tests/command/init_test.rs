@@ -8,15 +8,10 @@ use std::{
 
 use clap::{Parser, ValueEnum};
 use git_internal::hash::{HashKind, set_hash_kind};
+use libra::{internal::model::{config, reference}, utils::util::{DATABASE, ROOT_DIR}};
 use sea_orm::{ActiveModelTrait, DbConn, DbErr, Set, TransactionTrait};
 
-use crate::{
-    internal::{
-        db,
-        model::{config, reference},
-    },
-    utils::util::{DATABASE, ROOT_DIR},
-};
+
 const DEFAULT_BRANCH: &str = "master";
 
 /// Reference format validation modes
@@ -463,6 +458,8 @@ pub async fn init(args: InitArgs) -> io::Result<()> {
     #[cfg(target_os = "windows")]
     {
         // On Windows, we need to convert the path to a UNC path
+
+        use libra::internal::db;
         let database = database.to_str().unwrap().replace("\\", "/");
         conn = db::create_database(database.as_str()).await?;
     }
