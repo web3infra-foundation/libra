@@ -87,12 +87,12 @@ rust_binary(
         "//third-party/rust/crates/url/2.5.7:url",
         "//third-party/rust/crates/walkdir/2.5.0:walkdir",
         "//third-party/rust/crates/wax/0.6.0:wax",
-        ":liblibra",
+        ":libra-lib",
     ],
 )
 
 rust_library(
-    name = "liblibra",
+    name = "libra-lib",
     srcs = [":libra-vendor"],
     crate = "libra",
     crate_root = "vendor/src/lib.rs",

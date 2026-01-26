@@ -1,7 +1,5 @@
 //! Shared test utilities and re-exports for the command integration test suite.
 
-use std::path::Path;
-
 use git_internal::{
     hash::ObjectHash,
     internal::object::{commit::Commit, tree::Tree},
@@ -13,7 +11,7 @@ use libra::{
         calc_file_blob_hash,
         commit::{self, CommitArgs},
         get_target_commit,
-        init::{InitArgs, RefFormat, init},
+        init::{InitArgs, init},
         load_object,
         log::{LogArgs, get_reachable_commits},
         remove::{self, RemoveArgs},

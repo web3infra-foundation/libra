@@ -12,10 +12,7 @@ use libra::{
     internal::model::{config, reference},
     utils::util::{DATABASE, ROOT_DIR},
 };
-use sea_orm::{
-    ActiveModelTrait, ConnectionTrait, Database, DbBackend, DbConn, DbErr, Set, Statement,
-    TransactionTrait,
-};
+use sea_orm::{ActiveModelTrait, Database, DbConn, DbErr, Set, TransactionTrait};
 const DEFAULT_BRANCH: &str = "master";
 
 /// Reference format validation modes
@@ -76,16 +73,6 @@ pub struct InitArgs {
     /// - `filesystem`: Use filesystem-friendly reference name validation.
     #[clap(long = "ref-format", value_enum, required = false)]
     pub ref_format: Option<RefFormat>,
-}
-
-/// Execute the init function
-pub async fn execute(args: InitArgs) {
-    match init(args).await {
-        Ok(_) => {}
-        Err(e) => {
-            eprintln!("Error: {e}");
-        }
-    }
 }
 
 /// Check if the repository has already been initialized based on the presence of the description file.
