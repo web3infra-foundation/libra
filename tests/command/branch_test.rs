@@ -85,7 +85,7 @@ async fn test_branch() {
             commit_hash: None,
             list: false,
             delete: None,
-        delete_safe: None,
+            delete_safe: None,
             set_upstream_to: None,
             show_current: false,
             rename: vec![],
@@ -544,7 +544,8 @@ async fn test_branch_delete_safe() {
         rename: vec![],
         remotes: false,
         all: false,
-    }).await;
+    })
+    .await;
 
     // Switch to feature branch and make a commit
     switch::execute(SwitchArgs {
@@ -552,7 +553,8 @@ async fn test_branch_delete_safe() {
         create: None,
         detach: false,
         track: false,
-    }).await;
+    })
+    .await;
 
     let commit_args = CommitArgs {
         message: Some("feature work".to_string()),
@@ -575,7 +577,8 @@ async fn test_branch_delete_safe() {
         create: None,
         detach: false,
         track: false,
-    }).await;
+    })
+    .await;
 
     // Try to delete feature branch with -d (should fail - not merged)
     execute(BranchArgs {
@@ -589,7 +592,8 @@ async fn test_branch_delete_safe() {
         rename: vec![],
         remotes: false,
         all: false,
-    }).await;
+    })
+    .await;
 
     // Feature branch should still exist
     assert!(Branch::find_branch("feature", None).await.is_some());
@@ -600,14 +604,16 @@ async fn test_branch_delete_safe() {
         create: None,
         detach: false,
         track: false,
-    }).await;
+    })
+    .await;
 
     switch::execute(SwitchArgs {
         branch: Some("master".to_string()),
         create: None,
         detach: false,
         track: false,
-    }).await;
+    })
+    .await;
 
     // Fast-forward merge (just update master to feature's commit)
     let feature_commit = Branch::find_branch("feature", None).await.unwrap().commit;
@@ -625,7 +631,8 @@ async fn test_branch_delete_safe() {
         rename: vec![],
         remotes: false,
         all: false,
-    }).await;
+    })
+    .await;
 
     // Feature branch should be deleted
     assert!(Branch::find_branch("feature", None).await.is_none());

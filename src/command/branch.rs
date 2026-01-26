@@ -33,7 +33,7 @@ pub struct BranchArgs {
     #[clap(short = 'D', long, group = "sub")]
     pub delete: Option<String>,
 
-    /// safe delete branch 
+    /// safe delete branch
     #[clap(short = 'd', long, group = "sub")]
     pub delete_safe: Option<String>,
 
@@ -182,32 +182,32 @@ async fn delete_branch_safe(branch_name: String) {
     // 3. Check if the branch is fully merged into HEAD
     // Get current HEAD commit
     let head_commit = match head {
-        Head::Branch(_) => Head::current_commit().await
+        Head::Branch(_) => Head::current_commit()
+            .await
             .unwrap_or_else(|| panic!("fatal: cannot get HEAD commit")),
         Head::Detached(commit_hash) => commit_hash,
     };
 
     // Get all commits reachable from HEAD
     let head_reachable = crate::command::log::get_reachable_commits(head_commit.to_string()).await;
-    
+
     // Get all commits reachable from the branch to be deleted
-    let branch_reachable = crate::command::log::get_reachable_commits(branch.commit.to_string()).await;
+    let branch_reachable =
+        crate::command::log::get_reachable_commits(branch.commit.to_string()).await;
 
     // Check if all commits from the branch are reachable from HEAD
     // If yes, the branch is fully merged
-    let head_commit_ids: std::collections::HashSet<_> = head_reachable
-        .iter()
-        .map(|c| c.id.to_string())
-        .collect();
+    let head_commit_ids: std::collections::HashSet<_> =
+        head_reachable.iter().map(|c| c.id.to_string()).collect();
 
     for commit in &branch_reachable {
         if !head_commit_ids.contains(&commit.id.to_string()) {
             // Found a commit in branch that's not in HEAD - branch is not fully merged
+            eprintln!("error: The branch '{}' is not fully merged.", branch_name);
             eprintln!(
-                "error: The branch '{}' is not fully merged.",
+                "If you are sure you want to delete it, run 'libra branch -D {}'.",
                 branch_name
             );
-            eprintln!("If you are sure you want to delete it, run 'libra branch -D {}'.", branch_name);
             return;
         }
     }
