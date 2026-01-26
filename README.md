@@ -289,7 +289,7 @@ This section documents the compatibility between **Libra**’s CLI and **Git** a
 | --- | --- | --- | --- | --- | --- | --- |
 | `branch` | `<new_branch> [commit_hash]` | Yes | Yes | ✅ | - | Create branch from commit or HEAD |
 |  | `-D, --delete <branch>` | Yes | Yes | ✅ | - | Force delete branch |
-|  | `-d, --delete <branch>` | Yes | No | ⛔ | P1 | Safe delete (refuse if unmerged) |
+|  | `-d, --delete <branch>` | Yes | Yes | ✅ | - | Safe delete (refuse if unmerged) |
 |  | `-u, --set-upstream-to <upstream>` | Yes | Yes | ✅ | - | Set upstream tracking branch |
 |  | `--show-current` | Yes | Yes | ✅ | - | Show current branch |
 |  | `-m, --move [OLD] [NEW]` | Yes | Yes | ✅ | - | Rename branches |

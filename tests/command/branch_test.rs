@@ -55,6 +55,7 @@ async fn test_branch() {
             commit_hash: Some(first_commit_id.to_string()),
             list: false,
             delete: None,
+            delete_safe: None,
             set_upstream_to: None,
             show_current: false,
             rename: vec![],
@@ -84,6 +85,7 @@ async fn test_branch() {
             commit_hash: None,
             list: false,
             delete: None,
+        delete_safe: None,
             set_upstream_to: None,
             show_current: false,
             rename: vec![],
@@ -105,6 +107,7 @@ async fn test_branch() {
         commit_hash: None,
         list: false,
         delete: None,
+        delete_safe: None,
         set_upstream_to: None,
         show_current: true,
         rename: vec![],
@@ -151,6 +154,7 @@ async fn test_create_branch_from_remote() {
         commit_hash: Some("origin/master".into()),
         list: false,
         delete: None,
+        delete_safe: None,
         set_upstream_to: None,
         show_current: false,
         rename: vec![],
@@ -194,6 +198,7 @@ async fn test_invalid_branch_name() {
         commit_hash: None,
         list: false,
         delete: None,
+        delete_safe: None,
         set_upstream_to: None,
         show_current: false,
         rename: vec![],
@@ -239,6 +244,7 @@ async fn test_branch_rename() {
         commit_hash: None,
         list: false,
         delete: None,
+        delete_safe: None,
         set_upstream_to: None,
         show_current: false,
         rename: vec![],
@@ -258,6 +264,7 @@ async fn test_branch_rename() {
         commit_hash: None,
         list: false,
         delete: None,
+        delete_safe: None,
         set_upstream_to: None,
         show_current: false,
         rename: vec!["old_name".to_string(), "new_name".to_string()],
@@ -318,6 +325,7 @@ async fn test_rename_current_branch() {
         commit_hash: None,
         list: false,
         delete: None,
+        delete_safe: None,
         set_upstream_to: None,
         show_current: false,
         rename: vec!["main".to_string()],
@@ -376,6 +384,7 @@ async fn test_rename_to_existing_branch() {
         commit_hash: None,
         list: false,
         delete: None,
+        delete_safe: None,
         set_upstream_to: None,
         show_current: false,
         rename: vec![],
@@ -389,6 +398,7 @@ async fn test_rename_to_existing_branch() {
         commit_hash: None,
         list: false,
         delete: None,
+        delete_safe: None,
         set_upstream_to: None,
         show_current: false,
         rename: vec![],
@@ -403,6 +413,7 @@ async fn test_rename_to_existing_branch() {
         commit_hash: None,
         list: false,
         delete: None,
+        delete_safe: None,
         set_upstream_to: None,
         show_current: false,
         rename: vec!["branch1".to_string(), "branch2".to_string()],
@@ -447,6 +458,7 @@ async fn test_list_all_branches() {
         commit_hash: None,
         list: false,
         delete: None,
+        delete_safe: None,
         set_upstream_to: None,
         show_current: false,
         rename: vec![],
@@ -473,6 +485,7 @@ async fn test_list_all_branches() {
         commit_hash: None,
         list: false,
         delete: None,
+        delete_safe: None,
         set_upstream_to: None,
         show_current: false,
         rename: vec![],
@@ -492,4 +505,128 @@ async fn test_list_all_branches() {
             .await
             .is_some()
     );
+}
+
+#[tokio::test]
+#[serial]
+/// Tests safe delete (branch -d) functionality
+/// Verifies that -d refuses to delete unmerged branches but allows merged ones
+async fn test_branch_delete_safe() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    // Create first commit on master
+    let commit_args = CommitArgs {
+        message: Some("initial commit".to_string()),
+        file: None,
+        allow_empty: true,
+        conventional: false,
+        amend: false,
+        no_edit: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    };
+    commit::execute(commit_args).await;
+
+    // Create a feature branch
+    execute(BranchArgs {
+        new_branch: Some("feature".to_string()),
+        commit_hash: None,
+        list: false,
+        delete: None,
+        delete_safe: None,
+        set_upstream_to: None,
+        show_current: false,
+        rename: vec![],
+        remotes: false,
+        all: false,
+    }).await;
+
+    // Switch to feature branch and make a commit
+    switch::execute(SwitchArgs {
+        branch: Some("feature".to_string()),
+        create: None,
+        detach: false,
+        track: false,
+    }).await;
+
+    let commit_args = CommitArgs {
+        message: Some("feature work".to_string()),
+        file: None,
+        allow_empty: true,
+        conventional: false,
+        amend: false,
+        no_edit: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    };
+    commit::execute(commit_args).await;
+
+    // Switch back to master
+    switch::execute(SwitchArgs {
+        branch: Some("master".to_string()),
+        create: None,
+        detach: false,
+        track: false,
+    }).await;
+
+    // Try to delete feature branch with -d (should fail - not merged)
+    execute(BranchArgs {
+        new_branch: None,
+        commit_hash: None,
+        list: false,
+        delete: None,
+        delete_safe: Some("feature".to_string()),
+        set_upstream_to: None,
+        show_current: false,
+        rename: vec![],
+        remotes: false,
+        all: false,
+    }).await;
+
+    // Feature branch should still exist
+    assert!(Branch::find_branch("feature", None).await.is_some());
+
+    // Now merge feature into master
+    switch::execute(SwitchArgs {
+        branch: Some("feature".to_string()),
+        create: None,
+        detach: false,
+        track: false,
+    }).await;
+
+    switch::execute(SwitchArgs {
+        branch: Some("master".to_string()),
+        create: None,
+        detach: false,
+        track: false,
+    }).await;
+
+    // Fast-forward merge (just update master to feature's commit)
+    let feature_commit = Branch::find_branch("feature", None).await.unwrap().commit;
+    Branch::update_branch("master", &feature_commit.to_string(), None).await;
+
+    // Now try -d again (should succeed - fully merged)
+    execute(BranchArgs {
+        new_branch: None,
+        commit_hash: None,
+        list: false,
+        delete: None,
+        delete_safe: Some("feature".to_string()),
+        set_upstream_to: None,
+        show_current: false,
+        rename: vec![],
+        remotes: false,
+        all: false,
+    }).await;
+
+    // Feature branch should be deleted
+    assert!(Branch::find_branch("feature", None).await.is_none());
 }
