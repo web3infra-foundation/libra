@@ -54,10 +54,10 @@ pub struct BranchArgs {
     pub all: bool,
 }
 pub async fn execute(args: BranchArgs) {
-    if args.new_branch.is_some() {
-        create_branch(args.new_branch.unwrap(), args.commit_hash).await;
-    } else if args.delete.is_some() {
-        delete_branch(args.delete.unwrap()).await;
+    if let Some(new_branch) = args.new_branch {
+        create_branch(new_branch, args.commit_hash).await;
+    } else if let Some(branch_to_delete) = args.delete {
+        delete_branch(branch_to_delete).await;
     } else if args.show_current {
         show_current_branch().await;
     } else if args.set_upstream_to.is_some() {
