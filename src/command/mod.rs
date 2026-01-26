@@ -15,6 +15,7 @@ pub mod init;
 pub mod lfs;
 pub mod log;
 pub mod merge;
+pub mod open;
 pub mod pull;
 pub mod push;
 pub mod rebase;

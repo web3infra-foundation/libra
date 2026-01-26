@@ -104,6 +104,8 @@ enum Commands {
     Revert(command::revert::RevertArgs),
     #[command(subcommand, about = "Manage set of tracked repositories")]
     Remote(command::remote::RemoteCmds),
+    #[command(about = "Open the repository in the browser")]
+    Open(command::open::OpenArgs),
     #[command(about = "Manage repository configurations")]
     Config(command::config::ConfigArgs),
     #[command(about = "Manage the log of reference changes (e.g., HEAD, branches)")]
@@ -209,6 +211,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> Result<(), GitError> {
         Commands::Blame(args) => command::blame::execute(args).await,
         Commands::Revert(args) => command::revert::execute(args).await,
         Commands::Remote(cmd) => command::remote::execute(cmd).await,
+        Commands::Open(args) => command::open::open(args).await,
         Commands::Pull(args) => command::pull::execute(args).await,
         Commands::Config(args) => command::config::execute(args).await,
         Commands::Checkout(args) => command::checkout::execute(args).await,
