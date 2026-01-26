@@ -1,7 +1,9 @@
-use crate::internal::config::Config;
+use std::process::Command;
+
 use clap::Parser;
 use regex::Regex;
-use std::process::Command;
+
+use crate::internal::config::Config;
 
 #[derive(Parser, Debug)]
 pub struct OpenArgs {
