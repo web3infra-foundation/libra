@@ -2,6 +2,7 @@
 
 use std::{
     env,
+    collections::HashSet,
     io::Error as IoError,
     path::{Path, PathBuf},
 };
@@ -10,7 +11,7 @@ use bytes::Bytes;
 use futures_util::stream::{self, StreamExt};
 use git_internal::{
     errors::GitError,
-    hash::HashKind,
+    hash::get_hash_kind,
     internal::{
         metadata::{EntryMeta, MetaAttached},
         object::{
@@ -32,7 +33,10 @@ use crate::{
     command::{load_object, log::get_reachable_commits},
     git_protocol::ServiceType,
     internal::{branch::Branch, config::Config, head::Head, protocol::DiscRef, reflog},
-    utils::object_ext::TreeExt,
+    utils::{
+        object_ext::TreeExt,
+        util::cur_dir,
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -53,12 +57,14 @@ impl ProtocolClient for LocalClient {
             .to_file_path()
             .unwrap_or_else(|_| PathBuf::from(url.path()));
         Self {
-            repo_path: path,
-            source_type: if url.path().ends_with(".libra") {
-                RepoType::LibraRepo
-            } else {
-                RepoType::GitRepo
-            },
+            repo_path: path.clone(),
+            source_type: {
+                if path.join("libra.db").try_exists().unwrap_or(false) || path.join(".libra/libra.db").try_exists().unwrap_or(false) {
+                    RepoType::LibraRepo
+                } else {
+                    RepoType::GitRepo
+                }
+            }
         }
     }
 }
@@ -69,30 +75,41 @@ impl LocalClient {
         let absolute = if path.is_absolute() {
             path.to_path_buf()
         } else {
-            env::current_dir()?.join(path)
+            cur_dir().join(path)
         };
-        if !absolute.exists() {
+        if !absolute.try_exists().unwrap_or(false) {
             return Err(IoError::other(format!(
                 "Local repository path does not exist: {}",
                 absolute.display()
             )));
         }
-        if absolute.join("objects").exists() {
-            let is_libra_repo = absolute.join("libra.db").exists();
-            Ok(Self {
-                repo_path: absolute,
-                source_type: if is_libra_repo {
-                    RepoType::LibraRepo
-                } else {
-                    RepoType::GitRepo
+        if absolute.join("objects").try_exists().unwrap_or(false) {
+            let is_libra_repo = absolute.join("libra.db").try_exists().unwrap_or(false);
+            let is_git_repo = absolute.join("HEAD").try_exists().unwrap_or(false);
+            match (is_libra_repo, is_git_repo) {
+                (true, false) => {
+                    Ok(Self {
+                        repo_path: absolute,
+                        source_type: RepoType::LibraRepo
+                    })
                 },
-            })
-        } else if absolute.join(".git/HEAD").exists() {
+                (false, true) => {
+                    Ok(Self {
+                        repo_path: absolute,
+                        source_type: RepoType::GitRepo
+                    })
+                },
+                _ => Err(IoError::other(format!(
+                    "No valid Git directory structure found at: {}",
+                    absolute.display()
+                )))
+            }
+        } else if absolute.join(".git/HEAD").try_exists().unwrap_or(false) {
             Ok(Self {
                 repo_path: absolute.join(".git"),
                 source_type: RepoType::GitRepo,
             })
-        } else if absolute.join(".libra/libra.db").exists() {
+        } else if absolute.join(".libra/libra.db").try_exists().unwrap_or(false) {
             Ok(Self {
                 repo_path: absolute.join(".libra"),
                 source_type: RepoType::LibraRepo,
@@ -141,8 +158,8 @@ impl LocalClient {
                 parse_discovered_references(bytes, service)
             }
             RepoType::LibraRepo => {
-                let original_dir = env::current_dir()?;
-                env::set_current_dir(&self.repo_path).unwrap();
+                let original_dir = cur_dir();
+                env::set_current_dir(&self.repo_path)?;
                 let local_branches = Branch::list_branches(None).await;
 
                 let remote_configs = Config::all_remote_configs().await;
@@ -164,9 +181,9 @@ impl LocalClient {
                             ))
                             .collect::<Vec<_>>(),
                         capabilities: vec![],
-                        hash_kind: HashKind::Sha1,
+                        hash_kind: get_hash_kind(),
                     };
-                env::set_current_dir(original_dir).unwrap();
+                env::set_current_dir(original_dir)?;
                 Ok(result)
             }
         }
@@ -213,16 +230,23 @@ impl LocalClient {
                 Ok(stream::once(async move { Ok(stdout) }).boxed())
             }
             RepoType::LibraRepo => {
-                let original_dir = env::current_dir()?;
-                env::set_current_dir(&self.repo_path).unwrap();
+                let original_dir = cur_dir();
+                env::set_current_dir(&self.repo_path)?;
 
-                let mut commits = stream::iter(want)
-                    .then(|branch_hash| async move { get_branch_all_commits(branch_hash).await })
+                let mut seen = HashSet::new();
+                have.iter()
+                    .for_each(|hash| {
+                        seen.insert(hash.clone());
+                    });
+
+                let commits = stream::iter(want)
+                    .then(|branch_hash| async move { get_reachable_commits(branch_hash.to_string(), depth).await })
                     .flat_map(stream::iter)
-                    .collect::<Vec<_>>()
-                    .await;
-                commits.sort_by(|a, b| a.id.cmp(&b.id));
-                commits.dedup_by(|a, b| a.id == b.id);
+                    .collect::<Vec<Commit>>()
+                    .await
+                    .into_iter()
+                    .filter(|c| seen.insert(c.id.to_string()))
+                    .collect::<Vec<_>>();
 
                 let (tree_hash, blob_hash): (Vec<_>, Vec<_>) = commits
                     .iter()
@@ -239,6 +263,7 @@ impl LocalClient {
                             .into_iter()
                             .map(|(_, hash, mode)| (hash, mode))
                     })
+                    .filter(|(hash, _)| seen.insert(hash.to_string()))
                     .partition(|(_, mode)| *mode == TreeItemMode::Tree);
 
                 let trees = tree_hash
@@ -271,8 +296,8 @@ impl LocalClient {
                 all_entries.extend(blob_entries);
 
                 let (entry_tx, entry_rx) =
-                    tokio::sync::mpsc::channel::<MetaAttached<Entry, EntryMeta>>(1_000_000);
-                let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel(1_000_000);
+                    tokio::sync::mpsc::channel::<MetaAttached<Entry, EntryMeta>>(1_000);
+                let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel(1_000);
 
                 let total_objects = all_entries.len();
                 let window_size = 0;
@@ -335,7 +360,9 @@ impl LocalClient {
                     response_data.extend_from_slice(len_hex.as_bytes());
                     response_data.extend_from_slice(&sideband_data);
 
-                    if response_data.len() % (chunk_size * 10) == 0 {
+                    // Send progress update every ~10 chunks (approximately 655KB)
+                    const PROGRESS_CHUNK_INTERVAL: usize = 10;
+                    if response_data.len() % (chunk_size * PROGRESS_CHUNK_INTERVAL) == 0 {
                         let progress_msg =
                             format!("Pack {}/{}...\n", response_data.len(), pack_data.len());
                         let mut progress_data = Vec::with_capacity(1 + progress_msg.len());
@@ -353,19 +380,11 @@ impl LocalClient {
 
                 let response_stream = stream::iter(vec![Ok(Bytes::from(response_data))]);
 
-                env::set_current_dir(&original_dir).unwrap();
+                env::set_current_dir(&original_dir)?;
                 Ok(Box::pin(response_stream))
             }
         }
     }
-}
-
-async fn get_branch_all_commits(hash: &str) -> Vec<Commit> {
-    let mut commits = get_reachable_commits(hash.to_string()).await;
-
-    commits.sort_by(|a, b| b.committer.timestamp.cmp(&a.committer.timestamp));
-
-    commits
 }
 
 #[cfg(test)]

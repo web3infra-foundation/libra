@@ -224,11 +224,15 @@ pub fn generate_upload_pack_content(
 
 impl From<Branch> for DiscoveredReference {
     fn from(branch: Branch) -> Self {
-        let _ref = match branch.remote {
-            Some(remote) => format!("refs/remotes/{}/{}", remote, branch.name),
-            None => format!("refs/heads/{}", branch.name),
-        };
 
+       let _ref = if branch.name.starts_with("refs/") {
+            branch.name.clone()
+        } else {
+            match branch.remote {
+                Some(remote) => format!("refs/remotes/{}/{}", remote, branch.name),
+                None => format!("refs/heads/{}", branch.name),
+            }
+        };
         DiscoveredReference {
             _hash: branch.commit.to_string(),
             _ref,

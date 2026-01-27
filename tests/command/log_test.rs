@@ -21,7 +21,7 @@ async fn test_get_reachable_commits() {
 
     let commit_id = create_test_commit_tree().await;
 
-    let reachable_commits = get_reachable_commits(commit_id).await;
+    let reachable_commits = get_reachable_commits(commit_id, None).await;
     assert_eq!(reachable_commits.len(), 6);
 }
 
@@ -47,7 +47,7 @@ async fn test_execute_log() {
 
     let commit_hash = Head::current_commit().await.unwrap().to_string();
 
-    let mut reachable_commits = get_reachable_commits(commit_hash.clone()).await;
+    let mut reachable_commits = get_reachable_commits(commit_hash.clone(), None).await;
     // default sort with signature time
     reachable_commits.sort_by(|a, b| b.committer.timestamp.cmp(&a.committer.timestamp));
     //the last seven commits
@@ -147,7 +147,7 @@ async fn test_log_oneline() {
 
     // Create test commits
     let commit_id = create_test_commit_tree().await;
-    let reachable_commits = get_reachable_commits(commit_id).await;
+    let reachable_commits = get_reachable_commits(commit_id, None).await;
 
     // Test oneline format
     let args = LogArgs::try_parse_from(["libra", "--number", "3", "--oneline"]);
@@ -393,7 +393,7 @@ async fn test_log_patch_with_pathspec() {
 async fn collect_combined_diff_for_commits(count: usize, paths: Vec<std::path::PathBuf>) -> String {
     // Get head commit and reachable commits
     let commit_hash = Head::current_commit().await.unwrap().to_string();
-    let mut reachable_commits = get_reachable_commits(commit_hash).await;
+    let mut reachable_commits = get_reachable_commits(commit_hash, None).await;
     reachable_commits.sort_by(|a, b| b.committer.timestamp.cmp(&a.committer.timestamp));
 
     let max_output_number = std::cmp::min(count, reachable_commits.len());
@@ -598,7 +598,7 @@ async fn test_log_abbrev_params() {
 
     // Create test commits
     let commit_id = create_test_commit_tree().await;
-    let reachable_commits = get_reachable_commits(commit_id).await;
+    let reachable_commits = get_reachable_commits(commit_id, None).await;
 
     // Get the minimum unique hash length calculated by the log command
     let len = libra::utils::util::get_min_unique_hash_length(&reachable_commits);
@@ -808,7 +808,7 @@ async fn test_log_graph_simple_chain() {
     .await;
 
     let commit_hash = Head::current_commit().await.unwrap().to_string();
-    let reachable_commits = get_reachable_commits(commit_hash).await;
+    let reachable_commits = get_reachable_commits(commit_hash, None).await;
 
     let mut graph_state = libra::command::log::GraphState::new();
 

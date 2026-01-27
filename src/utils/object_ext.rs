@@ -104,7 +104,7 @@ impl TreeExt for Tree {
                 items.push((PathBuf::from(item.name.clone()), item.id, item.mode));
             } else {
                 let sub_tree = Tree::load(&item.id);
-                let sub_entries = sub_tree.get_plain_items_with_mode();
+                let sub_entries = sub_tree.get_items_with_mode();
 
                 // Use extend() instead of append() to avoid intermediate allocation
                 items.extend(sub_entries.into_iter().map(|(path, hash, mode)| {
