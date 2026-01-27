@@ -10,7 +10,7 @@ use bytes::Bytes;
 use futures_util::stream::{self, StreamExt};
 use git_internal::{
     errors::GitError,
-    hash::{HashKind, ObjectHash},
+    hash::HashKind,
     internal::{
         metadata::{EntryMeta, MetaAttached},
         object::{
@@ -18,7 +18,7 @@ use git_internal::{
             commit::Commit,
             tree::{Tree, TreeItemMode},
         },
-        pack::{Pack, encode::PackEncoder, entry::Entry},
+        pack::{encode::PackEncoder, entry::Entry},
     },
 };
 use tokio::{io::AsyncWriteExt, process::Command};
@@ -29,7 +29,7 @@ use super::{
     parse_discovered_references,
 };
 use crate::{
-    command::{load_object, log::get_reachable_commits, save_object},
+    command::{load_object, log::get_reachable_commits},
     git_protocol::ServiceType,
     internal::{branch::Branch, config::Config, head::Head, protocol::DiscRef, reflog},
     utils::object_ext::TreeExt,
@@ -218,8 +218,7 @@ impl LocalClient {
 
                 let mut commits = stream::iter(want)
                     .then(|branch_hash| async move {
-                        let a = get_branch_all_commits(&branch_hash).await;
-                        a
+                        get_branch_all_commits(branch_hash).await
                     })
                     .flat_map(stream::iter)
                     .collect::<Vec<_>>()
@@ -230,7 +229,7 @@ impl LocalClient {
                 let (tree_hash, blob_hash): (Vec<_>, Vec<_>) = commits
                     .iter()
                     .map(|commit| &commit.tree_id)
-                    .map(|tree_id| load_object::<Tree>(tree_id))
+                    .map(load_object::<Tree>)
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|giterror| match giterror {
                         GitError::IOError(io_error) => io_error,

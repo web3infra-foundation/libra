@@ -97,7 +97,7 @@ impl TreeExt for Tree {
     /// Get all the items in the tree recursively with mode information
     fn get_items_with_mode(&self) -> Vec<(PathBuf, ObjectHash, TreeItemMode)> {
         let mut items = Vec::new();
-        items.push((PathBuf::from("/"), self.id.clone(), TreeItemMode::Tree));
+        items.push((PathBuf::from("/"), self.id, TreeItemMode::Tree));
         for item in self.tree_items.iter() {
             if item.mode != TreeItemMode::Tree {
                 // Not Tree, maybe Blob, link, etc.
