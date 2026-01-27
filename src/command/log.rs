@@ -241,7 +241,6 @@ async fn determine_decorate_option(args: &LogArgs) -> Result<DecorateOptions, St
     }
 }
 
-
 /// Get all reachable commits from the given commit hash, up to a specified depth.
 /// **didn't consider the order of the commits**
 pub async fn get_reachable_commits(commit_hash: String, depth: Option<usize>) -> Vec<Commit> {
@@ -266,9 +265,10 @@ pub async fn get_reachable_commits(commit_hash: String, depth: Option<usize>) ->
 
         // If depth is limited and the current depth exceeds the limit, skip further processing
         if let Some(max_depth) = depth
-            && current_depth >= max_depth {
-                continue;
-            }
+            && current_depth >= max_depth
+        {
+            continue;
+        }
 
         // Add parent commits to the queue with incremented depth
         let parent_commit_ids = commit.parent_commit_ids.clone();

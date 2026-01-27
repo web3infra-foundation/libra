@@ -30,8 +30,12 @@ pub struct BranchArgs {
     pub list: bool,
 
     /// force delete branch
-    #[clap(short = 'D', long, group = "sub")]
+    #[clap(short = 'D', long = "delete-force", group = "sub")]
     pub delete: Option<String>,
+
+    /// safe delete branch (checks if merged before deletion)
+    #[clap(short = 'd', long = "delete", group = "sub")]
+    pub delete_safe: Option<String>,
 
     ///  Set up `branchname`>`'s tracking information so `<`upstream`>` is considered `<`branchname`>`'s upstream branch.
     #[clap(short = 'u', long, group = "sub")]
@@ -58,6 +62,8 @@ pub async fn execute(args: BranchArgs) {
         create_branch(new_branch, args.commit_hash).await;
     } else if let Some(branch_to_delete) = args.delete {
         delete_branch(branch_to_delete).await;
+    } else if let Some(branch_to_delete) = args.delete_safe {
+        delete_branch_safe(branch_to_delete).await;
     } else if args.show_current {
         show_current_branch().await;
     } else if args.set_upstream_to.is_some() {
@@ -157,6 +163,59 @@ async fn delete_branch(branch_name: String) {
     }
 
     Branch::delete_branch(&branch_name, None).await;
+}
+
+/// Safely delete a branch, refusing if it contains unmerged commits.
+///
+/// This performs a merge check to ensure the branch is fully merged into HEAD
+/// before deletion. If the branch is not fully merged, prints an error and
+/// suggests using `branch -D` for force deletion.
+async fn delete_branch_safe(branch_name: String) {
+    // 1. Check if branch exists
+    let branch = Branch::find_branch(&branch_name, None)
+        .await
+        .unwrap_or_else(|| panic!("fatal: branch '{branch_name}' not found"));
+
+    // 2. Check if trying to delete current branch
+    let head = Head::current().await;
+    if let Head::Branch(name) = &head
+        && name == &branch_name
+    {
+        panic!("fatal: Cannot delete the branch '{branch_name}' which you are currently on");
+    }
+
+    // 3. Check if the branch is fully merged into HEAD
+    // Get current HEAD commit
+    let head_commit = match head {
+        Head::Branch(_) => Head::current_commit()
+            .await
+            .unwrap_or_else(|| panic!("fatal: cannot get HEAD commit")),
+        Head::Detached(commit_hash) => commit_hash,
+    };
+
+    // Get all commits reachable from HEAD
+    let head_reachable =
+        crate::command::log::get_reachable_commits(head_commit.to_string(), None).await;
+
+    // Build HashSet for efficient lookup using ObjectHash directly (avoid string allocations)
+    let head_commit_ids: std::collections::HashSet<_> =
+        head_reachable.iter().map(|c| c.id).collect();
+
+    // Check if the branch's HEAD commit is reachable from current HEAD
+    // If the branch commit is in HEAD's history, the branch is fully merged
+    if !head_commit_ids.contains(&branch.commit) {
+        // Branch is not fully merged
+        eprintln!("error: The branch '{}' is not fully merged.", branch_name);
+        eprintln!(
+            "If you are sure you want to delete it, run 'libra branch -D {}'.",
+            branch_name
+        );
+        return;
+    }
+
+    // All checks passed, safe to delete
+    Branch::delete_branch(&branch_name, None).await;
+    println!("Deleted branch {} (was {}).", branch_name, branch.commit);
 }
 
 async fn rename_branch(args: Vec<String>) {

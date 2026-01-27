@@ -173,7 +173,7 @@ fn validate_depth(s: &str) -> Result<usize, String> {
                 Ok(val)
             } else {
                 Err("DEPTH must be greater than or equal to 1".to_string())
-        }
+            }
         })
 }
 
