@@ -31,3 +31,4 @@ buck-out/
 *:Zone.Identifier
 
 .libra//buck-out
+/buck-out

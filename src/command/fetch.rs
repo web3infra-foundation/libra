@@ -105,11 +105,12 @@ impl RemoteClient {
         &self,
         have: &[String],
         want: &[String],
+        depth: Option<usize>,
     ) -> Result<FetchStream, IoError> {
         match self {
-            RemoteClient::Http(client) => client.fetch_objects(have, want).await,
-            RemoteClient::Local(client) => client.fetch_objects(have, want).await,
-            RemoteClient::Git(client) => client.fetch_objects(have, want).await,
+            RemoteClient::Http(client) => client.fetch_objects(have, want, depth).await,
+            RemoteClient::Local(client) => client.fetch_objects(have, want, depth).await,
+            RemoteClient::Git(client) => client.fetch_objects(have, want, depth).await,
         }
     }
 }
@@ -134,7 +135,7 @@ pub async fn execute(args: FetchArgs) {
     if args.all {
         let remotes = Config::all_remote_configs().await;
         let tasks = remotes.into_iter().map(|remote| async move {
-            fetch_repository(remote, None, false).await;
+            fetch_repository(remote, None, false, None).await;
         });
         futures::future::join_all(tasks).await;
     } else {
@@ -153,7 +154,7 @@ pub async fn execute(args: FetchArgs) {
         };
         let remote_config = Config::remote_config(&remote).await;
         match remote_config {
-            Some(remote_config) => fetch_repository(remote_config, args.refspec, false).await,
+            Some(remote_config) => fetch_repository(remote_config, args.refspec, false, None).await,
             None => {
                 tracing::error!("remote config '{}' not found", remote);
                 eprintln!("fatal: '{remote}' does not appear to be a libra repository");
@@ -165,10 +166,12 @@ pub async fn execute(args: FetchArgs) {
 /// Fetch from remote repository
 /// - `branch` is optional, if `None`, fetch all branches
 /// - 'single_branch' is bool, if `true`, fetch only the specified branch
+/// - 'depth' is optional, if `Some(n)`, create a shallow clone with history truncated to n commits
 pub async fn fetch_repository(
     remote_config: RemoteConfig,
     branch: Option<String>,
     single_branch: bool,
+    depth: Option<usize>,
 ) {
     println!(
         "fetching from {}{}",
@@ -240,7 +243,7 @@ pub async fn fetch_repository(
 
     let want = refs.iter().map(|r| r._hash.clone()).collect::<Vec<_>>();
     let have = current_have().await; // TODO: return `DiscRef` rather than only hash, to compare `have` & `want` more accurately
-    let mut result_stream = match remote_client.fetch_objects(&have, &want).await {
+    let mut result_stream = match remote_client.fetch_objects(&have, &want, depth).await {
         Ok(stream) => stream,
         Err(e) => {
             eprintln!("fatal: failed to fetch objects: {e}");
@@ -362,14 +365,24 @@ pub async fn fetch_repository(
                     }
 
                     // Get the old OID *before* updating the branch
-                    let old_oid = Branch::find_branch_with_conn(txn, &full_ref_name, None)
-                        .await
-                        .map_or(ObjectHash::zero_str(get_hash_kind()), |b| {
-                            b.commit.to_string()
-                        });
+                    let old_oid = Branch::find_branch_with_conn(
+                        txn,
+                        &full_ref_name,
+                        Some(&remote_config.name),
+                    )
+                    .await
+                    .map_or(ObjectHash::zero_str(get_hash_kind()), |b| {
+                        b.commit.to_string()
+                    });
 
                     // Update the branch pointer
-                    Branch::update_branch_with_conn(txn, &full_ref_name, &r._hash, None).await;
+                    Branch::update_branch_with_conn(
+                        txn,
+                        &full_ref_name,
+                        &r._hash,
+                        Some(&remote_config.name),
+                    )
+                    .await;
 
                     // Prepare and insert the reflog entry for this specific remote-tracking branch
                     let context = ReflogContext {

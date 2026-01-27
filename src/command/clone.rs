@@ -36,6 +36,10 @@ pub struct CloneArgs {
     /// Clone only one branch, HEAD or --branch
     #[clap(long)]
     pub single_branch: bool,
+
+    /// Create a shallow clone with a history truncated to the specified number of commits
+    #[clap(long, value_name = "DEPTH")]
+    pub depth: Option<usize>,
 }
 
 pub async fn execute(args: CloneArgs) {
@@ -134,6 +138,7 @@ pub async fn execute(args: CloneArgs) {
         template: None,
         shared: None,
         object_format: Some(object_format),
+        ref_format: None,
     };
     command::init::execute(init_args).await;
 
@@ -146,6 +151,7 @@ pub async fn execute(args: CloneArgs) {
         remote_config.clone(),
         args.branch.clone(),
         args.single_branch,
+        args.depth,
     )
     .await;
 
@@ -181,9 +187,10 @@ async fn setup_repository(
 
     if let Some(branch_name) = branch_to_checkout {
         let remote_tracking_ref = format!("refs/remotes/{}/{}", remote_config.name, branch_name);
-        let origin_branch = Branch::find_branch_with_conn(db, &remote_tracking_ref, None)
-            .await
-            .ok_or_else(|| format!("fatal: remote branch '{}' not found.", branch_name))?;
+        let origin_branch =
+            Branch::find_branch_with_conn(db, &remote_tracking_ref, Some(&remote_config.name))
+                .await
+                .ok_or_else(|| format!("fatal: remote branch '{}' not found.", branch_name))?;
 
         // Prepare the reflog context *before* the transaction
         let action = ReflogAction::Clone {

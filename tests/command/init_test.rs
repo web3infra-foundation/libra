@@ -1,731 +1,616 @@
-//! Tests init command creating repository layout, configs, and database tables.
+//! Initializes a repository by creating .libra storage, seeding HEAD and default refs, and preparing the backing database.
 
-// use std::fs::File;
-//
-use std::fs;
+use std::{
+    fs,
+    io::{self, ErrorKind},
+    path::Path,
+};
 
-use libra::internal::model::config;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+use clap::{Parser, ValueEnum};
+use git_internal::hash::{HashKind, set_hash_kind};
+use libra::{
+    internal::model::{config, reference},
+    utils::util::{DATABASE, ROOT_DIR},
+};
+use sea_orm::{ActiveModelTrait, Database, DbConn, DbErr, Set, TransactionTrait};
+const DEFAULT_BRANCH: &str = "master";
 
-use super::*;
-
-pub fn verify_init(base_dir: &Path) {
-    // List of subdirectories to verify
-    let dirs = ["objects/pack", "objects/info", "info"];
-
-    // Loop through the directories and verify they exist
-    for dir in dirs {
-        let dir_path = base_dir.join(dir);
-        assert!(dir_path.exists(), "Directory {dir} does not exist");
-    }
-
-    // Additional file verification
-    let files = ["description", "libra.db", "info/exclude"];
-
-    for file in files {
-        let file_path = base_dir.join(file);
-        assert!(file_path.exists(), "File {file} does not exist");
-    }
-}
-#[tokio::test]
-#[serial]
-/// Test the init function with no parameters
-async fn test_init() {
-    let target_dir = tempdir().unwrap().keep();
-    // let _guard = ChangeDirGuard::new(target_dir.clone());
-
-    let args = InitArgs {
-        bare: false,
-        initial_branch: None,
-        repo_directory: target_dir.to_str().unwrap().to_string(),
-        quiet: false,
-        template: None,
-        shared: None,
-        object_format: None,
-    };
-    // Run the init function
-    init(args).await.unwrap();
-
-    // Verify that the `.libra` directory exists
-    let libra_dir = target_dir.join(".libra");
-    assert!(libra_dir.exists(), ".libra directory does not exist");
-
-    // Verify the contents of the other directory
-    verify_init(libra_dir.as_path());
+/// Reference format validation modes
+#[derive(ValueEnum, Debug, Clone, PartialEq)]
+pub enum RefFormat {
+    /// Strict reference name validation (Git-compatible)
+    Strict,
+    /// Filesystem-friendly reference name validation
+    Filesystem,
 }
 
-#[tokio::test]
-#[serial]
-/// Test the init function with a template directory
-async fn test_init_template() {
-    use std::fs;
+#[derive(Parser, Debug, Clone)]
+pub struct InitArgs {
+    /// Create a bare repository
+    #[clap(long, required = false)]
+    pub bare: bool, // Default is false
 
-    use tempfile::tempdir;
+    /// directory from which templates will be used
+    #[clap(long = "template", name = "template-directory", required = false)]
+    pub template: Option<String>,
 
-    // Create a temporary target directory for the new repo
-    let target_dir = tempdir().unwrap().keep();
+    /// Set the initial branch name
+    #[clap(short = 'b', long, required = false)]
+    pub initial_branch: Option<String>,
 
-    // Create a temporary template directory
-    let template_dir = tempdir().unwrap();
+    /// Create a repository in the specified directory
+    #[clap(default_value = ".")]
+    pub repo_directory: String,
 
-    // Set up template structure similar to Git template
-    fs::create_dir_all(template_dir.path().join("objects/pack")).unwrap();
-    fs::create_dir_all(template_dir.path().join("objects/info")).unwrap();
-    fs::create_dir_all(template_dir.path().join("info")).unwrap();
+    /// Suppress all output
+    #[clap(long, short = 'q', required = false)]
+    pub quiet: bool,
 
-    // Add description file in the template
-    fs::write(
-        template_dir.path().join("description"),
-        "Template repository",
-    )
-    .unwrap();
+    /// Specify repository sharing mode
+    ///
+    /// Supported values:
+    /// - `umask`: Default behavior (permissions depend on the user's umask).
+    /// - `group`: Makes the repository group-writable so multiple users
+    ///   in the same group can collaborate more easily.
+    /// - `all`: Makes the repository readable by all users on the system.
+    ///
+    /// Note: On Windows, this option is ignored.
+    #[clap(long, required = false, value_name = "MODE")]
+    pub shared: Option<String>,
 
-    // Add info/exclude file in the template
-    fs::write(template_dir.path().join("info/exclude"), "").unwrap();
+    /// Specify the object format (hash algorithm) for the repository.
+    ///
+    /// Supported values:
+    /// - `sha1`: The default and currently the only supported format.
+    /// - `sha256`: An alternative format using SHA-256 hashing.
+    #[clap(long = "object-format", name = "format", required = false)]
+    pub object_format: Option<String>,
 
-    // Prepare init arguments with template path
-    let args = InitArgs {
-        bare: false,
-        initial_branch: None,
-        repo_directory: target_dir.to_str().unwrap().to_string(),
-        quiet: false,
-        template: Some(template_dir.path().to_str().unwrap().to_string()),
-        shared: None,
-        object_format: None,
-    };
-
-    // Run the init function
-    init(args).await.unwrap();
-
-    // Verify that the `.libra` directory exists
-    let libra_dir = target_dir.join(".libra");
-    assert!(libra_dir.exists(), ".libra directory does not exist");
-
-    // Verify the repository initialization structure
-    verify_init(libra_dir.as_path());
-
-    // --- Additional checks for template contents ---
-
-    // Verify that description file is copied from template
-    let description_path = libra_dir.join("description");
-    assert!(
-        description_path.exists(),
-        "Template description file not copied"
-    );
-
-    // Verify that info/exclude file is copied from template
-    let exclude_path = libra_dir.join("info/exclude");
-    assert!(
-        exclude_path.exists(),
-        "Template info/exclude file not copied"
-    );
-
-    // Verify that objects subdirectories are copied from template
-    assert!(
-        libra_dir.join("objects/pack").exists(),
-        "Template objects/pack directory not copied"
-    );
-    assert!(
-        libra_dir.join("objects/info").exists(),
-        "Template objects/info directory not copied"
-    );
+    /// Specify the reference format validation mode.
+    ///
+    /// Supported values:
+    /// - `strict`: Use strict Git-compatible reference name validation.
+    /// - `filesystem`: Use filesystem-friendly reference name validation.
+    #[clap(long = "ref-format", value_enum, required = false)]
+    pub ref_format: Option<RefFormat>,
 }
 
-#[tokio::test]
-#[serial]
-/// Test the init function with an invalid template path
-async fn test_init_with_invalid_template_path() {
-    use tempfile::tempdir;
-
-    // Create a temporary target directory for the new repo
-    let target_dir = tempdir().unwrap().keep();
-
-    // Provide a non-existent template path
-    let invalid_template_path = "/path/to/nonexistent/template";
-
-    let args = InitArgs {
-        bare: false,
-        initial_branch: None,
-        repo_directory: target_dir.to_str().unwrap().to_string(),
-        quiet: false,
-        template: Some(invalid_template_path.to_string()),
-        shared: None,
-        object_format: None,
-    };
-
-    // Run the init function and expect it to return an error
-    let result = init(args).await;
-
-    // Verify that the function returns an error due to invalid template path
-    assert!(
-        result.is_err(),
-        "Init should fail when template path does not exist"
-    );
-
-    // Optionally, verify the error kind/message if your init function provides it
-    if let Err(err) = result {
-        // Uncomment and adjust depending on your error type
-        // assert_eq!(err.kind(), Some(ExpectedErrorKind::NotFound));
-        println!("Received expected error: {:?}", err);
-    }
+/// Check if the repository has already been initialized based on the presence of the description file.
+fn is_reinit(cur_dir: &Path) -> bool {
+    let bare_head_path = cur_dir.join("description");
+    let head_path = cur_dir.join(".libra/description");
+    // Check the presence of the description file
+    head_path.exists() || bare_head_path.exists()
 }
 
-#[tokio::test]
-#[serial]
-/// Test the init function with the --bare flag
-async fn test_init_bare() {
-    let target_dir = tempdir().unwrap().keep();
-    // let _guard = ChangeDirGuard::new(target_dir.clone());
-
-    // Run the init function with --bare flag
-    let args = InitArgs {
-        bare: true,
-        initial_branch: None,
-        repo_directory: target_dir.to_str().unwrap().to_string(),
-        quiet: false,
-        template: None,
-        shared: None,
-        object_format: None,
-    };
-    // Run the init function
-    init(args).await.unwrap();
-
-    // Verify the contents of the other directory
-    verify_init(target_dir.as_path());
-}
-
-#[tokio::test]
-#[serial]
-/// Test the init function with the --bare flag and an existing repository
-async fn test_init_bare_with_existing_repo() {
-    let target_dir = tempdir().unwrap().keep();
-
-    // Initialize a bare repository
-    let init_args = InitArgs {
-        bare: false,
-        initial_branch: None,
-        repo_directory: target_dir.to_str().unwrap().to_string(),
-        quiet: false,
-        template: None,
-        shared: None,
-        object_format: None,
-    };
-    init(init_args).await.unwrap(); // Execute init for bare repository
-
-    // Simulate trying to reinitialize the bare repo
-    let result = async {
-        let args = InitArgs {
-            bare: true,
-            initial_branch: None,
-            repo_directory: target_dir.to_str().unwrap().to_string(),
-            quiet: false,
-            template: None,
-            shared: None,
-            object_format: None,
-        };
-        init(args).await
-    };
-
-    // Check for the error
-    let err = result.await.unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists); // Check error type
-    assert!(err.to_string().contains("Initialization failed")); // Check error message contains "Already initialized"
-}
-
-#[tokio::test]
-#[serial]
-/// Test the init function with an initial branch name
-async fn test_init_with_initial_branch() {
-    // Set up the test environment without a Libra repository
-    let temp_path = tempdir().unwrap();
-    test::setup_clean_testing_env_in(temp_path.path());
-    let _guard = test::ChangeDirGuard::new(temp_path.path());
-
-    let args = InitArgs {
-        bare: false,
-        initial_branch: Some("main".to_string()),
-        repo_directory: temp_path.path().to_str().unwrap().to_string(),
-        quiet: false,
-        template: None,
-        shared: None,
-        object_format: None,
-    };
-    // Run the init function
-    init(args).await.unwrap();
-
-    // Verify the contents of the other directory
-    verify_init(temp_path.path().join(".libra").as_path());
-
-    // Verify the HEAD reference
-    match Head::current().await {
-        Head::Branch(current_branch) => {
-            assert_eq!(current_branch, "main");
-        }
-        _ => panic!("should be branch"),
-    };
-}
-
-#[tokio::test]
-#[serial]
-/// Test the init function with an invalid branch name
-async fn test_init_with_invalid_branch() {
-    // Cover all invalid branch name cases
-    test_invalid_branch_name("master ").await;
-    test_invalid_branch_name("master\t").await;
-    test_invalid_branch_name("master\\").await;
-    test_invalid_branch_name("master:").await;
-    test_invalid_branch_name("master\"").await;
-    test_invalid_branch_name("master?").await;
-    test_invalid_branch_name("master*").await;
-    test_invalid_branch_name("master[").await;
-    test_invalid_branch_name("/master").await;
-    test_invalid_branch_name("master/").await;
-    test_invalid_branch_name("master.").await;
-    test_invalid_branch_name("mast//er").await;
-    test_invalid_branch_name("mast..er").await;
-    test_invalid_branch_name("HEAD").await;
-    test_invalid_branch_name("mast@{er").await;
-    test_invalid_branch_name("").await;
-    test_invalid_branch_name(".").await;
-}
-
-async fn test_invalid_branch_name(branch_name: &str) {
-    let target_dir = tempdir().unwrap().keep();
-    let args = InitArgs {
-        bare: false,
-        initial_branch: Some(branch_name.to_string()),
-        repo_directory: target_dir.to_str().unwrap().to_string(),
-        quiet: false,
-        template: None,
-        shared: None,
-        object_format: None,
-    };
-    // Run the init function
-    let result = init(args).await;
-    // Check for the error
-    let err = result.unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput); // Check error type
-    assert!(err.to_string().contains("invalid branch name")); // Check error message contains "invalid branch name"
-}
-
-#[tokio::test]
-#[serial]
-/// Test the init function with [directory] parameter
-async fn test_init_with_directory() {
-    let target_dir = tempdir().unwrap().keep();
-
-    // Create a test directory
-    let test_dir = target_dir.join("test");
-
-    let args = InitArgs {
-        bare: false,
-        initial_branch: None,
-        repo_directory: test_dir.to_str().unwrap().to_owned(),
-        quiet: false,
-        template: None,
-        shared: None,
-        object_format: None,
-    };
-    // Run the init function
-    init(args).await.unwrap();
-
-    // Verify that the `.libra` directory exists
-    let libra_dir = test_dir.join(".libra");
-    assert!(libra_dir.exists(), ".libra directory does not exist");
-
-    // Verify the contents of the other directory
-    verify_init(&libra_dir);
-}
-
-#[tokio::test]
-#[serial]
-/// Test the init function with invalid [directory] parameter
-async fn test_init_with_invalid_directory() {
-    let target_dir = tempdir().unwrap().keep();
-
-    // Create a test file instead of a directory
-    let test_dir = target_dir.join("test.txt");
-
-    // Create a file with the same name as the test directory
-    fs::File::create(&test_dir).unwrap();
-
-    let args = InitArgs {
-        bare: false,
-        initial_branch: None,
-        repo_directory: test_dir.to_str().unwrap().to_owned(),
-        quiet: false,
-        template: None,
-        shared: None,
-        object_format: None,
-    };
-    // Run the init function
-    let result = init(args).await;
-
-    // Check for the error
-    let err = result.unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput); // Check error type
-    assert!(
-        err.to_string()
-            .contains("The target directory is not a directory")
-    ); // Check error message
-}
-
-#[tokio::test]
-#[serial]
-/// Tests that repository initialization fails when lacking write permissions in the target directory
-async fn test_init_with_unauthorized_directory() {
-    let target_dir = tempdir().unwrap().keep();
-
-    // Create a test directory
-    let test_dir = target_dir.join("test");
-
-    // Create a directory with restricted permissions
-    fs::create_dir(&test_dir).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&test_dir, fs::Permissions::from_mode(0o444)).unwrap();
-    }
-    #[cfg(windows)]
-    {
-        let mut perms = fs::metadata(&test_dir).unwrap().permissions();
-        perms.set_readonly(true);
-        fs::set_permissions(&test_dir, perms).unwrap();
-    }
-
-    let args = InitArgs {
-        bare: false,
-        initial_branch: None,
-        repo_directory: test_dir.to_str().unwrap().to_owned(),
-        quiet: false,
-        template: None,
-        shared: None,
-        object_format: None,
-    };
-    // Run the init function
-    let result = init(args).await;
-
-    // Check for the error
-    let err = result.unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied); // Check error type
-    assert!(
-        err.to_string()
-            .contains("The target directory is read-only")
-    ); // Check error message
-}
-
-#[tokio::test]
-#[serial]
-/// Test the init function with the --quiet flag by using --show-output
-async fn test_init_quiet() {
-    let target_dir = tempdir().unwrap().keep();
-
-    let args = InitArgs {
-        bare: false,
-        initial_branch: None,
-        repo_directory: target_dir.to_str().unwrap().to_string(),
-        quiet: true,
-        template: None,
-        shared: None,
-        object_format: None,
-    };
-    // Run the init function
-    init(args).await.unwrap();
-
-    // Verify that the `.libra` directory exists
-    let libra_dir = target_dir.join(".libra");
-    assert!(libra_dir.exists(), ".libra directory does not exist");
-
-    // Verify the contents of the other directory
-    verify_init(libra_dir.as_path());
-}
-
-/// Test the init function with the --shared flag
-async fn test_valid_shared_mode(shared_mode: &str) {
-    let target_dir = tempdir().unwrap().keep();
-
-    let args = InitArgs {
-        bare: false,
-        initial_branch: None,
-        repo_directory: target_dir.to_str().unwrap().to_string(),
-        quiet: false,
-        template: None,
-        shared: Some(shared_mode.to_string()),
-        object_format: None,
-    };
-    // Run the init function
-    init(args).await.unwrap();
-    // Verify that the '.libra' directory exists
-    let libra_dir = target_dir.join(".libra");
-    assert!(libra_dir.exists(), ".libra directory does not exist");
-    // Check shared mode of '.libra' directory (Only Unix like os)
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        // Verify the mode of pre-commit.sh
-        let perms = std::fs::metadata(libra_dir.join("hooks/pre-commit.sh"))
-            .unwrap()
-            .permissions()
-            .mode();
-        match shared_mode {
-            "true" | "group" => assert_eq!(perms & 0o777, 0o775),
-            "all" | "world" | "everybody" => assert_eq!(perms & 0o777, 0o777),
-            "false" | "umask" => (),
-            mode if mode.starts_with('0') => {
-                let expected = u32::from_str_radix(&mode[1..], 8).unwrap();
-                assert_eq!(perms & 0o777, expected);
+/// Check if the target directory is writable
+fn is_writable(cur_dir: &Path) -> io::Result<()> {
+    match fs::metadata(cur_dir) {
+        Ok(metadata) => {
+            // Check if the target directory is a directory
+            if !metadata.is_dir() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "The target directory is not a directory.",
+                ));
             }
-            _ => panic!("Unsupported shared mode"),
+            // Check permissions
+            if metadata.permissions().readonly() {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "The target directory is read-only.",
+                ));
+            }
+        }
+        Err(e) if e.kind() != ErrorKind::NotFound => {
+            return Err(e);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Recursively copy the contents of the template directory to the destination directory.
+///
+/// # Behavior
+/// - Directories are created as needed.
+/// - Existing files in `dst` are NOT overwritten.
+/// - Subdirectories are copied recursively.
+fn copy_template(src: &Path, dst: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let dest_path = dst.join(entry.file_name());
+
+        if file_type.is_dir() {
+            fs::create_dir_all(&dest_path)?;
+            copy_template(&entry.path(), &dest_path)?;
+        } else if !dest_path.exists() {
+            // Only copy if the file does not already exist
+            fs::copy(entry.path(), &dest_path)?;
         }
     }
+    Ok(())
 }
 
-async fn test_invalid_share_mode(shared_mode: &str) {
-    let target_dir = tempdir().unwrap().keep();
-    let args = InitArgs {
-        bare: false,
-        initial_branch: None,
-        repo_directory: target_dir.to_str().unwrap().to_string(),
-        quiet: false,
-        template: None,
-        shared: Some(shared_mode.to_string()),
-        object_format: None,
-    };
-
-    let result = init(args).await;
-    let err = result.unwrap_err();
-
-    // Verify the type of error
-    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-}
-
-#[tokio::test]
-#[serial]
-/// Test the init function with valid shared mode
-async fn test_init_with_valid_shared_mode() {
-    // Test all types of valid shared modes
-    test_valid_shared_mode("true").await;
-    test_valid_shared_mode("false").await;
-    test_valid_shared_mode("umask").await;
-    test_valid_shared_mode("group").await;
-    test_valid_shared_mode("all").await;
-    test_valid_shared_mode("world").await;
-    test_valid_shared_mode("everybody").await;
-    test_valid_shared_mode("0777").await;
-}
-
-#[tokio::test]
-#[serial]
-/// Test the init function with invalid shared mode
-async fn test_init_with_invalid_shared_mode() {
-    test_invalid_share_mode("invalid").await;
-    test_invalid_share_mode("mygroup").await;
-    test_invalid_share_mode("1234").await;
-    test_invalid_share_mode("0888").await;
-    test_invalid_share_mode("12345").await;
-}
-
-#[tokio::test]
-#[serial]
-/// Test init with a valid object format ('sha1' and 'sha256' are supported)
-async fn test_init_with_valid_object_format_sha1() {
-    let target_dir = tempdir().unwrap().keep();
-    let args = InitArgs {
-        bare: false,
-        initial_branch: None,
-        repo_directory: target_dir.to_str().unwrap().to_string(),
-        quiet: false,
-        template: None,
-        shared: None,
-        object_format: Some("sha1".to_string()),
-    };
-    // This should succeed
-    let result = init(args).await;
-    assert!(
-        result.is_ok(),
-        "init with --object-format sha1 should succeed"
-    );
-
-    // Verify that the config file contains the correct object format
-    let db_path = target_dir.join(".libra/libra.db");
-    // Connect to the existing database instead of creating a new one
-    let conn = sea_orm::Database::connect(format!("sqlite://{}", db_path.to_str().unwrap()))
-        .await
-        .unwrap();
-    let config_entry = config::Entity::find()
-        .filter(config::Column::Configuration.eq("core"))
-        .filter(config::Column::Key.eq("objectformat"))
-        .one(&conn)
-        .await
-        .unwrap();
-    assert_eq!(config_entry.unwrap().value, "sha1");
-}
-
-#[tokio::test]
-#[serial]
-/// Test init with a valid object format ('sha256') and verify it's saved to config.
-async fn test_init_with_valid_object_format_sha256() {
-    let target_dir = tempdir().unwrap().keep();
-    let args = InitArgs {
-        bare: false,
-        initial_branch: None,
-        repo_directory: target_dir.to_str().unwrap().to_string(),
-        quiet: true, // Use quiet to reduce test output noise
-        template: None,
-        shared: None,
-        object_format: Some("sha256".to_string()),
-    };
-    // This should succeed
-    let result = init(args).await;
-    assert!(
-        result.is_ok(),
-        "init with --object-format sha256 should succeed"
-    );
-
-    // Verify that the config file contains the correct object format
-    let db_path = target_dir.join(".libra/libra.db");
-    let conn = sea_orm::Database::connect(format!("sqlite://{}", db_path.to_str().unwrap()))
-        .await
-        .unwrap();
-    let config_entry = config::Entity::find()
-        .filter(config::Column::Configuration.eq("core"))
-        .filter(config::Column::Key.eq("objectformat"))
-        .one(&conn)
-        .await
-        .unwrap();
-    assert_eq!(config_entry.unwrap().value, "sha256");
-}
-
-#[tokio::test]
-#[serial]
-/// Test init with an invalid object format (e.g., 'md5')
-async fn test_init_with_invalid_object_format() {
-    let target_dir = tempdir().unwrap().keep();
-    let args = InitArgs {
-        bare: false,
-        initial_branch: None,
-        repo_directory: target_dir.to_str().unwrap().to_string(),
-        quiet: false,
-        template: None,
-        shared: None,
-        object_format: Some("md5".to_string()),
-    };
-    // This should fail with a generic invalid format error
-    let result = init(args).await;
-    let err = result.unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-    assert!(err.to_string().contains("unsupported object format"));
-}
-
-#[tokio::test]
-#[serial]
-#[cfg(unix)]
-/// Init should fail when the parent directory is not writable (permission denied)
-async fn test_init_fails_when_parent_not_writable() {
+/// Apply repository with sharing mode
+#[cfg(not(target_os = "windows"))]
+fn apply_shared(root_dir: &Path, shared_mode: &str) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    // Skip test if running as root - root can bypass permission restrictions
-    use std::process::Command;
-    let output = Command::new("id")
-        .arg("-u")
-        .output()
-        .expect("failed to execute id -u");
-    let uid = String::from_utf8(output.stdout).expect("failed to parse uid");
-    if uid.trim() == "0" {
-        return;
-    }
 
-    let dir = tempdir().unwrap();
-    let path = dir.path();
-
-    let original_perms = std::fs::metadata(path).unwrap().permissions();
-
-    let mut perms = original_perms.clone();
-    perms.set_mode(0o555);
-    std::fs::set_permissions(path, perms).unwrap();
-
-    // Attempt to initialize a repo inside a non-writable parent directory
-    let args = InitArgs {
-        bare: false,
-        initial_branch: None,
-        repo_directory: path.join("repo").to_str().unwrap().to_string(),
-        quiet: false,
-        template: None,
-        shared: None,
-        object_format: None,
-    };
-
-    // Expect init to fail with PermissionDenied
-    let err = init(args).await.unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
-
-    // Restore original permissions so tempdir can clean up properly
-    std::fs::set_permissions(path, original_perms).unwrap();
-}
-
-#[tokio::test]
-#[serial]
-/// Init should create a hooks/pre-commit.sh file that is present and non-empty
-async fn test_init_creates_hooks_and_precommit() {
-    let target_dir = tempfile::tempdir().unwrap().keep();
-
-    let args = InitArgs {
-        bare: false,
-        initial_branch: None,
-        repo_directory: target_dir.to_str().unwrap().to_string(),
-        quiet: false,
-        template: None,
-        shared: None,
-        object_format: None,
-    };
-
-    init(args).await.unwrap();
-
-    // Verify hook exists and is non-empty
-    let hook_path = target_dir.join(".libra/hooks/pre-commit.sh");
-    assert!(
-        hook_path.exists(),
-        "Expected .libra/hooks/pre-commit.sh to exist after init"
-    );
-
-    let meta = std::fs::metadata(&hook_path).expect("failed to stat hook file");
-    assert!(meta.len() > 0, "Expected pre-commit hook to be non-empty");
-
-    let content = std::fs::read_to_string(&hook_path).expect("failed to read pre-commit hook file");
-    assert!(
-        !content.trim().is_empty(),
-        "pre-commit hook content should not be empty"
-    );
-}
-
-#[tokio::test]
-#[serial]
-/// When initial branch is not specified, HEAD should point to a branch (branch name non-empty).
-async fn test_init_sets_head_to_branch_by_default() {
-    let target_dir = tempfile::tempdir().unwrap().keep();
-
-    // Use ChangeDirGuard to ensure proper cleanup even on panic
-    let _guard = ChangeDirGuard::new(&target_dir);
-
-    let args = InitArgs {
-        bare: false,
-        initial_branch: None,
-        repo_directory: target_dir.to_str().unwrap().to_string(),
-        quiet: false,
-        template: None,
-        shared: None,
-        object_format: None,
-    };
-
-    init(args).await.unwrap();
-
-    // Verify HEAD is a branch and non-empty
-    match Head::current().await {
-        Head::Branch(branch_name) => {
-            assert!(
-                !branch_name.is_empty(),
-                "Expected HEAD to point to a non-empty branch name"
-            );
+    // Help function: recursively set permission bits for all files and dirs
+    fn set_recursive(dir: &Path, mode: u32) -> io::Result<()> {
+        for entry in walkdir::WalkDir::new(dir) {
+            let entry = entry?;
+            let path = entry.path();
+            let metadata = fs::metadata(path)?;
+            let mut perms = metadata.permissions();
+            perms.set_mode(mode);
+            fs::set_permissions(path, perms)?;
         }
-        other => panic!("Expected HEAD to be a branch after init, got: {:?}", other),
+        Ok(())
     }
+    // Match the shared_mode argument and apply permissions accordingly
+    match shared_mode {
+        "false" | "umask" => {} // default
+        "true" | "group" => set_recursive(root_dir, 0o2775)?,
+        "all" | "world" | "everybody" => set_recursive(root_dir, 0o2777)?,
+        mode if mode.starts_with('0') && mode.len() == 4 => {
+            if let Ok(bits) = u32::from_str_radix(&mode[1..], 8) {
+                set_recursive(root_dir, bits)?;
+            } else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("invalid shared mode: {}", mode),
+                ));
+            }
+        }
+        other => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Invalid shared mode: {}", other),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Only verify the shared_mode
+#[cfg(target_os = "windows")]
+fn apply_shared(_root_dir: &Path, shared_mode: &str) -> io::Result<()> {
+    match shared_mode {
+        "true" | "false" | "umask" | "group" | "all" | "world" | "everybody" => {} // Valid string input
+        mode if mode.starts_with('0') && mode.len() == 4 => {
+            if let Ok(_bits) = u32::from_str_radix(&mode[1..], 8) { //Valid perm input
+            } else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("invalid shared mode: {}", mode),
+                ));
+            }
+        }
+        other => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Invalid shared mode: {}", other),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Initialize a new Libra repository
+/// This function creates the necessary directories and files for a new Libra repository.
+/// It also sets up the database and the initial configuration.
+/// Validate branch name according to the specified ref format mode
+fn validate_branch_name(branch_name: &str, ref_format: &RefFormat) -> io::Result<()> {
+    match ref_format {
+        RefFormat::Strict => validate_strict_branch_name(branch_name),
+        RefFormat::Filesystem => validate_filesystem_branch_name(branch_name),
+    }
+}
+
+/// Validate branch name with strict Git-compatible rules
+fn validate_strict_branch_name(branch_name: &str) -> io::Result<()> {
+    if branch_name.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "branch name cannot be empty",
+        ));
+    }
+
+    if branch_name == "HEAD" {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "branch name cannot be 'HEAD'",
+        ));
+    }
+
+    if branch_name == "@" {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "branch name cannot be '@'",
+        ));
+    }
+
+    // Check for control characters and other invalid characters
+    if branch_name.chars().any(|c| {
+        c.is_control()
+            || c == ' '
+            || c == '~'
+            || c == '^'
+            || c == ':'
+            || c == '\\'
+            || c == '*'
+            || c == '['
+            || c == '?'
+            || c == '"'
+            || c == '@'
+            || c == '\0'
+    }) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "branch name contains invalid characters",
+        ));
+    }
+
+    // Cannot start or end with '/'
+    if branch_name.starts_with('/') || branch_name.ends_with('/') {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "branch name contains invalid characters",
+        ));
+    }
+
+    // Cannot contain consecutive slashes
+    if branch_name.contains("//") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "branch name contains invalid characters",
+        ));
+    }
+
+    // Cannot contain ".."
+    if branch_name.contains("..") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "branch name contains invalid characters",
+        ));
+    }
+
+    // Cannot end with ".lock"
+    if branch_name.ends_with(".lock") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "branch name contains invalid characters",
+        ));
+    }
+
+    // Cannot end with "."
+    if branch_name.ends_with('.') {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "branch name contains invalid characters",
+        ));
+    }
+
+    Ok(())
+}
+
+/// Validate branch name with filesystem-friendly rules
+fn validate_filesystem_branch_name(branch_name: &str) -> io::Result<()> {
+    if branch_name.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "branch name cannot be empty",
+        ));
+    }
+
+    // Basic filesystem restrictions
+    if branch_name.chars().any(|c| {
+        c.is_control()
+            || c == '<'
+            || c == '>'
+            || c == ':'
+            || c == '"'
+            || c == '|'
+            || c == '?'
+            || c == '*'
+            || c == '\0'
+            || (cfg!(windows) && (c == '\\' || c == '/' || c == '\n' || c == '\r'))
+    }) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "branch name contains filesystem-invalid characters",
+        ));
+    }
+
+    // Cannot be "." or ".."
+    if branch_name == "." || branch_name == ".." {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "branch name contains invalid characters",
+        ));
+    }
+
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub async fn init(args: InitArgs) -> io::Result<()> {
+    // Get the current directory
+    // let cur_dir = env::current_dir()?;
+    let cur_dir = Path::new(&args.repo_directory).to_path_buf();
+    // Join the current directory with the root directory
+    let root_dir = if args.bare {
+        cur_dir.clone()
+    } else {
+        cur_dir.join(ROOT_DIR)
+    };
+    // check if format is supported,Now SHA-1 and SHA-256 are supported.
+    let object_format_value = args
+        .object_format
+        .as_ref()
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_else(|| "sha1".to_string());
+
+    if object_format_value != "sha1" && object_format_value != "sha256" {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "unsupported object format: '{}'. Supported formats are 'sha1' and 'sha256'.",
+                object_format_value
+            ),
+        ));
+    }
+
+    // Check if the root directory already exists
+    if is_reinit(&cur_dir) {
+        if !args.quiet {
+            eprintln!("Already initialized - [{}]", root_dir.display());
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "Initialization failed: The repository is already initialized at the specified location.
+            If you wish to reinitialize, please remove the existing directory or file.",
+        ));
+    }
+
+    // Check if the target directory is writable
+    match is_writable(&cur_dir) {
+        Ok(_) => {}
+        Err(e) => {
+            return Err(e);
+        }
+    }
+
+    // ensure root dir exists
+    fs::create_dir_all(&root_dir)?;
+
+    // If a template path is provided, copy the template files to the root directory
+    if let Some(template_path) = &args.template {
+        let template_dir = Path::new(template_path);
+        if template_dir.exists() {
+            copy_template(template_dir, &root_dir)?;
+        } else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("template directory '{}' does not exist", template_path),
+            ));
+        }
+    } else {
+        // Create info & hooks
+        let dirs = ["info", "hooks"];
+        for dir in dirs {
+            fs::create_dir_all(root_dir.join(dir))?;
+        }
+        // Create info/exclude
+        // `include_str!` includes the file content while compiling
+        fs::write(
+            root_dir.join("info/exclude"),
+            include_str!("../../template/exclude"),
+        )?;
+        // Create .libra/description
+        fs::write(
+            root_dir.join("description"),
+            include_str!("../../template/description"),
+        )?;
+        // Create .libra/hooks/pre-commit.sh
+        fs::write(
+            root_dir.join("hooks").join("pre-commit.sh"),
+            include_str!("../../template/pre-commit.sh"),
+        )?;
+
+        // Set Permission
+        #[cfg(not(target_os = "windows"))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = fs::Permissions::from_mode(0o755);
+            fs::set_permissions(root_dir.join("hooks").join("pre-commit.sh"), perms)?;
+        }
+
+        // Create .libra/hooks/pre-commit.ps1
+        fs::write(
+            root_dir.join("hooks").join("pre-commit.ps1"),
+            include_str!("../../template/pre-commit.ps1"),
+        )?;
+    }
+
+    // Complete .libra and sub-directories
+    let dirs = ["objects/pack", "objects/info"];
+    for dir in dirs {
+        fs::create_dir_all(root_dir.join(dir))?;
+    }
+
+    // Create database: .libra/libra.db
+    let database_path = root_dir.join(DATABASE);
+
+    #[cfg(target_os = "windows")]
+    let database_url = format!(
+        "sqlite://{}?mode=rwc",
+        database_path.to_str().unwrap().replace("\\", "/")
+    );
+
+    #[cfg(not(target_os = "windows"))]
+    let database_url = format!("sqlite://{}", database_path.to_str().unwrap());
+
+    let conn = Database::connect(&database_url).await.map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::Other,
+            format!("Failed to connect to database: {}", e),
+        )
+    })?;
+
+    // Create config table with bare parameter consideration and store ref format
+    init_config(
+        &conn,
+        args.bare,
+        Some(object_format_value.as_str()),
+        args.ref_format.as_ref(),
+    )
+    .await
+    .map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::Other,
+            format!("Failed to initialize config: {}", e),
+        )
+    })?;
+
+    // Determine the initial branch name: use provided name or default
+    let initial_branch_name = args
+        .initial_branch
+        .unwrap_or_else(|| DEFAULT_BRANCH.to_owned());
+
+    // Validate branch name based on ref-format mode
+    let ref_format_mode = args.ref_format.as_ref().unwrap_or(&RefFormat::Strict);
+
+    // Validate branch name according to the selected ref format
+    validate_branch_name(&initial_branch_name, ref_format_mode)?;
+
+    // For custom mode, we use refs/heads/%s format, for others we also use refs/heads/%s
+    // but with different validation rules applied above
+    let _initial_ref_name = format!("refs/heads/{}", initial_branch_name);
+
+    // Create HEAD (store the branch name as before; ref format stored in config)
+    let head_reference = reference::ActiveModel {
+        name: Set(Some(initial_branch_name.clone())),
+        kind: Set(reference::ConfigKind::Head),
+        ..Default::default() // all others are `NotSet`
+    };
+    head_reference.insert(&conn).await.map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::Other,
+            format!("Failed to insert HEAD reference: {}", e),
+        )
+    })?;
+
+    // Set .libra as hidden
+    set_dir_hidden(root_dir.to_str().unwrap())?;
+
+    // Apply shared permissions if requested
+    if let Some(shared_mode) = &args.shared {
+        apply_shared(&root_dir, shared_mode)?;
+    }
+
+    if !args.quiet {
+        let repo_type = if args.bare { "bare " } else { "" };
+        println!(
+            "Initializing empty {repo_type}Libra repository in {} with initial branch '{initial_branch_name}'",
+            root_dir.display()
+        );
+    }
+    // Set the global hash kind for the repository
+    set_hash_kind(match object_format_value.as_str() {
+        "sha1" => HashKind::Sha1,
+        "sha256" => HashKind::Sha256,
+        _ => HashKind::Sha1,
+    });
+
+    Ok(())
+}
+
+/// Initialize the configuration for the Libra repository
+/// This function creates the necessary configuration entries in the database.
+async fn init_config(
+    conn: &DbConn,
+    is_bare: bool,
+    object_format: Option<&str>,
+    ref_format: Option<&RefFormat>,
+) -> Result<(), DbErr> {
+    // Begin a new transaction
+    let txn = conn.begin().await?;
+
+    // Define the configuration entries for non-Windows systems
+    #[cfg(not(target_os = "windows"))]
+    let entries = [
+        ("repositoryformatversion", "0"),
+        ("filemode", "true"),
+        ("bare", if is_bare { "true" } else { "false" }),
+        ("logallrefupdates", "true"),
+    ];
+
+    // Define the configuration entries for Windows systems
+    #[cfg(target_os = "windows")]
+    let entries = [
+        ("repositoryformatversion", "0"),
+        ("filemode", "false"), // no filemode on windows
+        ("bare", if is_bare { "true" } else { "false" }),
+        ("logallrefupdates", "true"),
+        ("symlinks", "false"),  // no symlinks on windows
+        ("ignorecase", "true"), // ignorecase on windows
+    ];
+
+    // Insert each configuration entry into the database
+    for (key, value) in entries {
+        // tip: Set(None) == NotSet == default == NULL
+        let entry = config::ActiveModel {
+            configuration: Set("core".to_owned()),
+            key: Set(key.to_owned()),
+            value: Set(value.to_owned()),
+            ..Default::default() // id & name NotSet
+        };
+        entry.insert(&txn).await?;
+    }
+    // Insert the object format, defaulting to "sha1" if not specified.
+    let object_format_entry = config::ActiveModel {
+        configuration: Set("core".to_owned()),
+        key: Set("objectformat".to_owned()),
+        value: Set(object_format.unwrap_or("sha1").to_owned()),
+        ..Default::default() // id & name NotSet
+    };
+    object_format_entry.insert(&txn).await?;
+    // Insert the initial ref format used during init
+    let ref_format_value = match ref_format {
+        Some(RefFormat::Strict) => "strict",
+        Some(RefFormat::Filesystem) => "filesystem",
+        None => "strict", // default
+    };
+    let init_ref_format_entry = config::ActiveModel {
+        configuration: Set("core".to_owned()),
+        key: Set("initrefformat".to_owned()),
+        value: Set(ref_format_value.to_owned()),
+        ..Default::default()
+    };
+    init_ref_format_entry.insert(&txn).await?;
+
+    // Commit the transaction
+    txn.commit().await?;
+    Ok(())
+}
+
+/// Set a directory as hidden on Windows systems
+/// This function uses the `attrib` command to set the directory as hidden.
+#[cfg(target_os = "windows")]
+fn set_dir_hidden(dir: &str) -> io::Result<()> {
+    use std::process::Command;
+    Command::new("attrib").arg("+H").arg(dir).spawn()?.wait()?; // Wait for command execution to complete
+    Ok(())
+}
+
+/// On Unix-like systems, directories starting with a dot are hidden by default
+/// Therefore, this function does nothing.
+#[cfg(not(target_os = "windows"))]
+fn set_dir_hidden(_dir: &str) -> io::Result<()> {
+    // on unix-like systems, dotfiles are hidden by default
+    Ok(())
 }

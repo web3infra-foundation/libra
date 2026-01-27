@@ -528,6 +528,7 @@ async fn test_cherry_pick_sha256_hash_handling() {
         template: None,
         shared: None,
         object_format: Some("sha256".to_string()),
+        ref_format: None,
     })
     .await
     .unwrap();

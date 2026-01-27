@@ -246,12 +246,15 @@ async fn test_fetch_local_repository() {
         },
         None,
         false,
+        None,
     )
     .await;
 
-    let tracked_branch =
-        Branch::find_branch(&format!("refs/remotes/origin/{current_branch}"), None)
-            .await
-            .expect("remote-tracking branch not found");
+    let tracked_branch = Branch::find_branch(
+        &format!("refs/remotes/origin/{current_branch}"),
+        Some("origin"),
+    )
+    .await
+    .expect("remote-tracking branch not found");
     assert_eq!(tracked_branch.commit.to_string(), pushed_commit);
 }

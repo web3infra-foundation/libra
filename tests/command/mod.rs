@@ -1,7 +1,5 @@
 //! Shared test utilities and re-exports for the command integration test suite.
 
-use std::path::Path;
-
 use git_internal::{
     hash::ObjectHash,
     internal::object::{commit::Commit, tree::Tree},
