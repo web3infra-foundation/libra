@@ -30,11 +30,11 @@ pub struct BranchArgs {
     pub list: bool,
 
     /// force delete branch
-    #[clap(short = 'D', long, group = "sub")]
+    #[clap(short = 'D', long = "delete-force", group = "sub")]
     pub delete: Option<String>,
 
-    /// safe delete branch
-    #[clap(short = 'd', long, group = "sub")]
+    /// safe delete branch (checks if merged before deletion)
+    #[clap(short = 'd', long = "delete", group = "sub")]
     pub delete_safe: Option<String>,
 
     ///  Set up `branchname`>`'s tracking information so `<`upstream`>` is considered `<`branchname`>`'s upstream branch.
@@ -165,6 +165,11 @@ async fn delete_branch(branch_name: String) {
     Branch::delete_branch(&branch_name, None).await;
 }
 
+/// Safely delete a branch, refusing if it contains unmerged commits.
+///
+/// This performs a merge check to ensure the branch is fully merged into HEAD
+/// before deletion. If the branch is not fully merged, prints an error and
+/// suggests using `branch -D` for force deletion.
 async fn delete_branch_safe(branch_name: String) {
     // 1. Check if branch exists
     let branch = Branch::find_branch(&branch_name, None)
@@ -191,25 +196,20 @@ async fn delete_branch_safe(branch_name: String) {
     // Get all commits reachable from HEAD
     let head_reachable = crate::command::log::get_reachable_commits(head_commit.to_string()).await;
 
-    // Get all commits reachable from the branch to be deleted
-    let branch_reachable =
-        crate::command::log::get_reachable_commits(branch.commit.to_string()).await;
-
-    // Check if all commits from the branch are reachable from HEAD
-    // If yes, the branch is fully merged
+    // Build HashSet for efficient lookup
     let head_commit_ids: std::collections::HashSet<_> =
         head_reachable.iter().map(|c| c.id.to_string()).collect();
 
-    for commit in &branch_reachable {
-        if !head_commit_ids.contains(&commit.id.to_string()) {
-            // Found a commit in branch that's not in HEAD - branch is not fully merged
-            eprintln!("error: The branch '{}' is not fully merged.", branch_name);
-            eprintln!(
-                "If you are sure you want to delete it, run 'libra branch -D {}'.",
-                branch_name
-            );
-            return;
-        }
+    // Check if the branch's HEAD commit is reachable from current HEAD
+    // If the branch commit is in HEAD's history, the branch is fully merged
+    if !head_commit_ids.contains(&branch.commit.to_string()) {
+        // Branch is not fully merged
+        eprintln!("error: The branch '{}' is not fully merged.", branch_name);
+        eprintln!(
+            "If you are sure you want to delete it, run 'libra branch -D {}'.",
+            branch_name
+        );
+        return;
     }
 
     // All checks passed, safe to delete
