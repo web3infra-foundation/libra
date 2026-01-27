@@ -217,9 +217,7 @@ impl LocalClient {
                 env::set_current_dir(&self.repo_path).unwrap();
 
                 let mut commits = stream::iter(want)
-                    .then(|branch_hash| async move {
-                        get_branch_all_commits(branch_hash).await
-                    })
+                    .then(|branch_hash| async move { get_branch_all_commits(branch_hash).await })
                     .flat_map(stream::iter)
                     .collect::<Vec<_>>()
                     .await;
