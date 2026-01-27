@@ -196,13 +196,13 @@ async fn delete_branch_safe(branch_name: String) {
     // Get all commits reachable from HEAD
     let head_reachable = crate::command::log::get_reachable_commits(head_commit.to_string()).await;
 
-    // Build HashSet for efficient lookup
+    // Build HashSet for efficient lookup using ObjectHash directly (avoid string allocations)
     let head_commit_ids: std::collections::HashSet<_> =
-        head_reachable.iter().map(|c| c.id.to_string()).collect();
+        head_reachable.iter().map(|c| c.id).collect();
 
     // Check if the branch's HEAD commit is reachable from current HEAD
     // If the branch commit is in HEAD's history, the branch is fully merged
-    if !head_commit_ids.contains(&branch.commit.to_string()) {
+    if !head_commit_ids.contains(&branch.commit) {
         // Branch is not fully merged
         eprintln!("error: The branch '{}' is not fully merged.", branch_name);
         eprintln!(
