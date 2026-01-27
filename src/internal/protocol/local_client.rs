@@ -8,7 +8,19 @@ use std::{
 
 use bytes::Bytes;
 use futures_util::stream::{self, StreamExt};
-use git_internal::errors::GitError;
+use git_internal::{
+    errors::GitError,
+    hash::HashKind,
+    internal::{
+        metadata::{EntryMeta, MetaAttached},
+        object::{
+            blob::Blob,
+            commit::Commit,
+            tree::{Tree, TreeItemMode},
+        },
+        pack::{encode::PackEncoder, entry::Entry},
+    },
+};
 use tokio::{io::AsyncWriteExt, process::Command};
 use url::Url;
 
@@ -16,11 +28,23 @@ use super::{
     DiscoveryResult, FetchStream, ProtocolClient, generate_upload_pack_content,
     parse_discovered_references,
 };
-use crate::git_protocol::ServiceType;
+use crate::{
+    command::{load_object, log::get_reachable_commits},
+    git_protocol::ServiceType,
+    internal::{branch::Branch, config::Config, head::Head, protocol::DiscRef, reflog},
+    utils::object_ext::TreeExt,
+};
+
+#[derive(Debug, Clone)]
+enum RepoType {
+    GitRepo,
+    LibraRepo,
+}
 
 #[derive(Debug, Clone)]
 pub struct LocalClient {
     repo_path: PathBuf,
+    source_type: RepoType,
 }
 
 impl ProtocolClient for LocalClient {
@@ -28,7 +52,14 @@ impl ProtocolClient for LocalClient {
         let path = url
             .to_file_path()
             .unwrap_or_else(|_| PathBuf::from(url.path()));
-        Self { repo_path: path }
+        Self {
+            repo_path: path,
+            source_type: if url.path().ends_with(".libra") {
+                RepoType::LibraRepo
+            } else {
+                RepoType::GitRepo
+            },
+        }
     }
 }
 
@@ -46,18 +77,32 @@ impl LocalClient {
                 absolute.display()
             )));
         }
-        let repo_path = if absolute.join("HEAD").exists() && absolute.join("objects").exists() {
-            absolute
+        if absolute.join("objects").exists() {
+            let is_libra_repo = absolute.join("libra.db").exists();
+            Ok(Self {
+                repo_path: absolute,
+                source_type: if is_libra_repo {
+                    RepoType::LibraRepo
+                } else {
+                    RepoType::GitRepo
+                },
+            })
         } else if absolute.join(".git/HEAD").exists() {
-            absolute.join(".git")
+            Ok(Self {
+                repo_path: absolute.join(".git"),
+                source_type: RepoType::GitRepo,
+            })
+        } else if absolute.join(".libra/libra.db").exists() {
+            Ok(Self {
+                repo_path: absolute.join(".libra"),
+                source_type: RepoType::LibraRepo,
+            })
         } else {
-            return Err(IoError::other(format!(
+            Err(IoError::other(format!(
                 "No valid Git directory structure found at: {}",
                 absolute.display()
-            )));
-        };
-
-        Ok(Self { repo_path })
+            )))
+        }
     }
 
     pub fn repo_path(&self) -> &Path {
@@ -73,25 +118,58 @@ impl LocalClient {
                 "Unsupported service type for local protocol".to_string(),
             ));
         }
-        let output = Command::new("git-upload-pack")
-            .arg("--advertise-refs")
-            .arg(&self.repo_path)
-            .output()
-            .await
-            .map_err(|e| {
-                GitError::NetworkError(format!(
-                    "Failed to spawn git-upload-pack for discovery: {}",
-                    e
-                ))
-            })?;
-        if !output.status.success() {
-            return Err(GitError::NetworkError(format!(
-                "git-upload-pack --advertise-refs failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )));
+        match self.source_type {
+            RepoType::GitRepo => {
+                let output = Command::new("git-upload-pack")
+                    .arg("--advertise-refs")
+                    .arg(&self.repo_path)
+                    .output()
+                    .await
+                    .map_err(|e| {
+                        GitError::NetworkError(format!(
+                            "Failed to spawn git-upload-pack for discovery: {}",
+                            e
+                        ))
+                    })?;
+                if !output.status.success() {
+                    return Err(GitError::NetworkError(format!(
+                        "git-upload-pack --advertise-refs failed: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    )));
+                }
+                let bytes = Bytes::from(output.stdout);
+                parse_discovered_references(bytes, service)
+            }
+            RepoType::LibraRepo => {
+                let original_dir = env::current_dir()?;
+                env::set_current_dir(&self.repo_path).unwrap();
+                let local_branches = Branch::list_branches(None).await;
+
+                let remote_configs = Config::all_remote_configs().await;
+                let mut remote_branches: Vec<_> = vec![];
+                for remote in remote_configs {
+                    remote_branches.extend(Branch::list_branches(Some(&remote.name)).await);
+                }
+                let result =
+                    DiscoveryResult {
+                        refs: local_branches
+                            .into_iter()
+                            .chain(remote_branches.into_iter())
+                            .map(Into::into)
+                            .chain(Head::current_commit().await.map(|x| x.to_string()).map(
+                                |hash| DiscRef {
+                                    _hash: hash,
+                                    _ref: reflog::HEAD.to_string(),
+                                },
+                            ))
+                            .collect::<Vec<_>>(),
+                        capabilities: vec![],
+                        hash_kind: HashKind::Sha1,
+                    };
+                env::set_current_dir(original_dir).unwrap();
+                Ok(result)
+            }
         }
-        let bytes = Bytes::from(output.stdout);
-        parse_discovered_references(bytes, service)
     }
 
     pub async fn fetch_objects(
@@ -100,39 +178,194 @@ impl LocalClient {
         want: &[String],
         depth: Option<usize>,
     ) -> Result<FetchStream, IoError> {
-        let body = generate_upload_pack_content(have, want, depth);
-        let mut child = Command::new("git-upload-pack");
-        child.arg("--stateless-rpc");
-        child.arg(&self.repo_path);
-        child.stdin(std::process::Stdio::piped());
-        child.stdout(std::process::Stdio::piped());
-        child.stderr(std::process::Stdio::piped());
-        let mut child = child
-            .spawn()
-            .map_err(|e| IoError::other(format!("Failed to spawn git-upload-pack: {e}")))?;
+        match self.source_type {
+            RepoType::GitRepo => {
+                let body = generate_upload_pack_content(have, want, depth);
+                let mut child = Command::new("git-upload-pack");
+                child.arg("--stateless-rpc");
+                child.arg(&self.repo_path);
+                child.stdin(std::process::Stdio::piped());
+                child.stdout(std::process::Stdio::piped());
+                child.stderr(std::process::Stdio::piped());
+                let mut child = child
+                    .spawn()
+                    .map_err(|e| IoError::other(format!("Failed to spawn git-upload-pack: {e}")))?;
 
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(&body).await?;
-        } else {
-            return Err(IoError::other(
-                "Failed to capture stdin for git-upload-pack process",
-            ));
-        }
+                if let Some(mut stdin) = child.stdin.take() {
+                    stdin.write_all(&body).await?;
+                } else {
+                    return Err(IoError::other(
+                        "Failed to capture stdin for git-upload-pack process",
+                    ));
+                }
 
-        let output = child
-            .wait_with_output()
-            .await
-            .map_err(|e| IoError::other(format!("Failed to wait for git-upload-pack: {e}")))?;
-        if !output.status.success() {
-            tracing::error!(
-                "git-upload-pack stderr: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            return Err(IoError::other("git-upload-pack exited with failure"));
+                let output = child.wait_with_output().await.map_err(|e| {
+                    IoError::other(format!("Failed to wait for git-upload-pack: {e}"))
+                })?;
+                if !output.status.success() {
+                    tracing::error!(
+                        "git-upload-pack stderr: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    return Err(IoError::other("git-upload-pack exited with failure"));
+                }
+                let stdout = Bytes::from(output.stdout);
+                Ok(stream::once(async move { Ok(stdout) }).boxed())
+            }
+            RepoType::LibraRepo => {
+                let original_dir = env::current_dir()?;
+                env::set_current_dir(&self.repo_path).unwrap();
+
+                let mut commits = stream::iter(want)
+                    .then(|branch_hash| async move { get_branch_all_commits(branch_hash).await })
+                    .flat_map(stream::iter)
+                    .collect::<Vec<_>>()
+                    .await;
+                commits.sort_by(|a, b| a.id.cmp(&b.id));
+                commits.dedup_by(|a, b| a.id == b.id);
+
+                let (tree_hash, blob_hash): (Vec<_>, Vec<_>) = commits
+                    .iter()
+                    .map(|commit| &commit.tree_id)
+                    .map(load_object::<Tree>)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|giterror| match giterror {
+                        GitError::IOError(io_error) => io_error,
+                        _ => IoError::other(format!("{}", giterror)),
+                    })?
+                    .into_iter()
+                    .flat_map(|t| {
+                        t.get_items_with_mode()
+                            .into_iter()
+                            .map(|(_, hash, mode)| (hash, mode))
+                    })
+                    .partition(|(_, mode)| *mode == TreeItemMode::Tree);
+
+                let trees = tree_hash
+                    .into_iter()
+                    .map(|(hash, _)| load_object::<Tree>(&hash))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|giterror| match giterror {
+                        GitError::IOError(io_error) => io_error,
+                        _ => IoError::other(format!("{}", giterror)),
+                    })?;
+
+                let blobs = blob_hash
+                    .into_iter()
+                    .map(|(hash, _)| load_object::<Blob>(&hash))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|giterror| match giterror {
+                        GitError::IOError(io_error) => io_error,
+                        _ => IoError::other(format!("{}", giterror)),
+                    })?;
+
+                let commit_entries: Vec<Entry> = commits.into_iter().map(Entry::from).collect();
+
+                let tree_entries: Vec<Entry> = trees.into_iter().map(Entry::from).collect();
+
+                let blob_entries: Vec<Entry> = blobs.into_iter().map(Entry::from).collect();
+
+                let mut all_entries = Vec::new();
+                all_entries.extend(commit_entries);
+                all_entries.extend(tree_entries);
+                all_entries.extend(blob_entries);
+
+                let (entry_tx, entry_rx) =
+                    tokio::sync::mpsc::channel::<MetaAttached<Entry, EntryMeta>>(1_000_000);
+                let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel(1_000_000);
+
+                let total_objects = all_entries.len();
+                let window_size = 0;
+
+                let encoder = PackEncoder::new(total_objects, window_size, stream_tx);
+
+                let encode_handle = encoder
+                    .encode_async(entry_rx)
+                    .await
+                    .map_err(|e| IoError::other(format!("Failed to start encoding: {}", e)))?;
+
+                for entry in all_entries {
+                    let entry_meta = EntryMeta::default();
+                    let meta_entry = MetaAttached {
+                        inner: entry,
+                        meta: entry_meta,
+                    };
+
+                    if let Err(e) = entry_tx.send(meta_entry).await {
+                        return Err(IoError::other(format!("Failed to send entry: {}", e)));
+                    }
+                }
+
+                drop(entry_tx);
+
+                let mut pack_data = Vec::new();
+                while let Some(chunk) = stream_rx.recv().await {
+                    pack_data.extend(chunk);
+                }
+
+                encode_handle
+                    .await
+                    .map_err(|e| IoError::other(format!("Encode task panicked: {}", e)))?;
+
+                if pack_data.len() < 12 {
+                    return Err(IoError::other("Pack data too short"));
+                }
+
+                if &pack_data[0..4] != b"PACK" {
+                    return Err(IoError::other("Invalid pack signature"));
+                }
+
+                let mut response_data = Vec::new();
+
+                let nak_line = "NAK\n";
+                let nak_len = nak_line.len() + 4;
+                let nak_len_hex = format!("{:04x}", nak_len);
+                response_data.extend_from_slice(nak_len_hex.as_bytes());
+                response_data.extend_from_slice(nak_line.as_bytes());
+
+                let chunk_size = 65500;
+                for chunk in pack_data.chunks(chunk_size) {
+                    let mut sideband_data = Vec::with_capacity(1 + chunk.len());
+                    sideband_data.push(1);
+                    sideband_data.extend_from_slice(chunk);
+
+                    let total_len = sideband_data.len() + 4;
+                    let len_hex = format!("{:04x}", total_len);
+
+                    response_data.extend_from_slice(len_hex.as_bytes());
+                    response_data.extend_from_slice(&sideband_data);
+
+                    if response_data.len() % (chunk_size * 10) == 0 {
+                        let progress_msg =
+                            format!("Pack {}/{}...\n", response_data.len(), pack_data.len());
+                        let mut progress_data = Vec::with_capacity(1 + progress_msg.len());
+                        progress_data.push(2);
+                        progress_data.extend_from_slice(progress_msg.as_bytes());
+
+                        let progress_len = progress_data.len() + 4;
+                        let progress_len_hex = format!("{:04x}", progress_len);
+                        response_data.extend_from_slice(progress_len_hex.as_bytes());
+                        response_data.extend_from_slice(&progress_data);
+                    }
+                }
+
+                response_data.extend_from_slice(b"0000");
+
+                let response_stream = stream::iter(vec![Ok(Bytes::from(response_data))]);
+
+                env::set_current_dir(&original_dir).unwrap();
+                Ok(Box::pin(response_stream))
+            }
         }
-        let stdout = Bytes::from(output.stdout);
-        Ok(stream::once(async move { Ok(stdout) }).boxed())
     }
+}
+
+async fn get_branch_all_commits(hash: &str) -> Vec<Commit> {
+    let mut commits = get_reachable_commits(hash.to_string()).await;
+
+    commits.sort_by(|a, b| b.committer.timestamp.cmp(&a.committer.timestamp));
+
+    commits
 }
 
 #[cfg(test)]

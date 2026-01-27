@@ -167,8 +167,15 @@ pub struct InitArgs {
 
 /// Execute the init function
 pub async fn execute(args: InitArgs) {
-    if let Err(e) = init(args).await {
-        eprintln!("Error: {e}");
+    let target_path = cur_dir().join(Path::new(&args.repo_directory));
+    match init(args)
+        .await
+        .and_then(|_| Ok(env::set_current_dir(target_path)?))
+    {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("Error: {e}");
+        }
     }
 }
 
