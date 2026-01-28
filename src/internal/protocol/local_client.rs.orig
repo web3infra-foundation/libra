@@ -1,8 +1,8 @@
 //! Local protocol client using filesystem paths to run upload-pack/receive-pack locally and stream pack data over async pipes.
 
 use std::{
-    collections::HashSet,
     env,
+    collections::HashSet,
     io::Error as IoError,
     path::{Path, PathBuf},
 };
@@ -11,7 +11,11 @@ use bytes::Bytes;
 use futures_util::stream::{self, StreamExt};
 use git_internal::{
     errors::GitError,
+<<<<<<< HEAD
     hash::get_hash_kind,
+=======
+    hash::HashKind,
+>>>>>>> origin/HEAD
     internal::{
         metadata::{EntryMeta, MetaAttached},
         object::{
@@ -33,7 +37,14 @@ use crate::{
     command::{load_object, log::get_reachable_commits},
     git_protocol::ServiceType,
     internal::{branch::Branch, config::Config, head::Head, protocol::DiscRef, reflog},
-    utils::{object_ext::TreeExt, util::cur_dir},
+<<<<<<< HEAD
+    utils::{
+        object_ext::TreeExt,
+        util::cur_dir,
+    },
+=======
+    utils::object_ext::TreeExt,
+>>>>>>> origin/HEAD
 };
 
 #[derive(Debug, Clone)]
@@ -54,16 +65,23 @@ impl ProtocolClient for LocalClient {
             .to_file_path()
             .unwrap_or_else(|_| PathBuf::from(url.path()));
         Self {
+<<<<<<< HEAD
             repo_path: path.clone(),
             source_type: {
-                if path.join("libra.db").try_exists().unwrap_or(false)
-                    || path.join(".libra/libra.db").try_exists().unwrap_or(false)
-                {
+                if path.join("libra.db").try_exists().unwrap_or(false) || path.join(".libra/libra.db").try_exists().unwrap_or(false) {
                     RepoType::LibraRepo
                 } else {
                     RepoType::GitRepo
                 }
+            }
+=======
+            repo_path: path,
+            source_type: if url.path().ends_with(".libra") {
+                RepoType::LibraRepo
+            } else {
+                RepoType::GitRepo
             },
+>>>>>>> origin/HEAD
         }
     }
 }
@@ -82,33 +100,51 @@ impl LocalClient {
                 absolute.display()
             )));
         }
+<<<<<<< HEAD
         if absolute.join("objects").try_exists().unwrap_or(false) {
             let is_libra_repo = absolute.join("libra.db").try_exists().unwrap_or(false);
             let is_git_repo = absolute.join("HEAD").try_exists().unwrap_or(false);
             match (is_libra_repo, is_git_repo) {
-                (true, false) => Ok(Self {
-                    repo_path: absolute,
-                    source_type: RepoType::LibraRepo,
-                }),
-                (false, true) => Ok(Self {
-                    repo_path: absolute,
-                    source_type: RepoType::GitRepo,
-                }),
+                (true, false) => {
+                    Ok(Self {
+                        repo_path: absolute,
+                        source_type: RepoType::LibraRepo
+                    })
+                },
+                (false, true) => {
+                    Ok(Self {
+                        repo_path: absolute,
+                        source_type: RepoType::GitRepo
+                    })
+                },
                 _ => Err(IoError::other(format!(
                     "No valid Git directory structure found at: {}",
                     absolute.display()
-                ))),
+                )))
             }
         } else if absolute.join(".git/HEAD").try_exists().unwrap_or(false) {
+=======
+        if absolute.join("objects").exists() {
+            let is_libra_repo = absolute.join("libra.db").exists();
+            Ok(Self {
+                repo_path: absolute,
+                source_type: if is_libra_repo {
+                    RepoType::LibraRepo
+                } else {
+                    RepoType::GitRepo
+                },
+            })
+        } else if absolute.join(".git/HEAD").exists() {
+>>>>>>> origin/HEAD
             Ok(Self {
                 repo_path: absolute.join(".git"),
                 source_type: RepoType::GitRepo,
             })
-        } else if absolute
-            .join(".libra/libra.db")
-            .try_exists()
-            .unwrap_or(false)
-        {
+<<<<<<< HEAD
+        } else if absolute.join(".libra/libra.db").try_exists().unwrap_or(false) {
+=======
+        } else if absolute.join(".libra/libra.db").exists() {
+>>>>>>> origin/HEAD
             Ok(Self {
                 repo_path: absolute.join(".libra"),
                 source_type: RepoType::LibraRepo,
@@ -157,8 +193,13 @@ impl LocalClient {
                 parse_discovered_references(bytes, service)
             }
             RepoType::LibraRepo => {
+<<<<<<< HEAD
                 let original_dir = cur_dir();
                 env::set_current_dir(&self.repo_path)?;
+=======
+                let original_dir = env::current_dir()?;
+                env::set_current_dir(&self.repo_path).unwrap();
+>>>>>>> origin/HEAD
                 let local_branches = Branch::list_branches(None).await;
 
                 let remote_configs = Config::all_remote_configs().await;
@@ -180,9 +221,15 @@ impl LocalClient {
                             ))
                             .collect::<Vec<_>>(),
                         capabilities: vec![],
+<<<<<<< HEAD
                         hash_kind: get_hash_kind(),
                     };
                 env::set_current_dir(original_dir)?;
+=======
+                        hash_kind: HashKind::Sha1,
+                    };
+                env::set_current_dir(original_dir).unwrap();
+>>>>>>> origin/HEAD
                 Ok(result)
             }
         }
@@ -229,24 +276,36 @@ impl LocalClient {
                 Ok(stream::once(async move { Ok(stdout) }).boxed())
             }
             RepoType::LibraRepo => {
+<<<<<<< HEAD
                 let original_dir = cur_dir();
                 env::set_current_dir(&self.repo_path)?;
 
                 let mut seen = HashSet::new();
-                have.iter().for_each(|hash| {
-                    seen.insert(hash.clone());
-                });
+                have.iter()
+                    .for_each(|hash| {
+                        seen.insert(hash.clone());
+                    });
 
                 let commits = stream::iter(want)
-                    .then(|branch_hash| async move {
-                        get_reachable_commits(branch_hash.to_string(), depth).await
-                    })
+                    .then(|branch_hash| async move { get_reachable_commits(branch_hash.to_string(), depth).await })
                     .flat_map(stream::iter)
                     .collect::<Vec<Commit>>()
                     .await
                     .into_iter()
                     .filter(|c| seen.insert(c.id.to_string()))
                     .collect::<Vec<_>>();
+=======
+                let original_dir = env::current_dir()?;
+                env::set_current_dir(&self.repo_path).unwrap();
+
+                let mut commits = stream::iter(want)
+                    .then(|branch_hash| async move { get_branch_all_commits(branch_hash).await })
+                    .flat_map(stream::iter)
+                    .collect::<Vec<_>>()
+                    .await;
+                commits.sort_by(|a, b| a.id.cmp(&b.id));
+                commits.dedup_by(|a, b| a.id == b.id);
+>>>>>>> origin/HEAD
 
                 let (tree_hash, blob_hash): (Vec<_>, Vec<_>) = commits
                     .iter()
@@ -263,7 +322,10 @@ impl LocalClient {
                             .into_iter()
                             .map(|(_, hash, mode)| (hash, mode))
                     })
+<<<<<<< HEAD
                     .filter(|(hash, _)| seen.insert(hash.to_string()))
+=======
+>>>>>>> origin/HEAD
                     .partition(|(_, mode)| *mode == TreeItemMode::Tree);
 
                 let trees = tree_hash
@@ -296,8 +358,13 @@ impl LocalClient {
                 all_entries.extend(blob_entries);
 
                 let (entry_tx, entry_rx) =
+<<<<<<< HEAD
                     tokio::sync::mpsc::channel::<MetaAttached<Entry, EntryMeta>>(1_000);
                 let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel(1_000);
+=======
+                    tokio::sync::mpsc::channel::<MetaAttached<Entry, EntryMeta>>(1_000_000);
+                let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel(1_000_000);
+>>>>>>> origin/HEAD
 
                 let total_objects = all_entries.len();
                 let window_size = 0;
@@ -360,9 +427,13 @@ impl LocalClient {
                     response_data.extend_from_slice(len_hex.as_bytes());
                     response_data.extend_from_slice(&sideband_data);
 
+<<<<<<< HEAD
                     // Send progress update every ~10 chunks (approximately 655KB)
                     const PROGRESS_CHUNK_INTERVAL: usize = 10;
                     if response_data.len() % (chunk_size * PROGRESS_CHUNK_INTERVAL) == 0 {
+=======
+                    if response_data.len() % (chunk_size * 10) == 0 {
+>>>>>>> origin/HEAD
                         let progress_msg =
                             format!("Pack {}/{}...\n", response_data.len(), pack_data.len());
                         let mut progress_data = Vec::with_capacity(1 + progress_msg.len());
@@ -380,11 +451,23 @@ impl LocalClient {
 
                 let response_stream = stream::iter(vec![Ok(Bytes::from(response_data))]);
 
+<<<<<<< HEAD
                 env::set_current_dir(&original_dir)?;
+=======
+                env::set_current_dir(&original_dir).unwrap();
+>>>>>>> origin/HEAD
                 Ok(Box::pin(response_stream))
             }
         }
     }
+}
+
+async fn get_branch_all_commits(hash: &str) -> Vec<Commit> {
+    let mut commits = get_reachable_commits(hash.to_string()).await;
+
+    commits.sort_by(|a, b| b.committer.timestamp.cmp(&a.committer.timestamp));
+
+    commits
 }
 
 #[cfg(test)]

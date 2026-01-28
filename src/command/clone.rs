@@ -38,7 +38,7 @@ pub struct CloneArgs {
     pub single_branch: bool,
 
     /// Create a shallow clone with a history truncated to the specified number of commits
-    #[clap(long, value_name = "DEPTH")]
+    #[clap(long, value_name = "DEPTH", value_parser = validate_depth)]
     pub depth: Option<usize>,
 }
 
@@ -162,6 +162,19 @@ pub async fn execute(args: CloneArgs) {
     }
 
     is_success.set(true);
+}
+
+/// 自定义验证函数，确保 depth >= 1
+fn validate_depth(s: &str) -> Result<usize, String> {
+    s.parse::<usize>()
+        .map_err(|_| "DEPTH must be a valid integer".to_string())
+        .and_then(|val| {
+            if val >= 1 {
+                Ok(val)
+            } else {
+                Err("DEPTH must be greater than or equal to 1".to_string())
+            }
+        })
 }
 
 /// Sets up the local repository after a clone by configuring the remote,
