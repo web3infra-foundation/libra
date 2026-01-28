@@ -194,7 +194,8 @@ async fn delete_branch_safe(branch_name: String) {
     };
 
     // Get all commits reachable from HEAD
-    let head_reachable = crate::command::log::get_reachable_commits(head_commit.to_string()).await;
+    let head_reachable =
+        crate::command::log::get_reachable_commits(head_commit.to_string(), None).await;
 
     // Build HashSet for efficient lookup using ObjectHash directly (avoid string allocations)
     let head_commit_ids: std::collections::HashSet<_> =

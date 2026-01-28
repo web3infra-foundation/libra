@@ -71,8 +71,8 @@ pub async fn execute(args: MergeArgs) {
 }
 
 async fn lca_commit(lhs: &Commit, rhs: &Commit) -> Option<Commit> {
-    let lhs_reachable = log::get_reachable_commits(lhs.id.to_string()).await;
-    let rhs_reachable = log::get_reachable_commits(rhs.id.to_string()).await;
+    let lhs_reachable = log::get_reachable_commits(lhs.id.to_string(), None).await;
+    let rhs_reachable = log::get_reachable_commits(rhs.id.to_string(), None).await;
 
     // Commit `eq` is based on tree_id, so we shouldn't use it here
 

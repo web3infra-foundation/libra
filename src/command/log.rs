@@ -241,28 +241,42 @@ async fn determine_decorate_option(args: &LogArgs) -> Result<DecorateOptions, St
     }
 }
 
-/// Get all reachable commits from the given commit hash
+/// Get all reachable commits from the given commit hash, up to a specified depth.
 /// **didn't consider the order of the commits**
-pub async fn get_reachable_commits(commit_hash: String) -> Vec<Commit> {
+pub async fn get_reachable_commits(commit_hash: String, depth: Option<usize>) -> Vec<Commit> {
     let mut queue = VecDeque::new();
     let mut commit_set: HashSet<String> = HashSet::new(); // to avoid duplicate commits because of circular reference
     let mut reachable_commits: Vec<Commit> = Vec::new();
-    queue.push_back(commit_hash);
+
+    // Push the initial commit with depth 0
+    queue.push_back((commit_hash, 0)); // (commit_id, current_depth)
 
     while !queue.is_empty() {
-        let commit_id = queue.pop_front().unwrap();
+        let (commit_id, current_depth) = queue.pop_front().unwrap();
         let commit_id_hash = ObjectHash::from_str(&commit_id).unwrap();
         let commit = load_object::<Commit>(&commit_id_hash)
             .expect("fatal: storage broken, object not found");
+
+        // If we've already seen this commit, skip it
         if commit_set.contains(&commit_id) {
             continue;
         }
         commit_set.insert(commit_id);
 
+        // If depth is limited and the current depth exceeds the limit, skip further processing
+        if let Some(max_depth) = depth
+            && current_depth >= max_depth
+        {
+            continue;
+        }
+
+        // Add parent commits to the queue with incremented depth
         let parent_commit_ids = commit.parent_commit_ids.clone();
         for parent_commit_id in parent_commit_ids {
-            queue.push_back(parent_commit_id.to_string());
+            queue.push_back((parent_commit_id.to_string(), current_depth + 1));
         }
+
+        // Add the current commit to the result list
         reachable_commits.push(commit);
     }
     reachable_commits
@@ -334,7 +348,7 @@ pub async fn execute(args: LogArgs) {
 
     let commit_hash = Head::current_commit().await.unwrap().to_string();
 
-    let mut reachable_commits = get_reachable_commits(commit_hash.clone()).await;
+    let mut reachable_commits = get_reachable_commits(commit_hash.clone(), None).await;
     // default sort with signature time
     reachable_commits.sort_by(|a, b| b.committer.timestamp.cmp(&a.committer.timestamp));
 
