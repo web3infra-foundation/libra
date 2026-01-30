@@ -88,6 +88,37 @@ async fn test_status_ignored_outputs() {
     );
 }
 
+#[tokio::test]
+#[serial]
+/// Ensures `status` refuses to run inside a bare repository.
+async fn test_status_rejects_bare_repository() {
+    let temp_path = tempdir().unwrap();
+    test::setup_clean_testing_env_in(temp_path.path());
+
+    init(InitArgs {
+        bare: true,
+        initial_branch: None,
+        repo_directory: temp_path.path().to_str().unwrap().to_string(),
+        quiet: false,
+        template: None,
+        shared: None,
+        object_format: None,
+        ref_format: None,
+    })
+    .await
+    .unwrap();
+
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    let mut out = Vec::new();
+    status_execute(StatusArgs::default(), &mut out).await;
+    let output = String::from_utf8(out).unwrap();
+    assert!(
+        output.contains("fatal: this operation must be run in a work tree"),
+        "status should refuse to run in bare repositories: {output}"
+    );
+}
+
 // Helper function to create CommitArgs with a message, using default values for other fields
 fn create_commit_args(message: &str) -> CommitArgs {
     CommitArgs {
