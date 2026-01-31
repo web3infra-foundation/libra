@@ -22,7 +22,7 @@ use git_internal::{
 use super::stash;
 use crate::{
     command::calc_file_blob_hash,
-    internal::head::Head,
+    internal::{config::Config, head::Head},
     utils::{
         ignore::{self, IgnorePolicy},
         object_ext::{CommitExt, TreeExt},
@@ -185,6 +185,13 @@ impl Changes {
     }
 }
 
+async fn is_bare_repository() -> bool {
+    matches!(
+        Config::get("core", None, "bare").await,
+        Some(value) if value.eq_ignore_ascii_case("true")
+    )
+}
+
 /**
  * Two parts:
  * 1. unstaged
@@ -192,6 +199,11 @@ impl Changes {
  */
 pub async fn execute_to(args: StatusArgs, writer: &mut impl Write) {
     if !util::check_repo_exist() {
+        return;
+    }
+
+    if is_bare_repository().await {
+        writeln!(writer, "fatal: this operation must be run in a work tree").unwrap();
         return;
     }
 

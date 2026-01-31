@@ -1,6 +1,10 @@
 //! Supports cloning repositories by parsing URLs, fetching objects via protocol clients, checking out the working tree, and writing initial refs/config.
 
-use std::{cell::Cell, env, fs, path::PathBuf};
+use std::{
+    cell::Cell,
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 use clap::Parser;
 use colored::Colorize;
@@ -37,9 +41,21 @@ pub struct CloneArgs {
     #[clap(long)]
     pub single_branch: bool,
 
+    /// Create a bare repository without checking out a working tree
+    #[clap(long)]
+    pub bare: bool,
+
     /// Create a shallow clone with a history truncated to the specified number of commits
     #[clap(long, value_name = "DEPTH", value_parser = validate_depth)]
     pub depth: Option<usize>,
+}
+
+const REPO_MARKERS: &[&str] = &["description", "libra.db", "info/exclude", "objects"];
+
+fn contains_initialized_repo(metadata_root: &Path) -> bool {
+    REPO_MARKERS
+        .iter()
+        .any(|marker| metadata_root.join(marker).exists())
 }
 
 pub async fn execute(args: CloneArgs) {
@@ -60,7 +76,20 @@ pub async fn execute(args: CloneArgs) {
     } else {
         util::cur_dir().join(&local_path)
     };
+    let metadata_root = if args.bare {
+        local_path.clone()
+    } else {
+        local_path.join(util::ROOT_DIR)
+    };
     {
+        if metadata_root.exists() && contains_initialized_repo(&metadata_root) {
+            eprintln!(
+                "fatal: destination path '{}' already contains a libra repository.",
+                local_path.display()
+            );
+            return;
+        }
+
         if local_path.exists() && !util::is_empty_dir(&local_path) {
             eprintln!(
                 "fatal: destination path '{}' already exists and is not an empty directory.",
@@ -78,8 +107,16 @@ pub async fn execute(args: CloneArgs) {
             );
             return;
         }
-        let repo_name = local_path.file_name().unwrap().to_str().unwrap();
-        println!("Cloning into '{repo_name}'");
+        let repo_name = local_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| local_path.to_string_lossy().into_owned());
+        if args.bare {
+            println!("Cloning into bare repository '{repo_name}'");
+        } else {
+            println!("Cloning into '{repo_name}'");
+        }
     }
 
     let is_success = Cell::new(false);
@@ -131,7 +168,7 @@ pub async fn execute(args: CloneArgs) {
     // CAUTION: change [current_dir] to the repo directory
     env::set_current_dir(&local_path).unwrap();
     let init_args = command::init::InitArgs {
-        bare: false,
+        bare: args.bare,
         initial_branch: args.branch.clone(),
         repo_directory: local_path.to_str().unwrap().to_string(),
         quiet: false,
@@ -156,7 +193,7 @@ pub async fn execute(args: CloneArgs) {
     .await;
 
     /* setup */
-    if let Err(e) = setup_repository(remote_config, args.branch.clone()).await {
+    if let Err(e) = setup_repository(remote_config, args.branch.clone(), !args.bare).await {
         eprintln!("fatal: {}", e);
         return;
     }
@@ -179,9 +216,11 @@ fn validate_depth(s: &str) -> Result<usize, String> {
 
 /// Sets up the local repository after a clone by configuring the remote,
 /// setting up the initial branch and HEAD, and creating the first reflog entry.
+/// Skips checking out the worktree when `checkout_worktree` is `false` (bare clone).
 async fn setup_repository(
     remote_config: RemoteConfig,
     specified_branch: Option<String>,
+    checkout_worktree: bool,
 ) -> Result<(), String> {
     let db = crate::internal::db::get_db_conn_instance().await;
     let remote_head = Head::remote_current_with_conn(db, &remote_config.name).await;
@@ -271,13 +310,15 @@ async fn setup_repository(
         .map_err(|e| e.to_string())?;
 
         // After the DB is set up, restore the working directory
-        command::restore::execute(RestoreArgs {
-            worktree: true,
-            staged: true,
-            source: None,
-            pathspec: vec![util::working_dir_string()],
-        })
-        .await;
+        if checkout_worktree {
+            command::restore::execute(RestoreArgs {
+                worktree: true,
+                staged: true,
+                source: None,
+                pathspec: vec![util::working_dir_string()],
+            })
+            .await;
+        }
     } else {
         println!("warning: You appear to have cloned an empty repository.");
 
