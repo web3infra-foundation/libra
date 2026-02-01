@@ -2,8 +2,9 @@
 //!
 //! Verifies that the init command creates a .libra directory
 
-use assert_cmd::prelude::*;
 use std::process::Command;
+
+use assert_cmd::prelude::*;
 use tempfile::tempdir;
 
 /// Test: Initialize Libra repository in an empty directory

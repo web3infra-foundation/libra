@@ -2,8 +2,9 @@
 //!
 //! Verifies that running init twice handles the situation appropriately
 
-use assert_cmd::prelude::*;
 use std::process::Command;
+
+use assert_cmd::prelude::*;
 use tempfile::tempdir;
 
 /// Test: Attempt to initialize an already initialized repository

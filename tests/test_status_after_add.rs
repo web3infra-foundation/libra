@@ -2,10 +2,10 @@
 //!
 //! Verifies that the status command correctly reports added files
 
+use std::{path::Path, process::Command};
+
 use assert_cmd::prelude::*;
-use std::path::Path;
-use std::process::Command;
-use tempfile::{tempdir, TempDir};
+use tempfile::{TempDir, tempdir};
 
 /// Helper function to initialize a Libra repository in a temporary directory
 fn init_libra_repo(dir: &Path) {
