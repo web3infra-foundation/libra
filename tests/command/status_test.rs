@@ -1792,3 +1792,78 @@ async fn test_status_porcelain_v2_deleted_file() {
         deleted_line
     );
 }
+
+#[tokio::test]
+#[serial]
+/// Tests status command after adding a file
+///
+/// Verifies that the status command correctly reports added files with proper formatting
+async fn test_status_after_add() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    // Create a new file
+    let file_path = "test.txt";
+    fs::write(file_path, "content").unwrap();
+
+    // Add the file
+    add::execute(AddArgs {
+        pathspec: vec![String::from(file_path)],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+
+    // Test porcelain output
+    let mut output = Vec::new();
+    status_execute(
+        StatusArgs {
+            porcelain: Some(PorcelainVersion::V1),
+            ..Default::default()
+        },
+        &mut output,
+    )
+    .await;
+
+    let output_str = String::from_utf8(output).unwrap();
+    assert!(
+        output_str
+            .lines()
+            .any(|l| l.starts_with("A ") && l.contains(file_path)),
+        "Porcelain status should show 'A ' prefix for added file: {}",
+        output_str
+    );
+
+    // Test short output
+    let mut output = Vec::new();
+    status_execute(
+        StatusArgs {
+            short: true,
+            ..Default::default()
+        },
+        &mut output,
+    )
+    .await;
+
+    let output_str = String::from_utf8(output).unwrap();
+    assert!(
+        output_str
+            .lines()
+            .any(|l| l.starts_with("A ") && l.contains(file_path)),
+        "Short status should show 'A ' prefix for added file: {}",
+        output_str
+    );
+
+    // Verify via changes_to_be_committed
+    let changes = changes_to_be_committed().await;
+    assert!(
+        changes.new.iter().any(|x| x.to_str().unwrap() == file_path),
+        "Added file should appear in changes_to_be_committed"
+    );
+}
