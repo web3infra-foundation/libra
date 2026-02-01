@@ -617,3 +617,78 @@ async fn test_add_duplicate_file_should_not_duplicate_index() {
         );
     }
 }
+
+#[tokio::test]
+#[serial]
+/// Tests adding an empty file to the repository
+///
+/// Ensures that Libra can handle adding empty files without errors
+async fn test_add_empty_file() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    // Create an empty file
+    let file_path = "empty.txt";
+    fs::File::create(file_path).unwrap();
+
+    // Execute add command
+    add::execute(AddArgs {
+        pathspec: vec![String::from(file_path)],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+
+    // Verify the empty file was added to index
+    let changes = changes_to_be_committed().await;
+    assert!(
+        changes.new.iter().any(|x| x.to_str().unwrap() == file_path),
+        "Empty file should be added to index"
+    );
+}
+
+#[tokio::test]
+#[serial]
+/// Tests adding a file in a nested subdirectory
+///
+/// Ensures that Libra correctly handles files in deep directory structures
+async fn test_add_sub_directory_file() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    // Create nested subdirectory structure
+    let sub_dir = "a/b/c";
+    fs::create_dir_all(sub_dir).unwrap();
+    let file_path = "a/b/c/deep.txt";
+    fs::write(file_path, "hello deep").unwrap();
+
+    // Execute add command
+    add::execute(AddArgs {
+        pathspec: vec![String::from(file_path)],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+
+    // Verify the file in nested directory was added to index
+    let changes = changes_to_be_committed().await;
+    assert!(
+        changes
+            .new
+            .iter()
+            .any(|x| x.to_str().unwrap().replace("\\", "/") == file_path),
+        "File in nested subdirectory should be added to index"
+    );
+}
