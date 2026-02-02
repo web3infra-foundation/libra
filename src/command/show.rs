@@ -8,7 +8,6 @@ use git_internal::{
     hash::ObjectHash,
     internal::object::{blob::Blob, commit::Commit, tree::Tree, types::ObjectType},
 };
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
 use crate::{
     command::{
@@ -16,7 +15,7 @@ use crate::{
         log::{ChangeType, generate_diff, get_changed_files_for_commit},
     },
     common_utils::parse_commit_msg,
-    internal::{model::reference, tag},
+    internal::tag,
     utils::{client_storage::ClientStorage, object_ext::TreeExt, path, util},
 };
 
@@ -60,14 +59,28 @@ pub async fn execute(args: ShowArgs) {
 
     // 首先尝试作为引用解析（分支/标签/HEAD）
     if let Ok(commit_hash) = util::get_commit_base(object_ref).await {
-        // check if it is a tag reference
-        if let Some(tag_hash) = resolve_tag_to_hash(object_ref).await {
-            // it is a tag, first show tag information, then show the object it points to
-            show_tag_by_hash(&tag_hash, &args).await;
-            return;
+        // Use find_tag_and_commit to check if it's a tag and get tag info
+        match tag::find_tag_and_commit(object_ref).await {
+            Ok(Some((object, _))) => {
+                // It is a tag - show tag first
+                if object.get_type() == ObjectType::Tag {
+                    // For annotated tags, show tag details
+                    let tag_hash = if let tag::TagObject::Tag(tag_obj) = &object {
+                        tag_obj.id
+                    } else {
+                        commit_hash
+                    };
+                    show_tag_by_hash(&tag_hash, &args).await;
+                } else {
+                    // Lightweight tag points directly to commit
+                    show_commit(&commit_hash, &args).await;
+                }
+            }
+            _ => {
+                // Not a tag or tag doesn't exist, show as commit
+                show_commit(&commit_hash, &args).await;
+            }
         }
-        // it is a normal commit reference
-        show_commit(&commit_hash, &args).await;
         return;
     }
 
@@ -79,40 +92,6 @@ pub async fn execute(args: ShowArgs) {
 
     eprintln!("fatal: bad revision '{}'", object_ref);
     std::process::exit(1);
-}
-
-/// try to resolve the reference to a tag object hash
-async fn resolve_tag_to_hash(object_ref: &str) -> Option<ObjectHash> {
-    // check if it is a tag reference (refs/tags/ or direct tag name)
-    let tag_ref = if object_ref.starts_with("refs/tags/") {
-        object_ref.to_string()
-    } else {
-        format!("refs/tags/{}", object_ref)
-    };
-
-    // query the tag reference from the database
-    let db_conn = crate::internal::db::get_db_conn_instance().await;
-
-    if let Ok(Some(model)) = reference::Entity::find()
-        .filter(reference::Column::Name.eq(&tag_ref))
-        .filter(reference::Column::Kind.eq(reference::ConfigKind::Tag))
-        .one(db_conn)
-        .await
-    {
-        if let Some(commit_str) = model.commit.as_ref() {
-            if let Ok(hash) = ObjectHash::from_str(commit_str) {
-                // check if this is a tag object (not directly pointing to a commit)
-                let storage = ClientStorage::init(path::objects());
-                if let Ok(obj_type) = storage.get_object_type(&hash) {
-                    if obj_type == ObjectType::Tag {
-                        return Some(hash);
-                    }
-                }
-            }
-        }
-    }
-
-    None
 }
 
 /// 通过哈希值显示对象（自动检测类型）
