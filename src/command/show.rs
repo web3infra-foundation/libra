@@ -59,7 +59,28 @@ pub async fn execute(args: ShowArgs) {
 
     // 首先尝试作为引用解析（分支/标签/HEAD）
     if let Ok(commit_hash) = util::get_commit_base(object_ref).await {
-        show_commit(&commit_hash, &args).await;
+        // Use find_tag_and_commit to check if it's a tag and get tag info
+        match tag::find_tag_and_commit(object_ref).await {
+            Ok(Some((object, _))) => {
+                // It is a tag - show tag first
+                if object.get_type() == ObjectType::Tag {
+                    // For annotated tags, show tag details
+                    let tag_hash = if let tag::TagObject::Tag(tag_obj) = &object {
+                        tag_obj.id
+                    } else {
+                        commit_hash
+                    };
+                    show_tag_by_hash(&tag_hash, &args).await;
+                } else {
+                    // Lightweight tag points directly to commit
+                    show_commit(&commit_hash, &args).await;
+                }
+            }
+            _ => {
+                // Not a tag or tag doesn't exist, show as commit
+                show_commit(&commit_hash, &args).await;
+            }
+        }
         return;
     }
 

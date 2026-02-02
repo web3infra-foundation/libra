@@ -50,6 +50,7 @@ mod remove_test;
 mod reset_test;
 mod restore_test;
 mod revert_test;
+mod show_test;
 mod status_test;
 mod switch_test;
 mod tag_test;
