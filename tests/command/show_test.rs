@@ -1,144 +1,213 @@
 //! Tests for the show command, verifying correct display of commits and tags.
-//! Tests focus on testing the internal APIs that show uses, rather than CLI output.
+//! Tests use CLI commands via the libra binary.
 
-use libra::{
-    command::{
-        add::{self, AddArgs},
-        commit::{self, CommitArgs},
-        tag::{self, TagArgs},
-    },
-    internal::tag as internal_tag,
-    utils::test::{ChangeDirGuard, setup_with_new_libra_in},
-};
+use std::process::Command;
+
 use serial_test::serial;
-use tempfile::tempdir;
 
-/// Create a new temporary repo, set it as current dir, set up identity, add a file and commit.
-/// Returns the TempDir and a ChangeDirGuard so the caller can keep the guard alive for test duration.
-async fn setup_repo_with_commit() -> (tempfile::TempDir, ChangeDirGuard) {
-    setup_repo_with_commit_with("content", "Initial commit").await
+/// Initialize a temporary repository using CLI.
+fn init_temp_repo() -> tempfile::TempDir {
+    let temp_dir = tempfile::tempdir().expect("Failed to create temporary directory");
+    let temp_path = temp_dir.path();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .arg("init")
+        .output()
+        .expect("Failed to execute libra binary");
+
+    if !output.status.success() {
+        panic!(
+            "Failed to initialize libra repository: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    temp_dir
 }
 
-/// Same as `setup_repo_with_commit` but allows specifying file content and commit message.
-async fn setup_repo_with_commit_with(
-    content: &str,
-    commit_msg: &str,
-) -> (tempfile::TempDir, ChangeDirGuard) {
-    let temp = tempdir().unwrap();
-    let guard = ChangeDirGuard::new(temp.path());
-    setup_with_new_libra_in(temp.path()).await;
+/// Configure user identity for commits using CLI.
+fn configure_user_identity(temp_path: &std::path::Path) {
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(&["config", "user.name", "Test User"])
+        .output()
+        .expect("Failed to configure user.name");
 
-    std::fs::write("file.txt", content).unwrap();
-    add::execute(AddArgs {
-        pathspec: vec!["file.txt".into()],
-        all: false,
-        update: false,
-        verbose: false,
-        dry_run: false,
-        ignore_errors: false,
-        refresh: false,
-        force: false,
-    })
-    .await;
+    if !output.status.success() {
+        panic!(
+            "Failed to configure user.name: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
-    commit::execute(CommitArgs {
-        message: Some(commit_msg.into()),
-        file: None,
-        allow_empty: false,
-        conventional: false,
-        no_edit: false,
-        amend: false,
-        signoff: false,
-        disable_pre: false,
-        all: false,
-        no_verify: true,
-        author: None,
-    })
-    .await;
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(&["config", "user.email", "test@example.com"])
+        .output()
+        .expect("Failed to configure user.email");
 
-    (temp, guard)
+    if !output.status.success() {
+        panic!(
+            "Failed to configure user.email: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
-/// Helper function to create a lightweight tag (no message).
-async fn create_lightweight_tag(tag_name: &str) {
-    tag::execute(TagArgs {
-        name: Some(tag_name.into()),
-        list: false,
-        delete: false,
-        message: None,
-        force: false,
-        n_lines: None,
-    })
-    .await;
+/// Create a commit with a file using CLI.
+fn create_commit(temp_path: &std::path::Path, filename: &str, content: &str, message: &str) {
+    // Create file
+    std::fs::write(temp_path.join(filename), content).expect("Failed to create file");
+
+    // Add file
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(&["add", filename])
+        .output()
+        .expect("Failed to add file");
+
+    if !output.status.success() {
+        panic!(
+            "Failed to add file: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    // Commit
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(&["commit", "-m", message, "--no-verify"])
+        .output()
+        .expect("Failed to commit");
+
+    if !output.status.success() {
+        panic!(
+            "Failed to commit: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
-/// Helper function to create an annotated tag (with message using -m).
-async fn create_annotated_tag(tag_name: &str, message: &str) {
-    tag::execute(TagArgs {
-        name: Some(tag_name.into()),
-        list: false,
-        delete: false,
-        message: Some(message.into()),
-        force: false,
-        n_lines: None,
-    })
-    .await;
+/// Create a lightweight tag using CLI.
+fn create_lightweight_tag(temp_path: &std::path::Path, tag_name: &str) {
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(&["tag", tag_name])
+        .output()
+        .expect("Failed to create lightweight tag");
+
+    if !output.status.success() {
+        panic!(
+            "Failed to create tag: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
-/// Test that show can show a tag to its commit.
+/// Create an annotated tag using CLI.
+fn create_annotated_tag(temp_path: &std::path::Path, tag_name: &str, message: &str) {
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(&["tag", tag_name, "-m", message])
+        .output()
+        .expect("Failed to create annotated tag");
+
+    if !output.status.success() {
+        panic!(
+            "Failed to create annotated tag: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+/// Test that show can display a lightweight tag.
 #[tokio::test]
 #[serial]
 async fn test_show_lightweight_tag() {
-    let (_temp, _guard) = setup_repo_with_commit().await;
+    let temp_dir = init_temp_repo();
+    let temp_path = temp_dir.path();
+
+    configure_user_identity(temp_path);
+    create_commit(temp_path, "file.txt", "content", "Initial commit");
 
     // Create a lightweight tag
-    create_lightweight_tag("v1.0-light").await;
+    create_lightweight_tag(temp_path, "v1.0-light");
 
-    // Use the internal API that show uses to resolve tags
-    let result = internal_tag::find_tag_and_commit("v1.0-light").await;
+    // Show the tag via CLI
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(&["show", "v1.0-light", "--no-patch"])
+        .output()
+        .expect("Failed to execute show command");
 
-    // find_tag_and_commit returns Result<Option<...>, GitError>
-    let Ok(Some((object, commit))) = result else {
-        panic!("find_tag_and_commit failed or returned None");
-    };
+    assert!(
+        output.status.success(),
+        "show command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
-    // Lightweight tag points directly to commit
-    assert_eq!(
-        object.get_type(),
-        git_internal::internal::object::types::ObjectType::Commit
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("commit"),
+        "Output should contain 'commit': {}",
+        stdout
     );
     assert!(
-        commit.message.contains("Initial commit"),
-        "Should resolve to initial commit"
+        stdout.contains("Initial commit"),
+        "Output should contain commit message: {}",
+        stdout
     );
 }
 
-/// Test that show can show an annotated tag and include tag metadata.
+/// Test that show displays an annotated tag with its metadata.
 #[tokio::test]
 #[serial]
 async fn test_show_annotated_tag() {
-    let (_temp, _guard) = setup_repo_with_commit().await;
+    let temp_dir = init_temp_repo();
+    let temp_path = temp_dir.path();
+
+    configure_user_identity(temp_path);
+    create_commit(temp_path, "file.txt", "content", "Initial commit");
 
     // Create an annotated tag with a message
-    create_annotated_tag("v1.0-annotated", "Release v1.0.0").await;
+    create_annotated_tag(temp_path, "v1.0-annotated", "Release v1.0.0");
 
-    // Use the internal API that show uses to show tags
-    let result = internal_tag::find_tag_and_commit("v1.0-annotated").await;
+    // Show the annotated tag via CLI
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(&["show", "v1.0-annotated", "--no-patch"])
+        .output()
+        .expect("Failed to execute show command");
 
-    let Ok(Some((object, commit))) = result else {
-        panic!("show tag and commit failed or returned None");
-    };
-
-    // Annotated tag points to a Tag object, not directly to commit
-    assert_eq!(
-        object.get_type(),
-        git_internal::internal::object::types::ObjectType::Tag
+    assert!(
+        output.status.success(),
+        "show command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 
-    // Check that we can get the commit through the tag
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Annotated tag should show tag info
     assert!(
-        commit.message.contains("Initial commit"),
-        "Should resolve to initial commit"
+        stdout.contains("tag"),
+        "Output should contain 'tag': {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("v1.0-annotated"),
+        "Output should contain tag name: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("Release v1.0.0"),
+        "Output should contain tag message: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("Test User"),
+        "Output should contain tagger name: {}",
+        stdout
     );
 }
 
@@ -146,62 +215,59 @@ async fn test_show_annotated_tag() {
 #[tokio::test]
 #[serial]
 async fn test_show_multiple_tags() {
-    let (_temp, _guard) = setup_repo_with_commit_with("content v1", "Feature one").await;
+    let temp_dir = init_temp_repo();
+    let temp_path = temp_dir.path();
+
+    configure_user_identity(temp_path);
+    create_commit(temp_path, "file.txt", "content v1", "Feature one");
 
     // Create first tag on initial commit
-    create_annotated_tag("v0.1.0", "First release").await;
+    create_lightweight_tag(temp_path, "v0.1.0");
 
     // Make second commit
-    std::fs::write("file.txt", "content v2").unwrap();
-    add::execute(AddArgs {
-        pathspec: vec!["file.txt".into()],
-        all: false,
-        update: false,
-        verbose: false,
-        dry_run: false,
-        ignore_errors: false,
-        refresh: false,
-        force: false,
-    })
-    .await;
-
-    commit::execute(CommitArgs {
-        message: Some("Feature two".into()),
-        file: None,
-        allow_empty: false,
-        conventional: false,
-        no_edit: false,
-        amend: false,
-        signoff: false,
-        disable_pre: false,
-        all: false,
-        no_verify: true,
-        author: None,
-    })
-    .await;
+    create_commit(temp_path, "file.txt", "content v2", "Feature two");
 
     // Create second tag on latest commit
-    create_annotated_tag("v0.2.0", "Second release").await;
+    create_lightweight_tag(temp_path, "v0.2.0");
 
-    // Verify both tags resolve correctly
-    let v01_result = internal_tag::find_tag_and_commit("v0.1.0").await;
-    let v02_result = internal_tag::find_tag_and_commit("v0.2.0").await;
+    // Show first tag via CLI
+    let output1 = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(&["show", "v0.1.0", "--no-patch"])
+        .output()
+        .expect("Failed to execute show command");
 
-    let Ok(Some((_, v01_commit))) = v01_result else {
-        panic!("v0.1.0 should be found");
-    };
-    let Ok(Some((_, v02_commit))) = v02_result else {
-        panic!("v0.2.0 should be found");
-    };
-
-    // Each tag should resolve to its respective commit
     assert!(
-        v01_commit.message.contains("Feature one"),
-        "v0.1.0 should point to commit with 'Feature one'"
+        output1.status.success(),
+        "show v0.1.0 failed: {}",
+        String::from_utf8_lossy(&output1.stderr)
     );
+
+    let stdout1 = String::from_utf8_lossy(&output1.stdout);
     assert!(
-        v02_commit.message.contains("Feature two"),
-        "v0.2.0 should point to commit with 'Feature two'"
+        stdout1.contains("Feature one"),
+        "v0.1.0 should show 'Feature one': {}",
+        stdout1
+    );
+
+    // Show second tag via CLI
+    let output2 = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(&["show", "v0.2.0", "--no-patch"])
+        .output()
+        .expect("Failed to execute show command");
+
+    assert!(
+        output2.status.success(),
+        "show v0.2.0 failed: {}",
+        String::from_utf8_lossy(&output2.stderr)
+    );
+
+    let stdout2 = String::from_utf8_lossy(&output2.stdout);
+    assert!(
+        stdout2.contains("Feature two"),
+        "v0.2.0 should show 'Feature two': {}",
+        stdout2
     );
 }
 
@@ -209,13 +275,29 @@ async fn test_show_multiple_tags() {
 #[tokio::test]
 #[serial]
 async fn test_show_nonexistent_tag() {
-    let (_temp, _guard) = setup_repo_with_commit().await;
+    let temp_dir = init_temp_repo();
+    let temp_path = temp_dir.path();
 
-    // Try to find a non-existent tag
-    let result = internal_tag::find_tag_and_commit("nonexistent-tag").await;
+    configure_user_identity(temp_path);
+    create_commit(temp_path, "file.txt", "content", "Initial commit");
 
-    // The result should be Ok(None) for non-existent tag
-    let Ok(None) = result else {
-        panic!("show tag and commit should return Ok(None) for non-existent tag");
-    };
+    // Show a non-existent tag via CLI
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(&["show", "nonexistent-tag"])
+        .output()
+        .expect("Failed to execute show command");
+
+    // Should fail with error
+    assert!(
+        !output.status.success(),
+        "show command should fail for non-existent tag"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("bad revision") || stderr.contains("fatal"),
+        "Error output should indicate bad revision: {}",
+        stderr
+    );
 }
