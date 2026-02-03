@@ -19,6 +19,7 @@ async fn test_clone_branch() {
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
         branch: Some("dev".to_string()),
         single_branch: false,
+        bare: false,
         depth: None,
     })
     .await;
@@ -39,6 +40,52 @@ async fn test_clone_branch() {
 #[tokio::test]
 #[serial]
 #[ignore]
+/// Test the clone command in bare mode to ensure no working tree is created
+async fn test_clone_bare_repository() {
+    let temp_path = tempdir().unwrap();
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    let repo_dir = temp_path.path().join("mega-libra-clone-branch-test.git");
+    let remote_url = "https://gitee.com/pikady/mega-libra-clone-branch-test.git".to_string();
+
+    command::clone::execute(CloneArgs {
+        remote_repo: remote_url,
+        local_path: Some(repo_dir.to_str().unwrap().to_string()),
+        branch: Some("dev".to_string()),
+        single_branch: false,
+        bare: true,
+        depth: None,
+    })
+    .await;
+
+    assert!(
+        repo_dir.join("libra.db").exists(),
+        "bare clone should create libra.db at repo root"
+    );
+    assert!(
+        repo_dir.join("info").join("exclude").exists(),
+        "bare clone should create info/exclude at repo root"
+    );
+    assert!(
+        repo_dir.join("objects").exists(),
+        "bare clone should have objects directory at repo root"
+    );
+    assert!(
+        !repo_dir.join(".libra").exists(),
+        "bare clone should not create nested .libra metadata"
+    );
+
+    match Head::current().await {
+        Head::Branch(current_branch) => {
+            assert_eq!(current_branch, "dev");
+        }
+        _ => panic!("bare clone should still update HEAD to a branch"),
+    };
+}
+
+#[tokio::test]
+#[serial]
+#[ignore]
 /// Test the clone command with a specific branch and single branch
 async fn test_clone_branch_single_branch() {
     let temp_path = tempdir().unwrap();
@@ -51,6 +98,7 @@ async fn test_clone_branch_single_branch() {
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
         branch: Some("dev".to_string()),
         single_branch: true,
+        bare: false,
         depth: None,
     })
     .await;
@@ -85,6 +133,7 @@ async fn test_clone_default_branch() {
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
         branch: None,
         single_branch: false,
+        bare: false,
         depth: None,
     })
     .await;
@@ -117,6 +166,7 @@ async fn test_clone_default_branch_single_branch() {
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
         branch: None,
         single_branch: true,
+        bare: false,
         depth: None,
     })
     .await;
@@ -151,6 +201,7 @@ async fn test_clone_empty_repo() {
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
         branch: None,
         single_branch: false,
+        bare: false,
         depth: None,
     })
     .await;
@@ -185,6 +236,7 @@ async fn test_clone_to_existing_empty_dir() {
         local_path: Some(repo_path.to_str().unwrap().to_string()),
         branch: Some("dev".to_string()),
         single_branch: false,
+        bare: false,
         depth: None,
     })
     .await;
@@ -222,6 +274,7 @@ async fn test_clone_to_existing_dir() {
         local_path: Some(repo_path.to_str().unwrap().to_string()),
         branch: Some("dev".to_string()),
         single_branch: false,
+        bare: false,
         depth: None,
     })
     .await;
@@ -257,6 +310,7 @@ async fn test_clone_to_dir_with_existing_file_name() {
         local_path: Some(conflict_path.to_str().unwrap().to_string()),
         branch: Some("dev".to_string()),
         single_branch: false,
+        bare: false,
         depth: None,
     })
     .await;
@@ -294,6 +348,7 @@ async fn test_clone_with_depth() {
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
         branch: None,
         single_branch: false,
+        bare: false,
         depth: Some(1),
     })
     .await;
@@ -326,6 +381,7 @@ async fn test_clone_with_depth_and_branch() {
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
         branch: Some("dev".to_string()),
         single_branch: true,
+        bare: false,
         depth: Some(5),
     })
     .await;
