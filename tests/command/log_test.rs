@@ -868,10 +868,7 @@ async fn test_log_stat_and_graph_combined() {
     assert!(!prefix.is_empty());
 }
 
-fn run_log_cmd(
-    args: &[&str],
-    cwd: &std::path::Path,
-) -> (std::process::ExitStatus, String, String) {
+fn run_log_cmd(args: &[&str], cwd: &std::path::Path) -> (std::process::ExitStatus, String, String) {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(cwd)
         .arg("log")
@@ -898,16 +895,10 @@ async fn test_log_short_number_flag_equivalent_to_number() {
     let _ = create_test_commit_tree().await;
 
     let (status_short, out_short, err_short) = run_log_cmd(&["-2"], temp_path.path());
-    assert!(
-        status_short.success(),
-        "log -2 failed: {err_short}"
-    );
+    assert!(status_short.success(), "log -2 failed: {err_short}");
 
     let (status_long, out_long, err_long) = run_log_cmd(&["-n", "2"], temp_path.path());
-    assert!(
-        status_long.success(),
-        "log -n 2 failed: {err_long}"
-    );
+    assert!(status_long.success(), "log -n 2 failed: {err_long}");
 
     let short_count = count_commit_lines(&out_short);
     let long_count = count_commit_lines(&out_long);
@@ -927,18 +918,12 @@ async fn test_log_short_number_flag_multi_digit() {
     let _ = create_test_commit_tree().await;
 
     let (status_long, out_long, err_long) = run_log_cmd(&["-n", "10"], temp_path.path());
-    assert!(
-        status_long.success(),
-        "log -n 10 failed: {err_long}"
-    );
+    assert!(status_long.success(), "log -n 10 failed: {err_long}");
 
     let expected_count = count_commit_lines(&out_long);
 
     let (status_short, out_short, err_short) = run_log_cmd(&["-10"], temp_path.path());
-    assert!(
-        status_short.success(),
-        "log -10 failed: {err_short}"
-    );
+    assert!(status_short.success(), "log -10 failed: {err_short}");
 
     let short_count = count_commit_lines(&out_short);
     assert_eq!(short_count, expected_count);
