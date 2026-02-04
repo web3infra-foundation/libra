@@ -1,3 +1,5 @@
+use bytes::Buf;
+
 use super::{
     client::Client,
     gemini_api_types::{
@@ -66,13 +68,13 @@ impl CompletionModelTrait for CompletionModel {
                             UserContent::Text(t) => parts.push(Part { text: Some(t.text) }),
                             UserContent::Image(_) => {
                                 // Reserved for future Image support
-                                return Err(CompletionError::RequestError(
+                                return Err(CompletionError::NotImplemented(
                                     "Image support not implemented yet for Gemini provider".into(),
                                 ));
                             }
                             UserContent::ToolResult(_) => {
                                 // Reserved for future Tool support
-                                return Err(CompletionError::RequestError(
+                                return Err(CompletionError::NotImplemented(
                                     "Tool result support not implemented yet for Gemini provider"
                                         .into(),
                                 ));
@@ -91,7 +93,7 @@ impl CompletionModelTrait for CompletionModel {
                             AssistantContent::Text(t) => parts.push(Part { text: Some(t.text) }),
                             AssistantContent::ToolCall(_) => {
                                 // Reserved for future Tool support
-                                return Err(CompletionError::RequestError(
+                                return Err(CompletionError::NotImplemented(
                                     "Tool call support not implemented yet for Gemini provider"
                                         .into(),
                                 ));
@@ -152,7 +154,20 @@ impl CompletionModelTrait for CompletionModel {
         tracing::info!("Received response status: {}", resp.status());
 
         if !resp.status().is_success() {
-            let text = resp.text().await.unwrap_or_default();
+            // Read only the first 1KB of the error body to avoid memory issues with large responses
+            // and handle potential non-UTF8 content safely.
+            use std::io::Read;
+            let mut buf = [0u8; 1024];
+            let mut chunk = resp
+                .bytes()
+                .await
+                .map_err(CompletionError::HttpError)?
+                .reader();
+            let n = chunk
+                .read(&mut buf)
+                .map_err(|e: std::io::Error| CompletionError::ResponseError(e.to_string()))?;
+            let text = String::from_utf8_lossy(&buf[..n]);
+
             return Err(CompletionError::ProviderError(format!(
                 "Gemini API Error: {}",
                 text
@@ -170,7 +185,9 @@ impl CompletionModelTrait for CompletionModel {
             .and_then(|c| c.content.as_ref())
             .and_then(|c| c.parts.first())
             .and_then(|p| p.text.clone())
-            .unwrap_or_default();
+            .ok_or_else(|| {
+                CompletionError::ResponseError("No text content in Gemini response".into())
+            })?;
 
         Ok(CompletionResponse {
             choice: text,

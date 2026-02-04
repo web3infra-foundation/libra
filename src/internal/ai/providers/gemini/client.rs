@@ -1,17 +1,30 @@
-use std::env;
+use std::{env, fmt};
 
 use crate::internal::ai::client::Provider;
 
 /// Gemini AI Provider for interfacing with Google's Gemini models.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct GeminiProvider {
-    pub api_key: String,
+    api_key: String,
+}
+
+impl fmt::Debug for GeminiProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GeminiProvider")
+            .field("api_key", &"***")
+            .finish()
+    }
 }
 
 impl GeminiProvider {
     /// Creates a new GeminiProvider with the given API key.
     pub fn new(api_key: String) -> Self {
         Self { api_key }
+    }
+
+    /// Returns the API key.
+    pub fn api_key(&self) -> &str {
+        &self.api_key
     }
 }
 

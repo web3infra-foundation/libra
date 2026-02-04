@@ -26,8 +26,18 @@ impl Action for InputGenerator {
     }
 }
 
-#[test]
-fn test_gemini_agent_execution() {
+/// Integration test for Gemini agent execution.
+///
+/// # Setup
+/// This test requires a valid `GEMINI_API_KEY` environment variable.
+/// The test will be skipped if the key is not set.
+///
+/// ```bash
+/// export GEMINI_API_KEY="your_key_here"
+/// cargo test test_gemini_agent_execution
+/// ```
+#[tokio::test]
+async fn test_gemini_agent_execution() {
     // Check for API Key
     if env::var("GEMINI_API_KEY").is_err() {
         println!("Skipping test_gemini_agent_execution because GEMINI_API_KEY is not set.");
@@ -42,6 +52,7 @@ fn test_gemini_agent_execution() {
     let agent = AgentBuilder::new(model)
         .preamble("You are a translator. Translate the input to Spanish.")
         .temperature(0.7)
+        .expect("Invalid temperature")
         .build();
 
     let agent_action = AgentAction::new(agent);

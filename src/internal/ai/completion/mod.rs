@@ -23,6 +23,9 @@ pub enum CompletionError {
 
     #[error("ResponseError: {0}")]
     ResponseError(String),
+
+    #[error("Feature not implemented: {0}")]
+    NotImplemented(String),
 }
 
 pub trait CompletionModel: Clone + Send + Sync {

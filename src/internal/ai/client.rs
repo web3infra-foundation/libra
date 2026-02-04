@@ -31,7 +31,13 @@ impl<P> Client<P> {
         let http_client = HttpClient::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
-            .unwrap_or_else(|_| HttpClient::new());
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    "Failed to build HTTP client with timeout: {}. Using default client.",
+                    e
+                );
+                HttpClient::new()
+            });
 
         Self {
             base_url: base_url.to_string(),

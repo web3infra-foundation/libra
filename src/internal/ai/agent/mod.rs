@@ -16,13 +16,15 @@ pub use builder::AgentBuilder;
 /// It implements the `Prompt` and `Chat` traits for easy interaction.
 pub struct Agent<M: CompletionModel> {
     /// The underlying completion model (e.g., Gemini, OpenAI).
-    pub model: M,
+    model: M,
     /// System prompt or preamble to set the agent's behavior context.
-    pub preamble: Option<String>,
+    preamble: Option<String>,
     /// Sampling temperature (0.0 to 1.0). Higher values mean more creativity.
-    pub temperature: Option<f64>,
+    temperature: Option<f64>,
     /// Set of tools available to the agent.
-    pub tools: ToolSet,
+    /// Tools available to the agent (reserved for future tool-calling support).
+    #[allow(dead_code)]
+    tools: ToolSet,
 }
 
 impl<M: CompletionModel> Agent<M> {

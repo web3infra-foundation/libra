@@ -13,6 +13,8 @@ use crate::internal::ai::{
 /// This adapter bridges the gap between `dagrs::Action` and the AI `Agent`.
 /// It automatically handles:
 /// 1. Reading input from upstream nodes (as Prompt).
+///    - If there are multiple upstream nodes, their outputs are concatenated
+///      with newlines ("\n\n") to form a single prompt.
 /// 2. Invoking the Agent.
 /// 3. Broadcasting the Agent's response to downstream nodes.
 ///
@@ -43,30 +45,37 @@ impl<M: CompletionModel> Action for AgentAction<M> {
     ) -> Output {
         // 1. Get Input
         let ids = in_channels.get_sender_ids();
-        let input: String = if let Some(id) = ids.first() {
-            match in_channels.recv_from(id).await {
-                Ok(content) => content.get::<String>().cloned().unwrap_or_else(|| {
-                    tracing::warn!(
-                        "Received content from upstream {:?} is not a String. Defaulting to empty.",
-                        id
-                    );
-                    String::new()
-                }),
+        let mut inputs = Vec::new();
+
+        for id in ids {
+            match in_channels.recv_from(&id).await {
+                Ok(content) => {
+                    if let Some(text) = content.get::<String>() {
+                        inputs.push(text.clone());
+                    } else {
+                        tracing::warn!(
+                            "Received content from upstream {:?} is not a String. Defaulting to empty.",
+                            id
+                        );
+                    }
+                }
                 Err(e) => {
-                    tracing::error!("Failed to receive input from upstream {:?}: {:?}", id, e);
-                    String::new()
+                    let error_msg =
+                        format!("Failed to receive input from upstream {:?}: {:?}", id, e);
+                    tracing::error!("{}", error_msg);
+                    return Output::Err(error_msg);
                 }
             }
-        } else {
-            String::new()
-        };
+        }
+
+        let input = inputs.join("\n\n");
 
         // 2. Run Agent
         match self.agent.prompt(input).await {
             Ok(resp) => {
                 let content = Content::new(resp);
-                out_channels.broadcast(content.clone()).await;
-                Output::Out(Some(content))
+                out_channels.broadcast(content).await;
+                Output::Out(None)
             }
             Err(e) => {
                 tracing::error!("Agent Execution Error: {}", e);
