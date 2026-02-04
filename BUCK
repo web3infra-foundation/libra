@@ -52,6 +52,7 @@ rust_binary(
         "//third-party/rust/crates/clap/4.5.53:clap",
         "//third-party/rust/crates/colored/3.0.0:colored",
         "//third-party/rust/crates/crc32fast/1.5.0:crc32fast",
+        "//third-party/rust/crates/dagrs/0.6.0:dagrs",
         "//third-party/rust/crates/diffs/0.5.1:diffs",
         "//third-party/rust/crates/dirs/5.0.1:dirs",
         "//third-party/rust/crates/flate2/1.1.5:flate2",
@@ -87,12 +88,12 @@ rust_binary(
         "//third-party/rust/crates/url/2.5.7:url",
         "//third-party/rust/crates/walkdir/2.5.0:walkdir",
         "//third-party/rust/crates/wax/0.6.0:wax",
-        ":libra-lib",
+        ":liblibra",
     ],
 )
 
 rust_library(
-    name = "libra-lib",
+    name = "liblibra",
     srcs = [":libra-vendor"],
     crate = "libra",
     crate_root = "vendor/src/lib.rs",
@@ -114,6 +115,7 @@ rust_library(
         "//third-party/rust/crates/clap/4.5.53:clap",
         "//third-party/rust/crates/colored/3.0.0:colored",
         "//third-party/rust/crates/crc32fast/1.5.0:crc32fast",
+        "//third-party/rust/crates/dagrs/0.6.0:dagrs",
         "//third-party/rust/crates/diffs/0.5.1:diffs",
         "//third-party/rust/crates/dirs/5.0.1:dirs",
         "//third-party/rust/crates/flate2/1.1.5:flate2",
