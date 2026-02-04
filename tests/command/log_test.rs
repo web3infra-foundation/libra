@@ -867,3 +867,79 @@ async fn test_log_stat_and_graph_combined() {
     let prefix = graph_state.render(&commit);
     assert!(!prefix.is_empty());
 }
+
+fn run_log_cmd(
+    args: &[&str],
+    cwd: &std::path::Path,
+) -> (std::process::ExitStatus, String, String) {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(cwd)
+        .arg("log")
+        .args(args)
+        .output()
+        .expect("Failed to execute log command");
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    (output.status, stdout, stderr)
+}
+
+fn count_commit_lines(output: &str) -> usize {
+    output.lines().filter(|l| l.starts_with("commit ")).count()
+}
+
+#[tokio::test]
+#[serial]
+async fn test_log_short_number_flag_equivalent_to_number() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    let _ = create_test_commit_tree().await;
+
+    let (status_short, out_short, err_short) = run_log_cmd(&["-2"], temp_path.path());
+    assert!(
+        status_short.success(),
+        "log -2 failed: {err_short}"
+    );
+
+    let (status_long, out_long, err_long) = run_log_cmd(&["-n", "2"], temp_path.path());
+    assert!(
+        status_long.success(),
+        "log -n 2 failed: {err_long}"
+    );
+
+    let short_count = count_commit_lines(&out_short);
+    let long_count = count_commit_lines(&out_long);
+
+    assert_eq!(short_count, 2);
+    assert_eq!(long_count, 2);
+    assert_eq!(short_count, long_count);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_log_short_number_flag_multi_digit() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    let _ = create_test_commit_tree().await;
+
+    let (status_long, out_long, err_long) = run_log_cmd(&["-n", "10"], temp_path.path());
+    assert!(
+        status_long.success(),
+        "log -n 10 failed: {err_long}"
+    );
+
+    let expected_count = count_commit_lines(&out_long);
+
+    let (status_short, out_short, err_short) = run_log_cmd(&["-10"], temp_path.path());
+    assert!(
+        status_short.success(),
+        "log -10 failed: {err_short}"
+    );
+
+    let short_count = count_commit_lines(&out_short);
+    assert_eq!(short_count, expected_count);
+}

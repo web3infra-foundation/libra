@@ -160,13 +160,63 @@ pub async fn parse(args: Option<&[&str]>) -> Result<(), GitError> {
     parse_async(args).await
 }
 
+fn rewrite_log_short_number_args(args: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(args.len() + 2);
+    let mut in_log = false;
+    let mut after_double_dash = false;
+
+    for arg in args.into_iter() {
+        if !in_log {
+            if arg == "log" {
+                in_log = true;
+            }
+            out.push(arg);
+            continue;
+        }
+
+        if after_double_dash {
+            out.push(arg);
+            continue;
+        }
+
+        if arg == "--" {
+            after_double_dash = true;
+            out.push(arg);
+            continue;
+        }
+
+        if is_short_number_flag(&arg) {
+            out.push("-n".to_string());
+            out.push(arg[1..].to_string());
+        } else {
+            out.push(arg);
+        }
+    }
+
+    out
+}
+
+fn is_short_number_flag(arg: &str) -> bool {
+    if !arg.starts_with('-') || arg.len() < 2 {
+        return false;
+    }
+    let rest = &arg[1..];
+    rest.chars().all(|c| c.is_ascii_digit())
+}
+
 /// `async` version of the [parse] function
 pub async fn parse_async(args: Option<&[&str]>) -> Result<(), GitError> {
     let args = match args {
         Some(args) => {
-            Cli::try_parse_from(args).map_err(|e| GitError::InvalidArgument(e.to_string()))?
+            let argv = args.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+            let argv = rewrite_log_short_number_args(argv);
+            Cli::try_parse_from(argv).map_err(|e| GitError::InvalidArgument(e.to_string()))?
         }
-        None => Cli::parse(),
+        None => {
+            let argv = env::args().collect::<Vec<_>>();
+            let argv = rewrite_log_short_number_args(argv);
+            Cli::parse_from(argv)
+        }
     };
     // TODO: try check repo before parsing
     // For commands that don't initialize a repo, set the hash kind first.
