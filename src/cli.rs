@@ -160,20 +160,33 @@ pub async fn parse(args: Option<&[&str]>) -> Result<(), GitError> {
     parse_async(args).await
 }
 
+// Rewrite `log -<n>` into `log -n <n>` only when `log` is the actual subcommand.
 fn rewrite_log_short_number_args(args: Vec<String>) -> Vec<String> {
+    // Detect the real subcommand position to avoid rewriting positional args for other commands.
+    let subcommand = find_subcommand_index(&args);
+    let Some((log_index, from_double_dash)) = subcommand else {
+        return args;
+    };
+    if !matches!(args.get(log_index), Some(name) if name == "log") {
+        return args;
+    }
+
     let mut out: Vec<String> = Vec::with_capacity(args.len() + 2);
-    let mut in_log = false;
-    let mut after_double_dash = false;
-
-    for arg in args.into_iter() {
-        if !in_log {
-            if arg == "log" {
-                in_log = true;
+    if from_double_dash {
+        // Drop the `--` that was used to separate global args from the subcommand.
+        for (idx, arg) in args.iter().enumerate().take(log_index + 1) {
+            if idx + 1 == log_index && arg == "--" {
+                continue;
             }
-            out.push(arg);
-            continue;
+            out.push(arg.clone());
         }
+    } else {
+        out.extend(args.iter().take(log_index + 1).cloned());
+    }
 
+    // Respect `--` inside the log subcommand: stop rewriting after it.
+    let mut after_double_dash = false;
+    for arg in args.into_iter().skip(log_index + 1) {
         if after_double_dash {
             out.push(arg);
             continue;
@@ -194,6 +207,27 @@ fn rewrite_log_short_number_args(args: Vec<String>) -> Vec<String> {
     }
 
     out
+}
+
+// Find the first argument that represents the subcommand.
+// If `--` appears, treat the next argument as the subcommand.
+fn find_subcommand_index(args: &[String]) -> Option<(usize, bool)> {
+    let mut i = 1;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--" {
+            return if i + 1 < args.len() {
+                Some((i + 1, true))
+            } else {
+                None
+            };
+        }
+        if !arg.starts_with('-') {
+            return Some((i, false));
+        }
+        i += 1;
+    }
+    None
 }
 
 fn is_short_number_flag(arg: &str) -> bool {
