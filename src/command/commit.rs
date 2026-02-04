@@ -154,6 +154,12 @@ pub async fn execute(args: CommitArgs) {
         panic!("fatal: no changes added to commit, use --allow-empty to override");
     }
 
+    // Additional check: verify if there are any staged changes relative to HEAD
+    let staged_changes = status::changes_to_be_committed().await;
+    if staged_changes.is_empty() && !args.allow_empty {
+        panic!("nothing to commit, working tree clean");
+    }
+
     // run pre commit hook
     if !args.disable_pre && !args.no_verify {
         let hooks_dir = path::hooks();

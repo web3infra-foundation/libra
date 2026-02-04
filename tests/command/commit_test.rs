@@ -1,5 +1,6 @@
 //! Integration tests for the commit command covering staged changes, message handling, and tree/hash updates.
 
+use futures::executor::block_on;
 use libra::utils::object_ext::TreeExt;
 use serial_test::serial;
 use tempfile::tempdir;
@@ -542,4 +543,90 @@ async fn test_commit_amend_with_custom_author() {
 
     // Should be a different commit
     assert_ne!(initial_commit_id, amended_commit_id);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_commit_empty_working_tree() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    let args = CommitArgs {
+        message: Some("empty commit".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    };
+
+    let result = std::panic::catch_unwind(|| {
+        block_on(commit::execute(args));
+    });
+
+    assert!(result.is_err(), "Empty commit should fail");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_commit_with_actual_changes() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    let init_args = CommitArgs {
+        message: Some("initial commit".to_string()),
+        file: None,
+        allow_empty: true,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    };
+    block_on(commit::execute(init_args));
+
+    let test_file = temp_path.path().join("test.txt");
+    std::fs::write(&test_file, "test content").unwrap();
+
+    let add_args = add::AddArgs {
+        pathspec: vec!["test.txt".to_string()],
+        all: false,
+        update: false,
+        refresh: false,
+        verbose: false,
+        force: false,
+        dry_run: false,
+        ignore_errors: false,
+    };
+    add::execute(add_args).await;
+
+    let args = CommitArgs {
+        message: Some("add test file".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    };
+
+    let result = std::panic::catch_unwind(|| {
+        block_on(commit::execute(args));
+    });
+
+    assert!(result.is_ok(), "Commit with changes should succeed");
 }
