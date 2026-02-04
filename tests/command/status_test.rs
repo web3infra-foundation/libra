@@ -1883,12 +1883,14 @@ async fn test_status_after_add() {
     .await;
 
     let output_str = String::from_utf8(output).unwrap();
+    let re = regex::Regex::new(r"\x1b\[[0-9;]*m").unwrap();
+    let clean_output = re.replace_all(&output_str, "");
     assert!(
-        output_str
+        clean_output
             .lines()
             .any(|l| l.starts_with("A ") && l.contains(file_path)),
         "Short status should show 'A ' prefix for added file: {}",
-        output_str
+        clean_output
     );
 
     // Verify via changes_to_be_committed
