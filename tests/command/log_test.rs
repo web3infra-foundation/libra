@@ -867,3 +867,194 @@ async fn test_log_stat_and_graph_combined() {
     let prefix = graph_state.render(&commit);
     assert!(!prefix.is_empty());
 }
+
+fn run_log_cmd(args: &[&str], cwd: &std::path::Path) -> (std::process::ExitStatus, String, String) {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(cwd)
+        .arg("log")
+        .args(args)
+        .output()
+        .expect("Failed to execute log command");
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    (output.status, stdout, stderr)
+}
+
+fn run_libra_cmd(
+    args: &[&str],
+    cwd: &std::path::Path,
+) -> (std::process::ExitStatus, String, String) {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(cwd)
+        .args(args)
+        .output()
+        .expect("Failed to execute libra command");
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    (output.status, stdout, stderr)
+}
+
+fn count_commit_lines(output: &str) -> usize {
+    output.lines().filter(|l| l.starts_with("commit ")).count()
+}
+
+#[tokio::test]
+#[serial]
+async fn test_log_short_number_flag_equivalent_to_number() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    let _ = create_test_commit_tree().await;
+
+    let (status_short, out_short, err_short) = run_log_cmd(&["-2"], temp_path.path());
+    assert!(status_short.success(), "log -2 failed: {err_short}");
+
+    let (status_long, out_long, err_long) = run_log_cmd(&["-n", "2"], temp_path.path());
+    assert!(status_long.success(), "log -n 2 failed: {err_long}");
+
+    let short_count = count_commit_lines(&out_short);
+    let long_count = count_commit_lines(&out_long);
+
+    assert_eq!(short_count, 2);
+    assert_eq!(long_count, 2);
+    assert_eq!(short_count, long_count);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_log_short_number_flag_multi_digit() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    let _ = create_test_commit_tree().await;
+
+    let (status_long, out_long, err_long) = run_log_cmd(&["-n", "10"], temp_path.path());
+    assert!(status_long.success(), "log -n 10 failed: {err_long}");
+
+    let expected_count = count_commit_lines(&out_long);
+
+    let (status_short, out_short, err_short) = run_log_cmd(&["-10"], temp_path.path());
+    assert!(status_short.success(), "log -10 failed: {err_short}");
+
+    let short_count = count_commit_lines(&out_short);
+    assert_eq!(short_count, expected_count);
+}
+
+#[tokio::test]
+#[serial]
+/// Ensure `log -- -2` treats `-2` as a pathspec, not as `-n 2`.
+async fn test_log_double_dash_disables_short_number_rewrite() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    // Commit a normal file first.
+    test::ensure_file("a.txt", Some("A\n"));
+    add::execute(AddArgs {
+        pathspec: vec![String::from("a.txt")],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("Add a".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+        no_verify: false,
+        author: None,
+    })
+    .await;
+
+    // Commit a file named "-2" to validate pathspec handling.
+    test::ensure_file("-2", Some("dash\n"));
+    add::execute(AddArgs {
+        pathspec: vec![String::from("-2")],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+    commit::execute(CommitArgs {
+        message: Some("Add dash".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: false,
+        all: false,
+        no_verify: false,
+        author: None,
+    })
+    .await;
+
+    let (status, out, err) = run_log_cmd(&["--", "-2"], temp_path.path());
+    assert!(status.success(), "log -- -2 failed: {err}");
+
+    // Only the commit touching "-2" should be listed.
+    assert_eq!(count_commit_lines(&out), 1);
+    assert!(out.contains("Add dash"));
+}
+
+#[tokio::test]
+#[serial]
+/// Ensure `log` rewrite does not trigger when `log` is a positional path for another subcommand.
+async fn test_add_with_log_path_does_not_trigger_log_rewrite() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    // Create files named "log" and "-2".
+    test::ensure_file("log", Some("logfile\n"));
+    test::ensure_file("-2", Some("dashfile\n"));
+
+    let (status_add, _out_add, err_add) =
+        run_libra_cmd(&["add", "log", "--", "-2"], temp_path.path());
+    assert!(status_add.success(), "add failed: {err_add}");
+
+    let (status_status, out_status, err_status) =
+        run_libra_cmd(&["status", "--porcelain"], temp_path.path());
+    assert!(
+        status_status.success(),
+        "status --porcelain failed: {err_status}"
+    );
+
+    // Both files should be staged (porcelain v1 uses "A  <path>").
+    assert!(out_status.lines().any(|l| l == "A  log"));
+    assert!(out_status.lines().any(|l| l == "A  -2"));
+}
+
+#[tokio::test]
+#[serial]
+/// Ensure `libra -- log -2` treats `log` as the subcommand and rewrites `-2` correctly.
+async fn test_log_short_number_flag_with_double_dash_before_subcommand() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    let _ = create_test_commit_tree().await;
+
+    let (status, out, err) = run_libra_cmd(&["--", "log", "-2"], temp_path.path());
+    assert!(status.success(), "libra -- log -2 failed: {err}");
+    assert_eq!(count_commit_lines(&out), 2);
+}
