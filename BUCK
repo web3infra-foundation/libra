@@ -68,6 +68,7 @@ rust_binary(
         "//third-party/rust/crates/lru-mem/0.3.0:lru-mem",
         "//third-party/rust/crates/object_store/0.12.4:object_store",
         "//third-party/rust/crates/once_cell/1.21.3:once_cell",
+        "//third-party/rust/crates/openssl/0.10.75:openssl",
         "//third-party/rust/crates/path-absolutize/3.1.1:path-absolutize",
         "//third-party/rust/crates/pathdiff/0.2.3:pathdiff",
         "//third-party/rust/crates/regex/1.12.2:regex",
@@ -88,12 +89,12 @@ rust_binary(
         "//third-party/rust/crates/url/2.5.7:url",
         "//third-party/rust/crates/walkdir/2.5.0:walkdir",
         "//third-party/rust/crates/wax/0.6.0:wax",
-        ":liblibra",
+        ":libra-lib",
     ],
 )
 
 rust_library(
-    name = "liblibra",
+    name = "libra-lib",
     srcs = [":libra-vendor"],
     crate = "libra",
     crate_root = "vendor/src/lib.rs",
@@ -131,6 +132,7 @@ rust_library(
         "//third-party/rust/crates/lru-mem/0.3.0:lru-mem",
         "//third-party/rust/crates/object_store/0.12.4:object_store",
         "//third-party/rust/crates/once_cell/1.21.3:once_cell",
+        "//third-party/rust/crates/openssl/0.10.75:openssl",
         "//third-party/rust/crates/path-absolutize/3.1.1:path-absolutize",
         "//third-party/rust/crates/pathdiff/0.2.3:pathdiff",
         "//third-party/rust/crates/regex/1.12.2:regex",

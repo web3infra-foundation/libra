@@ -1,4 +1,4 @@
-use super::Agent;
+use crate::internal::ai::agent::Agent;
 use crate::internal::ai::{completion::CompletionModel, tools::ToolSet};
 
 /// A builder for configuring and creating AI Agent instances.

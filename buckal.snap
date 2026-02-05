@@ -3,7 +3,7 @@
 version = 2
 
 [fingerprints]
-"path+file://($WORKSPACE)#0.1.0" = "fac5eeaf38f0ee0e248839e9619ccc53c4cf524a538f04f5d246b3a41df90459"
+"path+file://($WORKSPACE)#0.1.0" = "ab1d22c75bb162cd8f7ea40951fd98703bb0b6e7d51eec974edc6de24242ebb1"
 "registry+https://github.com/rust-lang/crates.io-index#adler2@2.0.1" = "7081ce7693ca45bff0e855374e6b7f386805bba1de9f7c288b1c706b99abef7f"
 "registry+https://github.com/rust-lang/crates.io-index#ahash@0.7.8" = "263bbc26dec8ade458658cf9dae3ef8fc606e85f04c7b47abb4f9255319689ac"
 "registry+https://github.com/rust-lang/crates.io-index#ahash@0.8.12" = "f778671dc433ee46d961aca6e08860d4146d990e1822df6b553893e379d8bfa5"
@@ -229,8 +229,9 @@ version = 2
 "registry+https://github.com/rust-lang/crates.io-index#once_cell_polyfill@1.70.2" = "764f8f74b4f2b67bda4efd90d6264b1c005784d195f6446c09cf2b1d77847b2a"
 "registry+https://github.com/rust-lang/crates.io-index#openssl-macros@0.1.1" = "e71daaaabba0cdd9ead51480804765e422005aa6893b55e8a7225a1cbb3bff0d"
 "registry+https://github.com/rust-lang/crates.io-index#openssl-probe@0.1.6" = "9c5ef3a01dd89c6eaf6aac47c6ea7ec756627257b33cc650753fbbb4e40c5c2e"
-"registry+https://github.com/rust-lang/crates.io-index#openssl-sys@0.9.111" = "f82f503e256f3afe9a0a4ba29a91d4b50947889fe5aa3e51f02ca4473f0b97f5"
-"registry+https://github.com/rust-lang/crates.io-index#openssl@0.10.75" = "cfd83e8c4dff80c1fec0910995deadd7c92a99b294e9feb3da91c0cf4405d4c0"
+"registry+https://github.com/rust-lang/crates.io-index#openssl-src@300.5.5+3.5.5" = "b0e0335ee2569309c50d71bfc973170e74f04f5a26e70896365213796ea4fce6"
+"registry+https://github.com/rust-lang/crates.io-index#openssl-sys@0.9.111" = "af77ca87a11c74be1162c29434e69540485285e6f75d06772259b95b02bed070"
+"registry+https://github.com/rust-lang/crates.io-index#openssl@0.10.75" = "374b644ba3bf55c8327ef75ef716dcb0c35bd8f9ea124feabd72b3ae30bba832"
 "registry+https://github.com/rust-lang/crates.io-index#option-ext@0.2.0" = "4b94b9164c959b98642f0cf1674e4dbc12f05be187bf6e071b5522be940682aa"
 "registry+https://github.com/rust-lang/crates.io-index#ordered-float@4.6.0" = "fa73394ac1c216c4e1c7bb1239059215f8db89e8ae555e498f03fd30ca7930fe"
 "registry+https://github.com/rust-lang/crates.io-index#ouroboros@0.18.5" = "9fcbb04903b779ce55686c83deee486381f909ac382d8b649a3f9fae96bac598"
