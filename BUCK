@@ -93,7 +93,7 @@ rust_binary(
 )
 
 rust_library(
-    name = "libra",
+    name = "liblibra",
     srcs = [":libra-vendor"],
     crate = "libra",
     crate_root = "vendor/src/lib.rs",
