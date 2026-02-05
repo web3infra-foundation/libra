@@ -26,7 +26,10 @@ rust_library(
     env = {
         "OUT_DIR": "$(location :openssl-build-script-run[out_dir])",
     },
-    features = ["default"],
+    features = [
+        "default",
+        "vendored",
+    ],
     rustc_flags = [
         "@$(location :openssl-build-script-run[rustc_flags])",
         "@$(location :openssl-manifest[env_flags])",
@@ -51,7 +54,10 @@ rust_binary(
     crate = "build_script_build",
     crate_root = "vendor/build.rs",
     edition = "2021",
-    features = ["default"],
+    features = [
+        "default",
+        "vendored",
+    ],
     rustc_flags = ["@$(location :openssl-manifest[env_flags])"],
     visibility = [],
 )
@@ -64,7 +70,10 @@ buildscript_run(
         "//third-party/rust/crates/openssl-sys/0.9.111:openssl-sys-build-script-main-run[metadata]",
         ":openssl-manifest[env_dict]",
     ],
-    features = ["default"],
+    features = [
+        "default",
+        "vendored",
+    ],
     version = "0.10.75",
     manifest_dir = ":openssl-vendor",
     visibility = ["PUBLIC"],
