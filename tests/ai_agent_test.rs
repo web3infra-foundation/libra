@@ -36,8 +36,8 @@ impl Action for InputGenerator {
 /// export GEMINI_API_KEY="your_key_here"
 /// cargo test test_gemini_agent_execution
 /// ```
-#[tokio::test]
-async fn test_gemini_agent_execution() {
+#[test]
+fn test_gemini_agent_execution() {
     // Check for API Key
     if env::var("GEMINI_API_KEY").is_err() {
         println!("Skipping test_gemini_agent_execution because GEMINI_API_KEY is not set.");

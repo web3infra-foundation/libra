@@ -74,8 +74,8 @@ impl<M: CompletionModel> Action for AgentAction<M> {
         match self.agent.prompt(input).await {
             Ok(resp) => {
                 let content = Content::new(resp);
-                out_channels.broadcast(content).await;
-                Output::Out(None)
+                out_channels.broadcast(content.clone()).await;
+                Output::Out(Some(content))
             }
             Err(e) => {
                 tracing::error!("Agent Execution Error: {}", e);
