@@ -6,7 +6,16 @@ use crate::internal::ai::{
 pub mod builder;
 pub use builder::AgentBuilder;
 
+pub mod chat;
+pub use chat::ChatAgent;
+
 /// An AI Agent that manages interactions with a CompletionModel.
+///
+/// This is a **stateless** agent (also known as a Simple Agent). It handles configuration
+/// (preamble, tools, temperature) and requests, but it does not maintain conversation history
+/// between calls.
+///
+/// For a stateful agent that remembers context, use [`ChatAgent`].
 ///
 /// The Agent is responsible for:
 /// - Maintaining configuration (temperature, preamble/system prompt).

@@ -182,6 +182,14 @@ impl Message {
             content: OneOrMany::One(UserContent::Text(Text { text: text.into() })),
         }
     }
+
+    /// Create an assistant message with text content.
+    pub fn assistant(text: impl Into<String>) -> Self {
+        Message::Assistant {
+            id: None,
+            content: OneOrMany::One(AssistantContent::Text(Text { text: text.into() })),
+        }
+    }
 }
 
 impl From<String> for Message {

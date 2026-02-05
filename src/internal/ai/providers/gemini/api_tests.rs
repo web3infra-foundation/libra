@@ -1,23 +1,35 @@
-use serde::{Deserialize, Serialize};
-
 #[test]
 fn test_part_deserialization() {
-    use crate::internal::ai::providers::gemini::gemini_api_types::Part;
+    use crate::internal::ai::providers::gemini::gemini_api_types::{Part, PartKind};
 
     // Test text part
     let json = r#"{"text": "Hello, world!"}"#;
     let part: Part = serde_json::from_str(json).unwrap();
-    assert_eq!(part.text, Some("Hello, world!".to_string()));
-    assert!(part.function_call.is_none());
+    if let PartKind::Text(text) = part.part {
+        assert_eq!(text, "Hello, world!");
+    } else {
+        panic!("Expected Text part, got {:?}", part);
+    }
 
     // Test function call part
     let json = r#"{"functionCall": {"name": "get_weather", "args": {"location": "London"}}}"#;
     let part: Part = serde_json::from_str(json).unwrap();
-    assert!(part.text.is_none());
-    assert!(part.function_call.is_some());
-    let fc = part.function_call.unwrap();
-    assert_eq!(fc.name, "get_weather");
-    assert_eq!(fc.args["location"], "London");
+    if let PartKind::FunctionCall(fc) = part.part {
+        assert_eq!(fc.name, "get_weather");
+        assert_eq!(fc.args["location"], "London");
+    } else {
+        panic!("Expected FunctionCall part, got {:?}", part);
+    }
+
+    // Test function response part
+    let json = r#"{"functionResponse": {"name": "get_weather", "response": {"result": "Sunny"}}}"#;
+    let part: Part = serde_json::from_str(json).unwrap();
+    if let PartKind::FunctionResponse(fr) = part.part {
+        assert_eq!(fr.name, "get_weather");
+        assert_eq!(fr.response.unwrap()["result"], "Sunny");
+    } else {
+        panic!("Expected FunctionResponse part, got {:?}", part);
+    }
 }
 
 #[test]

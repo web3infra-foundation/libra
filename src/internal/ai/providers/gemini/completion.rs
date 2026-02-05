@@ -4,7 +4,7 @@ use super::{
     client::Client,
     gemini_api_types::{
         Content, FunctionCallingMode, FunctionDeclaration, GenerateContentRequest,
-        GenerateContentResponse, GenerationConfig, Part, Tool, ToolConfig,
+        GenerateContentResponse, GenerationConfig, Part, PartKind, Schema, Tool, ToolConfig,
     },
 };
 use crate::internal::ai::{
@@ -50,8 +50,8 @@ impl CompletionModelTrait for CompletionModel {
         &self,
         request: CompletionRequest,
     ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
-        // Use generic Provider to customize request if needed, though Gemini usually uses query param or header.
-        // Our new Client structure puts auth in header via on_request.
+        // Use generic Provider to customize request if needed.
+        // Our Client structure puts auth in header via on_request.
 
         let url = format!(
             "{}/v1beta/models/{}:generateContent",
@@ -67,9 +67,9 @@ impl CompletionModelTrait for CompletionModel {
                     for item in content.into_iter() {
                         match item {
                             UserContent::Text(t) => parts.push(Part {
-                                text: Some(t.text),
-                                function_call: None,
-                                function_response: None,
+                                part: PartKind::Text(t.text),
+                                thought: None,
+                                thought_signature: None,
                             }),
                             UserContent::Image(_) => {
                                 // Reserved for future Image support
@@ -84,9 +84,9 @@ impl CompletionModelTrait for CompletionModel {
                                     response: Some(serde_json::json!({ "result": r.result })),
                                 };
                                 parts.push(Part {
-                                    text: None,
-                                    function_call: None,
-                                    function_response: Some(function_response),
+                                    part: PartKind::FunctionResponse(function_response),
+                                    thought: None,
+                                    thought_signature: None,
                                 });
                             }
                         }
@@ -101,9 +101,9 @@ impl CompletionModelTrait for CompletionModel {
                     for item in content.into_iter() {
                         match item {
                             AssistantContent::Text(t) => parts.push(Part {
-                                text: Some(t.text),
-                                function_call: None,
-                                function_response: None,
+                                part: PartKind::Text(t.text),
+                                thought: None,
+                                thought_signature: None,
                             }),
                             AssistantContent::ToolCall(tc) => {
                                 let function_call = super::gemini_api_types::FunctionCall {
@@ -111,9 +111,9 @@ impl CompletionModelTrait for CompletionModel {
                                     args: tc.function.arguments,
                                 };
                                 parts.push(Part {
-                                    text: None,
-                                    function_call: Some(function_call),
-                                    function_response: None,
+                                    part: PartKind::FunctionCall(function_call),
+                                    thought: None,
+                                    thought_signature: None,
                                 });
                             }
                         }
@@ -124,16 +124,14 @@ impl CompletionModelTrait for CompletionModel {
                     });
                 }
                 Message::System { content } => {
-                    // System messages in chat history might need to be merged or handled as 'user' role for Gemini
-                    // or ignored if preamble is preferred.
-                    // For now, treat as user text.
+                    // System messages in chat history treated as user text.
                     let mut parts = Vec::new();
                     for item in content.into_iter() {
                         if let UserContent::Text(t) = item {
                             parts.push(Part {
-                                text: Some(t.text),
-                                function_call: None,
-                                function_response: None,
+                                part: PartKind::Text(t.text),
+                                thought: None,
+                                thought_signature: None,
                             })
                         }
                     }
@@ -149,9 +147,9 @@ impl CompletionModelTrait for CompletionModel {
         let system_instruction = request.preamble.map(|preamble| Content {
             role: Some("user".to_string()),
             parts: vec![Part {
-                text: Some(preamble),
-                function_call: None,
-                function_response: None,
+                part: PartKind::Text(preamble),
+                thought: None,
+                thought_signature: None,
             }],
         });
 
@@ -159,15 +157,21 @@ impl CompletionModelTrait for CompletionModel {
         let tools = if request.tools.is_empty() {
             None
         } else {
-            let function_declarations = request
-                .tools
-                .into_iter()
-                .map(|t| FunctionDeclaration {
+            let mut function_declarations = Vec::new();
+            for t in request.tools {
+                let parameters =
+                    if t.parameters == serde_json::json!({"type": "object", "properties": {}}) {
+                        None
+                    } else {
+                        Some(Schema::try_from(t.parameters)?)
+                    };
+
+                function_declarations.push(FunctionDeclaration {
                     name: t.name,
                     description: t.description,
-                    parameters: Some(t.parameters),
-                })
-                .collect();
+                    parameters,
+                });
+            }
             Some(vec![Tool {
                 function_declarations,
             }])
@@ -242,21 +246,27 @@ impl CompletionModelTrait for CompletionModel {
         let mut content = Vec::new();
         if let Some(c) = &candidate.content {
             for part in &c.parts {
-                if let Some(text) = &part.text {
-                    content.push(AssistantContent::Text(
-                        crate::internal::ai::completion::message::Text { text: text.clone() },
-                    ));
-                } else if let Some(fc) = &part.function_call {
-                    content.push(AssistantContent::ToolCall(
-                        crate::internal::ai::completion::message::ToolCall {
-                            id: fc.name.clone(), // Gemini uses name as ID implicitly or we generate one. Rig uses name.
-                            name: fc.name.clone(),
-                            function: crate::internal::ai::completion::message::Function {
+                match &part.part {
+                    PartKind::Text(text) => {
+                        content.push(AssistantContent::Text(
+                            crate::internal::ai::completion::message::Text { text: text.clone() },
+                        ));
+                    }
+                    PartKind::FunctionCall(fc) => {
+                        content.push(AssistantContent::ToolCall(
+                            crate::internal::ai::completion::message::ToolCall {
+                                id: fc.name.clone(), // Gemini uses name as ID
                                 name: fc.name.clone(),
-                                arguments: fc.args.clone(),
+                                function: crate::internal::ai::completion::message::Function {
+                                    name: fc.name.clone(),
+                                    arguments: fc.args.clone(),
+                                },
                             },
-                        },
-                    ));
+                        ));
+                    }
+                    _ => {
+                        tracing::warn!("Received unsupported part kind in response: {:?}", part);
+                    }
                 }
             }
         }
