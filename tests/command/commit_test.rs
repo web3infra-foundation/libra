@@ -543,3 +543,124 @@ async fn test_commit_amend_with_custom_author() {
     // Should be a different commit
     assert_ne!(initial_commit_id, amended_commit_id);
 }
+
+#[tokio::test]
+#[serial]
+#[should_panic(expected = "nothing to commit, working tree clean")]
+async fn test_commit_empty_working_tree() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    let args = CommitArgs {
+        message: Some("empty commit".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    };
+
+    commit::execute(args).await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_commit_with_actual_changes() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    let init_args = CommitArgs {
+        message: Some("initial commit".to_string()),
+        file: None,
+        allow_empty: true,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    };
+    commit::execute(init_args).await;
+
+    let test_file = temp_path.path().join("test.txt");
+    std::fs::write(&test_file, "test content").unwrap();
+
+    let add_args = add::AddArgs {
+        pathspec: vec!["test.txt".to_string()],
+        all: false,
+        update: false,
+        refresh: false,
+        verbose: false,
+        force: false,
+        dry_run: false,
+        ignore_errors: false,
+    };
+    add::execute(add_args).await;
+
+    let args = CommitArgs {
+        message: Some("add test file".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    };
+
+    commit::execute(args).await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_commit_amend_without_changes() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    // Create an initial commit
+    let init_args = CommitArgs {
+        message: Some("initial commit".to_string()),
+        file: None,
+        allow_empty: true,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    };
+    commit::execute(init_args).await;
+
+    // Amend the commit without any staged changes (should work without allow_empty)
+    let amend_args = CommitArgs {
+        message: Some("amended commit message".to_string()),
+        file: None,
+        allow_empty: false, // Should not need allow_empty for amend
+        conventional: false,
+        no_edit: false,
+        amend: true,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    };
+
+    // This should succeed even without staged changes
+    commit::execute(amend_args).await;
+}
