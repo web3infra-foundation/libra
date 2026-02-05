@@ -1,5 +1,4 @@
-use crate::internal::ai::agent::Agent;
-use crate::internal::ai::{completion::CompletionModel, tools::ToolSet};
+use crate::internal::ai::{agent::Agent, completion::CompletionModel, tools::ToolSet};
 
 /// A builder for configuring and creating AI Agent instances.
 pub struct AgentBuilder<M: CompletionModel> {
