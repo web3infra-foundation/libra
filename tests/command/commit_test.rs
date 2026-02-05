@@ -1,6 +1,5 @@
 //! Integration tests for the commit command covering staged changes, message handling, and tree/hash updates.
 
-use futures::executor::block_on;
 use libra::utils::object_ext::TreeExt;
 use serial_test::serial;
 use tempfile::tempdir;
@@ -547,6 +546,7 @@ async fn test_commit_amend_with_custom_author() {
 
 #[tokio::test]
 #[serial]
+#[should_panic(expected = "nothing to commit, working tree clean")]
 async fn test_commit_empty_working_tree() {
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
@@ -566,11 +566,7 @@ async fn test_commit_empty_working_tree() {
         author: None,
     };
 
-    let result = std::panic::catch_unwind(|| {
-        block_on(commit::execute(args));
-    });
-
-    assert!(result.is_err(), "Empty commit should fail");
+    commit::execute(args).await;
 }
 
 #[tokio::test]
@@ -593,7 +589,7 @@ async fn test_commit_with_actual_changes() {
         no_verify: false,
         author: None,
     };
-    block_on(commit::execute(init_args));
+    commit::execute(init_args).await;
 
     let test_file = temp_path.path().join("test.txt");
     std::fs::write(&test_file, "test content").unwrap();
@@ -624,9 +620,47 @@ async fn test_commit_with_actual_changes() {
         author: None,
     };
 
-    let result = std::panic::catch_unwind(|| {
-        block_on(commit::execute(args));
-    });
+    commit::execute(args).await;
+}
 
-    assert!(result.is_ok(), "Commit with changes should succeed");
+#[tokio::test]
+#[serial]
+async fn test_commit_amend_without_changes() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    // Create an initial commit
+    let init_args = CommitArgs {
+        message: Some("initial commit".to_string()),
+        file: None,
+        allow_empty: true,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    };
+    commit::execute(init_args).await;
+
+    // Amend the commit without any staged changes (should work without allow_empty)
+    let amend_args = CommitArgs {
+        message: Some("amended commit message".to_string()),
+        file: None,
+        allow_empty: false, // Should not need allow_empty for amend
+        conventional: false,
+        no_edit: false,
+        amend: true,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    };
+
+    // This should succeed even without staged changes
+    commit::execute(amend_args).await;
 }
