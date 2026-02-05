@@ -45,15 +45,39 @@ impl<M: CompletionModel> Agent<M> {
 impl<M: CompletionModel> Prompt for Agent<M> {
     async fn prompt(&self, prompt: impl Into<Message> + Send) -> Result<String, CompletionError> {
         let msg = prompt.into();
+        let tools = self.tools.tools.iter().map(|t| t.definition()).collect();
+
         let request = CompletionRequest {
             preamble: self.preamble.clone(),
             chat_history: vec![msg],
             temperature: self.temperature,
+            tools,
             ..Default::default()
         };
 
         let response = self.model.completion(request).await?;
-        Ok(response.choice)
+        // Extract text content for backward compatibility
+        // If there are multiple content items, join text ones.
+        // For tools, this simple Prompt trait might not be enough, but we stick to text return for now.
+        let text_response = response
+            .content
+            .iter()
+            .filter_map(|c| match c {
+                crate::internal::ai::completion::message::AssistantContent::Text(t) => {
+                    Some(t.text.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        if text_response.is_empty() && !response.content.is_empty() {
+            // If no text but has other content (e.g. tool call), return a placeholder or JSON representation
+            // For now, let's return a debug string if no text
+            return Ok(format!("(Non-text response: {:?})", response.content));
+        }
+
+        Ok(text_response)
     }
 }
 
@@ -65,15 +89,34 @@ impl<M: CompletionModel> Chat for Agent<M> {
     ) -> Result<String, CompletionError> {
         let msg = prompt.into();
         chat_history.push(msg);
+        let tools = self.tools.tools.iter().map(|t| t.definition()).collect();
 
         let request = CompletionRequest {
             preamble: self.preamble.clone(),
             chat_history,
             temperature: self.temperature,
+            tools,
             ..Default::default()
         };
 
         let response = self.model.completion(request).await?;
-        Ok(response.choice)
+
+        let text_response = response
+            .content
+            .iter()
+            .filter_map(|c| match c {
+                crate::internal::ai::completion::message::AssistantContent::Text(t) => {
+                    Some(t.text.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        if text_response.is_empty() && !response.content.is_empty() {
+            return Ok(format!("(Non-text response: {:?})", response.content));
+        }
+
+        Ok(text_response)
     }
 }

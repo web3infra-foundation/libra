@@ -1,10 +1,15 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// Request structure for generating content using Gemini API.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerateContentRequest {
     pub contents: Vec<Content>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<Tool>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_config: Option<ToolConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_instruction: Option<Content>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -18,12 +23,16 @@ pub struct Content {
     pub role: Option<String>,
 }
 
-/// A part of the content, which may contain text.
+/// A part of the content, which may contain text or function calls/responses.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Part {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function_call: Option<FunctionCall>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function_response: Option<FunctionResponse>,
 }
 
 /// Configuration for content generation.
@@ -47,4 +56,55 @@ pub struct GenerateContentResponse {
 pub struct Candidate {
     pub content: Option<Content>,
     pub finish_reason: Option<String>,
+}
+
+/// Tool details that the model may use to generate response.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Tool {
+    pub function_declarations: Vec<FunctionDeclaration>,
+}
+
+/// Structured representation of a function declaration as defined by the OpenAPI 3.0 specification.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FunctionDeclaration {
+    pub name: String,
+    pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parameters: Option<Value>,
+}
+
+/// Tool configuration for any Tool specified in the request.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolConfig {
+    pub function_calling_config: Option<FunctionCallingMode>,
+}
+
+/// Configuration for function calling.
+#[derive(Debug, Serialize, Deserialize, Default)]
+#[serde(tag = "mode", rename_all = "UPPERCASE")]
+pub enum FunctionCallingMode {
+    #[default]
+    Auto,
+    None,
+    Any {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        allowed_function_names: Option<Vec<String>>,
+    },
+}
+
+/// A predicted FunctionCall returned from the model.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct FunctionCall {
+    pub name: String,
+    pub args: Value,
+}
+
+/// The result output from a FunctionCall.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct FunctionResponse {
+    pub name: String,
+    pub response: Option<Value>,
 }

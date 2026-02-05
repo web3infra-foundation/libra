@@ -1,6 +1,18 @@
 use std::error::Error;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// A definition of a tool that can be used by the model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDefinition {
+    /// The name of the tool.
+    pub name: String,
+    /// A description of what the tool does.
+    pub description: String,
+    /// The parameters of the tool in JSON Schema format.
+    pub parameters: Value,
+}
 
 /// A trait representing a tool that can be invoked by an AI agent.
 pub trait Tool: Send + Sync {
@@ -9,6 +21,9 @@ pub trait Tool: Send + Sync {
 
     /// Returns a description of what the tool does.
     fn description(&self) -> String;
+
+    /// Returns the definition of the tool.
+    fn definition(&self) -> ToolDefinition;
 
     /// Executes the tool with the given arguments.
     ///

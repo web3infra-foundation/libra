@@ -72,8 +72,11 @@ mod tests {
             &self,
             _request: CompletionRequest,
         ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+            use crate::internal::ai::completion::message::{AssistantContent, Text};
             Ok(CompletionResponse {
-                choice: "mock response".to_string(),
+                content: vec![AssistantContent::Text(Text {
+                    text: "mock response".to_string(),
+                })],
                 raw_response: (),
             })
         }

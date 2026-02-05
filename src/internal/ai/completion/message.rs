@@ -59,6 +59,12 @@ pub struct Image {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ToolCall {
     pub id: String,
+    pub name: String, // Ensure name is present for Gemini mapping
+    pub function: Function,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct Function {
     pub name: String,
     pub arguments: serde_json::Value,
 }
@@ -67,6 +73,10 @@ pub struct ToolCall {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ToolResult {
     pub id: String,
+    /// The name of the tool function that was called.
+    /// This is required for some providers (e.g. Gemini).
+    #[serde(default)]
+    pub name: String,
     pub result: serde_json::Value,
 }
 
