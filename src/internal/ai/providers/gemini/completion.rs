@@ -78,6 +78,15 @@ impl CompletionModelTrait for CompletionModel {
                                 ));
                             }
                             UserContent::ToolResult(r) => {
+                                if r.name.is_empty() {
+                                    return Err(CompletionError::RequestError(
+                                        std::io::Error::new(
+                                            std::io::ErrorKind::InvalidInput,
+                                            "ToolResult name is required for Gemini",
+                                        )
+                                        .into(),
+                                    ));
+                                }
                                 // Gemini requires tool response to have a 'name'
                                 let function_response = super::gemini_api_types::FunctionResponse {
                                     name: r.name,

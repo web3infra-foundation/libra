@@ -31,7 +31,7 @@ impl<M: CompletionModel> AgentBuilder<M> {
         self
     }
 
-    /// Sets the temperature for the agent's responses.
+    /// Sets the temperature for the agent's responses (0.0 to 2.0).
     pub fn temperature(mut self, temperature: f64) -> Result<Self, String> {
         if !(0.0..=2.0).contains(&temperature) {
             return Err(format!(

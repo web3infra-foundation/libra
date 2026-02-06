@@ -57,10 +57,7 @@ impl<M: CompletionModel> ChatAgent<M> {
         // Delegate to the underlying agent's chat implementation.
         // The underlying agent handles the request construction using the provided history
         // and the new user message.
-        let response = self
-            .agent
-            .chat(user_msg.clone(), self.history.clone())
-            .await?;
+        let response = Chat::chat(&self.agent, user_msg.clone(), self.history.clone()).await?;
 
         // Update history with user message and assistant response
         self.history.push(user_msg);

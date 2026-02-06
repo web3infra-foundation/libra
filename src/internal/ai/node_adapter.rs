@@ -63,7 +63,7 @@ impl<M: CompletionModel> Action for AgentAction<M> {
                     let error_msg =
                         format!("Failed to receive input from upstream {:?}: {:?}", id, e);
                     tracing::error!("{}", error_msg);
-                    return Output::Err(error_msg);
+                    return Output::error(error_msg);
                 }
             }
         }
@@ -79,7 +79,7 @@ impl<M: CompletionModel> Action for AgentAction<M> {
             }
             Err(e) => {
                 tracing::error!("Agent Execution Error: {}", e);
-                Output::Err(e.to_string())
+                Output::error(e.to_string())
             }
         }
     }
