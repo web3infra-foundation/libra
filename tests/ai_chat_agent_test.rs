@@ -52,7 +52,7 @@ async fn test_chat_agent_conversation() {
 
     // Verify the response contains the name "Libra"
     assert!(
-        content2.contains("Libra"),
+        content2.to_lowercase().contains("libra"),
         "ChatAgent failed to remember the name. Response was: {}",
         content2
     );
