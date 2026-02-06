@@ -12,7 +12,7 @@ use libra::internal::ai::{
 ///
 /// ```bash
 /// export GEMINI_API_KEY="your_key_here"
-/// cargo test test_chat_agent_conversation
+/// cargo test --test ai_chat_agent_test test_chat_agent_conversation
 /// ```
 #[tokio::test]
 async fn test_chat_agent_conversation() {
