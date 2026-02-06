@@ -150,8 +150,16 @@ pub async fn execute(args: CommitArgs) {
     let index = Index::load(path::index()).unwrap();
     let storage = ClientStorage::init(path::objects());
     let tracked_entries = index.tracked_entries(0);
-    if tracked_entries.is_empty() && !args.allow_empty && !auto_stage_applied {
-        panic!("fatal: no changes added to commit, use --allow-empty to override");
+    // Skip empty commit check for --amend operations (allowed to modify message/author without changes)
+    if tracked_entries.is_empty() && !args.allow_empty && !args.amend && !auto_stage_applied {
+        panic!("nothing to commit, working tree clean");
+    }
+
+    // Additional check: verify if there are any staged changes relative to HEAD
+    // Skip this check for --amend operations
+    let staged_changes = status::changes_to_be_committed().await;
+    if staged_changes.is_empty() && !args.allow_empty && !args.amend {
+        panic!("nothing to commit, working tree clean");
     }
 
     // run pre commit hook
