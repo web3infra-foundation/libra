@@ -30,9 +30,10 @@ pub struct Agent<M: CompletionModel> {
     preamble: Option<String>,
     /// Sampling temperature (0.0 to 2.0). Higher values mean more creativity.
     temperature: Option<f64>,
+    /// Maximum number of steps for tool execution loops.
+    max_steps: usize,
     /// Set of tools available to the agent.
-    /// Tools available to the agent (reserved for future tool-calling support).
-    #[allow(dead_code)]
+    /// Tools available to the agent.
     tools: ToolSet,
 }
 
@@ -46,6 +47,7 @@ impl<M: CompletionModel> Agent<M> {
             model,
             preamble: None,
             temperature: None,
+            max_steps: 4,
             tools: ToolSet::default(),
         }
     }
@@ -56,8 +58,8 @@ impl<M: CompletionModel> Agent<M> {
     ) -> Result<String, CompletionError> {
         let tools: Vec<crate::internal::ai::tools::ToolDefinition> =
             self.tools.tools.iter().map(|t| t.definition()).collect();
+
         let mut steps = 0usize;
-        let max_steps = 4usize;
 
         loop {
             let request = CompletionRequest {
@@ -93,17 +95,21 @@ impl<M: CompletionModel> Agent<M> {
                     .join("\n");
 
                 if text_response.is_empty() && !response.content.is_empty() {
-                    return Ok(format!("(Non-text response: {:?})", response.content));
+                    // Return a more user-friendly error instead of debug format
+                    return Err(CompletionError::ResponseError(
+                        "Model returned non-text response (likely only thought or unsupported content)".into()
+                    ));
                 }
 
                 return Ok(text_response);
             }
 
             steps += 1;
-            if steps > max_steps {
-                return Err(CompletionError::ResponseError(
-                    "Tool calling exceeded max steps".into(),
-                ));
+            if steps >= self.max_steps {
+                return Err(CompletionError::ResponseError(format!(
+                    "Tool calling exceeded max steps ({})",
+                    self.max_steps
+                )));
             }
 
             let assistant_content = match crate::internal::ai::completion::message::OneOrMany::many(

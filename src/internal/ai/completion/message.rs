@@ -75,7 +75,6 @@ pub struct ToolResult {
     pub id: String,
     /// The name of the tool function that was called.
     /// This is required for some providers (e.g. Gemini).
-    #[serde(default)]
     pub name: String,
     pub result: serde_json::Value,
 }

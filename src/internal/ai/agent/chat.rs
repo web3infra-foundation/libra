@@ -1,5 +1,5 @@
 use super::Agent;
-use crate::internal::ai::completion::{Chat, CompletionError, CompletionModel, Message};
+use crate::internal::ai::completion::{CompletionError, CompletionModel, Message};
 
 /// A stateful agent that maintains conversation history.
 ///
@@ -54,24 +54,31 @@ impl<M: CompletionModel> ChatAgent<M> {
     ) -> Result<String, CompletionError> {
         let user_msg = Message::user(prompt.into());
 
-        // Delegate to the underlying agent's chat implementation.
-        // The underlying agent handles the request construction using the provided history
-        // and the new user message.
-        let response = Chat::chat(&self.agent, user_msg.clone(), self.history.clone()).await?;
-
-        // Update history with user message and assistant response
+        // Update history with user message first
         self.history.push(user_msg);
+
+        // Run the agent with the current history.
+        // We must clone the history because the agent takes ownership of the context for the request.
+        let response = self.agent.run_with_history(self.history.clone()).await?;
+
+        // Update history with assistant response
         self.history.push(Message::assistant(response.clone()));
 
         Ok(response)
     }
 
     /// Returns a reference to the current conversation history.
+    ///
+    /// Note: The history grows with each turn. For long-running conversations,
+    /// consider monitoring the length and clearing it if it becomes too large
+    /// to avoid token limit issues or excessive memory usage.
     pub fn history(&self) -> &[Message] {
         &self.history
     }
 
     /// Clears the conversation history.
+    ///
+    /// Use this to reset the conversation context.
     pub fn clear_history(&mut self) {
         self.history.clear();
     }

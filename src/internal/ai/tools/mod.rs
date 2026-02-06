@@ -17,10 +17,14 @@ pub struct ToolDefinition {
 /// A trait representing a tool that can be invoked by an AI agent.
 pub trait Tool: Send + Sync {
     /// Returns the name of the tool.
-    fn name(&self) -> String;
+    fn name(&self) -> String {
+        self.definition().name
+    }
 
     /// Returns a description of what the tool does.
-    fn description(&self) -> String;
+    fn description(&self) -> String {
+        self.definition().description
+    }
 
     /// Returns the definition of the tool.
     fn definition(&self) -> ToolDefinition;

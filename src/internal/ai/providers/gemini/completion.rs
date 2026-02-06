@@ -1,4 +1,5 @@
 use bytes::Buf;
+use uuid::Uuid;
 
 use super::{
     client::Client,
@@ -87,9 +88,22 @@ impl CompletionModelTrait for CompletionModel {
                                         .into(),
                                     ));
                                 }
+                                if !r
+                                    .name
+                                    .chars()
+                                    .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+                                {
+                                    return Err(CompletionError::RequestError(
+                                        std::io::Error::new(
+                                            std::io::ErrorKind::InvalidInput,
+                                            format!("Invalid ToolResult name: {}", r.name),
+                                        )
+                                        .into(),
+                                    ));
+                                }
                                 // Gemini requires tool response to have a 'name'
                                 let function_response = super::gemini_api_types::FunctionResponse {
-                                    name: r.name,
+                                    name: r.name.clone(),
                                     response: Some(serde_json::json!({ "result": r.result })),
                                 };
                                 parts.push(Part {
@@ -168,12 +182,13 @@ impl CompletionModelTrait for CompletionModel {
         } else {
             let mut function_declarations = Vec::new();
             for t in request.tools {
-                let parameters =
-                    if t.parameters == serde_json::json!({"type": "object", "properties": {}}) {
-                        None
-                    } else {
-                        Some(Schema::try_from(t.parameters)?)
-                    };
+                let parameters = if t.parameters.as_object().is_some_and(|o| o.is_empty())
+                    || t.parameters == serde_json::json!({"type": "object", "properties": {}})
+                {
+                    None
+                } else {
+                    Some(Schema::try_from(t.parameters)?)
+                };
 
                 function_declarations.push(FunctionDeclaration {
                     name: t.name,
@@ -220,10 +235,10 @@ impl CompletionModelTrait for CompletionModel {
         tracing::info!("Received response status: {}", resp.status());
 
         if !resp.status().is_success() {
-            // Read only the first 1KB of the error body to avoid memory issues with large responses
+            // Read up to 4KB of the error body to avoid memory issues with large responses
             // and handle potential non-UTF8 content safely.
             use std::io::Read;
-            let mut buf = [0u8; 1024];
+            let mut buf = [0u8; 4096];
             let mut chunk = resp
                 .bytes()
                 .await
@@ -232,7 +247,10 @@ impl CompletionModelTrait for CompletionModel {
             let n = chunk
                 .read(&mut buf)
                 .map_err(|e: std::io::Error| CompletionError::ResponseError(e.to_string()))?;
-            let text = String::from_utf8_lossy(&buf[..n]);
+            let mut text = String::from_utf8_lossy(&buf[..n]).to_string();
+            if n == 4096 {
+                text.push_str("... (truncated)");
+            }
 
             return Err(CompletionError::ProviderError(format!(
                 "Gemini API Error: {}",
@@ -264,7 +282,7 @@ impl CompletionModelTrait for CompletionModel {
                     PartKind::FunctionCall(fc) => {
                         content.push(AssistantContent::ToolCall(
                             crate::internal::ai::completion::message::ToolCall {
-                                id: fc.name.clone(), // Gemini uses name as ID
+                                id: format!("{}-{}", fc.name, Uuid::new_v4()), // Generate unique ID
                                 name: fc.name.clone(),
                                 function: crate::internal::ai::completion::message::Function {
                                     name: fc.name.clone(),

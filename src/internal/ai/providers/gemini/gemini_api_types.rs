@@ -161,11 +161,13 @@ pub struct Schema {
 fn extract_type(type_value: &Value) -> Option<String> {
     if type_value.is_string() {
         type_value.as_str().map(String::from)
-    } else if type_value.is_array() {
-        type_value
-            .as_array()
-            .and_then(|arr| arr.first())
-            .and_then(|v| v.as_str().map(String::from))
+    } else if let Some(arr) = type_value.as_array() {
+        // Handle array of types, e.g. ["string", "null"]
+        // Return the first non-null type found
+        arr.iter()
+            .filter_map(|v| v.as_str())
+            .find(|&s| s != "null")
+            .map(String::from)
     } else {
         None
     }
@@ -216,35 +218,37 @@ fn extract_schema_from_composition(composition: &Value) -> Option<serde_json::Ma
 }
 
 /// Helper function to infer the type of a schema object.
-fn infer_type(obj: &serde_json::Map<String, Value>) -> String {
+fn infer_type(obj: &serde_json::Map<String, Value>) -> Result<String, CompletionError> {
     if let Some(type_val) = obj.get("type")
         && let Some(type_str) = extract_type(type_val)
     {
-        return type_str;
+        return Ok(type_str);
     }
 
     if let Some(any_of) = obj.get("anyOf")
         && let Some(type_str) = extract_type_from_composition(any_of)
     {
-        return type_str;
+        return Ok(type_str);
     }
 
     if let Some(one_of) = obj.get("oneOf")
         && let Some(type_str) = extract_type_from_composition(one_of)
     {
-        return type_str;
+        return Ok(type_str);
     }
 
     if let Some(all_of) = obj.get("allOf")
         && let Some(type_str) = extract_type_from_composition(all_of)
     {
-        return type_str;
+        return Ok(type_str);
     }
 
     if obj.contains_key("properties") {
-        "object".to_string()
+        Ok("object".to_string())
     } else {
-        String::new()
+        Err(CompletionError::ResponseError(
+            "Could not infer type for schema".into(),
+        ))
     }
 }
 
@@ -270,7 +274,7 @@ impl TryFrom<Value> for Schema {
             };
 
             Ok(Schema {
-                r#type: infer_type(obj),
+                r#type: infer_type(obj)?,
                 format: obj.get("format").and_then(|v| v.as_str()).map(String::from),
                 description: obj
                     .get("description")
@@ -285,18 +289,29 @@ impl TryFrom<Value> for Schema {
                 max_items: obj
                     .get("maxItems")
                     .and_then(|v| v.as_i64())
-                    .map(|v| v as i32),
+                    .and_then(|v| i32::try_from(v).ok()),
                 min_items: obj
                     .get("minItems")
                     .and_then(|v| v.as_i64())
-                    .map(|v| v as i32),
+                    .and_then(|v| i32::try_from(v).ok()),
                 properties: props_source
                     .get("properties")
                     .and_then(|v| v.as_object())
                     .map(|map| {
                         map.iter()
                             .filter_map(|(k, v)| {
-                                v.clone().try_into().ok().map(|schema| (k.clone(), schema))
+                                match v.clone().try_into() {
+                                    Ok(schema) => Some((k.clone(), schema)),
+                                    Err(e) => {
+                                        // Log error or accumulate? For now, we skip invalid properties
+                                        // but ideally we should warn.
+                                        eprintln!(
+                                            "Warning: Failed to convert property {}: {}",
+                                            k, e
+                                        );
+                                        None
+                                    }
+                                }
                             })
                             .collect()
                     }),
@@ -322,6 +337,26 @@ impl TryFrom<Value> for Schema {
 }
 
 /// Flattens a JSON schema by resolving all `$ref` references inline.
+///
+/// This function recursively resolves references within the schema, replacing `$ref`
+/// nodes with the content of the referenced definition from `$defs` or `definitions`.
+///
+/// # Example
+///
+/// ```json
+/// {
+///   "$defs": { "A": { "type": "string" } },
+///   "properties": { "prop": { "$ref": "#/$defs/A" } }
+/// }
+/// ```
+///
+/// Becomes:
+///
+/// ```json
+/// {
+///   "properties": { "prop": { "type": "string" } }
+/// }
+/// ```
 pub fn flatten_schema(mut schema: Value) -> Result<Value, CompletionError> {
     let defs = if let Some(obj) = schema.as_object() {
         obj.get("$defs").or_else(|| obj.get("definitions")).cloned()
@@ -339,7 +374,7 @@ pub fn flatten_schema(mut schema: Value) -> Result<Value, CompletionError> {
         ));
     };
 
-    resolve_refs(&mut schema, defs_obj)?;
+    resolve_refs(&mut schema, defs_obj, 0)?;
 
     if let Some(obj) = schema.as_object_mut() {
         obj.remove("$defs");
@@ -352,7 +387,14 @@ pub fn flatten_schema(mut schema: Value) -> Result<Value, CompletionError> {
 fn resolve_refs(
     value: &mut Value,
     defs: &serde_json::Map<String, Value>,
+    depth: usize,
 ) -> Result<(), CompletionError> {
+    if depth > 50 {
+        return Err(CompletionError::ResponseError(
+            "Schema recursion limit exceeded".into(),
+        ));
+    }
+
     match value {
         Value::Object(obj) => {
             if let Some(ref_value) = obj.get("$ref")
@@ -365,18 +407,18 @@ fn resolve_refs(
                 })?;
 
                 let mut resolved = def.clone();
-                resolve_refs(&mut resolved, defs)?;
+                resolve_refs(&mut resolved, defs, depth + 1)?;
                 *value = resolved;
                 return Ok(());
             }
 
             for (_, v) in obj.iter_mut() {
-                resolve_refs(v, defs)?;
+                resolve_refs(v, defs, depth + 1)?;
             }
         }
         Value::Array(arr) => {
             for item in arr.iter_mut() {
-                resolve_refs(item, defs)?;
+                resolve_refs(item, defs, depth + 1)?;
             }
         }
         _ => {}
