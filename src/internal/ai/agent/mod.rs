@@ -190,15 +190,17 @@ impl<M: CompletionModel> Chat for Agent<M> {
 
 #[cfg(test)]
 mod tests {
-    use super::AgentBuilder;
-    use crate::internal::ai::completion::message::{
-        AssistantContent, Function, Text, ToolCall, UserContent,
-    };
-    use crate::internal::ai::completion::{
-        CompletionError, CompletionModel, CompletionRequest, CompletionResponse, Message, Prompt,
-    };
-    use crate::internal::ai::tools::{Tool, ToolDefinition, ToolSet};
     use serde_json::json;
+
+    use super::AgentBuilder;
+    use crate::internal::ai::{
+        completion::{
+            CompletionError, CompletionModel, CompletionRequest, CompletionResponse, Message,
+            Prompt,
+            message::{AssistantContent, Function, Text, ToolCall, UserContent},
+        },
+        tools::{Tool, ToolDefinition, ToolSet},
+    };
 
     #[derive(Clone)]
     struct MockModel;
