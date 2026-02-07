@@ -145,10 +145,13 @@ where
         for comp in path.components() {
             match comp {
                 Component::Prefix(prefix) => out.push(prefix.as_os_str()),
-                Component::RootDir => out.push(Path::new("/")),
+                Component::RootDir => out.push(Path::new(comp.as_os_str())),
                 Component::CurDir => {}
                 Component::ParentDir => {
-                    out.pop();
+                    // Never allow `..` to escape above filesystem root/prefix.
+                    if matches!(out.components().next_back(), Some(Component::Normal(_))) {
+                        out.pop();
+                    }
                 }
                 Component::Normal(part) => out.push(part),
             }
@@ -622,6 +625,24 @@ mod test {
         assert!(is_sub_path("src/main.rs", "src/"));
         assert!(is_sub_path("src/main.rs", "src/main.rs"));
         assert!(is_sub_path("src/main.rs", "."));
+    }
+
+    #[test]
+    fn test_is_sub_path_parent_dir_cannot_escape_root() {
+        assert!(!is_sub_path("/../../etc/passwd", "/tmp"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_is_sub_path_preserves_windows_prefix() {
+        assert!(is_sub_path(
+            r"C:\repo\sub\..\file.txt",
+            r"C:\repo"
+        ));
+        assert!(!is_sub_path(
+            r"C:\repo\..\Windows\System32",
+            r"C:\repo"
+        ));
     }
 
     #[test]

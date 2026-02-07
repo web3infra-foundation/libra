@@ -154,7 +154,9 @@ async fn run_graph_blocking<M: CompletionModel + 'static>(
             .cloned()
             .flatten()
             .map(|v| (*v).clone())
-            .unwrap_or_default();
+            .ok_or_else(|| {
+                "AI node produced no string output (node returned empty/non-string output)".to_string()
+            })?;
         Ok::<String, String>(output)
     })
     .await

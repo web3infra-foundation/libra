@@ -60,10 +60,19 @@ pub struct ToolRegistry {
 impl ToolRegistry {
     /// Create a new empty ToolRegistry.
     pub fn new() -> Self {
-        Self {
+        Self::try_new().unwrap_or_else(|err| {
+            panic!(
+                "failed to resolve current working directory for ToolRegistry::new(): {err}"
+            )
+        })
+    }
+
+    /// Try to create a new empty ToolRegistry from the current working directory.
+    pub fn try_new() -> std::io::Result<Self> {
+        Ok(Self {
             handlers: HashMap::new(),
-            working_dir: std::env::current_dir().unwrap_or_else(|_| ".".into()),
-        }
+            working_dir: std::env::current_dir()?,
+        })
     }
 
     /// Create a new ToolRegistry with a specific working directory.
@@ -119,7 +128,7 @@ impl ToolRegistry {
     ///
     /// This method validates the tool name, checks payload compatibility,
     /// and executes the tool.
-    pub async fn dispatch(&self, invocation: ToolInvocation) -> ToolResult<ToolOutput> {
+    pub async fn dispatch(&self, mut invocation: ToolInvocation) -> ToolResult<ToolOutput> {
         let tool_name = invocation.tool_name.clone();
 
         let handler = self
@@ -131,6 +140,10 @@ impl ToolRegistry {
                 "Tool {tool_name} received incompatible payload type"
             )));
         }
+
+        // The registry working directory is the single source of truth for sandboxing.
+        // Ignore any caller-provided working_dir to prevent sandbox bypass.
+        invocation.working_dir = self.working_dir.clone();
 
         handler.handle(invocation).await
     }
@@ -175,9 +188,18 @@ pub struct ToolRegistryBuilder {
 impl ToolRegistryBuilder {
     /// Create a new ToolRegistryBuilder.
     pub fn new() -> Self {
-        Self {
-            registry: ToolRegistry::new(),
-        }
+        Self::try_new().unwrap_or_else(|err| {
+            panic!(
+                "failed to resolve current working directory for ToolRegistryBuilder::new(): {err}"
+            )
+        })
+    }
+
+    /// Try to create a new ToolRegistryBuilder.
+    pub fn try_new() -> std::io::Result<Self> {
+        Ok(Self {
+            registry: ToolRegistry::try_new()?,
+        })
     }
 
     /// Create a new ToolRegistryBuilder with a specific working directory.

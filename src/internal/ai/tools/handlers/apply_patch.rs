@@ -246,16 +246,24 @@ fn parse_and_apply_unified_diff(original: &str, patch: &str) -> Result<String, T
                             eprintln!("[apply_patch] ~ context seek from @{} to @{} '{}'", current_line, found, expected);
                         }
                         current_line = found + 1;
-                    } else if current_line < result_lines.len() {
+                    } else {
+                        let actual = if current_line < result_lines.len() {
+                            result_lines[current_line].clone()
+                        } else {
+                            "<end of file>".to_string()
+                        };
                         if debug {
-                            eprintln!("[apply_patch] ! context mismatch @{} expected='{}' actual='{}'",
-                                current_line,
-                                expected,
-                                result_lines[current_line]
+                            eprintln!(
+                                "[apply_patch] ! context mismatch @{} expected='{}' actual='{}'",
+                                current_line, expected, actual
                             );
                         }
-                        // If we can't match context, advance to avoid infinite loops.
-                        current_line += 1;
+                        return Err(ToolError::ExecutionFailed(format!(
+                            "Patch failed: context mismatch at line {}: expected '{}', found '{}'",
+                            current_line + 1,
+                            expected,
+                            actual
+                        )));
                     }
                 }
 
