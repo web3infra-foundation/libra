@@ -3,7 +3,9 @@ pub mod request;
 
 use std::future::Future;
 
-pub use message::{AssistantContent, Message, MessageError, UserContent};
+pub use message::{
+    AssistantContent, Message, MessageError, OneOrMany, Text, ToolCall, ToolResult, UserContent,
+};
 pub use request::{CompletionRequest, CompletionResponse};
 use thiserror::Error;
 

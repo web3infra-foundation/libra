@@ -17,8 +17,9 @@ pub struct CompletionRequest {
 /// Represents a response from the AI completion service.
 #[derive(Debug)]
 pub struct CompletionResponse<T> {
-    pub choice: String,  // Simplified for basic text
-    pub raw_response: T, // Raw response from the AI service
+    pub choice: String,           // Simplified for basic text
+    pub message: Option<Message>, // Structured assistant message (text/tool calls)
+    pub raw_response: T,          // Raw response from the AI service
 }
 
 impl CompletionRequest {

@@ -67,6 +67,8 @@ pub struct ToolCall {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ToolResult {
     pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
     pub result: serde_json::Value,
 }
 

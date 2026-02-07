@@ -74,6 +74,7 @@ mod tests {
         ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
             Ok(CompletionResponse {
                 choice: "mock response".to_string(),
+                message: None,
                 raw_response: (),
             })
         }
