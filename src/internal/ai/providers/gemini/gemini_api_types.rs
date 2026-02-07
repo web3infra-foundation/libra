@@ -1,10 +1,19 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::internal::ai::completion::CompletionError;
 
 /// Request structure for generating content using Gemini API.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerateContentRequest {
     pub contents: Vec<Content>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<Tool>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_config: Option<ToolConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_instruction: Option<Content>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -18,12 +27,36 @@ pub struct Content {
     pub role: Option<String>,
 }
 
-/// A part of the content, which may contain text.
+/// A part of the content, which may contain text or function calls/responses.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Part {
+    /// Whether or not the part is a reasoning/thinking text or not.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
+    pub thought: Option<bool>,
+    /// An opaque sig for the thought so it can be reused - is a base64 string.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thought_signature: Option<String>,
+    #[serde(flatten)]
+    pub part: PartKind,
+}
+
+/// Enum representing the different kinds of parts in a content message.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum PartKind {
+    Text(String),
+    FunctionCall(FunctionCall),
+    FunctionResponse(FunctionResponse),
+    InlineData(Blob),
+}
+
+/// Raw media bytes.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Blob {
+    pub mime_type: String,
+    pub data: String,
 }
 
 /// Configuration for content generation.
@@ -47,4 +80,404 @@ pub struct GenerateContentResponse {
 pub struct Candidate {
     pub content: Option<Content>,
     pub finish_reason: Option<String>,
+}
+
+/// Tool details that the model may use to generate response.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Tool {
+    pub function_declarations: Vec<FunctionDeclaration>,
+}
+
+/// Structured representation of a function declaration as defined by the OpenAPI 3.0 specification.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FunctionDeclaration {
+    pub name: String,
+    pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parameters: Option<Schema>,
+}
+
+/// Tool configuration for any Tool specified in the request.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolConfig {
+    pub function_calling_config: Option<FunctionCallingMode>,
+}
+
+/// Configuration for function calling.
+#[derive(Debug, Serialize, Deserialize, Default)]
+#[serde(tag = "mode", rename_all = "UPPERCASE")]
+pub enum FunctionCallingMode {
+    #[default]
+    Auto,
+    None,
+    Any {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        allowed_function_names: Option<Vec<String>>,
+    },
+}
+
+/// A predicted FunctionCall returned from the model.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct FunctionCall {
+    pub name: String,
+    pub args: Value,
+}
+
+/// The result output from a FunctionCall.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct FunctionResponse {
+    pub name: String,
+    pub response: Option<Value>,
+}
+
+/// The Schema object allows the definition of input and output data types.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct Schema {
+    pub r#type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nullable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r#enum: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_items: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_items: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub properties: Option<HashMap<String, Schema>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub items: Option<Box<Schema>>,
+}
+
+/// Helper function to extract the type string from a JSON value.
+fn extract_type(type_value: &Value) -> Option<String> {
+    if type_value.is_string() {
+        type_value.as_str().map(String::from)
+    } else if let Some(arr) = type_value.as_array() {
+        // Handle array of types, e.g. ["string", "null"]
+        // Return the first non-null type found
+        arr.iter()
+            .filter_map(|v| v.as_str())
+            .find(|&s| s != "null")
+            .map(String::from)
+    } else {
+        None
+    }
+}
+
+/// Helper function to extract type from anyOf, oneOf, or allOf schemas.
+fn extract_type_from_composition(composition: &Value) -> Option<String> {
+    composition.as_array().and_then(|arr| {
+        arr.iter().find_map(|schema| {
+            if let Some(obj) = schema.as_object() {
+                if let Some(type_val) = obj.get("type")
+                    && let Some(type_str) = type_val.as_str()
+                    && type_str == "null"
+                {
+                    return None;
+                }
+                obj.get("type").and_then(extract_type).or_else(|| {
+                    if obj.contains_key("properties") {
+                        Some("object".to_string())
+                    } else {
+                        None
+                    }
+                })
+            } else {
+                None
+            }
+        })
+    })
+}
+
+/// Helper function to extract the first non-null schema from anyOf, oneOf, or allOf.
+fn extract_schema_from_composition(composition: &Value) -> Option<serde_json::Map<String, Value>> {
+    composition.as_array().and_then(|arr| {
+        arr.iter().find_map(|schema| {
+            if let Some(obj) = schema.as_object()
+                && let Some(type_val) = obj.get("type")
+                && let Some(type_str) = type_val.as_str()
+            {
+                if type_str == "null" {
+                    return None;
+                }
+                Some(obj.clone())
+            } else {
+                None
+            }
+        })
+    })
+}
+
+/// Helper function to infer the type of a schema object.
+fn infer_type(obj: &serde_json::Map<String, Value>) -> Result<String, CompletionError> {
+    if let Some(type_val) = obj.get("type")
+        && let Some(type_str) = extract_type(type_val)
+    {
+        return Ok(type_str);
+    }
+
+    if let Some(any_of) = obj.get("anyOf")
+        && let Some(type_str) = extract_type_from_composition(any_of)
+    {
+        return Ok(type_str);
+    }
+
+    if let Some(one_of) = obj.get("oneOf")
+        && let Some(type_str) = extract_type_from_composition(one_of)
+    {
+        return Ok(type_str);
+    }
+
+    if let Some(all_of) = obj.get("allOf")
+        && let Some(type_str) = extract_type_from_composition(all_of)
+    {
+        return Ok(type_str);
+    }
+
+    if obj.contains_key("properties") {
+        Ok("object".to_string())
+    } else {
+        Err(CompletionError::ResponseError(
+            "Could not infer type for schema".into(),
+        ))
+    }
+}
+
+impl TryFrom<Value> for Schema {
+    type Error = CompletionError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        let flattened_val = flatten_schema(value)?;
+        if let Some(obj) = flattened_val.as_object() {
+            let props_source = if obj.get("properties").is_none() {
+                if let Some(any_of) = obj.get("anyOf") {
+                    extract_schema_from_composition(any_of)
+                } else if let Some(one_of) = obj.get("oneOf") {
+                    extract_schema_from_composition(one_of)
+                } else if let Some(all_of) = obj.get("allOf") {
+                    extract_schema_from_composition(all_of)
+                } else {
+                    None
+                }
+                .unwrap_or(obj.clone())
+            } else {
+                obj.clone()
+            };
+
+            Ok(Schema {
+                r#type: infer_type(obj)?,
+                format: obj.get("format").and_then(|v| v.as_str()).map(String::from),
+                description: obj
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                nullable: obj.get("nullable").and_then(|v| v.as_bool()),
+                r#enum: obj.get("enum").and_then(|v| v.as_array()).map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                }),
+                max_items: obj
+                    .get("maxItems")
+                    .and_then(|v| v.as_i64())
+                    .and_then(|v| i32::try_from(v).ok()),
+                min_items: obj
+                    .get("minItems")
+                    .and_then(|v| v.as_i64())
+                    .and_then(|v| i32::try_from(v).ok()),
+                properties: props_source
+                    .get("properties")
+                    .and_then(|v| v.as_object())
+                    .map(|map| {
+                        map.iter()
+                            .filter_map(|(k, v)| {
+                                match v.clone().try_into() {
+                                    Ok(schema) => Some((k.clone(), schema)),
+                                    Err(e) => {
+                                        // Log error or accumulate? For now, we skip invalid properties
+                                        // but ideally we should warn.
+                                        eprintln!(
+                                            "Warning: Failed to convert property {}: {}",
+                                            k, e
+                                        );
+                                        None
+                                    }
+                                }
+                            })
+                            .collect()
+                    }),
+                required: props_source
+                    .get("required")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    }),
+                items: obj
+                    .get("items")
+                    .and_then(|v| v.clone().try_into().ok())
+                    .map(Box::new),
+            })
+        } else {
+            Err(CompletionError::ResponseError(
+                "Expected a JSON object for Schema".into(),
+            ))
+        }
+    }
+}
+
+/// Flattens a JSON schema by resolving all `$ref` references inline.
+///
+/// This function recursively resolves references within the schema, replacing `$ref`
+/// nodes with the content of the referenced definition from `$defs` or `definitions`.
+///
+/// # Example
+///
+/// ```json
+/// {
+///   "$defs": { "A": { "type": "string" } },
+///   "properties": { "prop": { "$ref": "#/$defs/A" } }
+/// }
+/// ```
+///
+/// Becomes:
+///
+/// ```json
+/// {
+///   "properties": { "prop": { "type": "string" } }
+/// }
+/// ```
+pub fn flatten_schema(mut schema: Value) -> Result<Value, CompletionError> {
+    let defs = if let Some(obj) = schema.as_object() {
+        obj.get("$defs").or_else(|| obj.get("definitions")).cloned()
+    } else {
+        None
+    };
+
+    let Some(defs_value) = defs else {
+        return Ok(schema);
+    };
+
+    let Some(defs_obj) = defs_value.as_object() else {
+        return Err(CompletionError::ResponseError(
+            "$defs must be an object".into(),
+        ));
+    };
+
+    resolve_refs(&mut schema, defs_obj, 0)?;
+
+    if let Some(obj) = schema.as_object_mut() {
+        obj.remove("$defs");
+        obj.remove("definitions");
+    }
+
+    Ok(schema)
+}
+
+fn resolve_refs(
+    value: &mut Value,
+    defs: &serde_json::Map<String, Value>,
+    depth: usize,
+) -> Result<(), CompletionError> {
+    if depth > 50 {
+        return Err(CompletionError::ResponseError(
+            "Schema recursion limit exceeded".into(),
+        ));
+    }
+
+    match value {
+        Value::Object(obj) => {
+            if let Some(ref_value) = obj.get("$ref")
+                && let Some(ref_str) = ref_value.as_str()
+            {
+                let def_name = parse_ref_path(ref_str)?;
+
+                let def = defs.get(&def_name).ok_or_else(|| {
+                    CompletionError::ResponseError(format!("Reference not found: {}", ref_str))
+                })?;
+
+                let mut resolved = def.clone();
+                resolve_refs(&mut resolved, defs, depth + 1)?;
+                *value = resolved;
+                return Ok(());
+            }
+
+            for (_, v) in obj.iter_mut() {
+                resolve_refs(v, defs, depth + 1)?;
+            }
+        }
+        Value::Array(arr) => {
+            for item in arr.iter_mut() {
+                resolve_refs(item, defs, depth + 1)?;
+            }
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn parse_ref_path(ref_str: &str) -> Result<String, CompletionError> {
+    if let Some(fragment) = ref_str.strip_prefix('#') {
+        if let Some(name) = fragment.strip_prefix("/$defs/") {
+            Ok(name.to_string())
+        } else if let Some(name) = fragment.strip_prefix("/definitions/") {
+            Ok(name.to_string())
+        } else {
+            Err(CompletionError::ResponseError(format!(
+                "Unsupported reference format: {}",
+                ref_str
+            )))
+        }
+    } else {
+        Err(CompletionError::ResponseError(format!(
+            "Only fragment references (#/...) are supported: {}",
+            ref_str
+        )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn test_flattened_schema() {
+        let ref_schema = json!({
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/Person"
+            },
+            "$defs": {
+                "Person": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" }
+                    }
+                }
+            }
+        });
+
+        let flattened = flatten_schema(ref_schema).unwrap();
+        let schema: Schema = flattened.try_into().unwrap();
+
+        assert_eq!(schema.r#type, "array");
+
+        if let Some(items) = schema.items {
+            assert_eq!(items.r#type, "object");
+            assert!(items.properties.is_some());
+        }
+    }
 }

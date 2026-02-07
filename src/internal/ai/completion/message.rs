@@ -59,6 +59,12 @@ pub struct Image {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ToolCall {
     pub id: String,
+    pub name: String, // Ensure name is present for Gemini mapping
+    pub function: Function,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct Function {
     pub name: String,
     pub arguments: serde_json::Value,
 }
@@ -67,6 +73,9 @@ pub struct ToolCall {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ToolResult {
     pub id: String,
+    /// The name of the tool function that was called.
+    /// This is required for some providers (e.g. Gemini).
+    pub name: String,
     pub result: serde_json::Value,
 }
 
@@ -170,6 +179,14 @@ impl Message {
     pub fn user(text: impl Into<String>) -> Self {
         Message::User {
             content: OneOrMany::One(UserContent::Text(Text { text: text.into() })),
+        }
+    }
+
+    /// Create an assistant message with text content.
+    pub fn assistant(text: impl Into<String>) -> Self {
+        Message::Assistant {
+            id: None,
+            content: OneOrMany::One(AssistantContent::Text(Text { text: text.into() })),
         }
     }
 }
