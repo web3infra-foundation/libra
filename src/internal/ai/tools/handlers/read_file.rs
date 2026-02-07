@@ -152,8 +152,6 @@ async fn read_file_slice(
 
 /// Format a line from raw bytes, handling encoding and length limits.
 fn format_line(bytes: &[u8]) -> String {
-    const MAX_LINE_LENGTH: usize = 500;
-
     let decoded = String::from_utf8_lossy(bytes);
 
     if decoded.len() > MAX_LINE_LENGTH {

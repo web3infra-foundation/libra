@@ -454,12 +454,9 @@ pub async fn init(args: InitArgs) -> io::Result<()> {
     #[cfg(not(target_os = "windows"))]
     let database_url = format!("sqlite://{}", database_path.to_str().unwrap());
 
-    let conn = Database::connect(&database_url).await.map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::Other,
-            format!("Failed to connect to database: {}", e),
-        )
-    })?;
+    let conn = Database::connect(&database_url)
+        .await
+        .map_err(|e| io::Error::other(format!("Failed to connect to database: {}", e)))?;
 
     // Create config table with bare parameter consideration and store ref format
     init_config(
@@ -469,12 +466,7 @@ pub async fn init(args: InitArgs) -> io::Result<()> {
         args.ref_format.as_ref(),
     )
     .await
-    .map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::Other,
-            format!("Failed to initialize config: {}", e),
-        )
-    })?;
+    .map_err(|e| io::Error::other(format!("Failed to initialize config: {}", e)))?;
 
     // Determine the initial branch name: use provided name or default
     let initial_branch_name = args
@@ -497,12 +489,10 @@ pub async fn init(args: InitArgs) -> io::Result<()> {
         kind: Set(reference::ConfigKind::Head),
         ..Default::default() // all others are `NotSet`
     };
-    head_reference.insert(&conn).await.map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::Other,
-            format!("Failed to insert HEAD reference: {}", e),
-        )
-    })?;
+    head_reference
+        .insert(&conn)
+        .await
+        .map_err(|e| io::Error::other(format!("Failed to insert HEAD reference: {}", e)))?;
 
     // Set .libra as hidden
     set_dir_hidden(root_dir.to_str().unwrap())?;

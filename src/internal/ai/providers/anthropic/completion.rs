@@ -1,7 +1,5 @@
 //! Anthropic completion model implementation.
 
-use std::future::Future;
-
 use serde::{Deserialize, Serialize};
 
 use crate::internal::ai::{
@@ -130,17 +128,16 @@ pub struct AnthropicResponse {
     pub id: String,
     pub r#type: String,
     pub role: String,
-    pub content: Vec<AnthropicContentBlock>,
+    content: Vec<AnthropicContentBlock>,
     pub model: String,
     pub stop_reason: Option<String>,
-    pub usage: AnthropicUsage,
+    usage: AnthropicUsage,
 }
 
 /// Anthropic API error response.
 #[derive(Debug, Deserialize)]
 struct AnthropicError {
     message: String,
-    r#type: Option<String>,
 }
 
 /// Anthropic API error wrapper.
@@ -156,74 +153,67 @@ struct AnthropicErrorResponse {
 impl CompletionModelTrait for Model {
     type Response = AnthropicResponse;
 
-    fn completion(
+    async fn completion(
         &self,
         request: CompletionRequest,
-    ) -> impl Future<Output = Result<CompletionResponse<Self::Response>, CompletionError>> + Send
-    {
-        async move {
-            let tools = parse_tools(&request.tools)?;
-            let (system, messages) = build_messages(&request)?;
+    ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+        let tools = parse_tools(&request.tools)?;
+        let (system, messages) = build_messages(&request)?;
 
-            // Calculate default max_tokens based on model if not provided
-            // Anthropic requires max_tokens to be set
-            let max_tokens = calculate_max_tokens(&self.model);
+        // Calculate default max_tokens based on model if not provided
+        // Anthropic requires max_tokens to be set
+        let max_tokens = calculate_max_tokens(&self.model);
 
-            // Build request
-            let anthropic_request = AnthropicRequest {
-                model: self.model.clone(),
-                messages,
-                max_tokens,
-                system,
-                temperature: request.temperature,
-                tool_choice: if tools.is_empty() {
-                    None
-                } else {
-                    Some(AnthropicToolChoice::Auto)
-                },
-                tools,
-            };
+        // Build request
+        let anthropic_request = AnthropicRequest {
+            model: self.model.clone(),
+            messages,
+            max_tokens,
+            system,
+            temperature: request.temperature,
+            tool_choice: if tools.is_empty() {
+                None
+            } else {
+                Some(AnthropicToolChoice::Auto)
+            },
+            tools,
+        };
 
-            // Send request
-            let mut req_builder = self
-                .client
-                .http_client
-                .post(format!("{}/v1/messages", self.client.base_url))
-                .json(&anthropic_request);
-            req_builder = self.client.provider.on_request(req_builder);
+        // Send request
+        let mut req_builder = self
+            .client
+            .http_client
+            .post(format!("{}/v1/messages", self.client.base_url))
+            .json(&anthropic_request);
+        req_builder = self.client.provider.on_request(req_builder);
 
-            let response = req_builder
-                .send()
-                .await
-                .map_err(|e| CompletionError::HttpError(e))?;
+        let response = req_builder.send().await.map_err(CompletionError::HttpError)?;
 
-            let status = response.status();
-            let response_text = response
-                .text()
-                .await
-                .map_err(|e| CompletionError::HttpError(e))?;
+        let status = response.status();
+        let response_text = response
+            .text()
+            .await
+            .map_err(CompletionError::HttpError)?;
 
-            if !status.is_success() {
-                // Try to parse error
-                if let Ok(error_response) =
-                    serde_json::from_str::<AnthropicErrorResponse>(&response_text)
-                {
-                    return Err(CompletionError::ProviderError(error_response.error.message));
-                }
-                return Err(CompletionError::ProviderError(response_text));
+        if !status.is_success() {
+            // Try to parse error
+            if let Ok(error_response) = serde_json::from_str::<AnthropicErrorResponse>(&response_text)
+            {
+                return Err(CompletionError::ProviderError(error_response.error.message));
             }
-
-            let anthropic_response: AnthropicResponse =
-                serde_json::from_str(&response_text).map_err(|e| CompletionError::JsonError(e))?;
-
-            let (choice_text, assistant_message) = parse_response(&anthropic_response)?;
-
-            Ok(CompletionResponse {
-                choice: choice_text,
-                message: assistant_message,
-                raw_response: anthropic_response,
-            })
+            return Err(CompletionError::ProviderError(response_text));
         }
+
+        let anthropic_response: AnthropicResponse =
+            serde_json::from_str(&response_text).map_err(CompletionError::JsonError)?;
+
+        let (choice_text, assistant_message) = parse_response(&anthropic_response)?;
+
+        Ok(CompletionResponse {
+            choice: choice_text,
+            message: assistant_message,
+            raw_response: anthropic_response,
+        })
     }
 }
 
@@ -442,11 +432,6 @@ fn calculate_max_tokens(model: &str) -> u64 {
         64000
     } else if model.starts_with("claude-3-5-sonnet") || model.starts_with("claude-3-5-haiku") {
         8192
-    } else if model.starts_with("claude-3-opus")
-        || model.starts_with("claude-3-sonnet")
-        || model.starts_with("claude-3-haiku")
-    {
-        4096
     } else {
         4096 // Default fallback
     }

@@ -124,7 +124,7 @@ impl CompletionModelTrait for CompletionModel {
         }
 
         // Handle Preamble (System Prompt)
-        let system_instruction = request.preamble.map(|preamble| Content::text(preamble));
+        let system_instruction = request.preamble.map(Content::text);
 
         // Convert tools to Gemini format
         let tools = if !request.tools.is_empty() {
@@ -205,11 +205,11 @@ fn parse_assistant_output(
     let mut assistant_parts = Vec::new();
 
     for (idx, part) in parts.iter().enumerate() {
-        if let Some(text) = &part.text {
-            if !text.trim().is_empty() {
-                text_parts.push(text.clone());
-                assistant_parts.push(AssistantContent::Text(Text { text: text.clone() }));
-            }
+        if let Some(text) = &part.text
+            && !text.trim().is_empty()
+        {
+            text_parts.push(text.clone());
+            assistant_parts.push(AssistantContent::Text(Text { text: text.clone() }));
         }
 
         if let Some(function_call) = &part.function_call {

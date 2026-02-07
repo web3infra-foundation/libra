@@ -1,7 +1,5 @@
 //! OpenAI completion model implementation.
 
-use std::future::Future;
-
 use serde::{Deserialize, Serialize};
 
 use crate::internal::ai::{
@@ -136,8 +134,6 @@ pub struct OpenAIResponse {
 #[derive(Debug, Deserialize)]
 struct OpenAIError {
     message: String,
-    r#type: Option<String>,
-    code: Option<String>,
 }
 
 /// OpenAI API error wrapper.
@@ -207,73 +203,67 @@ impl From<&Message> for OpenAIMessage {
 impl CompletionModelTrait for Model {
     type Response = OpenAIResponse;
 
-    fn completion(
+    async fn completion(
         &self,
         request: CompletionRequest,
-    ) -> impl Future<Output = Result<CompletionResponse<Self::Response>, CompletionError>> + Send
-    {
-        async move {
-            let tools = parse_tools(&request.tools)?;
-            let messages = build_messages(&request)?;
+    ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+        let tools = parse_tools(&request.tools)?;
+        let messages = build_messages(&request)?;
 
-            // Build request
-            let openai_request = OpenAIRequest {
-                model: self.model.clone(),
-                messages,
-                temperature: request.temperature,
-                tool_choice: if tools.is_empty() {
-                    None
-                } else {
-                    Some("auto".to_string())
-                },
-                tools,
-            };
+        // Build request
+        let openai_request = OpenAIRequest {
+            model: self.model.clone(),
+            messages,
+            temperature: request.temperature,
+            tool_choice: if tools.is_empty() {
+                None
+            } else {
+                Some("auto".to_string())
+            },
+            tools,
+        };
 
-            // Send request
-            let mut req_builder = self
-                .client
-                .http_client
-                .post(format!("{}/chat/completions", self.client.base_url))
-                .json(&openai_request);
-            req_builder = self.client.provider.on_request(req_builder);
+        // Send request
+        let mut req_builder = self
+            .client
+            .http_client
+            .post(format!("{}/chat/completions", self.client.base_url))
+            .json(&openai_request);
+        req_builder = self.client.provider.on_request(req_builder);
 
-            let response = req_builder
-                .send()
-                .await
-                .map_err(|e| CompletionError::HttpError(e))?;
+        let response = req_builder.send().await.map_err(CompletionError::HttpError)?;
 
-            let status = response.status();
-            let response_text = response
-                .text()
-                .await
-                .map_err(|e| CompletionError::HttpError(e))?;
+        let status = response.status();
+        let response_text = response
+            .text()
+            .await
+            .map_err(CompletionError::HttpError)?;
 
-            if !status.is_success() {
-                // Try to parse error
-                if let Ok(error_response) =
-                    serde_json::from_str::<OpenAIErrorResponse>(&response_text)
-                {
-                    return Err(CompletionError::ProviderError(error_response.error.message));
-                }
-                return Err(CompletionError::ProviderError(response_text));
+        if !status.is_success() {
+            // Try to parse error
+            if let Ok(error_response) = serde_json::from_str::<OpenAIErrorResponse>(&response_text)
+            {
+                return Err(CompletionError::ProviderError(error_response.error.message));
             }
-
-            let openai_response: OpenAIResponse =
-                serde_json::from_str(&response_text).map_err(|e| CompletionError::JsonError(e))?;
-
-            // Extract choice
-            let choice = openai_response.choices.first().ok_or_else(|| {
-                CompletionError::ResponseError("No choices in response".to_string())
-            })?;
-
-            let (choice_text, assistant_message) = parse_choice_message(&openai_response, choice)?;
-
-            Ok(CompletionResponse {
-                choice: choice_text,
-                message: assistant_message,
-                raw_response: openai_response,
-            })
+            return Err(CompletionError::ProviderError(response_text));
         }
+
+        let openai_response: OpenAIResponse =
+            serde_json::from_str(&response_text).map_err(CompletionError::JsonError)?;
+
+        // Extract choice
+        let choice = openai_response
+            .choices
+            .first()
+            .ok_or_else(|| CompletionError::ResponseError("No choices in response".to_string()))?;
+
+        let (choice_text, assistant_message) = parse_choice_message(&openai_response, choice)?;
+
+        Ok(CompletionResponse {
+            choice: choice_text,
+            message: assistant_message,
+            raw_response: openai_response,
+        })
     }
 }
 

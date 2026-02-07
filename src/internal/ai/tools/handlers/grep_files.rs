@@ -218,7 +218,7 @@ mod tests {
 
         let output = result.unwrap();
         let text = output.as_text().unwrap();
-        assert!(text.len() > 0);
+        assert!(!text.is_empty());
     }
 
     #[tokio::test]

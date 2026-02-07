@@ -188,10 +188,10 @@ fn parse_idx_v1(bytes: &[u8]) -> ParsedIdxV1 {
     assert!(bytes.len() >= 256 * 4 + TRAILER_SIZE, "idx v1 is too short");
 
     let mut fanout = [0u32; 256];
-    for i in 0..256 {
+    for (i, bucket) in fanout.iter_mut().enumerate() {
         let start = cursor + i * 4;
         let end = start + 4;
-        fanout[i] = u32::from_be_bytes(bytes[start..end].try_into().unwrap());
+        *bucket = u32::from_be_bytes(bytes[start..end].try_into().unwrap());
     }
     cursor += 256 * 4;
 
@@ -249,10 +249,10 @@ fn parse_idx_v2(bytes: &[u8], kind: HashKind) -> ParsedIdxV2 {
 
     let mut cursor = 8usize;
     let mut fanout = [0u32; 256];
-    for i in 0..256 {
+    for (i, bucket) in fanout.iter_mut().enumerate() {
         let start = cursor + i * 4;
         let end = start + 4;
-        fanout[i] = u32::from_be_bytes(bytes[start..end].try_into().unwrap());
+        *bucket = u32::from_be_bytes(bytes[start..end].try_into().unwrap());
     }
     cursor += 256 * 4;
 
@@ -442,8 +442,8 @@ fn assert_index_v2_matches_pack(
     label: &str,
 ) -> Result<(), GitError> {
     let _guard = set_hash_kind_for_test(kind);
-    let expected = decode_pack_expected(&pack_path, kind)?;
-    let idx_bytes = fs::read(&index_path)?;
+    let expected = decode_pack_expected(pack_path, kind)?;
+    let idx_bytes = fs::read(index_path)?;
     let parsed = parse_idx_v2(&idx_bytes, kind);
 
     assert_eq!(

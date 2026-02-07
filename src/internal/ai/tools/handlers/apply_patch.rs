@@ -87,7 +87,7 @@ async fn apply_patch_sync(path: &Path, patch: &str) -> Result<String, ToolError>
         eprintln!(
             "[apply_patch] write path='{}' bytes={} preview='{}'",
             path.display(),
-            result.as_bytes().len(),
+            result.len(),
             preview.replace('\n', "\\n")
         );
     }
@@ -199,9 +199,8 @@ fn parse_and_apply_unified_diff(original: &str, patch: &str) -> Result<String, T
                     break;
                 }
 
-                if hunk_line.starts_with('-') {
+                if let Some(expected) = hunk_line.strip_prefix('-') {
                     // Remove the expected line.
-                    let expected = &hunk_line[1..];
                     if current_line < result_lines.len() && result_lines[current_line] == expected {
                         if debug {
                             eprintln!("[apply_patch] - remove @{} '{}'", current_line, expected);
@@ -219,9 +218,8 @@ fn parse_and_apply_unified_diff(original: &str, patch: &str) -> Result<String, T
                             expected
                         )));
                     }
-                } else if hunk_line.starts_with('+') {
+                } else if let Some(content) = hunk_line.strip_prefix('+') {
                     // Insert line at current position and advance.
-                    let content = &hunk_line[1..];
                     if current_line <= result_lines.len() {
                         if debug {
                             eprintln!("[apply_patch] + insert @{} '{}'", current_line, content);

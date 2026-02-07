@@ -165,8 +165,8 @@ fn list_directory_recursive<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::internal::ai::tools::context::ToolPayload;
     use crate::internal::ai::tools::ToolKind;
+    use crate::internal::ai::tools::context::ToolPayload;
     use std::fs;
     use tempfile::TempDir;
 
@@ -240,7 +240,7 @@ mod tests {
         let output = result.unwrap();
         let text = output.as_text().unwrap();
         // Should contain nested entries
-        assert!(text.contains("level1") || text.len() > 0);
+        assert!(text.contains("level1") || !text.is_empty());
     }
 
     #[tokio::test]
