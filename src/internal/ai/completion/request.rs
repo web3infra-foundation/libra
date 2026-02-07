@@ -1,6 +1,7 @@
 use serde_json::Value;
 
-use super::message::Message;
+use super::message::{AssistantContent, Message};
+use crate::internal::ai::tools::ToolDefinition;
 
 /// Represents a request for AI completion, including chat history and optional parameters.
 #[derive(Debug, Clone, Default)]
@@ -9,7 +10,7 @@ pub struct CompletionRequest {
     pub chat_history: Vec<Message>, // Conversation messages
     pub temperature: Option<f64>,   // Sampling temperature
     // Future-proof: Tools support
-    pub tools: Vec<Value>, // Placeholder for generic ToolDefinition
+    pub tools: Vec<ToolDefinition>, // Tools available to the model
     // Future-proof: RAG support
     pub documents: Vec<Value>, // Placeholder for Document
 }
@@ -17,8 +18,8 @@ pub struct CompletionRequest {
 /// Represents a response from the AI completion service.
 #[derive(Debug)]
 pub struct CompletionResponse<T> {
-    pub choice: String,  // Simplified for basic text
-    pub raw_response: T, // Raw response from the AI service
+    pub content: Vec<AssistantContent>, // The content of the response (text, tool calls, etc.)
+    pub raw_response: T,                // Raw response from the AI service
 }
 
 impl CompletionRequest {
