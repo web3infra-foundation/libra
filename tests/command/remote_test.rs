@@ -467,7 +467,7 @@ async fn test_remote_prune_removes_stale_branches() {
 
     // Verify remaining branches still exist
     assert!(
-        Branch::find_branch(&format!("refs/remotes/origin/feature2"), Some("origin"))
+        Branch::find_branch("refs/remotes/origin/feature2", Some("origin"))
             .await
             .is_some(),
         "non-stale remote-tracking branch should still exist"

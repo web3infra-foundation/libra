@@ -4,8 +4,9 @@ use async_trait::async_trait;
 use dagrs::{Action, Content, EnvVar, InChannels, OutChannels, Output};
 
 use crate::internal::ai::{
-    agent::Agent,
+    agent::{Agent, ToolLoopConfig, run_tool_loop},
     completion::{CompletionModel, Prompt},
+    tools::ToolRegistry,
 };
 
 /// An Action adapter that wraps an AI Agent for use in a DAG node.
@@ -63,7 +64,7 @@ impl<M: CompletionModel> Action for AgentAction<M> {
                     let error_msg =
                         format!("Failed to receive input from upstream {:?}: {:?}", id, e);
                     tracing::error!("{}", error_msg);
-                    return Output::error(error_msg);
+                    return Output::Err(error_msg);
                 }
             }
         }
@@ -79,7 +80,83 @@ impl<M: CompletionModel> Action for AgentAction<M> {
             }
             Err(e) => {
                 tracing::error!("Agent Execution Error: {}", e);
-                Output::error(e.to_string())
+                Output::Err(e.to_string())
+            }
+        }
+    }
+}
+
+/// An Action adapter that runs the iterative tool-calling agent loop inside a DAG node.
+pub struct ToolLoopAction<M: CompletionModel + 'static> {
+    model: M,
+    registry: ToolRegistry,
+    config: ToolLoopConfig,
+}
+
+impl<M: CompletionModel> ToolLoopAction<M> {
+    pub fn new(
+        model: M,
+        registry: ToolRegistry,
+        preamble: Option<String>,
+        temperature: Option<f64>,
+        max_steps: usize,
+    ) -> Self {
+        Self {
+            model,
+            registry,
+            config: ToolLoopConfig {
+                preamble,
+                temperature,
+                max_steps,
+            },
+        }
+    }
+}
+
+#[async_trait]
+impl<M: CompletionModel> Action for ToolLoopAction<M> {
+    async fn run(
+        &self,
+        in_channels: &mut InChannels,
+        out_channels: &mut OutChannels,
+        _env: Arc<EnvVar>,
+    ) -> Output {
+        // Collect upstream string outputs into one prompt, consistent with AgentAction.
+        let ids = in_channels.get_sender_ids();
+        let mut inputs = Vec::new();
+
+        for id in ids {
+            match in_channels.recv_from(&id).await {
+                Ok(content) => {
+                    if let Some(text) = content.get::<String>() {
+                        inputs.push(text.clone());
+                    } else {
+                        tracing::warn!(
+                            "Received content from upstream {:?} is not a String. Defaulting to empty.",
+                            id
+                        );
+                    }
+                }
+                Err(e) => {
+                    let error_msg =
+                        format!("Failed to receive input from upstream {:?}: {:?}", id, e);
+                    tracing::error!("{}", error_msg);
+                    return Output::Err(error_msg);
+                }
+            }
+        }
+
+        let prompt = inputs.join("\n\n");
+
+        match run_tool_loop(&self.model, prompt, &self.registry, self.config.clone()).await {
+            Ok(resp) => {
+                let content = Content::new(resp);
+                out_channels.broadcast(content.clone()).await;
+                Output::Out(Some(content))
+            }
+            Err(e) => {
+                tracing::error!("Agent Tool Loop Error: {}", e);
+                Output::Err(e.to_string())
             }
         }
     }

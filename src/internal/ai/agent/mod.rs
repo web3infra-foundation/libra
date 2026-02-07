@@ -4,7 +4,9 @@ use crate::internal::ai::{
 };
 
 pub mod builder;
+pub(crate) mod tool_loop;
 pub use builder::AgentBuilder;
+pub(crate) use tool_loop::{ToolLoopConfig, run_tool_loop};
 
 pub mod chat;
 pub use chat::ChatAgent;

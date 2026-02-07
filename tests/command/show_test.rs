@@ -30,7 +30,7 @@ fn init_temp_repo() -> tempfile::TempDir {
 fn configure_user_identity(temp_path: &std::path::Path) {
     let output = Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(temp_path)
-        .args(&["config", "user.name", "Test User"])
+        .args(["config", "user.name", "Test User"])
         .output()
         .expect("Failed to configure user.name");
 
@@ -43,7 +43,7 @@ fn configure_user_identity(temp_path: &std::path::Path) {
 
     let output = Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(temp_path)
-        .args(&["config", "user.email", "test@example.com"])
+        .args(["config", "user.email", "test@example.com"])
         .output()
         .expect("Failed to configure user.email");
 
@@ -63,7 +63,7 @@ fn create_commit(temp_path: &std::path::Path, filename: &str, content: &str, mes
     // Add file
     let output = Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(temp_path)
-        .args(&["add", filename])
+        .args(["add", filename])
         .output()
         .expect("Failed to add file");
 
@@ -77,7 +77,7 @@ fn create_commit(temp_path: &std::path::Path, filename: &str, content: &str, mes
     // Commit
     let output = Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(temp_path)
-        .args(&["commit", "-m", message, "--no-verify"])
+        .args(["commit", "-m", message, "--no-verify"])
         .output()
         .expect("Failed to commit");
 
@@ -93,7 +93,7 @@ fn create_commit(temp_path: &std::path::Path, filename: &str, content: &str, mes
 fn create_lightweight_tag(temp_path: &std::path::Path, tag_name: &str) {
     let output = Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(temp_path)
-        .args(&["tag", tag_name])
+        .args(["tag", tag_name])
         .output()
         .expect("Failed to create lightweight tag");
 
@@ -109,7 +109,7 @@ fn create_lightweight_tag(temp_path: &std::path::Path, tag_name: &str) {
 fn create_annotated_tag(temp_path: &std::path::Path, tag_name: &str, message: &str) {
     let output = Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(temp_path)
-        .args(&["tag", tag_name, "-m", message])
+        .args(["tag", tag_name, "-m", message])
         .output()
         .expect("Failed to create annotated tag");
 
@@ -137,7 +137,7 @@ async fn test_show_lightweight_tag() {
     // Show the tag via CLI
     let output = Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(temp_path)
-        .args(&["show", "v1.0-light", "--no-patch"])
+        .args(["show", "v1.0-light", "--no-patch"])
         .output()
         .expect("Failed to execute show command");
 
@@ -176,7 +176,7 @@ async fn test_show_annotated_tag() {
     // Show the annotated tag via CLI
     let output = Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(temp_path)
-        .args(&["show", "v1.0-annotated", "--no-patch"])
+        .args(["show", "v1.0-annotated", "--no-patch"])
         .output()
         .expect("Failed to execute show command");
 
@@ -233,7 +233,7 @@ async fn test_show_multiple_tags() {
     // Show first tag via CLI
     let output1 = Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(temp_path)
-        .args(&["show", "v0.1.0", "--no-patch"])
+        .args(["show", "v0.1.0", "--no-patch"])
         .output()
         .expect("Failed to execute show command");
 
@@ -253,7 +253,7 @@ async fn test_show_multiple_tags() {
     // Show second tag via CLI
     let output2 = Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(temp_path)
-        .args(&["show", "v0.2.0", "--no-patch"])
+        .args(["show", "v0.2.0", "--no-patch"])
         .output()
         .expect("Failed to execute show command");
 
@@ -284,7 +284,7 @@ async fn test_show_nonexistent_tag() {
     // Show a non-existent tag via CLI
     let output = Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(temp_path)
-        .args(&["show", "nonexistent-tag"])
+        .args(["show", "nonexistent-tag"])
         .output()
         .expect("Failed to execute show command");
 

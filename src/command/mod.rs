@@ -1,6 +1,7 @@
 //! Command module hub exporting all subcommands plus shared helpers for loading/saving objects and prompting for authentication.
 
 pub mod add;
+pub mod ai;
 pub mod blame;
 pub mod branch;
 pub mod checkout;
