@@ -31,4 +31,4 @@ pub mod tools;
 
 pub use agent::{Agent, AgentBuilder};
 pub use completion::{Chat, CompletionModel, Message, Prompt};
-pub use node_adapter::AgentAction;
+pub use node_adapter::{AgentAction, ToolLoopAction};
