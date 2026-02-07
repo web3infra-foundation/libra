@@ -138,10 +138,46 @@ where
     P: AsRef<Path>,
     B: AsRef<Path>,
 {
-    // to absolute, just for clear redundant `..` `.` in the path
-    // may generate wrong intermediate path, but the final result is correct (after `starts_with`)
-    let path_abs = path.as_ref().absolutize().unwrap();
-    let parent_abs = parent.as_ref().absolutize().unwrap();
+    fn normalize_abs_path(path: &Path) -> PathBuf {
+        use std::path::Component;
+
+        let mut out = PathBuf::new();
+        for comp in path.components() {
+            match comp {
+                Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+                Component::RootDir => out.push(Path::new(comp.as_os_str())),
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    // Never allow `..` to escape above filesystem root/prefix.
+                    if matches!(out.components().next_back(), Some(Component::Normal(_))) {
+                        out.pop();
+                    }
+                }
+                Component::Normal(part) => out.push(part),
+            }
+        }
+        out
+    }
+
+    // Avoid panics and avoid depending on a valid current directory when inputs are absolute.
+    let path_abs = if path.as_ref().is_absolute() {
+        normalize_abs_path(path.as_ref())
+    } else {
+        match path.as_ref().absolutize() {
+            Ok(p) => p.to_path_buf(),
+            Err(_) => return false,
+        }
+    };
+
+    let parent_abs = if parent.as_ref().is_absolute() {
+        normalize_abs_path(parent.as_ref())
+    } else {
+        match parent.as_ref().absolutize() {
+            Ok(p) => p.to_path_buf(),
+            Err(_) => return false,
+        }
+    };
+
     path_abs.starts_with(parent_abs)
 }
 
@@ -589,6 +625,18 @@ mod test {
         assert!(is_sub_path("src/main.rs", "src/"));
         assert!(is_sub_path("src/main.rs", "src/main.rs"));
         assert!(is_sub_path("src/main.rs", "."));
+    }
+
+    #[test]
+    fn test_is_sub_path_parent_dir_cannot_escape_root() {
+        assert!(!is_sub_path("/../../etc/passwd", "/tmp"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_is_sub_path_preserves_windows_prefix() {
+        assert!(is_sub_path(r"C:\repo\sub\..\file.txt", r"C:\repo"));
+        assert!(!is_sub_path(r"C:\repo\..\Windows\System32", r"C:\repo"));
     }
 
     #[test]

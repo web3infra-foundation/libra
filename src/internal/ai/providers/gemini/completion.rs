@@ -1,19 +1,19 @@
 use bytes::Buf;
-use uuid::Uuid;
 
 use super::{
     client::Client,
     gemini_api_types::{
-        Content, FunctionCallingMode, FunctionDeclaration, GenerateContentRequest,
-        GenerateContentResponse, GenerationConfig, Part, PartKind, Schema, Tool, ToolConfig,
+        Content, FunctionDeclaration, FunctionParameters, GenerateContentRequest,
+        GenerateContentResponse, GenerationConfig, Part, ToolDeclaration,
     },
 };
 use crate::internal::ai::{
     client::Provider,
     completion::{
         AssistantContent, CompletionError, CompletionModel as CompletionModelTrait,
-        CompletionRequest, CompletionResponse, Message, UserContent,
+        CompletionRequest, CompletionResponse, Function, Message, Text, ToolCall, UserContent,
     },
+    tools::ToolDefinition,
 };
 
 /// A completion model implementation for Google Gemini.
@@ -51,8 +51,8 @@ impl CompletionModelTrait for CompletionModel {
         &self,
         request: CompletionRequest,
     ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
-        // Use generic Provider to customize request if needed.
-        // Our Client structure puts auth in header via on_request.
+        // Use generic Provider to customize request if needed, though Gemini usually uses query param or header.
+        // Our new Client structure puts auth in header via on_request.
 
         let url = format!(
             "{}/v1beta/models/{}:generateContent",
@@ -67,50 +67,19 @@ impl CompletionModelTrait for CompletionModel {
                     let mut parts = Vec::new();
                     for item in content.into_iter() {
                         match item {
-                            UserContent::Text(t) => parts.push(Part {
-                                part: PartKind::Text(t.text),
-                                thought: None,
-                                thought_signature: None,
-                            }),
+                            UserContent::Text(t) => parts.push(Part::text(t.text)),
                             UserContent::Image(_) => {
                                 // Reserved for future Image support
                                 return Err(CompletionError::NotImplemented(
                                     "Image support not implemented yet for Gemini provider".into(),
                                 ));
                             }
-                            UserContent::ToolResult(r) => {
-                                if r.name.is_empty() {
-                                    return Err(CompletionError::RequestError(
-                                        std::io::Error::new(
-                                            std::io::ErrorKind::InvalidInput,
-                                            "ToolResult name is required for Gemini",
-                                        )
-                                        .into(),
-                                    ));
-                                }
-                                if !r
-                                    .name
-                                    .chars()
-                                    .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
-                                {
-                                    return Err(CompletionError::RequestError(
-                                        std::io::Error::new(
-                                            std::io::ErrorKind::InvalidInput,
-                                            format!("Invalid ToolResult name: {}", r.name),
-                                        )
-                                        .into(),
-                                    ));
-                                }
-                                // Gemini requires tool response to have a 'name'
-                                let function_response = super::gemini_api_types::FunctionResponse {
-                                    name: r.name.clone(),
-                                    response: Some(serde_json::json!({ "result": r.result })),
-                                };
-                                parts.push(Part {
-                                    part: PartKind::FunctionResponse(function_response),
-                                    thought: None,
-                                    thought_signature: None,
-                                });
+                            UserContent::ToolResult(tool_result) => {
+                                // Convert tool result to function response
+                                parts.push(Part::function_response(
+                                    tool_result.name,
+                                    tool_result.result,
+                                ));
                             }
                         }
                     }
@@ -123,21 +92,13 @@ impl CompletionModelTrait for CompletionModel {
                     let mut parts = Vec::new();
                     for item in content.into_iter() {
                         match item {
-                            AssistantContent::Text(t) => parts.push(Part {
-                                part: PartKind::Text(t.text),
-                                thought: None,
-                                thought_signature: None,
-                            }),
-                            AssistantContent::ToolCall(tc) => {
-                                let function_call = super::gemini_api_types::FunctionCall {
-                                    name: tc.function.name,
-                                    args: tc.function.arguments,
-                                };
-                                parts.push(Part {
-                                    part: PartKind::FunctionCall(function_call),
-                                    thought: None,
-                                    thought_signature: None,
-                                });
+                            AssistantContent::Text(t) => parts.push(Part::text(t.text)),
+                            AssistantContent::ToolCall(tool_call) => {
+                                // Convert tool call to function call
+                                parts.push(Part::function_call(
+                                    tool_call.function.name,
+                                    tool_call.function.arguments,
+                                ));
                             }
                         }
                     }
@@ -147,15 +108,13 @@ impl CompletionModelTrait for CompletionModel {
                     });
                 }
                 Message::System { content } => {
-                    // System messages in chat history treated as user text.
+                    // System messages in chat history might need to be merged or handled as 'user' role for Gemini
+                    // or ignored if preamble is preferred.
+                    // For now, treat as user text.
                     let mut parts = Vec::new();
                     for item in content.into_iter() {
                         if let UserContent::Text(t) = item {
-                            parts.push(Part {
-                                part: PartKind::Text(t.text),
-                                thought: None,
-                                thought_signature: None,
-                            })
+                            parts.push(Part::text(t.text))
                         }
                     }
                     contents.push(Content {
@@ -167,45 +126,11 @@ impl CompletionModelTrait for CompletionModel {
         }
 
         // Handle Preamble (System Prompt)
-        let system_instruction = request.preamble.map(|preamble| Content {
-            role: Some("user".to_string()),
-            parts: vec![Part {
-                part: PartKind::Text(preamble),
-                thought: None,
-                thought_signature: None,
-            }],
-        });
+        let system_instruction = request.preamble.map(Content::text);
 
-        // Handle Tools
-        let tools = if request.tools.is_empty() {
-            None
-        } else {
-            let mut function_declarations = Vec::new();
-            for t in request.tools {
-                let parameters = if t.parameters.as_object().is_some_and(|o| o.is_empty())
-                    || t.parameters == serde_json::json!({"type": "object", "properties": {}})
-                {
-                    None
-                } else {
-                    Some(Schema::try_from(t.parameters)?)
-                };
-
-                function_declarations.push(FunctionDeclaration {
-                    name: t.name,
-                    description: t.description,
-                    parameters,
-                });
-            }
-            Some(vec![Tool {
-                function_declarations,
-            }])
-        };
-
-        // For now, we default to Auto if tools are present
-        let tool_config = if tools.is_some() {
-            Some(ToolConfig {
-                function_calling_config: Some(FunctionCallingMode::Auto),
-            })
+        // Convert tools to Gemini format
+        let tools = if !request.tools.is_empty() {
+            Some(convert_tools_to_gemini(&request.tools))
         } else {
             None
         };
@@ -213,11 +138,10 @@ impl CompletionModelTrait for CompletionModel {
         let body = GenerateContentRequest {
             contents,
             system_instruction,
-            tools,
-            tool_config,
             generation_config: Some(GenerationConfig {
                 temperature: request.temperature,
             }),
+            tools,
         };
 
         // Build request using generic client logic
@@ -235,10 +159,10 @@ impl CompletionModelTrait for CompletionModel {
         tracing::info!("Received response status: {}", resp.status());
 
         if !resp.status().is_success() {
-            // Read up to 4KB of the error body to avoid memory issues with large responses
+            // Read only the first 1KB of the error body to avoid memory issues with large responses
             // and handle potential non-UTF8 content safely.
             use std::io::Read;
-            let mut buf = [0u8; 4096];
+            let mut buf = [0u8; 1024];
             let mut chunk = resp
                 .bytes()
                 .await
@@ -247,10 +171,7 @@ impl CompletionModelTrait for CompletionModel {
             let n = chunk
                 .read(&mut buf)
                 .map_err(|e: std::io::Error| CompletionError::ResponseError(e.to_string()))?;
-            let mut text = String::from_utf8_lossy(&buf[..n]).to_string();
-            if n == 4096 {
-                text.push_str("... (truncated)");
-            }
+            let text = String::from_utf8_lossy(&buf[..n]);
 
             return Err(CompletionError::ProviderError(format!(
                 "Gemini API Error: {}",
@@ -261,52 +182,87 @@ impl CompletionModelTrait for CompletionModel {
         let api_resp: GenerateContentResponse =
             resp.json().await.map_err(CompletionError::HttpError)?;
 
-        // Extract content
-        let candidate = api_resp
-            .candidates
-            .as_ref()
-            .and_then(|c| c.first())
-            .ok_or_else(|| {
-                CompletionError::ResponseError("No response candidates in Gemini response".into())
-            })?;
-
-        let mut content = Vec::new();
-        if let Some(c) = &candidate.content {
-            for part in &c.parts {
-                match &part.part {
-                    PartKind::Text(text) => {
-                        content.push(AssistantContent::Text(
-                            crate::internal::ai::completion::message::Text { text: text.clone() },
-                        ));
-                    }
-                    PartKind::FunctionCall(fc) => {
-                        content.push(AssistantContent::ToolCall(
-                            crate::internal::ai::completion::message::ToolCall {
-                                id: format!("{}-{}", fc.name, Uuid::new_v4()), // Generate unique ID
-                                name: fc.name.clone(),
-                                function: crate::internal::ai::completion::message::Function {
-                                    name: fc.name.clone(),
-                                    arguments: fc.args.clone(),
-                                },
-                            },
-                        ));
-                    }
-                    _ => {
-                        tracing::warn!("Received unsupported part kind in response: {:?}", part);
-                    }
-                }
-            }
-        }
-
-        if content.is_empty() {
-            return Err(CompletionError::ResponseError(
-                "No content in Gemini response".into(),
-            ));
-        }
+        let content = parse_assistant_output(&api_resp)?;
 
         Ok(CompletionResponse {
             content,
             raw_response: api_resp,
         })
     }
+}
+
+fn parse_assistant_output(
+    api_resp: &GenerateContentResponse,
+) -> Result<Vec<AssistantContent>, CompletionError> {
+    let parts = api_resp
+        .candidates
+        .as_ref()
+        .and_then(|c| c.first())
+        .and_then(|c| c.content.as_ref())
+        .map(|c| c.parts.clone())
+        .ok_or_else(|| CompletionError::ResponseError("No candidate content in response".into()))?;
+
+    let mut assistant_parts = Vec::new();
+
+    for (idx, part) in parts.iter().enumerate() {
+        if let Some(text) = &part.text
+            && !text.trim().is_empty()
+        {
+            assistant_parts.push(AssistantContent::Text(Text { text: text.clone() }));
+        }
+
+        if let Some(function_call) = &part.function_call {
+            assistant_parts.push(AssistantContent::ToolCall(ToolCall {
+                id: format!("call-{}-{}", function_call.name, idx + 1),
+                name: function_call.name.clone(),
+                function: Function {
+                    name: function_call.name.clone(),
+                    arguments: function_call.args.clone(),
+                },
+            }));
+        }
+    }
+
+    if assistant_parts.is_empty() {
+        return Err(CompletionError::ResponseError(
+            "No text or tool-call content in Gemini response".into(),
+        ));
+    }
+
+    Ok(assistant_parts)
+}
+
+/// Convert generic tool specs to Gemini's tool declaration format.
+fn convert_tools_to_gemini(tools: &[ToolDefinition]) -> Vec<ToolDeclaration> {
+    let mut function_declarations = Vec::new();
+
+    for tool in tools {
+        let parameters = tool.parameters.as_object().and_then(|params| {
+            let param_type = params.get("type").and_then(|t| t.as_str())?;
+            let properties = params.get("properties").cloned()?;
+            let required = params.get("required").and_then(|r| {
+                r.as_array().map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+            });
+
+            Some(FunctionParameters {
+                param_type: param_type.to_string(),
+                properties,
+                required,
+            })
+        });
+
+        let mut function_decl =
+            FunctionDeclaration::new(tool.name.clone(), tool.description.clone());
+        if let Some(params) = parameters {
+            function_decl = function_decl.with_parameters(params);
+        }
+
+        function_declarations.push(function_decl);
+    }
+
+    vec![ToolDeclaration::new(function_declarations)]
 }

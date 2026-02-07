@@ -104,10 +104,9 @@ mod tests {
         ) -> Result<CompletionResponse<()>, CompletionError> {
             let last_msg = request.chat_history.last().unwrap();
             let response_text = match last_msg {
-                Message::User { content } => match content {
-                    OneOrMany::One(UserContent::Text(t)) => format!("Echo: {}", t.text),
-                    _ => "Unknown".to_string(),
-                },
+                Message::User {
+                    content: OneOrMany::One(UserContent::Text(t)),
+                } => format!("Echo: {}", t.text),
                 _ => "Unknown".to_string(),
             };
 
