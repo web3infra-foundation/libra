@@ -1,14 +1,97 @@
 use serde::{Deserialize, Serialize};
 
-/// Request structure for generating content using Gemini API.
-#[derive(Debug, Serialize)]
+/// Function call from the model.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct FunctionCall {
+    pub name: String,
+    pub args: serde_json::Value,
+}
+
+/// Function response sent back to the model.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct FunctionResponse {
+    pub name: String,
+    pub response: serde_json::Value,
+}
+
+impl FunctionResponse {
+    /// Create a new function response from a tool result.
+    pub fn from_result(name: String, result: &serde_json::Value) -> Self {
+        Self {
+            name,
+            response: result.clone(),
+        }
+    }
+
+    /// Create a function response from a text result.
+    pub fn from_text(name: String, text: &str) -> Self {
+        Self {
+            name,
+            response: serde_json::json!({ "result": text }),
+        }
+    }
+}
+
+/// A part of the content, which may contain text, function calls, or function responses.
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct GenerateContentRequest {
-    pub contents: Vec<Content>,
+pub struct Part {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub system_instruction: Option<Content>,
+    pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub generation_config: Option<GenerationConfig>,
+    pub function_call: Option<FunctionCall>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function_response: Option<FunctionResponse>,
+}
+
+impl Part {
+    /// Create a text part.
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: Some(text.into()),
+            function_call: None,
+            function_response: None,
+        }
+    }
+
+    /// Create a function call part.
+    pub fn function_call(name: impl Into<String>, args: serde_json::Value) -> Self {
+        Self {
+            text: None,
+            function_call: Some(FunctionCall {
+                name: name.into(),
+                args,
+            }),
+            function_response: None,
+        }
+    }
+
+    /// Create a function response part.
+    pub fn function_response(name: impl Into<String>, response: serde_json::Value) -> Self {
+        Self {
+            text: None,
+            function_call: None,
+            function_response: Some(FunctionResponse {
+                name: name.into(),
+                response,
+            }),
+        }
+    }
+
+    /// Check if this part contains a function call.
+    pub fn is_function_call(&self) -> bool {
+        self.function_call.is_some()
+    }
+
+    /// Check if this part contains a function response.
+    pub fn is_function_response(&self) -> bool {
+        self.function_response.is_some()
+    }
+
+    /// Check if this part contains text.
+    pub fn is_text(&self) -> bool {
+        self.text.is_some()
+    }
 }
 
 /// Content structure used in requests and responses.
@@ -18,12 +101,32 @@ pub struct Content {
     pub role: Option<String>,
 }
 
-/// A part of the content, which may contain text.
-#[derive(Debug, Deserialize, Serialize, Clone)]
+impl Content {
+    /// Create a new content with a single text part.
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            parts: vec![Part::text(text)],
+            role: None,
+        }
+    }
+
+    /// Create a new content from parts.
+    pub fn from_parts(parts: Vec<Part>) -> Self {
+        Self { parts, role: None }
+    }
+}
+
+/// Request structure for generating content using Gemini API.
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Part {
+pub struct GenerateContentRequest {
+    pub contents: Vec<Content>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
+    pub system_instruction: Option<Content>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation_config: Option<GenerationConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<ToolDeclaration>>,
 }
 
 /// Configuration for content generation.
@@ -47,4 +150,78 @@ pub struct GenerateContentResponse {
 pub struct Candidate {
     pub content: Option<Content>,
     pub finish_reason: Option<String>,
+}
+
+/// Tool declaration for function calling.
+#[derive(Debug, Serialize, Clone)]
+pub struct ToolDeclaration {
+    pub function_declarations: Vec<FunctionDeclaration>,
+}
+
+impl ToolDeclaration {
+    /// Create a new tool declaration from function declarations.
+    pub fn new(functions: Vec<FunctionDeclaration>) -> Self {
+        Self {
+            function_declarations: functions,
+        }
+    }
+
+    /// Create a single function tool declaration.
+    pub fn single(function: FunctionDeclaration) -> Self {
+        Self {
+            function_declarations: vec![function],
+        }
+    }
+}
+
+/// Function declaration within a tool.
+#[derive(Debug, Serialize, Clone)]
+pub struct FunctionDeclaration {
+    pub name: String,
+    pub description: String,
+    pub parameters: Option<FunctionParameters>,
+}
+
+impl FunctionDeclaration {
+    /// Create a new function declaration.
+    pub fn new(name: impl Into<String>, description: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            parameters: None,
+        }
+    }
+
+    /// Set the parameters for this function.
+    pub fn with_parameters(mut self, parameters: FunctionParameters) -> Self {
+        self.parameters = Some(parameters);
+        self
+    }
+}
+
+/// Function parameters schema.
+#[derive(Debug, Serialize, Clone)]
+pub struct FunctionParameters {
+    #[serde(rename = "type")]
+    pub param_type: String,
+    pub properties: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required: Option<Vec<String>>,
+}
+
+impl FunctionParameters {
+    /// Create new function parameters.
+    pub fn new(properties: serde_json::Value) -> Self {
+        Self {
+            param_type: "object".to_string(),
+            properties,
+            required: None,
+        }
+    }
+
+    /// Set required parameters.
+    pub fn with_required(mut self, required: Vec<String>) -> Self {
+        self.required = Some(required);
+        self
+    }
 }

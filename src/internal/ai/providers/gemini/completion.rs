@@ -3,14 +3,15 @@ use bytes::Buf;
 use super::{
     client::Client,
     gemini_api_types::{
-        Content, GenerateContentRequest, GenerateContentResponse, GenerationConfig, Part,
+        Content, FunctionDeclaration, FunctionParameters, GenerateContentRequest,
+        GenerateContentResponse, GenerationConfig, Part, ToolDeclaration,
     },
 };
 use crate::internal::ai::{
     client::Provider,
     completion::{
         AssistantContent, CompletionError, CompletionModel as CompletionModelTrait,
-        CompletionRequest, CompletionResponse, Message, UserContent,
+        CompletionRequest, CompletionResponse, Message, OneOrMany, Text, ToolCall, UserContent,
     },
 };
 
@@ -65,18 +66,19 @@ impl CompletionModelTrait for CompletionModel {
                     let mut parts = Vec::new();
                     for item in content.into_iter() {
                         match item {
-                            UserContent::Text(t) => parts.push(Part { text: Some(t.text) }),
+                            UserContent::Text(t) => parts.push(Part::text(t.text)),
                             UserContent::Image(_) => {
                                 // Reserved for future Image support
                                 return Err(CompletionError::NotImplemented(
                                     "Image support not implemented yet for Gemini provider".into(),
                                 ));
                             }
-                            UserContent::ToolResult(_) => {
-                                // Reserved for future Tool support
-                                return Err(CompletionError::NotImplemented(
-                                    "Tool result support not implemented yet for Gemini provider"
-                                        .into(),
+                            UserContent::ToolResult(tool_result) => {
+                                // Convert tool result to function response
+                                let function_name = tool_result.name.unwrap_or(tool_result.id);
+                                parts.push(Part::function_response(
+                                    function_name,
+                                    tool_result.result,
                                 ));
                             }
                         }
@@ -90,13 +92,11 @@ impl CompletionModelTrait for CompletionModel {
                     let mut parts = Vec::new();
                     for item in content.into_iter() {
                         match item {
-                            AssistantContent::Text(t) => parts.push(Part { text: Some(t.text) }),
-                            AssistantContent::ToolCall(_) => {
-                                // Reserved for future Tool support
-                                return Err(CompletionError::NotImplemented(
-                                    "Tool call support not implemented yet for Gemini provider"
-                                        .into(),
-                                ));
+                            AssistantContent::Text(t) => parts.push(Part::text(t.text)),
+                            AssistantContent::ToolCall(tool_call) => {
+                                // Convert tool call to function call
+                                parts
+                                    .push(Part::function_call(tool_call.name, tool_call.arguments));
                             }
                         }
                     }
@@ -112,7 +112,7 @@ impl CompletionModelTrait for CompletionModel {
                     let mut parts = Vec::new();
                     for item in content.into_iter() {
                         if let UserContent::Text(t) = item {
-                            parts.push(Part { text: Some(t.text) })
+                            parts.push(Part::text(t.text))
                         }
                     }
                     contents.push(Content {
@@ -124,12 +124,14 @@ impl CompletionModelTrait for CompletionModel {
         }
 
         // Handle Preamble (System Prompt)
-        let system_instruction = request.preamble.map(|preamble| Content {
-            role: Some("user".to_string()),
-            parts: vec![Part {
-                text: Some(preamble),
-            }],
-        });
+        let system_instruction = request.preamble.map(|preamble| Content::text(preamble));
+
+        // Convert tools to Gemini format
+        let tools = if !request.tools.is_empty() {
+            Some(convert_tools_to_gemini(&request.tools)?)
+        } else {
+            None
+        };
 
         let body = GenerateContentRequest {
             contents,
@@ -137,6 +139,7 @@ impl CompletionModelTrait for CompletionModel {
             generation_config: Some(GenerationConfig {
                 temperature: request.temperature,
             }),
+            tools,
         };
 
         // Build request using generic client logic
@@ -177,21 +180,130 @@ impl CompletionModelTrait for CompletionModel {
         let api_resp: GenerateContentResponse =
             resp.json().await.map_err(CompletionError::HttpError)?;
 
-        // Extract text
-        let text = api_resp
-            .candidates
-            .as_ref()
-            .and_then(|c| c.first())
-            .and_then(|c| c.content.as_ref())
-            .and_then(|c| c.parts.first())
-            .and_then(|p| p.text.clone())
-            .ok_or_else(|| {
-                CompletionError::ResponseError("No text content in Gemini response".into())
-            })?;
+        let (text, message) = parse_assistant_output(&api_resp)?;
 
         Ok(CompletionResponse {
             choice: text,
+            message,
             raw_response: api_resp,
         })
     }
+}
+
+fn parse_assistant_output(
+    api_resp: &GenerateContentResponse,
+) -> Result<(String, Option<Message>), CompletionError> {
+    let parts = api_resp
+        .candidates
+        .as_ref()
+        .and_then(|c| c.first())
+        .and_then(|c| c.content.as_ref())
+        .map(|c| c.parts.clone())
+        .ok_or_else(|| CompletionError::ResponseError("No candidate content in response".into()))?;
+
+    let mut text_parts = Vec::new();
+    let mut assistant_parts = Vec::new();
+
+    for (idx, part) in parts.iter().enumerate() {
+        if let Some(text) = &part.text {
+            if !text.trim().is_empty() {
+                text_parts.push(text.clone());
+                assistant_parts.push(AssistantContent::Text(Text { text: text.clone() }));
+            }
+        }
+
+        if let Some(function_call) = &part.function_call {
+            assistant_parts.push(AssistantContent::ToolCall(ToolCall {
+                id: format!("call-{}-{}", function_call.name, idx + 1),
+                name: function_call.name.clone(),
+                arguments: function_call.args.clone(),
+            }));
+        }
+    }
+
+    let choice = text_parts.join("\n");
+    let message = assistant_message_from_parts(assistant_parts);
+
+    if choice.trim().is_empty() && message.is_none() {
+        return Err(CompletionError::ResponseError(
+            "No text or tool-call content in Gemini response".into(),
+        ));
+    }
+
+    Ok((choice, message))
+}
+
+fn assistant_message_from_parts(parts: Vec<AssistantContent>) -> Option<Message> {
+    if parts.is_empty() {
+        return None;
+    }
+
+    let content = if parts.len() == 1 {
+        OneOrMany::One(parts.into_iter().next().unwrap())
+    } else {
+        OneOrMany::Many(parts)
+    };
+
+    Some(Message::Assistant { id: None, content })
+}
+
+/// Convert generic tool specs to Gemini's tool declaration format.
+fn convert_tools_to_gemini(
+    tools: &[serde_json::Value],
+) -> Result<Vec<ToolDeclaration>, CompletionError> {
+    let mut function_declarations = Vec::new();
+
+    for tool in tools {
+        // Parse the tool spec
+        let tool_spec: serde_json::Value = tool.clone();
+
+        // Extract function info
+        let function = tool_spec.get("function").ok_or_else(|| {
+            CompletionError::RequestError("Tool spec missing 'function' field".into())
+        })?;
+
+        let name = function
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                CompletionError::RequestError("Tool function missing 'name' field".into())
+            })?
+            .to_string();
+
+        let description = function
+            .get("description")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                CompletionError::RequestError("Tool function missing 'description' field".into())
+            })?
+            .to_string();
+
+        // Extract parameters
+        let parameters = function.get("parameters").and_then(|params| {
+            let param_type = params.get("type").and_then(|t| t.as_str())?;
+            let properties = params.get("properties").cloned()?;
+            let required = params.get("required").and_then(|r| {
+                r.as_array().map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+            });
+
+            Some(FunctionParameters {
+                param_type: param_type.to_string(),
+                properties,
+                required,
+            })
+        });
+
+        let mut function_decl = FunctionDeclaration::new(name, description);
+        if let Some(params) = parameters {
+            function_decl = function_decl.with_parameters(params);
+        }
+
+        function_declarations.push(function_decl);
+    }
+
+    Ok(vec![ToolDeclaration::new(function_declarations)])
 }
