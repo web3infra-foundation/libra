@@ -1,11 +1,11 @@
 //! Handler for the grep_files tool.
 
-use std::path::Path;
-use std::process::Stdio;
+use std::{io, path::Path, process::Stdio};
 
 use async_trait::async_trait;
 use tokio::process::Command;
 
+use super::parse_arguments;
 use crate::internal::ai::tools::{
     context::{GrepFilesArgs, ToolInvocation, ToolKind, ToolOutput},
     error::ToolError,
@@ -13,8 +13,6 @@ use crate::internal::ai::tools::{
     spec::{FunctionParameters, ToolSpec},
     utils::validate_path,
 };
-
-use super::parse_arguments;
 
 /// Handler for searching files using ripgrep.
 pub struct GrepFilesHandler;
@@ -95,10 +93,21 @@ async fn grep_search(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
-    let output = cmd
-        .output()
-        .await
-        .map_err(|e| ToolError::ExecutionFailed(format!("Failed to execute ripgrep: {}", e)))?;
+    let output = match cmd.output().await {
+        Ok(output) => output,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Err(ToolError::ExecutionFailed(
+                "ripgrep (rg) command not found. Please install ripgrep to use grep_files."
+                    .to_string(),
+            ));
+        }
+        Err(err) => {
+            return Err(ToolError::ExecutionFailed(format!(
+                "Failed to execute ripgrep: {}",
+                err
+            )));
+        }
+    };
 
     // Check if ripgrep was found
     if output.status.code() == Some(126) || output.status.code() == Some(127) {
@@ -130,11 +139,12 @@ async fn grep_search(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::internal::ai::tools::context::ToolPayload;
-    use crate::internal::ai::tools::ToolKind;
     use std::fs;
+
     use tempfile::TempDir;
+
+    use super::*;
+    use crate::internal::ai::tools::{ToolKind, context::ToolPayload};
 
     fn skip_if_rg_missing(result: &Result<ToolOutput, ToolError>) -> bool {
         match result {
@@ -455,6 +465,9 @@ mod tests {
         assert_eq!(handler.kind(), ToolKind::Function);
         let schema = handler.schema();
         assert_eq!(schema.function.name, "grep_files");
-        assert!(schema.function.description.contains("Search") || schema.function.description.contains("search"));
+        assert!(
+            schema.function.description.contains("Search")
+                || schema.function.description.contains("search")
+        );
     }
 }
