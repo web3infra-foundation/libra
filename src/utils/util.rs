@@ -138,10 +138,43 @@ where
     P: AsRef<Path>,
     B: AsRef<Path>,
 {
-    // to absolute, just for clear redundant `..` `.` in the path
-    // may generate wrong intermediate path, but the final result is correct (after `starts_with`)
-    let path_abs = path.as_ref().absolutize().unwrap();
-    let parent_abs = parent.as_ref().absolutize().unwrap();
+    fn normalize_abs_path(path: &Path) -> PathBuf {
+        use std::path::Component;
+
+        let mut out = PathBuf::new();
+        for comp in path.components() {
+            match comp {
+                Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+                Component::RootDir => out.push(Path::new("/")),
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    out.pop();
+                }
+                Component::Normal(part) => out.push(part),
+            }
+        }
+        out
+    }
+
+    // Avoid panics and avoid depending on a valid current directory when inputs are absolute.
+    let path_abs = if path.as_ref().is_absolute() {
+        normalize_abs_path(path.as_ref())
+    } else {
+        match path.as_ref().absolutize() {
+            Ok(p) => p.to_path_buf(),
+            Err(_) => return false,
+        }
+    };
+
+    let parent_abs = if parent.as_ref().is_absolute() {
+        normalize_abs_path(parent.as_ref())
+    } else {
+        match parent.as_ref().absolutize() {
+            Ok(p) => p.to_path_buf(),
+            Err(_) => return false,
+        }
+    };
+
     path_abs.starts_with(parent_abs)
 }
 
