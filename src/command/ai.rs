@@ -148,17 +148,36 @@ async fn run_graph_blocking<M: CompletionModel + 'static>(
 
         graph.start().map_err(|e| format!("{:?}", e))?;
 
-        let outputs = graph.get_results::<String>();
-        let output = outputs
+        let outputs = graph.get_outputs();
+        let node_output = outputs
             .get(&b_id)
-            .cloned()
-            .flatten()
-            .map(|v| (*v).clone())
-            .ok_or_else(|| {
-                "AI node produced no string output (node returned empty/non-string output)"
-                    .to_string()
-            })?;
-        Ok::<String, String>(output)
+            .ok_or_else(|| "AI node output missing from DAG results".to_string())?;
+
+        match node_output {
+            Output::Out(Some(content)) => content
+                .get::<String>()
+                .cloned()
+                .ok_or_else(|| "AI node produced non-string output".to_string()),
+            Output::Out(None) => Err("AI node produced no output".to_string()),
+            Output::Err(err) => Err(format!("AI node failed: {}", err)),
+            Output::ErrWithExitCode(code, content) => {
+                let message = content
+                    .as_ref()
+                    .and_then(|c| c.get::<String>())
+                    .cloned()
+                    .unwrap_or_else(|| "no error content".to_string());
+                Err(format!(
+                    "AI node failed with exit code {}: {}",
+                    code.map_or_else(|| "unknown".to_string(), |c| c.to_string()),
+                    message
+                ))
+            }
+            Output::ConditionResult(value) => Err(format!(
+                "AI node produced unexpected condition result: {}",
+                value
+            )),
+            Output::Flow(_) => Err("AI node produced unexpected flow-control output".to_string()),
+        }
     })
     .await
 }

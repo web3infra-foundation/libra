@@ -76,12 +76,25 @@ enum OpenAIMessage {
 
 /// OpenAI tool choice.
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(untagged)]
 enum OpenAIToolChoice {
+    Mode(OpenAIToolChoiceMode),
+    Function(OpenAIFunctionToolChoice),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum OpenAIToolChoiceMode {
     Auto,
     None,
     Required,
-    Function { function: OpenAIToolChoiceFunction },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct OpenAIFunctionToolChoice {
+    #[serde(rename = "type")]
+    r#type: String,
+    function: OpenAIToolChoiceFunction,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -234,7 +247,7 @@ impl CompletionModelTrait for Model {
             tool_choice: if tools.is_empty() {
                 None
             } else {
-                Some(OpenAIToolChoice::Auto)
+                Some(OpenAIToolChoice::Mode(OpenAIToolChoiceMode::Auto))
             },
             tools,
         };
@@ -494,11 +507,11 @@ mod tests {
                     }),
                 },
             }],
-            tool_choice: Some(OpenAIToolChoice::Auto),
+            tool_choice: Some(OpenAIToolChoice::Mode(OpenAIToolChoiceMode::Auto)),
         };
 
         let json = serde_json::to_value(request).unwrap();
-        assert_eq!(json["tool_choice"]["type"], "auto");
+        assert_eq!(json["tool_choice"], "auto");
     }
 
     #[test]

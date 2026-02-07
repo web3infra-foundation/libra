@@ -236,6 +236,7 @@ fn build_messages(
     request: &CompletionRequest,
 ) -> Result<(Option<String>, Vec<AnthropicMessage>), CompletionError> {
     let mut messages = Vec::new();
+    let mut system_messages = Vec::new();
 
     for msg in &request.chat_history {
         match msg {
@@ -312,8 +313,6 @@ fn build_messages(
                 });
             }
             Message::System { content } => {
-                // System messages should go to system parameter, not messages array
-                // We'll handle this at the request level by collecting all system messages
                 let text = content
                     .iter()
                     .filter_map(|c| match c {
@@ -323,21 +322,27 @@ fn build_messages(
                     .collect::<Vec<_>>()
                     .join("\n");
                 if !text.is_empty() {
-                    // We'll prepend system messages as user messages for now
-                    // (Anthropic doesn't support system messages in the messages array)
-                    messages.insert(
-                        0,
-                        AnthropicMessage {
-                            role: "user".to_string(),
-                            content: AnthropicContent::String(format!("System: {}", text)),
-                        },
-                    );
+                    system_messages.push(text);
                 }
             }
         }
     }
 
-    Ok((request.preamble.clone(), messages))
+    let mut system_parts = Vec::new();
+    if let Some(preamble) = &request.preamble
+        && !preamble.trim().is_empty()
+    {
+        system_parts.push(preamble.clone());
+    }
+    system_parts.extend(system_messages);
+
+    let system = if system_parts.is_empty() {
+        None
+    } else {
+        Some(system_parts.join("\n\n"))
+    };
+
+    Ok((system, messages))
 }
 
 fn parse_response(response: &AnthropicResponse) -> Vec<AssistantContent> {
@@ -494,6 +499,39 @@ mod tests {
         assert_eq!(response.id, "msg_456");
         assert_eq!(response.content.len(), 2);
         assert_eq!(response.stop_reason, Some("tool_use".to_string()));
+    }
+
+    #[test]
+    fn test_build_messages_consolidates_system_content() {
+        let request = CompletionRequest {
+            preamble: Some("preamble".to_string()),
+            chat_history: vec![
+                Message::System {
+                    content: crate::internal::ai::completion::message::OneOrMany::one(
+                        UserContent::Text(Text {
+                            text: "system one".to_string(),
+                        }),
+                    ),
+                },
+                Message::System {
+                    content: crate::internal::ai::completion::message::OneOrMany::one(
+                        UserContent::Text(Text {
+                            text: "system two".to_string(),
+                        }),
+                    ),
+                },
+                Message::user("hello"),
+            ],
+            ..Default::default()
+        };
+
+        let (system, messages) = build_messages(&request).unwrap();
+        assert_eq!(
+            system,
+            Some("preamble\n\nsystem one\n\nsystem two".to_string())
+        );
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "user");
     }
 
     #[test]

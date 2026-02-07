@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use async_trait::async_trait;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use super::parse_arguments;
 use crate::internal::ai::tools::{
@@ -49,8 +49,35 @@ impl ToolHandler for ApplyPatchHandler {
 
         validate_path(path, &working_dir)?;
 
+        // Open the file first, then validate the canonical target path to reduce TOCTOU risk.
+        let mut file = tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .await
+            .map_err(|e| {
+                ToolError::ExecutionFailed(format!(
+                    "Failed to open file '{}': {}",
+                    path.display(),
+                    e
+                ))
+            })?;
+
+        let canonical_path = tokio::fs::canonicalize(path).await.map_err(|e| {
+            ToolError::ExecutionFailed(format!(
+                "Failed to canonicalize file '{}': {}",
+                path.display(),
+                e
+            ))
+        })?;
+        let canonical_working_dir = tokio::fs::canonicalize(&working_dir)
+            .await
+            .unwrap_or(working_dir.clone());
+        validate_path(&canonical_path, &canonical_working_dir)?;
+        ensure_same_file(&file, &canonical_path).await?;
+
         // Apply the patch
-        let result = apply_patch_sync(path, &args.patch).await?;
+        let result = apply_patch_sync(&mut file, &canonical_path, &args.patch).await?;
 
         Ok(ToolOutput::success(result))
     }
@@ -71,11 +98,14 @@ impl ToolHandler for ApplyPatchHandler {
 }
 
 /// Apply a patch to a file synchronously.
-async fn apply_patch_sync(path: &Path, patch: &str) -> Result<String, ToolError> {
-    use tokio::fs;
-
+async fn apply_patch_sync(
+    file: &mut tokio::fs::File,
+    path: &Path,
+    patch: &str,
+) -> Result<String, ToolError> {
     // Read original file content
-    let original = fs::read_to_string(path).await.map_err(|e| {
+    let mut original = String::new();
+    file.read_to_string(&mut original).await.map_err(|e| {
         ToolError::ExecutionFailed(format!("Failed to read file '{}': {}", path.display(), e))
     })?;
 
@@ -91,11 +121,17 @@ async fn apply_patch_sync(path: &Path, patch: &str) -> Result<String, ToolError>
         );
     }
 
-    // Write the patched content back
-    let mut file = fs::File::create(path).await.map_err(|e| {
-        ToolError::ExecutionFailed(format!("Failed to open file '{}': {}", path.display(), e))
+    // Write the patched content back to the same open file descriptor.
+    file.set_len(0).await.map_err(|e| {
+        ToolError::ExecutionFailed(format!(
+            "Failed to truncate file '{}': {}",
+            path.display(),
+            e
+        ))
     })?;
-
+    file.rewind().await.map_err(|e| {
+        ToolError::ExecutionFailed(format!("Failed to rewind file '{}': {}", path.display(), e))
+    })?;
     file.write_all(result.as_bytes()).await.map_err(|e| {
         ToolError::ExecutionFailed(format!(
             "Failed to write to file '{}': {}",
@@ -111,6 +147,40 @@ async fn apply_patch_sync(path: &Path, patch: &str) -> Result<String, ToolError>
         "Patch applied successfully to '{}'",
         path.display()
     ))
+}
+
+#[cfg(unix)]
+async fn ensure_same_file(file: &tokio::fs::File, path: &Path) -> Result<(), ToolError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let file_meta = file.metadata().await.map_err(|e| {
+        ToolError::ExecutionFailed(format!(
+            "Failed to stat opened file '{}': {}",
+            path.display(),
+            e
+        ))
+    })?;
+    let path_meta = tokio::fs::metadata(path).await.map_err(|e| {
+        ToolError::ExecutionFailed(format!(
+            "Failed to stat canonical path '{}': {}",
+            path.display(),
+            e
+        ))
+    })?;
+
+    if file_meta.dev() != path_meta.dev() || file_meta.ino() != path_meta.ino() {
+        return Err(ToolError::ExecutionFailed(format!(
+            "File changed during validation for '{}'",
+            path.display()
+        )));
+    }
+
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn ensure_same_file(_file: &tokio::fs::File, _path: &Path) -> Result<(), ToolError> {
+    Ok(())
 }
 
 /// Parse a unified diff and apply it to the original content.

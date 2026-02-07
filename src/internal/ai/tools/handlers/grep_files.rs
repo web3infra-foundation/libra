@@ -3,7 +3,10 @@
 use std::{io, path::Path, process::Stdio};
 
 use async_trait::async_trait;
-use tokio::process::Command;
+use tokio::{
+    process::Command,
+    time::{Duration, timeout},
+};
 
 use super::parse_arguments;
 use crate::internal::ai::tools::{
@@ -16,6 +19,9 @@ use crate::internal::ai::tools::{
 
 /// Handler for searching files using ripgrep.
 pub struct GrepFilesHandler;
+const MAX_PATTERN_LENGTH: usize = 1000;
+const MAX_MATCHES_PER_FILE: usize = 1000;
+const GREP_TIMEOUT_SECONDS: u64 = 30;
 
 #[async_trait]
 impl ToolHandler for GrepFilesHandler {
@@ -77,11 +83,20 @@ async fn grep_search(
     path: &Path,
     case_insensitive: bool,
 ) -> Result<String, ToolError> {
+    if pattern.len() > MAX_PATTERN_LENGTH {
+        return Err(ToolError::InvalidArguments(format!(
+            "pattern too long (max {} characters)",
+            MAX_PATTERN_LENGTH
+        )));
+    }
+
     // Build ripgrep command
     let mut cmd = Command::new("rg");
     cmd.arg("--line-number") // Show line numbers
         .arg("--no-heading") // Don't group by file
         .arg("--color=never") // No ANSI colors
+        .arg("--max-count")
+        .arg(MAX_MATCHES_PER_FILE.to_string())
         .arg(pattern)
         .arg(path);
 
@@ -93,18 +108,24 @@ async fn grep_search(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
-    let output = match cmd.output().await {
-        Ok(output) => output,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+    let output = match timeout(Duration::from_secs(GREP_TIMEOUT_SECONDS), cmd.output()).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(err)) if err.kind() == io::ErrorKind::NotFound => {
             return Err(ToolError::ExecutionFailed(
                 "ripgrep (rg) command not found. Please install ripgrep to use grep_files."
                     .to_string(),
             ));
         }
-        Err(err) => {
+        Ok(Err(err)) => {
             return Err(ToolError::ExecutionFailed(format!(
                 "Failed to execute ripgrep: {}",
                 err
+            )));
+        }
+        Err(_) => {
+            return Err(ToolError::ExecutionFailed(format!(
+                "ripgrep timed out after {} seconds",
+                GREP_TIMEOUT_SECONDS
             )));
         }
     };
