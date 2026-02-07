@@ -3,11 +3,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::internal::ai::{
-    client::CompletionClient,
-    client::Provider,
+    client::{CompletionClient, Provider},
     completion::{
-        AssistantContent, CompletionError, CompletionModel as CompletionModelTrait, Message,
-        Function, Text, ToolCall, UserContent,
+        AssistantContent, CompletionError, CompletionModel as CompletionModelTrait, Function,
+        Message, Text, ToolCall, UserContent,
         request::{CompletionRequest, CompletionResponse},
     },
     providers::openai::client::Client,
@@ -248,13 +247,13 @@ impl CompletionModelTrait for Model {
             .json(&openai_request);
         req_builder = self.client.provider.on_request(req_builder);
 
-        let response = req_builder.send().await.map_err(CompletionError::HttpError)?;
-
-        let status = response.status();
-        let response_text = response
-            .text()
+        let response = req_builder
+            .send()
             .await
             .map_err(CompletionError::HttpError)?;
+
+        let status = response.status();
+        let response_text = response.text().await.map_err(CompletionError::HttpError)?;
 
         if !status.is_success() {
             // Try to parse error
@@ -383,9 +382,7 @@ fn build_messages(request: &CompletionRequest) -> Result<Vec<OpenAIMessage>, Com
     Ok(messages)
 }
 
-fn parse_choice_content(
-    choice: &OpenAIChoice,
-) -> Result<Vec<AssistantContent>, CompletionError> {
+fn parse_choice_content(choice: &OpenAIChoice) -> Result<Vec<AssistantContent>, CompletionError> {
     match &choice.message {
         OpenAIMessage::Assistant {
             content,

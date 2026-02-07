@@ -3,9 +3,12 @@
 use std::path::Path;
 
 use async_trait::async_trait;
-use tokio::fs::File;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::{
+    fs::File,
+    io::{AsyncBufReadExt, BufReader},
+};
 
+use super::parse_arguments;
 use crate::internal::ai::tools::{
     context::{ReadFileArgs, ToolInvocation, ToolKind, ToolOutput},
     error::ToolError,
@@ -13,8 +16,6 @@ use crate::internal::ai::tools::{
     spec::{FunctionParameters, ToolSpec},
     utils::validate_path,
 };
-
-use super::parse_arguments;
 
 /// Handler for reading file contents.
 pub struct ReadFileHandler;
@@ -169,12 +170,12 @@ fn format_line(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::internal::ai::tools::context::ToolPayload;
-    use crate::internal::ai::tools::ToolKind;
     use std::io::Write;
-    use tempfile::NamedTempFile;
-    use tempfile::TempDir;
+
+    use tempfile::{NamedTempFile, TempDir};
+
+    use super::*;
+    use crate::internal::ai::tools::{ToolKind, context::ToolPayload};
 
     #[tokio::test]
     async fn test_read_file_basic() {
@@ -458,7 +459,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let working_dir = temp_dir.path().to_path_buf();
         let file_path = working_dir.join("short.txt");
-        tokio::fs::write(&file_path, "line 1\nline 2\n").await.unwrap();
+        tokio::fs::write(&file_path, "line 1\nline 2\n")
+            .await
+            .unwrap();
 
         let handler = ReadFileHandler;
         let invocation = ToolInvocation::new(

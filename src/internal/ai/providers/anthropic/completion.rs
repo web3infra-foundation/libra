@@ -5,10 +5,9 @@ use serde::{Deserialize, Serialize};
 use crate::internal::ai::{
     client::{CompletionClient, Provider},
     completion::{
-        AssistantContent, Function,
+        AssistantContent, CompletionError, CompletionModel as CompletionModelTrait, Function,
+        Message, Text, ToolCall, UserContent,
         request::{CompletionRequest, CompletionResponse},
-        CompletionError, CompletionModel as CompletionModelTrait, Message, Text, ToolCall,
-        UserContent,
     },
     providers::anthropic::client::Client,
     tools::ToolDefinition,
@@ -75,7 +74,9 @@ enum AnthropicContent {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AnthropicContentBlock {
-    Text { text: String },
+    Text {
+        text: String,
+    },
     Image {
         source: AnthropicImageSource,
     },
@@ -190,17 +191,18 @@ impl CompletionModelTrait for Model {
             .json(&anthropic_request);
         req_builder = self.client.provider.on_request(req_builder);
 
-        let response = req_builder.send().await.map_err(CompletionError::HttpError)?;
-
-        let status = response.status();
-        let response_text = response
-            .text()
+        let response = req_builder
+            .send()
             .await
             .map_err(CompletionError::HttpError)?;
 
+        let status = response.status();
+        let response_text = response.text().await.map_err(CompletionError::HttpError)?;
+
         if !status.is_success() {
             // Try to parse error
-            if let Ok(error_response) = serde_json::from_str::<AnthropicErrorResponse>(&response_text)
+            if let Ok(error_response) =
+                serde_json::from_str::<AnthropicErrorResponse>(&response_text)
             {
                 return Err(CompletionError::ProviderError(error_response.error.message));
             }
@@ -230,7 +232,9 @@ fn parse_tools(tools: &[ToolDefinition]) -> Vec<AnthropicToolDefinition> {
         .collect()
 }
 
-fn build_messages(request: &CompletionRequest) -> Result<(Option<String>, Vec<AnthropicMessage>), CompletionError> {
+fn build_messages(
+    request: &CompletionRequest,
+) -> Result<(Option<String>, Vec<AnthropicMessage>), CompletionError> {
     let mut messages = Vec::new();
 
     for msg in &request.chat_history {
@@ -321,10 +325,13 @@ fn build_messages(request: &CompletionRequest) -> Result<(Option<String>, Vec<An
                 if !text.is_empty() {
                     // We'll prepend system messages as user messages for now
                     // (Anthropic doesn't support system messages in the messages array)
-                    messages.insert(0, AnthropicMessage {
-                        role: "user".to_string(),
-                        content: AnthropicContent::String(format!("System: {}", text)),
-                    });
+                    messages.insert(
+                        0,
+                        AnthropicMessage {
+                            role: "user".to_string(),
+                            content: AnthropicContent::String(format!("System: {}", text)),
+                        },
+                    );
                 }
             }
         }

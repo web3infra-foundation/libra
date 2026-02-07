@@ -635,14 +635,8 @@ mod test {
     #[cfg(windows)]
     #[test]
     fn test_is_sub_path_preserves_windows_prefix() {
-        assert!(is_sub_path(
-            r"C:\repo\sub\..\file.txt",
-            r"C:\repo"
-        ));
-        assert!(!is_sub_path(
-            r"C:\repo\..\Windows\System32",
-            r"C:\repo"
-        ));
+        assert!(is_sub_path(r"C:\repo\sub\..\file.txt", r"C:\repo"));
+        assert!(!is_sub_path(r"C:\repo\..\Windows\System32", r"C:\repo"));
     }
 
     #[test]

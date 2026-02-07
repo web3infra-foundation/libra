@@ -10,8 +10,8 @@ use super::{
 use crate::internal::ai::{
     client::Provider,
     completion::{
-        AssistantContent, CompletionError, CompletionModel as CompletionModelTrait, CompletionRequest,
-        CompletionResponse, Function, Message, Text, ToolCall, UserContent,
+        AssistantContent, CompletionError, CompletionModel as CompletionModelTrait,
+        CompletionRequest, CompletionResponse, Function, Message, Text, ToolCall, UserContent,
     },
     tools::ToolDefinition,
 };

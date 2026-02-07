@@ -5,6 +5,7 @@ use std::path::Path;
 use async_trait::async_trait;
 use tokio::io::AsyncWriteExt;
 
+use super::parse_arguments;
 use crate::internal::ai::tools::{
     context::{ApplyPatchArgs, ToolInvocation, ToolKind, ToolOutput},
     error::ToolError,
@@ -12,8 +13,6 @@ use crate::internal::ai::tools::{
     spec::{FunctionParameters, ToolSpec},
     utils::validate_path,
 };
-
-use super::parse_arguments;
 
 /// Handler for applying patches to files.
 pub struct ApplyPatchHandler;
@@ -157,9 +156,17 @@ fn parse_and_apply_unified_diff(original: &str, patch: &str) -> Result<String, T
         }
     }
 
-    fn find_in_window(lines: &[String], start: usize, needle: &str, window: usize) -> Option<usize> {
+    fn find_in_window(
+        lines: &[String],
+        start: usize,
+        needle: &str,
+        window: usize,
+    ) -> Option<usize> {
         let end = (start + window).min(lines.len());
-        lines[start..end].iter().position(|l| l == needle).map(|i| start + i)
+        lines[start..end]
+            .iter()
+            .position(|l| l == needle)
+            .map(|i| start + i)
     }
 
     let mut i = 0;
@@ -206,9 +213,14 @@ fn parse_and_apply_unified_diff(original: &str, patch: &str) -> Result<String, T
                             eprintln!("[apply_patch] - remove @{} '{}'", current_line, expected);
                         }
                         result_lines.remove(current_line);
-                    } else if let Some(found) = find_in_window(&result_lines, current_line, expected, 50) {
+                    } else if let Some(found) =
+                        find_in_window(&result_lines, current_line, expected, 50)
+                    {
                         if debug {
-                            eprintln!("[apply_patch] - remove @{} (found @{}) '{}'", current_line, found, expected);
+                            eprintln!(
+                                "[apply_patch] - remove @{} (found @{}) '{}'",
+                                current_line, found, expected
+                            );
                         }
                         result_lines.remove(found);
                         current_line = found;
@@ -243,7 +255,10 @@ fn parse_and_apply_unified_diff(original: &str, patch: &str) -> Result<String, T
                         find_in_window(&result_lines, current_line, expected, 50)
                     {
                         if debug {
-                            eprintln!("[apply_patch] ~ context seek from @{} to @{} '{}'", current_line, found, expected);
+                            eprintln!(
+                                "[apply_patch] ~ context seek from @{} to @{} '{}'",
+                                current_line, found, expected
+                            );
                         }
                         current_line = found + 1;
                     } else {
@@ -285,13 +300,12 @@ fn parse_and_apply_unified_diff(original: &str, patch: &str) -> Result<String, T
 
 #[cfg(test)]
 mod tests {
+    use std::{fs, io::Write};
+
+    use tempfile::{NamedTempFile, TempDir};
+
     use super::*;
-    use crate::internal::ai::tools::context::ToolPayload;
-    use crate::internal::ai::tools::ToolKind;
-    use std::fs;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-    use tempfile::TempDir;
+    use crate::internal::ai::tools::{ToolKind, context::ToolPayload};
 
     #[tokio::test]
     async fn test_apply_patch_basic() {
@@ -650,7 +664,10 @@ mod tests {
         assert_eq!(handler.kind(), ToolKind::Function);
         let schema = handler.schema();
         assert_eq!(schema.function.name, "apply_patch");
-        assert!(schema.function.description.contains("patch") || schema.function.description.contains("diff"));
+        assert!(
+            schema.function.description.contains("patch")
+                || schema.function.description.contains("diff")
+        );
     }
 
     #[test]

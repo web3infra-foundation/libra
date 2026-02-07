@@ -5,7 +5,9 @@ use crate::internal::ai::{
         AssistantContent, CompletionError, CompletionModel, CompletionRequest, Message, OneOrMany,
         ToolResult, UserContent,
     },
-    tools::{FunctionParameters, ToolDefinition, ToolInvocation, ToolOutput, ToolPayload, ToolRegistry},
+    tools::{
+        FunctionParameters, ToolDefinition, ToolInvocation, ToolOutput, ToolPayload, ToolRegistry,
+    },
 };
 
 /// Runtime configuration for iterative tool-calling execution.
@@ -68,7 +70,9 @@ pub async fn run_tool_loop<M: CompletionModel>(
 
         if !tool_calls.is_empty() {
             let assistant_content = OneOrMany::many(response.content.clone()).ok_or_else(|| {
-                CompletionError::ResponseError("Empty assistant content in tool call response".to_string())
+                CompletionError::ResponseError(
+                    "Empty assistant content in tool call response".to_string(),
+                )
             })?;
             history.push(Message::Assistant {
                 id: None,

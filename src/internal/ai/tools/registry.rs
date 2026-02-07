@@ -1,7 +1,6 @@
 //! Tool registry for managing and dispatching tool handlers.
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 
@@ -61,9 +60,7 @@ impl ToolRegistry {
     /// Create a new empty ToolRegistry.
     pub fn new() -> Self {
         Self::try_new().unwrap_or_else(|err| {
-            panic!(
-                "failed to resolve current working directory for ToolRegistry::new(): {err}"
-            )
+            panic!("failed to resolve current working directory for ToolRegistry::new(): {err}")
         })
     }
 
@@ -235,10 +232,13 @@ impl Default for ToolRegistryBuilder {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::internal::ai::tools::handlers::{ListDirHandler, ReadFileHandler};
-    use crate::internal::ai::tools::context::ToolPayload;
     use tempfile::TempDir;
+
+    use super::*;
+    use crate::internal::ai::tools::{
+        context::ToolPayload,
+        handlers::{ListDirHandler, ReadFileHandler},
+    };
 
     // Mock handler for testing
     struct MockHandler;

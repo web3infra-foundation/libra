@@ -11,7 +11,7 @@ use crate::internal::ai::{
     completion::CompletionModel,
     node_adapter::ToolLoopAction,
     providers::{
-        anthropic::{Client as AnthropicClient, CLAUDE_3_5_SONNET},
+        anthropic::{CLAUDE_3_5_SONNET, Client as AnthropicClient},
         gemini::{Client as GeminiClient, GEMINI_2_5_FLASH},
         openai::{Client as OpenAIClient, GPT_4O_MINI},
     },
@@ -155,7 +155,8 @@ async fn run_graph_blocking<M: CompletionModel + 'static>(
             .flatten()
             .map(|v| (*v).clone())
             .ok_or_else(|| {
-                "AI node produced no string output (node returned empty/non-string output)".to_string()
+                "AI node produced no string output (node returned empty/non-string output)"
+                    .to_string()
             })?;
         Ok::<String, String>(output)
     })

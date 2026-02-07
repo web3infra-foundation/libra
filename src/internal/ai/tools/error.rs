@@ -1,6 +1,7 @@
 //! Error types for tool operations.
 
 use std::path::PathBuf;
+
 use thiserror::Error;
 
 /// Errors that can occur during tool execution.

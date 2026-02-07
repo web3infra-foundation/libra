@@ -12,7 +12,7 @@
 pub mod client;
 pub mod completion;
 
-pub use client::{Client, AnthropicProvider};
+pub use client::{AnthropicProvider, Client};
 pub use completion::{CompletionModel, Model};
 
 // Model constants

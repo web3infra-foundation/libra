@@ -5,6 +5,7 @@ use std::path::Path;
 use async_trait::async_trait;
 use tokio::fs;
 
+use super::parse_arguments;
 use crate::internal::ai::tools::{
     context::{ListDirArgs, ToolInvocation, ToolKind, ToolOutput},
     error::ToolError,
@@ -12,8 +13,6 @@ use crate::internal::ai::tools::{
     spec::{FunctionParameters, ToolSpec},
     utils::validate_path,
 };
-
-use super::parse_arguments;
 
 /// Handler for listing directory contents.
 pub struct ListDirHandler;
@@ -164,11 +163,12 @@ fn list_directory_recursive<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::internal::ai::tools::ToolKind;
-    use crate::internal::ai::tools::context::ToolPayload;
     use std::fs;
+
     use tempfile::TempDir;
+
+    use super::*;
+    use crate::internal::ai::tools::{ToolKind, context::ToolPayload};
 
     #[tokio::test]
     async fn test_list_dir_basic() {

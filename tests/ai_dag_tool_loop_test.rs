@@ -76,16 +76,16 @@ fn test_dag_tool_loop_action_applies_patch() {
     let scripted = ScriptedModel::new(vec![
         CompletionResponse {
             content: vec![AssistantContent::ToolCall(ToolCall {
-                    id: "call-1".to_string(),
+                id: "call-1".to_string(),
+                name: "apply_patch".to_string(),
+                function: Function {
                     name: "apply_patch".to_string(),
-                    function: Function {
-                        name: "apply_patch".to_string(),
-                        arguments: serde_json::json!({
+                    arguments: serde_json::json!({
                         "file_path": file_path,
                         "patch": patch
                     }),
-                    },
-                })],
+                },
+            })],
             raw_response: (),
         },
         CompletionResponse {

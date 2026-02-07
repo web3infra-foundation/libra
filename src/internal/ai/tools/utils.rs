@@ -2,8 +2,10 @@
 
 use std::path::Path;
 
-use crate::internal::ai::tools::error::{ToolError, ToolResult};
-use crate::utils;
+use crate::{
+    internal::ai::tools::error::{ToolError, ToolResult},
+    utils,
+};
 
 /// Validate that a path is within the allowed working directory.
 ///
@@ -24,8 +26,9 @@ pub fn validate_path(path: &Path, working_dir: &Path) -> ToolResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::path::PathBuf;
+
+    use super::*;
 
     #[test]
     fn test_validate_path_absolute() {
