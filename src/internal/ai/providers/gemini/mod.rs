@@ -2,6 +2,9 @@ pub mod client;
 pub mod completion;
 pub mod gemini_api_types;
 
+#[cfg(test)]
+mod api_tests;
+
 pub use client::Client;
 pub use completion::CompletionModel;
 

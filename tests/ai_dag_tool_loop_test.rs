@@ -11,7 +11,7 @@ use libra::internal::ai::{
     ToolLoopAction,
     completion::{
         AssistantContent, CompletionError, CompletionModel, CompletionRequest, CompletionResponse,
-        Message, OneOrMany, ToolCall,
+        Function, Text, ToolCall,
     },
     tools::{ToolRegistryBuilder, handlers::ApplyPatchHandler},
 };
@@ -75,23 +75,23 @@ fn test_dag_tool_loop_action_applies_patch() {
 
     let scripted = ScriptedModel::new(vec![
         CompletionResponse {
-            choice: String::new(),
-            message: Some(Message::Assistant {
-                id: None,
-                content: OneOrMany::One(AssistantContent::ToolCall(ToolCall {
+            content: vec![AssistantContent::ToolCall(ToolCall {
                     id: "call-1".to_string(),
                     name: "apply_patch".to_string(),
-                    arguments: serde_json::json!({
+                    function: Function {
+                        name: "apply_patch".to_string(),
+                        arguments: serde_json::json!({
                         "file_path": file_path,
                         "patch": patch
                     }),
-                })),
-            }),
+                    },
+                })],
             raw_response: (),
         },
         CompletionResponse {
-            choice: "done".to_string(),
-            message: None,
+            content: vec![AssistantContent::Text(Text {
+                text: "done".to_string(),
+            })],
             raw_response: (),
         },
     ]);

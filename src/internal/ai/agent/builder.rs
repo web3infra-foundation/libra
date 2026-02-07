@@ -5,6 +5,7 @@ pub struct AgentBuilder<M: CompletionModel> {
     model: M,
     preamble: Option<String>,
     temperature: Option<f64>,
+    max_steps: Option<usize>,
     tools: ToolSet,
 }
 
@@ -15,6 +16,7 @@ impl<M: CompletionModel> AgentBuilder<M> {
             model,
             preamble: None,
             temperature: None,
+            max_steps: None,
             tools: ToolSet::default(),
         }
     }
@@ -25,13 +27,20 @@ impl<M: CompletionModel> AgentBuilder<M> {
         self
     }
 
+    /// Sets the maximum number of steps for tool execution loops.
+    /// Defaults to 4 if not set.
+    pub fn max_steps(mut self, max_steps: usize) -> Self {
+        self.max_steps = Some(max_steps);
+        self
+    }
+
     /// Sets the tools for the agent.
     pub fn tools(mut self, tools: ToolSet) -> Self {
         self.tools = tools;
         self
     }
 
-    /// Sets the temperature for the agent's responses.
+    /// Sets the temperature for the agent's responses (0.0 to 2.0).
     pub fn temperature(mut self, temperature: f64) -> Result<Self, String> {
         if !(0.0..=2.0).contains(&temperature) {
             return Err(format!(
@@ -49,6 +58,7 @@ impl<M: CompletionModel> AgentBuilder<M> {
             model: self.model,
             preamble: self.preamble,
             temperature: self.temperature,
+            max_steps: self.max_steps.unwrap_or(4),
             tools: self.tools,
         }
     }
@@ -72,9 +82,11 @@ mod tests {
             &self,
             _request: CompletionRequest,
         ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+            use crate::internal::ai::completion::message::{AssistantContent, Text};
             Ok(CompletionResponse {
-                choice: "mock response".to_string(),
-                message: None,
+                content: vec![AssistantContent::Text(Text {
+                    text: "mock response".to_string(),
+                })],
                 raw_response: (),
             })
         }

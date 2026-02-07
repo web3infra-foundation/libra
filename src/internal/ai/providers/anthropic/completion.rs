@@ -5,10 +5,13 @@ use serde::{Deserialize, Serialize};
 use crate::internal::ai::{
     client::{CompletionClient, Provider},
     completion::{
+        AssistantContent, Function,
         request::{CompletionRequest, CompletionResponse},
-        CompletionError, CompletionModel as CompletionModelTrait, Message,
+        CompletionError, CompletionModel as CompletionModelTrait, Message, Text, ToolCall,
+        UserContent,
     },
     providers::anthropic::client::Client,
+    tools::ToolDefinition,
 };
 
 /// Anthropic completion model.
@@ -157,7 +160,7 @@ impl CompletionModelTrait for Model {
         &self,
         request: CompletionRequest,
     ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
-        let tools = parse_tools(&request.tools)?;
+        let tools = parse_tools(&request.tools);
         let (system, messages) = build_messages(&request)?;
 
         // Calculate default max_tokens based on model if not provided
@@ -207,62 +210,24 @@ impl CompletionModelTrait for Model {
         let anthropic_response: AnthropicResponse =
             serde_json::from_str(&response_text).map_err(CompletionError::JsonError)?;
 
-        let (choice_text, assistant_message) = parse_response(&anthropic_response)?;
+        let content = parse_response(&anthropic_response);
 
         Ok(CompletionResponse {
-            choice: choice_text,
-            message: assistant_message,
+            content,
             raw_response: anthropic_response,
         })
     }
 }
 
-fn parse_tools(tools: &[serde_json::Value]) -> Result<Vec<AnthropicToolDefinition>, CompletionError> {
-    let mut out = Vec::new();
-    for tool in tools {
-        // Accept both:
-        // 1) flat tool objects: { name, description, parameters }
-        // 2) OpenAI-compatible tool objects: { type: "function", function: { name, description, parameters } }
-        //
-        // OpenAI uses "parameters" but Anthropic uses "input_schema" in its API.
-        let tool_obj = tool
-            .as_object()
-            .ok_or_else(|| CompletionError::RequestError("Tool must be an object".into()))?;
-
-        let function_obj = tool_obj.get("function").and_then(|v| v.as_object());
-        let fields = function_obj.unwrap_or(tool_obj);
-
-        let name = fields
-            .get("name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| CompletionError::RequestError("Tool missing 'name' field".into()))?
-            .to_string();
-
-        let description = fields
-            .get("description")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| CompletionError::RequestError("Tool missing 'description' field".into()))?
-            .to_string();
-
-        let parameters = fields
-            .get("parameters")
-            .or_else(|| fields.get("input_schema"))
-            .or_else(|| tool_obj.get("parameters"))
-            .or_else(|| tool_obj.get("input_schema"))
-            .ok_or_else(|| {
-                CompletionError::RequestError(
-                    "Tool missing 'parameters' or 'input_schema' field".into(),
-                )
-            })?
-            .clone();
-
-        out.push(AnthropicToolDefinition {
-            name,
-            description,
-            input_schema: parameters,
-        });
-    }
-    Ok(out)
+fn parse_tools(tools: &[ToolDefinition]) -> Vec<AnthropicToolDefinition> {
+    tools
+        .iter()
+        .map(|tool| AnthropicToolDefinition {
+            name: tool.name.clone(),
+            description: tool.description.clone(),
+            input_schema: tool.parameters.clone(),
+        })
+        .collect()
 }
 
 fn build_messages(request: &CompletionRequest) -> Result<(Option<String>, Vec<AnthropicMessage>), CompletionError> {
@@ -274,12 +239,12 @@ fn build_messages(request: &CompletionRequest) -> Result<(Option<String>, Vec<An
                 let mut content_blocks = Vec::new();
                 for item in content.iter() {
                     match item {
-                        crate::internal::ai::completion::message::UserContent::Text(t) => {
+                        UserContent::Text(t) => {
                             content_blocks.push(AnthropicContentBlock::Text {
                                 text: t.text.clone(),
                             });
                         }
-                        crate::internal::ai::completion::message::UserContent::ToolResult(tool_result) => {
+                        UserContent::ToolResult(tool_result) => {
                             let content = serde_json::to_string(&tool_result.result)
                                 .unwrap_or_else(|_| tool_result.result.to_string());
                             content_blocks.push(AnthropicContentBlock::ToolResult {
@@ -288,7 +253,7 @@ fn build_messages(request: &CompletionRequest) -> Result<(Option<String>, Vec<An
                                 is_error: None,
                             });
                         }
-                        crate::internal::ai::completion::message::UserContent::Image(_) => {
+                        UserContent::Image(_) => {
                             return Err(CompletionError::NotImplemented(
                                 "Image content not yet implemented for Anthropic provider".into(),
                             ));
@@ -315,18 +280,18 @@ fn build_messages(request: &CompletionRequest) -> Result<(Option<String>, Vec<An
                 let mut content_blocks = Vec::new();
                 for item in content.iter() {
                     match item {
-                        crate::internal::ai::completion::message::AssistantContent::Text(t) => {
+                        AssistantContent::Text(t) => {
                             if !t.text.trim().is_empty() {
                                 content_blocks.push(AnthropicContentBlock::Text {
                                     text: t.text.clone(),
                                 });
                             }
                         }
-                        crate::internal::ai::completion::message::AssistantContent::ToolCall(call) => {
+                        AssistantContent::ToolCall(call) => {
                             content_blocks.push(AnthropicContentBlock::ToolUse {
                                 id: call.id.clone(),
-                                name: call.name.clone(),
-                                input: call.arguments.clone(),
+                                name: call.function.name.clone(),
+                                input: call.function.arguments.clone(),
                             });
                         }
                     }
@@ -348,9 +313,7 @@ fn build_messages(request: &CompletionRequest) -> Result<(Option<String>, Vec<An
                 let text = content
                     .iter()
                     .filter_map(|c| match c {
-                        crate::internal::ai::completion::message::UserContent::Text(t) => {
-                            Some(t.text.clone())
-                        }
+                        UserContent::Text(t) => Some(t.text.clone()),
                         _ => None,
                     })
                     .collect::<Vec<_>>()
@@ -370,58 +333,30 @@ fn build_messages(request: &CompletionRequest) -> Result<(Option<String>, Vec<An
     Ok((request.preamble.clone(), messages))
 }
 
-fn parse_response(
-    response: &AnthropicResponse,
-) -> Result<(String, Option<Message>), CompletionError> {
-    let mut text_parts = Vec::new();
-    let mut tool_calls = Vec::new();
+fn parse_response(response: &AnthropicResponse) -> Vec<AssistantContent> {
+    let mut parts = Vec::new();
 
     for block in &response.content {
         match block {
             AnthropicContentBlock::Text { text } => {
                 if !text.trim().is_empty() {
-                    text_parts.push(text.clone());
+                    parts.push(AssistantContent::Text(Text { text: text.clone() }));
                 }
             }
             AnthropicContentBlock::ToolUse { id, name, input } => {
-                use crate::internal::ai::completion::message::AssistantContent;
-                use crate::internal::ai::completion::message::ToolCall;
-                tool_calls.push(AssistantContent::ToolCall(ToolCall {
+                parts.push(AssistantContent::ToolCall(ToolCall {
                     id: id.clone(),
                     name: name.clone(),
-                    arguments: input.clone(),
+                    function: Function {
+                        name: name.clone(),
+                        arguments: input.clone(),
+                    },
                 }));
             }
             _ => {}
         }
     }
-
-    let text = text_parts.join("\n");
-
-    let message = if text.is_empty() && tool_calls.is_empty() {
-        None
-    } else {
-        use crate::internal::ai::completion::message::OneOrMany;
-        let mut parts = Vec::new();
-        if !text.is_empty() {
-            use crate::internal::ai::completion::message::Text;
-            parts.push(crate::internal::ai::completion::message::AssistantContent::Text(Text {
-                text: text.clone(),
-            }));
-        }
-        parts.extend(tool_calls);
-
-        Some(Message::Assistant {
-            id: Some(response.id.clone()),
-            content: if parts.len() == 1 {
-                OneOrMany::one(parts.into_iter().next().unwrap())
-            } else {
-                OneOrMany::Many(parts)
-            },
-        })
-    };
-
-    Ok((text, message))
+    parts
 }
 
 /// Calculate default max_tokens based on the model.
@@ -580,23 +515,20 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_tools_accepts_openai_wrapped_format() {
-        let tools = vec![serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": "read_file",
-                "description": "Read a file",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "file_path": { "type": "string" }
-                    },
-                    "required": ["file_path"]
-                }
-            }
-        })];
+    fn test_parse_tools_maps_tool_definition() {
+        let tools = vec![crate::internal::ai::tools::ToolDefinition {
+            name: "read_file".to_string(),
+            description: "Read a file".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": { "type": "string" }
+                },
+                "required": ["file_path"]
+            }),
+        }];
 
-        let parsed = parse_tools(&tools).unwrap();
+        let parsed = parse_tools(&tools);
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].name, "read_file");
         assert_eq!(parsed[0].description, "Read a file");
@@ -604,20 +536,20 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_tools_accepts_flat_format() {
-        let tools = vec![serde_json::json!({
-            "name": "list_dir",
-            "description": "List directory contents",
-            "parameters": {
+    fn test_parse_tools_preserves_parameters() {
+        let tools = vec![crate::internal::ai::tools::ToolDefinition {
+            name: "list_dir".to_string(),
+            description: "List directory contents".to_string(),
+            parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "dir_path": { "type": "string" }
                 },
                 "required": ["dir_path"]
-            }
-        })];
+            }),
+        }];
 
-        let parsed = parse_tools(&tools).unwrap();
+        let parsed = parse_tools(&tools);
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].name, "list_dir");
         assert_eq!(parsed[0].description, "List directory contents");

@@ -10,9 +10,10 @@ use super::{
 use crate::internal::ai::{
     client::Provider,
     completion::{
-        AssistantContent, CompletionError, CompletionModel as CompletionModelTrait,
-        CompletionRequest, CompletionResponse, Message, OneOrMany, Text, ToolCall, UserContent,
+        AssistantContent, CompletionError, CompletionModel as CompletionModelTrait, CompletionRequest,
+        CompletionResponse, Function, Message, Text, ToolCall, UserContent,
     },
+    tools::ToolDefinition,
 };
 
 /// A completion model implementation for Google Gemini.
@@ -75,9 +76,8 @@ impl CompletionModelTrait for CompletionModel {
                             }
                             UserContent::ToolResult(tool_result) => {
                                 // Convert tool result to function response
-                                let function_name = tool_result.name.unwrap_or(tool_result.id);
                                 parts.push(Part::function_response(
-                                    function_name,
+                                    tool_result.name,
                                     tool_result.result,
                                 ));
                             }
@@ -95,8 +95,10 @@ impl CompletionModelTrait for CompletionModel {
                             AssistantContent::Text(t) => parts.push(Part::text(t.text)),
                             AssistantContent::ToolCall(tool_call) => {
                                 // Convert tool call to function call
-                                parts
-                                    .push(Part::function_call(tool_call.name, tool_call.arguments));
+                                parts.push(Part::function_call(
+                                    tool_call.function.name,
+                                    tool_call.function.arguments,
+                                ));
                             }
                         }
                     }
@@ -128,7 +130,7 @@ impl CompletionModelTrait for CompletionModel {
 
         // Convert tools to Gemini format
         let tools = if !request.tools.is_empty() {
-            Some(convert_tools_to_gemini(&request.tools)?)
+            Some(convert_tools_to_gemini(&request.tools))
         } else {
             None
         };
@@ -180,11 +182,10 @@ impl CompletionModelTrait for CompletionModel {
         let api_resp: GenerateContentResponse =
             resp.json().await.map_err(CompletionError::HttpError)?;
 
-        let (text, message) = parse_assistant_output(&api_resp)?;
+        let content = parse_assistant_output(&api_resp)?;
 
         Ok(CompletionResponse {
-            choice: text,
-            message,
+            content,
             raw_response: api_resp,
         })
     }
@@ -192,7 +193,7 @@ impl CompletionModelTrait for CompletionModel {
 
 fn parse_assistant_output(
     api_resp: &GenerateContentResponse,
-) -> Result<(String, Option<Message>), CompletionError> {
+) -> Result<Vec<AssistantContent>, CompletionError> {
     let parts = api_resp
         .candidates
         .as_ref()
@@ -201,14 +202,12 @@ fn parse_assistant_output(
         .map(|c| c.parts.clone())
         .ok_or_else(|| CompletionError::ResponseError("No candidate content in response".into()))?;
 
-    let mut text_parts = Vec::new();
     let mut assistant_parts = Vec::new();
 
     for (idx, part) in parts.iter().enumerate() {
         if let Some(text) = &part.text
             && !text.trim().is_empty()
         {
-            text_parts.push(text.clone());
             assistant_parts.push(AssistantContent::Text(Text { text: text.clone() }));
         }
 
@@ -216,70 +215,29 @@ fn parse_assistant_output(
             assistant_parts.push(AssistantContent::ToolCall(ToolCall {
                 id: format!("call-{}-{}", function_call.name, idx + 1),
                 name: function_call.name.clone(),
-                arguments: function_call.args.clone(),
+                function: Function {
+                    name: function_call.name.clone(),
+                    arguments: function_call.args.clone(),
+                },
             }));
         }
     }
 
-    let choice = text_parts.join("\n");
-    let message = assistant_message_from_parts(assistant_parts);
-
-    if choice.trim().is_empty() && message.is_none() {
+    if assistant_parts.is_empty() {
         return Err(CompletionError::ResponseError(
             "No text or tool-call content in Gemini response".into(),
         ));
     }
 
-    Ok((choice, message))
-}
-
-fn assistant_message_from_parts(parts: Vec<AssistantContent>) -> Option<Message> {
-    if parts.is_empty() {
-        return None;
-    }
-
-    let content = if parts.len() == 1 {
-        OneOrMany::One(parts.into_iter().next().unwrap())
-    } else {
-        OneOrMany::Many(parts)
-    };
-
-    Some(Message::Assistant { id: None, content })
+    Ok(assistant_parts)
 }
 
 /// Convert generic tool specs to Gemini's tool declaration format.
-fn convert_tools_to_gemini(
-    tools: &[serde_json::Value],
-) -> Result<Vec<ToolDeclaration>, CompletionError> {
+fn convert_tools_to_gemini(tools: &[ToolDefinition]) -> Vec<ToolDeclaration> {
     let mut function_declarations = Vec::new();
 
     for tool in tools {
-        // Parse the tool spec
-        let tool_spec: serde_json::Value = tool.clone();
-
-        // Extract function info
-        let function = tool_spec.get("function").ok_or_else(|| {
-            CompletionError::RequestError("Tool spec missing 'function' field".into())
-        })?;
-
-        let name = function
-            .get("name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                CompletionError::RequestError("Tool function missing 'name' field".into())
-            })?
-            .to_string();
-
-        let description = function
-            .get("description")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                CompletionError::RequestError("Tool function missing 'description' field".into())
-            })?
-            .to_string();
-
-        // Extract parameters
-        let parameters = function.get("parameters").and_then(|params| {
+        let parameters = tool.parameters.as_object().and_then(|params| {
             let param_type = params.get("type").and_then(|t| t.as_str())?;
             let properties = params.get("properties").cloned()?;
             let required = params.get("required").and_then(|r| {
@@ -297,7 +255,8 @@ fn convert_tools_to_gemini(
             })
         });
 
-        let mut function_decl = FunctionDeclaration::new(name, description);
+        let mut function_decl =
+            FunctionDeclaration::new(tool.name.clone(), tool.description.clone());
         if let Some(params) = parameters {
             function_decl = function_decl.with_parameters(params);
         }
@@ -305,5 +264,5 @@ fn convert_tools_to_gemini(
         function_declarations.push(function_decl);
     }
 
-    Ok(vec![ToolDeclaration::new(function_declarations)])
+    vec![ToolDeclaration::new(function_declarations)]
 }

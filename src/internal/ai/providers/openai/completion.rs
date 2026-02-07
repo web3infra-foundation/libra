@@ -7,10 +7,11 @@ use crate::internal::ai::{
     client::Provider,
     completion::{
         AssistantContent, CompletionError, CompletionModel as CompletionModelTrait, Message,
-        OneOrMany, Text, ToolCall, UserContent,
+        Function, Text, ToolCall, UserContent,
         request::{CompletionRequest, CompletionResponse},
     },
     providers::openai::client::Client,
+    tools::ToolDefinition,
 };
 
 /// OpenAI completion model.
@@ -49,7 +50,7 @@ struct OpenAIRequest {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<OpenAIToolDefinition>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tool_choice: Option<String>,
+    tool_choice: Option<OpenAIToolChoice>,
 }
 
 /// OpenAI message format.
@@ -69,8 +70,24 @@ enum OpenAIMessage {
     },
     Tool {
         tool_call_id: String,
+        name: String,
         content: String,
     },
+}
+
+/// OpenAI tool choice.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum OpenAIToolChoice {
+    Auto,
+    None,
+    Required,
+    Function { function: OpenAIToolChoiceFunction },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct OpenAIToolChoiceFunction {
+    name: String,
 }
 
 /// OpenAI tool definition.
@@ -207,7 +224,7 @@ impl CompletionModelTrait for Model {
         &self,
         request: CompletionRequest,
     ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
-        let tools = parse_tools(&request.tools)?;
+        let tools = parse_tools(&request.tools);
         let messages = build_messages(&request)?;
 
         // Build request
@@ -218,7 +235,7 @@ impl CompletionModelTrait for Model {
             tool_choice: if tools.is_empty() {
                 None
             } else {
-                Some("auto".to_string())
+                Some(OpenAIToolChoice::Auto)
             },
             tools,
         };
@@ -257,24 +274,27 @@ impl CompletionModelTrait for Model {
             .first()
             .ok_or_else(|| CompletionError::ResponseError("No choices in response".to_string()))?;
 
-        let (choice_text, assistant_message) = parse_choice_message(&openai_response, choice)?;
+        let content = parse_choice_content(choice)?;
 
         Ok(CompletionResponse {
-            choice: choice_text,
-            message: assistant_message,
+            content,
             raw_response: openai_response,
         })
     }
 }
 
-fn parse_tools(tools: &[serde_json::Value]) -> Result<Vec<OpenAIToolDefinition>, CompletionError> {
-    let mut out = Vec::new();
-    for tool in tools {
-        let parsed: OpenAIToolDefinition = serde_json::from_value(tool.clone())
-            .map_err(|e| CompletionError::RequestError(Box::new(e)))?;
-        out.push(parsed);
-    }
-    Ok(out)
+fn parse_tools(tools: &[ToolDefinition]) -> Vec<OpenAIToolDefinition> {
+    tools
+        .iter()
+        .map(|tool| OpenAIToolDefinition {
+            r#type: "function".to_string(),
+            function: OpenAIFunctionDefinition {
+                name: tool.name.clone(),
+                description: tool.description.clone(),
+                parameters: tool.parameters.clone(),
+            },
+        })
+        .collect()
 }
 
 fn build_messages(request: &CompletionRequest) -> Result<Vec<OpenAIMessage>, CompletionError> {
@@ -299,6 +319,7 @@ fn build_messages(request: &CompletionRequest) -> Result<Vec<OpenAIMessage>, Com
                                 .unwrap_or_else(|_| tool_result.result.to_string());
                             messages.push(OpenAIMessage::Tool {
                                 tool_call_id: tool_result.id.clone(),
+                                name: tool_result.name.clone(),
                                 content,
                             });
                         }
@@ -326,8 +347,8 @@ fn build_messages(request: &CompletionRequest) -> Result<Vec<OpenAIMessage>, Com
                                 id: call.id.clone(),
                                 r#type: "function".to_string(),
                                 function: OpenAIFunctionCall {
-                                    name: call.name.clone(),
-                                    arguments: tool_arguments_json(&call.arguments),
+                                    name: call.function.name.clone(),
+                                    arguments: tool_arguments_json(&call.function.arguments),
                                 },
                             });
                         }
@@ -362,10 +383,9 @@ fn build_messages(request: &CompletionRequest) -> Result<Vec<OpenAIMessage>, Com
     Ok(messages)
 }
 
-fn parse_choice_message(
-    response: &OpenAIResponse,
+fn parse_choice_content(
     choice: &OpenAIChoice,
-) -> Result<(String, Option<Message>), CompletionError> {
+) -> Result<Vec<AssistantContent>, CompletionError> {
     match &choice.message {
         OpenAIMessage::Assistant {
             content,
@@ -373,8 +393,9 @@ fn parse_choice_message(
         } => {
             let mut parts = Vec::new();
 
-            let text = content.clone().unwrap_or_default();
-            if !text.trim().is_empty() {
+            if let Some(text) = content
+                && !text.trim().is_empty()
+            {
                 parts.push(AssistantContent::Text(Text { text: text.clone() }));
             }
 
@@ -385,24 +406,14 @@ fn parse_choice_message(
                 parts.push(AssistantContent::ToolCall(ToolCall {
                     id: call.id.clone(),
                     name: call.function.name.clone(),
-                    arguments,
+                    function: Function {
+                        name: call.function.name.clone(),
+                        arguments,
+                    },
                 }));
             }
 
-            let message = if parts.is_empty() {
-                None
-            } else {
-                Some(Message::Assistant {
-                    id: Some(response.id.clone()),
-                    content: if parts.len() == 1 {
-                        OneOrMany::one(parts.into_iter().next().unwrap())
-                    } else {
-                        OneOrMany::Many(parts)
-                    },
-                })
-            };
-
-            Ok((text, message))
+            Ok(parts)
         }
         _ => Err(CompletionError::ResponseError(
             "Unexpected non-assistant message in OpenAI response".to_string(),
@@ -462,6 +473,35 @@ mod tests {
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"model\":\"gpt-4o\""));
         assert!(json.contains("\"temperature\":0.7"));
+    }
+
+    #[test]
+    fn test_openai_tool_choice_serialization() {
+        let request = OpenAIRequest {
+            model: "gpt-4o-mini".to_string(),
+            messages: vec![OpenAIMessage::User {
+                content: "hi".to_string(),
+            }],
+            temperature: None,
+            tools: vec![OpenAIToolDefinition {
+                r#type: "function".to_string(),
+                function: OpenAIFunctionDefinition {
+                    name: "read_file".to_string(),
+                    description: "Read file".to_string(),
+                    parameters: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "file_path": {"type": "string"}
+                        },
+                        "required": ["file_path"]
+                    }),
+                },
+            }],
+            tool_choice: Some(OpenAIToolChoice::Auto),
+        };
+
+        let json = serde_json::to_value(request).unwrap();
+        assert_eq!(json["tool_choice"]["type"], "auto");
     }
 
     #[test]
