@@ -1,5 +1,7 @@
 //! Branch management utilities for creating, deleting, listing, and switching branches while handling upstream metadata.
 
+use std::collections::VecDeque;
+
 use clap::Parser;
 use colored::Colorize;
 use git_internal::internal::object::commit::Commit;
@@ -56,6 +58,14 @@ pub struct BranchArgs {
     /// show all branches (includes local and remote)
     #[clap(short, long, group = "sub")]
     pub all: bool,
+
+    /// Only list branches which contain the specified commit (HEAD if not specified). Implies --list.
+    #[clap(long, alias = "with", value_name = "commit", num_args(0..=1), default_missing_value = "HEAD", action = clap::ArgAction::Append)]
+    pub contains: Vec<String>,
+
+    /// Only list branches which don’t contain the specified commit (HEAD if not specified). Implies --list.
+    #[clap(long, alias = "without", value_name = "commit", num_args(0..=1), default_missing_value = "HEAD", action = clap::ArgAction::Append)]
+    pub no_contains: Vec<String>,
 }
 pub async fn execute(args: BranchArgs) {
     if let Some(new_branch) = args.new_branch {
@@ -75,16 +85,22 @@ pub async fn execute(args: BranchArgs) {
         };
     } else if !args.rename.is_empty() {
         rename_branch(args.rename).await;
-    } else if args.list || args.all || args.remotes {
+    } else if args.list
+        || args.all
+        || args.remotes
+        || !args.contains.is_empty()
+        || !args.no_contains.is_empty()
+    {
         // default behavior
-        let mode = if args.all {
+        let list_mode = if args.all {
             BranchListMode::All
         } else if args.remotes {
             BranchListMode::Remote
         } else {
             BranchListMode::Local
         };
-        list_branches(mode).await;
+
+        list_branches(list_mode, &args.contains, &args.no_contains).await;
     } else {
         panic!("should not reach here")
     }
@@ -342,38 +358,100 @@ fn display_branches(branches: Vec<Branch>, head_name: &str, is_remote: bool) {
         }
     }
 }
-pub async fn list_branches(mode: BranchListMode) {
+
+pub async fn list_branches(
+    list_mode: BranchListMode,
+    commits_contains: &[String],
+    commits_no_contains: &[String],
+) {
     let head_name = display_head_state().await;
 
-    match mode {
-        BranchListMode::Local => {
-            let branches = Branch::list_branches(None).await;
-            display_branches(branches, &head_name, false);
-        }
-
-        BranchListMode::Remote => {
+    // filter branches by `list_mode`
+    let mut local_branches = match &list_mode {
+        BranchListMode::Local | BranchListMode::All => Branch::list_branches(None).await,
+        _ => vec![],
+    };
+    let mut remote_branches = vec![];
+    match list_mode {
+        BranchListMode::Remote | BranchListMode::All => {
             let remote_configs = Config::all_remote_configs().await;
-            let mut branches = vec![];
             for remote in remote_configs {
-                let remote_branches = Branch::list_branches(Some(&remote.name)).await;
-                branches.extend(remote_branches);
+                remote_branches.extend(Branch::list_branches(Some(&remote.name)).await);
             }
-            display_branches(branches, &head_name, true);
         }
+        _ => {}
+    };
 
-        BranchListMode::All => {
-            let branches = Branch::list_branches(None).await;
-            display_branches(branches, &head_name, false);
+    // apply the filter to `local_branches` and `remote_branches`
+    // When a list is empty the corresponding constraint is vacuously satisfied:
+    //   - empty `commits_contains`    → every branch passes the "contains" check
+    //   - empty `commits_no_contains` → every branch passes the "no-contains" check
+    for branches in [&mut local_branches, &mut remote_branches] {
+        filter_branches(branches, commits_contains, commits_no_contains).await;
+    }
 
-            let remote_configs = Config::all_remote_configs().await;
-            let mut remote_branches = vec![];
-            for remote in remote_configs {
-                let remote_branches_for_remote = Branch::list_branches(Some(&remote.name)).await;
-                remote_branches.extend(remote_branches_for_remote);
+    // display `local_branches` and `remote_branches` if not empty
+    if !local_branches.is_empty() {
+        display_branches(local_branches, &head_name, false);
+    }
+    if !remote_branches.is_empty() {
+        display_branches(remote_branches, &head_name, true);
+    }
+}
+
+// filter given branches by whether they contain or don't contain certain commits
+// use a function to do this so we can test it
+pub async fn filter_branches(
+    branches: &mut Vec<Branch>,
+    commits_contains: &[String],
+    commits_no_contains: &[String],
+) {
+    let mut keep = vec![false; branches.len()];
+    for (i, branch) in branches.iter().enumerate() {
+        let contains_ok =
+            commits_contains.is_empty() || commit_contains(branch, commits_contains).await;
+        let no_contains_ok =
+            commits_no_contains.is_empty() || !commit_contains(branch, commits_no_contains).await;
+        keep[i] = contains_ok && no_contains_ok;
+    }
+    let mut keep_iter = keep.iter();
+    branches.retain(|_| *keep_iter.next().unwrap());
+}
+
+// check if a branch contains at least one of the commits
+// NOTE: returns `false` if `commits` is empty
+pub async fn commit_contains(branch: &Branch, commits: &[String]) -> bool {
+    for commit in commits {
+        let target_commit = match get_target_commit(commit).await {
+            Ok(commit) => commit,
+            Err(e) => {
+                eprintln!("{e}");
+                continue;
             }
-            display_branches(remote_branches, &head_name, true);
+        };
+
+        let mut q = VecDeque::new();
+        q.push_back(branch.commit);
+
+        while let Some(current_commit) = q.pop_front() {
+            // found target commit
+            if current_commit == target_commit {
+                return true;
+            }
+
+            // enqueue all parent commits of `current_commit`
+            let current_commit_object: Commit = match load_object(&current_commit) {
+                Ok(commit) => commit,
+                Err(_) => panic!("fatal: should never arrive here"),
+            };
+            for parent_commit in current_commit_object.parent_commit_ids {
+                q.push_back(parent_commit);
+            }
         }
     }
+
+    // contains no commits
+    false
 }
 
 pub fn is_valid_git_branch_name(name: &str) -> bool {
