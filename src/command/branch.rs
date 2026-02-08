@@ -413,8 +413,10 @@ pub async fn list_branches(
     }
 }
 
-// filter given branches by whether they contain or don't contain certain commits
-// use a function to do this so we can test it
+/// Filter given branches by whether they contain or don't contain certain commits.
+///
+/// Internal test helper — not part of the stable public API.
+#[doc(hidden)]
 pub async fn filter_branches(
     branches: &mut Vec<Branch>,
     commits_contains: &[String],
@@ -432,9 +434,10 @@ pub async fn filter_branches(
     branches.retain(|_| *keep_iter.next().unwrap());
 }
 
-// check if a branch contains at least one of the commits
-// NOTE: returns `false` if `commits` is empty
-pub async fn commit_contains(branch: &Branch, commits: &[String]) -> bool {
+/// check if a branch contains at least one of the commits
+///
+/// NOTE: returns `false` if `commits` is empty
+async fn commit_contains(branch: &Branch, commits: &[String]) -> bool {
     for commit in commits {
         let target_commit = match get_target_commit(commit).await {
             Ok(commit) => commit,
