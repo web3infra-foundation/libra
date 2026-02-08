@@ -41,7 +41,7 @@ pub struct BranchArgs {
     pub commit_hash: Option<String>,
 
     /// list all branches, don't include remote branches
-    #[clap(short, long, group = "show", default_value = "true")]
+    #[clap(short, long, group = "show")]
     pub list: bool,
 
     /// force delete branch
@@ -99,13 +99,9 @@ pub async fn execute(args: BranchArgs) {
         };
     } else if !args.rename.is_empty() {
         rename_branch(args.rename).await;
-    } else if args.list
-        || args.all
-        || args.remotes
-        || !args.contains.is_empty()
-        || !args.no_contains.is_empty()
-    {
-        // priority: `--all` > `--remote` > `--list` (default behavior, also implied by `--contains`/`--no-contains`)
+    } else {
+        // Default behavior: list branches
+        // priority: `--all` > `--remote` > `--list` (default when no manipulate options given)
         let list_mode = if args.all {
             BranchListMode::All
         } else if args.remotes {
@@ -115,8 +111,6 @@ pub async fn execute(args: BranchArgs) {
         };
 
         list_branches(list_mode, &args.contains, &args.no_contains).await;
-    } else {
-        panic!("should not reach here")
     }
 }
 
