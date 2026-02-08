@@ -295,7 +295,7 @@ This section documents the compatibility between **Libra**’s CLI and **Git** a
 |  | `-m, --move [OLD] [NEW]` | Yes | Yes | ✅ | - | Rename branches |
 |  | `-r, --remotes` | Yes | Yes | ✅ | - | List remote branches |
 |  | `-a, --all` | Yes | Yes | ✅ | - | List all branches |
-|  | `--contains <commit>` | Yes | Yes | ✅ | - | Filter branches containing commit (default HEAD) |
+|  | `--contains [<commit>]` | Yes | Yes | ✅ | - | Filter branches containing commit (default HEAD) |
 |  | `--no-contains [<commit>]` | Yes | Yes | ✅ | - | Filter branches not containing commit (default HEAD) |
 |  | `--merged / --no-merged` | Yes | No | ⛔ | P1 | Check merge status into current HEAD |
 | `switch` | `<branch>` | Yes | Yes | ✅ | - | Switch to branch |
