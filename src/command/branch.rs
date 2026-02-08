@@ -1,6 +1,6 @@
 //! Branch management utilities for creating, deleting, listing, and switching branches while handling upstream metadata.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 use clap::{ArgGroup, Parser};
 use colored::Colorize;
@@ -438,8 +438,12 @@ async fn commit_contains(branch: &Branch, commits: &[String]) -> bool {
             Err(e) => panic!("fatal: {e}"),
         };
 
+        // do BFS to find out whether `branch` contains `target_commit` or not
         let mut q = VecDeque::new();
+        let mut visited = HashSet::new();
+        
         q.push_back(branch.commit);
+        visited.insert(branch.commit);
 
         while let Some(current_commit) = q.pop_front() {
             // found target commit
@@ -453,7 +457,10 @@ async fn commit_contains(branch: &Branch, commits: &[String]) -> bool {
                 Err(e) => panic!("error: failed to load commit {current_commit}: {e}"),
             };
             for parent_commit in current_commit_object.parent_commit_ids {
-                q.push_back(parent_commit);
+                if !visited.contains(&parent_commit) {
+                    visited.insert(parent_commit);
+                    q.push_back(parent_commit);
+                }
             }
         }
     }
