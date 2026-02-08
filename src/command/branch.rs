@@ -22,7 +22,7 @@ pub enum BranchListMode {
 #[derive(Parser, Debug)]
 #[command(group(
     ArgGroup::new("manipulate")
-        .multiple(true)
+        .multiple(false)
         .conflicts_with("show")
 ))]
 #[command(group(
