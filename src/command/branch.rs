@@ -438,10 +438,7 @@ pub async fn commit_contains(branch: &Branch, commits: &[String]) -> bool {
     for commit in commits {
         let target_commit = match get_target_commit(commit).await {
             Ok(commit) => commit,
-            Err(e) => {
-                eprintln!("{e}");
-                continue;
-            }
+            Err(e) => panic!("fatal: {e}"),
         };
 
         let mut q = VecDeque::new();
