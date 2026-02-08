@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 
-use clap::Parser;
+use clap::{ArgGroup, Parser};
 use colored::Colorize;
 use git_internal::internal::object::commit::Commit;
 
@@ -17,10 +17,23 @@ pub enum BranchListMode {
     All,
 }
 
+// options which manipulate branches are mutually exclusive with options which show branches
+// meanwhile, options which show branches can be combined
 #[derive(Parser, Debug)]
+#[command(group(
+    ArgGroup::new("manipulate")
+        .multiple(true)
+        .conflicts_with("show")
+))]
+#[command(group(
+    ArgGroup::new("show")
+        .required(false)
+        .multiple(true)
+        .conflicts_with("manipulate")
+))]
 pub struct BranchArgs {
     /// new branch name
-    #[clap(group = "sub")]
+    #[clap(group = "manipulate")]
     pub new_branch: Option<String>,
 
     /// base branch name or commit hash
@@ -28,43 +41,44 @@ pub struct BranchArgs {
     pub commit_hash: Option<String>,
 
     /// list all branches, don't include remote branches
-    #[clap(short, long, group = "sub", default_value = "true")]
+    #[clap(short, long, group = "show", default_value = "true")]
     pub list: bool,
 
     /// force delete branch
-    #[clap(short = 'D', long = "delete-force", group = "sub")]
+    #[clap(short = 'D', long = "delete-force", group = "manipulate")]
     pub delete: Option<String>,
 
     /// safe delete branch (checks if merged before deletion)
-    #[clap(short = 'd', long = "delete", group = "sub")]
+    #[clap(short = 'd', long = "delete", group = "manipulate")]
     pub delete_safe: Option<String>,
 
     ///  Set up `branchname`>`'s tracking information so `<`upstream`>` is considered `<`branchname`>`'s upstream branch.
-    #[clap(short = 'u', long, group = "sub")]
+    #[clap(short = 'u', long, group = "manipulate")]
     pub set_upstream_to: Option<String>,
 
     /// show current branch
-    #[clap(long, group = "sub")]
+    #[clap(long, group = "show")]
     pub show_current: bool,
 
     /// Rename a branch. With one argument, renames the current branch. With two arguments, renames OLD_BRANCH to NEW_BRANCH.
-    #[clap(short = 'm', long = "move", group = "sub", value_names = ["OLD_BRANCH", "NEW_BRANCH"], num_args = 1..=2)]
+    #[clap(short = 'm', long = "move", group = "manipulate", value_names = ["OLD_BRANCH", "NEW_BRANCH"], num_args = 1..=2)]
     pub rename: Vec<String>,
 
     /// show remote branches
-    #[clap(short, long)] // TODO limit to required `list` option, even in default
+    #[clap(short, long, group = "show")]
+    // TODO limit to required `list` option, even in default
     pub remotes: bool,
 
     /// show all branches (includes local and remote)
-    #[clap(short, long, group = "sub")]
+    #[clap(short, long, group = "show")]
     pub all: bool,
 
     /// Only list branches which contain the specified commit (HEAD if not specified). Implies --list.
-    #[clap(long, alias = "with", value_name = "commit", num_args(0..=1), default_missing_value = "HEAD", action = clap::ArgAction::Append)]
+    #[clap(long, group = "show", alias = "with", value_name = "commit", num_args = 0..=1, default_missing_value = "HEAD", action = clap::ArgAction::Append)]
     pub contains: Vec<String>,
 
     /// Only list branches which don’t contain the specified commit (HEAD if not specified). Implies --list.
-    #[clap(long, alias = "without", value_name = "commit", num_args(0..=1), default_missing_value = "HEAD", action = clap::ArgAction::Append)]
+    #[clap(long, group = "show", alias = "without", value_name = "commit", num_args = 0..=1, default_missing_value = "HEAD", action = clap::ArgAction::Append)]
     pub no_contains: Vec<String>,
 }
 pub async fn execute(args: BranchArgs) {
@@ -91,7 +105,7 @@ pub async fn execute(args: BranchArgs) {
         || !args.contains.is_empty()
         || !args.no_contains.is_empty()
     {
-        // default behavior
+        // priority: `--all` > `--remote` > `--list` (default behavior, also implied by `--contains`/`--no-contains`)
         let list_mode = if args.all {
             BranchListMode::All
         } else if args.remotes {
