@@ -4,7 +4,7 @@ use std::collections::{HashSet, VecDeque};
 
 use clap::{ArgGroup, Parser};
 use colored::Colorize;
-use git_internal::internal::object::commit::Commit;
+use git_internal::{hash::ObjectHash, internal::object::commit::Commit};
 
 use crate::{
     command::{get_target_commit, load_object},
@@ -416,32 +416,41 @@ pub async fn filter_branches(
     commits_contains: &[String],
     commits_no_contains: &[String],
 ) {
-    let mut keep = vec![false; branches.len()];
-    for (i, branch) in branches.iter().enumerate() {
-        let contains_ok =
-            commits_contains.is_empty() || commit_contains(branch, commits_contains).await;
+    // Pre-resolve target commits once to avoid repeated string parsing
+    let contains_set = resolve_commits(commits_contains).await;
+    let no_contains_set = resolve_commits(commits_no_contains).await;
+
+    // Filter branches in-place using retain
+    branches.retain(|branch| {
+        let contains_ok = contains_set.is_empty() || commit_contains(branch, &contains_set);
         let no_contains_ok =
-            commits_no_contains.is_empty() || !commit_contains(branch, commits_no_contains).await;
-        keep[i] = contains_ok && no_contains_ok;
-    }
-    let mut keep_iter = keep.iter();
-    branches.retain(|_| *keep_iter.next().unwrap());
+            no_contains_set.is_empty() || !commit_contains(branch, &no_contains_set);
+        contains_ok && no_contains_ok
+    });
 }
 
-/// check if a branch contains at least one of the commits
-///
-/// NOTE: returns `false` if `commits` is empty
-async fn commit_contains(branch: &Branch, commits: &[String]) -> bool {
+/// Resolve commit references to ObjectHash set, panicking on invalid refs.
+async fn resolve_commits(commits: &[String]) -> HashSet<ObjectHash> {
+    let mut set = HashSet::new();
     for commit in commits {
         let target_commit = match get_target_commit(commit).await {
             Ok(commit) => commit,
             Err(e) => panic!("fatal: {e}"),
         };
+        set.insert(target_commit);
+    }
+    set
+}
 
+/// check if a branch contains at least one of the commits
+///
+/// NOTE: returns `false` if `commits` is empty
+fn commit_contains(branch: &Branch, target_commits: &HashSet<ObjectHash>) -> bool {
+    for &target_commit in target_commits {
         // do BFS to find out whether `branch` contains `target_commit` or not
         let mut q = VecDeque::new();
         let mut visited = HashSet::new();
-        
+
         q.push_back(branch.commit);
         visited.insert(branch.commit);
 
