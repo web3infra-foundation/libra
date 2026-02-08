@@ -33,7 +33,7 @@ async fn test_switch_branch() {
 
     let show_all_branches = async || {
         // Use the list_branches function of the branch module to list all current local branches
-        branch::list_branches(branch::BranchListMode::Local).await;
+        branch::list_branches(branch::BranchListMode::Local, &[], &[]).await;
         println!(
             "Current branch is '{}'.",
             get_current_branch()

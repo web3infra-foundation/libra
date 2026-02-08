@@ -54,6 +54,8 @@ async fn setup_standard_repo(
         rename: vec![],
         remotes: false,
         all: false,
+        contains: vec![],
+        no_contains: vec![],
     })
     .await;
 
@@ -95,6 +97,8 @@ async fn setup_standard_repo(
         rename: vec![],
         remotes: false,
         all: false,
+        contains: vec![],
+        no_contains: vec![],
     })
     .await;
 
@@ -136,6 +140,8 @@ async fn setup_standard_repo(
         rename: vec![],
         remotes: false,
         all: false,
+        contains: vec![],
+        no_contains: vec![],
     })
     .await;
 
@@ -177,6 +183,8 @@ async fn setup_standard_repo(
         rename: vec![],
         remotes: false,
         all: false,
+        contains: vec![],
+        no_contains: vec![],
     })
     .await;
 

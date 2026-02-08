@@ -1,6 +1,7 @@
 //! Tests branch subcommand for creation, listing, deletion, and switching logic.
 
 #![cfg(test)]
+
 use libra::internal::config::Config;
 use serial_test::serial;
 use tempfile::tempdir;
@@ -61,6 +62,8 @@ async fn test_branch() {
             rename: vec![],
             remotes: false,
             all: false,
+            contains: vec![],
+            no_contains: vec![],
         };
         execute(args).await;
 
@@ -91,6 +94,8 @@ async fn test_branch() {
             rename: vec![],
             remotes: false,
             all: false,
+            contains: vec![],
+            no_contains: vec![],
         };
         execute(args).await;
         let second_branch = Branch::find_branch(&second_branch_name, None)
@@ -113,6 +118,8 @@ async fn test_branch() {
         rename: vec![],
         remotes: false,
         all: false,
+        contains: vec![],
+        no_contains: vec![],
     };
     execute(args).await;
 
@@ -160,6 +167,8 @@ async fn test_create_branch_from_remote() {
         rename: vec![],
         remotes: false,
         all: false,
+        contains: vec![],
+        no_contains: vec![],
     };
     execute(args).await;
 
@@ -204,6 +213,8 @@ async fn test_invalid_branch_name() {
         rename: vec![],
         remotes: false,
         all: false,
+        contains: vec![],
+        no_contains: vec![],
     };
     execute(args).await;
 
@@ -250,6 +261,8 @@ async fn test_branch_rename() {
         rename: vec![],
         remotes: false,
         all: false,
+        contains: vec![],
+        no_contains: vec![],
     };
     execute(args).await;
 
@@ -270,6 +283,8 @@ async fn test_branch_rename() {
         rename: vec!["old_name".to_string(), "new_name".to_string()],
         remotes: false,
         all: false,
+        contains: vec![],
+        no_contains: vec![],
     };
     execute(args).await;
 
@@ -331,6 +346,8 @@ async fn test_rename_current_branch() {
         rename: vec!["main".to_string()],
         remotes: false,
         all: false,
+        contains: vec![],
+        no_contains: vec![],
     };
     execute(args).await;
 
@@ -390,6 +407,8 @@ async fn test_rename_to_existing_branch() {
         rename: vec![],
         remotes: false,
         all: false,
+        contains: vec![],
+        no_contains: vec![],
     };
     execute(args).await;
 
@@ -404,6 +423,8 @@ async fn test_rename_to_existing_branch() {
         rename: vec![],
         remotes: false,
         all: false,
+        contains: vec![],
+        no_contains: vec![],
     };
     execute(args).await;
 
@@ -419,6 +440,8 @@ async fn test_rename_to_existing_branch() {
         rename: vec!["branch1".to_string(), "branch2".to_string()],
         remotes: false,
         all: false,
+        contains: vec![],
+        no_contains: vec![],
     };
     execute(args).await;
 
@@ -464,6 +487,8 @@ async fn test_list_all_branches() {
         rename: vec![],
         remotes: false,
         all: false,
+        contains: vec![],
+        no_contains: vec![],
     };
     execute(args).await;
 
@@ -491,6 +516,8 @@ async fn test_list_all_branches() {
         rename: vec![],
         remotes: false,
         all: true,
+        contains: vec![],
+        no_contains: vec![],
     };
     execute(args).await; // This will print to stdout, which is fine for tests
 
@@ -544,6 +571,8 @@ async fn test_branch_delete_safe() {
         rename: vec![],
         remotes: false,
         all: false,
+        contains: vec![],
+        no_contains: vec![],
     })
     .await;
 
@@ -592,6 +621,8 @@ async fn test_branch_delete_safe() {
         rename: vec![],
         remotes: false,
         all: false,
+        contains: vec![],
+        no_contains: vec![],
     })
     .await;
 
@@ -631,9 +662,284 @@ async fn test_branch_delete_safe() {
         rename: vec![],
         remotes: false,
         all: false,
+        contains: vec![],
+        no_contains: vec![],
     })
     .await;
 
     // Feature branch should be deleted
     assert!(Branch::find_branch("feature", None).await.is_none());
+}
+
+#[tokio::test]
+#[serial]
+/// Comprehensive tests for `branch --contains` and `branch --no-contains` filters.
+///
+/// Builds a classic divergent branch topology:
+///
+/// ```text
+///   master:  base ← m1 ← m2
+///             ↖
+///   dev:        d1 ← d2
+/// ```
+///
+/// Where:
+/// - `base`: common ancestor, reachable from both branches
+/// - `m1`, `m2`: commits unique to master
+/// - `d1`, `d2`: commits unique to dev (d1 branches from base, d2 extends d1)
+///
+/// Tests cover:
+/// 1. Single filters (`--contains` or `--no-contains` alone)
+/// 2. Combined filters (`--contains` AND `--no-contains`)
+/// 3. Multiple values (OR semantics for `--contains`, AND for `--no-contains`)
+async fn test_branch_contains_commit_filter() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+    test::init_debug_logger();
+
+    let main_branch = match Head::current().await {
+        Head::Branch(name) => name,
+        _ => panic!("expected to start on a branch"),
+    };
+
+    let make_commit = |msg: &str| CommitArgs {
+        message: Some(msg.to_string()),
+        file: None,
+        allow_empty: true,
+        conventional: false,
+        amend: false,
+        no_edit: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    };
+
+    // ================================================================
+    //  Build commit graph: divergent branches with shared ancestor
+    // ================================================================
+
+    // Common ancestor
+    commit::execute(make_commit("base")).await;
+    let base = Head::current_commit().await.unwrap().to_string();
+
+    // Create dev branch and add two commits
+    execute(BranchArgs {
+        new_branch: Some("dev".to_string()),
+        commit_hash: None,
+        list: false,
+        delete: None,
+        delete_safe: None,
+        set_upstream_to: None,
+        show_current: false,
+        rename: vec![],
+        remotes: false,
+        all: false,
+        contains: vec![],
+        no_contains: vec![],
+    })
+    .await;
+
+    switch::execute(SwitchArgs {
+        branch: Some("dev".to_string()),
+        create: None,
+        detach: false,
+        track: false,
+    })
+    .await;
+
+    commit::execute(make_commit("d1")).await;
+    let d1 = Head::current_commit().await.unwrap().to_string();
+
+    commit::execute(make_commit("d2")).await;
+    let d2 = Head::current_commit().await.unwrap().to_string();
+
+    // Return to main branch and add two commits
+    switch::execute(SwitchArgs {
+        branch: Some(main_branch.clone()),
+        create: None,
+        detach: false,
+        track: false,
+    })
+    .await;
+
+    commit::execute(make_commit("m1")).await;
+    let m1 = Head::current_commit().await.unwrap().to_string();
+
+    commit::execute(make_commit("m2")).await;
+    let m2 = Head::current_commit().await.unwrap().to_string();
+
+    // ── Helper: filter and return sorted branch names ──
+    let run_filter = |contains: &[&str], no_contains: &[&str]| {
+        let contains: Vec<String> = contains.iter().map(|s| s.to_string()).collect();
+        let no_contains: Vec<String> = no_contains.iter().map(|s| s.to_string()).collect();
+        async move {
+            let mut branches = Branch::list_branches(None).await;
+            filter_branches(&mut branches, &contains, &no_contains).await;
+            let mut names: Vec<String> = branches.into_iter().map(|b| b.name).collect();
+            names.sort();
+            names
+        }
+    };
+
+    let sorted = |names: &[&str]| -> Vec<String> {
+        let mut v: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+        v.sort();
+        v
+    };
+
+    // ================================================================
+    //  Test single `--contains` filter
+    // ================================================================
+
+    // Common ancestor is in both branches
+    assert_eq!(
+        run_filter(&[&base], &[]).await,
+        sorted(&[&main_branch, "dev"]),
+        "`--contains base` should match both branches"
+    );
+
+    // Branch-specific commits
+    assert_eq!(
+        run_filter(&[&d1], &[]).await,
+        sorted(&["dev"]),
+        "`--contains d1` should match only dev"
+    );
+
+    assert_eq!(
+        run_filter(&[&d2], &[]).await,
+        sorted(&["dev"]),
+        "`--contains d2` (tip of dev) should match only dev"
+    );
+
+    assert_eq!(
+        run_filter(&[&m1], &[]).await,
+        sorted(&[&main_branch]),
+        "`--contains m1` should match only master"
+    );
+
+    assert_eq!(
+        run_filter(&[&m2], &[]).await,
+        sorted(&[&main_branch]),
+        "`--contains m2` (tip of master) should match only master"
+    );
+
+    // ================================================================
+    //  Test single `--no-contains` filter
+    // ================================================================
+
+    // Excluding common ancestor filters out everything
+    assert_eq!(
+        run_filter(&[], &[&base]).await,
+        sorted(&[]),
+        "`--no-contains base` should match nothing"
+    );
+
+    // Excluding branch-specific commits
+    assert_eq!(
+        run_filter(&[], &[&d1]).await,
+        sorted(&[&main_branch]),
+        "`--no-contains d1` should match only master"
+    );
+
+    assert_eq!(
+        run_filter(&[], &[&m1]).await,
+        sorted(&["dev"]),
+        "`--no-contains m1` should match only dev"
+    );
+
+    // ================================================================
+    //  Test multiple `--contains` (OR semantics)
+    // ================================================================
+
+    // Any branch containing d1 OR m1
+    assert_eq!(
+        run_filter(&[&d1, &m1], &[]).await,
+        sorted(&[&main_branch, "dev"]),
+        "`--contains d1 --contains m1` should match both (OR)"
+    );
+
+    // Any branch containing d2 OR m2 (both tips)
+    assert_eq!(
+        run_filter(&[&d2, &m2], &[]).await,
+        sorted(&[&main_branch, "dev"]),
+        "`--contains d2 --contains m2` should match both (OR)"
+    );
+
+    // ================================================================
+    //  Test multiple `--no-contains` (AND semantics)
+    // ================================================================
+
+    // Branches excluding both d1 AND m1 → none (each branch has one)
+    assert_eq!(
+        run_filter(&[], &[&d1, &m1]).await,
+        sorted(&[]),
+        "`--no-contains d1 --no-contains m1` should match nothing (each branch has one)"
+    );
+
+    // ================================================================
+    //  Test combined `--contains` and `--no-contains`
+    // ================================================================
+
+    // Branches with base but not m1 → dev
+    assert_eq!(
+        run_filter(&[&base], &[&m1]).await,
+        sorted(&["dev"]),
+        "`--contains base --no-contains m1` should match dev"
+    );
+
+    // Branches with base but not d1 → master
+    assert_eq!(
+        run_filter(&[&base], &[&d1]).await,
+        sorted(&[&main_branch]),
+        "`--contains base --no-contains d1` should match master"
+    );
+
+    // Branches with base but not m2 → dev
+    assert_eq!(
+        run_filter(&[&base], &[&m2]).await,
+        sorted(&["dev"]),
+        "`--contains base --no-contains m2` should match dev"
+    );
+
+    // Branches with d1 OR m1, but not d2 → only master (dev is excluded by d2)
+    assert_eq!(
+        run_filter(&[&d1, &m1], &[&d2]).await,
+        sorted(&[&main_branch]),
+        "`--contains d1 --contains m1 --no-contains d2` should match master"
+    );
+
+    // Branches with d1 OR m1, but not m2 → only dev (master is excluded by m2)
+    assert_eq!(
+        run_filter(&[&d1, &m1], &[&m2]).await,
+        sorted(&["dev"]),
+        "`--contains d1 --contains m1 --no-contains m2` should match dev"
+    );
+
+    // ================================================================
+    //  Test edge cases
+    // ================================================================
+
+    // Chain dependency: d2 contains d1, so `--contains d1 --no-contains d2` → empty
+    assert_eq!(
+        run_filter(&[&d1], &[&d2]).await,
+        sorted(&[]),
+        "`--contains d1 --no-contains d2` should match nothing (d2 contains d1)"
+    );
+
+    // Similarly for master chain
+    assert_eq!(
+        run_filter(&[&m1], &[&m2]).await,
+        sorted(&[]),
+        "`--contains m1 --no-contains m2` should match nothing (m2 contains m1)"
+    );
+
+    // Branches with base but excluding both tips → none
+    assert_eq!(
+        run_filter(&[&base], &[&d2, &m2]).await,
+        sorted(&[]),
+        "`--contains base --no-contains d2 --no-contains m2` should match nothing"
+    );
 }

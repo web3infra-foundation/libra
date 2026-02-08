@@ -7,7 +7,7 @@ use git_internal::{
 use libra::{
     command::{
         add::{self, AddArgs},
-        branch::{BranchArgs, execute},
+        branch::{BranchArgs, execute, filter_branches},
         calc_file_blob_hash,
         commit::{self, CommitArgs},
         get_target_commit,

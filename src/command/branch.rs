@@ -1,7 +1,10 @@
 //! Branch management utilities for creating, deleting, listing, and switching branches while handling upstream metadata.
 
-use clap::Parser;
+use std::collections::{HashSet, VecDeque};
+
+use clap::{ArgGroup, Parser};
 use colored::Colorize;
+use git_internal::hash::ObjectHash;
 use git_internal::internal::object::commit::Commit;
 
 use crate::{
@@ -15,10 +18,23 @@ pub enum BranchListMode {
     All,
 }
 
+// options which manipulate branches are mutually exclusive with options which show branches
+// meanwhile, options which show branches can be combined
 #[derive(Parser, Debug)]
+#[command(group(
+    ArgGroup::new("manipulate")
+        .multiple(false)
+        .conflicts_with("show")
+))]
+#[command(group(
+    ArgGroup::new("show")
+        .required(false)
+        .multiple(true)
+        .conflicts_with("manipulate")
+))]
 pub struct BranchArgs {
     /// new branch name
-    #[clap(group = "sub")]
+    #[clap(group = "manipulate")]
     pub new_branch: Option<String>,
 
     /// base branch name or commit hash
@@ -26,36 +42,45 @@ pub struct BranchArgs {
     pub commit_hash: Option<String>,
 
     /// list all branches, don't include remote branches
-    #[clap(short, long, group = "sub", default_value = "true")]
+    #[clap(short, long, group = "show")]
     pub list: bool,
 
     /// force delete branch
-    #[clap(short = 'D', long = "delete-force", group = "sub")]
+    #[clap(short = 'D', long = "delete-force", group = "manipulate")]
     pub delete: Option<String>,
 
     /// safe delete branch (checks if merged before deletion)
-    #[clap(short = 'd', long = "delete", group = "sub")]
+    #[clap(short = 'd', long = "delete", group = "manipulate")]
     pub delete_safe: Option<String>,
 
     ///  Set up `branchname`>`'s tracking information so `<`upstream`>` is considered `<`branchname`>`'s upstream branch.
-    #[clap(short = 'u', long, group = "sub")]
+    #[clap(short = 'u', long, group = "manipulate")]
     pub set_upstream_to: Option<String>,
 
     /// show current branch
-    #[clap(long, group = "sub")]
+    #[clap(long, group = "show")]
     pub show_current: bool,
 
     /// Rename a branch. With one argument, renames the current branch. With two arguments, renames OLD_BRANCH to NEW_BRANCH.
-    #[clap(short = 'm', long = "move", group = "sub", value_names = ["OLD_BRANCH", "NEW_BRANCH"], num_args = 1..=2)]
+    #[clap(short = 'm', long = "move", group = "manipulate", value_names = ["OLD_BRANCH", "NEW_BRANCH"], num_args = 1..=2)]
     pub rename: Vec<String>,
 
     /// show remote branches
-    #[clap(short, long)] // TODO limit to required `list` option, even in default
+    #[clap(short, long, group = "show")]
+    // TODO limit to required `list` option, even in default
     pub remotes: bool,
 
     /// show all branches (includes local and remote)
-    #[clap(short, long, group = "sub")]
+    #[clap(short, long, group = "show")]
     pub all: bool,
+
+    /// Only list branches which contain the specified commit (HEAD if not specified). Implies --list.
+    #[clap(long, group = "show", alias = "with", value_name = "commit", num_args = 0..=1, default_missing_value = "HEAD", action = clap::ArgAction::Append)]
+    pub contains: Vec<String>,
+
+    /// Only list branches which don’t contain the specified commit (HEAD if not specified). Implies --list.
+    #[clap(long, group = "show", alias = "without", value_name = "commit", num_args = 0..=1, default_missing_value = "HEAD", action = clap::ArgAction::Append)]
+    pub no_contains: Vec<String>,
 }
 pub async fn execute(args: BranchArgs) {
     if let Some(new_branch) = args.new_branch {
@@ -75,18 +100,18 @@ pub async fn execute(args: BranchArgs) {
         };
     } else if !args.rename.is_empty() {
         rename_branch(args.rename).await;
-    } else if args.list || args.all || args.remotes {
-        // default behavior
-        let mode = if args.all {
+    } else {
+        // Default behavior: list branches
+        // priority: `--all` > `--remote` > `--list` (default when no manipulate options given)
+        let list_mode = if args.all {
             BranchListMode::All
         } else if args.remotes {
             BranchListMode::Remote
         } else {
             BranchListMode::Local
         };
-        list_branches(mode).await;
-    } else {
-        panic!("should not reach here")
+
+        list_branches(list_mode, &args.contains, &args.no_contains).await;
     }
 }
 
@@ -342,38 +367,115 @@ fn display_branches(branches: Vec<Branch>, head_name: &str, is_remote: bool) {
         }
     }
 }
-pub async fn list_branches(mode: BranchListMode) {
+
+pub async fn list_branches(
+    list_mode: BranchListMode,
+    commits_contains: &[String],
+    commits_no_contains: &[String],
+) {
     let head_name = display_head_state().await;
 
-    match mode {
-        BranchListMode::Local => {
-            let branches = Branch::list_branches(None).await;
-            display_branches(branches, &head_name, false);
-        }
-
-        BranchListMode::Remote => {
+    // filter branches by `list_mode`
+    let mut local_branches = match &list_mode {
+        BranchListMode::Local | BranchListMode::All => Branch::list_branches(None).await,
+        _ => vec![],
+    };
+    let mut remote_branches = vec![];
+    match list_mode {
+        BranchListMode::Remote | BranchListMode::All => {
             let remote_configs = Config::all_remote_configs().await;
-            let mut branches = vec![];
             for remote in remote_configs {
-                let remote_branches = Branch::list_branches(Some(&remote.name)).await;
-                branches.extend(remote_branches);
+                remote_branches.extend(Branch::list_branches(Some(&remote.name)).await);
             }
-            display_branches(branches, &head_name, true);
         }
+        _ => {}
+    };
 
-        BranchListMode::All => {
-            let branches = Branch::list_branches(None).await;
-            display_branches(branches, &head_name, false);
+    // apply the filter to `local_branches` and `remote_branches`
+    // When a list is empty the corresponding constraint is vacuously satisfied:
+    //   - empty `commits_contains`    → every branch passes the "contains" check
+    //   - empty `commits_no_contains` → every branch passes the "no-contains" check
+    for branches in [&mut local_branches, &mut remote_branches] {
+        filter_branches(branches, commits_contains, commits_no_contains).await;
+    }
 
-            let remote_configs = Config::all_remote_configs().await;
-            let mut remote_branches = vec![];
-            for remote in remote_configs {
-                let remote_branches_for_remote = Branch::list_branches(Some(&remote.name)).await;
-                remote_branches.extend(remote_branches_for_remote);
+    // display `local_branches` and `remote_branches` if not empty
+    if !local_branches.is_empty() {
+        display_branches(local_branches, &head_name, false);
+    }
+    if !remote_branches.is_empty() {
+        display_branches(remote_branches, &head_name, true);
+    }
+}
+
+/// Filter given branches by whether they contain or don't contain certain commits.
+///
+/// Internal test helper — not part of the stable public API.
+#[doc(hidden)]
+pub async fn filter_branches(
+    branches: &mut Vec<Branch>,
+    commits_contains: &[String],
+    commits_no_contains: &[String],
+) {
+    // Pre-resolve target commits once to avoid repeated string parsing
+    let contains_set = resolve_commits(commits_contains).await;
+    let no_contains_set = resolve_commits(commits_no_contains).await;
+
+    // Filter branches in-place using retain
+    branches.retain(|branch| {
+        let contains_ok = contains_set.is_empty() || commit_contains(branch, &contains_set);
+        let no_contains_ok = no_contains_set.is_empty() || !commit_contains(branch, &no_contains_set);
+        contains_ok && no_contains_ok
+    });
+}
+
+/// Resolve commit references to ObjectHash set, panicking on invalid refs.
+async fn resolve_commits(commits: &[String]) -> HashSet<ObjectHash> {
+    let mut set = HashSet::new();
+    for commit in commits {
+        let target_commit = match get_target_commit(commit).await {
+            Ok(commit) => commit,
+            Err(e) => panic!("fatal: {e}"),
+        };
+        set.insert(target_commit);
+    }
+    set
+}
+
+/// check if a branch contains at least one of the commits
+///
+/// NOTE: returns `false` if `commits` is empty
+fn commit_contains(branch: &Branch, target_commits: &HashSet<ObjectHash>) -> bool {
+    for &target_commit in target_commits {
+        // do BFS to find out whether `branch` contains `target_commit` or not
+        let mut q = VecDeque::new();
+        let mut visited = HashSet::new();
+        
+        q.push_back(branch.commit);
+        visited.insert(branch.commit);
+
+        while let Some(current_commit) = q.pop_front() {
+            // found target commit
+            if current_commit == target_commit {
+                return true;
             }
-            display_branches(remote_branches, &head_name, true);
+
+            // enqueue all parent commits of `current_commit`
+            let current_commit_object: Commit = match load_object(&current_commit) {
+                Ok(commit) => commit,
+                Err(e) => panic!("error: failed to load commit {current_commit}: {e}"),
+            };
+            for parent_commit in current_commit_object.parent_commit_ids {
+                if !visited.contains(&parent_commit) {
+                    visited.insert(parent_commit);
+                    q.push_back(parent_commit);
+                }
+            }
         }
     }
+
+    // contains no commits
+    false
 }
 
 pub fn is_valid_git_branch_name(name: &str) -> bool {
