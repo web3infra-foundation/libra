@@ -453,7 +453,7 @@ pub async fn commit_contains(branch: &Branch, commits: &[String]) -> bool {
             // enqueue all parent commits of `current_commit`
             let current_commit_object: Commit = match load_object(&current_commit) {
                 Ok(commit) => commit,
-                Err(_) => panic!("fatal: should never arrive here"),
+                Err(e) => panic!("error: failed to load commit {current_commit}: {e}"),
             };
             for parent_commit in current_commit_object.parent_commit_ids {
                 q.push_back(parent_commit);
