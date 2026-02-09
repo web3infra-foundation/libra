@@ -446,30 +446,28 @@ async fn resolve_commits(commits: &[String]) -> HashSet<ObjectHash> {
 ///
 /// NOTE: returns `false` if `commits` is empty
 fn commit_contains(branch: &Branch, target_commits: &HashSet<ObjectHash>) -> bool {
-    for &target_commit in target_commits {
-        // do BFS to find out whether `branch` contains `target_commit` or not
-        let mut q = VecDeque::new();
-        let mut visited = HashSet::new();
+    // do BFS to find out whether `branch` contains `target_commit` or not
+    let mut q = VecDeque::new();
+    let mut visited = HashSet::new();
 
-        q.push_back(branch.commit);
-        visited.insert(branch.commit);
+    q.push_back(branch.commit);
+    visited.insert(branch.commit);
 
-        while let Some(current_commit) = q.pop_front() {
-            // found target commit
-            if current_commit == target_commit {
-                return true;
-            }
+    while let Some(current_commit) = q.pop_front() {
+        // found target commit
+        if target_commits.contains(&current_commit) {
+            return true;
+        }
 
-            // enqueue all parent commits of `current_commit`
-            let current_commit_object: Commit = match load_object(&current_commit) {
-                Ok(commit) => commit,
-                Err(e) => panic!("error: failed to load commit {current_commit}: {e}"),
-            };
-            for parent_commit in current_commit_object.parent_commit_ids {
-                if !visited.contains(&parent_commit) {
-                    visited.insert(parent_commit);
-                    q.push_back(parent_commit);
-                }
+        // enqueue all parent commits of `current_commit`
+        let current_commit_object: Commit = match load_object(&current_commit) {
+            Ok(commit) => commit,
+            Err(e) => panic!("error: failed to load commit {current_commit}: {e}"),
+        };
+        for parent_commit in current_commit_object.parent_commit_ids {
+            if !visited.contains(&parent_commit) {
+                visited.insert(parent_commit);
+                q.push_back(parent_commit);
             }
         }
     }
