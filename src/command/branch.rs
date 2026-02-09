@@ -17,23 +17,23 @@ pub enum BranchListMode {
     All,
 }
 
-// options which manipulate branches are mutually exclusive with options which show branches
-// meanwhile, options which show branches can be combined
+// action options are mutually exclusive with query options
+// query options can be combined
 #[derive(Parser, Debug)]
 #[command(group(
-    ArgGroup::new("manipulate")
+    ArgGroup::new("action")
         .multiple(false)
-        .conflicts_with("show")
+        .conflicts_with("query")
 ))]
 #[command(group(
-    ArgGroup::new("show")
+    ArgGroup::new("query")
         .required(false)
         .multiple(true)
-        .conflicts_with("manipulate")
+        .conflicts_with("action")
 ))]
 pub struct BranchArgs {
     /// new branch name
-    #[clap(group = "manipulate")]
+    #[clap(group = "action")]
     pub new_branch: Option<String>,
 
     /// base branch name or commit hash
@@ -41,44 +41,44 @@ pub struct BranchArgs {
     pub commit_hash: Option<String>,
 
     /// list all branches, don't include remote branches
-    #[clap(short, long, group = "show")]
+    #[clap(short, long, group = "query")]
     pub list: bool,
 
     /// force delete branch
-    #[clap(short = 'D', long = "delete-force", group = "manipulate")]
+    #[clap(short = 'D', long = "delete-force", group = "action")]
     pub delete: Option<String>,
 
     /// safe delete branch (checks if merged before deletion)
-    #[clap(short = 'd', long = "delete", group = "manipulate")]
+    #[clap(short = 'd', long = "delete", group = "action")]
     pub delete_safe: Option<String>,
 
     ///  Set up `branchname`>`'s tracking information so `<`upstream`>` is considered `<`branchname`>`'s upstream branch.
-    #[clap(short = 'u', long, group = "manipulate")]
+    #[clap(short = 'u', long, group = "action")]
     pub set_upstream_to: Option<String>,
 
     /// show current branch
-    #[clap(long, group = "show")]
+    #[clap(long, group = "action")]
     pub show_current: bool,
 
     /// Rename a branch. With one argument, renames the current branch. With two arguments, renames OLD_BRANCH to NEW_BRANCH.
-    #[clap(short = 'm', long = "move", group = "manipulate", value_names = ["OLD_BRANCH", "NEW_BRANCH"], num_args = 1..=2)]
+    #[clap(short = 'm', long = "move", group = "action", value_names = ["OLD_BRANCH", "NEW_BRANCH"], num_args = 1..=2)]
     pub rename: Vec<String>,
 
     /// show remote branches
-    #[clap(short, long, group = "show")]
+    #[clap(short, long, group = "query")]
     // TODO limit to required `list` option, even in default
     pub remotes: bool,
 
     /// show all branches (includes local and remote)
-    #[clap(short, long, group = "show")]
+    #[clap(short, long, group = "query")]
     pub all: bool,
 
     /// Only list branches which contain the specified commit (HEAD if not specified). Implies --list.
-    #[clap(long, group = "show", alias = "with", value_name = "commit", num_args = 0..=1, default_missing_value = "HEAD", action = clap::ArgAction::Append)]
+    #[clap(long, group = "query", alias = "with", value_name = "commit", num_args = 0..=1, default_missing_value = "HEAD", action = clap::ArgAction::Append)]
     pub contains: Vec<String>,
 
     /// Only list branches which don’t contain the specified commit (HEAD if not specified). Implies --list.
-    #[clap(long, group = "show", alias = "without", value_name = "commit", num_args = 0..=1, default_missing_value = "HEAD", action = clap::ArgAction::Append)]
+    #[clap(long, group = "query", alias = "without", value_name = "commit", num_args = 0..=1, default_missing_value = "HEAD", action = clap::ArgAction::Append)]
     pub no_contains: Vec<String>,
 }
 pub async fn execute(args: BranchArgs) {
