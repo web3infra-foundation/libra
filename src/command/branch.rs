@@ -394,8 +394,11 @@ pub async fn list_branches(
     // When a list is empty the corresponding constraint is vacuously satisfied:
     //   - empty `commits_contains`    → every branch passes the "contains" check
     //   - empty `commits_no_contains` → every branch passes the "no-contains" check
+    // Pre-resolve target commits once to avoid repeated string parsing
+    let contains_set = resolve_commits(commits_contains).await;
+    let no_contains_set = resolve_commits(commits_no_contains).await;
     for branches in [&mut local_branches, &mut remote_branches] {
-        filter_branches(branches, commits_contains, commits_no_contains).await;
+        filter_branches(branches, &contains_set, &no_contains_set).await;
     }
 
     // display `local_branches` and `remote_branches` if not empty
@@ -413,18 +416,14 @@ pub async fn list_branches(
 #[doc(hidden)]
 pub async fn filter_branches(
     branches: &mut Vec<Branch>,
-    commits_contains: &[String],
-    commits_no_contains: &[String],
+    contains_set: &HashSet<ObjectHash>,
+    no_contains_set: &HashSet<ObjectHash>,
 ) {
-    // Pre-resolve target commits once to avoid repeated string parsing
-    let contains_set = resolve_commits(commits_contains).await;
-    let no_contains_set = resolve_commits(commits_no_contains).await;
-
     // Filter branches in-place using retain
     branches.retain(|branch| {
-        let contains_ok = contains_set.is_empty() || commit_contains(branch, &contains_set);
+        let contains_ok = contains_set.is_empty() || commit_contains(branch, contains_set);
         let no_contains_ok =
-            no_contains_set.is_empty() || !commit_contains(branch, &no_contains_set);
+            no_contains_set.is_empty() || !commit_contains(branch, no_contains_set);
         contains_ok && no_contains_ok
     });
 }

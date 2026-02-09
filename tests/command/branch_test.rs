@@ -2,6 +2,8 @@
 
 #![cfg(test)]
 
+use std::collections::HashSet;
+
 use libra::internal::config::Config;
 use serial_test::serial;
 use tempfile::tempdir;
@@ -771,13 +773,31 @@ async fn test_branch_contains_commit_filter() {
     commit::execute(make_commit("m2")).await;
     let m2 = Head::current_commit().await.unwrap().to_string();
 
-    // ── Helper: filter and return sorted branch names ──
+    // -- Helper: resolve commits from `&[String]` to `HashSet<ObjectHash>`
+    let resolve_commits = async |commits: &[String]| {
+        let mut set = HashSet::new();
+        for commit in commits {
+            let target_commit = match get_target_commit(commit).await {
+                Ok(commit) => commit,
+                Err(e) => panic!("fatal: {e}"),
+            };
+            set.insert(target_commit);
+        }
+        set
+    };
+
+    // -- Helper: filter and return sorted branch names --
     let run_filter = |contains: &[&str], no_contains: &[&str]| {
         let contains: Vec<String> = contains.iter().map(|s| s.to_string()).collect();
         let no_contains: Vec<String> = no_contains.iter().map(|s| s.to_string()).collect();
         async move {
             let mut branches = Branch::list_branches(None).await;
-            filter_branches(&mut branches, &contains, &no_contains).await;
+            filter_branches(
+                &mut branches,
+                &resolve_commits(&contains).await,
+                &resolve_commits(&no_contains).await,
+            )
+            .await;
             let mut names: Vec<String> = branches.into_iter().map(|b| b.name).collect();
             names.sort();
             names
