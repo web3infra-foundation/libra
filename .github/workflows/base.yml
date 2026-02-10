@@ -93,6 +93,11 @@ jobs:
       - name: Build with Buck2
         run: buck2 build //:libra
 
+      - name: Clean Buck2 artifacts
+        run: buck2 clean
+        if: always()
+        continue-on-error: true
+
   test:
     name: Run Tests
 
@@ -107,5 +112,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
+
       - name: Run tests
         run: cargo test --all
