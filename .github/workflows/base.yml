@@ -96,6 +96,7 @@ jobs:
       - name: Clean Buck2 artifacts
         run: buck2 clean
         if: always()
+        continue-on-error: true
 
   test:
     name: Run Tests
