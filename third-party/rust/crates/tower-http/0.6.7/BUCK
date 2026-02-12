@@ -33,7 +33,7 @@ rust_library(
     visibility = ["PUBLIC"],
     deps = [
         "//third-party/rust/crates/bitflags/2.10.0:bitflags",
-        "//third-party/rust/crates/bytes/1.11.0:bytes",
+        "//third-party/rust/crates/bytes/1.11.1:bytes",
         "//third-party/rust/crates/futures-util/0.3.31:futures-util",
         "//third-party/rust/crates/http-body/1.0.1:http-body",
         "//third-party/rust/crates/http/1.4.0:http",

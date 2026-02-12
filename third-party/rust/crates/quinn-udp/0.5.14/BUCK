@@ -42,7 +42,7 @@ rust_library(
     },
     visibility = ["PUBLIC"],
     deps = [
-        "//third-party/rust/crates/libc/0.2.178:libc",
+        "//third-party/rust/crates/libc/0.2.181:libc",
         "//third-party/rust/crates/tracing/0.1.44:tracing",
     ],
 )

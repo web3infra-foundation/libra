@@ -29,8 +29,8 @@ rust_library(
     ],
     rustc_flags = ["@$(location :errno-manifest[env_flags])"],
     os_deps = {
-        "linux": ["//third-party/rust/crates/libc/0.2.178:libc"],
-        "macos": ["//third-party/rust/crates/libc/0.2.178:libc"],
+        "linux": ["//third-party/rust/crates/libc/0.2.181:libc"],
+        "macos": ["//third-party/rust/crates/libc/0.2.181:libc"],
         "windows": ["//third-party/rust/crates/winapi/0.3.9:winapi"],
     },
     visibility = ["PUBLIC"],

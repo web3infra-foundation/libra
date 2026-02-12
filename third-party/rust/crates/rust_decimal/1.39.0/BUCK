@@ -39,7 +39,7 @@ rust_library(
     deps = [
         "//third-party/rust/crates/arrayvec/0.7.6:arrayvec",
         "//third-party/rust/crates/borsh/1.6.0:borsh",
-        "//third-party/rust/crates/bytes/1.11.0:bytes",
+        "//third-party/rust/crates/bytes/1.11.1:bytes",
         "//third-party/rust/crates/num-traits/0.2.19:num-traits",
         "//third-party/rust/crates/rand/0.8.5:rand",
         "//third-party/rust/crates/rkyv/0.7.45:rkyv",

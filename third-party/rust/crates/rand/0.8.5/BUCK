@@ -25,16 +25,18 @@ rust_library(
     edition = "2018",
     features = [
         "alloc",
+        "default",
         "getrandom",
         "libc",
         "rand_chacha",
+        "small_rng",
         "std",
         "std_rng",
     ],
     rustc_flags = ["@$(location :rand-manifest[env_flags])"],
     os_deps = {
-        "linux": ["//third-party/rust/crates/libc/0.2.178:libc"],
-        "macos": ["//third-party/rust/crates/libc/0.2.178:libc"],
+        "linux": ["//third-party/rust/crates/libc/0.2.181:libc"],
+        "macos": ["//third-party/rust/crates/libc/0.2.181:libc"],
     },
     visibility = ["PUBLIC"],
     deps = [
