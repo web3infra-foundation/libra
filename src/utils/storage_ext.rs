@@ -166,26 +166,17 @@ impl<S: Storage + Send + Sync + ?Sized> StorageExt for S {
     ) -> Result<ObjectHash, GitError> {
         let hash = self.put_json(object).await?;
 
-        // Try to update History (Best Effort)
-        if let Ok(repo_root) = try_get_storage_path(None) {
-            // Workaround: We use `crate::utils::util::objects_storage()` which creates a new ClientStorage instance
-            // pointing to the same disk location.
-            // Since ClientStorage doesn't implement Storage trait directly but wraps it,
-            // we need to access its internal storage or just use LocalStorage for MVP if we know it's local.
-            // But objects_storage() returns ClientStorage which wraps Arc<dyn Storage>.
-            // Let's rely on LocalStorage for now to fix the compilation error, as we are in `try_get_storage_path` context implying local repo.
-            let storage = Arc::new(crate::utils::storage::local::LocalStorage::new(
-                repo_root.join("objects"),
-            ));
-            let history_manager = HistoryManager::new(storage, repo_root);
+        let repo_root = try_get_storage_path(None).map_err(|e| {
+            GitError::InvalidObjectInfo(format!("Failed to locate repo storage path: {}", e))
+        })?;
+        let storage = Arc::new(crate::utils::storage::local::LocalStorage::new(
+            repo_root.join("objects"),
+        ));
+        let history_manager = HistoryManager::new(storage, repo_root);
 
-            if let Err(e) = history_manager
-                .append(&object.object_type(), &object.object_id(), hash)
-                .await
-            {
-                eprintln!("Warning: Failed to append to history: {}", e);
-            }
-        }
+        history_manager
+            .append(&object.object_type(), &object.object_id(), hash)
+            .await?;
 
         Ok(hash)
     }

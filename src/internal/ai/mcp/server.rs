@@ -1,3 +1,16 @@
+//! MCP `ServerHandler` implementation: resources (URI) and tool routing.
+//!
+//! - `LibraMcpServer` declares MCP capabilities (resources/tools) and implements resource reads.
+//! - Tool implementations live in `crate::internal::ai::mcp::tools` and are registered via
+//!   `rmcp`'s `#[tool_router]`.
+//!
+//! # Resource behavior (summary)
+//!
+//! - `libra://object/{object_id}`: resolve id -> hash in history, then read JSON blob from storage.
+//! - `libra://objects/{object_type}`: list objects by type (one line: `{object_id} {object_hash}`).
+//! - `libra://history/latest`: placeholder resource (future: expose history head commit hash).
+//!
+//! If `HistoryManager` or `Storage` is missing, related calls return `ErrorData`.
 use std::sync::Arc;
 
 use rmcp::{
@@ -40,6 +53,23 @@ impl LibraMcpServer {
         if uri == "libra://history/latest" {
             // For now return a placeholder or HEAD hash if we can expose it
             return Ok(vec![ResourceContents::text("latest", "History Head")]);
+        }
+
+        if let Some(object_type) = uri.strip_prefix("libra://objects/") {
+            let history = self
+                .history_manager
+                .as_ref()
+                .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
+            let objects = history
+                .list_objects(object_type)
+                .await
+                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            let body = objects
+                .into_iter()
+                .map(|(id, hash)| format!("{} {}", id, hash))
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Ok(vec![ResourceContents::text(body, uri)]);
         }
 
         if let Some(object_id_str) = uri.strip_prefix("libra://object/") {
@@ -110,17 +140,30 @@ impl ServerHandler for LibraMcpServer {
         _: RequestContext<RoleServer>,
     ) -> Result<ListResourceTemplatesResult, ErrorData> {
         Ok(ListResourceTemplatesResult {
-            resource_templates: vec![ResourceTemplate::new(
-                RawResourceTemplate {
-                    uri_template: "libra://object/{object_id}".to_string(),
-                    name: "Get AI Object by ID".to_string(),
-                    description: None,
-                    mime_type: None,
-                    title: None, // Added title
-                    icons: None, // Added icons
-                },
-                None,
-            )],
+            resource_templates: vec![
+                ResourceTemplate::new(
+                    RawResourceTemplate {
+                        uri_template: "libra://object/{object_id}".to_string(),
+                        name: "Get AI Object by ID".to_string(),
+                        description: None,
+                        mime_type: None,
+                        title: None,
+                        icons: None,
+                    },
+                    None,
+                ),
+                ResourceTemplate::new(
+                    RawResourceTemplate {
+                        uri_template: "libra://objects/{object_type}".to_string(),
+                        name: "List AI Objects by Type".to_string(),
+                        description: None,
+                        mime_type: None,
+                        title: None,
+                        icons: None,
+                    },
+                    None,
+                ),
+            ],
             next_cursor: None,
             meta: None,
         })

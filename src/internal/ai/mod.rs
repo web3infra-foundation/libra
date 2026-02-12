@@ -30,6 +30,7 @@ pub mod mcp;
 pub mod node_adapter;
 pub mod providers;
 pub mod tools;
+pub mod util;
 
 pub use agent::{Agent, AgentBuilder, ChatAgent};
 pub use completion::{Chat, CompletionModel, Message, Prompt};

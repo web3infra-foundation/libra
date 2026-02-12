@@ -21,13 +21,13 @@ const HISTORY_REF: &str = "refs/libra/history";
 ///
 /// Structure:
 /// refs/libra/history -> Commit -> Tree
-///   ├── tasks/
+///   ├── task/
 ///   │   └── <task_id>
-///   ├── runs/
+///   ├── run/
 ///   │   └── <run_id>
-///   ├── plans/
+///   ├── plan/
 ///   │   └── <plan_id>
-///   └── artifacts/
+///   └── artifact/
 ///       └── <artifact_hash>
 pub struct HistoryManager {
     #[allow(dead_code)]
@@ -246,9 +246,6 @@ impl HistoryManager {
     }
 
     fn write_tree(&self, tree_items: &[TreeItem]) -> Result<ObjectHash, GitError> {
-        // Tree serialization is specific. git-internal might have it.
-        // Tree::to_data() or similar?
-        // If not, we construct it manually: mode <space> name \0 hash (20 bytes binary)
         let mut data = Vec::new();
         for item in tree_items {
             let mode_str = match item.mode {
@@ -262,10 +259,15 @@ impl HistoryManager {
             data.push(b' ');
             data.extend_from_slice(item.name.as_bytes());
             data.push(0);
-            // ObjectHash usually displays as hex string, but we need raw bytes for tree entry.
-            // Since `hash` field is private/missing, we parse the hex string back to bytes.
             let hash_hex = item.id.to_string();
-            let hash_bytes = hex::decode(&hash_hex).unwrap(); // Should be safe for valid hash
+            let hash_bytes =
+                hex::decode(&hash_hex).map_err(|e| GitError::InvalidObjectInfo(e.to_string()))?;
+            if hash_bytes.len() != 20 && hash_bytes.len() != 32 {
+                return Err(GitError::InvalidObjectInfo(format!(
+                    "Invalid object hash length: {}",
+                    hash_bytes.len()
+                )));
+            }
             data.extend_from_slice(&hash_bytes);
         }
 
@@ -306,7 +308,7 @@ mod tests {
 
         // 1. Append first object
         let blob_hash = ObjectHash::from_str("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391").unwrap();
-        manager.append("tasks", "task-1", blob_hash).await.unwrap();
+        manager.append("task", "task-1", blob_hash).await.unwrap();
 
         // Verify ref exists
         let history_ref = repo_path.join("refs/libra/history");
@@ -314,13 +316,10 @@ mod tests {
 
         // 2. Append second object (same type)
         let blob_hash_2 = ObjectHash::from_str("f4e6d0434b8b29ae775ad8c2e48c5391e69de29b").unwrap();
-        manager
-            .append("tasks", "task-2", blob_hash_2)
-            .await
-            .unwrap();
+        manager.append("task", "task-2", blob_hash_2).await.unwrap();
 
         // 3. Append third object (different type)
-        manager.append("runs", "run-1", blob_hash).await.unwrap();
+        manager.append("run", "run-1", blob_hash).await.unwrap();
 
         // Load Head Commit
         let commit_hash_str = std::fs::read_to_string(history_ref).unwrap();
@@ -330,6 +329,6 @@ mod tests {
         let data = read_git_object(&repo_path, &commit_hash).unwrap();
         let content = String::from_utf8_lossy(&data);
         assert!(content.contains("tree "));
-        assert!(content.contains("Update runs/run-1"));
+        assert!(content.contains("Update run/run-1"));
     }
 }

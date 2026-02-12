@@ -1,4 +1,4 @@
-use std::{fs, str::FromStr, sync::Arc};
+use std::{str::FromStr, sync::Arc};
 
 use git_internal::{
     hash::ObjectHash,
@@ -9,10 +9,14 @@ use git_internal::{
         types::{ActorRef, ObjectType},
     },
 };
-use libra::utils::{
-    storage::{Storage, local::LocalStorage, remote::RemoteStorage},
-    storage_ext::StorageExt,
-    test,
+use libra::{
+    command::commit::CommitArgs,
+    internal::head::Head,
+    utils::{
+        storage::{Storage, local::LocalStorage, remote::RemoteStorage},
+        storage_ext::StorageExt,
+        test,
+    },
 };
 use tempfile::tempdir;
 use uuid::Uuid;
@@ -25,9 +29,9 @@ async fn test_ai_flow_local() {
     // Change directory so try_get_storage_path finds the repo
     let _guard = test::ChangeDirGuard::new(dir.path());
 
-    // Create .libra directory to simulate a repo
+    test::setup_with_new_libra_in(dir.path()).await;
+
     let libra_dir = dir.path().join(".libra");
-    fs::create_dir(&libra_dir).unwrap();
     let objects_dir = libra_dir.join("objects");
 
     let storage = Arc::new(LocalStorage::new(objects_dir));
@@ -57,60 +61,38 @@ async fn test_ai_flow_local() {
         history_ref_path
     );
 
-    // 2.5. Create ContextSnapshot (Correct base for Run)
-    // Signature seems to be: new(repo_id: Uuid, created_by: ActorRef, base_commit_sha: impl AsRef<str>, items: Vec<ContextItem>, selection_strategy: SelectionStrategy)
-    // Based on error: arg 1 expected UUID (found String).
+    libra::command::commit::execute(CommitArgs {
+        message: Some("initial commit".to_string()),
+        allow_empty: true,
+        disable_pre: true,
+        no_verify: true,
+        ..Default::default()
+    })
+    .await;
 
-    // Read the commit hash from ref (We need it for ContextSnapshot)
-    let history_ref_path = libra_dir.join("refs/libra/history");
-    let commit_hash_str = fs::read_to_string(&history_ref_path).unwrap();
-    let commit_hash = ObjectHash::from_str(commit_hash_str.trim()).unwrap();
-
-    let commit_sha1 = commit_hash.to_string();
-    let base_commit_padded = format!("{:0<64}", commit_sha1);
+    let head_commit = Head::current_commit().await.unwrap().to_string();
+    let base_commit_sha = libra::internal::ai::util::normalize_commit_anchor(&head_commit).unwrap();
 
     let snapshot = git_internal::internal::object::context::ContextSnapshot::new(
         repo_id,
         actor.clone(),
-        base_commit_padded, // padded
+        &base_commit_sha,
         git_internal::internal::object::context::SelectionStrategy::Heuristic,
     )
     .unwrap();
-    // It seems items are not part of `new`? Or maybe they are added later?
-    // Let's check if we need to add items.
-    // snapshot.items = Vec::new(); // if pub field
 
     let snapshot_hash = storage.put_tracked(&snapshot).await.unwrap();
     println!("Stored Snapshot: {}", snapshot_hash);
 
     // 2.6. User creates a Run
-    // Now we use the Snapshot ID (SHA256) as the base_commit, which satisfies Run's validation.
-    // Wait, snapshot.header().object_id() returns a UUID (36 chars).
-    // Run expects a 64-char hash for base_commit (if it's referring to snapshot).
-    // If Snapshot is an Object, it has a hash (snapshot_hash, which is 40 chars SHA1 in our storage backend).
-    // But `Run` enforces 64 chars.
-    // This implies `Run` expects to point to an object that has a SHA256 ID.
-    // If `git-internal` uses UUIDs for object IDs in headers, but Run expects SHA256 for references...
-    // The user said: "Run references another Run or Snapshot (they are SHA256)".
-    // This implies Snapshot's ID *should* be SHA256.
-    // But `snapshot.header().object_id()` is a UUID (v7/v4).
-    // Maybe `Run` expects the *Content Hash* of the snapshot?
-    // Our storage backend produced `snapshot_hash` (SHA1 40 chars).
-    // It seems we are stuck in a world where `git-internal` objects expect SHA256 everywhere, but our underlying storage is SHA1.
-    // To proceed with the test, we must pad.
-    // Ideally, we would switch `LocalStorage` to use SHA256, but that's a larger change.
-
-    let snapshot_id_str = snapshot.header().object_id().to_string(); // UUID 36 chars
-    // If Run expects 64 chars, and we pass UUID, it fails (got 36).
-    // If we pass snapshot_hash (40 chars), it fails.
-    // So we pad the UUID or Hash.
-    // Let's assume we refer to Snapshot by its Object ID (UUID), but padded?
-    // Or maybe we should use the *Content Hash*?
-    // Let's use the Content Hash (snapshot_hash) and pad it, as that's the "pointer" in Git.
-    let snapshot_hash_str = snapshot_hash.to_string();
-    let run_base = format!("{:0<64}", snapshot_hash_str);
-
-    let run = Run::new(task.header().object_id(), actor.clone(), repo_id, run_base).unwrap();
+    let mut run = Run::new(
+        repo_id,
+        actor.clone(),
+        task.header().object_id(),
+        &base_commit_sha,
+    )
+    .unwrap();
+    run.set_context_snapshot_id(Some(snapshot.header().object_id()));
 
     let run_hash = storage.put_tracked(&run).await.unwrap();
     println!("Stored Run: {}", run_hash);
@@ -127,11 +109,6 @@ async fn test_ai_flow_local() {
     // Verify Plan Retrieval
     let loaded_plan: Plan = storage.get_json(&plan_hash).await.unwrap();
     assert_eq!(plan.header().object_id(), loaded_plan.header().object_id());
-
-    // Verify the tree contains our task
-    // Note: We don't parse the whole tree here (too low level for this test),
-    // but the fact that commit exists implies success of append() logic.
-    // For rigorous testing, we could parse the tree, but let's trust unit tests/implementation for tree structure details.
 
     // 3. Verify Task Retrieval
     let loaded_task: Task = storage.get_json(&task_hash).await.unwrap();
