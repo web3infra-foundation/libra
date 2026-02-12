@@ -55,6 +55,8 @@ enum Commands {
     Clone(command::clone::CloneArgs),
     #[command(about = "Run AI-assisted coding with tool calling")]
     Ai(command::ai::AiArgs),
+    #[command(about = "Start a web-based code editor server")]
+    Code(command::code::CodeArgs),
 
     // The rest of the commands require a repository to be present
     #[command(about = "Add file contents to the index")]
@@ -257,7 +259,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> Result<(), GitError> {
     // TODO: try check repo before parsing
     // For commands that don't initialize a repo, set the hash kind first.
     match &args.command {
-        Commands::Init(_) | Commands::Clone(_) | Commands::Ai(_) => {}
+        Commands::Init(_) | Commands::Clone(_) | Commands::Ai(_) | Commands::Code(_) => {}
         _ => {
             if !utils::util::check_repo_exist() {
                 return Err(GitError::RepoNotFound);
@@ -275,6 +277,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> Result<(), GitError> {
         }
         Commands::Clone(args) => command::clone::execute(args).await, //clone will use init internally,so we don't need to set hash kind here again
         Commands::Ai(args) => command::ai::execute(args).await,
+        Commands::Code(args) => command::code::execute(args).await,
         Commands::Add(args) => command::add::execute(args).await,
         Commands::Rm(args) => command::remove::execute(args).await,
         Commands::Restore(args) => command::restore::execute(args).await,

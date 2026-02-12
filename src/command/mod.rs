@@ -3,6 +3,7 @@
 pub mod add;
 pub mod ai;
 pub mod blame;
+pub mod code;
 pub mod branch;
 pub mod checkout;
 pub mod cherry_pick;

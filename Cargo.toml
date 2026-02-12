@@ -65,6 +65,9 @@ pathdiff = "0.2.3"
 crc32fast = "1.5.0"
 dirs = "5.0.1"
 dagrs = "0.6.0"
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs"] }
 
 [target.'cfg(unix)'.dependencies] # only on Unix
 pager = "0.16.1"
