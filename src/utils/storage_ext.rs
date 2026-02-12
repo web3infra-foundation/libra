@@ -5,7 +5,18 @@ use git_internal::{
     errors::GitError,
     hash::ObjectHash,
     internal::object::{
-        integrity::IntegrityHash, task::Task, types::ArtifactRef, types::ObjectType,
+        integrity::IntegrityHash, 
+        task::Task, 
+        run::Run, 
+        plan::Plan, 
+        context::ContextSnapshot,
+        patchset::PatchSet,
+        evidence::Evidence,
+        tool::ToolInvocation,
+        provenance::Provenance,
+        decision::Decision,
+        types::ArtifactRef, 
+        types::ObjectType,
     },
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -22,6 +33,78 @@ pub trait Identifiable {
 }
 
 impl Identifiable for Task {
+    fn object_id(&self) -> String {
+        self.header().object_id().to_string()
+    }
+    fn object_type(&self) -> String {
+        self.header().object_type().to_string()
+    }
+}
+
+impl Identifiable for Run {
+    fn object_id(&self) -> String {
+        self.header().object_id().to_string()
+    }
+    fn object_type(&self) -> String {
+        self.header().object_type().to_string()
+    }
+}
+
+impl Identifiable for Plan {
+    fn object_id(&self) -> String {
+        self.header().object_id().to_string()
+    }
+    fn object_type(&self) -> String {
+        self.header().object_type().to_string()
+    }
+}
+
+impl Identifiable for ContextSnapshot {
+    fn object_id(&self) -> String {
+        self.header().object_id().to_string()
+    }
+    fn object_type(&self) -> String {
+        self.header().object_type().to_string()
+    }
+}
+
+impl Identifiable for PatchSet {
+    fn object_id(&self) -> String {
+        self.header().object_id().to_string()
+    }
+    fn object_type(&self) -> String {
+        self.header().object_type().to_string()
+    }
+}
+
+impl Identifiable for Evidence {
+    fn object_id(&self) -> String {
+        self.header().object_id().to_string()
+    }
+    fn object_type(&self) -> String {
+        self.header().object_type().to_string()
+    }
+}
+
+impl Identifiable for ToolInvocation {
+    fn object_id(&self) -> String {
+        self.header().object_id().to_string()
+    }
+    fn object_type(&self) -> String {
+        self.header().object_type().to_string()
+    }
+}
+
+impl Identifiable for Provenance {
+    fn object_id(&self) -> String {
+        self.header().object_id().to_string()
+    }
+    fn object_type(&self) -> String {
+        self.header().object_type().to_string()
+    }
+}
+
+impl Identifiable for Decision {
     fn object_id(&self) -> String {
         self.header().object_id().to_string()
     }
