@@ -142,6 +142,64 @@ impl HistoryManager {
         Ok(())
     }
 
+    /// Retrieve the object hash for a given type and ID from the current history.
+    pub async fn get_object_hash(
+        &self,
+        object_type: &str,
+        object_id: &str,
+    ) -> Result<Option<ObjectHash>, GitError> {
+        let parent_commit_id = self.resolve_history_head().await?;
+        if let Some(parent_id) = parent_commit_id {
+            let root_items = self.load_commit_tree(&parent_id)?;
+            if let Some(type_entry) = root_items.iter().find(|item| item.name == object_type) {
+                let type_items = self.load_tree(&type_entry.id)?;
+                if let Some(item) = type_items.iter().find(|item| item.name == object_id) {
+                    return Ok(Some(item.id));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Find an object by ID across all types in the history.
+    /// Returns (hash, type).
+    pub async fn find_object_hash(
+        &self,
+        object_id: &str,
+    ) -> Result<Option<(ObjectHash, String)>, GitError> {
+        let parent_commit_id = self.resolve_history_head().await?;
+        if let Some(parent_id) = parent_commit_id {
+            let root_items = self.load_commit_tree(&parent_id)?;
+            for type_entry in root_items {
+                let type_items = self.load_tree(&type_entry.id)?;
+                if let Some(item) = type_items.iter().find(|item| item.name == object_id) {
+                    return Ok(Some((item.id, type_entry.name.clone())));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// List all objects of a specific type from the current history.
+    /// Returns a list of (object_id, object_hash).
+    pub async fn list_objects(
+        &self,
+        object_type: &str,
+    ) -> Result<Vec<(String, ObjectHash)>, GitError> {
+        let parent_commit_id = self.resolve_history_head().await?;
+        if let Some(parent_id) = parent_commit_id {
+            let root_items = self.load_commit_tree(&parent_id)?;
+            if let Some(type_entry) = root_items.iter().find(|item| item.name == object_type) {
+                let type_items = self.load_tree(&type_entry.id)?;
+                return Ok(type_items
+                    .into_iter()
+                    .map(|item| (item.name, item.id))
+                    .collect());
+            }
+        }
+        Ok(Vec::new())
+    }
+
     async fn resolve_history_head(&self) -> Result<Option<ObjectHash>, GitError> {
         let ref_path = self.repo_path.join(HISTORY_REF);
         if !ref_path.exists() {
@@ -231,9 +289,10 @@ impl HistoryManager {
 
 #[cfg(test)]
 mod tests {
+    use tempfile::tempdir;
+
     use super::*;
     use crate::utils::storage::local::LocalStorage;
-    use tempfile::tempdir;
 
     #[tokio::test]
     async fn test_history_append_simple() {

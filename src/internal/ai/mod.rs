@@ -26,6 +26,7 @@ pub mod agent;
 pub mod client;
 pub mod completion;
 pub mod history;
+pub mod mcp;
 pub mod node_adapter;
 pub mod providers;
 pub mod tools;
