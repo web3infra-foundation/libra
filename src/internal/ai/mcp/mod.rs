@@ -41,7 +41,7 @@
 //! - If the repo uses SHA-256: pass the 64-hex commit id as-is.
 //! - If the repo uses SHA-1: you may pass a 40-hex commit id; the server will right-pad with `0`
 //!   to 64 hex (reversible).
-//! See `crate::internal::ai::util::normalize_commit_anchor`.
+//!   See `crate::internal::ai::util::normalize_commit_anchor`.
 //!
 //! # Error conventions
 //!
