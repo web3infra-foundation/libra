@@ -317,10 +317,12 @@ impl LocalStorage {
                 Pack::decode_pack_object(&mut pack_reader, &mut offset)?
             }
         };
+        let obj = obj.expect("Failed to get cache object");
         let full_obj = match obj.object_type() {
             ObjectType::OffsetDelta => {
-                let base_offset = obj.offset_delta().unwrap();
-                let base_obj = Self::read_pack_obj(pack_file, base_offset as u64)?;
+                let delta = obj.offset_delta().unwrap();
+                let base_offset = offset - delta as u64;
+                let base_obj = Self::read_pack_obj(pack_file, base_offset)?;
                 let base_obj = Arc::new(base_obj);
                 Pack::rebuild_delta(obj, base_obj)
             }

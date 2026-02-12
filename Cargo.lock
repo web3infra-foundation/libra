@@ -1328,9 +1328,9 @@ dependencies = [
 
 [[package]]
 name = "git-internal"
-version = "0.4.1"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3373b0719c11eed1df7d80242354816316b44c7f842f519daf60efacec7a861a"
+checksum = "a1e9f5f8b8c9ee15de5e2c7e367abfd5200dd612c296f36e8ba160a620bc66cc"
 dependencies = [
  "ahash 0.8.12",
  "async-trait",
@@ -1356,8 +1356,10 @@ dependencies = [
  "num_cpus",
  "path-absolutize",
  "rayon",
+ "ring",
  "sea-orm",
  "serde",
+ "serde_json",
  "sha1",
  "sha2",
  "similar",
@@ -1972,9 +1974,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.180"
+version = "0.2.182"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bcc35a38544a891a5f7c865aca548a982ccb3b8650a5b06d0fd33a10283c56fc"
+checksum = "6800badb6cb2082ffd7b6a67e6125bb39f18782f793520caee8cb8846be06112"
 
 [[package]]
 name = "libloading"
@@ -2045,6 +2047,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "uuid",
  "walkdir",
  "wax",
 ]

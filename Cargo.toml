@@ -7,7 +7,7 @@ edition = "2024"
 default = []
 
 [dependencies]
-git-internal = "0.4.0"
+git-internal = "0.5.0"
 anyhow = "1.0.100"
 byte-unit = "5.2.0"
 byteorder = "1.5.0"
@@ -84,3 +84,4 @@ testcontainers = { version = "0.25.2", features = [
 ] }
 reqwest = { version = "0.12.24", features = ["blocking"] }
 assert_cmd = "2.1.2"
+uuid = { version = "1.20.0", features = ["v4", "v7"] }
