@@ -241,7 +241,7 @@ fn registry_tool_definitions(registry: &ToolRegistry) -> Vec<ToolDefinition> {
                 description: spec.function.description,
                 parameters,
             }
-    })
+        })
         .collect()
 }
 
