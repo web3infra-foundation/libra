@@ -1,4 +1,8 @@
-use crate::internal::ai::{agent::Agent, completion::CompletionModel, tools::ToolSet};
+use crate::internal::ai::{
+    agent::Agent,
+    completion::CompletionModel,
+    tools::{Tool, ToolRegistry, ToolSet},
+};
 
 /// A builder for configuring and creating AI Agent instances.
 pub struct AgentBuilder<M: CompletionModel> {
@@ -37,6 +41,19 @@ impl<M: CompletionModel> AgentBuilder<M> {
     /// Sets the tools for the agent.
     pub fn tools(mut self, tools: ToolSet) -> Self {
         self.tools = tools;
+        self
+    }
+
+    /// Add a single tool to the agent.
+    pub fn tool(mut self, tool: impl Tool + 'static) -> Self {
+        self.tools.tools.push(std::sync::Arc::new(tool));
+        self
+    }
+
+    /// Add tools from a ToolRegistry.
+    pub fn with_registry(self, _registry: &ToolRegistry) -> Self {
+        // For now, we can't directly convert ToolHandler to Tool
+        // This is a placeholder for future integration
         self
     }
 

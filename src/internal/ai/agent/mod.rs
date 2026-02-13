@@ -6,7 +6,9 @@ use crate::internal::ai::{
 pub mod builder;
 pub(crate) mod tool_loop;
 pub use builder::AgentBuilder;
-pub(crate) use tool_loop::{ToolLoopConfig, run_tool_loop};
+pub(crate) use tool_loop::{
+    ToolLoopConfig, ToolLoopObserver, run_tool_loop, run_tool_loop_with_history_and_observer,
+};
 
 pub mod chat;
 pub use chat::ChatAgent;
@@ -25,7 +27,11 @@ pub use chat::ChatAgent;
 /// - Constructing requests to the underlying model.
 ///
 /// It implements the `Prompt` and `Chat` traits for easy interaction.
-pub struct Agent<M: CompletionModel> {
+#[derive(Clone)]
+pub struct Agent<M: CompletionModel>
+where
+    M: Clone,
+{
     /// The underlying completion model (e.g., Gemini, OpenAI).
     model: M,
     /// System prompt or preamble to set the agent's behavior context.
@@ -39,7 +45,7 @@ pub struct Agent<M: CompletionModel> {
     tools: ToolSet,
 }
 
-impl<M: CompletionModel> Agent<M> {
+impl<M: CompletionModel + Clone> Agent<M> {
     /// Creates a new Agent with the given model.
     ///
     /// # Arguments
@@ -54,7 +60,7 @@ impl<M: CompletionModel> Agent<M> {
         }
     }
 
-    async fn run_with_history(
+    pub(crate) async fn run_with_history(
         &self,
         mut chat_history: Vec<Message>,
     ) -> Result<String, CompletionError> {
@@ -177,14 +183,14 @@ impl<M: CompletionModel> Agent<M> {
     }
 }
 
-impl<M: CompletionModel> Prompt for Agent<M> {
+impl<M: CompletionModel + Clone> Prompt for Agent<M> {
     async fn prompt(&self, prompt: impl Into<Message> + Send) -> Result<String, CompletionError> {
         let msg = prompt.into();
         self.run_with_history(vec![msg]).await
     }
 }
 
-impl<M: CompletionModel> Chat for Agent<M> {
+impl<M: CompletionModel + Clone> Chat for Agent<M> {
     async fn chat(
         &self,
         prompt: impl Into<Message> + Send,
@@ -285,7 +291,7 @@ mod tests {
     #[tokio::test]
     async fn test_tool_call_loop_executes_tool() {
         let mut tool_set = ToolSet::default();
-        tool_set.tools.push(Box::new(MockTool));
+        tool_set.tools.push(std::sync::Arc::new(MockTool));
 
         let agent = AgentBuilder::new(MockModel).tools(tool_set).build();
         let response = Prompt::prompt(&agent, "hi").await.unwrap();

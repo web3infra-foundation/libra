@@ -168,7 +168,7 @@ fn test_gemini_agent_with_tools() {
     let tool_called = Arc::new(AtomicBool::new(false));
 
     let mut tool_set = ToolSet::default();
-    tool_set.tools.push(Box::new(WeatherTool {
+    tool_set.tools.push(std::sync::Arc::new(WeatherTool {
         called: tool_called.clone(),
     }));
 
@@ -281,7 +281,7 @@ mod error_tests {
     #[tokio::test]
     async fn test_max_steps_exceeded() {
         let mut tools = ToolSet::default();
-        tools.tools.push(Box::new(MockTool));
+        tools.tools.push(std::sync::Arc::new(MockTool));
 
         let agent = AgentBuilder::new(MockLoopModel)
             .tools(tools)

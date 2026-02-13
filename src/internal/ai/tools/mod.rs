@@ -1,6 +1,6 @@
 //! Tool calling infrastructure for AI agents.
 
-use std::error::Error;
+use std::{error::Error, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -41,9 +41,9 @@ pub trait Tool: Send + Sync {
     fn call(&self, args: Value) -> Result<Value, Box<dyn Error + Send + Sync>>;
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ToolSet {
-    pub tools: Vec<Box<dyn Tool>>,
+    pub tools: Vec<Arc<dyn Tool>>,
 }
 
 #[cfg(test)]
