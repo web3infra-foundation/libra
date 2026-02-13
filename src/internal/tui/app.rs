@@ -16,7 +16,7 @@ use super::{
     app_event::{AgentEvent, AgentStatus, AppEvent, ExitMode},
     chatwidget::ChatWidget,
     history_cell::{AssistantHistoryCell, ToolCallHistoryCell, UserHistoryCell},
-    tui::{TARGET_FRAME_INTERVAL, Tui, TuiEvent},
+    terminal::{TARGET_FRAME_INTERVAL, Tui, TuiEvent},
 };
 use crate::internal::ai::{
     agent::{ToolLoopConfig, run_tool_loop_with_history_and_observer},

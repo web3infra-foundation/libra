@@ -8,8 +8,8 @@ mod app_event;
 mod bottom_pane;
 mod chatwidget;
 mod history_cell;
-mod tui;
+mod terminal;
 
 pub use app::{App, AppExitInfo, ExitReason};
 pub use app_event::{AgentEvent, AgentStatus, AppEvent, ExitMode};
-pub use tui::{Tui, TuiEvent, init as tui_init, restore as tui_restore};
+pub use terminal::{Tui, TuiEvent, init as tui_init, restore as tui_restore};
