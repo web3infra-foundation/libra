@@ -229,15 +229,6 @@ pub struct GrepFilesArgs {
     pub case_insensitive: bool,
 }
 
-/// Arguments for the apply_patch tool.
-#[derive(Clone, Deserialize, Debug)]
-pub struct ApplyPatchArgs {
-    /// Absolute path to the file to patch.
-    pub file_path: String,
-    /// The patch to apply in unified diff format.
-    pub patch: String,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

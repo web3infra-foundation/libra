@@ -27,13 +27,16 @@ rust_library(
         "default",
         "fs",
         "net",
+        "sync",
         "time",
+        "tokio-util",
     ],
     rustc_flags = ["@$(location :tokio-stream-manifest[env_flags])"],
     visibility = ["PUBLIC"],
     deps = [
         "//third-party/rust/crates/futures-core/0.3.31:futures-core",
         "//third-party/rust/crates/pin-project-lite/0.2.16:pin-project-lite",
+        "//third-party/rust/crates/tokio-util/0.7.18:tokio-util",
         "//third-party/rust/crates/tokio/1.49.0:tokio",
     ],
 )

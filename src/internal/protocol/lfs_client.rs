@@ -522,7 +522,7 @@ impl LFSClient {
         }
         let mut res = resp.json::<FetchchunkResponse>().await.unwrap();
         // sort by offset
-        res.chunks.sort_by(|a, b| a.offset.cmp(&b.offset));
+        res.chunks.sort_by_key(|a| a.offset);
         Ok(res.chunks)
     }
 }

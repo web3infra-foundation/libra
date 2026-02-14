@@ -26,6 +26,10 @@ rust_library(
     features = [
         "Win32",
         "Win32_Foundation",
+        "Win32_NetworkManagement",
+        "Win32_NetworkManagement_IpHelper",
+        "Win32_Networking",
+        "Win32_Networking_WinSock",
         "Win32_Security",
         "Win32_Storage",
         "Win32_Storage_FileSystem",
@@ -33,6 +37,7 @@ rust_library(
         "Win32_System_Com",
         "Win32_System_Console",
         "Win32_System_SystemServices",
+        "Win32_System_Threading",
         "Win32_UI",
         "Win32_UI_Shell",
         "default",

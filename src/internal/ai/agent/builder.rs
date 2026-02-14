@@ -1,4 +1,10 @@
-use crate::internal::ai::{agent::Agent, completion::CompletionModel, tools::ToolSet};
+use std::sync::Arc;
+
+use crate::internal::ai::{
+    agent::Agent,
+    completion::CompletionModel,
+    tools::{Tool, ToolRegistry, ToolSet},
+};
 
 /// A builder for configuring and creating AI Agent instances.
 pub struct AgentBuilder<M: CompletionModel> {
@@ -40,6 +46,19 @@ impl<M: CompletionModel> AgentBuilder<M> {
         self
     }
 
+    /// Add a single tool to the agent.
+    pub fn tool(mut self, tool: impl Tool + 'static) -> Self {
+        self.tools.tools.push(std::sync::Arc::new(tool));
+        self
+    }
+
+    /// Add tools from a ToolRegistry.
+    pub fn with_registry(self, _registry: &ToolRegistry) -> Self {
+        // For now, we can't directly convert ToolHandler to Tool
+        // This is a placeholder for future integration
+        self
+    }
+
     /// Sets the temperature for the agent's responses (0.0 to 2.0).
     pub fn temperature(mut self, temperature: f64) -> Result<Self, String> {
         if !(0.0..=2.0).contains(&temperature) {
@@ -55,7 +74,7 @@ impl<M: CompletionModel> AgentBuilder<M> {
     /// Builds and returns the configured Agent instance.
     pub fn build(self) -> Agent<M> {
         Agent {
-            model: self.model,
+            model: Arc::new(self.model),
             preamble: self.preamble,
             temperature: self.temperature,
             max_steps: self.max_steps.unwrap_or(4),

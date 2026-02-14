@@ -49,7 +49,7 @@ async fn test_execute_log() {
 
     let mut reachable_commits = get_reachable_commits(commit_hash.clone(), None).await;
     // default sort with signature time
-    reachable_commits.sort_by(|a, b| b.committer.timestamp.cmp(&a.committer.timestamp));
+    reachable_commits.sort_by_key(|b| std::cmp::Reverse(b.committer.timestamp));
     //the last seven commits
     let max_output_number = min(6, reachable_commits.len());
     let mut output_number = 6;
@@ -154,7 +154,7 @@ async fn test_log_oneline() {
 
     // Since execute function writes to stdout, we'll test the logic directly
     let mut sorted_commits = reachable_commits.clone();
-    sorted_commits.sort_by(|a, b| b.committer.timestamp.cmp(&a.committer.timestamp));
+    sorted_commits.sort_by_key(|b| std::cmp::Reverse(b.committer.timestamp));
 
     let max_commits = std::cmp::min(
         args.unwrap().number.unwrap_or(usize::MAX),
@@ -394,7 +394,7 @@ async fn collect_combined_diff_for_commits(count: usize, paths: Vec<std::path::P
     // Get head commit and reachable commits
     let commit_hash = Head::current_commit().await.unwrap().to_string();
     let mut reachable_commits = get_reachable_commits(commit_hash, None).await;
-    reachable_commits.sort_by(|a, b| b.committer.timestamp.cmp(&a.committer.timestamp));
+    reachable_commits.sort_by_key(|b| std::cmp::Reverse(b.committer.timestamp));
 
     let max_output_number = std::cmp::min(count, reachable_commits.len());
     let mut out = String::new();

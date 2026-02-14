@@ -46,9 +46,9 @@ rust_library(
     rustc_flags = ["@$(location :reqwest-manifest[env_flags])"],
     os_named_deps = {
         "native_tls_crate": {
-            "linux": "//third-party/rust/crates/native-tls/0.2.14:native-tls",
-            "macos": "//third-party/rust/crates/native-tls/0.2.14:native-tls",
-            "windows": "//third-party/rust/crates/native-tls/0.2.14:native-tls",
+            "linux": "//third-party/rust/crates/native-tls/0.2.16:native-tls",
+            "macos": "//third-party/rust/crates/native-tls/0.2.16:native-tls",
+            "windows": "//third-party/rust/crates/native-tls/0.2.16:native-tls",
         },
     },
     os_deps = {
