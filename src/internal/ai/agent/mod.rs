@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::internal::ai::{
     completion::{Chat, CompletionError, CompletionModel, CompletionRequest, Message, Prompt},
     tools::ToolSet,
@@ -28,12 +30,9 @@ pub use chat::ChatAgent;
 ///
 /// It implements the `Prompt` and `Chat` traits for easy interaction.
 #[derive(Clone)]
-pub struct Agent<M: CompletionModel>
-where
-    M: Clone,
-{
+pub struct Agent<M: CompletionModel> {
     /// The underlying completion model (e.g., Gemini, OpenAI).
-    model: M,
+    model: Arc<M>,
     /// System prompt or preamble to set the agent's behavior context.
     preamble: Option<String>,
     /// Sampling temperature (0.0 to 2.0). Higher values mean more creativity.
@@ -45,14 +44,14 @@ where
     tools: ToolSet,
 }
 
-impl<M: CompletionModel + Clone> Agent<M> {
+impl<M: CompletionModel> Agent<M> {
     /// Creates a new Agent with the given model.
     ///
     /// # Arguments
     /// * `model` - The completion model instance.
     pub fn new(model: M) -> Self {
         Self {
-            model,
+            model: Arc::new(model),
             preamble: None,
             temperature: None,
             max_steps: 4,
@@ -183,14 +182,14 @@ impl<M: CompletionModel + Clone> Agent<M> {
     }
 }
 
-impl<M: CompletionModel + Clone> Prompt for Agent<M> {
+impl<M: CompletionModel> Prompt for Agent<M> {
     async fn prompt(&self, prompt: impl Into<Message> + Send) -> Result<String, CompletionError> {
         let msg = prompt.into();
         self.run_with_history(vec![msg]).await
     }
 }
 
-impl<M: CompletionModel + Clone> Chat for Agent<M> {
+impl<M: CompletionModel> Chat for Agent<M> {
     async fn chat(
         &self,
         prompt: impl Into<Message> + Send,

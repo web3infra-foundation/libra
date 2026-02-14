@@ -87,6 +87,7 @@ pub fn restore() -> Result<()> {
     execute!(stdout(), DisableBracketedPaste)?;
     let _ = execute!(stdout(), DisableMouseCapture);
     let _ = execute!(stdout(), DisableFocusChange);
+    let _ = execute!(stdout(), LeaveAlternateScreen);
     terminal::disable_raw_mode()?;
     let _ = execute!(stdout(), crossterm::cursor::Show);
     Ok(())
@@ -131,37 +132,56 @@ impl Tui {
         Box::pin(async_stream::stream! {
             let mut event_rx = event_rx;
             let mut draw_rx = draw_rx;
+            let mut draw_open = true;
 
             loop {
                 tokio::select! {
                     // Handle terminal events
-                    Some(Ok(event)) = async {
+                    terminal_event = async {
                         match &mut event_rx {
                             Some(rx) => rx.next().await,
                             None => None,
                         }
-                    } => {
-                        match event {
-                            crossterm::event::Event::Key(key) => {
-                                yield TuiEvent::Key(key);
+                    }, if event_rx.is_some() => {
+                        match terminal_event {
+                            Some(Ok(event)) => {
+                                match event {
+                                    crossterm::event::Event::Key(key) => {
+                                        yield TuiEvent::Key(key);
+                                    }
+                                    crossterm::event::Event::Paste(s) => {
+                                        yield TuiEvent::Paste(s);
+                                    }
+                                    crossterm::event::Event::Mouse(mouse) => {
+                                        yield TuiEvent::Mouse(mouse);
+                                    }
+                                    crossterm::event::Event::Resize(_, _) => {
+                                        yield TuiEvent::Resize;
+                                    }
+                                    _ => {}
+                                }
                             }
-                            crossterm::event::Event::Paste(s) => {
-                                yield TuiEvent::Paste(s);
+                            Some(Err(_)) | None => {
+                                event_rx = None;
                             }
-                            crossterm::event::Event::Mouse(mouse) => {
-                                yield TuiEvent::Mouse(mouse);
-                            }
-                            crossterm::event::Event::Resize(_, _) => {
-                                yield TuiEvent::Resize;
-                            }
-                            _ => {}
                         }
                     }
 
                     // Handle draw requests
-                    Ok(()) = draw_rx.recv() => {
-                        yield TuiEvent::Draw;
+                    draw_event = draw_rx.recv(), if draw_open => {
+                        match draw_event {
+                            Ok(()) => {
+                                yield TuiEvent::Draw;
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                yield TuiEvent::Draw;
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                draw_open = false;
+                            }
+                        }
                     }
+                    else => break,
                 }
             }
         })

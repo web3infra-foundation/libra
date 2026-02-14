@@ -105,6 +105,18 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
     pub async fn run(&mut self) -> anyhow::Result<AppExitInfo> {
         // Enter alternate screen
         self.tui.enter_alt_screen()?;
+        let run_result = self.run_in_alt_screen().await;
+        let leave_result = self.tui.leave_alt_screen();
+
+        match (run_result, leave_result) {
+            (Ok(exit_info), Ok(())) => Ok(exit_info),
+            (Err(run_err), Ok(())) => Err(run_err),
+            (Ok(_), Err(leave_err)) => Err(leave_err.into()),
+            (Err(run_err), Err(_leave_err)) => Err(run_err),
+        }
+    }
+
+    async fn run_in_alt_screen(&mut self) -> anyhow::Result<AppExitInfo> {
         self.tui.clear()?;
 
         // Welcome message
@@ -138,9 +150,6 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 }
             }
         }
-
-        // Restore terminal
-        self.tui.leave_alt_screen()?;
 
         Ok(self.exit_info.clone().unwrap_or(AppExitInfo {
             reason: ExitReason::UserRequested,
@@ -501,7 +510,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 .downcast_ref::<AssistantHistoryCell>()
                 .is_some_and(|a| a.is_streaming)
         }) {
-            self.widget.cells.insert(index, cell);
+            self.widget.insert_cell(index, cell);
         } else {
             self.widget.add_cell(cell);
         }
@@ -533,6 +542,14 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
     /// Schedule a frame draw with frame rate limiting.
     fn schedule_draw(&mut self) {
+        if self
+            .scheduled_draw_task
+            .as_ref()
+            .is_some_and(tokio::task::JoinHandle::is_finished)
+        {
+            self.scheduled_draw_task = None;
+        }
+
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_draw_time);
         if elapsed >= TARGET_FRAME_INTERVAL {

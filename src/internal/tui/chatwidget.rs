@@ -19,6 +19,8 @@ pub struct ChatWidget {
     pub bottom_pane: BottomPane,
     /// Last rendered input area rectangle (for mouse hit-testing).
     last_input_area: Option<Rect>,
+    /// Last rendered chat area width used to estimate added line count.
+    last_chat_area_width: u16,
 }
 
 impl ChatWidget {
@@ -29,14 +31,28 @@ impl ChatWidget {
             scroll_from_bottom_lines: 0,
             bottom_pane: BottomPane::new(),
             last_input_area: None,
+            last_chat_area_width: 80,
         }
     }
 
     /// Add a cell to the history.
     pub fn add_cell(&mut self, cell: Box<dyn HistoryCell>) {
+        if self.scroll_from_bottom_lines > 0 {
+            self.scroll_from_bottom_lines = self
+                .scroll_from_bottom_lines
+                .saturating_add(cell.desired_height(self.last_chat_area_width) as usize);
+        }
         self.cells.push(cell);
-        // Auto-scroll to bottom only if we are pinned to bottom.
-        // If the user has scrolled up, preserve their relative position.
+    }
+
+    /// Insert a cell at a specific index.
+    pub fn insert_cell(&mut self, index: usize, cell: Box<dyn HistoryCell>) {
+        if self.scroll_from_bottom_lines > 0 {
+            self.scroll_from_bottom_lines = self
+                .scroll_from_bottom_lines
+                .saturating_add(cell.desired_height(self.last_chat_area_width) as usize);
+        }
+        self.cells.insert(index, cell);
     }
 
     /// Scroll up by N lines.
@@ -99,6 +115,8 @@ impl ChatWidget {
     }
 
     fn render_chat_area(&mut self, area: Rect, buf: &mut Buffer) {
+        self.last_chat_area_width = area.width;
+
         // Calculate visible lines
         let mut lines: Vec<Line<'static>> = Vec::new();
 

@@ -87,10 +87,7 @@ impl<M: CompletionModel> ChatAgent<M> {
     ///
     /// This is useful when you need to execute the agent in a separate task
     /// while still being able to update the history afterwards.
-    pub fn clone_agent(&self) -> Agent<M>
-    where
-        M: Clone,
-    {
+    pub fn clone_agent(&self) -> Agent<M> {
         self.agent.clone()
     }
 

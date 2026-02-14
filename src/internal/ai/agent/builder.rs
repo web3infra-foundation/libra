@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::internal::ai::{
     agent::Agent,
     completion::CompletionModel,
@@ -72,7 +74,7 @@ impl<M: CompletionModel> AgentBuilder<M> {
     /// Builds and returns the configured Agent instance.
     pub fn build(self) -> Agent<M> {
         Agent {
-            model: self.model,
+            model: Arc::new(self.model),
             preamble: self.preamble,
             temperature: self.temperature,
             max_steps: self.max_steps.unwrap_or(4),
