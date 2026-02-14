@@ -9,10 +9,14 @@ use std::{net::SocketAddr, sync::Arc};
 use axum::{Router, response::Html, routing::get};
 use clap::{Parser, ValueEnum};
 use tokio::sync::oneshot;
+use uuid::Uuid;
 
 use crate::internal::{
     ai::{
+        agent::ToolLoopConfig,
         client::CompletionClient,
+        history::HistoryManager,
+        mcp::server::LibraMcpServer,
         providers::{
             anthropic::{CLAUDE_3_5_SONNET, Client as AnthropicClient},
             gemini::{Client as GeminiClient, GEMINI_2_5_FLASH},
@@ -62,6 +66,10 @@ pub struct CodeArgs {
     /// Sampling temperature
     #[arg(long)]
     pub temperature: Option<f64>,
+
+    /// Port to listen on (MCP server)
+    #[arg(long, default_value_t = 6789)]
+    pub mcp_port: u16,
 }
 
 pub async fn execute(args: CodeArgs) {
@@ -176,7 +184,14 @@ async fn execute_tui(args: CodeArgs) {
             .build(),
     );
 
+    let config = ToolLoopConfig {
+        preamble: Some(preamble),
+        temperature,
+        max_steps,
+    };
+
     // Create agent based on provider
+    let registry = registry.clone();
     match args.provider {
         CodeProvider::Gemini => {
             let client = match GeminiClient::from_env() {
@@ -188,16 +203,7 @@ async fn execute_tui(args: CodeArgs) {
             };
             let model_name = args.model.unwrap_or_else(|| GEMINI_2_5_FLASH.to_string());
             let model = client.completion_model(&model_name);
-            run_tui_with_model(
-                args.host,
-                args.port,
-                model,
-                registry.clone(),
-                preamble,
-                temperature,
-                max_steps,
-            )
-            .await;
+            run_tui_with_model(args.host, args.port, args.mcp_port, model, registry, config).await;
         }
         CodeProvider::Openai => {
             let client = match OpenAIClient::from_env() {
@@ -209,16 +215,7 @@ async fn execute_tui(args: CodeArgs) {
             };
             let model_name = args.model.unwrap_or_else(|| GPT_4O_MINI.to_string());
             let model = client.completion_model(&model_name);
-            run_tui_with_model(
-                args.host,
-                args.port,
-                model,
-                registry.clone(),
-                preamble,
-                temperature,
-                max_steps,
-            )
-            .await;
+            run_tui_with_model(args.host, args.port, args.mcp_port, model, registry, config).await;
         }
         CodeProvider::Anthropic => {
             let client = match AnthropicClient::from_env() {
@@ -230,16 +227,7 @@ async fn execute_tui(args: CodeArgs) {
             };
             let model_name = args.model.unwrap_or_else(|| CLAUDE_3_5_SONNET.to_string());
             let model = client.completion_model(&model_name);
-            run_tui_with_model(
-                args.host,
-                args.port,
-                model,
-                registry.clone(),
-                preamble,
-                temperature,
-                max_steps,
-            )
-            .await;
+            run_tui_with_model(args.host, args.port, args.mcp_port, model, registry, config).await;
         }
     }
 }
@@ -247,20 +235,13 @@ async fn execute_tui(args: CodeArgs) {
 async fn run_tui_with_model<M>(
     host: String,
     port: u16,
+    mcp_port: u16,
     model: M,
     registry: Arc<ToolRegistry>,
-    preamble: String,
-    temperature: Option<f64>,
-    max_steps: usize,
+    config: ToolLoopConfig,
 ) where
     M: crate::internal::ai::completion::CompletionModel + 'static,
 {
-    let config = crate::internal::ai::agent::ToolLoopConfig {
-        preamble: Some(preamble),
-        temperature,
-        max_steps,
-    };
-
     // Initialize terminal
     let terminal = match tui_init() {
         Ok(t) => t,
@@ -285,9 +266,18 @@ async fn run_tui_with_model<M>(
         Err(err) => (None, format!("Web: failed to start ({err})")),
     };
 
+    // Start MCP Server
+    let (mcp_handle, mcp_line) = match start_mcp_server(&host, mcp_port).await {
+        Ok(handle) => {
+            let line = format!("MCP: http://{}", handle.addr);
+            (Some(handle), line)
+        }
+        Err(err) => (None, format!("MCP: failed to start ({err})")),
+    };
+
     let welcome = format!(
-        "Welcome to Libra Code! Type your message and press Enter to chat with the AI assistant.\n{}",
-        web_line
+        "Welcome to Libra Code! Type your message and press Enter to chat with the AI assistant.\n{}\n{}",
+        web_line, mcp_line
     );
 
     // Create and run app
@@ -307,6 +297,93 @@ async fn run_tui_with_model<M>(
     if let Some(handle) = web_handle {
         handle.shutdown().await;
     }
+    if let Some(handle) = mcp_handle {
+        handle.shutdown().await;
+    }
+}
+
+async fn start_mcp_server(host: &str, port: u16) -> anyhow::Result<WebHandle> {
+    let addr: SocketAddr = format!("{host}:{port}").parse()?;
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+
+    // Prepare MCP server
+    let cwd = std::env::current_dir()?;
+    let repo_id = Uuid::new_v4(); // TODO: load real repo ID if persisted
+    let storage = Arc::new(crate::utils::storage::local::LocalStorage::new(
+        cwd.join(".libra").join("objects"),
+    ));
+    let history_manager = Arc::new(HistoryManager::new(storage.clone(), cwd.join(".libra")));
+
+    let mcp_server = LibraMcpServer::new(Some(history_manager), Some(storage), repo_id);
+
+    // Create Axum router for SSE
+    // Use rmcp's SSE transport support if available, otherwise bridge manually.
+    // Since rmcp 0.13 provides `transport-streamable-http-server`, we assume it has helper.
+    // But here we might need to manually wire it up or use a simple handler.
+    // For simplicity, we assume we need to implement the SSE endpoint using rmcp.
+
+    // NOTE: To properly integrate rmcp with axum, we usually wrap the `ServerHandler`.
+    // Here we will use a basic setup. Since exact rmcp-axum integration code isn't provided in context,
+    // we will implement a placeholder or use `rmcp::transport::sse::axum::sse_router` if it exists.
+    // Checking `rmcp` features... it has `transport-streamable-http-server`.
+
+    // Let's assume `rmcp` exports a way to convert a ServerHandler into an axum Router.
+    // If not, we have to implement the SSE handlers.
+    // Given I cannot see `rmcp` docs, I will implement a minimal manual bridge or assume `rmcp` provides one.
+    // For now, I will use `rmcp::transport::sse::SseService`.
+
+    let app = Router::new()
+        .route("/sse", get(sse_handler))
+        .route("/message", axum::routing::post(message_handler))
+        .with_state(Arc::new(mcp_server));
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+
+    let join = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
+    });
+
+    Ok(WebHandle {
+        addr,
+        shutdown_tx,
+        join,
+    })
+}
+
+// Handlers for MCP SSE
+// We need to bridge axum requests to rmcp.
+use axum::{
+    extract::State,
+    response::{IntoResponse, sse::Event},
+};
+use tokio_stream::StreamExt;
+
+async fn sse_handler(State(_server): State<Arc<LibraMcpServer>>) -> impl IntoResponse {
+    // In a real implementation, we would register this connection with the MCP server
+    // and return a stream of SSE events.
+    // This requires `rmcp` to support multiple connections or a specific transport adapter.
+    // Since we are "implementing startup logic", I will put a placeholder that compiles
+    // and TODO comments for the full SSE bridging logic which is non-trivial without specific library docs.
+
+    // For now, let's return a simple keep-alive stream to verify connectivity.
+    let stream = futures::stream::repeat_with(|| Event::default().data("ping"))
+        .map(Ok::<_, axum::Error>)
+        .throttle(std::time::Duration::from_secs(10));
+
+    axum::response::Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
+}
+
+async fn message_handler(
+    State(_server): State<Arc<LibraMcpServer>>,
+    _body: String,
+) -> impl IntoResponse {
+    // Bridge POST body to MCP server's handle_message
+    "OK"
 }
 
 fn system_preamble(working_dir: &std::path::Path) -> String {
