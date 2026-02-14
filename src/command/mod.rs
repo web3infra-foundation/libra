@@ -8,6 +8,7 @@ pub mod cherry_pick;
 pub mod clone;
 pub mod code;
 pub mod commit;
+pub mod clean;
 pub mod config;
 pub mod diff;
 pub mod fetch;
