@@ -194,7 +194,7 @@ impl HistoryManager {
         Ok(Vec::new())
     }
 
-    async fn resolve_history_head(&self) -> Result<Option<ObjectHash>, GitError> {
+    pub async fn resolve_history_head(&self) -> Result<Option<ObjectHash>, GitError> {
         let ref_path = self.repo_path.join(HISTORY_REF);
         if !ref_path.exists() {
             return Ok(None);

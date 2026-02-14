@@ -27,6 +27,6 @@ rust_library(
     visibility = ["PUBLIC"],
     deps = [
         "//third-party/rust/crates/errno/0.2.8:errno",
-        "//third-party/rust/crates/libc/0.2.181:libc",
+        "//third-party/rust/crates/libc/0.2.182:libc",
     ],
 )

@@ -45,7 +45,7 @@ rust_library(
     deps = [
         "//third-party/rust/crates/cfg-if/1.0.4:cfg-if",
         "//third-party/rust/crates/getrandom/0.3.4:getrandom",
-        "//third-party/rust/crates/zerocopy/0.8.30:zerocopy",
+        "//third-party/rust/crates/zerocopy/0.8.39:zerocopy",
     ],
 )
 

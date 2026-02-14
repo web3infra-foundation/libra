@@ -32,8 +32,8 @@ rust_library(
     rustc_flags = ["@$(location :byte-unit-manifest[env_flags])"],
     visibility = ["PUBLIC"],
     deps = [
-        "//third-party/rust/crates/rust_decimal/1.39.0:rust_decimal",
-        "//third-party/rust/crates/schemars/1.1.0:schemars",
+        "//third-party/rust/crates/rust_decimal/1.40.0:rust_decimal",
+        "//third-party/rust/crates/schemars/1.2.1:schemars",
         "//third-party/rust/crates/serde/1.0.228:serde",
         "//third-party/rust/crates/utf8-width/0.1.8:utf8-width",
     ],

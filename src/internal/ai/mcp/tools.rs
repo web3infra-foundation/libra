@@ -11,7 +11,7 @@
 //! # How tools and resources work together
 //!
 //! - `create_*` returns an object UUID (e.g. `"Task created with ID: ..."`).
-//! - `list_*` is for quick browsing (some include title/status summaries).
+//! - `list_*` returns summaries with key fields (ID, status, title, etc.) for quick browsing.
 //! - To fetch the full JSON payload, read the resource: `libra://object/{object_id}`.
 //!
 //! # object_type (history directory name)
@@ -527,6 +527,10 @@ impl LibraMcpServer {
             .history_manager
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
         let objects = history
             .list_objects("snapshot")
@@ -534,19 +538,28 @@ impl LibraMcpServer {
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
         let limit = params.limit.unwrap_or(10);
-        let out = objects
-            .into_iter()
-            .take(limit)
-            .map(|(id, _)| id)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let mut out = Vec::new();
+        for (_id, hash) in objects.into_iter() {
+            if out.len() >= limit {
+                break;
+            }
+            if let Ok(snap) = storage.get_json::<ContextSnapshot>(&hash).await {
+                out.push(format!(
+                    "ID: {} | Strategy: {:?} | Items: {} | Summary: {}",
+                    snap.header().object_id(),
+                    snap.selection_strategy(),
+                    snap.items().len(),
+                    snap.summary().unwrap_or("-"),
+                ));
+            }
+        }
 
         if out.is_empty() {
             Ok(CallToolResult::success(vec![Content::text(
                 "No context snapshots found.",
             )]))
         } else {
-            Ok(CallToolResult::success(vec![Content::text(out)]))
+            Ok(CallToolResult::success(vec![Content::text(out.join("\n"))]))
         }
     }
 
@@ -631,6 +644,10 @@ impl LibraMcpServer {
             .history_manager
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
         let objects = history
             .list_objects("plan")
@@ -638,19 +655,28 @@ impl LibraMcpServer {
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
         let limit = params.limit.unwrap_or(10);
-        let out = objects
-            .into_iter()
-            .take(limit)
-            .map(|(id, _)| id)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let mut out = Vec::new();
+        for (_id, hash) in objects.into_iter() {
+            if out.len() >= limit {
+                break;
+            }
+            if let Ok(plan) = storage.get_json::<Plan>(&hash).await {
+                out.push(format!(
+                    "ID: {} | Run: {} | Version: {} | Steps: {}",
+                    plan.header().object_id(),
+                    plan.run_id(),
+                    plan.plan_version(),
+                    plan.steps().len(),
+                ));
+            }
+        }
 
         if out.is_empty() {
             Ok(CallToolResult::success(vec![Content::text(
                 "No plans found.",
             )]))
         } else {
-            Ok(CallToolResult::success(vec![Content::text(out)]))
+            Ok(CallToolResult::success(vec![Content::text(out.join("\n"))]))
         }
     }
 
@@ -737,6 +763,10 @@ impl LibraMcpServer {
             .history_manager
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
         let objects = history
             .list_objects("patchset")
@@ -744,19 +774,29 @@ impl LibraMcpServer {
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
         let limit = params.limit.unwrap_or(10);
-        let out = objects
-            .into_iter()
-            .take(limit)
-            .map(|(id, _)| id)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let mut out = Vec::new();
+        for (_id, hash) in objects.into_iter() {
+            if out.len() >= limit {
+                break;
+            }
+            if let Ok(ps) = storage.get_json::<PatchSet>(&hash).await {
+                out.push(format!(
+                    "ID: {} | Run: {} | Gen: {} | Files: {} | Status: {:?}",
+                    ps.header().object_id(),
+                    ps.run_id(),
+                    ps.generation(),
+                    ps.touched_files().len(),
+                    ps.apply_status(),
+                ));
+            }
+        }
 
         if out.is_empty() {
             Ok(CallToolResult::success(vec![Content::text(
                 "No patchsets found.",
             )]))
         } else {
-            Ok(CallToolResult::success(vec![Content::text(out)]))
+            Ok(CallToolResult::success(vec![Content::text(out.join("\n"))]))
         }
     }
 
@@ -829,6 +869,10 @@ impl LibraMcpServer {
             .history_manager
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
         let objects = history
             .list_objects("evidence")
@@ -836,19 +880,29 @@ impl LibraMcpServer {
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
         let limit = params.limit.unwrap_or(10);
-        let out = objects
-            .into_iter()
-            .take(limit)
-            .map(|(id, _)| id)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let mut out = Vec::new();
+        for (_id, hash) in objects.into_iter() {
+            if out.len() >= limit {
+                break;
+            }
+            if let Ok(ev) = storage.get_json::<Evidence>(&hash).await {
+                out.push(format!(
+                    "ID: {} | Kind: {:?} | Tool: {} | Exit: {} | Summary: {}",
+                    ev.header().object_id(),
+                    ev.kind(),
+                    ev.tool(),
+                    ev.exit_code().map_or("-".to_string(), |c| c.to_string()),
+                    ev.summary().unwrap_or("-"),
+                ));
+            }
+        }
 
         if out.is_empty() {
             Ok(CallToolResult::success(vec![Content::text(
                 "No evidences found.",
             )]))
         } else {
-            Ok(CallToolResult::success(vec![Content::text(out)]))
+            Ok(CallToolResult::success(vec![Content::text(out.join("\n"))]))
         }
     }
 
@@ -921,6 +975,10 @@ impl LibraMcpServer {
             .history_manager
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
         let objects = history
             .list_objects("invocation")
@@ -928,19 +986,28 @@ impl LibraMcpServer {
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
         let limit = params.limit.unwrap_or(10);
-        let out = objects
-            .into_iter()
-            .take(limit)
-            .map(|(id, _)| id)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let mut out = Vec::new();
+        for (_id, hash) in objects.into_iter() {
+            if out.len() >= limit {
+                break;
+            }
+            if let Ok(inv) = storage.get_json::<ToolInvocation>(&hash).await {
+                out.push(format!(
+                    "ID: {} | Tool: {} | Status: {:?} | Summary: {}",
+                    inv.header().object_id(),
+                    inv.tool_name(),
+                    inv.status(),
+                    inv.result_summary().unwrap_or("-"),
+                ));
+            }
+        }
 
         if out.is_empty() {
             Ok(CallToolResult::success(vec![Content::text(
                 "No tool invocations found.",
             )]))
         } else {
-            Ok(CallToolResult::success(vec![Content::text(out)]))
+            Ok(CallToolResult::success(vec![Content::text(out.join("\n"))]))
         }
     }
 
@@ -1006,6 +1073,10 @@ impl LibraMcpServer {
             .history_manager
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
         let objects = history
             .list_objects("provenance")
@@ -1013,19 +1084,27 @@ impl LibraMcpServer {
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
         let limit = params.limit.unwrap_or(10);
-        let out = objects
-            .into_iter()
-            .take(limit)
-            .map(|(id, _)| id)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let mut out = Vec::new();
+        for (_id, hash) in objects.into_iter() {
+            if out.len() >= limit {
+                break;
+            }
+            if let Ok(prov) = storage.get_json::<Provenance>(&hash).await {
+                out.push(format!(
+                    "ID: {} | Provider: {} | Model: {}",
+                    prov.header().object_id(),
+                    prov.provider(),
+                    prov.model(),
+                ));
+            }
+        }
 
         if out.is_empty() {
             Ok(CallToolResult::success(vec![Content::text(
                 "No provenances found.",
             )]))
         } else {
-            Ok(CallToolResult::success(vec![Content::text(out)]))
+            Ok(CallToolResult::success(vec![Content::text(out.join("\n"))]))
         }
     }
 
@@ -1099,6 +1178,10 @@ impl LibraMcpServer {
             .history_manager
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
         let objects = history
             .list_objects("decision")
@@ -1106,19 +1189,27 @@ impl LibraMcpServer {
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
         let limit = params.limit.unwrap_or(10);
-        let out = objects
-            .into_iter()
-            .take(limit)
-            .map(|(id, _)| id)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let mut out = Vec::new();
+        for (_id, hash) in objects.into_iter() {
+            if out.len() >= limit {
+                break;
+            }
+            if let Ok(dec) = storage.get_json::<Decision>(&hash).await {
+                out.push(format!(
+                    "ID: {} | Type: {:?} | Rationale: {}",
+                    dec.header().object_id(),
+                    dec.decision_type(),
+                    dec.rationale().unwrap_or("-"),
+                ));
+            }
+        }
 
         if out.is_empty() {
             Ok(CallToolResult::success(vec![Content::text(
                 "No decisions found.",
             )]))
         } else {
-            Ok(CallToolResult::success(vec![Content::text(out)]))
+            Ok(CallToolResult::success(vec![Content::text(out.join("\n"))]))
         }
     }
 }

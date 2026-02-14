@@ -40,8 +40,8 @@ rust_library(
     ],
     rustc_flags = ["@$(location :chrono-manifest[env_flags])"],
     os_deps = {
-        "linux": ["//third-party/rust/crates/iana-time-zone/0.1.64:iana-time-zone"],
-        "macos": ["//third-party/rust/crates/iana-time-zone/0.1.64:iana-time-zone"],
+        "linux": ["//third-party/rust/crates/iana-time-zone/0.1.65:iana-time-zone"],
+        "macos": ["//third-party/rust/crates/iana-time-zone/0.1.65:iana-time-zone"],
         "windows": ["//third-party/rust/crates/windows-link/0.2.1:windows-link"],
     },
     visibility = ["PUBLIC"],

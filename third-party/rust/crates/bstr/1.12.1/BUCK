@@ -33,7 +33,7 @@ rust_library(
     visibility = ["PUBLIC"],
     deps = [
         "//third-party/rust/crates/memchr/2.7.6:memchr",
-        "//third-party/rust/crates/regex-automata/0.4.13:regex-automata",
+        "//third-party/rust/crates/regex-automata/0.4.14:regex-automata",
         "//third-party/rust/crates/serde/1.0.228:serde",
     ],
 )

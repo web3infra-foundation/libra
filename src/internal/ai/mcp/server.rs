@@ -8,7 +8,8 @@
 //!
 //! - `libra://object/{object_id}`: resolve id -> hash in history, then read JSON blob from storage.
 //! - `libra://objects/{object_type}`: list objects by type (one line: `{object_id} {object_hash}`).
-//! - `libra://history/latest`: placeholder resource (future: expose history head commit hash).
+//! - `libra://history/latest`: returns the current history orphan-branch HEAD commit hash.
+//! - `libra://context/active`: returns the latest active Run/Task/ContextSnapshot as JSON.
 //!
 //! If `HistoryManager` or `Storage` is missing, related calls return `ErrorData`.
 use std::sync::Arc;
@@ -58,8 +59,19 @@ impl LibraMcpServer {
 
     pub async fn read_resource_impl(&self, uri: &str) -> Result<Vec<ResourceContents>, ErrorData> {
         if uri == "libra://history/latest" {
-            // For now return a placeholder or HEAD hash if we can expose it
-            return Ok(vec![ResourceContents::text("latest", "History Head")]);
+            let history = self
+                .history_manager
+                .as_ref()
+                .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
+            let head = history
+                .resolve_history_head()
+                .await
+                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            let text = match head {
+                Some(hash) => hash.to_string(),
+                None => "no history".to_string(),
+            };
+            return Ok(vec![ResourceContents::text(text, uri)]);
         }
 
         if uri == "libra://context/active" {
@@ -236,9 +248,10 @@ impl LibraMcpServer {
             let mut found_task = false;
             for (_id, hash) in tasks.into_iter().rev() {
                 if let Ok(task) = storage.get_json::<Task>(&hash).await {
-                    let status = task.status().as_str();
-                    if status == "done" || status == "failed" || status == "cancelled" {
-                        continue;
+                    use git_internal::internal::object::task::TaskStatus;
+                    match task.status() {
+                        TaskStatus::Done | TaskStatus::Failed | TaskStatus::Cancelled => continue,
+                        _ => {}
                     }
                     let task_obj = serde_json::json!({
                         "id": task.header().object_id().to_string(),

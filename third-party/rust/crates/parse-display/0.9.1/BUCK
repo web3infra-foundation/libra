@@ -33,7 +33,7 @@ rust_library(
     visibility = ["PUBLIC"],
     deps = [
         "//third-party/rust/crates/parse-display-derive/0.9.1:parse-display-derive",
-        "//third-party/rust/crates/regex-syntax/0.8.8:regex-syntax",
-        "//third-party/rust/crates/regex/1.12.2:regex",
+        "//third-party/rust/crates/regex-syntax/0.8.9:regex-syntax",
+        "//third-party/rust/crates/regex/1.12.3:regex",
     ],
 )

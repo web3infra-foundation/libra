@@ -14,8 +14,8 @@
 //!
 //! - `libra://object/{object_id}`: read JSON by UUID (resolve id -> hash in history, then read blob from storage).
 //! - `libra://objects/{object_type}`: list objects by type (one line per entry: `{object_id} {object_hash}`).
-//! - `libra://history/latest`: placeholder resource (currently returns `"latest"`).
-//! - `libra://context/active`: reserved URI (currently not implemented; read returns not found).
+//! - `libra://history/latest`: returns the current history orphan-branch HEAD commit hash.
+//! - `libra://context/active`: returns the active Run/Task/ContextSnapshot context as JSON.
 //!
 //! The supported `object_type` values match the history directory naming:
 //! `task`, `run`, `snapshot`, `plan`, `patchset`, `evidence`, `invocation`, `provenance`, `decision`.
