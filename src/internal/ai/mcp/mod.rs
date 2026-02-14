@@ -7,7 +7,7 @@
 //! # Quick start (conceptual)
 //!
 //! 1. Construct `LibraMcpServer` in your host process (inject `Storage` and `HistoryManager`).
-//! 2. Attach the server to your chosen MCP transport (stdio/http/websocket; handled by the host).
+//! 2. Attach the server to the MCP Streamable HTTP transport (via `rmcp::transport::streamable_http_server`).
 //! 3. Clients call tools to create objects, and read resources to fetch object JSON.
 //!
 //! # Resources (URI)

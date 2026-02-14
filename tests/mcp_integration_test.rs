@@ -375,7 +375,7 @@ async fn test_list_decisions_with_summary() {
 /// Test that explicit actor_kind/actor_id params override the MCP default.
 #[tokio::test]
 async fn test_create_task_with_explicit_human_actor() {
-    let (server, storage, _history_manager, _repo_id) = setup_server();
+    let (server, _storage, _history_manager, _repo_id) = setup_server();
 
     let params = CreateTaskParams {
         title: "Human-authored task".to_string(),

@@ -152,6 +152,16 @@ async fn execute_web_only(args: CodeArgs) {
     let app = Router::new().route("/", get(root));
     println!("Libra Code server running at http://{}", addr);
 
+    // Start MCP Server
+    let (mcp_handle, mcp_line) = match start_mcp_server(&args.host, args.mcp_port).await {
+        Ok(handle) => {
+            let line = format!("MCP: http://{}", handle.addr);
+            (Some(handle), line)
+        }
+        Err(err) => (None, format!("MCP: failed to start ({err})")),
+    };
+    println!("{}", mcp_line);
+
     if let Err(e) = axum::serve(listener, app)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
@@ -159,6 +169,10 @@ async fn execute_web_only(args: CodeArgs) {
         .await
     {
         eprintln!("Server error: {}", e);
+    }
+
+    if let Some(handle) = mcp_handle {
+        handle.shutdown().await;
     }
 }
 
@@ -302,6 +316,14 @@ async fn run_tui_with_model<M>(
     }
 }
 
+use hyper_util::{
+    rt::{TokioExecutor, TokioIo},
+    service::TowerToHyperService,
+};
+use rmcp::transport::streamable_http_server::{
+    StreamableHttpService, session::local::LocalSessionManager,
+};
+
 async fn start_mcp_server(host: &str, port: u16) -> anyhow::Result<WebHandle> {
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -316,36 +338,43 @@ async fn start_mcp_server(host: &str, port: u16) -> anyhow::Result<WebHandle> {
 
     let mcp_server = LibraMcpServer::new(Some(history_manager), Some(storage), repo_id);
 
-    // Create Axum router for SSE
-    // Use rmcp's SSE transport support if available, otherwise bridge manually.
-    // Since rmcp 0.13 provides `transport-streamable-http-server`, we assume it has helper.
-    // But here we might need to manually wire it up or use a simple handler.
-    // For simplicity, we assume we need to implement the SSE endpoint using rmcp.
+    // Use rmcp's Streamable HTTP transport via Hyper directly
+    let service = TowerToHyperService::new(StreamableHttpService::new(
+        move || Ok(mcp_server.clone()),
+        LocalSessionManager::default().into(),
+        Default::default(),
+    ));
 
-    // NOTE: To properly integrate rmcp with axum, we usually wrap the `ServerHandler`.
-    // Here we will use a basic setup. Since exact rmcp-axum integration code isn't provided in context,
-    // we will implement a placeholder or use `rmcp::transport::sse::axum::sse_router` if it exists.
-    // Checking `rmcp` features... it has `transport-streamable-http-server`.
-
-    // Let's assume `rmcp` exports a way to convert a ServerHandler into an axum Router.
-    // If not, we have to implement the SSE handlers.
-    // Given I cannot see `rmcp` docs, I will implement a minimal manual bridge or assume `rmcp` provides one.
-    // For now, I will use `rmcp::transport::sse::SseService`.
-
-    let app = Router::new()
-        .route("/sse", get(sse_handler))
-        .route("/message", axum::routing::post(message_handler))
-        .with_state(Arc::new(mcp_server));
-
-    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
 
     let join = tokio::spawn(async move {
-        axum::serve(listener, app)
-            .with_graceful_shutdown(async move {
-                let _ = shutdown_rx.await;
-            })
-            .await
-            .map_err(|e| anyhow::anyhow!(e))
+        loop {
+            tokio::select! {
+                _ = &mut shutdown_rx => {
+                    break;
+                }
+                accept = listener.accept() => {
+                    match accept {
+                        Ok((stream, _)) => {
+                            let io = TokioIo::new(stream);
+                            let service = service.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = hyper_util::server::conn::auto::Builder::new(TokioExecutor::default())
+                                    .serve_connection(io, service)
+                                    .await
+                                {
+                                    eprintln!("MCP connection error: {:?}", e);
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            eprintln!("MCP accept error: {:?}", e);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     });
 
     Ok(WebHandle {
@@ -353,37 +382,6 @@ async fn start_mcp_server(host: &str, port: u16) -> anyhow::Result<WebHandle> {
         shutdown_tx,
         join,
     })
-}
-
-// Handlers for MCP SSE
-// We need to bridge axum requests to rmcp.
-use axum::{
-    extract::State,
-    response::{IntoResponse, sse::Event},
-};
-use tokio_stream::StreamExt;
-
-async fn sse_handler(State(_server): State<Arc<LibraMcpServer>>) -> impl IntoResponse {
-    // In a real implementation, we would register this connection with the MCP server
-    // and return a stream of SSE events.
-    // This requires `rmcp` to support multiple connections or a specific transport adapter.
-    // Since we are "implementing startup logic", I will put a placeholder that compiles
-    // and TODO comments for the full SSE bridging logic which is non-trivial without specific library docs.
-
-    // For now, let's return a simple keep-alive stream to verify connectivity.
-    let stream = futures::stream::repeat_with(|| Event::default().data("ping"))
-        .map(Ok::<_, axum::Error>)
-        .throttle(std::time::Duration::from_secs(10));
-
-    axum::response::Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
-}
-
-async fn message_handler(
-    State(_server): State<Arc<LibraMcpServer>>,
-    _body: String,
-) -> impl IntoResponse {
-    // Bridge POST body to MCP server's handle_message
-    "OK"
 }
 
 fn system_preamble(working_dir: &std::path::Path) -> String {

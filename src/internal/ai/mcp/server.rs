@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use rmcp::{
     RoleServer, ServerHandler, handler::server::router::tool::ToolRouter, model::*,
-    service::RequestContext, tool_handler, tool_router,
+    service::RequestContext, tool_handler,
 };
 use uuid::Uuid;
 
@@ -33,7 +33,6 @@ pub struct LibraMcpServer {
     tool_router: ToolRouter<LibraMcpServer>,
 }
 
-#[tool_router]
 impl LibraMcpServer {
     pub fn new(
         history_manager: Option<Arc<HistoryManager>>,
@@ -44,7 +43,7 @@ impl LibraMcpServer {
             history_manager,
             storage,
             repo_id,
-            tool_router: Self::tool_router(),
+            tool_router: Self::build_tool_router(),
         }
     }
 }
