@@ -11,6 +11,9 @@
 //! # How tools and resources work together
 //!
 //! - `create_*` returns an object UUID (e.g. `"Task created with ID: ..."`).
+//!   All `create_*` tools accept optional `actor_kind` (`"human"`, `"agent"`, `"system"`,
+//!   `"mcp_client"`) and `actor_id` parameters to identify the creator. When omitted, the
+//!   actor is derived from the MCP client handshake or defaults to `mcp_client("mcp-user")`.
 //! - `list_*` returns summaries with key fields (ID, status, title, etc.) for quick browsing.
 //! - To fetch the full JSON payload, read the resource: `libra://object/{object_id}`.
 //!
@@ -28,7 +31,7 @@ use git_internal::internal::object::{
     run::{Run, RunStatus},
     task::{GoalType, Task},
     tool::{IoFootprint, ToolInvocation, ToolStatus},
-    types::ActorRef,
+    types::{ActorKind, ActorRef},
 };
 use rmcp::{
     RoleServer, handler::server::wrapper::Parameters, model::*, schemars, service::RequestContext,
@@ -44,9 +47,25 @@ impl LibraMcpServer {
         ActorRef::mcp_client("mcp-user").map_err(|e| ErrorData::internal_error(e.to_string(), None))
     }
 
-    fn get_actor(&self, ctx: &RequestContext<RoleServer>) -> Result<ActorRef, ErrorData> {
-        // Extract client name from MCP initialization handshake (peer_info).
-        // Falls back to default "mcp-user" if peer info is not yet available.
+    /// Resolve actor identity for a tool call.
+    ///
+    /// Priority:
+    /// 1. Explicit `actor_kind` + `actor_id` from tool parameters (lets callers specify
+    ///    human / agent / system / mcp_client).
+    /// 2. MCP peer info from the initialization handshake (`McpClient` kind).
+    /// 3. Fallback default `McpClient("mcp-user")`.
+    fn resolve_actor(
+        &self,
+        ctx: &RequestContext<RoleServer>,
+        actor_kind: Option<&str>,
+        actor_id: Option<&str>,
+    ) -> Result<ActorRef, ErrorData> {
+        if let Some(kind_str) = actor_kind {
+            let id = actor_id.unwrap_or("unknown");
+            let kind: ActorKind = kind_str.into();
+            return ActorRef::new(kind, id).map_err(|e| ErrorData::invalid_params(e, None));
+        }
+        // No explicit actor — derive from MCP peer info.
         if let Some(client_info) = ctx.peer.peer_info() {
             let client_name = &client_info.client_info.name;
             return ActorRef::mcp_client(client_name)
@@ -63,6 +82,10 @@ pub struct CreateTaskParams {
     pub goal_type: Option<String>,
     pub constraints: Option<Vec<String>>,
     pub acceptance_criteria: Option<Vec<String>>,
+    /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
+    pub actor_kind: Option<String>,
+    /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
+    pub actor_id: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -78,6 +101,10 @@ pub struct CreateRunParams {
     pub status: Option<String>,
     pub context_snapshot_id: Option<String>,
     pub error: Option<String>,
+    /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
+    pub actor_kind: Option<String>,
+    /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
+    pub actor_id: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -92,6 +119,10 @@ pub struct CreateContextSnapshotParams {
     pub selection_strategy: String,
     pub items: Option<Vec<ContextItemParams>>,
     pub summary: Option<String>,
+    /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
+    pub actor_kind: Option<String>,
+    /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
+    pub actor_id: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -110,6 +141,10 @@ pub struct CreatePlanParams {
     pub run_id: String,
     pub plan_version: Option<u32>,
     pub steps: Option<Vec<PlanStepParams>>,
+    /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
+    pub actor_kind: Option<String>,
+    /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
+    pub actor_id: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -132,6 +167,10 @@ pub struct CreatePatchSetParams {
     pub touched_files: Option<Vec<TouchedFileParams>>,
     pub rationale: Option<String>,
     pub apply_status: Option<String>,
+    /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
+    pub actor_kind: Option<String>,
+    /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
+    pub actor_id: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -156,6 +195,10 @@ pub struct CreateEvidenceParams {
     pub command: Option<String>,
     pub exit_code: Option<i32>,
     pub summary: Option<String>,
+    /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
+    pub actor_kind: Option<String>,
+    /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
+    pub actor_id: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -171,6 +214,10 @@ pub struct CreateToolInvocationParams {
     pub args_json: Option<String>,
     pub io_footprint: Option<IoFootprintParams>,
     pub result_summary: Option<String>,
+    /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
+    pub actor_kind: Option<String>,
+    /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
+    pub actor_id: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -191,6 +238,10 @@ pub struct CreateProvenanceParams {
     pub model: String,
     pub parameters_json: Option<String>,
     pub token_usage_json: Option<String>,
+    /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
+    pub actor_kind: Option<String>,
+    /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
+    pub actor_id: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -205,6 +256,10 @@ pub struct CreateDecisionParams {
     pub chosen_patchset_id: Option<String>,
     pub checkpoint_id: Option<String>,
     pub rationale: Option<String>,
+    /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
+    pub actor_kind: Option<String>,
+    /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
+    pub actor_id: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -219,7 +274,11 @@ impl LibraMcpServer {
         ctx: RequestContext<RoleServer>,
         Parameters(params): Parameters<CreateTaskParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let actor = self.get_actor(&ctx)?;
+        let actor = self.resolve_actor(
+            &ctx,
+            params.actor_kind.as_deref(),
+            params.actor_id.as_deref(),
+        )?;
         self.create_task_impl(params, actor).await
     }
 
@@ -351,7 +410,11 @@ impl LibraMcpServer {
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
         let repo_id = self.repo_id;
-        let actor = self.get_actor(&ctx)?;
+        let actor = self.resolve_actor(
+            &ctx,
+            params.actor_kind.as_deref(),
+            params.actor_id.as_deref(),
+        )?;
         let task_id = params
             .task_id
             .parse::<Uuid>()
@@ -467,7 +530,11 @@ impl LibraMcpServer {
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
         let repo_id = self.repo_id;
-        let actor = self.get_actor(&ctx)?;
+        let actor = self.resolve_actor(
+            &ctx,
+            params.actor_kind.as_deref(),
+            params.actor_id.as_deref(),
+        )?;
 
         let strategy = match params.selection_strategy.as_str() {
             "explicit" => SelectionStrategy::Explicit,
@@ -581,7 +648,11 @@ impl LibraMcpServer {
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
         let repo_id = self.repo_id;
-        let actor = self.get_actor(&ctx)?;
+        let actor = self.resolve_actor(
+            &ctx,
+            params.actor_kind.as_deref(),
+            params.actor_id.as_deref(),
+        )?;
         let run_id = params
             .run_id
             .parse::<Uuid>()
@@ -698,7 +769,11 @@ impl LibraMcpServer {
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
         let repo_id = self.repo_id;
-        let actor = self.get_actor(&ctx)?;
+        let actor = self.resolve_actor(
+            &ctx,
+            params.actor_kind.as_deref(),
+            params.actor_id.as_deref(),
+        )?;
         let run_id = params
             .run_id
             .parse::<Uuid>()
@@ -818,7 +893,11 @@ impl LibraMcpServer {
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
         let repo_id = self.repo_id;
-        let actor = self.get_actor(&ctx)?;
+        let actor = self.resolve_actor(
+            &ctx,
+            params.actor_kind.as_deref(),
+            params.actor_id.as_deref(),
+        )?;
         let run_id = params
             .run_id
             .parse::<Uuid>()
@@ -924,7 +1003,11 @@ impl LibraMcpServer {
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
         let repo_id = self.repo_id;
-        let actor = self.get_actor(&ctx)?;
+        let actor = self.resolve_actor(
+            &ctx,
+            params.actor_kind.as_deref(),
+            params.actor_id.as_deref(),
+        )?;
         let run_id = params
             .run_id
             .parse::<Uuid>()
@@ -1029,7 +1112,11 @@ impl LibraMcpServer {
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
         let repo_id = self.repo_id;
-        let actor = self.get_actor(&ctx)?;
+        let actor = self.resolve_actor(
+            &ctx,
+            params.actor_kind.as_deref(),
+            params.actor_id.as_deref(),
+        )?;
         let run_id = params
             .run_id
             .parse::<Uuid>()
@@ -1126,7 +1213,11 @@ impl LibraMcpServer {
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
         let repo_id = self.repo_id;
-        let actor = self.get_actor(&ctx)?;
+        let actor = self.resolve_actor(
+            &ctx,
+            params.actor_kind.as_deref(),
+            params.actor_id.as_deref(),
+        )?;
         let run_id = params
             .run_id
             .parse::<Uuid>()

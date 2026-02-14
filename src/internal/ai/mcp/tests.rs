@@ -28,6 +28,8 @@ async fn test_create_task_tool() {
         goal_type: None,
         constraints: None,
         acceptance_criteria: None,
+        actor_kind: None,
+        actor_id: None,
     };
 
     let actor = server.default_actor().unwrap();

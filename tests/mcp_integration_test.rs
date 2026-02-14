@@ -74,6 +74,8 @@ async fn test_mcp_integration_create_and_read_task() {
         goal_type: Some("feature".to_string()),
         constraints: Some(vec!["Must use Rust".to_string()]),
         acceptance_criteria: None,
+        actor_kind: None,
+        actor_id: None,
     };
 
     let actor = server.default_actor().unwrap();
@@ -364,4 +366,98 @@ async fn test_list_decisions_with_summary() {
 
     assert!(text.contains("Commit"));
     assert!(text.contains("all tests pass"));
+}
+
+/// Test that explicit actor_kind/actor_id params override the MCP default.
+#[tokio::test]
+async fn test_create_task_with_explicit_human_actor() {
+    let (server, storage, _history_manager, _repo_id) = setup_server();
+
+    let params = CreateTaskParams {
+        title: "Human-authored task".to_string(),
+        description: None,
+        goal_type: None,
+        constraints: None,
+        acceptance_criteria: None,
+        actor_kind: Some("human".to_string()),
+        actor_id: Some("jackie".to_string()),
+    };
+
+    let actor = ActorRef::human("jackie").unwrap();
+    let result = server
+        .create_task_impl(params, actor.clone())
+        .await
+        .unwrap();
+    let val = serde_json::to_value(&result.content[0]).unwrap();
+    let text = val.get("text").unwrap().as_str().unwrap();
+    assert!(text.contains("Task created with ID:"));
+
+    // Verify the stored object has Human actor kind
+    let task_id = text.split("ID: ").nth(1).unwrap().trim();
+    use libra::internal::ai::mcp::tools::ListTasksParams;
+    let list = server
+        .list_tasks(Parameters(ListTasksParams {
+            limit: None,
+            status: None,
+        }))
+        .await
+        .unwrap();
+    let list_text = serde_json::to_value(&list.content[0])
+        .unwrap()
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(list_text.contains(task_id));
+}
+
+/// Test creating a task with agent actor kind.
+#[tokio::test]
+async fn test_create_task_with_agent_actor() {
+    let (server, _storage, _history_manager, _repo_id) = setup_server();
+
+    let params = CreateTaskParams {
+        title: "Agent-created task".to_string(),
+        description: None,
+        goal_type: None,
+        constraints: None,
+        acceptance_criteria: None,
+        actor_kind: Some("agent".to_string()),
+        actor_id: Some("coder-bot".to_string()),
+    };
+
+    let actor = ActorRef::agent("coder-bot").unwrap();
+    let result = server.create_task_impl(params, actor).await.unwrap();
+    let val = serde_json::to_value(&result.content[0]).unwrap();
+    let text = val.get("text").unwrap().as_str().unwrap();
+    assert!(text.contains("Task created with ID:"));
+}
+
+/// Test that omitting actor_kind/actor_id defaults to mcp_client.
+#[tokio::test]
+async fn test_create_task_default_actor_is_mcp() {
+    let (server, _storage, _history_manager, _repo_id) = setup_server();
+
+    let params = CreateTaskParams {
+        title: "Default actor task".to_string(),
+        description: None,
+        goal_type: None,
+        constraints: None,
+        acceptance_criteria: None,
+        actor_kind: None,
+        actor_id: None,
+    };
+
+    // Using default_actor (falls back to mcp_client)
+    let actor = server.default_actor().unwrap();
+    assert_eq!(
+        actor.kind(),
+        &git_internal::internal::object::types::ActorKind::McpClient
+    );
+
+    let result = server.create_task_impl(params, actor).await.unwrap();
+    let val = serde_json::to_value(&result.content[0]).unwrap();
+    let text = val.get("text").unwrap().as_str().unwrap();
+    assert!(text.contains("Task created with ID:"));
 }
