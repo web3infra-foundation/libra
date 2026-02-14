@@ -5,7 +5,7 @@
 
 use std::{sync::Arc, time::Instant};
 
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 use tokio::{
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
     task::JoinHandle,
@@ -160,7 +160,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
     async fn handle_tui_event(&mut self, event: TuiEvent) -> anyhow::Result<()> {
         match event {
             TuiEvent::Key(key) => {
-                self.handle_key_event(key).await?;
+                if key.kind == KeyEventKind::Press {
+                    self.handle_key_event(key).await?;
+                }
             }
             TuiEvent::Paste(text) => {
                 for c in text.chars() {
