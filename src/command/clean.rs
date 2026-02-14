@@ -22,18 +22,27 @@ pub async fn execute(args: CleanArgs) {
     if !util::check_repo_exist() {
         return;
     }
-    if let Err(e) = run_clean(args).await {
+    if let Err(e) = run_clean(args) {
         eprintln!("{}", format!("fatal: {}", e).red());
     }
 }
 
-async fn run_clean(args: CleanArgs) -> Result<(), String> {
+fn run_clean(args: CleanArgs) -> Result<(), String> {
     if !args.force && !args.dry_run {
-        return Err("clean requires -f or -n".to_string());
+        return Err("clean requires -f or -n (use -f to remove files, -n to dry-run)".to_string());
     }
 
     let index_path = path::index();
-    let index = Index::load(&index_path).unwrap_or_else(|_| Index::new());
+    let index = match Index::load(&index_path) {
+        Ok(index) => index,
+        Err(e) => {
+            if !index_path.exists() {
+                Index::new()
+            } else {
+                return Err(format!("Failed to load index: {}", e));
+            }
+        }
+    };
     let untracked = worktree::untracked_workdir_paths(&index)?;
 
     if untracked.is_empty() {
@@ -47,9 +56,19 @@ async fn run_clean(args: CleanArgs) -> Result<(), String> {
         return Ok(());
     }
 
+    let workdir = fs::canonicalize(util::working_dir())
+        .map_err(|e| format!("Failed to resolve working directory: {}", e))?;
     for path in untracked {
         let abs_path = util::workdir_to_absolute(&path);
         if abs_path.exists() {
+            let resolved = fs::canonicalize(&abs_path)
+                .map_err(|e| format!("Failed to resolve path {}: {}", abs_path.display(), e))?;
+            if !resolved.starts_with(&workdir) {
+                return Err(format!(
+                    "Refusing to remove path outside workdir: {}",
+                    abs_path.display()
+                ));
+            }
             fs::remove_file(&abs_path).map_err(|e| e.to_string())?;
         }
     }
