@@ -35,3 +35,5 @@ rust_library(
     deps = [
         "//third-party/rust/crates/core-foundation-sys/0.8.7:core-foundation-sys",
         "//third-party/rust/crates/libc/0.2.182:libc",
+    ],
+)
