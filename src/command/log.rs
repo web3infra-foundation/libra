@@ -350,7 +350,7 @@ pub async fn execute(args: LogArgs) {
 
     let mut reachable_commits = get_reachable_commits(commit_hash.clone(), None).await;
     // default sort with signature time
-    reachable_commits.sort_by(|a, b| b.committer.timestamp.cmp(&a.committer.timestamp));
+    reachable_commits.sort_by_key(|b| std::cmp::Reverse(b.committer.timestamp));
 
     let ref_commits = create_reference_commit_map().await;
     let full_hash_len = commit_hash.len();
@@ -732,11 +732,9 @@ pub fn format_stat_output(stats: &[FileStat]) -> String {
             changes
         };
 
-        let plus_count = if changes > 0 {
-            (stat.insertions * bar_width) / changes
-        } else {
-            0
-        };
+        let plus_count = (stat.insertions * bar_width)
+            .checked_div(changes)
+            .unwrap_or(0);
         let minus_count = bar_width.saturating_sub(plus_count);
 
         output.push_str(&format!(

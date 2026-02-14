@@ -65,6 +65,25 @@ pathdiff = "0.2.3"
 crc32fast = "1.5.0"
 dirs = "5.0.1"
 dagrs = "0.6.0"
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs"] }
+
+# TUI
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["bracketed-paste", "event-stream"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+async-stream = "0.3"
+futures-core = "0.3"
+
+# Diff parsing
+diffy = "0.4"
+
+# Markdown rendering
+pulldown-cmark = "0.12"
+
+# Unicode handling
+unicode-width = "0.2"
 
 [target.'cfg(unix)'.dependencies] # only on Unix
 pager = "0.16.1"

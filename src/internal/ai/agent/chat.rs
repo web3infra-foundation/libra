@@ -82,6 +82,23 @@ impl<M: CompletionModel> ChatAgent<M> {
     pub fn clear_history(&mut self) {
         self.history.clear();
     }
+
+    /// Clone the inner agent for background execution.
+    ///
+    /// This is useful when you need to execute the agent in a separate task
+    /// while still being able to update the history afterwards.
+    pub fn clone_agent(&self) -> Agent<M> {
+        self.agent.clone()
+    }
+
+    /// Update the history after a response is complete.
+    ///
+    /// This is used in conjunction with `clone_agent` to update the local history
+    /// after the agent call completes in a background task.
+    pub fn update_history(&mut self, user_msg: String, assistant_response: String) {
+        self.history.push(Message::user(user_msg));
+        self.history.push(Message::assistant(assistant_response));
+    }
 }
 
 #[cfg(test)]
