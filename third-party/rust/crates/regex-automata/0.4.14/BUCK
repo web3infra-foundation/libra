@@ -54,11 +54,7 @@ rust_library(
     visibility = ["PUBLIC"],
     deps = [
         "//third-party/rust/crates/aho-corasick/1.1.4:aho-corasick",
-<<<<<<< HEAD
         "//third-party/rust/crates/memchr/2.8.0:memchr",
-=======
-        "//third-party/rust/crates/memchr/2.7.6:memchr",
->>>>>>> origin/main
         "//third-party/rust/crates/regex-syntax/0.8.9:regex-syntax",
     ],
 )

@@ -39,13 +39,8 @@ rust_library(
     deps = [
         "//third-party/rust/crates/prost-types/0.14.3:prost-types",
         "//third-party/rust/crates/prost/0.14.3:prost",
-<<<<<<< HEAD
         "//third-party/rust/crates/tonic-prost/0.14.4:tonic-prost",
         "//third-party/rust/crates/tonic/0.14.4:tonic",
-=======
-        "//third-party/rust/crates/tonic-prost/0.14.3:tonic-prost",
-        "//third-party/rust/crates/tonic/0.14.3:tonic",
->>>>>>> origin/main
         "//third-party/rust/crates/ureq/3.2.0:ureq",
     ],
 )

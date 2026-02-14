@@ -45,11 +45,7 @@ rust_library(
         "//third-party/rust/crates/etcetera/0.10.0:etcetera",
         "//third-party/rust/crates/futures/0.3.31:futures",
         "//third-party/rust/crates/log/0.4.29:log",
-<<<<<<< HEAD
         "//third-party/rust/crates/memchr/2.8.0:memchr",
-=======
-        "//third-party/rust/crates/memchr/2.7.6:memchr",
->>>>>>> origin/main
         "//third-party/rust/crates/parse-display/0.9.1:parse-display",
         "//third-party/rust/crates/pin-project-lite/0.2.16:pin-project-lite",
         "//third-party/rust/crates/reqwest/0.12.28:reqwest",

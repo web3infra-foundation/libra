@@ -5,17 +5,10 @@ load("@buckal//:wrapper.bzl", "rust_library")
 
 http_archive(
     name = "cc-vendor",
-<<<<<<<< HEAD:third-party/rust/crates/cc/1.2.56/BUCK
     urls = ["https://static.crates.io/crates/cc/cc-1.2.56.crate"],
     sha256 = "aebf35691d1bfb0ac386a69bac2fde4dd276fb618cf8bf4f5318fe285e821bb2",
     type = "tar.gz",
     strip_prefix = "cc-1.2.56",
-========
-    urls = ["https://static.crates.io/crates/cc/cc-1.2.55.crate"],
-    sha256 = "47b26a0954ae34af09b50f0de26458fa95369a0d478d8236d3f93082b219bd29",
-    type = "tar.gz",
-    strip_prefix = "cc-1.2.55",
->>>>>>>> origin/main:third-party/rust/crates/cc/1.2.55/BUCK
     out = "vendor",
 )
 
@@ -33,13 +26,8 @@ rust_library(
     features = ["parallel"],
     rustc_flags = ["@$(location :cc-manifest[env_flags])"],
     os_deps = {
-<<<<<<<< HEAD:third-party/rust/crates/cc/1.2.56/BUCK
         "linux": ["//third-party/rust/crates/libc/0.2.182:libc"],
         "macos": ["//third-party/rust/crates/libc/0.2.182:libc"],
-========
-        "linux": ["//third-party/rust/crates/libc/0.2.180:libc"],
-        "macos": ["//third-party/rust/crates/libc/0.2.180:libc"],
->>>>>>>> origin/main:third-party/rust/crates/cc/1.2.55/BUCK
     },
     visibility = ["PUBLIC"],
     deps = [

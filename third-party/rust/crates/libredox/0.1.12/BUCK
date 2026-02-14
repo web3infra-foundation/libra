@@ -32,20 +32,11 @@ rust_library(
     ],
     rustc_flags = ["@$(location :libredox-manifest[env_flags])"],
     named_deps = {
-<<<<<<< HEAD
         "syscall": "//third-party/rust/crates/redox_syscall/0.7.1:redox_syscall",
     },
     visibility = ["PUBLIC"],
     deps = [
         "//third-party/rust/crates/bitflags/2.11.0:bitflags",
         "//third-party/rust/crates/libc/0.2.182:libc",
-=======
-        "syscall": "//third-party/rust/crates/redox_syscall/0.7.0:redox_syscall",
-    },
-    visibility = ["PUBLIC"],
-    deps = [
-        "//third-party/rust/crates/bitflags/2.10.0:bitflags",
-        "//third-party/rust/crates/libc/0.2.180:libc",
->>>>>>> origin/main
     ],
 )

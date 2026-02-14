@@ -29,11 +29,7 @@ rust_library(
         "//third-party/rust/crates/bumpalo/3.19.1:bumpalo",
         "//third-party/rust/crates/proc-macro2/1.0.106:proc-macro2",
         "//third-party/rust/crates/quote/1.0.44:quote",
-<<<<<<< HEAD
         "//third-party/rust/crates/syn/2.0.115:syn",
-=======
-        "//third-party/rust/crates/syn/2.0.114:syn",
->>>>>>> origin/main
         "//third-party/rust/crates/wasm-bindgen-shared/0.2.108:wasm-bindgen-shared",
     ],
 )

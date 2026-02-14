@@ -5,17 +5,10 @@ load("@buckal//:wrapper.bzl", "rust_library")
 
 http_archive(
     name = "tonic-prost-vendor",
-<<<<<<<< HEAD:third-party/rust/crates/tonic-prost/0.14.4/BUCK
     urls = ["https://static.crates.io/crates/tonic-prost/tonic-prost-0.14.4.crate"],
     sha256 = "9f86539c0089bfd09b1f8c0ab0239d80392af74c21bc9e0f15e1b4aca4c1647f",
     type = "tar.gz",
     strip_prefix = "tonic-prost-0.14.4",
-========
-    urls = ["https://static.crates.io/crates/tonic-prost/tonic-prost-0.14.3.crate"],
-    sha256 = "d6c55a2d6a14174563de34409c9f92ff981d006f56da9c6ecd40d9d4a31500b0",
-    type = "tar.gz",
-    strip_prefix = "tonic-prost-0.14.3",
->>>>>>>> origin/main:third-party/rust/crates/tonic-prost/0.14.3/BUCK
     out = "vendor",
 )
 
@@ -35,10 +28,6 @@ rust_library(
     deps = [
         "//third-party/rust/crates/bytes/1.11.1:bytes",
         "//third-party/rust/crates/prost/0.14.3:prost",
-<<<<<<<< HEAD:third-party/rust/crates/tonic-prost/0.14.4/BUCK
         "//third-party/rust/crates/tonic/0.14.4:tonic",
-========
-        "//third-party/rust/crates/tonic/0.14.3:tonic",
->>>>>>>> origin/main:third-party/rust/crates/tonic-prost/0.14.3/BUCK
     ],
 )

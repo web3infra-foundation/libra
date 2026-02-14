@@ -44,13 +44,10 @@ rust_binary(
     crate = "build_script_build",
     crate_root = "vendor/build.rs",
     edition = "2024",
-<<<<<<< HEAD
     features = [
         "async",
         "std",
     ],
-=======
->>>>>>> origin/main
     rustc_flags = ["@$(location :wit-bindgen-manifest[env_flags])"],
     visibility = [],
 )
@@ -60,13 +57,10 @@ buildscript_run(
     package_name = "wit-bindgen",
     buildscript_rule = ":wit-bindgen-build-script-build",
     env_srcs = [":wit-bindgen-manifest[env_dict]"],
-<<<<<<< HEAD
     features = [
         "async",
         "std",
     ],
-=======
->>>>>>> origin/main
     version = "0.51.0",
     manifest_dir = ":wit-bindgen-vendor",
     visibility = ["PUBLIC"],

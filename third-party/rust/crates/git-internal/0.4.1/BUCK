@@ -5,17 +5,10 @@ load("@buckal//:wrapper.bzl", "rust_library")
 
 http_archive(
     name = "git-internal-vendor",
-<<<<<<<< HEAD:third-party/rust/crates/git-internal/0.5.0/BUCK
     urls = ["https://static.crates.io/crates/git-internal/git-internal-0.5.0.crate"],
     sha256 = "a1e9f5f8b8c9ee15de5e2c7e367abfd5200dd612c296f36e8ba160a620bc66cc",
     type = "tar.gz",
     strip_prefix = "git-internal-0.5.0",
-========
-    urls = ["https://static.crates.io/crates/git-internal/git-internal-0.4.1.crate"],
-    sha256 = "3373b0719c11eed1df7d80242354816316b44c7f842f519daf60efacec7a861a",
-    type = "tar.gz",
-    strip_prefix = "git-internal-0.4.1",
->>>>>>>> origin/main:third-party/rust/crates/git-internal/0.4.1/BUCK
     out = "vendor",
 )
 
@@ -54,11 +47,7 @@ rust_library(
         "//third-party/rust/crates/futures-util/0.3.31:futures-util",
         "//third-party/rust/crates/futures/0.3.31:futures",
         "//third-party/rust/crates/hex/0.4.3:hex",
-<<<<<<<< HEAD:third-party/rust/crates/git-internal/0.5.0/BUCK
         "//third-party/rust/crates/libc/0.2.182:libc",
-========
-        "//third-party/rust/crates/libc/0.2.180:libc",
->>>>>>>> origin/main:third-party/rust/crates/git-internal/0.4.1/BUCK
         "//third-party/rust/crates/lru-mem/0.3.0:lru-mem",
         "//third-party/rust/crates/memchr/2.8.0:memchr",
         "//third-party/rust/crates/natord/1.0.9:natord",
@@ -72,22 +61,14 @@ rust_library(
         "//third-party/rust/crates/sha1/0.10.6:sha1",
         "//third-party/rust/crates/sha2/0.10.9:sha2",
         "//third-party/rust/crates/similar/2.7.0:similar",
-<<<<<<<< HEAD:third-party/rust/crates/git-internal/0.5.0/BUCK
         "//third-party/rust/crates/tempfile/3.25.0:tempfile",
-========
-        "//third-party/rust/crates/tempfile/3.24.0:tempfile",
->>>>>>>> origin/main:third-party/rust/crates/git-internal/0.4.1/BUCK
         "//third-party/rust/crates/thiserror/2.0.18:thiserror",
         "//third-party/rust/crates/threadpool/1.8.1:threadpool",
         "//third-party/rust/crates/tokio-stream/0.1.18:tokio-stream",
         "//third-party/rust/crates/tokio/1.49.0:tokio",
         "//third-party/rust/crates/tracing-subscriber/0.3.22:tracing-subscriber",
         "//third-party/rust/crates/tracing/0.1.44:tracing",
-<<<<<<<< HEAD:third-party/rust/crates/git-internal/0.5.0/BUCK
         "//third-party/rust/crates/uuid/1.21.0:uuid",
-========
-        "//third-party/rust/crates/uuid/1.20.0:uuid",
->>>>>>>> origin/main:third-party/rust/crates/git-internal/0.4.1/BUCK
         "//third-party/rust/crates/zstd-sys/2.0.16+zstd.1.5.7:zstd-sys",
     ],
 )

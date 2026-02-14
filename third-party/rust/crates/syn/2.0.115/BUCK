@@ -5,17 +5,10 @@ load("@buckal//:wrapper.bzl", "rust_library")
 
 http_archive(
     name = "syn-vendor",
-<<<<<<<< HEAD:third-party/rust/crates/syn/2.0.115/BUCK
     urls = ["https://static.crates.io/crates/syn/syn-2.0.115.crate"],
     sha256 = "6e614ed320ac28113fa64972c4262d5dbc89deacdfd00c34a3e4cea073243c12",
     type = "tar.gz",
     strip_prefix = "syn-2.0.115",
-========
-    urls = ["https://static.crates.io/crates/syn/syn-2.0.114.crate"],
-    sha256 = "d4d107df263a3013ef9b1879b0df87d706ff80f65a86ea879bd9c31f9b307c2a",
-    type = "tar.gz",
-    strip_prefix = "syn-2.0.114",
->>>>>>>> origin/main:third-party/rust/crates/syn/2.0.114/BUCK
     out = "vendor",
 )
 
@@ -48,10 +41,6 @@ rust_library(
     deps = [
         "//third-party/rust/crates/proc-macro2/1.0.106:proc-macro2",
         "//third-party/rust/crates/quote/1.0.44:quote",
-<<<<<<<< HEAD:third-party/rust/crates/syn/2.0.115/BUCK
         "//third-party/rust/crates/unicode-ident/1.0.23:unicode-ident",
-========
-        "//third-party/rust/crates/unicode-ident/1.0.22:unicode-ident",
->>>>>>>> origin/main:third-party/rust/crates/syn/2.0.114/BUCK
     ],
 )

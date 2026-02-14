@@ -5,17 +5,10 @@ load("@buckal//:wrapper.bzl", "buildscript_run", "rust_binary", "rust_library")
 
 http_archive(
     name = "libc-vendor",
-<<<<<<<< HEAD:third-party/rust/crates/libc/0.2.182/BUCK
     urls = ["https://static.crates.io/crates/libc/libc-0.2.182.crate"],
     sha256 = "6800badb6cb2082ffd7b6a67e6125bb39f18782f793520caee8cb8846be06112",
     type = "tar.gz",
     strip_prefix = "libc-0.2.182",
-========
-    urls = ["https://static.crates.io/crates/libc/libc-0.2.180.crate"],
-    sha256 = "bcc35a38544a891a5f7c865aca548a982ccb3b8650a5b06d0fd33a10283c56fc",
-    type = "tar.gz",
-    strip_prefix = "libc-0.2.180",
->>>>>>>> origin/main:third-party/rust/crates/libc/0.2.180/BUCK
     out = "vendor",
 )
 
@@ -70,11 +63,7 @@ buildscript_run(
         "extra_traits",
         "std",
     ],
-<<<<<<<< HEAD:third-party/rust/crates/libc/0.2.182/BUCK
     version = "0.2.182",
-========
-    version = "0.2.180",
->>>>>>>> origin/main:third-party/rust/crates/libc/0.2.180/BUCK
     manifest_dir = ":libc-vendor",
     visibility = ["PUBLIC"],
 )

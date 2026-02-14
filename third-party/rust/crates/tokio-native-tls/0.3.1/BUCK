@@ -26,11 +26,7 @@ rust_library(
     rustc_flags = ["@$(location :tokio-native-tls-manifest[env_flags])"],
     visibility = ["PUBLIC"],
     deps = [
-<<<<<<< HEAD
         "//third-party/rust/crates/native-tls/0.2.16:native-tls",
-=======
-        "//third-party/rust/crates/native-tls/0.2.14:native-tls",
->>>>>>> origin/main
         "//third-party/rust/crates/tokio/1.49.0:tokio",
     ],
 )

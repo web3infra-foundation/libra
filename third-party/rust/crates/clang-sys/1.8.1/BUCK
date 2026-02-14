@@ -50,11 +50,7 @@ rust_library(
     visibility = ["PUBLIC"],
     deps = [
         "//third-party/rust/crates/glob/0.3.3:glob",
-<<<<<<< HEAD
         "//third-party/rust/crates/libc/0.2.182:libc",
-=======
-        "//third-party/rust/crates/libc/0.2.180:libc",
->>>>>>> origin/main
         "//third-party/rust/crates/libloading/0.8.9:libloading",
     ],
 )

@@ -33,11 +33,7 @@ rust_library(
     },
     visibility = ["PUBLIC"],
     deps = [
-<<<<<<< HEAD
         "//third-party/rust/crates/libc/0.2.182:libc",
-=======
-        "//third-party/rust/crates/libc/0.2.180:libc",
->>>>>>> origin/main
         "//third-party/rust/crates/signal-hook/0.3.18:signal-hook",
     ],
 )

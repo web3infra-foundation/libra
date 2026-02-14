@@ -34,11 +34,7 @@ rust_library(
         "//third-party/rust/crates/cfg-if/1.0.4:cfg-if",
         "//third-party/rust/crates/itoa/1.0.17:itoa",
         "//third-party/rust/crates/rustversion/1.0.22:rustversion",
-<<<<<<< HEAD
         "//third-party/rust/crates/ryu/1.0.23:ryu",
-=======
-        "//third-party/rust/crates/ryu/1.0.22:ryu",
->>>>>>> origin/main
         "//third-party/rust/crates/static_assertions/1.1.0:static_assertions",
     ],
 )

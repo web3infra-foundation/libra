@@ -39,15 +39,9 @@ rust_library(
     visibility = ["PUBLIC"],
     deps = [
         "//third-party/rust/crates/itoa/1.0.17:itoa",
-<<<<<<< HEAD
         "//third-party/rust/crates/memchr/2.8.0:memchr",
         "//third-party/rust/crates/serde_core/1.0.228:serde_core",
         "//third-party/rust/crates/zmij/1.0.21:zmij",
-=======
-        "//third-party/rust/crates/memchr/2.7.6:memchr",
-        "//third-party/rust/crates/serde_core/1.0.228:serde_core",
-        "//third-party/rust/crates/zmij/1.0.19:zmij",
->>>>>>> origin/main
     ],
 )
 
