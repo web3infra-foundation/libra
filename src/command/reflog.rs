@@ -247,7 +247,7 @@ async fn handle_delete(selectors: &[String]) {
     let groups = groups
         .into_values()
         .map(|mut group| {
-            group.sort_by(|a, b| b.1.cmp(&a.1));
+            group.sort_by_key(|b| std::cmp::Reverse(b.1));
             group
         })
         .collect::<Vec<_>>();

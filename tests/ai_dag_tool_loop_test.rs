@@ -67,11 +67,14 @@ fn test_dag_tool_loop_action_applies_patch() {
     let file_path = temp_dir.path().join("target.txt");
     std::fs::write(&file_path, "line 1\nline 2\nline 3\n").unwrap();
 
-    let patch = "@@ -1,3 +1,3 @@
+    let patch = "*** Begin Patch
+*** Update File: target.txt
+@@
  line 1
 -line 2
 +line two
- line 3";
+ line 3
+*** End Patch";
 
     let scripted = ScriptedModel::new(vec![
         CompletionResponse {
@@ -81,7 +84,6 @@ fn test_dag_tool_loop_action_applies_patch() {
                 function: Function {
                     name: "apply_patch".to_string(),
                     arguments: serde_json::json!({
-                        "file_path": file_path,
                         "patch": patch
                     }),
                 },

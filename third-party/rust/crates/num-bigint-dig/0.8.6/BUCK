@@ -40,7 +40,7 @@ rust_library(
     visibility = ["PUBLIC"],
     deps = [
         "//third-party/rust/crates/lazy_static/1.5.0:lazy_static",
-        "//third-party/rust/crates/libm/0.2.15:libm",
+        "//third-party/rust/crates/libm/0.2.16:libm",
         "//third-party/rust/crates/num-integer/0.1.46:num-integer",
         "//third-party/rust/crates/num-iter/0.1.45:num-iter",
         "//third-party/rust/crates/num-traits/0.2.19:num-traits",

@@ -1,13 +1,11 @@
-//! Handler for the apply_patch tool.
-
-use std::path::Path;
+//! Handler for the apply_patch tool using Codex-style format.
 
 use async_trait::async_trait;
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use super::parse_arguments;
 use crate::internal::ai::tools::{
-    context::{ApplyPatchArgs, ToolInvocation, ToolKind, ToolOutput},
+    apply_patch::{self, ApplyPatchArgs},
+    context::{ToolInvocation, ToolKind, ToolOutput},
     error::ToolError,
     registry::ToolHandler,
     spec::{FunctionParameters, ToolSpec},
@@ -39,333 +37,48 @@ impl ToolHandler for ApplyPatchHandler {
             }
         };
 
+        // Parse arguments (new format: only needs patch string)
         let args: ApplyPatchArgs = parse_arguments(&arguments)?;
 
-        // Validate path
-        let path = Path::new(&args.file_path);
-        if !path.is_absolute() {
-            return Err(ToolError::PathNotAbsolute(path.to_path_buf()));
+        // Apply the patch (paths in patch content are relative to working_dir)
+        let working_dir_clone = working_dir.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            apply_patch::apply_patch(&args.patch, &working_dir_clone)
+        })
+        .await
+        .map_err(|e| ToolError::ExecutionFailed(e.to_string()))??;
+
+        // Validate all affected paths are within working directory
+        // Note: We don't canonicalize paths because deleted files won't exist,
+        // and symlink resolution can cause path mismatches on macOS.
+        // The apply_patch function already constructs absolute paths from relative ones.
+        for path in result
+            .added
+            .iter()
+            .chain(result.modified.iter())
+            .chain(result.deleted.iter())
+        {
+            validate_path(path, &working_dir)?;
         }
 
-        validate_path(path, &working_dir)?;
-
-        // Open the file first, then validate the canonical target path to reduce TOCTOU risk.
-        let mut file = tokio::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)
-            .await
-            .map_err(|e| {
-                ToolError::ExecutionFailed(format!(
-                    "Failed to open file '{}': {}",
-                    path.display(),
-                    e
-                ))
-            })?;
-
-        let canonical_path = tokio::fs::canonicalize(path).await.map_err(|e| {
-            ToolError::ExecutionFailed(format!(
-                "Failed to canonicalize file '{}': {}",
-                path.display(),
-                e
-            ))
-        })?;
-        let canonical_working_dir = tokio::fs::canonicalize(&working_dir)
-            .await
-            .unwrap_or(working_dir.clone());
-        validate_path(&canonical_path, &canonical_working_dir)?;
-        ensure_same_file(&file, &canonical_path).await?;
-
-        // Apply the patch
-        let result = apply_patch_sync(&mut file, &canonical_path, &args.patch).await?;
-
-        Ok(ToolOutput::success(result))
+        // Format result
+        let output = apply_patch::format_summary(&result);
+        Ok(ToolOutput::success(output))
     }
 
     fn schema(&self) -> ToolSpec {
         ToolSpec::new(
             "apply_patch",
-            "Apply a unified diff patch to a file. Modifies the file in place. Returns a summary of changes applied.",
+            "Apply a patch to files using Codex-style format. \
+             Format: *** Begin Patch, followed by hunks (*** Add File:/Delete File:/Update File:), \
+             then *** End Patch. Supports adding, deleting, updating, and moving files. \
+             Paths are relative to the working directory.",
         )
         .with_parameters(FunctionParameters::object(
-            [
-                ("file_path", "string", "Absolute path to the file to patch"),
-                ("patch", "string", "The patch in unified diff format"),
-            ],
-            [("file_path", true), ("patch", true)],
+            [("patch", "string", "The patch in Codex format")],
+            [("patch", true)],
         ))
     }
-}
-
-/// Apply a patch to a file synchronously.
-async fn apply_patch_sync(
-    file: &mut tokio::fs::File,
-    path: &Path,
-    patch: &str,
-) -> Result<String, ToolError> {
-    // Read original file content
-    let mut original = String::new();
-    file.read_to_string(&mut original).await.map_err(|e| {
-        ToolError::ExecutionFailed(format!("Failed to read file '{}': {}", path.display(), e))
-    })?;
-
-    // Parse and apply the patch
-    let result = parse_and_apply_unified_diff(&original, patch)?;
-    if std::env::var_os("LIBRA_APPLY_PATCH_DEBUG").is_some() {
-        let preview = result.chars().take(120).collect::<String>();
-        eprintln!(
-            "[apply_patch] write path='{}' bytes={} preview='{}'",
-            path.display(),
-            result.len(),
-            preview.replace('\n', "\\n")
-        );
-    }
-
-    // Write the patched content back to the same open file descriptor.
-    file.set_len(0).await.map_err(|e| {
-        ToolError::ExecutionFailed(format!(
-            "Failed to truncate file '{}': {}",
-            path.display(),
-            e
-        ))
-    })?;
-    file.rewind().await.map_err(|e| {
-        ToolError::ExecutionFailed(format!("Failed to rewind file '{}': {}", path.display(), e))
-    })?;
-    file.write_all(result.as_bytes()).await.map_err(|e| {
-        ToolError::ExecutionFailed(format!(
-            "Failed to write to file '{}': {}",
-            path.display(),
-            e
-        ))
-    })?;
-    file.flush().await.map_err(|e| {
-        ToolError::ExecutionFailed(format!("Failed to flush file '{}': {}", path.display(), e))
-    })?;
-
-    Ok(format!(
-        "Patch applied successfully to '{}'",
-        path.display()
-    ))
-}
-
-#[cfg(unix)]
-async fn ensure_same_file(file: &tokio::fs::File, path: &Path) -> Result<(), ToolError> {
-    use std::os::unix::fs::MetadataExt;
-
-    let file_meta = file.metadata().await.map_err(|e| {
-        ToolError::ExecutionFailed(format!(
-            "Failed to stat opened file '{}': {}",
-            path.display(),
-            e
-        ))
-    })?;
-    let path_meta = tokio::fs::metadata(path).await.map_err(|e| {
-        ToolError::ExecutionFailed(format!(
-            "Failed to stat canonical path '{}': {}",
-            path.display(),
-            e
-        ))
-    })?;
-
-    if file_meta.dev() != path_meta.dev() || file_meta.ino() != path_meta.ino() {
-        return Err(ToolError::ExecutionFailed(format!(
-            "File changed during validation for '{}'",
-            path.display()
-        )));
-    }
-
-    Ok(())
-}
-
-#[cfg(not(unix))]
-async fn ensure_same_file(_file: &tokio::fs::File, _path: &Path) -> Result<(), ToolError> {
-    Ok(())
-}
-
-/// Parse a unified diff and apply it to the original content.
-fn parse_and_apply_unified_diff(original: &str, patch: &str) -> Result<String, ToolError> {
-    // Parse unified diff format
-    // Format:
-    // --- a/file.txt
-    // +++ b/file.txt
-    // @@ -line,count +line,count @@
-    //  lines to remove (prefixed with '-')
-    //  lines to add (prefixed with '+')
-    //  context lines (prefixed with ' ')
-
-    let lines: Vec<&str> = patch.lines().collect();
-    let mut result_lines: Vec<String> = original.lines().map(|s| s.to_string()).collect();
-    let mut current_line = 0usize;
-    let had_trailing_newline = original.ends_with('\n');
-    let debug = std::env::var_os("LIBRA_APPLY_PATCH_DEBUG").is_some();
-    if debug {
-        eprintln!(
-            "[apply_patch] original_lines={} had_trailing_newline={} patch_lines={}",
-            result_lines.len(),
-            had_trailing_newline,
-            patch.lines().count()
-        );
-    }
-
-    fn context_expected(raw: &str) -> &str {
-        // Tolerate both:
-        // 1) Standard unified diff context lines: " <content>"
-        // 2) "Raw" context lines without the leading space prefix, which appear in some tests.
-        //
-        // Heuristic:
-        // - If the line starts with a single space and the next char is not whitespace, treat it as diff-prefixed.
-        // - Otherwise, treat the full line as the expected content.
-        let mut chars = raw.chars();
-        if chars.next() != Some(' ') {
-            return raw;
-        }
-        match chars.next() {
-            Some(c) if c != ' ' && c != '\t' => &raw[1..],
-            _ => raw,
-        }
-    }
-
-    fn find_in_window(
-        lines: &[String],
-        start: usize,
-        needle: &str,
-        window: usize,
-    ) -> Option<usize> {
-        let end = (start + window).min(lines.len());
-        lines[start..end]
-            .iter()
-            .position(|l| l == needle)
-            .map(|i| start + i)
-    }
-
-    let mut i = 0;
-    while i < lines.len() {
-        let line = lines[i];
-
-        // Look for hunk header @@ -l,c +l,c @@
-        if line.starts_with("@@") {
-            // Parse hunk header to find start line
-            // Format: @@ -old_start,old_count +new_start,new_count @@
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 3 {
-                // Parse old_start from "-old_start,old_count"
-                let old_info = parts[1]; // e.g., "-10,5"
-                let old_start: usize = old_info
-                    .trim_start_matches('-')
-                    .split(',')
-                    .next()
-                    .unwrap_or("1")
-                    .parse()
-                    .unwrap_or(1);
-
-                // Convert to 0-indexed
-                current_line = old_start.saturating_sub(1);
-            }
-
-            i += 1;
-            if debug {
-                eprintln!("[apply_patch] hunk_start current_line={}", current_line);
-            }
-
-            // Process hunk content
-            while i < lines.len() {
-                let hunk_line = lines[i];
-                if hunk_line.starts_with("@@") {
-                    // Next hunk starts, break
-                    break;
-                }
-
-                if let Some(expected) = hunk_line.strip_prefix('-') {
-                    // Remove the expected line.
-                    if current_line < result_lines.len() && result_lines[current_line] == expected {
-                        if debug {
-                            eprintln!("[apply_patch] - remove @{} '{}'", current_line, expected);
-                        }
-                        result_lines.remove(current_line);
-                    } else if let Some(found) =
-                        find_in_window(&result_lines, current_line, expected, 50)
-                    {
-                        if debug {
-                            eprintln!(
-                                "[apply_patch] - remove @{} (found @{}) '{}'",
-                                current_line, found, expected
-                            );
-                        }
-                        result_lines.remove(found);
-                        current_line = found;
-                    } else {
-                        return Err(ToolError::ExecutionFailed(format!(
-                            "Patch failed: expected to remove '{}', but it was not found",
-                            expected
-                        )));
-                    }
-                } else if let Some(content) = hunk_line.strip_prefix('+') {
-                    // Insert line at current position and advance.
-                    if current_line <= result_lines.len() {
-                        if debug {
-                            eprintln!("[apply_patch] + insert @{} '{}'", current_line, content);
-                        }
-                        result_lines.insert(current_line, content.to_string());
-                        current_line += 1;
-                    }
-                } else if hunk_line.is_empty() || hunk_line.starts_with('\\') {
-                    // Ignore empty lines and "\ No newline at end of file" markers.
-                } else if hunk_line.starts_with("--- ") || hunk_line.starts_with("+++ ") {
-                    // Ignore file headers if present.
-                } else {
-                    // Context line (tolerant).
-                    let expected = context_expected(hunk_line);
-                    if current_line < result_lines.len() && result_lines[current_line] == expected {
-                        if debug {
-                            eprintln!("[apply_patch] = context @{} '{}'", current_line, expected);
-                        }
-                        current_line += 1;
-                    } else if let Some(found) =
-                        find_in_window(&result_lines, current_line, expected, 50)
-                    {
-                        if debug {
-                            eprintln!(
-                                "[apply_patch] ~ context seek from @{} to @{} '{}'",
-                                current_line, found, expected
-                            );
-                        }
-                        current_line = found + 1;
-                    } else {
-                        let actual = if current_line < result_lines.len() {
-                            result_lines[current_line].clone()
-                        } else {
-                            "<end of file>".to_string()
-                        };
-                        if debug {
-                            eprintln!(
-                                "[apply_patch] ! context mismatch @{} expected='{}' actual='{}'",
-                                current_line, expected, actual
-                            );
-                        }
-                        return Err(ToolError::ExecutionFailed(format!(
-                            "Patch failed: context mismatch at line {}: expected '{}', found '{}'",
-                            current_line + 1,
-                            expected,
-                            actual
-                        )));
-                    }
-                }
-
-                i += 1;
-            }
-
-            continue;
-        }
-
-        i += 1;
-    }
-
-    let mut out = result_lines.join("\n");
-    if had_trailing_newline && !out.ends_with('\n') {
-        out.push('\n');
-    }
-    Ok(out)
 }
 
 #[cfg(test)]
@@ -377,15 +90,14 @@ mod tests {
     use super::*;
     use crate::internal::ai::tools::{ToolKind, context::ToolPayload};
 
+    fn wrap_patch(body: &str) -> String {
+        format!("*** Begin Patch\n{body}\n*** End Patch")
+    }
+
     #[tokio::test]
-    async fn test_apply_patch_basic() {
+    async fn test_apply_patch_add_file() {
         let temp_dir = TempDir::new().unwrap();
         let working_dir = temp_dir.path().to_path_buf();
-        let mut temp = NamedTempFile::new_in(&working_dir).unwrap();
-        writeln!(temp, "line 1").unwrap();
-        writeln!(temp, "line 2").unwrap();
-        writeln!(temp, "line 3").unwrap();
-        writeln!(temp, "line 4").unwrap();
 
         let handler = ApplyPatchHandler;
         let invocation = ToolInvocation::new(
@@ -393,41 +105,98 @@ mod tests {
             "apply_patch",
             ToolPayload::Function {
                 arguments: serde_json::json!({
-                    "file_path": temp.path(),
-                    "patch": format!(
-                        "@@ -1,4 +1,4 @@
- line 1
--line 2
-+line 2 modified
- line 3
- line 4"
-                    ),
+                    "patch": wrap_patch(
+                        r#"*** Add File: new_file.txt
++line 1
++line 2"#
+                    )
                 })
                 .to_string(),
             },
-            working_dir,
+            working_dir.clone(),
         );
 
         let result = handler.handle(invocation).await;
         assert!(result.is_ok());
 
         let output = result.unwrap();
-        assert!(output.as_text().unwrap().contains("applied successfully"));
+        assert!(output.as_text().unwrap().contains("Success"));
+        assert!(output.as_text().unwrap().contains("A"));
+
+        // Verify the file was created
+        let content = fs::read_to_string(working_dir.join("new_file.txt")).unwrap();
+        assert_eq!(content, "line 1\nline 2\n");
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_delete_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let working_dir = temp_dir.path().to_path_buf();
+        let file_path = working_dir.join("to_delete.txt");
+        fs::write(&file_path, "content").unwrap();
+
+        let handler = ApplyPatchHandler;
+        let invocation = ToolInvocation::new(
+            "call-1",
+            "apply_patch",
+            ToolPayload::Function {
+                arguments: serde_json::json!({
+                    "patch": wrap_patch("*** Delete File: to_delete.txt")
+                })
+                .to_string(),
+            },
+            working_dir.clone(),
+        );
+
+        let result = handler.handle(invocation).await;
+        assert!(result.is_ok());
+
+        // Verify the file was deleted
+        assert!(!file_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_update_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let working_dir = temp_dir.path().to_path_buf();
+        let file_path = working_dir.join("test.txt");
+        fs::write(&file_path, "line 1\nline 2\nline 3\n").unwrap();
+
+        let handler = ApplyPatchHandler;
+        let invocation = ToolInvocation::new(
+            "call-1",
+            "apply_patch",
+            ToolPayload::Function {
+                arguments: serde_json::json!({
+                    "patch": wrap_patch(
+                        r#"*** Update File: test.txt
+@@
+ line 1
+-line 2
++line 2 modified
+ line 3"#
+                    )
+                })
+                .to_string(),
+            },
+            working_dir,
+        );
+
+        let result = handler.handle(invocation).await;
+        assert!(result.is_ok());
 
         // Verify the file was modified
-        let content = fs::read_to_string(temp.path()).unwrap();
+        let content = fs::read_to_string(&file_path).unwrap();
         assert!(content.contains("line 2 modified"));
         assert!(!content.contains("line 2\n"));
     }
 
     #[tokio::test]
-    async fn test_apply_patch_add_lines() {
+    async fn test_apply_patch_move_file() {
         let temp_dir = TempDir::new().unwrap();
         let working_dir = temp_dir.path().to_path_buf();
-        let mut temp = NamedTempFile::new_in(&working_dir).unwrap();
-        writeln!(temp, "line 1").unwrap();
-        writeln!(temp, "line 2").unwrap();
-        writeln!(temp, "line 3").unwrap();
+        let src_path = working_dir.join("src.txt");
+        fs::write(&src_path, "content\n").unwrap();
 
         let handler = ApplyPatchHandler;
         let invocation = ToolInvocation::new(
@@ -435,35 +204,34 @@ mod tests {
             "apply_patch",
             ToolPayload::Function {
                 arguments: serde_json::json!({
-                    "file_path": temp.path(),
-                    "patch": "@@ -1,3 +1,4 @@
- line 1
- line 2
-+new line
- line 3".to_string(),
+                    "patch": wrap_patch(
+                        r#"*** Update File: src.txt
+*** Move to: dst.txt
+@@
+-content
++modified content"#
+                    )
                 })
                 .to_string(),
             },
-            working_dir,
+            working_dir.clone(),
         );
 
         let result = handler.handle(invocation).await;
         assert!(result.is_ok());
 
-        // Verify the file was modified
-        let content = fs::read_to_string(temp.path()).unwrap();
-        assert!(content.contains("new line"));
+        // Verify the file was moved
+        assert!(!src_path.exists());
+        let content = fs::read_to_string(working_dir.join("dst.txt")).unwrap();
+        assert_eq!(content, "modified content\n");
     }
 
     #[tokio::test]
-    async fn test_apply_patch_delete_lines() {
+    async fn test_apply_patch_multiple_files() {
         let temp_dir = TempDir::new().unwrap();
         let working_dir = temp_dir.path().to_path_buf();
-        let mut temp = NamedTempFile::new_in(&working_dir).unwrap();
-        writeln!(temp, "line 1").unwrap();
-        writeln!(temp, "line 2").unwrap();
-        writeln!(temp, "line 3").unwrap();
-        writeln!(temp, "line 4").unwrap();
+        let file1 = working_dir.join("file1.txt");
+        fs::write(&file1, "original\n").unwrap();
 
         let handler = ApplyPatchHandler;
         let invocation = ToolInvocation::new(
@@ -471,99 +239,35 @@ mod tests {
             "apply_patch",
             ToolPayload::Function {
                 arguments: serde_json::json!({
-                    "file_path": temp.path(),
-                    "patch": "@@ -1,4 +1,3 @@
- line 1
--line 2
- line 3
- line 4".to_string(),
+                    "patch": wrap_patch(
+                        r#"*** Add File: new.txt
++new content
+*** Update File: file1.txt
+@@
+-original
++modified"#
+                    )
                 })
                 .to_string(),
             },
-            working_dir,
+            working_dir.clone(),
         );
 
         let result = handler.handle(invocation).await;
         assert!(result.is_ok());
 
-        // Verify the file was modified
-        let content = fs::read_to_string(temp.path()).unwrap();
-        assert!(!content.contains("line 2"));
+        // Verify both operations
+        assert!(working_dir.join("new.txt").exists());
+        let content = fs::read_to_string(&file1).unwrap();
+        assert_eq!(content, "modified\n");
     }
 
     #[tokio::test]
-    async fn test_apply_patch_nonexistent_file() {
-        let handler = ApplyPatchHandler;
-        let invocation = ToolInvocation::new(
-            "call-1",
-            "apply_patch",
-            ToolPayload::Function {
-                arguments: serde_json::json!({
-                    "file_path": "/nonexistent/file.txt",
-                    "patch": "@@ -1,1 +1,1 @@
--old
-+new"
-                })
-                .to_string(),
-            },
-            std::env::current_dir().unwrap(),
-        );
-
-        let result = handler.handle(invocation).await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_apply_patch_relative_path_fails() {
-        let temp_dir = TempDir::new().unwrap();
-        let handler = ApplyPatchHandler;
-        let invocation = ToolInvocation::new(
-            "call-1",
-            "apply_patch",
-            ToolPayload::Function {
-                arguments: serde_json::json!({
-                    "file_path": "relative/path.txt",
-                    "patch": "@@ -1,1 +1,1 @@\n-old\n+new"
-                })
-                .to_string(),
-            },
-            temp_dir.path().to_path_buf(),
-        );
-
-        let result = handler.handle(invocation).await;
-        assert!(matches!(result, Err(ToolError::PathNotAbsolute(_))));
-    }
-
-    #[tokio::test]
-    async fn test_apply_patch_outside_working_dir_fails() {
-        let temp_dir = TempDir::new().unwrap();
-        let mut outside = NamedTempFile::new().unwrap();
-        writeln!(outside, "old").unwrap();
-
-        let handler = ApplyPatchHandler;
-        let invocation = ToolInvocation::new(
-            "call-1",
-            "apply_patch",
-            ToolPayload::Function {
-                arguments: serde_json::json!({
-                    "file_path": outside.path(),
-                    "patch": "@@ -1,1 +1,1 @@\n-old\n+new"
-                })
-                .to_string(),
-            },
-            temp_dir.path().to_path_buf(),
-        );
-
-        let result = handler.handle(invocation).await;
-        assert!(matches!(result, Err(ToolError::PathOutsideWorkingDir(_))));
-    }
-
-    #[tokio::test]
-    async fn test_apply_patch_context_lines() {
+    async fn test_apply_patch_unicode_content() {
         let temp_dir = TempDir::new().unwrap();
         let working_dir = temp_dir.path().to_path_buf();
         let file_path = working_dir.join("test.txt");
-        fs::write(&file_path, "line 1\nline 2\nline 3\nline 4\n").unwrap();
+        fs::write(&file_path, "Hello 世界\n").unwrap();
 
         let handler = ApplyPatchHandler;
         let invocation = ToolInvocation::new(
@@ -571,121 +275,12 @@ mod tests {
             "apply_patch",
             ToolPayload::Function {
                 arguments: serde_json::json!({
-                    "file_path": file_path,
-                    "patch": "@@ -1,4 +1,4 @@\n line 1\n line 2\n-line 3\n+line 3 modified\n line 4"
-                })
-                .to_string(),
-            },
-            working_dir,
-        );
-
-        let result = handler.handle(invocation).await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_apply_patch_preserves_trailing_newline() {
-        let temp_dir = TempDir::new().unwrap();
-        let working_dir = temp_dir.path().to_path_buf();
-        let file_path = working_dir.join("test.txt");
-        fs::write(&file_path, "line 1\n").unwrap();
-
-        let handler = ApplyPatchHandler;
-        let invocation = ToolInvocation::new(
-            "call-1",
-            "apply_patch",
-            ToolPayload::Function {
-                arguments: serde_json::json!({
-                    "file_path": file_path.clone(),
-                    "patch": "@@ -1,1 +1,2 @@\n line 1\n+line 2"
-                })
-                .to_string(),
-            },
-            working_dir,
-        );
-
-        let result = handler.handle(invocation).await;
-        assert!(result.is_ok());
-
-        let content = fs::read_to_string(&file_path).unwrap();
-        assert!(content.ends_with('\n'));
-        assert!(content.contains("line 2"));
-    }
-
-    #[tokio::test]
-    async fn test_apply_patch_whitespace_handling() {
-        let temp_dir = TempDir::new().unwrap();
-        let working_dir = temp_dir.path().to_path_buf();
-        let file_path = working_dir.join("test.txt");
-        fs::write(&file_path, "  indented line\ntab\tline\n").unwrap();
-
-        let handler = ApplyPatchHandler;
-        let invocation = ToolInvocation::new(
-            "call-1",
-            "apply_patch",
-            ToolPayload::Function {
-                arguments: serde_json::json!({
-                    "file_path": file_path.clone(),
-                    "patch": "@@ -1,2 +1,2 @@\n  indented line\n-tab\tline\n+replaced"
-                })
-                .to_string(),
-            },
-            working_dir,
-        );
-
-        let result = handler.handle(invocation).await;
-        assert!(result.is_ok());
-
-        let content = fs::read_to_string(&file_path).unwrap();
-        assert!(content.contains("  indented line"));
-        assert!(!content.contains("tab\tline"));
-    }
-
-    #[tokio::test]
-    async fn test_apply_patch_multiline_change() {
-        let temp_dir = TempDir::new().unwrap();
-        let working_dir = temp_dir.path().to_path_buf();
-        let file_path = working_dir.join("test.txt");
-        fs::write(&file_path, "line 1\nline 2\nline 3\nline 4\nline 5\n").unwrap();
-
-        let handler = ApplyPatchHandler;
-        let invocation = ToolInvocation::new(
-            "call-1",
-            "apply_patch",
-            ToolPayload::Function {
-                arguments: serde_json::json!({
-                    "file_path": file_path.clone(),
-                    "patch": "@@ -1,5 +1,5 @@\n line 1\n-line 2\n-line 3\n-line 4\n+new line a\n+new line b\n+new line c\n line 5"
-                })
-                .to_string(),
-            },
-            working_dir,
-        );
-
-        let result = handler.handle(invocation).await;
-        assert!(result.is_ok());
-
-        let content = fs::read_to_string(&file_path).unwrap();
-        assert!(content.contains("new line a"));
-        assert!(content.contains("new line b"));
-        assert!(content.contains("new line c"));
-    }
-
-    #[tokio::test]
-    async fn test_apply_patch_utf8_content() {
-        let temp_dir = TempDir::new().unwrap();
-        let working_dir = temp_dir.path().to_path_buf();
-        let file_path = working_dir.join("test.txt");
-        fs::write(&file_path, "Hello 世界\nПривет мир\n").unwrap();
-
-        let handler = ApplyPatchHandler;
-        let invocation = ToolInvocation::new(
-            "call-1",
-            "apply_patch",
-            ToolPayload::Function {
-                arguments: serde_json::json!({
-                    "file_path": file_path.clone(),
-                    "patch": "@@ -1,2 +1,2 @@\n-Hello 世界\n+Hello 世界!\n Привет мир"
+                    "patch": wrap_patch(
+                        r#"*** Update File: test.txt
+@@
+-Hello 世界
++Hello 世界!"#
+                    )
                 })
                 .to_string(),
             },
@@ -700,32 +295,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_apply_patch_no_changes_needed() {
+    async fn test_apply_patch_outside_working_dir_fails() {
         let temp_dir = TempDir::new().unwrap();
-        let working_dir = temp_dir.path().to_path_buf();
-        let file_path = working_dir.join("test.txt");
-        fs::write(&file_path, "line 1\nline 2\n").unwrap();
+        let outside_dir = TempDir::new().unwrap();
+        let mut outside = NamedTempFile::new_in(&outside_dir).unwrap();
+        writeln!(outside, "old").unwrap();
 
+        // Try to delete a file outside working_dir
         let handler = ApplyPatchHandler;
         let invocation = ToolInvocation::new(
             "call-1",
             "apply_patch",
             ToolPayload::Function {
                 arguments: serde_json::json!({
-                    "file_path": file_path.clone(),
-                    "patch": "@@ -1,2 +1,2 @@\n line 1\n line 2"
+                    "patch": wrap_patch(&format!(
+                        "*** Delete File: {}",
+                        outside.path().display()
+                    ))
                 })
                 .to_string(),
             },
-            working_dir,
+            temp_dir.path().to_path_buf(),
         );
 
         let result = handler.handle(invocation).await;
-        assert!(result.is_ok());
-
-        let content = fs::read_to_string(&file_path).unwrap();
-        assert!(content.contains("line 1"));
-        assert!(content.contains("line 2"));
+        assert!(matches!(result, Err(ToolError::PathOutsideWorkingDir(_))));
     }
 
     #[tokio::test]
@@ -735,23 +329,17 @@ mod tests {
         let schema = handler.schema();
         assert_eq!(schema.function.name, "apply_patch");
         assert!(
-            schema.function.description.contains("patch")
-                || schema.function.description.contains("diff")
+            schema.function.description.contains("Codex")
+                || schema.function.description.contains("patch")
         );
-    }
-
-    #[test]
-    fn test_parse_and_apply_unified_diff() {
-        let original = "line 1\nline 2\nline 3\nline 4\n";
-        let patch = "@@ -1,4 +1,4 @@
- line 1
--line 2
-+line 2 modified
- line 3
- line 4";
-
-        let result = parse_and_apply_unified_diff(original, patch).unwrap();
-        assert!(result.contains("line 2 modified"));
-        assert!(!result.contains("\nline 2\n"));
+        // Verify only 'patch' parameter is required
+        if let crate::internal::ai::tools::spec::FunctionParameters::Object { required, .. } =
+            schema.function.parameters
+        {
+            assert!(required.contains(&"patch".to_string()));
+            assert!(!required.contains(&"file_path".to_string()));
+        } else {
+            panic!("Expected Object parameters");
+        }
     }
 }

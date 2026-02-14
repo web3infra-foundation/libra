@@ -30,6 +30,6 @@ rust_library(
         "//third-party/rust/crates/base64/0.22.1:base64",
         "//third-party/rust/crates/http/1.4.0:http",
         "//third-party/rust/crates/httparse/1.10.1:httparse",
-        "//third-party/rust/crates/log/0.4.28:log",
+        "//third-party/rust/crates/log/0.4.29:log",
     ],
 )

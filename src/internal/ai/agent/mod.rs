@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::internal::ai::{
     completion::{Chat, CompletionError, CompletionModel, CompletionRequest, Message, Prompt},
     tools::ToolSet,
@@ -6,7 +8,9 @@ use crate::internal::ai::{
 pub mod builder;
 pub(crate) mod tool_loop;
 pub use builder::AgentBuilder;
-pub(crate) use tool_loop::{ToolLoopConfig, run_tool_loop};
+pub(crate) use tool_loop::{
+    ToolLoopConfig, ToolLoopObserver, run_tool_loop, run_tool_loop_with_history_and_observer,
+};
 
 pub mod chat;
 pub use chat::ChatAgent;
@@ -25,9 +29,10 @@ pub use chat::ChatAgent;
 /// - Constructing requests to the underlying model.
 ///
 /// It implements the `Prompt` and `Chat` traits for easy interaction.
+#[derive(Clone)]
 pub struct Agent<M: CompletionModel> {
     /// The underlying completion model (e.g., Gemini, OpenAI).
-    model: M,
+    model: Arc<M>,
     /// System prompt or preamble to set the agent's behavior context.
     preamble: Option<String>,
     /// Sampling temperature (0.0 to 2.0). Higher values mean more creativity.
@@ -46,7 +51,7 @@ impl<M: CompletionModel> Agent<M> {
     /// * `model` - The completion model instance.
     pub fn new(model: M) -> Self {
         Self {
-            model,
+            model: Arc::new(model),
             preamble: None,
             temperature: None,
             max_steps: 4,
@@ -54,7 +59,7 @@ impl<M: CompletionModel> Agent<M> {
         }
     }
 
-    async fn run_with_history(
+    pub(crate) async fn run_with_history(
         &self,
         mut chat_history: Vec<Message>,
     ) -> Result<String, CompletionError> {
@@ -285,7 +290,7 @@ mod tests {
     #[tokio::test]
     async fn test_tool_call_loop_executes_tool() {
         let mut tool_set = ToolSet::default();
-        tool_set.tools.push(Box::new(MockTool));
+        tool_set.tools.push(std::sync::Arc::new(MockTool));
 
         let agent = AgentBuilder::new(MockModel).tools(tool_set).build();
         let response = Prompt::prompt(&agent, "hi").await.unwrap();

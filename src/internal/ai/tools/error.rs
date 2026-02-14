@@ -4,6 +4,8 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
+use super::apply_patch::ApplyPatchError;
+
 /// Errors that can occur during tool execution.
 #[derive(Debug, Error)]
 pub enum ToolError {
@@ -42,6 +44,12 @@ pub enum ToolError {
     /// Generic tool error.
     #[error("Tool error: {0}")]
     Other(String),
+}
+
+impl From<ApplyPatchError> for ToolError {
+    fn from(err: ApplyPatchError) -> Self {
+        ToolError::ExecutionFailed(err.to_string())
+    }
 }
 
 /// Result type for tool operations.
