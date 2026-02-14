@@ -76,6 +76,9 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 async-stream = "0.3"
 futures-core = "0.3"
 
+# Diff parsing
+diffy = "0.4"
+
 # Markdown rendering
 pulldown-cmark = "0.12"
 

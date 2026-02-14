@@ -9,6 +9,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use tokio::{
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
     task::JoinHandle,
+    time::sleep,
 };
 use tokio_stream::StreamExt;
 
@@ -66,6 +67,8 @@ pub struct App<M: CompletionModel> {
     last_draw_time: Instant,
     /// Background agent task handle (used for interrupt).
     agent_task: Option<JoinHandle<()>>,
+    /// Delayed draw task for frame coalescing inside frame interval.
+    scheduled_draw_task: Option<JoinHandle<()>>,
     /// Initial welcome message.
     welcome_message: String,
 }
@@ -93,6 +96,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             exit_info: None,
             last_draw_time: Instant::now(),
             agent_task: None,
+            scheduled_draw_task: None,
             welcome_message,
         }
     }
@@ -163,6 +167,8 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 self.schedule_draw();
             }
             TuiEvent::Draw => {
+                self.scheduled_draw_task = None;
+                self.last_draw_time = Instant::now();
                 self.draw()?;
             }
         }
@@ -173,6 +179,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
     async fn handle_key_event(&mut self, key: crossterm::event::KeyEvent) -> anyhow::Result<()> {
         // Check for Ctrl+C first (always handled)
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            self.interrupt_agent_task();
             self.exit_info = Some(AppExitInfo {
                 reason: ExitReason::UserRequested,
             });
@@ -527,10 +534,25 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
     /// Schedule a frame draw with frame rate limiting.
     fn schedule_draw(&mut self) {
         let now = Instant::now();
-        if now.duration_since(self.last_draw_time) >= TARGET_FRAME_INTERVAL {
+        let elapsed = now.duration_since(self.last_draw_time);
+        if elapsed >= TARGET_FRAME_INTERVAL {
+            if let Some(task) = self.scheduled_draw_task.take() {
+                task.abort();
+            }
             let _ = self.tui.frame_requester().send(());
-            self.last_draw_time = now;
+            return;
         }
+
+        if self.scheduled_draw_task.is_some() {
+            return;
+        }
+
+        let delay = TARGET_FRAME_INTERVAL - elapsed;
+        let draw_tx = self.tui.frame_requester();
+        self.scheduled_draw_task = Some(tokio::spawn(async move {
+            sleep(delay).await;
+            let _ = draw_tx.send(());
+        }));
     }
 
     /// Draw the current frame.

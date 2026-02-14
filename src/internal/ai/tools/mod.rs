@@ -5,6 +5,7 @@ use std::{error::Error, sync::Arc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod apply_patch;
 pub mod context;
 pub mod error;
 pub mod handlers;
@@ -13,8 +14,7 @@ pub mod spec;
 pub mod utils;
 
 pub use context::{
-    ApplyPatchArgs, GrepFilesArgs, ListDirArgs, ReadFileArgs, ToolInvocation, ToolKind, ToolOutput,
-    ToolPayload,
+    GrepFilesArgs, ListDirArgs, ReadFileArgs, ToolInvocation, ToolKind, ToolOutput, ToolPayload,
 };
 pub use error::{ToolError, ToolResult};
 pub use registry::{ToolHandler, ToolRegistry, ToolRegistryBuilder};

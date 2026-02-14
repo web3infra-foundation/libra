@@ -3,12 +3,33 @@
 //! A `HistoryCell` is the unit of display in the conversation UI, representing
 //! user messages, assistant responses, and tool calls.
 
-use std::{any::Any, fmt::Debug};
+use std::{any::Any, collections::HashMap, fmt::Debug, path::PathBuf};
 
 use ratatui::prelude::*;
 use serde_json::Value;
 
+use super::diff::{DiffSummary, FileChange, create_diff_summary};
 use crate::internal::ai::tools::ToolOutput;
+
+fn truncate_utf8(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    if max_bytes == 0 {
+        return String::new();
+    }
+
+    let mut end = 0usize;
+    for (idx, ch) in text.char_indices() {
+        let next = idx + ch.len_utf8();
+        if next > max_bytes {
+            break;
+        }
+        end = next;
+    }
+
+    text[..end].to_string()
+}
 
 /// Trait for cells displayed in the chat history.
 pub trait HistoryCell: Debug + Send + Sync {
@@ -232,7 +253,7 @@ impl HistoryCell for ToolCallHistoryCell {
         // Arguments (abbreviated)
         let args_str = self.arguments.to_string();
         let truncated = if args_str.len() > 100 {
-            format!("{}...", &args_str[..100])
+            format!("{}...", truncate_utf8(&args_str, 100))
         } else {
             args_str
         };
@@ -251,7 +272,7 @@ impl HistoryCell for ToolCallHistoryCell {
                                 .map(|s| if s { "success" } else { "failed" })
                                 .unwrap_or("done");
                             let preview = if content.len() > 50 {
-                                format!("{}...", &content[..50])
+                                format!("{}...", truncate_utf8(content, 50))
                             } else {
                                 content.clone()
                             };
@@ -277,6 +298,36 @@ impl HistoryCell for ToolCallHistoryCell {
 
         lines.push(Line::raw("")); // Empty line for spacing
         lines
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+/// A diff/patch display cell in the chat history.
+#[derive(Debug, Clone)]
+pub struct DiffHistoryCell {
+    /// The diff summary to display.
+    pub summary: DiffSummary,
+}
+
+impl DiffHistoryCell {
+    /// Create a new diff history cell.
+    pub fn new(changes: HashMap<PathBuf, FileChange>, cwd: PathBuf) -> Self {
+        Self {
+            summary: DiffSummary::new(changes, cwd),
+        }
+    }
+}
+
+impl HistoryCell for DiffHistoryCell {
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        create_diff_summary(&self.summary.changes, &self.summary.cwd, width as usize)
     }
 
     fn as_any(&self) -> &dyn Any {

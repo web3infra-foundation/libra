@@ -83,14 +83,14 @@ impl ToolSpec {
     pub fn apply_patch() -> Self {
         Self::new(
             "apply_patch",
-            "Apply a unified diff patch to a file. Modifies the file in place.",
+            "Apply a patch to files using Codex-style format. \
+             Format: *** Begin Patch, followed by hunks (*** Add File:/Delete File:/Update File:), \
+             then *** End Patch. Supports adding, deleting, updating, and moving files. \
+             Paths are relative to the working directory.",
         )
         .with_parameters(FunctionParameters::object(
-            [
-                ("file_path", "string", "Absolute path to the file to patch"),
-                ("patch", "string", "The patch in unified diff format"),
-            ],
-            [("file_path", true), ("patch", true)],
+            [("patch", "string", "The patch in Codex format")],
+            [("patch", true)],
         ))
     }
 
