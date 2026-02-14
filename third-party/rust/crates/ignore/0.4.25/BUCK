@@ -32,7 +32,11 @@ rust_library(
         "//third-party/rust/crates/crossbeam-deque/0.8.6:crossbeam-deque",
         "//third-party/rust/crates/globset/0.4.18:globset",
         "//third-party/rust/crates/log/0.4.29:log",
+<<<<<<< HEAD
         "//third-party/rust/crates/memchr/2.8.0:memchr",
+=======
+        "//third-party/rust/crates/memchr/2.7.6:memchr",
+>>>>>>> origin/main
         "//third-party/rust/crates/regex-automata/0.4.14:regex-automata",
         "//third-party/rust/crates/same-file/1.0.6:same-file",
         "//third-party/rust/crates/walkdir/2.5.0:walkdir",

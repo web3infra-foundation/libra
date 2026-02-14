@@ -55,12 +55,19 @@ rust_library(
         "//third-party/rust/crates/http/1.4.0:http",
         "//third-party/rust/crates/hyper/1.8.1:hyper",
         "//third-party/rust/crates/ipnet/2.11.0:ipnet",
+<<<<<<< HEAD
         "//third-party/rust/crates/libc/0.2.182:libc",
+=======
+        "//third-party/rust/crates/libc/0.2.180:libc",
+>>>>>>> origin/main
         "//third-party/rust/crates/percent-encoding/2.3.2:percent-encoding",
         "//third-party/rust/crates/pin-project-lite/0.2.16:pin-project-lite",
         "//third-party/rust/crates/socket2/0.6.2:socket2",
         "//third-party/rust/crates/tokio/1.49.0:tokio",
+<<<<<<< HEAD
         "//third-party/rust/crates/tower-layer/0.3.3:tower-layer",
+=======
+>>>>>>> origin/main
         "//third-party/rust/crates/tower-service/0.3.3:tower-service",
         "//third-party/rust/crates/tracing/0.1.44:tracing",
     ],

@@ -54,6 +54,10 @@ rust_library(
         "//third-party/rust/crates/time/0.3.47:time",
         "//third-party/rust/crates/tracing/0.1.44:tracing",
         "//third-party/rust/crates/url/2.5.8:url",
+<<<<<<< HEAD
         "//third-party/rust/crates/uuid/1.21.0:uuid",
+=======
+        "//third-party/rust/crates/uuid/1.20.0:uuid",
+>>>>>>> origin/main
     ],
 )

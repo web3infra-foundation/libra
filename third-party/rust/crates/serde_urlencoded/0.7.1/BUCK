@@ -28,7 +28,11 @@ rust_library(
     deps = [
         "//third-party/rust/crates/form_urlencoded/1.2.2:form_urlencoded",
         "//third-party/rust/crates/itoa/1.0.17:itoa",
+<<<<<<< HEAD
         "//third-party/rust/crates/ryu/1.0.23:ryu",
+=======
+        "//third-party/rust/crates/ryu/1.0.22:ryu",
+>>>>>>> origin/main
         "//third-party/rust/crates/serde/1.0.228:serde",
     ],
 )

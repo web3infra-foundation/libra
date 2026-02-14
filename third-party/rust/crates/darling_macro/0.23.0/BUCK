@@ -29,6 +29,10 @@ rust_library(
     deps = [
         "//third-party/rust/crates/darling_core/0.23.0:darling_core",
         "//third-party/rust/crates/quote/1.0.44:quote",
+<<<<<<< HEAD
         "//third-party/rust/crates/syn/2.0.115:syn",
+=======
+        "//third-party/rust/crates/syn/2.0.114:syn",
+>>>>>>> origin/main
     ],
 )

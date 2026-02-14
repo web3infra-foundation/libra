@@ -26,10 +26,13 @@ rust_library(
     env = {
         "OUT_DIR": "$(location :mime_guess-build-script-run[out_dir])",
     },
+<<<<<<< HEAD
     features = [
         "default",
         "rev-mappings",
     ],
+=======
+>>>>>>> origin/main
     rustc_flags = [
         "@$(location :mime_guess-build-script-run[rustc_flags])",
         "@$(location :mime_guess-manifest[env_flags])",
@@ -47,10 +50,13 @@ rust_binary(
     crate = "build_script_build",
     crate_root = "vendor/build.rs",
     edition = "2015",
+<<<<<<< HEAD
     features = [
         "default",
         "rev-mappings",
     ],
+=======
+>>>>>>> origin/main
     rustc_flags = ["@$(location :mime_guess-manifest[env_flags])"],
     visibility = [],
     deps = ["//third-party/rust/crates/unicase/2.9.0:unicase"],
@@ -61,10 +67,13 @@ buildscript_run(
     package_name = "mime_guess",
     buildscript_rule = ":mime_guess-build-script-build",
     env_srcs = [":mime_guess-manifest[env_dict]"],
+<<<<<<< HEAD
     features = [
         "default",
         "rev-mappings",
     ],
+=======
+>>>>>>> origin/main
     version = "2.0.5",
     manifest_dir = ":mime_guess-vendor",
     visibility = ["PUBLIC"],

@@ -29,5 +29,9 @@ rust_library(
     ],
     rustc_flags = ["@$(location :openssl-src-manifest[env_flags])"],
     visibility = ["PUBLIC"],
+<<<<<<< HEAD
     deps = ["//third-party/rust/crates/cc/1.2.56:cc"],
+=======
+    deps = ["//third-party/rust/crates/cc/1.2.55:cc"],
+>>>>>>> origin/main
 )

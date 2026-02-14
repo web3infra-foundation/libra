@@ -29,7 +29,11 @@ rust_library(
     deps = [
         "//third-party/rust/crates/indexmap/2.13.0:indexmap",
         "//third-party/rust/crates/toml_datetime/0.7.5+spec-1.1.0:toml_datetime",
+<<<<<<< HEAD
         "//third-party/rust/crates/toml_parser/1.0.8+spec-1.1.0:toml_parser",
+=======
+        "//third-party/rust/crates/toml_parser/1.0.6+spec-1.1.0:toml_parser",
+>>>>>>> origin/main
         "//third-party/rust/crates/winnow/0.7.14:winnow",
     ],
 )
