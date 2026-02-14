@@ -32,8 +32,8 @@ rust_library(
     deps = [
         "//third-party/rust/crates/aho-corasick/1.1.4:aho-corasick",
         "//third-party/rust/crates/bstr/1.12.1:bstr",
-        "//third-party/rust/crates/log/0.4.28:log",
-        "//third-party/rust/crates/regex-automata/0.4.13:regex-automata",
-        "//third-party/rust/crates/regex-syntax/0.8.8:regex-syntax",
+        "//third-party/rust/crates/log/0.4.29:log",
+        "//third-party/rust/crates/regex-automata/0.4.14:regex-automata",
+        "//third-party/rust/crates/regex-syntax/0.8.9:regex-syntax",
     ],
 )

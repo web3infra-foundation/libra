@@ -30,21 +30,21 @@ rust_library(
     rustc_flags = ["@$(location :astral-tokio-tar-manifest[env_flags])"],
     os_deps = {
         "linux": [
-            "//third-party/rust/crates/libc/0.2.178:libc",
+            "//third-party/rust/crates/libc/0.2.180:libc",
             "//third-party/rust/crates/xattr/1.6.1:xattr",
         ],
         "macos": [
-            "//third-party/rust/crates/libc/0.2.178:libc",
+            "//third-party/rust/crates/libc/0.2.180:libc",
             "//third-party/rust/crates/xattr/1.6.1:xattr",
         ],
     },
     visibility = ["PUBLIC"],
     deps = [
-        "//third-party/rust/crates/filetime/0.2.26:filetime",
+        "//third-party/rust/crates/filetime/0.2.27:filetime",
         "//third-party/rust/crates/futures-core/0.3.31:futures-core",
-        "//third-party/rust/crates/portable-atomic/1.11.1:portable-atomic",
+        "//third-party/rust/crates/portable-atomic/1.13.1:portable-atomic",
         "//third-party/rust/crates/rustc-hash/2.1.1:rustc-hash",
-        "//third-party/rust/crates/tokio-stream/0.1.17:tokio-stream",
-        "//third-party/rust/crates/tokio/1.48.0:tokio",
+        "//third-party/rust/crates/tokio-stream/0.1.18:tokio-stream",
+        "//third-party/rust/crates/tokio/1.49.0:tokio",
     ],
 )
