@@ -51,6 +51,24 @@ impl LibraMcpServer {
         ActorRef::mcp_client("mcp-user").map_err(|e| ErrorData::internal_error(e.to_string(), None))
     }
 
+    /// Resolve actor identity from explicit tool parameters only, without requiring
+    /// a `RequestContext`. Falls back to `default_actor()` when no explicit params
+    /// are provided.
+    ///
+    /// This is used by the TUI bridge handler where no MCP session exists.
+    pub fn resolve_actor_from_params(
+        &self,
+        actor_kind: Option<&str>,
+        actor_id: Option<&str>,
+    ) -> Result<ActorRef, ErrorData> {
+        if let Some(kind_str) = actor_kind {
+            let id = actor_id.unwrap_or("unknown");
+            let kind: ActorKind = kind_str.into();
+            return ActorRef::new(kind, id).map_err(|e| ErrorData::invalid_params(e, None));
+        }
+        self.default_actor()
+    }
+
     /// Resolve actor identity for a tool call.
     ///
     /// Priority:
@@ -404,6 +422,14 @@ impl LibraMcpServer {
         &self,
         Parameters(params): Parameters<ListTasksParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        self.list_tasks_impl(params).await
+    }
+
+    /// Core implementation of list_tasks, callable without rmcp Parameters wrapper.
+    pub async fn list_tasks_impl(
+        &self,
+        params: ListTasksParams,
+    ) -> Result<CallToolResult, ErrorData> {
         let history = self
             .history_manager
             .as_ref()
@@ -460,17 +486,26 @@ impl LibraMcpServer {
         ctx: RequestContext<RoleServer>,
         Parameters(params): Parameters<CreateRunParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let actor = self.resolve_actor(
+            &ctx,
+            params.actor_kind.as_deref(),
+            params.actor_id.as_deref(),
+        )?;
+        self.create_run_impl(params, actor).await
+    }
+
+    /// Core implementation of create_run, callable without RequestContext.
+    pub async fn create_run_impl(
+        &self,
+        params: CreateRunParams,
+        actor: ActorRef,
+    ) -> Result<CallToolResult, ErrorData> {
         let storage = self
             .storage
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
         let repo_id = self.repo_id;
-        let actor = self.resolve_actor(
-            &ctx,
-            params.actor_kind.as_deref(),
-            params.actor_id.as_deref(),
-        )?;
         let task_id = params
             .task_id
             .parse::<Uuid>()
@@ -547,6 +582,14 @@ impl LibraMcpServer {
         &self,
         Parameters(params): Parameters<ListRunsParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        self.list_runs_impl(params).await
+    }
+
+    /// Core implementation of list_runs, callable without rmcp Parameters wrapper.
+    pub async fn list_runs_impl(
+        &self,
+        params: ListRunsParams,
+    ) -> Result<CallToolResult, ErrorData> {
         let history = self
             .history_manager
             .as_ref()
@@ -597,17 +640,26 @@ impl LibraMcpServer {
         ctx: RequestContext<RoleServer>,
         Parameters(params): Parameters<CreateContextSnapshotParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let actor = self.resolve_actor(
+            &ctx,
+            params.actor_kind.as_deref(),
+            params.actor_id.as_deref(),
+        )?;
+        self.create_context_snapshot_impl(params, actor).await
+    }
+
+    /// Core implementation of create_context_snapshot, callable without RequestContext.
+    pub async fn create_context_snapshot_impl(
+        &self,
+        params: CreateContextSnapshotParams,
+        actor: ActorRef,
+    ) -> Result<CallToolResult, ErrorData> {
         let storage = self
             .storage
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
         let repo_id = self.repo_id;
-        let actor = self.resolve_actor(
-            &ctx,
-            params.actor_kind.as_deref(),
-            params.actor_id.as_deref(),
-        )?;
 
         let strategy = match params.selection_strategy.as_str() {
             "explicit" => SelectionStrategy::Explicit,
@@ -669,6 +721,14 @@ impl LibraMcpServer {
         &self,
         Parameters(params): Parameters<ListContextSnapshotsParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        self.list_context_snapshots_impl(params).await
+    }
+
+    /// Core implementation of list_context_snapshots, callable without rmcp Parameters wrapper.
+    pub async fn list_context_snapshots_impl(
+        &self,
+        params: ListContextSnapshotsParams,
+    ) -> Result<CallToolResult, ErrorData> {
         let history = self
             .history_manager
             .as_ref()
@@ -715,17 +775,26 @@ impl LibraMcpServer {
         ctx: RequestContext<RoleServer>,
         Parameters(params): Parameters<CreatePlanParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let actor = self.resolve_actor(
+            &ctx,
+            params.actor_kind.as_deref(),
+            params.actor_id.as_deref(),
+        )?;
+        self.create_plan_impl(params, actor).await
+    }
+
+    /// Core implementation of create_plan, callable without RequestContext.
+    pub async fn create_plan_impl(
+        &self,
+        params: CreatePlanParams,
+        actor: ActorRef,
+    ) -> Result<CallToolResult, ErrorData> {
         let storage = self
             .storage
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
         let repo_id = self.repo_id;
-        let actor = self.resolve_actor(
-            &ctx,
-            params.actor_kind.as_deref(),
-            params.actor_id.as_deref(),
-        )?;
         let run_id = params
             .run_id
             .parse::<Uuid>()
@@ -790,6 +859,14 @@ impl LibraMcpServer {
         &self,
         Parameters(params): Parameters<ListPlansParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        self.list_plans_impl(params).await
+    }
+
+    /// Core implementation of list_plans, callable without rmcp Parameters wrapper.
+    pub async fn list_plans_impl(
+        &self,
+        params: ListPlansParams,
+    ) -> Result<CallToolResult, ErrorData> {
         let history = self
             .history_manager
             .as_ref()
@@ -836,17 +913,26 @@ impl LibraMcpServer {
         ctx: RequestContext<RoleServer>,
         Parameters(params): Parameters<CreatePatchSetParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let actor = self.resolve_actor(
+            &ctx,
+            params.actor_kind.as_deref(),
+            params.actor_id.as_deref(),
+        )?;
+        self.create_patchset_impl(params, actor).await
+    }
+
+    /// Core implementation of create_patchset, callable without RequestContext.
+    pub async fn create_patchset_impl(
+        &self,
+        params: CreatePatchSetParams,
+        actor: ActorRef,
+    ) -> Result<CallToolResult, ErrorData> {
         let storage = self
             .storage
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
         let repo_id = self.repo_id;
-        let actor = self.resolve_actor(
-            &ctx,
-            params.actor_kind.as_deref(),
-            params.actor_id.as_deref(),
-        )?;
         let run_id = params
             .run_id
             .parse::<Uuid>()
@@ -913,6 +999,14 @@ impl LibraMcpServer {
         &self,
         Parameters(params): Parameters<ListPatchSetsParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        self.list_patchsets_impl(params).await
+    }
+
+    /// Core implementation of list_patchsets, callable without rmcp Parameters wrapper.
+    pub async fn list_patchsets_impl(
+        &self,
+        params: ListPatchSetsParams,
+    ) -> Result<CallToolResult, ErrorData> {
         let history = self
             .history_manager
             .as_ref()
@@ -960,17 +1054,26 @@ impl LibraMcpServer {
         ctx: RequestContext<RoleServer>,
         Parameters(params): Parameters<CreateEvidenceParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let actor = self.resolve_actor(
+            &ctx,
+            params.actor_kind.as_deref(),
+            params.actor_id.as_deref(),
+        )?;
+        self.create_evidence_impl(params, actor).await
+    }
+
+    /// Core implementation of create_evidence, callable without RequestContext.
+    pub async fn create_evidence_impl(
+        &self,
+        params: CreateEvidenceParams,
+        actor: ActorRef,
+    ) -> Result<CallToolResult, ErrorData> {
         let storage = self
             .storage
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
         let repo_id = self.repo_id;
-        let actor = self.resolve_actor(
-            &ctx,
-            params.actor_kind.as_deref(),
-            params.actor_id.as_deref(),
-        )?;
         let run_id = params
             .run_id
             .parse::<Uuid>()
@@ -1023,6 +1126,14 @@ impl LibraMcpServer {
         &self,
         Parameters(params): Parameters<ListEvidencesParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        self.list_evidences_impl(params).await
+    }
+
+    /// Core implementation of list_evidences, callable without rmcp Parameters wrapper.
+    pub async fn list_evidences_impl(
+        &self,
+        params: ListEvidencesParams,
+    ) -> Result<CallToolResult, ErrorData> {
         let history = self
             .history_manager
             .as_ref()
@@ -1070,17 +1181,26 @@ impl LibraMcpServer {
         ctx: RequestContext<RoleServer>,
         Parameters(params): Parameters<CreateToolInvocationParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let actor = self.resolve_actor(
+            &ctx,
+            params.actor_kind.as_deref(),
+            params.actor_id.as_deref(),
+        )?;
+        self.create_tool_invocation_impl(params, actor).await
+    }
+
+    /// Core implementation of create_tool_invocation, callable without RequestContext.
+    pub async fn create_tool_invocation_impl(
+        &self,
+        params: CreateToolInvocationParams,
+        actor: ActorRef,
+    ) -> Result<CallToolResult, ErrorData> {
         let storage = self
             .storage
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
         let repo_id = self.repo_id;
-        let actor = self.resolve_actor(
-            &ctx,
-            params.actor_kind.as_deref(),
-            params.actor_id.as_deref(),
-        )?;
         let run_id = params
             .run_id
             .parse::<Uuid>()
@@ -1133,6 +1253,14 @@ impl LibraMcpServer {
         &self,
         Parameters(params): Parameters<ListToolInvocationsParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        self.list_tool_invocations_impl(params).await
+    }
+
+    /// Core implementation of list_tool_invocations, callable without rmcp Parameters wrapper.
+    pub async fn list_tool_invocations_impl(
+        &self,
+        params: ListToolInvocationsParams,
+    ) -> Result<CallToolResult, ErrorData> {
         let history = self
             .history_manager
             .as_ref()
@@ -1179,17 +1307,26 @@ impl LibraMcpServer {
         ctx: RequestContext<RoleServer>,
         Parameters(params): Parameters<CreateProvenanceParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let actor = self.resolve_actor(
+            &ctx,
+            params.actor_kind.as_deref(),
+            params.actor_id.as_deref(),
+        )?;
+        self.create_provenance_impl(params, actor).await
+    }
+
+    /// Core implementation of create_provenance, callable without RequestContext.
+    pub async fn create_provenance_impl(
+        &self,
+        params: CreateProvenanceParams,
+        actor: ActorRef,
+    ) -> Result<CallToolResult, ErrorData> {
         let storage = self
             .storage
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
         let repo_id = self.repo_id;
-        let actor = self.resolve_actor(
-            &ctx,
-            params.actor_kind.as_deref(),
-            params.actor_id.as_deref(),
-        )?;
         let run_id = params
             .run_id
             .parse::<Uuid>()
@@ -1234,6 +1371,14 @@ impl LibraMcpServer {
     pub async fn list_provenances(
         &self,
         Parameters(params): Parameters<ListProvenancesParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.list_provenances_impl(params).await
+    }
+
+    /// Core implementation of list_provenances, callable without rmcp Parameters wrapper.
+    pub async fn list_provenances_impl(
+        &self,
+        params: ListProvenancesParams,
     ) -> Result<CallToolResult, ErrorData> {
         let history = self
             .history_manager
@@ -1280,17 +1425,26 @@ impl LibraMcpServer {
         ctx: RequestContext<RoleServer>,
         Parameters(params): Parameters<CreateDecisionParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let actor = self.resolve_actor(
+            &ctx,
+            params.actor_kind.as_deref(),
+            params.actor_id.as_deref(),
+        )?;
+        self.create_decision_impl(params, actor).await
+    }
+
+    /// Core implementation of create_decision, callable without RequestContext.
+    pub async fn create_decision_impl(
+        &self,
+        params: CreateDecisionParams,
+        actor: ActorRef,
+    ) -> Result<CallToolResult, ErrorData> {
         let storage = self
             .storage
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
         let repo_id = self.repo_id;
-        let actor = self.resolve_actor(
-            &ctx,
-            params.actor_kind.as_deref(),
-            params.actor_id.as_deref(),
-        )?;
         let run_id = params
             .run_id
             .parse::<Uuid>()
@@ -1353,6 +1507,14 @@ impl LibraMcpServer {
     pub async fn list_decisions(
         &self,
         Parameters(params): Parameters<ListDecisionsParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.list_decisions_impl(params).await
+    }
+
+    /// Core implementation of list_decisions, callable without rmcp Parameters wrapper.
+    pub async fn list_decisions_impl(
+        &self,
+        params: ListDecisionsParams,
     ) -> Result<CallToolResult, ErrorData> {
         let history = self
             .history_manager

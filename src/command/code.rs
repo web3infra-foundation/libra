@@ -24,7 +24,10 @@ use crate::internal::{
         },
         tools::{
             ToolRegistry, ToolRegistryBuilder,
-            handlers::{ApplyPatchHandler, GrepFilesHandler, ListDirHandler, ReadFileHandler},
+            handlers::{
+                ApplyPatchHandler, GrepFilesHandler, ListDirHandler, McpBridgeHandler,
+                ReadFileHandler,
+            },
         },
     },
     tui::{App, Tui, tui_init, tui_restore},
@@ -152,8 +155,28 @@ async fn execute_web_only(args: CodeArgs) {
     let app = Router::new().route("/", get(root));
     println!("Libra Code server running at http://{}", addr);
 
+    // Prepare MCP server instance shared between the HTTP transport and TUI bridge
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("Failed to get current directory: {}", e);
+            return;
+        }
+    };
+    let repo_id = load_or_create_repo_id(&cwd);
+    let storage = Arc::new(crate::utils::storage::local::LocalStorage::new(
+        cwd.join(".libra").join("objects"),
+    ));
+    let history_manager = Arc::new(HistoryManager::new(storage.clone(), cwd.join(".libra")));
+    let mcp_server = Arc::new(LibraMcpServer::new(
+        Some(history_manager),
+        Some(storage),
+        repo_id,
+    ));
+
     // Start MCP Server
-    let (mcp_handle, mcp_line) = match start_mcp_server(&args.host, args.mcp_port).await {
+    let (mcp_handle, mcp_line) = match start_mcp_server(&args.host, args.mcp_port, mcp_server).await
+    {
         Ok(handle) => {
             let line = format!("MCP: http://{}", handle.addr);
             (Some(handle), line)
@@ -189,14 +212,33 @@ async fn execute_tui(args: CodeArgs) {
     let temperature = args.temperature;
     let max_steps = args.max_steps;
 
-    let registry = Arc::new(
-        ToolRegistryBuilder::with_working_dir(working_dir)
-            .register("read_file", Arc::new(ReadFileHandler))
-            .register("list_dir", Arc::new(ListDirHandler))
-            .register("grep_files", Arc::new(GrepFilesHandler))
-            .register("apply_patch", Arc::new(ApplyPatchHandler))
-            .build(),
-    );
+    // Prepare MCP server instance shared between the HTTP transport and TUI bridge
+    let repo_id = load_or_create_repo_id(&working_dir);
+    let storage = Arc::new(crate::utils::storage::local::LocalStorage::new(
+        working_dir.join(".libra").join("objects"),
+    ));
+    let history_manager = Arc::new(HistoryManager::new(
+        storage.clone(),
+        working_dir.join(".libra"),
+    ));
+    let mcp_server = Arc::new(LibraMcpServer::new(
+        Some(history_manager),
+        Some(storage),
+        repo_id,
+    ));
+
+    // Build registry: basic file tools + MCP workflow tools
+    let mut builder = ToolRegistryBuilder::with_working_dir(working_dir)
+        .register("read_file", Arc::new(ReadFileHandler))
+        .register("list_dir", Arc::new(ListDirHandler))
+        .register("grep_files", Arc::new(GrepFilesHandler))
+        .register("apply_patch", Arc::new(ApplyPatchHandler));
+
+    for (name, handler) in McpBridgeHandler::all_handlers(mcp_server.clone()) {
+        builder = builder.register(name, handler);
+    }
+
+    let registry = Arc::new(builder.build());
 
     let config = ToolLoopConfig {
         preamble: Some(preamble),
@@ -217,7 +259,16 @@ async fn execute_tui(args: CodeArgs) {
             };
             let model_name = args.model.unwrap_or_else(|| GEMINI_2_5_FLASH.to_string());
             let model = client.completion_model(&model_name);
-            run_tui_with_model(args.host, args.port, args.mcp_port, model, registry, config).await;
+            run_tui_with_model(
+                args.host,
+                args.port,
+                args.mcp_port,
+                model,
+                registry,
+                config,
+                mcp_server,
+            )
+            .await;
         }
         CodeProvider::Openai => {
             let client = match OpenAIClient::from_env() {
@@ -229,7 +280,16 @@ async fn execute_tui(args: CodeArgs) {
             };
             let model_name = args.model.unwrap_or_else(|| GPT_4O_MINI.to_string());
             let model = client.completion_model(&model_name);
-            run_tui_with_model(args.host, args.port, args.mcp_port, model, registry, config).await;
+            run_tui_with_model(
+                args.host,
+                args.port,
+                args.mcp_port,
+                model,
+                registry,
+                config,
+                mcp_server,
+            )
+            .await;
         }
         CodeProvider::Anthropic => {
             let client = match AnthropicClient::from_env() {
@@ -241,7 +301,16 @@ async fn execute_tui(args: CodeArgs) {
             };
             let model_name = args.model.unwrap_or_else(|| CLAUDE_3_5_SONNET.to_string());
             let model = client.completion_model(&model_name);
-            run_tui_with_model(args.host, args.port, args.mcp_port, model, registry, config).await;
+            run_tui_with_model(
+                args.host,
+                args.port,
+                args.mcp_port,
+                model,
+                registry,
+                config,
+                mcp_server,
+            )
+            .await;
         }
     }
 }
@@ -253,6 +322,7 @@ async fn run_tui_with_model<M>(
     model: M,
     registry: Arc<ToolRegistry>,
     config: ToolLoopConfig,
+    mcp_server: Arc<LibraMcpServer>,
 ) where
     M: crate::internal::ai::completion::CompletionModel + 'static,
 {
@@ -281,7 +351,7 @@ async fn run_tui_with_model<M>(
     };
 
     // Start MCP Server
-    let (mcp_handle, mcp_line) = match start_mcp_server(&host, mcp_port).await {
+    let (mcp_handle, mcp_line) = match start_mcp_server(&host, mcp_port, mcp_server).await {
         Ok(handle) => {
             let line = format!("MCP: http://{}", handle.addr);
             (Some(handle), line)
@@ -324,19 +394,13 @@ use rmcp::transport::streamable_http_server::{
     StreamableHttpService, session::local::LocalSessionManager,
 };
 
-async fn start_mcp_server(host: &str, port: u16) -> anyhow::Result<WebHandle> {
+async fn start_mcp_server(
+    host: &str,
+    port: u16,
+    mcp_server: Arc<LibraMcpServer>,
+) -> anyhow::Result<WebHandle> {
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
-
-    // Prepare MCP server
-    let cwd = std::env::current_dir()?;
-    let repo_id = Uuid::new_v4(); // TODO: load real repo ID if persisted
-    let storage = Arc::new(crate::utils::storage::local::LocalStorage::new(
-        cwd.join(".libra").join("objects"),
-    ));
-    let history_manager = Arc::new(HistoryManager::new(storage.clone(), cwd.join(".libra")));
-
-    let mcp_server = LibraMcpServer::new(Some(history_manager), Some(storage), repo_id);
 
     // Use rmcp's Streamable HTTP transport via Hyper directly
     let service = TowerToHyperService::new(StreamableHttpService::new(
@@ -391,4 +455,19 @@ Working directory: {}. \
 Be concise and helpful in your responses.",
         working_dir.display()
     )
+}
+
+/// Load the repo UUID from `.libra/repo_id`, or create one if not present.
+fn load_or_create_repo_id(working_dir: &std::path::Path) -> Uuid {
+    let repo_id_path = working_dir.join(".libra").join("repo_id");
+    if let Ok(content) = std::fs::read_to_string(&repo_id_path)
+        && let Ok(id) = content.trim().parse::<Uuid>()
+    {
+        return id;
+    }
+    let id = Uuid::new_v4();
+    // Best-effort persist; ignore errors (e.g. .libra dir missing)
+    let _ = std::fs::create_dir_all(repo_id_path.parent().unwrap());
+    let _ = std::fs::write(&repo_id_path, id.to_string());
+    id
 }
