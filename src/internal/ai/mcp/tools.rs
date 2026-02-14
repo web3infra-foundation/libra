@@ -28,8 +28,8 @@ use git_internal::internal::object::{
     patchset::{ApplyStatus, ChangeType, PatchSet, TouchedFile},
     plan::{Plan, PlanStatus, PlanStep},
     provenance::Provenance,
-    run::{Run, RunStatus},
-    task::{GoalType, Task},
+    run::{AgentInstance, Run, RunStatus},
+    task::{GoalType, Task, TaskStatus},
     tool::{IoFootprint, ToolInvocation, ToolStatus},
     types::{ActorKind, ActorRef},
 };
@@ -82,6 +82,14 @@ pub struct CreateTaskParams {
     pub goal_type: Option<String>,
     pub constraints: Option<Vec<String>>,
     pub acceptance_criteria: Option<Vec<String>>,
+    /// Actor who requested this task (kind: "human", "agent", etc.).
+    pub requested_by_kind: Option<String>,
+    /// Actor ID for the requester.
+    pub requested_by_id: Option<String>,
+    /// UUIDs of tasks this task depends on.
+    pub dependencies: Option<Vec<String>>,
+    /// Task status: "draft", "running", "done", "failed", "cancelled". Defaults to "draft".
+    pub status: Option<String>,
     /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
     pub actor_kind: Option<String>,
     /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
@@ -101,10 +109,20 @@ pub struct CreateRunParams {
     pub status: Option<String>,
     pub context_snapshot_id: Option<String>,
     pub error: Option<String>,
+    /// Agent instances participating in this run.
+    pub agent_instances: Option<Vec<AgentInstanceParams>>,
+    /// Arbitrary metrics JSON (e.g. token counts, timings).
+    pub metrics_json: Option<String>,
     /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
     pub actor_kind: Option<String>,
     /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
     pub actor_id: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct AgentInstanceParams {
+    pub role: String,
+    pub provider_route: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -254,6 +272,8 @@ pub struct CreateDecisionParams {
     pub run_id: String,
     pub decision_type: String,
     pub chosen_patchset_id: Option<String>,
+    /// The commit SHA produced by this decision (64-hex or 40-hex SHA-1).
+    pub result_commit_sha: Option<String>,
     pub checkpoint_id: Option<String>,
     pub rationale: Option<String>,
     /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
@@ -319,6 +339,37 @@ impl LibraMcpServer {
             for c in criteria {
                 task.add_acceptance_criterion(c);
             }
+        }
+
+        // Set optional requested_by actor
+        if let Some(rb_kind) = params.requested_by_kind {
+            let rb_id = params.requested_by_id.as_deref().unwrap_or("unknown");
+            let rb_actor_kind: ActorKind = rb_kind.as_str().into();
+            let rb_actor = ActorRef::new(rb_actor_kind, rb_id)
+                .map_err(|e| ErrorData::invalid_params(e, None))?;
+            task.set_requested_by(Some(rb_actor));
+        }
+
+        // Add task dependencies
+        if let Some(deps) = params.dependencies {
+            for dep in deps {
+                let dep_id = dep
+                    .parse::<Uuid>()
+                    .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+                task.add_dependency(dep_id);
+            }
+        }
+
+        // Set task status if explicitly provided
+        if let Some(s) = params.status {
+            task.set_status(match s.as_str() {
+                "draft" => TaskStatus::Draft,
+                "running" => TaskStatus::Running,
+                "done" => TaskStatus::Done,
+                "failed" => TaskStatus::Failed,
+                "cancelled" => TaskStatus::Cancelled,
+                _ => return Err(ErrorData::invalid_params("invalid task status", None)),
+            });
         }
 
         let hash = storage
@@ -445,6 +496,23 @@ impl LibraMcpServer {
         }
         if let Some(err) = params.error {
             run.set_error(Some(err));
+        }
+
+        // Add agent instances
+        if let Some(instances) = params.agent_instances {
+            for ai in instances {
+                run.add_agent_instance(AgentInstance {
+                    role: ai.role,
+                    provider_route: ai.provider_route,
+                });
+            }
+        }
+
+        // Set metrics
+        if let Some(metrics_json) = params.metrics_json {
+            let v = serde_json::from_str(&metrics_json)
+                .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+            run.set_metrics(Some(v));
         }
 
         let hash = storage
@@ -1243,6 +1311,16 @@ impl LibraMcpServer {
         }
         decision.set_checkpoint_id(params.checkpoint_id);
         decision.set_rationale(params.rationale);
+
+        // Set result commit SHA if provided
+        if let Some(sha) = params.result_commit_sha {
+            let normalized = crate::internal::ai::util::normalize_commit_anchor(&sha)
+                .map_err(|e| ErrorData::invalid_params(e, None))?;
+            let hash_val = normalized
+                .parse()
+                .map_err(|e: String| ErrorData::invalid_params(e, None))?;
+            decision.set_result_commit_sha(Some(hash_val));
+        }
 
         let hash = storage
             .put_json(&decision)

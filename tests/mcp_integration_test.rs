@@ -74,6 +74,10 @@ async fn test_mcp_integration_create_and_read_task() {
         goal_type: Some("feature".to_string()),
         constraints: Some(vec!["Must use Rust".to_string()]),
         acceptance_criteria: None,
+        requested_by_kind: None,
+        requested_by_id: None,
+        dependencies: None,
+        status: None,
         actor_kind: None,
         actor_id: None,
     };
@@ -379,6 +383,10 @@ async fn test_create_task_with_explicit_human_actor() {
         goal_type: None,
         constraints: None,
         acceptance_criteria: None,
+        requested_by_kind: None,
+        requested_by_id: None,
+        dependencies: None,
+        status: None,
         actor_kind: Some("human".to_string()),
         actor_id: Some("jackie".to_string()),
     };
@@ -423,6 +431,10 @@ async fn test_create_task_with_agent_actor() {
         goal_type: None,
         constraints: None,
         acceptance_criteria: None,
+        requested_by_kind: None,
+        requested_by_id: None,
+        dependencies: None,
+        status: None,
         actor_kind: Some("agent".to_string()),
         actor_id: Some("coder-bot".to_string()),
     };
@@ -445,6 +457,10 @@ async fn test_create_task_default_actor_is_mcp() {
         goal_type: None,
         constraints: None,
         acceptance_criteria: None,
+        requested_by_kind: None,
+        requested_by_id: None,
+        dependencies: None,
+        status: None,
         actor_kind: None,
         actor_id: None,
     };

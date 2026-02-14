@@ -28,6 +28,10 @@ async fn test_create_task_tool() {
         goal_type: None,
         constraints: None,
         acceptance_criteria: None,
+        requested_by_kind: None,
+        requested_by_id: None,
+        dependencies: None,
+        status: None,
         actor_kind: None,
         actor_id: None,
     };
