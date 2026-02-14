@@ -65,19 +65,41 @@ impl UserHistoryCell {
 
 impl HistoryCell for UserHistoryCell {
     fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
-        let mut lines = vec![Line::styled(
-            "User:",
-            Style::default().fg(Color::Cyan).bold(),
-        )];
+        let mut lines = Vec::new();
 
-        for line in self.message.lines() {
-            lines.push(Line::styled(
-                format!("  {}", line),
-                Style::default().fg(Color::White),
-            ));
+        // User message with codex-style prefix
+        let message_lines = self.message.lines();
+        let mut is_first_line = true;
+
+        for line in message_lines {
+            if line.trim().is_empty() {
+                lines.push(Line::raw(""));
+            } else if line.starts_with("```") {
+                // Code block start/end
+                lines.push(Line::styled(
+                    format!("  {}", line),
+                    Style::default().fg(Color::Yellow),
+                ));
+            } else if line.starts_with("    ") || line.starts_with("\t") {
+                // Code indent
+                lines.push(Line::styled(
+                    format!("  {}", line),
+                    Style::default().fg(Color::Yellow),
+                ));
+            } else {
+                // Regular text with codex-style prefix
+                let prefix = if is_first_line { "› " } else { "  " };
+                lines.push(Line::styled(
+                    format!("{}{}", prefix, line),
+                    Style::default().fg(Color::White),
+                ));
+                is_first_line = false;
+            }
         }
 
-        lines.push(Line::raw("")); // Empty line for spacing
+        if !lines.is_empty() {
+            lines.push(Line::raw("")); // Empty line for spacing
+        }
         lines
     }
 
@@ -129,26 +151,26 @@ impl AssistantHistoryCell {
 
 impl HistoryCell for AssistantHistoryCell {
     fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
-        let mut lines = vec![Line::styled(
-            "Assistant:",
-            Style::default().fg(Color::Green).bold(),
-        )];
+        let mut lines = Vec::new();
 
         // Simple markdown-like rendering
         let content = self.content.trim();
         if content.is_empty() {
             if self.is_streaming {
                 lines.push(Line::styled(
-                    "  Thinking...",
+                    "• Thinking...",
                     Style::default().fg(Color::DarkGray),
                 ));
             }
         } else {
+            let mut is_first_line = true;
             for line in content.lines() {
-                // Simple code block detection
-                if line.starts_with("```") {
+                if line.trim().is_empty() {
+                    lines.push(Line::raw(""));
+                } else if line.starts_with("```") {
+                    // Code block start/end
                     lines.push(Line::styled(
-                        line.to_string(),
+                        format!("  {}", line),
                         Style::default().fg(Color::Yellow),
                     ));
                 } else if line.starts_with("    ") || line.starts_with("\t") {
@@ -158,17 +180,21 @@ impl HistoryCell for AssistantHistoryCell {
                         Style::default().fg(Color::Yellow),
                     ));
                 } else {
+                    // Regular text with codex-style prefix
+                    let prefix = if is_first_line { "• " } else { "  " };
                     lines.push(Line::styled(
-                        format!("  {}", line),
+                        format!("{}{}", prefix, line),
                         Style::default().fg(Color::White),
                     ));
+                    is_first_line = false;
                 }
             }
         }
 
         if self.is_streaming {
-            lines.push(Line::styled("  ▌", Style::default().fg(Color::Green)));
-        } else {
+            // Streaming indicator
+            lines.push(Line::styled("• ▌", Style::default().fg(Color::Green)));
+        } else if !lines.is_empty() {
             lines.push(Line::raw("")); // Empty line for spacing
         }
 
@@ -227,7 +253,7 @@ impl HistoryCell for ToolCallHistoryCell {
     fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
         let mut lines: Vec<Line<'static>> = Vec::new();
 
-        // Status icon
+        // Status icon and tool name (codex-style)
         let status_icon = if self.is_running {
             "⏳"
         } else if self.is_success() {
@@ -244,7 +270,7 @@ impl HistoryCell for ToolCallHistoryCell {
             Color::Red
         };
 
-        // Tool name line
+        // Tool header with codex-style
         lines.push(Line::styled(
             format!("{} Tool: {}", status_icon, self.tool_name),
             Style::default().fg(status_color).bold(),

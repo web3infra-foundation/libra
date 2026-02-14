@@ -286,7 +286,7 @@ async fn run_tui_with_model<M>(
     };
 
     let welcome = format!(
-        "Welcome to Libra Code! Type your message and press Enter to chat with the AI assistant.\n{}",
+        "╭─────────────────────────────────────────────────╮\n\n│ ✨ Update available! 1.0.0 -> 1.0.1              │\n│                                                 │\n│ See full release notes:                         │\n│ https://github.com/web3infra-foundation/libra │\n╰─────────────────────────────────────────────────╯\n\n╭───────────────────────────────────────────────────╮\n│ >_ Libra Codex (v0.99.0)                         │\n│                                                   │\n│ model:     gpt-5.3-codex xhigh   /model to change │\n│ directory: ~                                      │\n╰───────────────────────────────────────────────────╯\n\nWelcome to Libra Code! Type your message and press Enter to chat with the AI assistant.\n{}",
         web_line
     );
 

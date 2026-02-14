@@ -150,13 +150,13 @@ impl CompletionModelTrait for CompletionModel {
         // Apply Provider customizations (Auth headers)
         req_builder = self.client.provider.on_request(req_builder);
 
-        tracing::info!("Sending request to Gemini API: {}", url);
+        tracing::debug!("Sending request to Gemini API: {}", url);
         let resp = req_builder
             .send()
             .await
             .map_err(CompletionError::HttpError)?;
 
-        tracing::info!("Received response status: {}", resp.status());
+        tracing::debug!("Received response status: {}", resp.status());
 
         if !resp.status().is_success() {
             // Read only the first 1KB of the error body to avoid memory issues with large responses

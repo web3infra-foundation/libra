@@ -17,6 +17,7 @@ use super::{
     app_event::{AgentEvent, AgentStatus, AppEvent, ExitMode},
     chatwidget::ChatWidget,
     history_cell::{AssistantHistoryCell, ToolCallHistoryCell, UserHistoryCell},
+    slash_command::parse_command,
     terminal::{TARGET_FRAME_INTERVAL, Tui, TuiEvent},
 };
 use crate::internal::ai::{
@@ -198,6 +199,42 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             return Ok(());
         }
 
+        // Handle command popup navigation first
+        if self.widget.bottom_pane.is_popup_visible() {
+            match key.code {
+                KeyCode::Up => {
+                    self.widget.bottom_pane.popup_move_up();
+                    self.schedule_draw();
+                    return Ok(());
+                }
+                KeyCode::Down => {
+                    self.widget.bottom_pane.popup_move_down();
+                    self.schedule_draw();
+                    return Ok(());
+                }
+                KeyCode::Enter => {
+                    if self.widget.bottom_pane.apply_selected_command() {
+                        self.schedule_draw();
+                    }
+                    return Ok(());
+                }
+                KeyCode::Tab => {
+                    self.widget.bottom_pane.apply_selected_command();
+                    self.schedule_draw();
+                    return Ok(());
+                }
+                KeyCode::Esc => {
+                    self.widget.bottom_pane.hide_popup();
+                    self.schedule_draw();
+                    return Ok(());
+                }
+                _ => {
+                    // For other keys (typing), let them pass through
+                    // The popup will update automatically when the input changes
+                }
+            }
+        }
+
         // Handle input based on agent status
         match self.widget.bottom_pane.status {
             AgentStatus::Idle => match key.code {
@@ -270,6 +307,12 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     self.widget.bottom_pane.cursor_right();
                     self.schedule_draw();
                 }
+                KeyCode::Esc => {
+                    if self.widget.bottom_pane.is_popup_visible() {
+                        self.widget.bottom_pane.hide_popup();
+                        self.schedule_draw();
+                    }
+                }
                 _ => {}
             },
             AgentStatus::Thinking | AgentStatus::ExecutingTool => {
@@ -277,6 +320,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 if key.code == KeyCode::Esc {
                     self.interrupt_agent_task();
                     self.widget.bottom_pane.set_status(AgentStatus::Idle);
+                    self.widget
+                        .status_indicator
+                        .update_status(AgentStatus::Idle);
                     self.complete_streaming_assistant_cell("Interrupted.".to_string());
                     self.complete_running_tool_cells_with_interrupt();
                     self.schedule_draw();
@@ -328,6 +374,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 self.widget
                     .add_cell(Box::new(AssistantHistoryCell::streaming()));
                 self.widget.bottom_pane.set_status(AgentStatus::Thinking);
+                self.widget
+                    .status_indicator
+                    .update_status(AgentStatus::Thinking);
                 self.schedule_draw();
 
                 // Prepare components for background task
@@ -438,6 +487,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                             }
                         }
                         self.widget.bottom_pane.set_status(AgentStatus::Idle);
+                        self.widget
+                            .status_indicator
+                            .update_status(AgentStatus::Idle);
                         self.schedule_draw();
                     }
                     AgentEvent::Error { message } => {
@@ -445,6 +497,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
                         self.complete_streaming_assistant_cell(format!("Error: {}", message));
                         self.widget.bottom_pane.set_status(AgentStatus::Idle);
+                        self.widget
+                            .status_indicator
+                            .update_status(AgentStatus::Idle);
                         self.schedule_draw();
                     }
                 }
@@ -463,6 +518,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 self.widget
                     .bottom_pane
                     .set_status(AgentStatus::ExecutingTool);
+                self.widget
+                    .status_indicator
+                    .update_status(AgentStatus::ExecutingTool);
                 self.schedule_draw();
             }
             AppEvent::ToolCallEnd {
@@ -481,10 +539,14 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     }
                 }
                 self.widget.bottom_pane.set_status(AgentStatus::Thinking);
+                self.widget
+                    .status_indicator
+                    .update_status(AgentStatus::Thinking);
                 self.schedule_draw();
             }
             AppEvent::AgentStatusUpdate { status } => {
                 self.widget.bottom_pane.set_status(status);
+                self.widget.status_indicator.update_status(status);
                 self.schedule_draw();
             }
         }
@@ -494,7 +556,56 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
     /// Submit a user message.
     fn submit_message(&mut self, text: String) {
+        if let Some((cmd, args)) = parse_command(&text) {
+            self.handle_slash_command(cmd, args);
+            return;
+        }
         let _ = self.app_event_tx.send(AppEvent::SubmitUserMessage { text });
+    }
+
+    fn handle_slash_command(&mut self, command: super::SlashCommand, _args: &str) {
+        match command {
+            super::SlashCommand::Help => {
+                let help_text = r#"Available Commands:
+/help   - Show this help message
+/clear  - Clear conversation history
+/model  - Show current model
+/status - Show current status
+/quit   - Quit the application
+"#;
+                self.widget
+                    .add_cell(Box::new(AssistantHistoryCell::new(help_text.to_string())));
+                self.schedule_draw();
+            }
+            super::SlashCommand::Clear => {
+                self.widget.cells.clear();
+                self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                    "Conversation cleared.".to_string(),
+                )));
+                self.schedule_draw();
+            }
+            super::SlashCommand::Model => {
+                let model_info = format!(
+                    "Current model: {}\n(Use --model flag to change)",
+                    "gemini-2.0-flash"
+                );
+                self.widget
+                    .add_cell(Box::new(AssistantHistoryCell::new(model_info)));
+                self.schedule_draw();
+            }
+            super::SlashCommand::Status => {
+                let status_text = format!("Status: {:?}", self.widget.bottom_pane.status);
+                self.widget
+                    .add_cell(Box::new(AssistantHistoryCell::new(status_text)));
+                self.schedule_draw();
+            }
+            super::SlashCommand::Quit => {
+                self.exit_info = Some(AppExitInfo {
+                    reason: ExitReason::UserRequested,
+                });
+                self.should_exit = true;
+            }
+        }
     }
 
     fn interrupt_agent_task(&mut self) {
