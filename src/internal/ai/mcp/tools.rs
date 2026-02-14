@@ -44,8 +44,14 @@ impl LibraMcpServer {
         ActorRef::mcp_client("mcp-user").map_err(|e| ErrorData::internal_error(e.to_string(), None))
     }
 
-    fn get_actor(&self, _ctx: &RequestContext<RoleServer>) -> Result<ActorRef, ErrorData> {
-        // TODO: Extract real user from context headers or init params
+    fn get_actor(&self, ctx: &RequestContext<RoleServer>) -> Result<ActorRef, ErrorData> {
+        // Extract client name from MCP initialization handshake (peer_info).
+        // Falls back to default "mcp-user" if peer info is not yet available.
+        if let Some(client_info) = ctx.peer.peer_info() {
+            let client_name = &client_info.client_info.name;
+            return ActorRef::mcp_client(client_name)
+                .map_err(|e| ErrorData::internal_error(e.to_string(), None));
+        }
         self.default_actor()
     }
 }
