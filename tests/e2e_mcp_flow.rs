@@ -201,7 +201,7 @@ async fn test_e2e_mcp_flow() {
         .to_str()
         .unwrap()
         .to_string();
-    println!("Session ID: {session_id}");
+    println!("Session ID: <redacted, len={}>", session_id.len());
 
     // Parse SSE body
     let init_sse = response.text().await.unwrap();

@@ -28,7 +28,6 @@ rust_library(
         "OSX_10_11",
         "OSX_10_12",
         "OSX_10_9",
-        "default",
     ],
     rustc_flags = ["@$(location :security-framework-sys-manifest[env_flags])"],
     visibility = ["PUBLIC"],
