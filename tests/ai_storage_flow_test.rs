@@ -11,7 +11,7 @@ use git_internal::{
 };
 use libra::{
     command::commit::CommitArgs,
-    internal::head::Head,
+    internal::{ai::history::HistoryManager, head::Head},
     utils::{
         storage::{Storage, local::LocalStorage, remote::RemoteStorage},
         storage_ext::StorageExt,
@@ -35,6 +35,7 @@ async fn test_ai_flow_local() {
     let objects_dir = libra_dir.join("objects");
 
     let storage = Arc::new(LocalStorage::new(objects_dir));
+    let history_manager = HistoryManager::new(storage.clone(), libra_dir.clone());
 
     // 2. User creates a Task
     let repo_id = Uuid::new_v4();
@@ -49,7 +50,7 @@ async fn test_ai_flow_local() {
     task.add_constraint("Must use StorageExt");
 
     // Use put_tracked to ensure History Log is updated (Orphan Branch)
-    let task_hash = storage.put_tracked(&task).await.unwrap();
+    let task_hash = storage.put_tracked(&task, &history_manager).await.unwrap();
     println!("Stored Task: {}", task_hash);
 
     // Verify History Log Creation
@@ -81,7 +82,10 @@ async fn test_ai_flow_local() {
     )
     .unwrap();
 
-    let snapshot_hash = storage.put_tracked(&snapshot).await.unwrap();
+    let snapshot_hash = storage
+        .put_tracked(&snapshot, &history_manager)
+        .await
+        .unwrap();
     println!("Stored Snapshot: {}", snapshot_hash);
 
     // 2.6. User creates a Run
@@ -94,12 +98,12 @@ async fn test_ai_flow_local() {
     .unwrap();
     run.set_context_snapshot_id(Some(snapshot.header().object_id()));
 
-    let run_hash = storage.put_tracked(&run).await.unwrap();
+    let run_hash = storage.put_tracked(&run, &history_manager).await.unwrap();
     println!("Stored Run: {}", run_hash);
 
     // 2.7. User creates a Plan
     let plan = Plan::new(repo_id, actor.clone(), run.header().object_id()).unwrap();
-    let plan_hash = storage.put_tracked(&plan).await.unwrap();
+    let plan_hash = storage.put_tracked(&plan, &history_manager).await.unwrap();
     println!("Stored Plan: {}", plan_hash);
 
     // Verify Run Retrieval

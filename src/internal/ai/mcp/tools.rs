@@ -30,10 +30,25 @@ use git_internal::internal::object::{
     tool::{IoFootprint, ToolInvocation, ToolStatus},
     types::ActorRef,
 };
-use rmcp::{handler::server::wrapper::Parameters, model::*, schemars, tool};
+use rmcp::{
+    RoleServer, handler::server::wrapper::Parameters, model::*, schemars, service::RequestContext,
+    tool,
+};
 use uuid::Uuid;
 
 use crate::{internal::ai::mcp::server::LibraMcpServer, utils::storage_ext::StorageExt};
+
+impl LibraMcpServer {
+    /// Default actor for MCP tool calls. Extracted for testability.
+    pub fn default_actor(&self) -> Result<ActorRef, ErrorData> {
+        ActorRef::mcp_client("mcp-user").map_err(|e| ErrorData::internal_error(e.to_string(), None))
+    }
+
+    fn get_actor(&self, _ctx: &RequestContext<RoleServer>) -> Result<ActorRef, ErrorData> {
+        // TODO: Extract real user from context headers or init params
+        self.default_actor()
+    }
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct CreateTaskParams {
@@ -195,16 +210,25 @@ impl LibraMcpServer {
     #[tool(description = "Create a new Task")]
     pub async fn create_task(
         &self,
+        ctx: RequestContext<RoleServer>,
         Parameters(params): Parameters<CreateTaskParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let actor = self.get_actor(&ctx)?;
+        self.create_task_impl(params, actor).await
+    }
+
+    /// Core implementation of create_task, callable without RequestContext for testing.
+    pub async fn create_task_impl(
+        &self,
+        params: CreateTaskParams,
+        actor: ActorRef,
     ) -> Result<CallToolResult, ErrorData> {
         let storage = self
             .storage
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
-        let repo_id = Uuid::new_v4();
-        let actor = ActorRef::mcp_client("mcp-user")
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let repo_id = self.repo_id;
 
         let goal_type = if let Some(gt) = params.goal_type {
             use std::str::FromStr;
@@ -276,7 +300,10 @@ impl LibraMcpServer {
         let mut tasks_info = Vec::new();
         let limit = params.limit.unwrap_or(10);
 
-        for (_id, hash) in objects.into_iter().take(limit) {
+        for (_id, hash) in objects.into_iter() {
+            if tasks_info.len() >= limit {
+                break;
+            }
             // Read task from storage to get title/status
             if let Ok(task) = storage.get_json::<Task>(&hash).await {
                 // Filter by status if requested
@@ -309,6 +336,7 @@ impl LibraMcpServer {
     #[tool(description = "Create a new Run")]
     pub async fn create_run(
         &self,
+        ctx: RequestContext<RoleServer>,
         Parameters(params): Parameters<CreateRunParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let storage = self
@@ -316,9 +344,8 @@ impl LibraMcpServer {
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
-        let repo_id = Uuid::new_v4();
-        let actor = ActorRef::mcp_client("mcp-user")
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let repo_id = self.repo_id;
+        let actor = self.get_actor(&ctx)?;
         let task_id = params
             .task_id
             .parse::<Uuid>()
@@ -394,7 +421,10 @@ impl LibraMcpServer {
 
         let mut out = Vec::new();
         let limit = params.limit.unwrap_or(10);
-        for (_id, hash) in objects.into_iter().take(limit) {
+        for (_id, hash) in objects.into_iter() {
+            if out.len() >= limit {
+                break;
+            }
             if let Ok(run) = storage.get_json::<Run>(&hash).await {
                 if let Some(status_filter) = &params.status
                     && run.status().as_str() != status_filter
@@ -422,6 +452,7 @@ impl LibraMcpServer {
     #[tool(description = "Create a new ContextSnapshot")]
     pub async fn create_context_snapshot(
         &self,
+        ctx: RequestContext<RoleServer>,
         Parameters(params): Parameters<CreateContextSnapshotParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let storage = self
@@ -429,9 +460,8 @@ impl LibraMcpServer {
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
-        let repo_id = Uuid::new_v4();
-        let actor = ActorRef::mcp_client("mcp-user")
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let repo_id = self.repo_id;
+        let actor = self.get_actor(&ctx)?;
 
         let strategy = match params.selection_strategy.as_str() {
             "explicit" => SelectionStrategy::Explicit,
@@ -523,6 +553,7 @@ impl LibraMcpServer {
     #[tool(description = "Create a new Plan")]
     pub async fn create_plan(
         &self,
+        ctx: RequestContext<RoleServer>,
         Parameters(params): Parameters<CreatePlanParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let storage = self
@@ -530,9 +561,8 @@ impl LibraMcpServer {
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
-        let repo_id = Uuid::new_v4();
-        let actor = ActorRef::mcp_client("mcp-user")
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let repo_id = self.repo_id;
+        let actor = self.get_actor(&ctx)?;
         let run_id = params
             .run_id
             .parse::<Uuid>()
@@ -627,6 +657,7 @@ impl LibraMcpServer {
     #[tool(description = "Create a new PatchSet")]
     pub async fn create_patchset(
         &self,
+        ctx: RequestContext<RoleServer>,
         Parameters(params): Parameters<CreatePatchSetParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let storage = self
@@ -634,9 +665,8 @@ impl LibraMcpServer {
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
-        let repo_id = Uuid::new_v4();
-        let actor = ActorRef::mcp_client("mcp-user")
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let repo_id = self.repo_id;
+        let actor = self.get_actor(&ctx)?;
         let run_id = params
             .run_id
             .parse::<Uuid>()
@@ -733,6 +763,7 @@ impl LibraMcpServer {
     #[tool(description = "Create a new Evidence")]
     pub async fn create_evidence(
         &self,
+        ctx: RequestContext<RoleServer>,
         Parameters(params): Parameters<CreateEvidenceParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let storage = self
@@ -740,9 +771,8 @@ impl LibraMcpServer {
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
-        let repo_id = Uuid::new_v4();
-        let actor = ActorRef::mcp_client("mcp-user")
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let repo_id = self.repo_id;
+        let actor = self.get_actor(&ctx)?;
         let run_id = params
             .run_id
             .parse::<Uuid>()
@@ -825,6 +855,7 @@ impl LibraMcpServer {
     #[tool(description = "Create a new ToolInvocation")]
     pub async fn create_tool_invocation(
         &self,
+        ctx: RequestContext<RoleServer>,
         Parameters(params): Parameters<CreateToolInvocationParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let storage = self
@@ -832,9 +863,8 @@ impl LibraMcpServer {
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
-        let repo_id = Uuid::new_v4();
-        let actor = ActorRef::mcp_client("mcp-user")
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let repo_id = self.repo_id;
+        let actor = self.get_actor(&ctx)?;
         let run_id = params
             .run_id
             .parse::<Uuid>()
@@ -917,6 +947,7 @@ impl LibraMcpServer {
     #[tool(description = "Create a new Provenance")]
     pub async fn create_provenance(
         &self,
+        ctx: RequestContext<RoleServer>,
         Parameters(params): Parameters<CreateProvenanceParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let storage = self
@@ -924,9 +955,8 @@ impl LibraMcpServer {
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
-        let repo_id = Uuid::new_v4();
-        let actor = ActorRef::mcp_client("mcp-user")
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let repo_id = self.repo_id;
+        let actor = self.get_actor(&ctx)?;
         let run_id = params
             .run_id
             .parse::<Uuid>()
@@ -1002,6 +1032,7 @@ impl LibraMcpServer {
     #[tool(description = "Create a new Decision")]
     pub async fn create_decision(
         &self,
+        ctx: RequestContext<RoleServer>,
         Parameters(params): Parameters<CreateDecisionParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let storage = self
@@ -1009,9 +1040,8 @@ impl LibraMcpServer {
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
-        let repo_id = Uuid::new_v4();
-        let actor = ActorRef::mcp_client("mcp-user")
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let repo_id = self.repo_id;
+        let actor = self.get_actor(&ctx)?;
         let run_id = params
             .run_id
             .parse::<Uuid>()

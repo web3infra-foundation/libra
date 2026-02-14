@@ -1,11 +1,18 @@
 pub fn normalize_commit_anchor(commit: &str) -> Result<String, String> {
     let v = commit.trim();
+    if !v.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!(
+            "Invalid commit hash: contains non-hex characters: {}",
+            v
+        ));
+    }
+    let v = v.to_ascii_lowercase();
     if v.len() == 64 {
-        return Ok(v.to_string());
+        return Ok(v);
     }
     if v.len() == 40 {
         let mut out = String::with_capacity(64);
-        out.push_str(v);
+        out.push_str(&v);
         while out.len() < 64 {
             out.push('0');
         }
@@ -18,6 +25,12 @@ pub fn extract_sha1_from_anchor(anchor64: &str) -> Result<String, String> {
     let v = anchor64.trim();
     if v.len() != 64 {
         return Err(format!("Invalid anchor length: {}", v.len()));
+    }
+    if !v.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!(
+            "Invalid anchor: contains non-hex characters: {}",
+            v
+        ));
     }
     Ok(v.chars().take(40).collect())
 }

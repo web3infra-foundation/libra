@@ -12,6 +12,8 @@ use libra::{
 };
 use rmcp::{ServerHandler, handler::server::wrapper::Parameters};
 use tempfile::tempdir;
+use uuid::Uuid;
+
 #[tokio::test]
 async fn test_mcp_integration_server_info() {
     let temp_dir = tempdir().unwrap();
@@ -20,7 +22,8 @@ async fn test_mcp_integration_server_info() {
         storage.clone(),
         temp_dir.path().to_path_buf(),
     ));
-    let server = LibraMcpServer::new(Some(history_manager), Some(storage));
+    let repo_id = Uuid::new_v4();
+    let server = LibraMcpServer::new(Some(history_manager), Some(storage), repo_id);
 
     let info = ServerHandler::get_info(&server);
     assert_eq!(info.server_info.name, "libra");
@@ -34,7 +37,8 @@ async fn test_mcp_integration_list_resources() {
         storage.clone(),
         temp_dir.path().to_path_buf(),
     ));
-    let server = LibraMcpServer::new(Some(history_manager), Some(storage));
+    let repo_id = Uuid::new_v4();
+    let server = LibraMcpServer::new(Some(history_manager), Some(storage), repo_id);
 
     // Call implementation directly to avoid RequestContext
     let resources = server.list_resources_impl().await.unwrap();
@@ -50,7 +54,8 @@ async fn test_mcp_integration_create_and_read_task() {
         storage.clone(),
         temp_dir.path().to_path_buf(),
     ));
-    let server = LibraMcpServer::new(Some(history_manager), Some(storage));
+    let repo_id = Uuid::new_v4();
+    let server = LibraMcpServer::new(Some(history_manager), Some(storage), repo_id);
 
     // 1. Create Task
     let params = CreateTaskParams {
@@ -61,7 +66,8 @@ async fn test_mcp_integration_create_and_read_task() {
         acceptance_criteria: None,
     };
 
-    let result = server.create_task(Parameters(params)).await.unwrap();
+    let actor = server.default_actor().unwrap();
+    let result = server.create_task_impl(params, actor).await.unwrap();
     let content = &result.content[0];
 
     // Use serde_json to inspect content to avoid enum variant issues

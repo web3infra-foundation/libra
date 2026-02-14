@@ -17,13 +17,18 @@ use rmcp::{
     RoleServer, ServerHandler, handler::server::router::tool::ToolRouter, model::*,
     service::RequestContext, tool_handler, tool_router,
 };
+use uuid::Uuid;
 
-use crate::{internal::ai::history::HistoryManager, utils::storage::Storage};
+use crate::{
+    internal::ai::history::HistoryManager,
+    utils::{storage::Storage, storage_ext::StorageExt},
+};
 
 #[derive(Clone)]
 pub struct LibraMcpServer {
     pub history_manager: Option<Arc<HistoryManager>>,
     pub storage: Option<Arc<dyn Storage + Send + Sync>>,
+    pub repo_id: Uuid,
     tool_router: ToolRouter<LibraMcpServer>,
 }
 
@@ -32,10 +37,12 @@ impl LibraMcpServer {
     pub fn new(
         history_manager: Option<Arc<HistoryManager>>,
         storage: Option<Arc<dyn Storage + Send + Sync>>,
+        repo_id: Uuid,
     ) -> Self {
         Self {
             history_manager,
             storage,
+            repo_id,
             tool_router: Self::tool_router(),
         }
     }
@@ -53,6 +60,10 @@ impl LibraMcpServer {
         if uri == "libra://history/latest" {
             // For now return a placeholder or HEAD hash if we can expose it
             return Ok(vec![ResourceContents::text("latest", "History Head")]);
+        }
+
+        if uri == "libra://context/active" {
+            return self.read_active_context().await;
         }
 
         if let Some(object_type) = uri.strip_prefix("libra://objects/") {
@@ -73,24 +84,185 @@ impl LibraMcpServer {
         }
 
         if let Some(object_id_str) = uri.strip_prefix("libra://object/") {
-            if let Some(history) = &self.history_manager
-                && let Some(storage) = &self.storage
-                && let Ok(Some((hash, _type))) = history.find_object_hash(object_id_str).await
-            {
-                // Read object from storage
-                // Storage::get returns (Vec<u8>, ObjectType).
-                if let Ok((data, _)) = storage.get(&hash).await {
+            let history = self
+                .history_manager
+                .as_ref()
+                .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
+            let storage = self
+                .storage
+                .as_ref()
+                .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
+
+            let result = history
+                .find_object_hash(object_id_str)
+                .await
+                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+            match result {
+                Some((hash, _type)) => {
+                    let (data, _) = storage
+                        .get(&hash)
+                        .await
+                        .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
                     let json_str = String::from_utf8_lossy(&data).to_string();
                     return Ok(vec![ResourceContents::text(json_str, uri)]);
                 }
+                None => {
+                    return Err(ErrorData::resource_not_found(
+                        format!("Object not found: {}", object_id_str),
+                        None,
+                    ));
+                }
             }
-            return Err(ErrorData::resource_not_found(
-                format!("Object not found: {}", object_id_str),
-                None,
-            ));
         }
 
         Err(ErrorData::resource_not_found("Resource not found", None))
+    }
+
+    /// Build the `libra://context/active` resource by finding the latest
+    /// non-terminal Run, then loading its parent Task and linked ContextSnapshot.
+    ///
+    /// Returns a JSON object with `task`, `run`, and optionally `context_snapshot` fields.
+    /// If no active run is found, falls back to the latest non-terminal Task.
+    /// If nothing is active, returns `{"active": false}`.
+    async fn read_active_context(&self) -> Result<Vec<ResourceContents>, ErrorData> {
+        use git_internal::internal::object::{
+            context::ContextSnapshot,
+            run::{Run, RunStatus},
+            task::Task,
+        };
+
+        let history = self
+            .history_manager
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
+
+        let uri = "libra://context/active";
+
+        // 1. Find the latest active Run (UUID v7 is lexicographically time-ordered)
+        let runs = history
+            .list_objects("run")
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        let mut active_run: Option<Run> = None;
+        // Iterate in reverse so the latest (by UUID sort) is checked first
+        for (_id, hash) in runs.into_iter().rev() {
+            if let Ok(run) = storage.get_json::<Run>(&hash).await {
+                match run.status() {
+                    RunStatus::Completed | RunStatus::Failed => continue,
+                    _ => {
+                        active_run = Some(run);
+                        break;
+                    }
+                }
+            }
+        }
+
+        let mut result = serde_json::Map::new();
+
+        if let Some(run) = &active_run {
+            // Serialize run info
+            let run_obj = serde_json::json!({
+                "id": run.header().object_id().to_string(),
+                "status": run.status().as_str(),
+                "task_id": run.task_id().to_string(),
+                "base_commit_sha": run.base_commit_sha().to_string(),
+            });
+            result.insert("run".to_string(), run_obj);
+
+            // Load parent Task
+            let task_hash = history
+                .get_object_hash("task", &run.task_id().to_string())
+                .await
+                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            if let Some(hash) = task_hash
+                && let Ok(task) = storage.get_json::<Task>(&hash).await
+            {
+                let task_obj = serde_json::json!({
+                    "id": task.header().object_id().to_string(),
+                    "title": task.title(),
+                    "status": task.status().as_str(),
+                    "goal_type": task.goal_type().map(|g| g.to_string()),
+                    "constraints": task.constraints(),
+                    "acceptance_criteria": task.acceptance_criteria(),
+                });
+                result.insert("task".to_string(), task_obj);
+            }
+
+            // Load linked ContextSnapshot if present
+            if let Some(snapshot_id) = run.context_snapshot_id() {
+                let snap_hash = history
+                    .get_object_hash("snapshot", &snapshot_id.to_string())
+                    .await
+                    .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+                if let Some(hash) = snap_hash
+                    && let Ok(snapshot) = storage.get_json::<ContextSnapshot>(&hash).await
+                {
+                    let items: Vec<serde_json::Value> = snapshot
+                        .items()
+                        .iter()
+                        .map(|item| {
+                            serde_json::json!({
+                                "kind": format!("{:?}", item.kind),
+                                "path": item.path,
+                                "content_id": item.content_id.to_string(),
+                            })
+                        })
+                        .collect();
+                    let snap_obj = serde_json::json!({
+                        "id": snapshot.header().object_id().to_string(),
+                        "base_commit_sha": snapshot.base_commit_sha().to_string(),
+                        "selection_strategy": format!("{:?}", snapshot.selection_strategy()),
+                        "items": items,
+                        "summary": snapshot.summary(),
+                    });
+                    result.insert("context_snapshot".to_string(), snap_obj);
+                }
+            }
+
+            result.insert("active".to_string(), serde_json::Value::Bool(true));
+        } else {
+            // No active run — try to find the latest non-terminal Task as fallback
+            let tasks = history
+                .list_objects("task")
+                .await
+                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+            let mut found_task = false;
+            for (_id, hash) in tasks.into_iter().rev() {
+                if let Ok(task) = storage.get_json::<Task>(&hash).await {
+                    let status = task.status().as_str();
+                    if status == "done" || status == "failed" || status == "cancelled" {
+                        continue;
+                    }
+                    let task_obj = serde_json::json!({
+                        "id": task.header().object_id().to_string(),
+                        "title": task.title(),
+                        "status": task.status().as_str(),
+                        "goal_type": task.goal_type().map(|g| g.to_string()),
+                        "constraints": task.constraints(),
+                        "acceptance_criteria": task.acceptance_criteria(),
+                    });
+                    result.insert("task".to_string(), task_obj);
+                    result.insert("active".to_string(), serde_json::Value::Bool(true));
+                    found_task = true;
+                    break;
+                }
+            }
+
+            if !found_task {
+                result.insert("active".to_string(), serde_json::Value::Bool(false));
+            }
+        }
+
+        let json = serde_json::to_string(&result)
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        Ok(vec![ResourceContents::text(json, uri)])
     }
 }
 

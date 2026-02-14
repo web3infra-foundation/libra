@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use rmcp::handler::server::wrapper::Parameters;
 use tempfile::tempdir;
+use uuid::Uuid;
 
 use crate::{
     internal::ai::{
@@ -19,7 +19,8 @@ async fn test_create_task_tool() {
         storage.clone(),
         temp_dir.path().to_path_buf(),
     ));
-    let server = LibraMcpServer::new(Some(history_manager), Some(storage));
+    let repo_id = Uuid::new_v4();
+    let server = LibraMcpServer::new(Some(history_manager), Some(storage), repo_id);
 
     let params = CreateTaskParams {
         title: "Test Task".to_string(),
@@ -29,7 +30,8 @@ async fn test_create_task_tool() {
         acceptance_criteria: None,
     };
 
-    let result = server.create_task(Parameters(params)).await;
+    let actor = server.default_actor().unwrap();
+    let result = server.create_task_impl(params, actor).await;
     assert!(result.is_ok());
 
     let call_result = result.unwrap();

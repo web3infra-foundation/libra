@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use git_internal::{
     errors::GitError,
@@ -20,10 +18,7 @@ use git_internal::{
 };
 use serde::{Serialize, de::DeserializeOwned};
 
-use crate::{
-    internal::ai::history::HistoryManager,
-    utils::{storage::Storage, util::try_get_storage_path},
-};
+use crate::{internal::ai::history::HistoryManager, utils::storage::Storage};
 
 /// Trait for objects that have a unique ID and Type, used for Ref creation.
 pub trait Identifiable {
@@ -124,9 +119,11 @@ pub trait StorageExt: Storage + Send + Sync {
 
     /// Store an object and automatically add it to the history log (Orphan Branch).
     /// This prevents GC and organizes objects in a time-series tree.
+    /// Requires an explicit `HistoryManager` to decouple tracking from process CWD.
     async fn put_tracked<T: Serialize + Send + Sync + Identifiable>(
         &self,
         object: &T,
+        history_manager: &HistoryManager,
     ) -> Result<ObjectHash, GitError>;
 
     /// Retrieve and deserialize an object from a Git Blob hash.
@@ -163,16 +160,9 @@ impl<S: Storage + Send + Sync + ?Sized> StorageExt for S {
     async fn put_tracked<T: Serialize + Send + Sync + Identifiable>(
         &self,
         object: &T,
+        history_manager: &HistoryManager,
     ) -> Result<ObjectHash, GitError> {
         let hash = self.put_json(object).await?;
-
-        let repo_root = try_get_storage_path(None).map_err(|e| {
-            GitError::InvalidObjectInfo(format!("Failed to locate repo storage path: {}", e))
-        })?;
-        let storage = Arc::new(crate::utils::storage::local::LocalStorage::new(
-            repo_root.join("objects"),
-        ));
-        let history_manager = HistoryManager::new(storage, repo_root);
 
         history_manager
             .append(&object.object_type(), &object.object_id(), hash)

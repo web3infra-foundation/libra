@@ -51,13 +51,7 @@ impl HistoryManager {
         // 1. Resolve current history head
         let parent_commit_id = self.resolve_history_head().await?;
         let mut root_items = if let Some(parent_id) = parent_commit_id {
-            match self.load_commit_tree(&parent_id) {
-                Ok(items) => items,
-                Err(e) => {
-                    eprintln!("Warning: Failed to load history tree: {}", e);
-                    Vec::new()
-                }
-            }
+            self.load_commit_tree(&parent_id)?
         } else {
             Vec::new()
         };
@@ -233,14 +227,7 @@ impl HistoryManager {
 
     fn load_tree(&self, tree_id: &ObjectHash) -> Result<Vec<TreeItem>, GitError> {
         let data = read_git_object(&self.repo_path, tree_id)?;
-        // Use ObjectTrait::from_bytes is not available in scope or implementation issue.
-        // git-internal Tree has `from_bytes` but maybe via trait or direct impl.
-        // Let's assume there is a way or fallback to Tree::from_tree_items if we could parse it manually,
-        // but read_git_object returns decompressed bytes.
-        // Wait, the previous error said `no function named from_bytes`.
-        // Let's check git-internal source if we can...
-        // Assuming Tree implements ObjectTrait which has from_bytes.
-        // We need to import ObjectTrait.
+
         let tree = Tree::from_bytes(&data, *tree_id)?;
         Ok(tree.tree_items)
     }
