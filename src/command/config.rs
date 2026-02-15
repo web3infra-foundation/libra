@@ -319,8 +319,7 @@ mod tests {
 
     #[test]
     fn scope_flags_are_mutually_exclusive() {
-        let args =
-            ConfigArgs::try_parse_from(["config", "--global", "--system", "user.name"]);
+        let args = ConfigArgs::try_parse_from(["config", "--global", "--system", "user.name"]);
         assert!(args.is_err());
         assert!(matches!(
             args.err().unwrap().kind(),

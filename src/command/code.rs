@@ -22,6 +22,7 @@ use crate::internal::{
             deepseek::client::Client as DeepSeekClient,
             gemini::{Client as GeminiClient, GEMINI_2_5_FLASH},
             openai::{Client as OpenAIClient, GPT_4O_MINI},
+            zhipu::{Client as ZhipuClient, GLM_5},
         },
         tools::{
             ToolRegistry, ToolRegistryBuilder,
@@ -40,6 +41,7 @@ pub enum CodeProvider {
     Openai,
     Anthropic,
     Deepseek,
+    Zhipu,
 }
 
 #[derive(Parser, Debug)]
@@ -328,6 +330,28 @@ async fn execute_tui(args: CodeArgs) {
             // Fixed model: deepseek-chat
             let model = client.completion_model("deepseek-chat");
             let model_type = crate::internal::tui::ModelType::Deepseek(model);
+            run_tui_with_model(
+                args.host,
+                args.port,
+                args.mcp_port,
+                model_type,
+                registry,
+                config,
+                mcp_server,
+            )
+            .await;
+        }
+        CodeProvider::Zhipu => {
+            let client = match ZhipuClient::from_env() {
+                Ok(client) => client,
+                Err(_) => {
+                    eprintln!("error: ZHIPU_API_KEY is not set");
+                    return;
+                }
+            };
+            let model_name = args.model.unwrap_or_else(|| GLM_5.to_string());
+            let model = client.completion_model(&model_name);
+            let model_type = crate::internal::tui::ModelType::Zhipu(model);
             run_tui_with_model(
                 args.host,
                 args.port,
