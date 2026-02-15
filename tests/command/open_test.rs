@@ -19,7 +19,7 @@ async fn test_open_remote_origin() {
     // Add origin remote
     remote::execute(RemoteCmds::Add {
         name: "origin".into(),
-        url: "git@github.com:user/repo.git".into(),
+        url: "git@github.com:web3infra-foundation/libra.git".into(),
     })
     .await;
 

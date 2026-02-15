@@ -185,14 +185,14 @@ This section documents the compatibility between **Libra**’s CLI and **Git** a
 |  | `-b, --initial-branch <name>` | Yes | Yes | ✅ | - | Set initial branch name |
 |  | `-q, --quiet` | Yes | Yes | ✅ | - | Suppress output |
 |  | `--shared <perm>` | Yes | Yes | ⚠️ | P1 | Supported, but effective semantics may differ from Git in edge cases |
-|  | `--separate-git-dir <dir>` | Yes | No | ⛔ | P1 | Separate `.git` directory; useful for advanced layouts |
+|  | `--separate-git-dir <dir>` | Yes | Yes | ✅ | - | Separate storage directory (Libra: `--separate-libra-dir` is the preferred option name; `--separate-git-dir` is an alias); semantics may differ slightly from Git |
 |  | `--object-format <alg>` | Yes | Yes | ✅ | - | Important for SHA‑1/SHA‑256 migration/compatibility |
 | `clone` | `<remote_repo>` | Yes | Yes | ✅ | - | Repository URL/path |
 |  | `[local_path]` | Yes | Yes | ✅ | - | Target directory |
 |  | `-b, --branch <name>` | Yes | Yes | ✅ | - | Check out given branch |
 |  | `--depth <n>` | Yes | Yes | ✅ | - | Shallow clone, widely used in CI and large repos |
 |  | `--single-branch` | Yes | Yes | ✅ | - | Clone only the specified branch |
-|  | `--recurse-submodules` | Yes | No | ⛔ | P1 | Requires submodule support; important in mono‑repos |
+|  | `--recurse-submodules` | Yes | No | ⛔ | P1 | Requires submodule support; important in monorepos |
 |  | `--bare` | Yes | Yes | ✅ | - | Bare clone for server‑side usage |
 |  | `--mirror` | Yes | No | ⛔ | P1 | Full mirror including refs, for replication scenarios |
 
