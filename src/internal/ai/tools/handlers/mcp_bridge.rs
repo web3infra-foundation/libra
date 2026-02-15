@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use rmcp::model::CallToolResult;
 
 use crate::internal::ai::{
-    mcp::{server::LibraMcpServer, tools::*},
+    mcp::{resource::*, server::LibraMcpServer},
     tools::{
         context::{ToolInvocation, ToolKind, ToolOutput, ToolPayload},
         error::{ToolError, ToolResult},

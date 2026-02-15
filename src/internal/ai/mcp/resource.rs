@@ -21,6 +21,8 @@
 //!
 //! List tools call `HistoryManager::list_objects(object_type)` using the following types:
 //! `task`, `run`, `snapshot`, `plan`, `patchset`, `evidence`, `invocation`, `provenance`, `decision`, `intent`.
+use std::collections::HashMap;
+
 use git_internal::internal::object::{
     context::{ContextItem, ContextItemKind, ContextSnapshot, SelectionStrategy},
     decision::{Decision, DecisionType},
@@ -31,7 +33,7 @@ use git_internal::internal::object::{
     run::{AgentInstance, Run, RunStatus},
     task::{GoalType, Task, TaskStatus},
     tool::{IoFootprint, ToolInvocation, ToolStatus},
-    types::{ActorKind, ActorRef},
+    types::{ActorKind, ActorRef, ArtifactRef},
 };
 use rmcp::{
     RoleServer,
@@ -100,6 +102,32 @@ impl LibraMcpServer {
     }
 }
 
+/// Helper to convert local ArtifactParams to git_internal::ArtifactRef
+fn convert_artifact(p: ArtifactParams) -> Result<ArtifactRef, ErrorData> {
+    let mut artifact =
+        ArtifactRef::new(p.store, p.key).map_err(|e| ErrorData::invalid_params(e, None))?;
+
+    artifact.set_content_type(p.content_type);
+    artifact.set_size_bytes(p.size_bytes);
+
+    if let Some(hash_hex) = p.hash {
+        artifact = artifact
+            .with_hash_hex(hash_hex)
+            .map_err(|e| ErrorData::invalid_params(e, None))?;
+    }
+
+    Ok(artifact)
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ArtifactParams {
+    pub store: String,
+    pub key: String,
+    pub content_type: Option<String>,
+    pub size_bytes: Option<u64>,
+    pub hash: Option<String>,
+}
+
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct CreateIntentParams {
     /// The prompt or goal content.
@@ -136,6 +164,10 @@ pub struct CreateTaskParams {
     pub dependencies: Option<Vec<String>>,
     /// Task status: "draft", "running", "done", "failed", "cancelled". Defaults to "draft".
     pub status: Option<String>,
+    /// Search tags (key-value pairs)
+    pub tags: Option<HashMap<String, String>>,
+    /// External ID mapping
+    pub external_ids: Option<HashMap<String, String>>,
     /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
     pub actor_kind: Option<String>,
     /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
@@ -159,6 +191,12 @@ pub struct CreateRunParams {
     pub agent_instances: Option<Vec<AgentInstanceParams>>,
     /// Arbitrary metrics JSON (e.g. token counts, timings).
     pub metrics_json: Option<String>,
+    /// Orchestrator version (default: libra-builtin)
+    pub orchestrator_version: Option<String>,
+    /// Search tags (key-value pairs)
+    pub tags: Option<HashMap<String, String>>,
+    /// External ID mapping
+    pub external_ids: Option<HashMap<String, String>>,
     /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
     pub actor_kind: Option<String>,
     /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
@@ -183,6 +221,10 @@ pub struct CreateContextSnapshotParams {
     pub selection_strategy: String,
     pub items: Option<Vec<ContextItemParams>>,
     pub summary: Option<String>,
+    /// Search tags (key-value pairs)
+    pub tags: Option<HashMap<String, String>>,
+    /// External ID mapping
+    pub external_ids: Option<HashMap<String, String>>,
     /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
     pub actor_kind: Option<String>,
     /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
@@ -205,6 +247,10 @@ pub struct CreatePlanParams {
     pub run_id: String,
     pub plan_version: Option<u32>,
     pub steps: Option<Vec<PlanStepParams>>,
+    /// Search tags (key-value pairs)
+    pub tags: Option<HashMap<String, String>>,
+    /// External ID mapping
+    pub external_ids: Option<HashMap<String, String>>,
     /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
     pub actor_kind: Option<String>,
     /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
@@ -214,6 +260,9 @@ pub struct CreatePlanParams {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct PlanStepParams {
     pub intent: String,
+    pub inputs: Option<serde_json::Value>,
+    pub outputs: Option<serde_json::Value>,
+    pub checks: Option<serde_json::Value>,
     pub status: Option<String>,
     pub owner_role: Option<String>,
 }
@@ -231,6 +280,12 @@ pub struct CreatePatchSetParams {
     pub touched_files: Option<Vec<TouchedFileParams>>,
     pub rationale: Option<String>,
     pub apply_status: Option<String>,
+    pub diff_format: Option<String>,
+    pub diff_artifact: Option<ArtifactParams>,
+    /// Search tags (key-value pairs)
+    pub tags: Option<HashMap<String, String>>,
+    /// External ID mapping
+    pub external_ids: Option<HashMap<String, String>>,
     /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
     pub actor_kind: Option<String>,
     /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
@@ -259,6 +314,11 @@ pub struct CreateEvidenceParams {
     pub command: Option<String>,
     pub exit_code: Option<i32>,
     pub summary: Option<String>,
+    pub report_artifacts: Option<Vec<ArtifactParams>>,
+    /// Search tags (key-value pairs)
+    pub tags: Option<HashMap<String, String>>,
+    /// External ID mapping
+    pub external_ids: Option<HashMap<String, String>>,
     /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
     pub actor_kind: Option<String>,
     /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
@@ -278,6 +338,11 @@ pub struct CreateToolInvocationParams {
     pub args_json: Option<String>,
     pub io_footprint: Option<IoFootprintParams>,
     pub result_summary: Option<String>,
+    pub artifacts: Option<Vec<ArtifactParams>>,
+    /// Search tags (key-value pairs)
+    pub tags: Option<HashMap<String, String>>,
+    /// External ID mapping
+    pub external_ids: Option<HashMap<String, String>>,
     /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
     pub actor_kind: Option<String>,
     /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
@@ -302,6 +367,10 @@ pub struct CreateProvenanceParams {
     pub model: String,
     pub parameters_json: Option<String>,
     pub token_usage_json: Option<String>,
+    /// Search tags (key-value pairs)
+    pub tags: Option<HashMap<String, String>>,
+    /// External ID mapping
+    pub external_ids: Option<HashMap<String, String>>,
     /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
     pub actor_kind: Option<String>,
     /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
@@ -322,6 +391,10 @@ pub struct CreateDecisionParams {
     pub result_commit_sha: Option<String>,
     pub checkpoint_id: Option<String>,
     pub rationale: Option<String>,
+    /// Search tags (key-value pairs)
+    pub tags: Option<HashMap<String, String>>,
+    /// External ID mapping
+    pub external_ids: Option<HashMap<String, String>>,
     /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
     pub actor_kind: Option<String>,
     /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
@@ -402,11 +475,7 @@ impl LibraMcpServer {
             .ok_or_else(|| ErrorData::internal_error("Intent history not available", None))?;
 
         history
-            .append(
-                &intent.object_type(),
-                &intent.object_id(),
-                hash,
-            )
+            .append(&intent.object_type(), &intent.object_id(), hash)
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
@@ -558,6 +627,15 @@ impl LibraMcpServer {
                 _ => return Err(ErrorData::invalid_params("invalid task status", None)),
             });
         }
+
+        // Set tags and external_ids
+        // TODO: Enable these when git-internal is updated to expose header_mut/tags
+        // if let Some(tags) = params.tags {
+        //     task.header_mut().tags_mut().extend(tags);
+        // }
+        // if let Some(eids) = params.external_ids {
+        //     task.header_mut().external_ids_mut().extend(eids);
+        // }
 
         let hash = storage
             .put_json(&task)
@@ -719,6 +797,17 @@ impl LibraMcpServer {
             run.set_metrics(Some(v));
         }
 
+        // Set tags, external_ids, orchestrator_version
+        // orchestrator_version is currently hardcoded in Run::new but we can't change it easily without a setter
+        // However, we can set tags/external_ids
+        // TODO: Enable these when git-internal is updated to expose header_mut/tags
+        // if let Some(tags) = params.tags {
+        //     run.header_mut().tags_mut().extend(tags);
+        // }
+        // if let Some(eids) = params.external_ids {
+        //     run.header_mut().external_ids_mut().extend(eids);
+        // }
+
         let hash = storage
             .put_json(&run)
             .await
@@ -858,6 +947,14 @@ impl LibraMcpServer {
             snapshot.set_summary(Some(summary));
         }
 
+        // TODO: Enable these when git-internal is updated to expose header_mut/tags
+        // if let Some(tags) = params.tags {
+        //     snapshot.header_mut().tags_mut().extend(tags);
+        // }
+        // if let Some(eids) = params.external_ids {
+        //     snapshot.header_mut().external_ids_mut().extend(eids);
+        // }
+
         let hash = storage
             .put_json(&snapshot)
             .await
@@ -987,14 +1084,22 @@ impl LibraMcpServer {
                 };
                 plan.add_step(PlanStep {
                     intent: step.intent,
-                    inputs: None,
-                    outputs: None,
-                    checks: None,
+                    inputs: step.inputs,
+                    outputs: step.outputs,
+                    checks: step.checks,
                     owner_role: step.owner_role,
                     status,
                 });
             }
         }
+
+        // TODO: Enable these when git-internal is updated to expose header_mut/tags
+        // if let Some(tags) = params.tags {
+        //     plan.header_mut().tags_mut().extend(tags);
+        // }
+        // if let Some(eids) = params.external_ids {
+        //     plan.header_mut().external_ids_mut().extend(eids);
+        // }
 
         let hash = storage
             .put_json(&plan)
@@ -1135,6 +1240,20 @@ impl LibraMcpServer {
                 _ => return Err(ErrorData::invalid_params("invalid apply_status", None)),
             });
         }
+        if let Some(artifact_params) = params.diff_artifact {
+            let artifact = convert_artifact(artifact_params)?;
+            patchset.set_diff_artifact(Some(artifact));
+        }
+
+        // TODO: Set diff_format when git-internal supports it
+
+        // TODO: Enable these when git-internal is updated to expose header_mut/tags
+        // if let Some(tags) = params.tags {
+        //     patchset.header_mut().tags_mut().extend(tags);
+        // }
+        // if let Some(eids) = params.external_ids {
+        //     patchset.header_mut().external_ids_mut().extend(eids);
+        // }
 
         let hash = storage
             .put_json(&patchset)
@@ -1262,6 +1381,20 @@ impl LibraMcpServer {
         evidence.set_command(params.command);
         evidence.set_exit_code(params.exit_code);
         evidence.set_summary(params.summary);
+        if let Some(artifacts) = params.report_artifacts {
+            for ap in artifacts {
+                let artifact = convert_artifact(ap)?;
+                evidence.add_report_artifact(artifact);
+            }
+        }
+
+        // TODO: Enable these when git-internal is updated to expose header_mut/tags
+        // if let Some(tags) = params.tags {
+        //     evidence.header_mut().tags_mut().extend(tags);
+        // }
+        // if let Some(eids) = params.external_ids {
+        //     evidence.header_mut().external_ids_mut().extend(eids);
+        // }
 
         let hash = storage
             .put_json(&evidence)
@@ -1389,6 +1522,20 @@ impl LibraMcpServer {
             paths_written: p.paths_written.unwrap_or_default(),
         }));
         inv.set_result_summary(params.result_summary);
+        if let Some(artifacts) = params.artifacts {
+            for ap in artifacts {
+                let artifact = convert_artifact(ap)?;
+                inv.add_artifact(artifact);
+            }
+        }
+
+        // TODO: Enable these when git-internal is updated to expose header_mut/tags
+        // if let Some(tags) = params.tags {
+        //     inv.header_mut().tags_mut().extend(tags);
+        // }
+        // if let Some(eids) = params.external_ids {
+        //     inv.header_mut().external_ids_mut().extend(eids);
+        // }
 
         let hash = storage
             .put_json(&inv)
@@ -1508,6 +1655,14 @@ impl LibraMcpServer {
                 .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
             prov.set_token_usage(Some(v));
         }
+
+        // TODO: Enable these when git-internal is updated to expose header_mut/tags
+        // if let Some(tags) = params.tags {
+        //     prov.header_mut().tags_mut().extend(tags);
+        // }
+        // if let Some(eids) = params.external_ids {
+        //     prov.header_mut().external_ids_mut().extend(eids);
+        // }
 
         let hash = storage
             .put_json(&prov)
@@ -1644,6 +1799,14 @@ impl LibraMcpServer {
                 .map_err(|e: String| ErrorData::invalid_params(e, None))?;
             decision.set_result_commit_sha(Some(hash_val));
         }
+
+        // TODO: Enable these when git-internal is updated to expose header_mut/tags
+        // if let Some(tags) = params.tags {
+        //     decision.header_mut().tags_mut().extend(tags);
+        // }
+        // if let Some(eids) = params.external_ids {
+        //     decision.header_mut().external_ids_mut().extend(eids);
+        // }
 
         let hash = storage
             .put_json(&decision)

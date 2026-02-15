@@ -1,7 +1,7 @@
 //! MCP `ServerHandler` implementation: resources (URI) and tool routing.
 //!
 //! - `LibraMcpServer` declares MCP capabilities (resources/tools) and implements resource reads.
-//! - Tool implementations live in `crate::internal::ai::mcp::tools` and are registered via
+//! - Tool implementations live in `crate::internal::ai::mcp::resource` and are registered via
 //!   `rmcp`'s `#[tool_router]`.
 //!
 //! # Resource behavior (summary)
@@ -84,10 +84,9 @@ impl LibraMcpServer {
 
         if let Some(object_type) = uri.strip_prefix("libra://objects/") {
             if object_type == "intent" {
-                let history = self
-                    .intent_history_manager
-                    .as_ref()
-                    .ok_or_else(|| ErrorData::internal_error("Intent history not available", None))?;
+                let history = self.intent_history_manager.as_ref().ok_or_else(|| {
+                    ErrorData::internal_error("Intent history not available", None)
+                })?;
                 let objects = history
                     .list_objects(object_type)
                     .await
@@ -136,7 +135,7 @@ impl LibraMcpServer {
                 Some(res) => Some(res),
                 None => {
                     if let Some(intent_history) = &self.intent_history_manager {
-                         intent_history
+                        intent_history
                             .find_object_hash(object_id_str)
                             .await
                             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?

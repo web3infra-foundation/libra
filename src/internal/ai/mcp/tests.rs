@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::{
     internal::ai::{
         history::HistoryManager,
-        mcp::{server::LibraMcpServer, tools::CreateTaskParams},
+        mcp::{resource::CreateTaskParams, server::LibraMcpServer},
     },
     utils::storage::local::LocalStorage,
 };
@@ -32,6 +32,8 @@ async fn test_create_task_tool() {
         requested_by_id: None,
         dependencies: None,
         status: None,
+        tags: None,
+        external_ids: None,
         actor_kind: None,
         actor_id: None,
     };

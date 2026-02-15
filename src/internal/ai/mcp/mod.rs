@@ -1,53 +1,33 @@
-//! Libra MCP (Model Context Protocol) implementation.
+//! MCP tools and resources implementation.
 //!
-//! This module builds an MCP server on top of `rmcp` by implementing `ServerHandler`, exposing:
-//! - **Resources** via `libra://` URIs for read-only access (object fetch, list-by-type, etc.).
-//! - **Tools** for creating and listing AI workflow process objects (Task/Run/Plan/...).
+//! # Tools Interface
 //!
-//! # Quick start (conceptual)
+//! | Tool Name | Description |
+//! |-----------|-------------|
+//! | `create_task` | Create a new AI Task (Goal/Intent). Input: `CreateTaskParams`. Output: Task ID. |
+//! | `list_tasks` | List recent Tasks. Input: `ListTasksParams`. Output: List of task summaries. |
+//! | `create_run` | Create a new Run for a Task. Input: `CreateRunParams`. Output: Run ID. |
+//! | `list_runs` | List recent Runs. Input: `ListRunsParams`. Output: List of run summaries. |
+//! | `create_context_snapshot` | Create a Context Snapshot. Input: `CreateContextSnapshotParams`. Output: Snapshot ID. |
+//! | `list_context_snapshots` | List recent Snapshots. Input: `ListContextSnapshotsParams`. Output: List of summaries. |
+//! | `create_plan` | Create a Plan for a Run. Input: `CreatePlanParams`. Output: Plan ID. |
+//! | `list_plans` | List recent Plans. Input: `ListPlansParams`. Output: List of plan summaries. |
+//! | `create_patchset` | Create a PatchSet (proposed changes). Input: `CreatePatchSetParams`. Output: PatchSet ID. |
+//! | `list_patchsets` | List recent PatchSets. Input: `ListPatchSetsParams`. Output: List of summaries. |
+//! | `create_evidence` | Create Evidence (test/lint results). Input: `CreateEvidenceParams`. Output: Evidence ID. |
+//! | `list_evidences` | List recent Evidence. Input: `ListEvidencesParams`. Output: List of summaries. |
+//! | `create_tool_invocation` | Record a Tool Invocation. Input: `CreateToolInvocationParams`. Output: Invocation ID. |
+//! | `list_tool_invocations` | List recent Tool Invocations. Input: `ListToolInvocationsParams`. Output: List of summaries. |
+//! | `create_provenance` | Record Model Provenance. Input: `CreateProvenanceParams`. Output: Provenance ID. |
+//! | `list_provenances` | List recent Provenance records. Input: `ListProvenancesParams`. Output: List of summaries. |
+//! | `create_decision` | Record a Decision (Commit/Checkpoint). Input: `CreateDecisionParams`. Output: Decision ID. |
+//! | `list_decisions` | List recent Decisions. Input: `ListDecisionsParams`. Output: List of summaries. |
+//! | `create_intent` | Create a new Intent (Prompt). Input: `CreateIntentParams`. Output: Intent ID. |
+//! | `list_intents` | List recent Intents. Input: `ListIntentsParams`. Output: List of intent summaries. |
 //!
-//! 1. Construct `LibraMcpServer` in your host process (inject `Storage` and `HistoryManager`).
-//! 2. Attach the server to the MCP Streamable HTTP transport (via `rmcp::transport::streamable_http_server`).
-//! 3. Clients call tools to create objects, and read resources to fetch object JSON.
-//!
-//! # Resources (URI)
-//!
-//! - `libra://object/{object_id}`: read JSON by UUID (resolve id -> hash in history, then read blob from storage).
-//! - `libra://objects/{object_type}`: list objects by type (one line per entry: `{object_id} {object_hash}`).
-//! - `libra://history/latest`: returns the current history orphan-branch HEAD commit hash.
-//! - `libra://context/active`: returns the active Run/Task/ContextSnapshot context as JSON.
-//!
-//! The supported `object_type` values match the history directory naming:
-//! `task`, `run`, `snapshot`, `plan`, `patchset`, `evidence`, `invocation`, `provenance`, `decision`.
-//!
-//! # Tools
-//!
-//! Tools are mostly "create" and "list" pairs:
-//! - Task: `create_task` / `list_tasks`
-//! - Run: `create_run` / `list_runs`
-//! - ContextSnapshot: `create_context_snapshot` / `list_context_snapshots`
-//! - Plan: `create_plan` / `list_plans`
-//! - PatchSet: `create_patchset` / `list_patchsets`
-//! - Evidence: `create_evidence` / `list_evidences`
-//! - ToolInvocation: `create_tool_invocation` / `list_tool_invocations`
-//! - Provenance: `create_provenance` / `list_provenances`
-//! - Decision: `create_decision` / `list_decisions`
-//!
-//! ## base_commit_sha (strong anchor)
-//!
-//! `base_commit_sha` is the commit anchor used by `create_run` / `create_context_snapshot` /
-//! `create_patchset` to indicate which repository commit the workflow is based on.
-//! The object model expects a 64-hex string:
-//! - If the repo uses SHA-256: pass the 64-hex commit id as-is.
-//! - If the repo uses SHA-1: you may pass a 40-hex commit id; the server will right-pad with `0`
-//!   to 64 hex (reversible).
-//!   See `crate::internal::ai::util::normalize_commit_anchor`.
-//!
-//! # Error conventions
-//!
-//! - If `Storage` is not injected: create tools return `"Storage not available"`.
-//! - If `HistoryManager` is not injected: list tools and object reads return `"History not available"`.
+//! See `resource.rs` for detailed parameter structures.
+
+pub mod resource;
 pub mod server;
 #[cfg(test)]
 mod tests;
-pub mod tools;
