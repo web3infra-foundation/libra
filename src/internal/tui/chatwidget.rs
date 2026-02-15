@@ -113,14 +113,6 @@ impl ChatWidget {
         self.status_indicator.render(chunks[1], buf);
 
         // Render bottom pane (Input → Status → Help)
-        let bottom_chunks = Layout::vertical([
-            Constraint::Length(3), // Input area
-            Constraint::Length(1), // Status bar (hidden when running)
-            Constraint::Length(1), // Help text
-        ])
-        .split(chunks[2]);
-        self.last_input_area = Some(bottom_chunks[0]);
-
         self.bottom_pane.render(chunks[2], buf)
     }
 

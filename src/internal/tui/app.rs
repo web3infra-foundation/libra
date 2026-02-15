@@ -217,7 +217,14 @@ impl App {
                     if self.widget.bottom_pane.apply_selected_command() {
                         self.schedule_draw();
                     }
-                    return Ok(());
+                    // If the popup is still visible after applying the command,
+                    // keep treating Enter as "select" only and do not submit yet.
+                    // If the popup has been closed (e.g., command fully applied),
+                    // fall through to the normal Enter handling below so the
+                    // completed command can be submitted.
+                    if self.widget.bottom_pane.is_popup_visible() {
+                        return Ok(());
+                    }
                 }
                 KeyCode::Tab => {
                     self.widget.bottom_pane.apply_selected_command();

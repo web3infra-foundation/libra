@@ -27,10 +27,12 @@ impl StatusIndicator {
     }
 
     pub fn update_status(&mut self, status: AgentStatus) {
-        if status == AgentStatus::Idle {
+        // No-op if the status is unchanged.
+        if self.status == status {
             return;
         }
-        if self.status == AgentStatus::Idle {
+        // When transitioning from Idle to a non-idle status, reset the timer.
+        if self.status == AgentStatus::Idle && status != AgentStatus::Idle {
             self.started_at = Instant::now();
         }
         self.status = status;

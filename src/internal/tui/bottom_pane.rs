@@ -138,7 +138,7 @@ impl BottomPane {
         self.status = status;
     }
 
-    /// Check if the current input is a slash command (starts with /).
+    /// Check if the input is empty.
     pub fn is_empty(&self) -> bool {
         self.input.is_empty()
     }

@@ -70,7 +70,7 @@ pub fn get_commands_for_input(input: &str) -> Vec<(&'static str, &'static str)> 
     let search = input[1..].to_lowercase();
     SlashCommand::all()
         .iter()
-        .filter(|c| c.name().contains(&search) || c.name().starts_with(&search))
+        .filter(|c| c.name().contains(&search))
         .map(|c| (c.name(), c.description()))
         .collect()
 }

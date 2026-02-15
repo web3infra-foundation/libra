@@ -385,7 +385,7 @@ async fn run_tui_with_model(
     };
 
     let welcome = format!(
-        "Welcome to Libra Code! Type your message and press Enter to chat with the AI assistant.\n{}\n{}",
+        "Welcome to Libra Code!\n\nThis is an interactive coding assistant. Type your message and press Enter to chat with the AI.\n\n{}\n{}",
         web_line, mcp_line
     );
 
