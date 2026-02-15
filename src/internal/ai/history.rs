@@ -19,8 +19,10 @@ const HISTORY_REF: &str = "refs/libra/history";
 
 /// Manages object history using an orphan branch and Git Tree structure.
 ///
-/// Structure:
-/// refs/libra/history -> Commit -> Tree
+/// This manager can operate on any given Git reference (e.g., `refs/libra/history` for code history,
+/// `refs/libra/intent` for intent history), allowing parallel history timelines.
+///
+/// Structure (Commit -> Tree):
 ///   ├── task/
 ///   │   └── <task_id>
 ///   ├── run/
@@ -33,11 +35,25 @@ pub struct HistoryManager {
     #[allow(dead_code)]
     storage: Arc<dyn Storage + Send + Sync>,
     repo_path: PathBuf,
+    /// The Git reference name this manager writes to (e.g. "refs/libra/history").
+    ref_name: String,
 }
 
 impl HistoryManager {
     pub fn new(storage: Arc<dyn Storage + Send + Sync>, repo_path: PathBuf) -> Self {
-        Self { storage, repo_path }
+        Self::new_with_ref(storage, repo_path, HISTORY_REF)
+    }
+
+    pub fn new_with_ref(
+        storage: Arc<dyn Storage + Send + Sync>,
+        repo_path: PathBuf,
+        ref_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            storage,
+            repo_path,
+            ref_name: ref_name.into(),
+        }
     }
 
     /// Append an object to the history log.
@@ -131,7 +147,7 @@ impl HistoryManager {
         let commit_hash = write_git_object(&self.repo_path, "commit", commit_content.as_bytes())?;
 
         // 4. Update Ref
-        self.update_ref(HISTORY_REF, commit_hash)?;
+        self.update_ref(&self.ref_name, commit_hash)?;
 
         Ok(())
     }
@@ -195,7 +211,7 @@ impl HistoryManager {
     }
 
     pub async fn resolve_history_head(&self) -> Result<Option<ObjectHash>, GitError> {
-        let ref_path = self.repo_path.join(HISTORY_REF);
+        let ref_path = self.repo_path.join(&self.ref_name);
         if !ref_path.exists() {
             return Ok(None);
         }

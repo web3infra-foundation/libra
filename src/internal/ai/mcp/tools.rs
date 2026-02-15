@@ -20,7 +20,7 @@
 //! # object_type (history directory name)
 //!
 //! List tools call `HistoryManager::list_objects(object_type)` using the following types:
-//! `task`, `run`, `snapshot`, `plan`, `patchset`, `evidence`, `invocation`, `provenance`, `decision`.
+//! `task`, `run`, `snapshot`, `plan`, `patchset`, `evidence`, `invocation`, `provenance`, `decision`, `intent`.
 use git_internal::internal::object::{
     context::{ContextItem, ContextItemKind, ContextSnapshot, SelectionStrategy},
     decision::{Decision, DecisionType},
@@ -43,7 +43,10 @@ use rmcp::{
 };
 use uuid::Uuid;
 
-use crate::{internal::ai::mcp::server::LibraMcpServer, utils::storage_ext::StorageExt};
+use crate::{
+    internal::ai::{intent::Intent, mcp::server::LibraMcpServer},
+    utils::storage_ext::{Identifiable, StorageExt},
+};
 
 impl LibraMcpServer {
     /// Default actor for MCP tool calls. Extracted for testability.
@@ -95,6 +98,27 @@ impl LibraMcpServer {
         }
         self.default_actor()
     }
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CreateIntentParams {
+    /// The prompt or goal content.
+    pub content: String,
+    /// ID of the parent intent, forming the history chain.
+    pub parent_id: Option<String>,
+    /// Status: "draft", "active", "completed", "discarded".
+    pub status: Option<String>,
+    /// Optional ID of the task derived from this intent.
+    pub task_id: Option<String>,
+    /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
+    pub actor_kind: Option<String>,
+    /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
+    pub actor_id: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ListIntentsParams {
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -311,6 +335,146 @@ pub struct ListDecisionsParams {
 
 #[tool_router]
 impl LibraMcpServer {
+    #[tool(description = "Create a new Intent (Prompt/Goal)")]
+    pub async fn create_intent(
+        &self,
+        ctx: RequestContext<RoleServer>,
+        Parameters(params): Parameters<CreateIntentParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let actor = self.resolve_actor(
+            &ctx,
+            params.actor_kind.as_deref(),
+            params.actor_id.as_deref(),
+        )?;
+        self.create_intent_impl(params, actor).await
+    }
+
+    pub async fn create_intent_impl(
+        &self,
+        params: CreateIntentParams,
+        actor: ActorRef,
+    ) -> Result<CallToolResult, ErrorData> {
+        use crate::internal::ai::intent::IntentStatus;
+
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
+
+        let parent_id = if let Some(pid) = params.parent_id {
+            Some(
+                pid.parse::<Uuid>()
+                    .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?,
+            )
+        } else {
+            None
+        };
+
+        let task_id = if let Some(tid) = params.task_id {
+            Some(
+                tid.parse::<Uuid>()
+                    .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?,
+            )
+        } else {
+            None
+        };
+
+        let mut intent = Intent::new(params.content, parent_id, task_id, Some(actor));
+        if let Some(status) = params.status {
+            intent.set_status(match status.as_str() {
+                "draft" => IntentStatus::Draft,
+                "active" => IntentStatus::Active,
+                "completed" => IntentStatus::Completed,
+                "discarded" => IntentStatus::Discarded,
+                _ => return Err(ErrorData::invalid_params("invalid intent status", None)),
+            });
+        }
+
+        let hash = storage
+            .put_json(&intent)
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        // Use the dedicated intent history manager if available
+        let history = self
+            .intent_history_manager
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("Intent history not available", None))?;
+
+        history
+            .append(
+                &intent.object_type(),
+                &intent.object_id(),
+                hash,
+            )
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Intent created with ID: {}",
+            intent.id
+        ))]))
+    }
+
+    #[tool(description = "List recent intents")]
+    pub async fn list_intents(
+        &self,
+        Parameters(params): Parameters<ListIntentsParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.list_intents_impl(params).await
+    }
+
+    pub async fn list_intents_impl(
+        &self,
+        params: ListIntentsParams,
+    ) -> Result<CallToolResult, ErrorData> {
+        let history = self
+            .intent_history_manager
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("Intent history not available", None))?;
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
+
+        let objects = history
+            .list_objects("intent")
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        let mut intents = Vec::new();
+        for (_id, hash) in objects {
+            if let Ok(intent) = storage.get_json::<Intent>(&hash).await {
+                intents.push(intent);
+            }
+        }
+
+        // Sort by created_at descending
+        intents.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+        let limit = params.limit.unwrap_or(10);
+        let out: Vec<String> = intents
+            .into_iter()
+            .take(limit)
+            .map(|i| {
+                format!(
+                    "ID: {} | Status: {} | Content: {:.50}",
+                    i.id,
+                    i.status,
+                    i.content.replace('\n', " ")
+                )
+            })
+            .collect();
+
+        if out.is_empty() {
+            Ok(CallToolResult::success(vec![Content::text(
+                "No intents found.",
+            )]))
+        } else {
+            Ok(CallToolResult::success(vec![Content::text(out.join("\n"))]))
+        }
+    }
+
     #[tool(description = "Create a new Task")]
     pub async fn create_task(
         &self,

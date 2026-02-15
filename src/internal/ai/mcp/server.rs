@@ -6,8 +6,10 @@
 //!
 //! # Resource behavior (summary)
 //!
-//! - `libra://object/{object_id}`: resolve id -> hash in history, then read JSON blob from storage.
+//! - `libra://object/{object_id}`: resolve id -> hash in history (both main and intent history), then read JSON blob from storage.
 //! - `libra://objects/{object_type}`: list objects by type (one line: `{object_id} {object_hash}`).
+//!   - For `intent` type, it queries the dedicated intent history (`refs/libra/intent`).
+//!   - For other types, it queries the main code history (`refs/libra/history`).
 //! - `libra://history/latest`: returns the current history orphan-branch HEAD commit hash.
 //! - `libra://context/active`: returns the latest active Run/Task/ContextSnapshot as JSON.
 //!
@@ -28,6 +30,7 @@ use crate::{
 #[derive(Clone)]
 pub struct LibraMcpServer {
     pub history_manager: Option<Arc<HistoryManager>>,
+    pub intent_history_manager: Option<Arc<HistoryManager>>,
     pub storage: Option<Arc<dyn Storage + Send + Sync>>,
     pub repo_id: Uuid,
     tool_router: ToolRouter<LibraMcpServer>,
@@ -36,11 +39,13 @@ pub struct LibraMcpServer {
 impl LibraMcpServer {
     pub fn new(
         history_manager: Option<Arc<HistoryManager>>,
+        intent_history_manager: Option<Arc<HistoryManager>>,
         storage: Option<Arc<dyn Storage + Send + Sync>>,
         repo_id: Uuid,
     ) -> Self {
         Self {
             history_manager,
+            intent_history_manager,
             storage,
             repo_id,
             tool_router: Self::build_tool_router(),
@@ -78,6 +83,23 @@ impl LibraMcpServer {
         }
 
         if let Some(object_type) = uri.strip_prefix("libra://objects/") {
+            if object_type == "intent" {
+                let history = self
+                    .intent_history_manager
+                    .as_ref()
+                    .ok_or_else(|| ErrorData::internal_error("Intent history not available", None))?;
+                let objects = history
+                    .list_objects(object_type)
+                    .await
+                    .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+                let body = objects
+                    .into_iter()
+                    .map(|(id, hash)| format!("{} {}", id, hash))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Ok(vec![ResourceContents::text(body, uri)]);
+            }
+
             let history = self
                 .history_manager
                 .as_ref()
@@ -108,6 +130,21 @@ impl LibraMcpServer {
                 .find_object_hash(object_id_str)
                 .await
                 .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+            // If not found in main history, try intent history
+            let result = match result {
+                Some(res) => Some(res),
+                None => {
+                    if let Some(intent_history) = &self.intent_history_manager {
+                         intent_history
+                            .find_object_hash(object_id_str)
+                            .await
+                            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?
+                    } else {
+                        None
+                    }
+                }
+            };
 
             match result {
                 Some((hash, _type)) => {
