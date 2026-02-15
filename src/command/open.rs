@@ -130,20 +130,20 @@ mod tests {
     #[test]
     fn test_transform_url() {
         assert_eq!(
-            transform_url("git@github.com:rust-lang/rust.git"),
-            "https://github.com/rust-lang/rust"
+            transform_url("git@github.com:web3infra-foundation/libra.git"),
+            "https://github.com/web3infra-foundation/libra"
         );
         assert_eq!(
             transform_url("git@gitlab.com:group/project.git"),
             "https://gitlab.com/group/project"
         );
         assert_eq!(
-            transform_url("https://github.com/rust-lang/rust.git"),
-            "https://github.com/rust-lang/rust"
+            transform_url("https://github.com/web3infra-foundation/libra.git"),
+            "https://github.com/web3infra-foundation/libra"
         );
         assert_eq!(
-            transform_url("ssh://git@github.com/rust-lang/rust.git"),
-            "https://github.com/rust-lang/rust"
+            transform_url("ssh://git@github.com/web3infra-foundation/libra.git"),
+            "https://github.com/web3infra-foundation/libra"
         );
         assert_eq!(
             transform_url("ssh://user@host.com:2222/repo.git"),
