@@ -23,17 +23,20 @@
 //! `task`, `run`, `snapshot`, `plan`, `patchset`, `evidence`, `invocation`, `provenance`, `decision`, `intent`.
 use std::collections::HashMap;
 
-use git_internal::internal::object::{
-    context::{ContextItem, ContextItemKind, ContextSnapshot, SelectionStrategy},
-    decision::{Decision, DecisionType},
-    evidence::{Evidence, EvidenceKind},
-    patchset::{ApplyStatus, ChangeType, PatchSet, TouchedFile},
-    plan::{Plan, PlanStatus, PlanStep},
-    provenance::Provenance,
-    run::{AgentInstance, Run, RunStatus},
-    task::{GoalType, Task, TaskStatus},
-    tool::{IoFootprint, ToolInvocation, ToolStatus},
-    types::{ActorKind, ActorRef, ArtifactRef},
+use git_internal::{
+    hash::ObjectHash,
+    internal::object::{
+        context::{ContextItem, ContextItemKind, ContextSnapshot, SelectionStrategy},
+        decision::{Decision, DecisionType},
+        evidence::{Evidence, EvidenceKind},
+        patchset::{ApplyStatus, ChangeType, PatchSet, TouchedFile},
+        plan::{Plan, PlanStatus, PlanStep},
+        provenance::Provenance,
+        run::{AgentInstance, Run, RunStatus},
+        task::{GoalType, Task, TaskStatus},
+        tool::{IoFootprint, ToolInvocation, ToolStatus},
+        types::{ActorKind, ActorRef, ArtifactRef},
+    },
 };
 use rmcp::{
     RoleServer,
@@ -138,10 +141,22 @@ pub struct CreateIntentParams {
     pub status: Option<String>,
     /// Optional ID of the task derived from this intent.
     pub task_id: Option<String>,
+    /// SHA of the code commit this intent resulted in (cross-reference to the code branch).
+    pub commit_sha: Option<String>,
     /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
     pub actor_kind: Option<String>,
     /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
     pub actor_id: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct UpdateIntentParams {
+    /// ID of the intent to update.
+    pub intent_id: String,
+    /// New status: "draft", "active", "completed", "discarded".
+    pub status: Option<String>,
+    /// SHA of the code commit this intent resulted in (cross-reference to the code branch).
+    pub commit_sha: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -427,6 +442,8 @@ impl LibraMcpServer {
         params: CreateIntentParams,
         actor: ActorRef,
     ) -> Result<CallToolResult, ErrorData> {
+        use std::str::FromStr;
+
         use crate::internal::ai::intent::IntentStatus;
 
         let storage = self
@@ -461,6 +478,13 @@ impl LibraMcpServer {
                 "discarded" => IntentStatus::Discarded,
                 _ => return Err(ErrorData::invalid_params("invalid intent status", None)),
             });
+        }
+        if let Some(sha) = params.commit_sha {
+            let normalized = crate::internal::ai::util::normalize_commit_anchor(&sha)
+                .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+            let hash_val = ObjectHash::from_str(&normalized)
+                .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+            intent.set_commit_sha(hash_val);
         }
 
         let hash = storage
@@ -542,6 +566,91 @@ impl LibraMcpServer {
         } else {
             Ok(CallToolResult::success(vec![Content::text(out.join("\n"))]))
         }
+    }
+
+    #[tool(description = "Update an existing Intent (set commit_sha or status)")]
+    pub async fn update_intent(
+        &self,
+        Parameters(params): Parameters<UpdateIntentParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.update_intent_impl(params).await
+    }
+
+    pub async fn update_intent_impl(
+        &self,
+        params: UpdateIntentParams,
+    ) -> Result<CallToolResult, ErrorData> {
+        use std::str::FromStr;
+
+        use crate::internal::ai::intent::IntentStatus;
+
+        let history = self
+            .history_manager
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
+
+        // 1. Find the intent blob hash via history
+        let blob_hash = history
+            .get_object_hash("intent", &params.intent_id)
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?
+            .ok_or_else(|| {
+                ErrorData::invalid_params(format!("Intent not found: {}", params.intent_id), None)
+            })?;
+
+        // 2. Load the existing intent
+        let mut intent: Intent = storage
+            .get_json(&blob_hash)
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        // 3. Apply updates
+        let mut changed = false;
+
+        if let Some(status) = params.status {
+            intent.set_status(match status.as_str() {
+                "draft" => IntentStatus::Draft,
+                "active" => IntentStatus::Active,
+                "completed" => IntentStatus::Completed,
+                "discarded" => IntentStatus::Discarded,
+                _ => return Err(ErrorData::invalid_params("invalid intent status", None)),
+            });
+            changed = true;
+        }
+
+        if let Some(sha) = params.commit_sha {
+            let hash_val = ObjectHash::from_str(&sha)
+                .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+            intent.set_commit_sha(hash_val);
+            changed = true;
+        }
+
+        if !changed {
+            return Err(ErrorData::invalid_params(
+                "No fields to update. Provide at least 'status' or 'commit_sha'.",
+                None,
+            ));
+        }
+
+        // 4. Write updated intent blob and update history
+        let new_hash = storage
+            .put_json(&intent)
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        history
+            .append(&intent.object_type(), &intent.object_id(), new_hash)
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Intent {} updated successfully",
+            intent.id
+        ))]))
     }
 
     #[tool(description = "Create a new Task")]
