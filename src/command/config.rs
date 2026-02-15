@@ -301,32 +301,7 @@ pub struct ConfigArgs {
     pub default: Option<String>,
 }
 
-#[cfg(test)]
-mod tests {
-    use clap::Parser;
-
-    use super::*;
-
-    #[test]
-    fn default_works_with_get_all() {
-        let args =
-            ConfigArgs::try_parse_from(["config", "--get-all", "-d", "fallback", "user.name"])
-                .unwrap();
-
-        assert!(args.get_all);
-        assert_eq!(args.default.as_deref(), Some("fallback"));
-    }
-
-    #[test]
-    fn scope_flags_are_mutually_exclusive() {
-        let args = ConfigArgs::try_parse_from(["config", "--global", "--system", "user.name"]);
-        assert!(args.is_err());
-        assert!(matches!(
-            args.err().unwrap().kind(),
-            clap::error::ErrorKind::ArgumentConflict
-        ));
-    }
-}
+// argument-level tests live in the args_tests module near ConfigArgs
 
 impl ConfigArgs {
     pub fn validate(&self) -> Result<(), String> {
@@ -900,7 +875,7 @@ async fn list_all_config_cascaded() -> Result<Vec<(String, String)>, String> {
 }
 
 #[cfg(test)]
-mod tests {
+mod args_tests {
     use clap::Parser;
 
     use super::*;
