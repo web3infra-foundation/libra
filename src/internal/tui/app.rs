@@ -587,6 +587,7 @@ impl App {
             }
             super::SlashCommand::Clear => {
                 self.widget.cells.clear();
+                self.history.clear();
                 self.widget.add_cell(Box::new(AssistantHistoryCell::new(
                     "Conversation cleared.".to_string(),
                 )));
