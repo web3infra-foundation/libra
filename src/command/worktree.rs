@@ -1,6 +1,7 @@
 use std::{
+    collections::HashSet,
     env, fs, io,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use clap::{Parser, Subcommand};
@@ -133,20 +134,22 @@ fn load_state() -> io::Result<WorktreeState> {
     let path = state_path();
     if !path.exists() {
         let mut state = WorktreeState::default();
-        ensure_main_entry(&mut state)?;
+        let _ = ensure_main_entry(&mut state)?;
         save_state(&state)?;
         return Ok(state);
     }
     let data = fs::read(&path)?;
     if data.is_empty() {
         let mut state = WorktreeState::default();
-        ensure_main_entry(&mut state)?;
+        let _ = ensure_main_entry(&mut state)?;
         save_state(&state)?;
         return Ok(state);
     }
     let mut state: WorktreeState =
         serde_json::from_slice(&data).map_err(|e| io::Error::other(e.to_string()))?;
-    ensure_main_entry(&mut state)?;
+    if ensure_main_entry(&mut state)? {
+        save_state(&state)?;
+    }
     Ok(state)
 }
 
@@ -187,65 +190,129 @@ fn save_state(state: &WorktreeState) -> io::Result<()> {
 
 /// Normalizes the given path into an absolute, canonical path where possible.
 ///
-/// For existing paths this is a thin wrapper around `fs::canonicalize`. For
-/// non-existing paths we join with the current directory first, and when the
-/// parent directory already exists we canonicalize the parent and reattach
-/// the final component. This keeps persisted worktree paths stable while
-/// avoiding directory creation side effects.
+/// For non-existing paths, this resolves the deepest existing ancestor and
+/// appends the remaining lexical components. This keeps persisted worktree
+/// paths stable even when intermediate parents do not exist yet.
+fn normalize_abs_path(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            Component::RootDir => out.push(Path::new(comp.as_os_str())),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(out.components().next_back(), Some(Component::Normal(_))) {
+                    out.pop();
+                }
+            }
+            Component::Normal(part) => out.push(part),
+        }
+    }
+    out
+}
+
 fn canonicalize<P: AsRef<Path>>(path: P) -> io::Result<PathBuf> {
     let p = path.as_ref();
-    if p.exists() {
-        fs::canonicalize(p)
+    let joined = if p.is_absolute() {
+        p.to_path_buf()
     } else {
-        let base = util::cur_dir();
-        let joined = if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            base.join(p)
-        };
-        if let Some(parent) = joined.parent().filter(|p| p.exists()) {
-            let canonical_parent = fs::canonicalize(parent)?;
-            if let Some(name) = joined.file_name() {
-                return Ok(canonical_parent.join(name));
+        util::cur_dir().join(p)
+    };
+    let normalized = normalize_abs_path(&joined);
+
+    let mut current = normalized.as_path();
+    let mut remainder = PathBuf::new();
+    loop {
+        if current.exists() {
+            let mut canonical = fs::canonicalize(current)?;
+            if !remainder.as_os_str().is_empty() {
+                canonical.push(&remainder);
             }
-            return Ok(canonical_parent);
+            return Ok(canonical);
         }
-        Ok(joined)
+
+        let Some(parent) = current.parent() else {
+            break;
+        };
+
+        if let Some(name) = current.file_name() {
+            remainder = if remainder.as_os_str().is_empty() {
+                PathBuf::from(name)
+            } else {
+                PathBuf::from(name).join(remainder)
+            };
+            current = parent;
+            continue;
+        }
+
+        break;
     }
+
+    Ok(normalized)
 }
 
 /// Ensures that the main worktree entry exists and is unique.
 ///
-/// The main worktree is always considered to be the parent directory of the
-/// `.libra` storage directory. If an entry with that path exists, it becomes
-/// the sole `is_main = true` entry. Otherwise a new main entry is appended and
-/// all existing entries are marked as non-main.
-fn ensure_main_entry(state: &mut WorktreeState) -> io::Result<()> {
+/// If a main entry already exists, it is preserved and made unique. Otherwise,
+/// the main path is inferred from repository layout:
+/// - standard layout: parent of `.libra` storage directory
+/// - `--separate-libra-dir` layout: current repository working directory
+///
+/// The inferred main entry is then ensured to be the sole `is_main = true`.
+///
+/// Returns `true` when the state is mutated.
+fn ensure_main_entry(state: &mut WorktreeState) -> io::Result<bool> {
+    // Preserve an existing main entry whenever possible. This is required for
+    // `--separate-libra-dir` repositories, where storage path and main workdir
+    // are not in a parent-child relationship.
+    if let Some(idx) = state.worktrees.iter().position(|w| w.is_main) {
+        let mut changed = false;
+        for (i, w) in state.worktrees.iter_mut().enumerate() {
+            let should_be_main = i == idx;
+            if w.is_main != should_be_main {
+                w.is_main = should_be_main;
+                changed = true;
+            }
+        }
+        return Ok(changed);
+    }
+
     let storage = util::storage_path();
-    let repo_root = storage
-        .parent()
-        .ok_or_else(|| io::Error::other("invalid storage path"))?;
-    let main_path = canonicalize(repo_root)?;
+    let inferred_main = if storage.file_name() == Some(std::ffi::OsStr::new(util::ROOT_DIR)) {
+        let repo_root = storage
+            .parent()
+            .ok_or_else(|| io::Error::other("invalid storage path"))?;
+        canonicalize(repo_root)?
+    } else {
+        canonicalize(util::working_dir())?
+    };
+
     if let Some(idx) = state
         .worktrees
         .iter()
-        .position(|w| Path::new(&w.path) == main_path)
+        .position(|w| Path::new(&w.path) == inferred_main)
     {
+        let mut changed = false;
         for (i, w) in state.worktrees.iter_mut().enumerate() {
-            w.is_main = i == idx;
+            let should_be_main = i == idx;
+            if w.is_main != should_be_main {
+                w.is_main = should_be_main;
+                changed = true;
+            }
         }
+        Ok(changed)
     } else {
         for w in &mut *state.worktrees {
             w.is_main = false;
         }
         state.worktrees.push(WorktreeEntry {
-            path: main_path.to_string_lossy().to_string(),
+            path: inferred_main.to_string_lossy().to_string(),
             is_main: true,
             locked: false,
             lock_reason: None,
         });
+        Ok(true)
     }
-    Ok(())
 }
 
 /// Finds a mutable worktree entry by canonical path.
@@ -285,13 +352,8 @@ async fn add_worktree(path: String) -> io::Result<()> {
         return Err(io::Error::other("target exists and is not a directory"));
     }
 
-    if !target.exists() {
-        fs::create_dir_all(&target)?;
-    }
-
     let canonical_target = canonicalize(&target)?;
     if util::is_sub_path(&canonical_target, &storage) {
-        fs::remove_dir_all(&target)?;
         return Err(io::Error::other(
             "worktree path cannot be inside .libra storage",
         ));
@@ -307,6 +369,12 @@ async fn add_worktree(path: String) -> io::Result<()> {
         return Ok(());
     }
 
+    let mut created_target = false;
+    if !target.exists() {
+        fs::create_dir_all(&target)?;
+        created_target = true;
+    }
+
     let link_path = target.join(util::ROOT_DIR);
     if link_path.exists() {
         return Err(io::Error::other("target already contains a .libra entry"));
@@ -316,17 +384,37 @@ async fn add_worktree(path: String) -> io::Result<()> {
     let content = format!("gitdir: {}\n", storage_str);
     fs::write(&link_path, content)?;
 
+    let rollback_partial_add = || {
+        let _ = fs::remove_file(&link_path);
+        if created_target {
+            let _ = fs::remove_dir_all(&target);
+        }
+    };
+
     if Head::current_commit().await.is_some() {
-        let _guard = DirGuard::change_to(&target)?;
-        // With staged: false and source: None, restore populates the new worktree from the index
-        // without modifying the shared index itself.
-        restore::execute(RestoreArgs {
+        let _guard = match DirGuard::change_to(&target) {
+            Ok(g) => g,
+            Err(e) => {
+                rollback_partial_add();
+                return Err(e);
+            }
+        };
+        // Use restore-from-index mode to populate the new worktree. This path
+        // is expected to leave the shared index unchanged (covered by
+        // `test_worktree_add_does_not_reset_index`).
+        if let Err(e) = restore::execute_checked(RestoreArgs {
             pathspec: vec![util::working_dir_string()],
             source: None,
             worktree: true,
             staged: false,
         })
-        .await;
+        .await
+        {
+            rollback_partial_add();
+            return Err(io::Error::other(format!(
+                "failed to populate worktree: {e}"
+            )));
+        }
     }
 
     state.worktrees.push(WorktreeEntry {
@@ -335,7 +423,10 @@ async fn add_worktree(path: String) -> io::Result<()> {
         locked: false,
         lock_reason: None,
     });
-    save_state(&state)?;
+    if let Err(e) = save_state(&state) {
+        rollback_partial_add();
+        return Err(e);
+    }
 
     println!("{}", canonical_target.display());
 
@@ -542,19 +633,20 @@ fn repair_worktrees() -> io::Result<()> {
     let mut state = load_state()?;
     let mut changed = false;
 
-    let mut seen = Vec::<PathBuf>::new();
+    let mut seen = HashSet::<PathBuf>::new();
     state.worktrees.retain(|w| {
-        let p = Path::new(&w.path);
-        if seen.iter().any(|s| s == p) {
+        let p = PathBuf::from(&w.path);
+        if !seen.insert(p) {
             changed = true;
             false
         } else {
-            seen.push(p.to_path_buf());
             true
         }
     });
 
-    ensure_main_entry(&mut state)?;
+    if ensure_main_entry(&mut state)? {
+        changed = true;
+    }
 
     if changed {
         save_state(&state)?;

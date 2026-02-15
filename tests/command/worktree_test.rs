@@ -1,6 +1,8 @@
 //! Tests worktree subcommands for core success paths and important error branches.
 
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, symlink};
 
 use libra::{
     exec_async,
@@ -68,6 +70,292 @@ async fn test_worktree_add_creates_linked_directory() {
         content.trim_start().starts_with("gitdir:"),
         "link file should start with gitdir:, got: {}",
         content
+    );
+}
+
+#[tokio::test]
+#[serial]
+/// `worktree add` stores a stable canonical path even if input uses a missing parent plus `..`.
+async fn test_worktree_add_normalizes_missing_parent_with_dotdot() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    exec_async(vec!["worktree", "add", "missing_parent/../wt_norm"])
+        .await
+        .expect("worktree add should succeed");
+
+    let expected = repo_dir.path().join("wt_norm").canonicalize().unwrap();
+    let state = read_worktree_state();
+    let entry = state
+        .worktrees
+        .iter()
+        .find(|w| w.path.ends_with("wt_norm"))
+        .expect("state should contain the added worktree");
+    assert_eq!(
+        entry.path,
+        expected.to_string_lossy().as_ref(),
+        "stored worktree path should be canonical and normalized"
+    );
+
+    exec_async(vec!["worktree", "lock", "wt_norm"])
+        .await
+        .expect("worktree lock should succeed");
+    exec_async(vec!["worktree", "unlock", "wt_norm"])
+        .await
+        .expect("worktree unlock should succeed");
+    exec_async(vec!["worktree", "remove", "wt_norm"])
+        .await
+        .expect("worktree remove should succeed");
+}
+
+#[tokio::test]
+#[serial]
+/// Adding the same path via `../...` and absolute form should deduplicate to one canonical entry.
+async fn test_worktree_add_parent_relative_and_absolute_path_are_equivalent() {
+    let root_dir = tempdir().unwrap();
+    let repo_path = root_dir.path().join("repo");
+    fs::create_dir_all(&repo_path).unwrap();
+    test::setup_with_new_libra_in(&repo_path).await;
+    let _guard = test::ChangeDirGuard::new(&repo_path);
+
+    exec_async(vec!["worktree", "add", "../wt_rel_abs"])
+        .await
+        .expect("first worktree add should succeed");
+
+    let abs_target = root_dir.path().join("wt_rel_abs").canonicalize().unwrap();
+    let abs_target_str = abs_target.to_string_lossy().to_string();
+
+    exec_async(vec!["worktree", "add", abs_target_str.as_str()])
+        .await
+        .expect("second worktree add with absolute path should succeed");
+
+    let paths = worktree_paths();
+    let matches = paths
+        .iter()
+        .filter(|p| p.as_str() == abs_target.to_string_lossy().as_ref())
+        .count();
+    assert_eq!(
+        matches, 1,
+        "same worktree path should only be registered once"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+/// Symlink inputs should be canonicalized to the real target path.
+async fn test_worktree_add_symlink_path_is_canonicalized_to_real_path() {
+    let root_dir = tempdir().unwrap();
+    let repo_path = root_dir.path().join("repo");
+    fs::create_dir_all(&repo_path).unwrap();
+    test::setup_with_new_libra_in(&repo_path).await;
+    let _guard = test::ChangeDirGuard::new(&repo_path);
+
+    let real_target = root_dir.path().join("wt_real");
+    fs::create_dir_all(&real_target).unwrap();
+    let symlink_path = repo_path.join("wt_link");
+    symlink(&real_target, &symlink_path).expect("failed to create symlink for test");
+
+    exec_async(vec!["worktree", "add", "wt_link"])
+        .await
+        .expect("worktree add through symlink should succeed");
+
+    let real_canonical = real_target.canonicalize().unwrap();
+    let symlink_abs = symlink_path.canonicalize().unwrap();
+    assert_eq!(
+        real_canonical, symlink_abs,
+        "sanity check: symlink should resolve to real target"
+    );
+
+    let paths = worktree_paths();
+    assert!(
+        paths
+            .iter()
+            .any(|p| p.as_str() == real_canonical.to_string_lossy().as_ref()),
+        "state should store canonical real path instead of symlink path"
+    );
+
+    exec_async(vec!["worktree", "lock", "wt_link"])
+        .await
+        .expect("lock by symlink path should resolve the registered entry");
+    exec_async(vec!["worktree", "unlock", "wt_link"])
+        .await
+        .expect("unlock by symlink path should resolve the registered entry");
+    exec_async(vec!["worktree", "remove", "wt_link"])
+        .await
+        .expect("remove by symlink path should resolve the registered entry");
+}
+
+#[tokio::test]
+#[serial]
+/// Duplicate `worktree add` should not recreate a missing directory when the path is already registered.
+async fn test_worktree_add_duplicate_registered_path_does_not_create_directory() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    exec_async(vec!["worktree", "add", "wt_dup"])
+        .await
+        .expect("initial worktree add should succeed");
+
+    let wt_path = repo_dir.path().join("wt_dup");
+    assert!(wt_path.is_dir());
+
+    fs::remove_dir_all(&wt_path).expect("failed to remove existing worktree directory");
+    assert!(!wt_path.exists(), "worktree directory should be missing");
+
+    let before_paths = worktree_paths();
+    exec_async(vec!["worktree", "add", "wt_dup"])
+        .await
+        .expect("duplicate worktree add command itself should not fail");
+    let after_paths = worktree_paths();
+
+    assert_eq!(
+        before_paths, after_paths,
+        "duplicate add should not mutate registered worktree state"
+    );
+    assert!(
+        !wt_path.exists(),
+        "duplicate add should not create a new directory for an already registered path"
+    );
+}
+
+#[tokio::test]
+#[serial]
+/// If population fails after writing the link file, `worktree add` rolls back partial artifacts.
+async fn test_worktree_add_rolls_back_link_on_restore_failure() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    test::ensure_file("conflict/file.txt", Some("v1"));
+    add::execute(AddArgs {
+        pathspec: vec!["conflict/file.txt".to_string()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+    exec_async(vec!["commit", "-m", "initial"])
+        .await
+        .expect("initial commit should succeed");
+
+    let wt_path = repo_dir.path().join("wt_restore_fail");
+    fs::create_dir_all(&wt_path).expect("failed to create existing target directory");
+    fs::write(wt_path.join("conflict"), b"blocking file")
+        .expect("failed to create conflicting path in target");
+
+    exec_async(vec!["worktree", "add", "wt_restore_fail"])
+        .await
+        .expect("worktree add command itself should not fail");
+
+    assert!(
+        !wt_path.join(".libra").exists(),
+        "failed restore should remove the partial .libra link"
+    );
+
+    let canonical_target = wt_path.canonicalize().unwrap();
+    let paths = worktree_paths();
+    assert!(
+        !paths
+            .iter()
+            .any(|p| p == canonical_target.to_string_lossy().as_ref()),
+        "failed restore should not register the worktree in state"
+    );
+    assert!(
+        wt_path.join("conflict").is_file(),
+        "pre-existing target content should be preserved on rollback"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+/// Cross-filesystem moves should fail cleanly and keep registry/state unchanged when test env provides separate devices.
+async fn test_worktree_move_across_filesystems_rolls_back_when_supported() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    exec_async(vec!["worktree", "add", "wt_cross_src"])
+        .await
+        .expect("worktree add should succeed");
+    let src_path = repo_dir.path().join("wt_cross_src");
+    assert!(src_path.is_dir());
+
+    let other_fs_dir = match tempfile::tempdir_in("/tmp") {
+        Ok(d) => d,
+        Err(_) => return, // Environment does not allow creating this probe directory.
+    };
+
+    let repo_dev = fs::metadata(repo_dir.path()).unwrap().dev();
+    let other_dev = fs::metadata(other_fs_dir.path()).unwrap().dev();
+    if repo_dev == other_dev {
+        return; // Not a cross-filesystem setup on this machine; skip.
+    }
+
+    let dest_path = other_fs_dir.path().join("wt_cross_dest");
+    let dest_str = dest_path.to_string_lossy().to_string();
+    let before_paths = worktree_paths();
+
+    exec_async(vec!["worktree", "move", "wt_cross_src", dest_str.as_str()])
+        .await
+        .expect("worktree move command itself should not fail");
+
+    let after_paths = worktree_paths();
+    assert_eq!(
+        before_paths, after_paths,
+        "failed cross-filesystem move should keep worktree registry unchanged"
+    );
+    assert!(
+        src_path.exists(),
+        "source directory should remain after failed cross-filesystem move"
+    );
+    assert!(
+        !dest_path.exists(),
+        "destination directory should not be created by failed cross-filesystem move"
+    );
+}
+
+#[tokio::test]
+#[serial]
+/// Corrupted `worktrees.json` should fail commands gracefully without mutating state or creating directories.
+async fn test_worktree_corrupted_state_file_is_handled_without_side_effects() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    exec_async(vec!["worktree", "list"])
+        .await
+        .expect("worktree list should initialize state first");
+
+    let state_path = util::storage_path().join("worktrees.json");
+    fs::write(&state_path, b"{ invalid json").expect("failed to corrupt state file");
+    let before = fs::read_to_string(&state_path).unwrap();
+
+    exec_async(vec!["worktree", "list"])
+        .await
+        .expect("worktree list command itself should not fail on corrupted state");
+
+    let after = fs::read_to_string(&state_path).unwrap();
+    assert_eq!(
+        before, after,
+        "failed state load should not rewrite corrupted worktree state"
+    );
+
+    let new_path = repo_dir.path().join("wt_from_corrupt");
+    assert!(!new_path.exists());
+    exec_async(vec!["worktree", "add", "wt_from_corrupt"])
+        .await
+        .expect("worktree add command itself should not fail on corrupted state");
+    assert!(
+        !new_path.exists(),
+        "add should not create target directory when worktree state cannot be loaded"
     );
 }
 
@@ -481,6 +769,46 @@ async fn test_worktree_repair_deduplicates_entries() {
 
 #[tokio::test]
 #[serial]
+/// `worktree repair` persists main-flag fixes even when there are no duplicate paths.
+async fn test_worktree_repair_persists_main_flag_fix_without_duplicates() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    exec_async(vec!["worktree", "add", "wt_main_fix"])
+        .await
+        .expect("worktree add should succeed");
+
+    let mut state = read_worktree_state();
+    for w in &mut state.worktrees {
+        w.is_main = false;
+    }
+
+    let state_path = util::storage_path().join("worktrees.json");
+    let data = serde_json::to_string_pretty(&state)
+        .expect("failed to serialize worktree state with broken main flags");
+    fs::write(&state_path, data).expect("failed to overwrite worktrees.json");
+
+    exec_async(vec!["worktree", "repair"])
+        .await
+        .expect("worktree repair should succeed");
+
+    let repaired = read_worktree_state();
+    let main_entries: Vec<_> = repaired.worktrees.iter().filter(|w| w.is_main).collect();
+    assert_eq!(
+        main_entries.len(),
+        1,
+        "repair should persist exactly one main worktree flag"
+    );
+    assert_eq!(
+        main_entries[0].path,
+        repo_dir.path().canonicalize().unwrap().to_string_lossy(),
+        "repair should persist the original repository root as main"
+    );
+}
+
+#[tokio::test]
+#[serial]
 /// The main worktree flag remains unique and anchored to the original repo root.
 async fn test_worktree_main_flag_remains_single_and_stable() {
     let repo_dir = tempdir().unwrap();
@@ -511,4 +839,104 @@ async fn test_worktree_main_flag_remains_single_and_stable() {
         repo_main.to_string_lossy(),
         "main worktree entry should remain the original repo directory"
     );
+}
+
+#[tokio::test]
+#[serial]
+/// With `--separate-libra-dir`, the main worktree entry should stay anchored to the original workdir.
+async fn test_worktree_main_flag_stable_with_separate_libra_dir() {
+    let temp_root = tempdir().unwrap();
+    let workdir = temp_root.path().join("work");
+    let storage = temp_root.path().join("storage");
+    fs::create_dir_all(&workdir).unwrap();
+
+    init(InitArgs {
+        bare: false,
+        template: None,
+        initial_branch: None,
+        repo_directory: workdir.to_string_lossy().to_string(),
+        quiet: true,
+        shared: None,
+        object_format: None,
+        ref_format: None,
+        separate_libra_dir: Some(storage.to_string_lossy().to_string()),
+    })
+    .await
+    .expect("init with separate-libra-dir should succeed");
+
+    let _guard = test::ChangeDirGuard::new(&workdir);
+    exec_async(vec!["worktree", "add", "wt_sep_main"])
+        .await
+        .expect("worktree add should succeed");
+
+    let original_main = workdir.canonicalize().unwrap();
+    let wt_path = workdir.join("wt_sep_main");
+    let _guard_wt = test::ChangeDirGuard::new(&wt_path);
+    exec_async(vec!["worktree", "list"])
+        .await
+        .expect("worktree list from linked worktree should succeed");
+
+    let state = read_worktree_state();
+    let main_entries: Vec<_> = state.worktrees.iter().filter(|w| w.is_main).collect();
+    assert_eq!(
+        main_entries.len(),
+        1,
+        "there should be exactly one main worktree entry"
+    );
+    assert_eq!(
+        main_entries[0].path,
+        original_main.to_string_lossy(),
+        "main worktree entry should remain the original workdir with separate storage"
+    );
+}
+
+#[tokio::test]
+#[serial]
+/// In `--separate-libra-dir` layout, removing the real main worktree from a linked worktree is rejected.
+async fn test_worktree_remove_main_is_rejected_with_separate_libra_dir() {
+    let temp_root = tempdir().unwrap();
+    let workdir = temp_root.path().join("work");
+    let storage = temp_root.path().join("storage");
+    fs::create_dir_all(&workdir).unwrap();
+
+    init(InitArgs {
+        bare: false,
+        template: None,
+        initial_branch: None,
+        repo_directory: workdir.to_string_lossy().to_string(),
+        quiet: true,
+        shared: None,
+        object_format: None,
+        ref_format: None,
+        separate_libra_dir: Some(storage.to_string_lossy().to_string()),
+    })
+    .await
+    .expect("init with separate-libra-dir should succeed");
+
+    let _guard = test::ChangeDirGuard::new(&workdir);
+    exec_async(vec!["worktree", "add", "wt_sep_guard"])
+        .await
+        .expect("worktree add should succeed");
+
+    let main_path = workdir.canonicalize().unwrap();
+    let main_path_str = main_path.to_string_lossy().to_string();
+
+    let wt_path = workdir.join("wt_sep_guard");
+    let _guard_wt = test::ChangeDirGuard::new(&wt_path);
+    let before_paths = worktree_paths();
+
+    exec_async(vec!["worktree", "remove", main_path_str.as_str()])
+        .await
+        .expect("worktree remove command itself should not fail");
+
+    let after_paths = worktree_paths();
+    assert_eq!(
+        before_paths, after_paths,
+        "remove main should not mutate worktree state in separate-libra-dir layout"
+    );
+
+    let state = read_worktree_state();
+    let main_entries: Vec<_> = state.worktrees.iter().filter(|w| w.is_main).collect();
+    assert_eq!(main_entries.len(), 1);
+    assert_eq!(main_entries[0].path, main_path.to_string_lossy());
 }
