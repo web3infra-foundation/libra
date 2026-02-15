@@ -4,7 +4,7 @@
 //!
 //! | Tool Name | Description |
 //! |-----------|-------------|
-//! | `create_task` | Create a new AI Task (Goal/Intent). Input: `CreateTaskParams`. Output: Task ID. |
+//! | `create_task` | Create a new AI Task. Input: `CreateTaskParams`. Output: Task ID. |
 //! | `list_tasks` | List recent Tasks. Input: `ListTasksParams`. Output: List of task summaries. |
 //! | `create_run` | Create a new Run for a Task. Input: `CreateRunParams`. Output: Run ID. |
 //! | `list_runs` | List recent Runs. Input: `ListRunsParams`. Output: List of run summaries. |

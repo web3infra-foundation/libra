@@ -28,7 +28,7 @@ use crate::{
 
 #[derive(Clone)]
 pub struct LibraMcpServer {
-    pub history_manager: Option<Arc<HistoryManager>>,
+    pub intent_history_manager: Option<Arc<HistoryManager>>,
     pub storage: Option<Arc<dyn Storage + Send + Sync>>,
     pub repo_id: Uuid,
     tool_router: ToolRouter<LibraMcpServer>,
@@ -36,12 +36,12 @@ pub struct LibraMcpServer {
 
 impl LibraMcpServer {
     pub fn new(
-        history_manager: Option<Arc<HistoryManager>>,
+        intent_history_manager: Option<Arc<HistoryManager>>,
         storage: Option<Arc<dyn Storage + Send + Sync>>,
         repo_id: Uuid,
     ) -> Self {
         Self {
-            history_manager,
+            intent_history_manager,
             storage,
             repo_id,
             tool_router: Self::build_tool_router(),
@@ -60,7 +60,7 @@ impl LibraMcpServer {
     pub async fn read_resource_impl(&self, uri: &str) -> Result<Vec<ResourceContents>, ErrorData> {
         if uri == "libra://history/latest" {
             let history = self
-                .history_manager
+                .intent_history_manager
                 .as_ref()
                 .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
             let head = history
@@ -80,7 +80,7 @@ impl LibraMcpServer {
 
         if let Some(object_type) = uri.strip_prefix("libra://objects/") {
             let history = self
-                .history_manager
+                .intent_history_manager
                 .as_ref()
                 .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
             let objects = history
@@ -97,7 +97,7 @@ impl LibraMcpServer {
 
         if let Some(object_id_str) = uri.strip_prefix("libra://object/") {
             let history = self
-                .history_manager
+                .intent_history_manager
                 .as_ref()
                 .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
             let storage = self
@@ -145,7 +145,7 @@ impl LibraMcpServer {
         };
 
         let history = self
-            .history_manager
+            .intent_history_manager
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
         let storage = self

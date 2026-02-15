@@ -562,8 +562,7 @@ pub async fn init(args: InitArgs) -> Result<(), InitError> {
     // This also acts as a GC root — objects reachable from this ref will
     // not be garbage-collected.
     {
-        use crate::internal::ai::history::HistoryManager;
-        use crate::utils::storage::local::LocalStorage;
+        use crate::{internal::ai::history::HistoryManager, utils::storage::local::LocalStorage};
 
         let objects_dir = root_dir.join("objects");
         let storage = std::sync::Arc::new(LocalStorage::new(objects_dir));

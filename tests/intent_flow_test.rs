@@ -47,6 +47,7 @@ async fn test_intent_flow() {
     // 3. Create Root Intent
     let actor = git_internal::internal::object::types::ActorRef::human("jackie").unwrap();
     let root_intent = Intent::new(
+        uuid::Uuid::new_v4(),
         "Initial high-level goal: Refactor system".to_string(),
         None,
         None,
@@ -61,6 +62,7 @@ async fn test_intent_flow() {
 
     // 4. Create Child Intent
     let child_intent = Intent::new(
+        uuid::Uuid::new_v4(),
         "Sub-goal: Move Intent struct to libra".to_string(),
         Some(root_intent.id),
         None,

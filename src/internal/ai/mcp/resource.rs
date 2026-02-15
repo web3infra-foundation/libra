@@ -469,7 +469,13 @@ impl LibraMcpServer {
             None
         };
 
-        let mut intent = Intent::new(params.content, parent_id, task_id, Some(actor));
+        let mut intent = Intent::new(
+            self.repo_id,
+            params.content,
+            parent_id,
+            task_id,
+            Some(actor),
+        );
         if let Some(status) = params.status {
             intent.set_status(match status.as_str() {
                 "draft" => IntentStatus::Draft,
@@ -494,7 +500,7 @@ impl LibraMcpServer {
 
         // Track in the unified AI history branch
         let history = self
-            .history_manager
+            .intent_history_manager
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
 
@@ -522,7 +528,7 @@ impl LibraMcpServer {
         params: ListIntentsParams,
     ) -> Result<CallToolResult, ErrorData> {
         let history = self
-            .history_manager
+            .intent_history_manager
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
         let storage = self
@@ -585,7 +591,7 @@ impl LibraMcpServer {
         use crate::internal::ai::intent::IntentStatus;
 
         let history = self
-            .history_manager
+            .intent_history_manager
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
         let storage = self
@@ -751,7 +757,7 @@ impl LibraMcpServer {
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
-        if let Some(history) = &self.history_manager {
+        if let Some(history) = &self.intent_history_manager {
             history
                 .append(
                     &task.header().object_type().to_string(),
@@ -782,7 +788,7 @@ impl LibraMcpServer {
         params: ListTasksParams,
     ) -> Result<CallToolResult, ErrorData> {
         let history = self
-            .history_manager
+            .intent_history_manager
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
         let storage = self
@@ -922,7 +928,7 @@ impl LibraMcpServer {
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
-        if let Some(history) = &self.history_manager {
+        if let Some(history) = &self.intent_history_manager {
             history
                 .append(
                     &run.header().object_type().to_string(),
@@ -953,7 +959,7 @@ impl LibraMcpServer {
         params: ListRunsParams,
     ) -> Result<CallToolResult, ErrorData> {
         let history = self
-            .history_manager
+            .intent_history_manager
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
         let storage = self
@@ -1069,7 +1075,7 @@ impl LibraMcpServer {
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
-        if let Some(history) = &self.history_manager {
+        if let Some(history) = &self.intent_history_manager {
             history
                 .append(
                     &snapshot.header().object_type().to_string(),
@@ -1100,7 +1106,7 @@ impl LibraMcpServer {
         params: ListContextSnapshotsParams,
     ) -> Result<CallToolResult, ErrorData> {
         let history = self
-            .history_manager
+            .intent_history_manager
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
         let storage = self
@@ -1215,7 +1221,7 @@ impl LibraMcpServer {
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
-        if let Some(history) = &self.history_manager {
+        if let Some(history) = &self.intent_history_manager {
             history
                 .append(
                     &plan.header().object_type().to_string(),
@@ -1246,7 +1252,7 @@ impl LibraMcpServer {
         params: ListPlansParams,
     ) -> Result<CallToolResult, ErrorData> {
         let history = self
-            .history_manager
+            .intent_history_manager
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
         let storage = self
@@ -1369,7 +1375,7 @@ impl LibraMcpServer {
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
-        if let Some(history) = &self.history_manager {
+        if let Some(history) = &self.intent_history_manager {
             history
                 .append(
                     &patchset.header().object_type().to_string(),
@@ -1400,7 +1406,7 @@ impl LibraMcpServer {
         params: ListPatchSetsParams,
     ) -> Result<CallToolResult, ErrorData> {
         let history = self
-            .history_manager
+            .intent_history_manager
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
         let storage = self
@@ -1510,7 +1516,7 @@ impl LibraMcpServer {
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
-        if let Some(history) = &self.history_manager {
+        if let Some(history) = &self.intent_history_manager {
             history
                 .append(
                     &evidence.header().object_type().to_string(),
@@ -1541,7 +1547,7 @@ impl LibraMcpServer {
         params: ListEvidencesParams,
     ) -> Result<CallToolResult, ErrorData> {
         let history = self
-            .history_manager
+            .intent_history_manager
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
         let storage = self
@@ -1651,7 +1657,7 @@ impl LibraMcpServer {
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
-        if let Some(history) = &self.history_manager {
+        if let Some(history) = &self.intent_history_manager {
             history
                 .append(
                     &inv.header().object_type().to_string(),
@@ -1682,7 +1688,7 @@ impl LibraMcpServer {
         params: ListToolInvocationsParams,
     ) -> Result<CallToolResult, ErrorData> {
         let history = self
-            .history_manager
+            .intent_history_manager
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
         let storage = self
@@ -1778,7 +1784,7 @@ impl LibraMcpServer {
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
-        if let Some(history) = &self.history_manager {
+        if let Some(history) = &self.intent_history_manager {
             history
                 .append(
                     &prov.header().object_type().to_string(),
@@ -1809,7 +1815,7 @@ impl LibraMcpServer {
         params: ListProvenancesParams,
     ) -> Result<CallToolResult, ErrorData> {
         let history = self
-            .history_manager
+            .intent_history_manager
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
         let storage = self
@@ -1922,7 +1928,7 @@ impl LibraMcpServer {
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
-        if let Some(history) = &self.history_manager {
+        if let Some(history) = &self.intent_history_manager {
             history
                 .append(
                     &decision.header().object_type().to_string(),
@@ -1953,7 +1959,7 @@ impl LibraMcpServer {
         params: ListDecisionsParams,
     ) -> Result<CallToolResult, ErrorData> {
         let history = self
-            .history_manager
+            .intent_history_manager
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
         let storage = self

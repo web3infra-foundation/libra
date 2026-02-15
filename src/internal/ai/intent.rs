@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{collections::HashMap, fmt};
 
 use chrono::{DateTime, Utc};
 use git_internal::{hash::ObjectHash, internal::object::types::ActorRef};
@@ -47,6 +47,8 @@ impl fmt::Display for IntentStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Intent {
     pub id: Uuid,
+    /// Repository ID this intent belongs to.
+    pub repo_id: Uuid,
     pub created_at: DateTime<Utc>,
     /// Pointer to the previous intent in the chain (forming the parallel branch).
     pub parent_id: Option<Uuid>,
@@ -60,10 +62,15 @@ pub struct Intent {
     pub commit_sha: Option<ObjectHash>,
     /// Status of the intent.
     pub status: IntentStatus,
+    /// Search tags (key-value pairs) for filtering and categorization
+    pub tags: HashMap<String, String>,
+    /// External ID mappings for integration with other systems
+    pub external_ids: HashMap<String, String>,
 }
 
 impl Intent {
     pub fn new(
+        repo_id: Uuid,
         content: String,
         parent_id: Option<Uuid>,
         task_id: Option<Uuid>,
@@ -71,6 +78,7 @@ impl Intent {
     ) -> Self {
         Self {
             id: Uuid::now_v7(),
+            repo_id,
             created_at: Utc::now(),
             parent_id,
             content,
@@ -78,6 +86,8 @@ impl Intent {
             created_by,
             commit_sha: None,
             status: IntentStatus::Active,
+            tags: HashMap::new(),
+            external_ids: HashMap::new(),
         }
     }
 
