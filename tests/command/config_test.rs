@@ -163,7 +163,7 @@ async fn test_config_get_failed() {
     let err = args.validate().unwrap_err();
     assert_eq!(
         err,
-        "default value is only valid when get (get_all) is set".to_string()
+        "--default is only valid when --get or --get-all is set".to_string()
     );
 }
 

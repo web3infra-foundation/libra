@@ -322,7 +322,7 @@ impl ConfigArgs {
     pub fn validate(&self) -> Result<(), String> {
         // validate the default value is only present when get or get_all is set
         if self.default.is_some() && !(self.get || self.get_all) {
-            return Err("default value is only valid when get (get_all) is set".to_string());
+            return Err("--default is only valid when --get or --get-all is set".to_string());
         }
         // validate that name_only is only valid when list is set
         if self.name_only && !self.list {
