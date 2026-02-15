@@ -3,11 +3,13 @@
 pub mod apply_patch;
 pub mod grep_files;
 pub mod list_dir;
+pub mod mcp_bridge;
 pub mod read_file;
 
 pub use apply_patch::ApplyPatchHandler;
 pub use grep_files::GrepFilesHandler;
 pub use list_dir::ListDirHandler;
+pub use mcp_bridge::McpBridgeHandler;
 pub use read_file::ReadFileHandler;
 
 /// Helper function to parse JSON arguments for tool handlers.

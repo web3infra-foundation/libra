@@ -43,7 +43,7 @@ rust_library(
     rustc_flags = ["@$(location :tower-http-manifest[env_flags])"],
     visibility = ["PUBLIC"],
     deps = [
-        "//third-party/rust/crates/bitflags/2.10.0:bitflags",
+        "//third-party/rust/crates/bitflags/2.11.0:bitflags",
         "//third-party/rust/crates/bytes/1.11.1:bytes",
         "//third-party/rust/crates/futures-core/0.3.31:futures-core",
         "//third-party/rust/crates/futures-util/0.3.31:futures-util",

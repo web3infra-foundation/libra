@@ -8,6 +8,7 @@ pub mod object_ext;
 pub mod path;
 pub mod path_ext;
 pub mod storage;
+pub mod storage_ext;
 pub mod test;
 pub mod tree;
 pub mod util;

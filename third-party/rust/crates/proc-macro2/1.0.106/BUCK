@@ -35,7 +35,7 @@ rust_library(
         "@$(location :proc-macro2-manifest[env_flags])",
     ],
     visibility = ["PUBLIC"],
-    deps = ["//third-party/rust/crates/unicode-ident/1.0.22:unicode-ident"],
+    deps = ["//third-party/rust/crates/unicode-ident/1.0.23:unicode-ident"],
 )
 
 rust_binary(

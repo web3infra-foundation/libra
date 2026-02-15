@@ -245,6 +245,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_dir_nonexistent() {
+        let temp_dir = TempDir::new().unwrap();
         let handler = ListDirHandler;
         let invocation = ToolInvocation::new(
             "call-1",
@@ -256,7 +257,7 @@ mod tests {
                 })
                 .to_string(),
             },
-            std::env::current_dir().unwrap(),
+            temp_dir.path().to_path_buf(),
         );
 
         let result = handler.handle(invocation).await;

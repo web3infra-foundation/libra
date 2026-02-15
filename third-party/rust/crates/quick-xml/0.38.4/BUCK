@@ -32,7 +32,7 @@ rust_library(
     rustc_flags = ["@$(location :quick-xml-manifest[env_flags])"],
     visibility = ["PUBLIC"],
     deps = [
-        "//third-party/rust/crates/memchr/2.7.6:memchr",
+        "//third-party/rust/crates/memchr/2.8.0:memchr",
         "//third-party/rust/crates/serde/1.0.228:serde",
     ],
 )

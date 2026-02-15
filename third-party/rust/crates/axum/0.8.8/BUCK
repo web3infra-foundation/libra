@@ -51,7 +51,7 @@ rust_library(
         "//third-party/rust/crates/hyper/1.8.1:hyper",
         "//third-party/rust/crates/itoa/1.0.17:itoa",
         "//third-party/rust/crates/matchit/0.8.4:matchit",
-        "//third-party/rust/crates/memchr/2.7.6:memchr",
+        "//third-party/rust/crates/memchr/2.8.0:memchr",
         "//third-party/rust/crates/mime/0.3.17:mime",
         "//third-party/rust/crates/percent-encoding/2.3.2:percent-encoding",
         "//third-party/rust/crates/pin-project-lite/0.2.16:pin-project-lite",

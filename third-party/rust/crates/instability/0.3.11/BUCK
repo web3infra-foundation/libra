@@ -37,7 +37,7 @@ rust_library(
         "//third-party/rust/crates/indoc/2.0.7:indoc",
         "//third-party/rust/crates/proc-macro2/1.0.106:proc-macro2",
         "//third-party/rust/crates/quote/1.0.44:quote",
-        "//third-party/rust/crates/syn/2.0.114:syn",
+        "//third-party/rust/crates/syn/2.0.115:syn",
     ],
 )
 

@@ -44,13 +44,13 @@ rust_library(
         },
     },
     os_deps = {
-        "linux": ["//third-party/rust/crates/libc/0.2.180:libc"],
-        "macos": ["//third-party/rust/crates/libc/0.2.180:libc"],
+        "linux": ["//third-party/rust/crates/libc/0.2.182:libc"],
+        "macos": ["//third-party/rust/crates/libc/0.2.182:libc"],
         "windows": ["//third-party/rust/crates/windows-sys/0.61.2:windows-sys"],
     },
     visibility = ["PUBLIC"],
     deps = [
-        "//third-party/rust/crates/bitflags/2.10.0:bitflags",
+        "//third-party/rust/crates/bitflags/2.11.0:bitflags",
         "//third-party/rust/crates/linux-raw-sys/0.11.0:linux-raw-sys",
     ],
 )
