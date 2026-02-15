@@ -20,7 +20,7 @@ async fn test_create_task_tool() {
         temp_dir.path().to_path_buf(),
     ));
     let repo_id = Uuid::new_v4();
-    let server = LibraMcpServer::new(Some(history_manager), None, Some(storage), repo_id);
+    let server = LibraMcpServer::new(Some(history_manager), Some(storage), repo_id);
 
     let params = CreateTaskParams {
         title: "Test Task".to_string(),

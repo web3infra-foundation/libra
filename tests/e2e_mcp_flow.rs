@@ -349,8 +349,8 @@ async fn test_e2e_mcp_flow() {
     let objects_dir = repo_path.join(".libra/objects");
     assert!(objects_dir.exists(), ".libra/objects should exist");
 
-    let history_ref = repo_path.join(".libra/refs/libra/history");
-    assert!(history_ref.exists(), "History ref should be created");
+    let history_ref = repo_path.join(".libra/refs/libra/intent");
+    assert!(history_ref.exists(), "AI history ref should be created");
 
     let history_content = std::fs::read_to_string(&history_ref).unwrap();
     println!("History Head: {}", history_content.trim());

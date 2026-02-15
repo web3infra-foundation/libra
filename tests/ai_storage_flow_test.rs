@@ -54,11 +54,11 @@ async fn test_ai_flow_local() {
     println!("Stored Task: {}", task_hash);
 
     // Verify History Log Creation
-    // The history ref should exist and point to a commit
-    let history_ref_path = libra_dir.join("refs/libra/history");
+    // The AI ref should exist and point to a commit
+    let history_ref_path = libra_dir.join("refs/libra/intent");
     assert!(
         history_ref_path.exists(),
-        "History ref file should be created at {:?}",
+        "AI history ref file should be created at {:?}",
         history_ref_path
     );
 

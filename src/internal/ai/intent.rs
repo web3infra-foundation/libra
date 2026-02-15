@@ -39,10 +39,11 @@ impl fmt::Display for IntentStatus {
 }
 
 /// Intent object representing a user prompt or high-level goal.
-/// It forms a parallel history chain separate from code commits (maintained in `refs/libra/intent`).
+/// It is stored on the unified AI history branch (`refs/libra/intent`) alongside
+/// all other AI process objects (Task, Run, Plan, etc.).
 ///
-/// Unlike other AI objects, Intents are stored in a dedicated history branch to decouple
-/// "What/Why" (Intent) from "How" (Implementation/Code History).
+/// The `parent_id` field forms a logical chain of intents, allowing traversal
+/// of the "What/Why" history independently of implementation details.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Intent {
     pub id: Uuid,

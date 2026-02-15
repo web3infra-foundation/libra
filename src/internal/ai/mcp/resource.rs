@@ -468,11 +468,11 @@ impl LibraMcpServer {
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
-        // Use the dedicated intent history manager if available
+        // Track in the unified AI history branch
         let history = self
-            .intent_history_manager
+            .history_manager
             .as_ref()
-            .ok_or_else(|| ErrorData::internal_error("Intent history not available", None))?;
+            .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
 
         history
             .append(&intent.object_type(), &intent.object_id(), hash)
@@ -498,9 +498,9 @@ impl LibraMcpServer {
         params: ListIntentsParams,
     ) -> Result<CallToolResult, ErrorData> {
         let history = self
-            .intent_history_manager
+            .history_manager
             .as_ref()
-            .ok_or_else(|| ErrorData::internal_error("Intent history not available", None))?;
+            .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
         let storage = self
             .storage
             .as_ref()

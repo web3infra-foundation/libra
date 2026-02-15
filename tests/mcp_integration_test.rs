@@ -33,7 +33,7 @@ async fn test_mcp_integration_server_info() {
         temp_dir.path().to_path_buf(),
     ));
     let repo_id = Uuid::new_v4();
-    let server = LibraMcpServer::new(Some(history_manager), None, Some(storage), repo_id);
+    let server = LibraMcpServer::new(Some(history_manager), Some(storage), repo_id);
 
     let info = ServerHandler::get_info(&server);
     assert_eq!(info.server_info.name, "libra");
@@ -48,7 +48,7 @@ async fn test_mcp_integration_list_resources() {
         temp_dir.path().to_path_buf(),
     ));
     let repo_id = Uuid::new_v4();
-    let server = LibraMcpServer::new(Some(history_manager), None, Some(storage), repo_id);
+    let server = LibraMcpServer::new(Some(history_manager), Some(storage), repo_id);
 
     // Call implementation directly to avoid RequestContext
     let resources = server.list_resources_impl().await.unwrap();
@@ -65,7 +65,7 @@ async fn test_mcp_integration_create_and_read_task() {
         temp_dir.path().to_path_buf(),
     ));
     let repo_id = Uuid::new_v4();
-    let server = LibraMcpServer::new(Some(history_manager), None, Some(storage), repo_id);
+    let server = LibraMcpServer::new(Some(history_manager), Some(storage), repo_id);
 
     // 1. Create Task
     let params = CreateTaskParams {
@@ -148,7 +148,6 @@ fn setup_server() -> (LibraMcpServer, Arc<LocalStorage>, Arc<HistoryManager>, Uu
     let repo_id = Uuid::new_v4();
     let server = LibraMcpServer::new(
         Some(history_manager.clone()),
-        None,
         Some(storage.clone()),
         repo_id,
     );
