@@ -952,7 +952,6 @@ async fn test_config_cross_platform_paths() {
 #[test]
 #[serial]
 fn test_config_system_rejects_relative_programdata() {
-    let _guard =
-        EnvVarGuard::set("PROGRAMDATA", std::ffi::OsStr::new("relative/path"));
+    let _guard = EnvVarGuard::set("PROGRAMDATA", std::ffi::OsStr::new("relative/path"));
     assert_eq!(config::ConfigScope::System.get_config_path(), None);
 }

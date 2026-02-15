@@ -13,6 +13,8 @@ pub enum ModelType {
     Anthropic(crate::internal::ai::providers::anthropic::completion::CompletionModel),
     /// DeepSeek model
     Deepseek(crate::internal::ai::providers::deepseek::completion::CompletionModel),
+    /// Zhipu model
+    Zhipu(crate::internal::ai::providers::zhipu::completion::CompletionModel),
 }
 
 impl CompletionModel for ModelType {
@@ -50,6 +52,12 @@ impl CompletionModel for ModelType {
                     raw_response: Box::new(r.raw_response) as Self::Response,
                 }
             }),
+            ModelType::Zhipu(model) => model.completion(request).await.map(|r| {
+                crate::internal::ai::completion::CompletionResponse {
+                    content: r.content,
+                    raw_response: Box::new(r.raw_response) as Self::Response,
+                }
+            }),
         }
     }
 }
@@ -62,6 +70,7 @@ impl ModelType {
             ModelType::Openai(model) => model.model_name().to_string(),
             ModelType::Anthropic(model) => model.model_name().to_string(),
             ModelType::Deepseek(model) => model.model_name().to_string(),
+            ModelType::Zhipu(model) => model.model_name().to_string(),
         }
     }
 
@@ -72,6 +81,7 @@ impl ModelType {
             ModelType::Openai(_) => "openai".to_string(),
             ModelType::Anthropic(_) => "anthropic".to_string(),
             ModelType::Deepseek(_) => "deepseek".to_string(),
+            ModelType::Zhipu(_) => "zhipu".to_string(),
         }
     }
 }
@@ -89,6 +99,9 @@ pub const SUPPORTED_MODELS: &[(&str, &str, &str)] = &[
     ),
     ("anthropic", "claude-3-opus", "Anthropic Claude 3 Opus"),
     ("deepseek", "deepseek-chat", "DeepSeek Chat"),
+    ("zhipu", "glm-5", "Zhipu GLM-5"),
+    ("zhipu", "glm-4", "Zhipu GLM-4"),
+    ("zhipu", "glm-4-flash", "Zhipu GLM-4 Flash"),
 ];
 
 /// Get all supported models.
