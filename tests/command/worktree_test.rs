@@ -12,6 +12,10 @@ use tempfile::tempdir;
 
 use super::*;
 
+/// Mirror of the on-disk `WorktreeEntry` used only in tests.
+///
+/// This type allows tests to deserialize `worktrees.json` without depending
+/// on internal, non-public structs from the main crate.
 #[derive(Clone, Deserialize, Serialize)]
 struct TestWorktreeEntry {
     path: String,
@@ -20,17 +24,20 @@ struct TestWorktreeEntry {
     lock_reason: Option<String>,
 }
 
+/// Mirror of the on-disk `WorktreeState` used only in tests.
 #[derive(Deserialize, Serialize)]
 struct TestWorktreeState {
     worktrees: Vec<TestWorktreeEntry>,
 }
 
+/// Loads the current `worktrees.json` into a test-friendly `TestWorktreeState`.
 fn read_worktree_state() -> TestWorktreeState {
     let state_path = util::storage_path().join("worktrees.json");
     let data = fs::read_to_string(state_path).expect("worktrees.json should exist");
     serde_json::from_str(&data).expect("worktrees.json should be valid JSON")
 }
 
+/// Returns all worktree paths from the persisted test state.
 fn worktree_paths() -> Vec<String> {
     read_worktree_state()
         .worktrees
@@ -41,6 +48,7 @@ fn worktree_paths() -> Vec<String> {
 
 #[tokio::test]
 #[serial]
+/// `worktree add` creates a linked directory with a `.libra` link file.
 async fn test_worktree_add_creates_linked_directory() {
     let repo_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(repo_dir.path()).await;
@@ -65,6 +73,7 @@ async fn test_worktree_add_creates_linked_directory() {
 
 #[tokio::test]
 #[serial]
+/// Basic lock/unlock/remove happy path for a non-main worktree.
 async fn test_worktree_lock_unlock_and_remove() {
     let repo_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(repo_dir.path()).await;
@@ -89,6 +98,7 @@ async fn test_worktree_lock_unlock_and_remove() {
 
 #[tokio::test]
 #[serial]
+/// Creating a worktree must not disturb existing staged changes in the index.
 async fn test_worktree_add_does_not_reset_index() {
     let repo_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(repo_dir.path()).await;
@@ -149,6 +159,7 @@ async fn test_worktree_add_does_not_reset_index() {
 
 #[tokio::test]
 #[serial]
+/// `worktree list` should include both main and added worktrees and be read-only.
 async fn test_worktree_list_includes_main_and_added_worktrees() {
     let repo_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(repo_dir.path()).await;
@@ -178,6 +189,7 @@ async fn test_worktree_list_includes_main_and_added_worktrees() {
 
 #[tokio::test]
 #[serial]
+/// Moving an unlocked, non-main worktree updates both the filesystem and state.
 async fn test_worktree_move_moves_unlocked_non_main_worktree() {
     let repo_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(repo_dir.path()).await;
@@ -222,6 +234,7 @@ async fn test_worktree_move_moves_unlocked_non_main_worktree() {
 
 #[tokio::test]
 #[serial]
+/// Moving the main worktree is rejected without creating or registering a destination.
 async fn test_worktree_move_main_is_rejected_without_side_effects() {
     let repo_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(repo_dir.path()).await;
@@ -269,6 +282,7 @@ async fn test_worktree_move_main_is_rejected_without_side_effects() {
 
 #[tokio::test]
 #[serial]
+/// Moving a locked worktree is rejected without changing its path or lock state.
 async fn test_worktree_move_locked_is_rejected_without_side_effects() {
     let repo_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(repo_dir.path()).await;
@@ -313,6 +327,7 @@ async fn test_worktree_move_locked_is_rejected_without_side_effects() {
 
 #[tokio::test]
 #[serial]
+/// Moving a worktree onto an existing worktree path is rejected without mutation.
 async fn test_worktree_move_rejects_duplicate_destination() {
     let repo_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(repo_dir.path()).await;
@@ -352,6 +367,7 @@ async fn test_worktree_move_rejects_duplicate_destination() {
 
 #[tokio::test]
 #[serial]
+/// `worktree prune` removes missing non-main worktrees from the registry.
 async fn test_worktree_prune_removes_missing_non_main_worktrees() {
     let repo_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(repo_dir.path()).await;
@@ -385,6 +401,7 @@ async fn test_worktree_prune_removes_missing_non_main_worktrees() {
 
 #[tokio::test]
 #[serial]
+/// Removing a locked worktree is rejected without changing state or directory.
 async fn test_worktree_remove_locked_is_rejected_without_side_effects() {
     let repo_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(repo_dir.path()).await;
@@ -421,6 +438,7 @@ async fn test_worktree_remove_locked_is_rejected_without_side_effects() {
 
 #[tokio::test]
 #[serial]
+/// `worktree repair` removes duplicate entries that point to the same path.
 async fn test_worktree_repair_deduplicates_entries() {
     let repo_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(repo_dir.path()).await;
@@ -463,6 +481,7 @@ async fn test_worktree_repair_deduplicates_entries() {
 
 #[tokio::test]
 #[serial]
+/// The main worktree flag remains unique and anchored to the original repo root.
 async fn test_worktree_main_flag_remains_single_and_stable() {
     let repo_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(repo_dir.path()).await;
