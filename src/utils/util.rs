@@ -61,40 +61,55 @@ pub fn cur_dir() -> PathBuf {
     }
 }
 
+/// Parse a `.libra` link file that points to a separate storage directory.
+/// The file format intentionally matches Git's `gitdir` link format for compatibility:
+/// `gitdir: /absolute/or/relative/path/to/storage`.
 fn parse_separate_git_dir_file(link: &Path) -> Result<PathBuf, io::Error> {
     let content = fs::read_to_string(link)?;
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Some(rest) = trimmed.strip_prefix("gitdir:") else {
-            return Err(io::Error::new(
+    let line = content
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .ok_or_else(|| {
+            io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("invalid separate-git-dir file format at {}", link.display()),
-            ));
-        };
-        let target = rest.trim();
-        if target.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("empty gitdir in {}", link.display()),
-            ));
-        }
-        let target_path = Path::new(target);
-        let resolved = if target_path.is_absolute() {
-            target_path.to_path_buf()
-        } else {
-            link.parent()
-                .unwrap_or_else(|| Path::new(""))
-                .join(target_path)
-        };
-        return Ok(resolved);
+                format!(
+                    "empty .libra link file at {}; expected `gitdir: <path>`",
+                    link.display()
+                ),
+            )
+        })?;
+
+    let rest = line.strip_prefix("gitdir:").ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "invalid .libra link file format at {}; expected line starting with `gitdir:`",
+                link.display()
+            ),
+        )
+    })?;
+
+    let target = rest.trim();
+    if target.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "empty gitdir target in .libra link file at {}",
+                link.display()
+            ),
+        ));
     }
-    Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!("empty separate-git-dir file at {}", link.display()),
-    ))
+
+    let target_path = Path::new(target);
+    let resolved = if target_path.is_absolute() {
+        target_path.to_path_buf()
+    } else {
+        link.parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join(target_path)
+    };
+    Ok(resolved)
 }
 
 fn try_get_paths(path: Option<PathBuf>) -> Result<(PathBuf, PathBuf), io::Error> {

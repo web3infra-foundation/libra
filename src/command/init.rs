@@ -473,7 +473,15 @@ pub async fn init(args: InitArgs) -> Result<(), InitError> {
     // For non-bare repositories with a separate storage directory, create the link file
     if !args.bare && args.separate_git_dir.is_some() {
         let link_path = cur_dir.join(ROOT_DIR);
-        let storage_abs = root_dir.canonicalize().unwrap_or(root_dir.clone());
+        let storage_abs = root_dir.canonicalize().map_err(|e| {
+            InitError::Io(io::Error::new(
+                e.kind(),
+                format!(
+                    "failed to resolve storage directory {}: {e}",
+                    root_dir.display()
+                ),
+            ))
+        })?;
         let content = format!("gitdir: {}\n", storage_abs.display());
         fs::write(link_path, content)?;
     }
