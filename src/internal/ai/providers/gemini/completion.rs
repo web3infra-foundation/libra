@@ -42,6 +42,11 @@ impl CompletionModel {
             model: model.into(),
         }
     }
+
+    /// Returns the model name.
+    pub fn model_name(&self) -> &str {
+        &self.model
+    }
 }
 
 impl CompletionModelTrait for CompletionModel {

@@ -17,12 +17,13 @@ use super::{
     app_event::{AgentEvent, AgentStatus, AppEvent, ExitMode},
     chatwidget::ChatWidget,
     history_cell::{AssistantHistoryCell, ToolCallHistoryCell, UserHistoryCell},
+    model::ModelType,
     slash_command::parse_command,
     terminal::{TARGET_FRAME_INTERVAL, Tui, TuiEvent},
 };
 use crate::internal::ai::{
     agent::{ToolLoopConfig, run_tool_loop_with_history_and_observer},
-    completion::{CompletionModel, Message},
+    completion::Message,
     tools::{ToolOutput, ToolRegistry},
 };
 
@@ -43,13 +44,13 @@ pub struct AppExitInfo {
 }
 
 /// The main application struct.
-pub struct App<M: CompletionModel> {
+pub struct App {
     /// The TUI instance.
     tui: Tui,
     /// The chat widget.
     widget: ChatWidget,
     /// The completion model used by the agent loop.
-    model: M,
+    model: ModelType,
     /// The tool registry.
     registry: Arc<ToolRegistry>,
     /// Tool loop runtime config.
@@ -74,11 +75,11 @@ pub struct App<M: CompletionModel> {
     welcome_message: String,
 }
 
-impl<M: CompletionModel + Clone + 'static> App<M> {
+impl App {
     /// Create a new App instance.
     pub fn new(
         tui: Tui,
-        model: M,
+        model: ModelType,
         registry: Arc<ToolRegistry>,
         config: ToolLoopConfig,
         welcome_message: String,
@@ -569,7 +570,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 let help_text = r#"Available Commands:
 /help   - Show this help message
 /clear  - Clear conversation history
-/model  - Show current model
+/model  - Show current model and supported models
 /status - Show current status
 /quit   - Quit the application
 "#;
@@ -585,10 +586,32 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 self.schedule_draw();
             }
             super::SlashCommand::Model => {
-                let model_info = format!(
-                    "Current model: {}\n(Use --model flag to change)",
-                    "gemini-2.0-flash"
+                // Show current model and supported models
+                let current_model = self.model.name();
+                let current_provider = self.model.provider();
+
+                let mut model_info = format!(
+                    "Current model: {} ({})\n\nSupported models:\n",
+                    current_model, current_provider
                 );
+
+                // Group models by provider
+                let mut models_by_provider = std::collections::HashMap::new();
+                for (provider, model, desc) in super::model::get_supported_models() {
+                    models_by_provider
+                        .entry(provider)
+                        .or_insert_with(Vec::new)
+                        .push((model, desc));
+                }
+
+                // Display models grouped by provider
+                for (provider, models) in models_by_provider {
+                    model_info.push_str(&format!("\n{} models:\n", provider));
+                    for (model, desc) in models {
+                        model_info.push_str(&format!("  - {}: {}\n", model, desc));
+                    }
+                }
+
                 self.widget
                     .add_cell(Box::new(AssistantHistoryCell::new(model_info)));
                 self.schedule_draw();

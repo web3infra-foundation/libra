@@ -67,39 +67,35 @@ impl HistoryCell for UserHistoryCell {
     fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
 
-        // User message with codex-style prefix
+        lines.push(Line::raw(""));
+
         let message_lines = self.message.lines();
         let mut is_first_line = true;
 
         for line in message_lines {
             if line.trim().is_empty() {
                 lines.push(Line::raw(""));
-            } else if line.starts_with("```") {
-                // Code block start/end
-                lines.push(Line::styled(
-                    format!("  {}", line),
-                    Style::default().fg(Color::Yellow),
-                ));
-            } else if line.starts_with("    ") || line.starts_with("\t") {
-                // Code indent
+            } else if line.starts_with("```") || line.starts_with("    ") || line.starts_with("\t")
+            {
                 lines.push(Line::styled(
                     format!("  {}", line),
                     Style::default().fg(Color::Yellow),
                 ));
             } else {
-                // Regular text with codex-style prefix
-                let prefix = if is_first_line { "› " } else { "  " };
-                lines.push(Line::styled(
-                    format!("{}{}", prefix, line),
-                    Style::default().fg(Color::White),
-                ));
+                let prefix = if is_first_line {
+                    "› ".to_string()
+                } else {
+                    "  ".to_string()
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(prefix, Style::default().fg(Color::Green)),
+                    Span::styled(line.to_owned(), Style::default().fg(Color::White)),
+                ]));
                 is_first_line = false;
             }
         }
 
-        if !lines.is_empty() {
-            lines.push(Line::raw("")); // Empty line for spacing
-        }
+        lines.push(Line::raw(""));
         lines
     }
 
@@ -153,7 +149,8 @@ impl HistoryCell for AssistantHistoryCell {
     fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
 
-        // Simple markdown-like rendering
+        lines.push(Line::raw(""));
+
         let content = self.content.trim();
         if content.is_empty() {
             if self.is_streaming {
@@ -167,37 +164,34 @@ impl HistoryCell for AssistantHistoryCell {
             for line in content.lines() {
                 if line.trim().is_empty() {
                     lines.push(Line::raw(""));
-                } else if line.starts_with("```") {
-                    // Code block start/end
-                    lines.push(Line::styled(
-                        format!("  {}", line),
-                        Style::default().fg(Color::Yellow),
-                    ));
-                } else if line.starts_with("    ") || line.starts_with("\t") {
-                    // Code indent
+                } else if line.starts_with("```")
+                    || line.starts_with("    ")
+                    || line.starts_with("\t")
+                {
                     lines.push(Line::styled(
                         format!("  {}", line),
                         Style::default().fg(Color::Yellow),
                     ));
                 } else {
-                    // Regular text with codex-style prefix
-                    let prefix = if is_first_line { "• " } else { "  " };
-                    lines.push(Line::styled(
-                        format!("{}{}", prefix, line),
-                        Style::default().fg(Color::White),
-                    ));
+                    let prefix = if is_first_line {
+                        "• ".to_string()
+                    } else {
+                        "  ".to_string()
+                    };
+                    lines.push(Line::from(vec![
+                        Span::styled(prefix, Style::default().fg(Color::Blue)),
+                        Span::styled(line.to_owned(), Style::default().fg(Color::White)),
+                    ]));
                     is_first_line = false;
                 }
             }
         }
 
         if self.is_streaming {
-            // Streaming indicator
             lines.push(Line::styled("• ▌", Style::default().fg(Color::Green)));
-        } else if !lines.is_empty() {
-            lines.push(Line::raw("")); // Empty line for spacing
         }
 
+        lines.push(Line::raw(""));
         lines
     }
 

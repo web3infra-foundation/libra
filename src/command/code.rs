@@ -15,6 +15,7 @@ use crate::internal::{
         client::CompletionClient,
         providers::{
             anthropic::{CLAUDE_3_5_SONNET, Client as AnthropicClient},
+            deepseek::client::Client as DeepSeekClient,
             gemini::{Client as GeminiClient, GEMINI_2_5_FLASH},
             openai::{Client as OpenAIClient, GPT_4O_MINI},
         },
@@ -31,6 +32,7 @@ pub enum CodeProvider {
     Gemini,
     Openai,
     Anthropic,
+    Deepseek,
 }
 
 #[derive(Parser, Debug)]
@@ -188,10 +190,11 @@ async fn execute_tui(args: CodeArgs) {
             };
             let model_name = args.model.unwrap_or_else(|| GEMINI_2_5_FLASH.to_string());
             let model = client.completion_model(&model_name);
+            let model_type = crate::internal::tui::ModelType::Gemini(model);
             run_tui_with_model(
                 args.host,
                 args.port,
-                model,
+                model_type,
                 registry.clone(),
                 preamble,
                 temperature,
@@ -209,10 +212,11 @@ async fn execute_tui(args: CodeArgs) {
             };
             let model_name = args.model.unwrap_or_else(|| GPT_4O_MINI.to_string());
             let model = client.completion_model(&model_name);
+            let model_type = crate::internal::tui::ModelType::Openai(model);
             run_tui_with_model(
                 args.host,
                 args.port,
-                model,
+                model_type,
                 registry.clone(),
                 preamble,
                 temperature,
@@ -230,10 +234,33 @@ async fn execute_tui(args: CodeArgs) {
             };
             let model_name = args.model.unwrap_or_else(|| CLAUDE_3_5_SONNET.to_string());
             let model = client.completion_model(&model_name);
+            let model_type = crate::internal::tui::ModelType::Anthropic(model);
             run_tui_with_model(
                 args.host,
                 args.port,
-                model,
+                model_type,
+                registry.clone(),
+                preamble,
+                temperature,
+                max_steps,
+            )
+            .await;
+        }
+        CodeProvider::Deepseek => {
+            let client = match DeepSeekClient::from_env() {
+                Ok(client) => client,
+                Err(_) => {
+                    eprintln!("error: DEEPSEEK_API_KEY is not set");
+                    return;
+                }
+            };
+            // Fixed model: deepseek-chat
+            let model = client.completion_model("deepseek-chat");
+            let model_type = crate::internal::tui::ModelType::Deepseek(model);
+            run_tui_with_model(
+                args.host,
+                args.port,
+                model_type,
                 registry.clone(),
                 preamble,
                 temperature,
@@ -244,17 +271,15 @@ async fn execute_tui(args: CodeArgs) {
     }
 }
 
-async fn run_tui_with_model<M>(
+async fn run_tui_with_model(
     host: String,
     port: u16,
-    model: M,
+    model: crate::internal::tui::ModelType,
     registry: Arc<ToolRegistry>,
     preamble: String,
     temperature: Option<f64>,
     max_steps: usize,
-) where
-    M: crate::internal::ai::completion::CompletionModel + 'static,
-{
+) {
     let config = crate::internal::ai::agent::ToolLoopConfig {
         preamble: Some(preamble),
         temperature,
