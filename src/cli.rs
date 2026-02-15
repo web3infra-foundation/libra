@@ -254,10 +254,10 @@ pub async fn parse_async(args: Option<&[&str]>) -> Result<(), GitError> {
             Cli::parse_from(argv)
         }
     };
-    // TODO: try check repo before parsing
-    // For commands that don't initialize a repo, set the hash kind first.
     match &args.command {
         Commands::Init(_) | Commands::Clone(_) | Commands::Code(_) => {}
+        // Config global/system scopes don't require a repository
+        Commands::Config(cfg) if cfg.global || cfg.system => {}
         _ => {
             if !utils::util::check_repo_exist() {
                 return Err(GitError::RepoNotFound);
