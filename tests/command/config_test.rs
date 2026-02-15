@@ -1,8 +1,9 @@
 //! Tests config command read/write behaviors, scope handling, and edge cases.
-
+//
 use libra::{command::config, exec_async};
 use serial_test::serial;
 use tempfile::tempdir;
+use git_internal::errors::GitError;
 
 use super::*;
 
@@ -30,8 +31,11 @@ async fn test_cli_config_global_without_repo() {
     );
 
     let result = exec_async(vec!["config", "--global", "user.name", "cli_global_user"]).await;
-
     assert!(result.is_ok());
+
+    let read_result =
+        exec_async(vec!["config", "--global", "--get", "user.name"]).await;
+    assert!(read_result.is_ok());
 }
 
 #[tokio::test]
@@ -47,9 +51,23 @@ async fn test_cli_config_system_without_repo() {
         &system_db_dir.path().join("system_config_cli_sys.db"),
     );
 
-    let result = exec_async(vec!["config", "--system", "user.name", "cli_system_user"]).await;
-
+    let result =
+        exec_async(vec!["config", "--system", "user.name", "cli_system_user"]).await;
     assert!(result.is_ok());
+
+    let read_result =
+        exec_async(vec!["config", "--system", "--get", "user.name"]).await;
+    assert!(read_result.is_ok());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_cli_config_local_without_repo_requires_repo() {
+    let temp_dir = tempdir().unwrap();
+    let _guard = test::ChangeDirGuard::new(temp_dir.path());
+
+    let result = exec_async(vec!["config", "--list"]).await;
+    assert!(matches!(result, Err(GitError::RepoNotFound)));
 }
 
 impl EnvVarGuard {

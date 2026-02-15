@@ -297,8 +297,30 @@ pub struct ConfigArgs {
     pub valuepattern: Option<String>,
     /// If the target key is not present, return the given default value.
     /// This is only valid when `get` or `get-all` is set.
-    #[clap(long, short = 'd', requires = "get")]
+    #[clap(long, short = 'd')]
     pub default: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+
+    #[test]
+    fn default_works_with_get_all() {
+        let args = ConfigArgs::try_parse_from([
+            "config",
+            "--get-all",
+            "-d",
+            "fallback",
+            "user.name",
+        ])
+        .unwrap();
+
+        assert!(args.get_all);
+        assert_eq!(args.default.as_deref(), Some("fallback"));
+    }
 }
 
 impl ConfigArgs {
