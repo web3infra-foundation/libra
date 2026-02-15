@@ -309,14 +309,9 @@ mod tests {
 
     #[test]
     fn default_works_with_get_all() {
-        let args = ConfigArgs::try_parse_from([
-            "config",
-            "--get-all",
-            "-d",
-            "fallback",
-            "user.name",
-        ])
-        .unwrap();
+        let args =
+            ConfigArgs::try_parse_from(["config", "--get-all", "-d", "fallback", "user.name"])
+                .unwrap();
 
         assert!(args.get_all);
         assert_eq!(args.default.as_deref(), Some("fallback"));
