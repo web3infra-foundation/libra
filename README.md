@@ -1,6 +1,6 @@
 ## Libra
 
-`Libra` is a partial implementation of a **Git** client, developed using **Rust**. Our goal is not to create a 100% replica of Git (for those interested in such a project, please refer to the [gitoxide](https://github.com/Byron/gitoxide)). Instead, `libra` focus on implementing the basic functionalities of Git for learning **Git** and **Rust**. A key feature of `libra` is the replacement of the original **Git** internal storage architecture with **SQLite**.
+`Libra` is a partial implementation of a **Git** client, developed using **Rust**. Our goal is not to create a 100% replica of Git (for those interested in such a project, please refer to the [gitoxide](https://github.com/Byron/gitoxide)). Instead, Libra is evolving into an **AI agent–native version control system**. The new `libra code` command starts an interactive TUI (with a background web server) that is designed to be driven by AI agents and humans collaboratively.
 
 ## Example
 ```
@@ -12,6 +12,7 @@ Usage: libra <COMMAND>
 Commands:
   init     Initialize a new repository
   clone    Clone a repository into a new directory
+  code     Start Libra Code interactive TUI (with background web server)
   add      Add file contents to the index
   rm       Remove files from the working tree and from the index
   restore  Restore working tree files
@@ -185,14 +186,14 @@ This section documents the compatibility between **Libra**’s CLI and **Git** a
 |  | `-q, --quiet` | Yes | Yes | ✅ | - | Suppress output |
 |  | `--shared <perm>` | Yes | Yes | ⚠️ | P1 | Supported, but effective semantics may differ from Git in edge cases |
 |  | `--separate-git-dir <dir>` | Yes | No | ⛔ | P1 | Separate `.git` directory; useful for advanced layouts |
-|  | `--object-format <alg>` | Yes | No | ⛔ | P0 | Important for SHA‑1/SHA‑256 migration/compatibility |
+|  | `--object-format <alg>` | Yes | Yes | ✅ | - | Important for SHA‑1/SHA‑256 migration/compatibility |
 | `clone` | `<remote_repo>` | Yes | Yes | ✅ | - | Repository URL/path |
 |  | `[local_path]` | Yes | Yes | ✅ | - | Target directory |
 |  | `-b, --branch <name>` | Yes | Yes | ✅ | - | Check out given branch |
-|  | `--depth <n>` | Yes | No | ⛔ | P0 | Shallow clone, widely used in CI and large repos |
+|  | `--depth <n>` | Yes | Yes | ✅ | - | Shallow clone, widely used in CI and large repos |
 |  | `--single-branch` | Yes | Yes | ✅ | - | Clone only the specified branch |
 |  | `--recurse-submodules` | Yes | No | ⛔ | P1 | Requires submodule support; important in mono‑repos |
-|  | `--bare` | Yes | No | ⛔ | P0 | Bare clone for server‑side usage |
+|  | `--bare` | Yes | Yes | ✅ | - | Bare clone for server‑side usage |
 |  | `--mirror` | Yes | No | ⛔ | P1 | Full mirror including refs, for replication scenarios |
 
 ---
@@ -219,9 +220,9 @@ This section documents the compatibility between **Libra**’s CLI and **Git** a
 |  | `-r, --recursive` | Yes | Yes | ✅ | - | Recurse into directories |
 |  | `-f, --force` | Yes | Yes | ✅ | - | Force removal |
 |  | `--dry-run` | Yes | Yes | ✅ | - | Show what would be removed |
-|  | `--ignore-unmatch` | Yes | No | ⛔ | P0 | Don’t error if paths don’t match; important for scripts |
-|  | `--pathspec-from-file <file>` | Yes | No | ⛔ | P1 | Read pathspecs from file |
-|  | `--pathspec-file-nul` | Yes | No | ⛔ | P1 | NUL‑separated pathspec file |
+|  | `--ignore-unmatch` | Yes | Yes | ✅ | - | Don’t error if paths don’t match; important for scripts |
+|  | `--pathspec-from-file <file>` | Yes | Yes | ✅ | - | Read pathspecs from file |
+|  | `--pathspec-file-nul` | Yes | Yes | ✅ | - | NUL‑separated pathspec file |
 | `restore` | `<pathspec...>` | Yes | Yes | ✅ | - | Restore paths |
 |  | `-s, --source <commit>` | Yes | Yes | ✅ | - | Restore from specific commit |
 |  | `-W, --worktree` | Yes | Yes | ✅ | - | Restore working tree only |
@@ -230,7 +231,7 @@ This section documents the compatibility between **Libra**’s CLI and **Git** a
 |  | `-s, --short` | Yes | Yes | ✅ | - | Short format |
 |  | `--branch` | Yes | Yes | ✅ | - | Show branch info |
 |  | `--ignored` | Yes | Yes | ✅ | - | Show ignored files |
-|  | `--untracked-files[=no\|normal\|all]` | Yes | No | ⛔ | P0 | Control visibility of untracked files |
+|  | `--untracked-files[=no\|normal\|all]` | Yes | Yes | ✅ | - | Control visibility of untracked files |
 |  | `--show-stash` | No | Yes | ⚠️ | P1 | Libra extension; only in standard mode |
 
 ---
@@ -248,9 +249,9 @@ This section documents the compatibility between **Libra**’s CLI and **Git** a
 |  | `--disable-pre` | Approx. `--no-verify` | Yes | ⚠️ | P0 | Behavior should be aligned with Git hook semantics as much as possible |
 |  | `-a, --all` | Yes | Yes | ✅ | - | Auto‑stage tracked changes |
 |  | `-p, --patch` | Yes | No | ⛔ | P1 | Patch‑mode commit (often paired with `add -p`) |
-|  | `--no-verify` | Yes | No | ⛔ | P0 | Standard way to skip hooks; should coexist with or alias `--disable-pre` |
-|  | `--no-edit` | Yes | No | ⛔ | P1 | Reuse previous message |
-|  | `--author <name>` | Yes | No | ⛔ | P0 | Override author identity |
+|  | `--no-verify` | Yes | Yes | ✅ | - | Standard way to skip hooks; coexists with `--disable-pre` |
+|  | `--no-edit` | Yes | Yes | ✅ | - | Reuse previous message |
+|  | `--author <name>` | Yes | Yes | ⚠️ | P0 | Override author identity (expects "Name <email>" format) |
 |  | `--date <when>` | Yes | No | ⛔ | P0 | Override author date |
 |  | `-S, --gpg-sign` / `--no-gpg-sign` | Yes | No | ⛔ | P1 | GPG signing support |
 | `log` | `-n, --number <n>` | Yes | Yes | ✅ | - | Limit number of commits |
@@ -259,12 +260,12 @@ This section documents the compatibility between **Libra**’s CLI and **Git** a
 |  | `--decorate / --no-decorate` | Yes | Yes | ✅ | - | Show/hide ref decorations |
 |  | `[pathspec]` | Yes | Yes | ✅ | - | Restrict to paths |
 |  | `--graph` | Yes | Yes | ✅ | - | ASCII commit graph |
-|  | `--pretty=<format>` | Yes | No | ⛔ | P0 | Customizable formatting; heavily used in tooling |
+|  | `--pretty=<format>` | Yes | Yes | ⚠️ | P0 | Customizable formatting; Libra pretty syntax may differ from Git |
 |  | `--abbrev-commit` | Yes | YES | ✅ | - | Shorten commit IDs |
-|  | `--name-only / --name-status` | Yes | No | ⛔ | P0 | Show changed files, with or without status |
+|  | `--name-only / --name-status` | Yes | Yes | ✅ | - | Show changed files, with or without status |
 |  | `--stat` | Yes | Yes | ✅ | - | Diffstat summary |
-|  | `--since <date> / --until <date>` | Yes | No | ⛔ | P0 | Time‑based filtering |
-|  | `--author <pattern>` | Yes | No | ⛔ | P0 | Author‑based filtering |
+|  | `--since <date> / --until <date>` | Yes | Yes | ✅ | - | Time‑based filtering |
+|  | `--author <pattern>` | Yes | Yes | ⚠️ | P0 | Author‑based filtering (substring match; not full Git pattern syntax) |
 | `tag` | `<name>` | Yes | Yes | ✅ | - | Lightweight tag |
 |  | `-l, --list [pattern]` | Yes | Yes | ✅ | - | List tags |
 |  | `-d, --delete <name>` | Yes | Yes | ✅ | - | Delete tags |
@@ -329,7 +330,7 @@ This section documents the compatibility between **Libra**’s CLI and **Git** a
 |  | `-i, --interactive` | Yes | No | ⛔ | P1 | Interactive rebase (edit/reorder/squash) |
 |  | `--onto <newbase>` | Yes | No | ⛔ | P1 | Rebase onto different base |
 |  | `--autostash` | Yes | No | ⛔ | P1 | Stash/unstash automatically around rebase |
-|  | `--continue / --abort / --skip` | Yes | No | ⛔ | P0 | Essential state machine for resolving rebase conflicts |
+|  | `--continue / --abort / --skip` | Yes | Yes | ✅ | - | Essential state machine for resolving rebase conflicts |
 | `cherry-pick` | `<commits...>` | Yes | Yes | ✅ | - | Apply one or more commits |
 |  | `-n, --no-commit` | Yes | Yes | ✅ | - | Don’t create commit automatically |
 |  | `-x` | Yes | No | ⛔ | P1 | Append “(cherry picked from …)” |
@@ -354,16 +355,16 @@ This section documents the compatibility between **Libra**’s CLI and **Git** a
 |  | `-v` (list with URLs) | Yes | Yes | ✅ | - | List remotes verbosely |
 |  | `show` | Yes | Yes | ✅ | - | Show remote details |
 |  | `get-url <name> [--push\|--all]` | Yes | Yes | ✅ | - | Print configured URLs |
-|  | `set-url <name> <newurl> [--add] [--delete] [--push] [--all]` | Yes | Partial | ⛔ | P1 | Advanced URL management; basic `set-url` support is P0 |
-|  | `prune <name>` | Yes | No | ⛔ | P1 | Prune stale remote-tracking refs |
+|  | `set-url <name> <newurl> [--add] [--delete] [--push] [--all]` | Yes | Yes | ✅ | - | Advanced URL management: supports --add/--delete/--push/--all |
+|  | `prune <name>` | Yes | Yes | ✅ | - | Prune stale remote-tracking refs (with optional --dry-run) |
 |  | `update [<group>\|<remotes>...]` | Yes | No | ⛔ | P2 | Batch remote updates |
 | `push` | `<repository> <refspec>` | Yes | Yes | ✅ | - | Basic push |
 |  | `-u, --set-upstream` | Yes | Yes | ✅ | - | Set upstream on push |
-|  | `--force` | Yes | No | ⛔ | P0 | Force push (use carefully) |
+|  | `--force` | Yes | Yes | ✅ | - | Force push (use carefully) |
 |  | `--force-with-lease` | Yes | No | ⛔ | P0 | Safer force push; strongly recommended over bare `--force` |
 |  | `--tags / --all` | Yes | No | ⛔ | P1 | Push all tags / all branches |
 |  | `--delete` | Yes | No | ⛔ | P1 | Delete remote ref |
-|  | `--dry-run` | Yes | No | ⛔ | P2 | Simulate push |
+|  | `--dry-run` | Yes | Yes | ✅ | - | Simulate push |
 | `fetch` | `[<repository>] [<refspec>]` | Yes | Yes | ✅ | - | Basic fetch |
 |  | `-a, --all` | Yes | Yes | ✅ | - | Fetch from all remotes |
 |  | `--tags` | Yes | No | ⛔ | P1 | Fetch all tags |
@@ -378,7 +379,7 @@ This section documents the compatibility between **Libra**’s CLI and **Git** a
 |  | `locks` / `lock` / `unlock` | Yes | Yes | ✅ | - | LFS locking |
 |  | `install / uninstall` | Yes | No | ⛔ | P1 | Install LFS filters/hooks |
 |  | `fetch / pull / push` | Yes | No | ⛔ | P0 | Transfer LFS objects with remotes |
-|  | `ls-files` | Yes | No | ⛔ | P1 | List LFS‑tracked files |
+|  | `ls-files` | Yes | Yes | ✅ | - | List LFS‑tracked files |
 |  | `env / version` | Yes | No | ⛔ | P2 | Diagnostic info |
 
 ---
@@ -395,7 +396,7 @@ This section documents the compatibility between **Libra**’s CLI and **Git** a
 |  | `-l, --list` | Yes | Yes | ✅ | - | List config |
 |  | `--name-only` | Yes | Yes | ✅ | - | Show names only |
 |  | `-d, --default <value>` | Yes | Yes | ✅ | - | Default value if missing |
-|  | `--global / --system / --local` | Yes | No | ⛔ | P0 | Select config scope (system/global/repo) |
+|  | `--global / --system / --local` | Yes | Yes | ✅ | - | Select config scope (system/global/repo) |
 |  | `--file <path>` | Yes | No | ⛔ | P1 | Use explicit config file |
 |  | `--replace-all` | Yes | No | ⛔ | P1 | Replace all matching entries |
 |  | `--type=<bool\|int\|path>` | Yes | No | ⛔ | P2 | Typed config parsing |
@@ -466,4 +467,3 @@ When you update dependencies in Cargo.toml, regenerate Buck metadata and third-p
 ```bash
 cargo buckal migrate
 ```
-
