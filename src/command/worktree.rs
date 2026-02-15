@@ -56,6 +56,24 @@ struct WorktreeState {
     worktrees: Vec<WorktreeEntry>,
 }
 
+struct DirGuard {
+    old_dir: PathBuf,
+}
+
+impl DirGuard {
+    fn change_to(new_dir: &Path) -> io::Result<Self> {
+        let old_dir = env::current_dir()?;
+        env::set_current_dir(new_dir)?;
+        Ok(Self { old_dir })
+    }
+}
+
+impl Drop for DirGuard {
+    fn drop(&mut self) {
+        let _ = env::set_current_dir(&self.old_dir);
+    }
+}
+
 pub async fn execute(args: WorktreeArgs) {
     if !util::check_repo_exist() {
         return;
@@ -110,7 +128,25 @@ fn save_state(state: &WorktreeState) -> io::Result<()> {
         fs::create_dir_all(parent)?;
     }
     fs::write(&tmp, data)?;
-    fs::rename(tmp, path)?;
+    #[cfg(windows)]
+    {
+        if path.exists() {
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    let _ = fs::remove_file(&tmp);
+                    return Err(e);
+                }
+            }
+        }
+        fs::rename(&tmp, &path)?;
+    }
+
+    #[cfg(not(windows))]
+    {
+        fs::rename(&tmp, &path)?;
+    }
     Ok(())
 }
 
@@ -132,22 +168,34 @@ fn canonicalize<P: AsRef<Path>>(path: P) -> io::Result<PathBuf> {
 fn ensure_main_entry(state: &mut WorktreeState) -> io::Result<()> {
     let main_path = canonicalize(util::working_dir())?;
     let main_str = main_path.to_string_lossy().to_string();
-    if !state
+    let existing_main_index = state.worktrees.iter().position(|w| w.is_main);
+    let current_index = state
         .worktrees
         .iter()
-        .any(|w| Path::new(&w.path) == main_path)
-    {
-        state.worktrees.push(WorktreeEntry {
-            path: main_str,
-            is_main: true,
-            locked: false,
-            lock_reason: None,
-        });
-    } else {
-        for w in &mut state.worktrees {
-            if Path::new(&w.path) == main_path {
-                w.is_main = true;
-            }
+        .position(|w| Path::new(&w.path) == main_path);
+
+    match (existing_main_index, current_index) {
+        (Some(_), Some(cur_idx)) => {
+            state.worktrees[cur_idx].is_main = false;
+        }
+        (Some(_), None) => {
+            state.worktrees.push(WorktreeEntry {
+                path: main_str,
+                is_main: false,
+                locked: false,
+                lock_reason: None,
+            });
+        }
+        (None, Some(cur_idx)) => {
+            state.worktrees[cur_idx].is_main = true;
+        }
+        (None, None) => {
+            state.worktrees.push(WorktreeEntry {
+                path: main_str,
+                is_main: true,
+                locked: false,
+                lock_reason: None,
+            });
         }
     }
     Ok(())
@@ -174,12 +222,6 @@ async fn add_worktree(path: String) -> io::Result<()> {
         ));
     }
 
-    if target.join(util::ROOT_DIR).exists() {
-        return Err(io::Error::other(
-            "target already contains a .libra directory",
-        ));
-    }
-
     if target.exists() && !target.is_dir() {
         return Err(io::Error::other("target exists and is not a directory"));
     }
@@ -198,21 +240,24 @@ async fn add_worktree(path: String) -> io::Result<()> {
     fs::write(&link_path, content)?;
 
     if Head::current_commit().await.is_some() {
-        let original_dir = util::cur_dir();
-        env::set_current_dir(&target)?;
+        let _guard = DirGuard::change_to(&target)?;
         restore::execute(RestoreArgs {
             pathspec: vec![util::working_dir_string()],
             source: None,
             worktree: true,
-            staged: true,
+            staged: false,
         })
         .await;
-        env::set_current_dir(original_dir)?;
     }
 
     let mut state = load_state()?;
-    let target_str = target.to_string_lossy().to_string();
-    if state.worktrees.iter().any(|w| Path::new(&w.path) == target) {
+    let canonical_target = canonicalize(&target)?;
+    let target_str = canonical_target.to_string_lossy().to_string();
+    if state
+        .worktrees
+        .iter()
+        .any(|w| Path::new(&w.path) == canonical_target)
+    {
         return Ok(());
     }
     state.worktrees.push(WorktreeEntry {

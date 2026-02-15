@@ -57,7 +57,7 @@ achieving unified management.
 
 ## Worktree Management
 
-Libra implements a `worktree` subcommand that is broadly compatible with `git worktree` and allows you to manage multiple working directories attached to the same repository storage:
+Libra implements a `worktree` subcommand that is broadly compatible with `git worktree` and allows you to manage multiple working directories attached to the same repository storage (note that, unlike `git worktree remove`, Libra does not delete worktree directories on disk by default):
 
 - `libra worktree add <path>` - create a new linked working tree at `<path>`
 - `libra worktree list` - list all registered working trees (including the main worktree)
@@ -65,7 +65,7 @@ Libra implements a `worktree` subcommand that is broadly compatible with `git wo
 - `libra worktree unlock <path>` - unlock a previously locked worktree
 - `libra worktree move <src> <dest>` - move a worktree directory to a new location
 - `libra worktree prune` - prune missing/non-existent worktrees from the registry
-- `libra worktree remove <path>` - remove a worktree from the registry (the main worktree cannot be removed)
+- `libra worktree remove <path>` - remove a worktree from the registry without deleting its directory on disk (the main worktree cannot be removed)
 - `libra worktree repair` - repair inconsistent worktree state if the registry and directories get out of sync
 
 ## Object Storage Configuration
