@@ -16,7 +16,7 @@ pub struct RemoteStorage {
 }
 
 impl RemoteStorage {
-    /// Create a new RemoteStorage instance
+    /// Create a new RemoteStorage instance from an existing ObjectStore
     pub fn new(inner: Arc<dyn ObjectStore>) -> Self {
         Self { inner }
     }

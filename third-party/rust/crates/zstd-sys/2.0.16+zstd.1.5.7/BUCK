@@ -57,7 +57,7 @@ rust_binary(
     visibility = [],
     deps = [
         "//third-party/rust/crates/bindgen/0.72.1:bindgen",
-        "//third-party/rust/crates/cc/1.2.55:cc",
+        "//third-party/rust/crates/cc/1.2.56:cc",
         "//third-party/rust/crates/pkg-config/0.3.32:pkg-config",
     ],
 )

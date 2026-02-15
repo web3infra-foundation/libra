@@ -317,10 +317,17 @@ impl LocalStorage {
                 Pack::decode_pack_object(&mut pack_reader, &mut offset)?
             }
         };
+        let obj = obj.ok_or_else(|| {
+            GitError::InvalidObjectInfo(format!(
+                "Failed to decode pack object at offset {}",
+                offset
+            ))
+        })?;
         let full_obj = match obj.object_type() {
             ObjectType::OffsetDelta => {
-                let base_offset = obj.offset_delta().unwrap();
-                let base_obj = Self::read_pack_obj(pack_file, base_offset as u64)?;
+                let delta = obj.offset_delta().unwrap();
+                let base_offset = offset - delta as u64;
+                let base_obj = Self::read_pack_obj(pack_file, base_offset)?;
                 let base_obj = Arc::new(base_obj);
                 Pack::rebuild_delta(obj, base_obj)
             }
@@ -341,7 +348,7 @@ impl LocalStorage {
             .insert(cache_key, full_obj.clone())
             .is_err()
         {
-            eprintln!("Warn: EntryTooLarge");
+            tracing::warn!("Pack object cache: entry too large to cache");
         }
         Ok(full_obj)
     }
