@@ -253,19 +253,18 @@ fn canonicalize<P: AsRef<Path>>(path: P) -> io::Result<PathBuf> {
 
 /// Ensures that the main worktree entry exists and is unique.
 ///
-/// If a main entry already exists, it is preserved and made unique. Otherwise,
-/// the main path is inferred from repository layout:
-/// - standard layout: parent of `.libra` storage directory
-/// - `--separate-libra-dir` layout: current repository working directory
-///
-/// The inferred main entry is then ensured to be the sole `is_main = true`.
+/// If the current `is_main` marker is invalid or duplicated, this function
+/// repairs it by preferring a valid existing worktree path and then enforcing
+/// uniqueness. Only when no entries exist does it infer a new main path from
+/// repository layout.
 ///
 /// Returns `true` when the state is mutated.
 fn ensure_main_entry(state: &mut WorktreeState) -> io::Result<bool> {
-    // Preserve an existing main entry whenever possible. This is required for
-    // `--separate-libra-dir` repositories, where storage path and main workdir
-    // are not in a parent-child relationship.
-    if let Some(idx) = state.worktrees.iter().position(|w| w.is_main) {
+    fn is_valid_worktree_path(path: &Path) -> bool {
+        path.join(util::ROOT_DIR).exists()
+    }
+
+    fn apply_unique_main(state: &mut WorktreeState, idx: usize) -> bool {
         let mut changed = false;
         for (i, w) in state.worktrees.iter_mut().enumerate() {
             let should_be_main = i == idx;
@@ -274,15 +273,54 @@ fn ensure_main_entry(state: &mut WorktreeState) -> io::Result<bool> {
                 changed = true;
             }
         }
-        return Ok(changed);
+        changed
+    }
+
+    // First prefer a currently marked main entry if it points to an actual
+    // worktree root.
+    if let Some(idx) =
+        state.worktrees.iter().enumerate().find_map(|(i, w)| {
+            (w.is_main && is_valid_worktree_path(Path::new(&w.path))).then_some(i)
+        })
+    {
+        return Ok(apply_unique_main(state, idx));
     }
 
     let storage = util::storage_path();
-    let inferred_main = if storage.file_name() == Some(std::ffi::OsStr::new(util::ROOT_DIR)) {
-        let repo_root = storage
-            .parent()
-            .ok_or_else(|| io::Error::other("invalid storage path"))?;
-        canonicalize(repo_root)?
+    let inferred_standard_main =
+        if storage.file_name() == Some(std::ffi::OsStr::new(util::ROOT_DIR)) {
+            let repo_root = storage
+                .parent()
+                .ok_or_else(|| io::Error::other("invalid storage path"))?;
+            Some(canonicalize(repo_root)?)
+        } else {
+            None
+        };
+
+    // No valid main marker exists. Prefer an existing real worktree path so
+    // the original main is stable even when running from linked worktrees.
+    if let Some(idx) = inferred_standard_main
+        .as_ref()
+        .and_then(|p| {
+            state
+                .worktrees
+                .iter()
+                .position(|w| Path::new(&w.path) == p && is_valid_worktree_path(Path::new(&w.path)))
+        })
+        .or_else(|| {
+            state
+                .worktrees
+                .iter()
+                .position(|w| is_valid_worktree_path(Path::new(&w.path)))
+        })
+        .or_else(|| (!state.worktrees.is_empty()).then_some(0))
+    {
+        return Ok(apply_unique_main(state, idx));
+    }
+
+    // Empty state fallback: infer a new main entry.
+    let inferred_main = if let Some(p) = inferred_standard_main {
+        p
     } else {
         canonicalize(util::working_dir())?
     };
@@ -292,15 +330,7 @@ fn ensure_main_entry(state: &mut WorktreeState) -> io::Result<bool> {
         .iter()
         .position(|w| Path::new(&w.path) == inferred_main)
     {
-        let mut changed = false;
-        for (i, w) in state.worktrees.iter_mut().enumerate() {
-            let should_be_main = i == idx;
-            if w.is_main != should_be_main {
-                w.is_main = should_be_main;
-                changed = true;
-            }
-        }
-        Ok(changed)
+        Ok(apply_unique_main(state, idx))
     } else {
         for w in &mut *state.worktrees {
             w.is_main = false;
