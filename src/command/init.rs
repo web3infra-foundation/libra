@@ -176,6 +176,14 @@ pub struct InitArgs {
 
 /// Execute the init function
 pub async fn execute(args: InitArgs) {
+    let used_separate_git_dir = std::env::args()
+        .any(|arg| arg == "--separate-git-dir" || arg.starts_with("--separate-git-dir="));
+    if used_separate_git_dir {
+        eprintln!(
+            "warning: `--separate-git-dir` is deprecated; use `--separate-libra-dir` instead"
+        );
+    }
+
     let target_path = cur_dir().join(Path::new(&args.repo_directory));
     match init(args)
         .await

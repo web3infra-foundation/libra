@@ -1,4 +1,4 @@
-use std::fs;
+use std::{fs, process::Command};
 
 use libra::utils::util;
 use serial_test::serial;
@@ -103,5 +103,37 @@ async fn test_init_rejects_bare_with_separate_git_dir() {
     assert!(
         res.is_err(),
         "init should error when both --bare and --separate-libra-dir are specified"
+    );
+}
+
+#[test]
+#[serial]
+fn test_init_warns_on_separate_git_dir_alias() {
+    let temp_root = tempdir().unwrap();
+    let workdir = temp_root.path().join("work");
+    let storage = temp_root.path().join("storage");
+
+    fs::create_dir_all(&workdir).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(&workdir)
+        .arg("init")
+        .arg("--separate-git-dir")
+        .arg(storage.to_str().unwrap())
+        .output()
+        .expect("Failed to execute libra binary");
+
+    assert!(
+        output.status.success(),
+        "init with --separate-git-dir should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            "warning: `--separate-git-dir` is deprecated; use `--separate-libra-dir` instead"
+        ),
+        "expected deprecation warning in stderr, got: {stderr}"
     );
 }
