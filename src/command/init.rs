@@ -149,8 +149,13 @@ pub struct InitArgs {
     pub shared: Option<String>,
 
     /// Use a separate directory for repository storage instead of `.libra` inside the working tree
-    #[clap(long = "separate-git-dir", value_name = "dir", required = false)]
-    pub separate_git_dir: Option<String>,
+    #[clap(
+        long = "separate-libra-dir",
+        visible_alias = "separate-git-dir",
+        value_name = "dir",
+        required = false
+    )]
+    pub separate_libra_dir: Option<String>,
 
     /// Specify the object format (hash algorithm) for the repository.
     ///
@@ -416,16 +421,16 @@ fn validate_filesystem_branch_name(branch_name: &str) -> Result<(), InitError> {
 pub async fn init(args: InitArgs) -> Result<(), InitError> {
     // Get the current directory
     let cur_dir = Path::new(&args.repo_directory).to_path_buf();
-    if args.bare && args.separate_git_dir.is_some() {
+    if args.bare && args.separate_libra_dir.is_some() {
         return Err(InitError::Io(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "cannot specify both --bare and --separate-git-dir",
+            "cannot specify both --bare and --separate-libra-dir",
         )));
     }
     // Determine storage root directory
     let root_dir = if args.bare {
         cur_dir.clone()
-    } else if let Some(ref separate) = args.separate_git_dir {
+    } else if let Some(ref separate) = args.separate_libra_dir {
         Path::new(separate).to_path_buf()
     } else {
         cur_dir.join(ROOT_DIR)
@@ -459,7 +464,6 @@ pub async fn init(args: InitArgs) -> Result<(), InitError> {
         )));
     }
 
-    // Check if the target directory is writable
     match is_writable(&cur_dir) {
         Ok(_) => {}
         Err(e) => {
@@ -467,11 +471,13 @@ pub async fn init(args: InitArgs) -> Result<(), InitError> {
         }
     }
 
-    // ensure root dir exists
+    if !args.bare && args.separate_libra_dir.is_some() && !cur_dir.exists() {
+        fs::create_dir_all(&cur_dir)?;
+    }
+
     fs::create_dir_all(&root_dir)?;
 
-    // For non-bare repositories with a separate storage directory, create the link file
-    if !args.bare && args.separate_git_dir.is_some() {
+    if !args.bare && args.separate_libra_dir.is_some() {
         let link_path = cur_dir.join(ROOT_DIR);
         let storage_abs = root_dir.canonicalize().map_err(|e| {
             InitError::Io(io::Error::new(

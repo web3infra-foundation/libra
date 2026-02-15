@@ -176,7 +176,7 @@ pub async fn execute(args: CloneArgs) {
         shared: None,
         object_format: Some(object_format),
         ref_format: None,
-        separate_git_dir: None,
+        separate_libra_dir: None,
     };
     command::init::execute(init_args).await;
 

@@ -13,8 +13,6 @@ async fn test_init_with_separate_git_dir_creates_link_and_uses_storage() {
     let workdir = temp_root.path().join("work");
     let storage = temp_root.path().join("storage");
 
-    fs::create_dir_all(&workdir).unwrap();
-
     let args = InitArgs {
         bare: false,
         template: None,
@@ -24,16 +22,13 @@ async fn test_init_with_separate_git_dir_creates_link_and_uses_storage() {
         shared: None,
         object_format: None,
         ref_format: None,
-        separate_git_dir: Some(storage.to_str().unwrap().to_string()),
+        separate_libra_dir: Some(storage.to_str().unwrap().to_string()),
     };
 
     init(args).await.unwrap();
 
     let link_path = workdir.join(".libra");
-    assert!(
-        link_path.is_file(),
-        ".libra in working directory should be a file when using --separate-git-dir"
-    );
+    assert!(link_path.is_file());
 
     let content = fs::read_to_string(&link_path).unwrap();
     assert!(
@@ -41,14 +36,8 @@ async fn test_init_with_separate_git_dir_creates_link_and_uses_storage() {
         "link file should start with 'gitdir:'"
     );
 
-    assert!(
-        storage.join("objects").is_dir(),
-        "objects directory should be created in separate storage dir"
-    );
-    assert!(
-        storage.join("libra.db").is_file(),
-        "database file should be created in separate storage dir"
-    );
+    assert!(storage.join("objects").is_dir());
+    assert!(storage.join("libra.db").is_file());
 }
 
 #[tokio::test]
@@ -69,7 +58,7 @@ async fn test_repository_detection_with_separate_git_dir() {
         shared: None,
         object_format: None,
         ref_format: None,
-        separate_git_dir: Some(storage.to_str().unwrap().to_string()),
+        separate_libra_dir: Some(storage.to_str().unwrap().to_string()),
     };
 
     init(args).await.unwrap();
@@ -86,7 +75,7 @@ async fn test_repository_detection_with_separate_git_dir() {
     );
     assert_eq!(
         working_dir, expected_workdir,
-        "working_dir should be the work tree when using --separate-git-dir"
+        "working_dir should be the work tree when using --separate-libra-dir"
     );
 }
 
@@ -107,12 +96,12 @@ async fn test_init_rejects_bare_with_separate_git_dir() {
         shared: None,
         object_format: None,
         ref_format: None,
-        separate_git_dir: Some(dir.join("storage").to_str().unwrap().to_string()),
+        separate_libra_dir: Some(dir.join("storage").to_str().unwrap().to_string()),
     };
 
     let res: Result<_, _> = init(args).await;
     assert!(
         res.is_err(),
-        "init should error when both --bare and --separate-git-dir are specified"
+        "init should error when both --bare and --separate-libra-dir are specified"
     );
 }

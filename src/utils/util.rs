@@ -102,14 +102,12 @@ fn parse_separate_git_dir_file(link: &Path) -> Result<PathBuf, io::Error> {
     }
 
     let target_path = Path::new(target);
-    let resolved = if target_path.is_absolute() {
-        target_path.to_path_buf()
-    } else {
-        link.parent()
-            .unwrap_or_else(|| Path::new(""))
-            .join(target_path)
-    };
-    Ok(resolved)
+    if target_path.is_absolute() {
+        return Ok(target_path.to_path_buf());
+    }
+
+    let base = link.parent().unwrap_or_else(|| Path::new("."));
+    Ok(base.join(target_path))
 }
 
 fn try_get_paths(path: Option<PathBuf>) -> Result<(PathBuf, PathBuf), io::Error> {

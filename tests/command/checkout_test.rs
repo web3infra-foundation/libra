@@ -73,7 +73,7 @@ async fn test_checkout_module_functions() {
         shared: None,
         object_format: None,
         ref_format: None,
-        separate_git_dir: None,
+        separate_libra_dir: None,
     };
 
     init::init(init_args)
@@ -122,7 +122,7 @@ async fn test_checkout_module_functions_sha256() {
         shared: None,
         object_format: Some("sha256".to_string()),
         ref_format: None,
-        separate_git_dir: None,
+        separate_libra_dir: None,
     };
 
     init::init(init_args)
@@ -173,7 +173,7 @@ async fn checkout_restore_rejects_sha1_hash_in_sha256_repo() {
         shared: None,
         object_format: Some("sha256".to_string()),
         ref_format: None,
-        separate_git_dir: None,
+        separate_libra_dir: None,
     })
     .await
     .unwrap();
