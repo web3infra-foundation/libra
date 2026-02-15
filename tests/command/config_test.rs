@@ -1,6 +1,6 @@
 //! Tests config command read/write behaviors, scope handling, and edge cases.
 
-use libra::command::config;
+use libra::{command::config, exec_async};
 use serial_test::serial;
 use tempfile::tempdir;
 
@@ -14,6 +14,42 @@ use super::*;
 struct EnvVarGuard {
     key: &'static str,
     original: Option<std::ffi::OsString>,
+}
+
+#[tokio::test]
+#[serial]
+async fn test_cli_config_global_without_repo() {
+    let temp_dir = tempdir().unwrap();
+    let _guard = test::ChangeDirGuard::new(temp_dir.path());
+
+    let global_db_dir = tempdir().unwrap();
+    let system_db_dir = tempdir().unwrap();
+    let _scoped = ScopedConfigPathGuard::new(
+        &global_db_dir.path().join("global_config_cli.db"),
+        &system_db_dir.path().join("system_config_cli.db"),
+    );
+
+    let result = exec_async(vec!["config", "--global", "user.name", "cli_global_user"]).await;
+
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_cli_config_system_without_repo() {
+    let temp_dir = tempdir().unwrap();
+    let _guard = test::ChangeDirGuard::new(temp_dir.path());
+
+    let global_db_dir = tempdir().unwrap();
+    let system_db_dir = tempdir().unwrap();
+    let _scoped = ScopedConfigPathGuard::new(
+        &global_db_dir.path().join("global_config_cli_sys.db"),
+        &system_db_dir.path().join("system_config_cli_sys.db"),
+    );
+
+    let result = exec_async(vec!["config", "--system", "user.name", "cli_system_user"]).await;
+
+    assert!(result.is_ok());
 }
 
 impl EnvVarGuard {
