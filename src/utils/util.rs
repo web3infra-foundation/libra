@@ -61,21 +61,58 @@ pub fn cur_dir() -> PathBuf {
     }
 }
 
-/// Try to get the storage path of the repository, which is the path of the `.libra` directory
-/// - if the current directory or given path is not a repository, return an error
-pub fn try_get_storage_path(path: Option<PathBuf>) -> Result<PathBuf, io::Error> {
+fn parse_separate_git_dir_file(link: &Path) -> Result<PathBuf, io::Error> {
+    let content = fs::read_to_string(link)?;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Some(rest) = trimmed.strip_prefix("gitdir:") else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid separate-git-dir file format at {}", link.display()),
+            ));
+        };
+        let target = rest.trim();
+        if target.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("empty gitdir in {}", link.display()),
+            ));
+        }
+        let target_path = Path::new(target);
+        let resolved = if target_path.is_absolute() {
+            target_path.to_path_buf()
+        } else {
+            link.parent()
+                .unwrap_or_else(|| Path::new(""))
+                .join(target_path)
+        };
+        return Ok(resolved);
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("empty separate-git-dir file at {}", link.display()),
+    ))
+}
+
+fn try_get_paths(path: Option<PathBuf>) -> Result<(PathBuf, PathBuf), io::Error> {
     let mut path = path.clone().unwrap_or_else(cur_dir);
     let orig = path.clone();
 
     loop {
         let standard_repo = path.join(ROOT_DIR);
-        if standard_repo.exists() {
-            return Ok(standard_repo);
+        if standard_repo.is_dir() {
+            return Ok((standard_repo, path.clone()));
+        }
+        if standard_repo.is_file() {
+            let storage = parse_separate_git_dir_file(&standard_repo)?;
+            return Ok((storage, path.clone()));
         }
 
-        // Bare repository: database and objects live in the repository root without `.libra`
         if path.join(DATABASE).exists() && path.join("objects").exists() {
-            return Ok(path);
+            return Ok((path.clone(), path.clone()));
         }
 
         if !path.pop() {
@@ -85,6 +122,13 @@ pub fn try_get_storage_path(path: Option<PathBuf>) -> Result<PathBuf, io::Error>
             ));
         }
     }
+}
+
+/// Try to get the storage path of the repository, which is the path of the `.libra` directory
+/// - if the current directory or given path is not a repository, return an error
+pub fn try_get_storage_path(path: Option<PathBuf>) -> Result<PathBuf, io::Error> {
+    let (storage, _) = try_get_paths(path)?;
+    Ok(storage)
 }
 
 /// Load the storage path with optional given repository
@@ -109,9 +153,8 @@ pub fn objects_storage() -> ClientStorage {
 /// Get the working directory of the repository
 /// - panics if the current directory is not a repository
 pub fn working_dir() -> PathBuf {
-    let mut storage_path = storage_path();
-    storage_path.pop();
-    storage_path
+    let (_, workdir) = try_get_paths(None).unwrap();
+    workdir
 }
 
 /// Get the working directory of the repository as a string, panics if the path is not valid utf-8

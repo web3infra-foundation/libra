@@ -354,6 +354,7 @@ async fn test_commit_sha256() {
         shared: None,
         object_format: Some("sha256".to_string()),
         ref_format: None,
+        separate_git_dir: None,
     })
     .await
     .unwrap();

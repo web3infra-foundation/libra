@@ -148,6 +148,10 @@ pub struct InitArgs {
     #[clap(long, required = false, value_name = "MODE")]
     pub shared: Option<String>,
 
+    /// Use a separate directory for repository storage instead of `.libra` inside the working tree
+    #[clap(long = "separate-git-dir", value_name = "dir", required = false)]
+    pub separate_git_dir: Option<String>,
+
     /// Specify the object format (hash algorithm) for the repository.
     ///
     /// Supported values:
@@ -181,7 +185,7 @@ pub async fn execute(args: InitArgs) {
 
 /// Check if the repository has already been initialized based on the presence of the .libra directory.
 fn is_reinit(cur_dir: &Path) -> bool {
-    cur_dir.join(".libra").exists()
+    cur_dir.join(ROOT_DIR).exists()
 }
 
 /// Check if the target directory is writable
@@ -412,9 +416,17 @@ fn validate_filesystem_branch_name(branch_name: &str) -> Result<(), InitError> {
 pub async fn init(args: InitArgs) -> Result<(), InitError> {
     // Get the current directory
     let cur_dir = Path::new(&args.repo_directory).to_path_buf();
-    // Join the current directory with the root directory
+    if args.bare && args.separate_git_dir.is_some() {
+        return Err(InitError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "cannot specify both --bare and --separate-git-dir",
+        )));
+    }
+    // Determine storage root directory
     let root_dir = if args.bare {
         cur_dir.clone()
+    } else if let Some(ref separate) = args.separate_git_dir {
+        Path::new(separate).to_path_buf()
     } else {
         cur_dir.join(ROOT_DIR)
     };
@@ -457,6 +469,14 @@ pub async fn init(args: InitArgs) -> Result<(), InitError> {
 
     // ensure root dir exists
     fs::create_dir_all(&root_dir)?;
+
+    // For non-bare repositories with a separate storage directory, create the link file
+    if !args.bare && args.separate_git_dir.is_some() {
+        let link_path = cur_dir.join(ROOT_DIR);
+        let storage_abs = root_dir.canonicalize().unwrap_or(root_dir.clone());
+        let content = format!("gitdir: {}\n", storage_abs.display());
+        fs::write(link_path, content)?;
+    }
 
     // If a template path is provided, copy the template files to the root directory
     if let Some(template_path) = &args.template {

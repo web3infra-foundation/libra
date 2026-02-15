@@ -104,6 +104,7 @@ async fn test_status_rejects_bare_repository() {
         shared: None,
         object_format: None,
         ref_format: None,
+        separate_git_dir: None,
     })
     .await
     .unwrap();

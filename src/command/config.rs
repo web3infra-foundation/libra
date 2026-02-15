@@ -301,34 +301,6 @@ pub struct ConfigArgs {
     pub default: Option<String>,
 }
 
-#[cfg(test)]
-mod tests {
-    use clap::Parser;
-
-    use super::*;
-
-    #[test]
-    fn default_works_with_get_all() {
-        let args =
-            ConfigArgs::try_parse_from(["config", "--get-all", "-d", "fallback", "user.name"])
-                .unwrap();
-
-        assert!(args.get_all);
-        assert_eq!(args.default.as_deref(), Some("fallback"));
-    }
-
-    #[test]
-    fn scope_flags_are_mutually_exclusive() {
-        let args =
-            ConfigArgs::try_parse_from(["config", "--global", "--system", "user.name"]);
-        assert!(args.is_err());
-        assert!(matches!(
-            args.err().unwrap().kind(),
-            clap::error::ErrorKind::ArgumentConflict
-        ));
-    }
-}
-
 impl ConfigArgs {
     pub fn validate(&self) -> Result<(), String> {
         // validate the default value is only present when get or get_all is set
@@ -898,4 +870,31 @@ async fn list_all_config_cascaded() -> Result<Vec<(String, String)>, String> {
     let mut out: Vec<(String, String)> = merged.into_iter().collect();
     out.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+
+    #[test]
+    fn default_works_with_get_all() {
+        let args =
+            ConfigArgs::try_parse_from(["config", "--get-all", "-d", "fallback", "user.name"])
+                .unwrap();
+
+        assert!(args.get_all);
+        assert_eq!(args.default.as_deref(), Some("fallback"));
+    }
+
+    #[test]
+    fn scope_flags_are_mutually_exclusive() {
+        let args = ConfigArgs::try_parse_from(["config", "--global", "--system", "user.name"]);
+        assert!(args.is_err());
+        assert!(matches!(
+            args.err().unwrap().kind(),
+            clap::error::ErrorKind::ArgumentConflict
+        ));
+    }
 }
