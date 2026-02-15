@@ -5,7 +5,7 @@
 
 use std::{sync::Arc, time::Instant};
 
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 use tokio::{
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
     task::JoinHandle,
@@ -17,11 +17,13 @@ use super::{
     app_event::{AgentEvent, AgentStatus, AppEvent, ExitMode},
     chatwidget::ChatWidget,
     history_cell::{AssistantHistoryCell, ToolCallHistoryCell, UserHistoryCell},
+    model::ModelType,
+    slash_command::parse_command,
     terminal::{TARGET_FRAME_INTERVAL, Tui, TuiEvent},
 };
 use crate::internal::ai::{
     agent::{ToolLoopConfig, run_tool_loop_with_history_and_observer},
-    completion::{CompletionModel, Message},
+    completion::Message,
     tools::{ToolOutput, ToolRegistry},
 };
 
@@ -42,13 +44,13 @@ pub struct AppExitInfo {
 }
 
 /// The main application struct.
-pub struct App<M: CompletionModel> {
+pub struct App {
     /// The TUI instance.
     tui: Tui,
     /// The chat widget.
     widget: ChatWidget,
     /// The completion model used by the agent loop.
-    model: M,
+    model: ModelType,
     /// The tool registry.
     registry: Arc<ToolRegistry>,
     /// Tool loop runtime config.
@@ -73,11 +75,11 @@ pub struct App<M: CompletionModel> {
     welcome_message: String,
 }
 
-impl<M: CompletionModel + Clone + 'static> App<M> {
+impl App {
     /// Create a new App instance.
     pub fn new(
         tui: Tui,
-        model: M,
+        model: ModelType,
         registry: Arc<ToolRegistry>,
         config: ToolLoopConfig,
         welcome_message: String,
@@ -160,7 +162,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
     async fn handle_tui_event(&mut self, event: TuiEvent) -> anyhow::Result<()> {
         match event {
             TuiEvent::Key(key) => {
-                self.handle_key_event(key).await?;
+                if key.kind == KeyEventKind::Press {
+                    self.handle_key_event(key).await?;
+                }
             }
             TuiEvent::Paste(text) => {
                 for c in text.chars() {
@@ -194,6 +198,49 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             });
             self.should_exit = true;
             return Ok(());
+        }
+
+        // Handle command popup navigation first
+        if self.widget.bottom_pane.is_popup_visible() {
+            match key.code {
+                KeyCode::Up => {
+                    self.widget.bottom_pane.popup_move_up();
+                    self.schedule_draw();
+                    return Ok(());
+                }
+                KeyCode::Down => {
+                    self.widget.bottom_pane.popup_move_down();
+                    self.schedule_draw();
+                    return Ok(());
+                }
+                KeyCode::Enter => {
+                    if self.widget.bottom_pane.apply_selected_command() {
+                        self.schedule_draw();
+                    }
+                    // If the popup is still visible after applying the command,
+                    // keep treating Enter as "select" only and do not submit yet.
+                    // If the popup has been closed (e.g., command fully applied),
+                    // fall through to the normal Enter handling below so the
+                    // completed command can be submitted.
+                    if self.widget.bottom_pane.is_popup_visible() {
+                        return Ok(());
+                    }
+                }
+                KeyCode::Tab => {
+                    self.widget.bottom_pane.apply_selected_command();
+                    self.schedule_draw();
+                    return Ok(());
+                }
+                KeyCode::Esc => {
+                    self.widget.bottom_pane.hide_popup();
+                    self.schedule_draw();
+                    return Ok(());
+                }
+                _ => {
+                    // For other keys (typing), let them pass through
+                    // The popup will update automatically when the input changes
+                }
+            }
         }
 
         // Handle input based on agent status
@@ -268,6 +315,12 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     self.widget.bottom_pane.cursor_right();
                     self.schedule_draw();
                 }
+                KeyCode::Esc => {
+                    if self.widget.bottom_pane.is_popup_visible() {
+                        self.widget.bottom_pane.hide_popup();
+                        self.schedule_draw();
+                    }
+                }
                 _ => {}
             },
             AgentStatus::Thinking | AgentStatus::ExecutingTool => {
@@ -275,6 +328,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 if key.code == KeyCode::Esc {
                     self.interrupt_agent_task();
                     self.widget.bottom_pane.set_status(AgentStatus::Idle);
+                    self.widget
+                        .status_indicator
+                        .update_status(AgentStatus::Idle);
                     self.complete_streaming_assistant_cell("Interrupted.".to_string());
                     self.complete_running_tool_cells_with_interrupt();
                     self.schedule_draw();
@@ -326,6 +382,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 self.widget
                     .add_cell(Box::new(AssistantHistoryCell::streaming()));
                 self.widget.bottom_pane.set_status(AgentStatus::Thinking);
+                self.widget
+                    .status_indicator
+                    .update_status(AgentStatus::Thinking);
                 self.schedule_draw();
 
                 // Prepare components for background task
@@ -436,6 +495,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                             }
                         }
                         self.widget.bottom_pane.set_status(AgentStatus::Idle);
+                        self.widget
+                            .status_indicator
+                            .update_status(AgentStatus::Idle);
                         self.schedule_draw();
                     }
                     AgentEvent::Error { message } => {
@@ -443,6 +505,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
                         self.complete_streaming_assistant_cell(format!("Error: {}", message));
                         self.widget.bottom_pane.set_status(AgentStatus::Idle);
+                        self.widget
+                            .status_indicator
+                            .update_status(AgentStatus::Idle);
                         self.schedule_draw();
                     }
                 }
@@ -461,6 +526,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 self.widget
                     .bottom_pane
                     .set_status(AgentStatus::ExecutingTool);
+                self.widget
+                    .status_indicator
+                    .update_status(AgentStatus::ExecutingTool);
                 self.schedule_draw();
             }
             AppEvent::ToolCallEnd {
@@ -479,10 +547,14 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     }
                 }
                 self.widget.bottom_pane.set_status(AgentStatus::Thinking);
+                self.widget
+                    .status_indicator
+                    .update_status(AgentStatus::Thinking);
                 self.schedule_draw();
             }
             AppEvent::AgentStatusUpdate { status } => {
                 self.widget.bottom_pane.set_status(status);
+                self.widget.status_indicator.update_status(status);
                 self.schedule_draw();
             }
         }
@@ -492,7 +564,79 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
     /// Submit a user message.
     fn submit_message(&mut self, text: String) {
+        if let Some((cmd, args)) = parse_command(&text) {
+            self.handle_slash_command(cmd, args);
+            return;
+        }
         let _ = self.app_event_tx.send(AppEvent::SubmitUserMessage { text });
+    }
+
+    fn handle_slash_command(&mut self, command: super::SlashCommand, _args: &str) {
+        match command {
+            super::SlashCommand::Help => {
+                let help_text = r#"Available Commands:
+/help   - Show this help message
+/clear  - Clear conversation history
+/model  - Show current model and supported models
+/status - Show current status
+/quit   - Quit the application
+"#;
+                self.widget
+                    .add_cell(Box::new(AssistantHistoryCell::new(help_text.to_string())));
+                self.schedule_draw();
+            }
+            super::SlashCommand::Clear => {
+                self.widget.cells.clear();
+                self.history.clear();
+                self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                    "Conversation cleared.".to_string(),
+                )));
+                self.schedule_draw();
+            }
+            super::SlashCommand::Model => {
+                // Show current model and supported models
+                let current_model = self.model.name();
+                let current_provider = self.model.provider();
+
+                let mut model_info = format!(
+                    "Current model: {} ({})\n\nSupported models:\n",
+                    current_model, current_provider
+                );
+
+                // Group models by provider
+                let mut models_by_provider = std::collections::HashMap::new();
+                for (provider, model, desc) in super::model::get_supported_models() {
+                    models_by_provider
+                        .entry(provider)
+                        .or_insert_with(Vec::new)
+                        .push((model, desc));
+                }
+
+                // Display models grouped by provider
+                for (provider, models) in models_by_provider {
+                    model_info.push_str(&format!("\n{} models:\n", provider));
+                    for (model, desc) in models {
+                        model_info.push_str(&format!("  - {}: {}\n", model, desc));
+                    }
+                }
+
+                self.widget
+                    .add_cell(Box::new(AssistantHistoryCell::new(model_info)));
+                self.schedule_draw();
+            }
+            super::SlashCommand::Status => {
+                let status_text = format!("Status: {:?}", self.widget.bottom_pane.status);
+                self.widget
+                    .add_cell(Box::new(AssistantHistoryCell::new(status_text)));
+                self.schedule_draw();
+            }
+            super::SlashCommand::Quit => {
+                self.exit_info = Some(AppExitInfo {
+                    reason: ExitReason::UserRequested,
+                });
+                self.should_exit = true;
+            }
+        }
     }
 
     fn interrupt_agent_task(&mut self) {

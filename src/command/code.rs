@@ -19,6 +19,7 @@ use crate::internal::{
         mcp::server::LibraMcpServer,
         providers::{
             anthropic::{CLAUDE_3_5_SONNET, Client as AnthropicClient},
+            deepseek::client::Client as DeepSeekClient,
             gemini::{Client as GeminiClient, GEMINI_2_5_FLASH},
             openai::{Client as OpenAIClient, GPT_4O_MINI},
         },
@@ -38,6 +39,7 @@ pub enum CodeProvider {
     Gemini,
     Openai,
     Anthropic,
+    Deepseek,
 }
 
 #[derive(Parser, Debug)]
@@ -259,11 +261,12 @@ async fn execute_tui(args: CodeArgs) {
             };
             let model_name = args.model.unwrap_or_else(|| GEMINI_2_5_FLASH.to_string());
             let model = client.completion_model(&model_name);
+            let model_type = crate::internal::tui::ModelType::Gemini(model);
             run_tui_with_model(
                 args.host,
                 args.port,
                 args.mcp_port,
-                model,
+                model_type,
                 registry,
                 config,
                 mcp_server,
@@ -280,11 +283,12 @@ async fn execute_tui(args: CodeArgs) {
             };
             let model_name = args.model.unwrap_or_else(|| GPT_4O_MINI.to_string());
             let model = client.completion_model(&model_name);
+            let model_type = crate::internal::tui::ModelType::Openai(model);
             run_tui_with_model(
                 args.host,
                 args.port,
                 args.mcp_port,
-                model,
+                model_type,
                 registry,
                 config,
                 mcp_server,
@@ -301,11 +305,34 @@ async fn execute_tui(args: CodeArgs) {
             };
             let model_name = args.model.unwrap_or_else(|| CLAUDE_3_5_SONNET.to_string());
             let model = client.completion_model(&model_name);
+            let model_type = crate::internal::tui::ModelType::Anthropic(model);
             run_tui_with_model(
                 args.host,
                 args.port,
                 args.mcp_port,
-                model,
+                model_type,
+                registry,
+                config,
+                mcp_server,
+            )
+            .await;
+        }
+        CodeProvider::Deepseek => {
+            let client = match DeepSeekClient::from_env() {
+                Ok(client) => client,
+                Err(_) => {
+                    eprintln!("error: DEEPSEEK_API_KEY is not set");
+                    return;
+                }
+            };
+            // Fixed model: deepseek-chat
+            let model = client.completion_model("deepseek-chat");
+            let model_type = crate::internal::tui::ModelType::Deepseek(model);
+            run_tui_with_model(
+                args.host,
+                args.port,
+                args.mcp_port,
+                model_type,
                 registry,
                 config,
                 mcp_server,
@@ -315,17 +342,15 @@ async fn execute_tui(args: CodeArgs) {
     }
 }
 
-async fn run_tui_with_model<M>(
+async fn run_tui_with_model(
     host: String,
     port: u16,
     mcp_port: u16,
-    model: M,
+    model: crate::internal::tui::ModelType,
     registry: Arc<ToolRegistry>,
     config: ToolLoopConfig,
     mcp_server: Arc<LibraMcpServer>,
-) where
-    M: crate::internal::ai::completion::CompletionModel + 'static,
-{
+) {
     // Initialize terminal
     let terminal = match tui_init() {
         Ok(t) => t,
@@ -359,9 +384,15 @@ async fn run_tui_with_model<M>(
         Err(err) => (None, format!("MCP: failed to start ({err})")),
     };
 
+    let version = env!("CARGO_PKG_VERSION");
+    let model_name = model.name();
+    let _provider = model.provider(); // Unused variable, prefixed with underscore
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("~"));
+    let current_dir_display = current_dir.display();
+
     let welcome = format!(
-        "Welcome to Libra Code! Type your message and press Enter to chat with the AI assistant.\n{}\n{}",
-        web_line, mcp_line
+        "╭─────────────────────────────────────────────────────────────────────╮\n│ >_ Libra Codex (v{})                                             │\n│                                                                     │\n│ model:     {:39} /model to change │\n│ directory: {}                    │\n│                                                                     │\n│ Project: https://github.com/web3infra-foundation/libra              │\n╰─────────────────────────────────────────────────────────────────────╯\n\nWelcome to Libra Code! Type your message and press Enter to chat with the AI assistant.\n{}\n{}",
+        version, model_name, current_dir_display, web_line, mcp_line
     );
 
     // Create and run app
