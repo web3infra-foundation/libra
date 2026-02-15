@@ -389,14 +389,10 @@ async fn run_tui_with_model(
     let _provider = model.provider(); // Unused variable, prefixed with underscore
     let current_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("~"));
     let current_dir_display = current_dir.display();
-    
+
     let welcome = format!(
         "╭─────────────────────────────────────────────────────────────────────╮\n│ >_ Libra Codex (v{})                                             │\n│                                                                     │\n│ model:     {:39} /model to change │\n│ directory: {}                    │\n│                                                                     │\n│ Project: https://github.com/web3infra-foundation/libra              │\n╰─────────────────────────────────────────────────────────────────────╯\n\nWelcome to Libra Code! Type your message and press Enter to chat with the AI assistant.\n{}\n{}",
-        version,
-        model_name,
-        current_dir_display,
-        web_line,
-        mcp_line
+        version, model_name, current_dir_display, web_line, mcp_line
     );
 
     // Create and run app
