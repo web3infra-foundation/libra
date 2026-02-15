@@ -166,7 +166,11 @@ fn canonicalize<P: AsRef<Path>>(path: P) -> io::Result<PathBuf> {
 }
 
 fn ensure_main_entry(state: &mut WorktreeState) -> io::Result<()> {
-    let main_path = canonicalize(util::working_dir())?;
+    let storage = util::storage_path();
+    let repo_root = storage
+        .parent()
+        .ok_or_else(|| io::Error::other("invalid storage path"))?;
+    let main_path = canonicalize(repo_root)?;
     let main_str = main_path.to_string_lossy().to_string();
     let existing_main_index = state.worktrees.iter().position(|w| w.is_main);
     let current_index = state
@@ -175,8 +179,11 @@ fn ensure_main_entry(state: &mut WorktreeState) -> io::Result<()> {
         .position(|w| Path::new(&w.path) == main_path);
 
     match (existing_main_index, current_index) {
-        (Some(_), Some(cur_idx)) => {
-            state.worktrees[cur_idx].is_main = false;
+        (Some(main_idx), Some(cur_idx)) => {
+            if main_idx != cur_idx {
+                // keep existing main, ensure current is non-main
+                state.worktrees[cur_idx].is_main = false;
+            }
         }
         (Some(_), None) => {
             state.worktrees.push(WorktreeEntry {
