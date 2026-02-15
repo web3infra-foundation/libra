@@ -185,7 +185,7 @@ This section documents the compatibility between **Libra**’s CLI and **Git** a
 |  | `-b, --initial-branch <name>` | Yes | Yes | ✅ | - | Set initial branch name |
 |  | `-q, --quiet` | Yes | Yes | ✅ | - | Suppress output |
 |  | `--shared <perm>` | Yes | Yes | ⚠️ | P1 | Supported, but effective semantics may differ from Git in edge cases |
-|  | `--separate-libra-dir <dir>` | Yes | Yes | ✅ | - | Separate `.libra` storage directory; semantics may differ slightly from Git |
+|  | `--separate-libra-dir <dir>` | Yes | Yes | ✅ | - | Separate storage directory (Git: `--separate-git-dir`; Libra preferred alias: `--separate-libra-dir`); Separate `.libra` storage directory; semantics may differ slightly from Git |
 |  | `--object-format <alg>` | Yes | Yes | ✅ | - | Important for SHA‑1/SHA‑256 migration/compatibility |
 | `clone` | `<remote_repo>` | Yes | Yes | ✅ | - | Repository URL/path |
 |  | `[local_path]` | Yes | Yes | ✅ | - | Target directory |

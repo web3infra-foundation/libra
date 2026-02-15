@@ -64,7 +64,7 @@ pub fn cur_dir() -> PathBuf {
 /// Parse a `.libra` link file that points to a separate storage directory.
 /// The file format intentionally matches Git's `gitdir` link format for compatibility:
 /// `gitdir: /absolute/or/relative/path/to/storage`.
-fn parse_separate_git_dir_file(link: &Path) -> Result<PathBuf, io::Error> {
+fn parse_separate_libra_dir_file(link: &Path) -> Result<PathBuf, io::Error> {
     let content = fs::read_to_string(link)?;
     let line = content
         .lines()
@@ -120,7 +120,7 @@ fn try_get_paths(path: Option<PathBuf>) -> Result<(PathBuf, PathBuf), io::Error>
             return Ok((standard_repo, path.clone()));
         }
         if standard_repo.is_file() {
-            let storage = parse_separate_git_dir_file(&standard_repo)?;
+            let storage = parse_separate_libra_dir_file(&standard_repo)?;
             return Ok((storage, path.clone()));
         }
 
