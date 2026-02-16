@@ -29,6 +29,7 @@ pub mod restore;
 pub mod revert;
 pub mod show;
 pub mod tag;
+pub mod worktree;
 
 pub mod stash;
 pub mod status;

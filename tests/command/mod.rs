@@ -57,3 +57,4 @@ mod show_test;
 mod status_test;
 mod switch_test;
 mod tag_test;
+mod worktree_test;
