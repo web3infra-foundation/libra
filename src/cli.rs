@@ -65,6 +65,8 @@ enum Commands {
     Restore(command::restore::RestoreArgs),
     #[command(about = "Show the working tree status")]
     Status(command::status::StatusArgs),
+    #[command(about = "Remove untracked files from the working tree")]
+    Clean(command::clean::CleanArgs),
     #[command(
         subcommand,
         about = "Stash the changes in a dirty working directory away"
@@ -279,6 +281,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> Result<(), GitError> {
         Commands::Rm(args) => command::remove::execute(args).await,
         Commands::Restore(args) => command::restore::execute(args).await,
         Commands::Status(args) => command::status::execute(args).await,
+        Commands::Clean(args) => command::clean::execute(args).await,
         Commands::Stash(cmd) => command::stash::execute(cmd).await,
         Commands::Lfs(cmd) => command::lfs::execute(cmd).await,
         Commands::Log(args) => command::log::execute(args).await,

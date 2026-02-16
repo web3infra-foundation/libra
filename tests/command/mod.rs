@@ -9,6 +9,7 @@ use libra::{
         add::{self, AddArgs},
         branch::{BranchArgs, execute, filter_branches},
         calc_file_blob_hash,
+        clean::{self, CleanArgs},
         commit::{self, CommitArgs},
         get_target_commit,
         init::{InitArgs, init},
@@ -30,6 +31,7 @@ mod blame_test;
 mod branch_test;
 mod checkout_test;
 mod cherry_pick_test;
+mod clean_test;
 mod clone_test;
 mod commit_test;
 mod config_test;
