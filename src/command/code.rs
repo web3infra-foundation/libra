@@ -5,7 +5,7 @@
 //! - Web Mode (`--web`): Web server only, suitable for browser access or remote hosting.
 //! - Stdio Mode (`--stdio`): MCP server over standard input/output, designed for integration with AI clients like Claude Desktop.
 
-use std::{net::SocketAddr, sync::Arc, path::PathBuf};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use axum::{Router, response::Html, routing::get};
 use clap::{Parser, ValueEnum};
@@ -174,7 +174,7 @@ async fn execute_web_only(args: CodeArgs) {
             return;
         }
     };
-    
+
     let mcp_server = init_mcp_server(&cwd, false);
 
     // Start MCP Server
@@ -558,12 +558,13 @@ async fn execute_stdio(_args: CodeArgs) {
             return;
         }
     };
-    
+
     let mcp_server = init_mcp_server(&cwd, true);
 
-    use rmcp::transport::io::stdio;
-    use rmcp::transport::async_rw::AsyncRwTransport;
-    use rmcp::service::serve_server;
+    use rmcp::{
+        service::serve_server,
+        transport::{async_rw::AsyncRwTransport, io::stdio},
+    };
 
     let (stdin, stdout) = stdio();
     let transport = AsyncRwTransport::new_server(stdin, stdout);
