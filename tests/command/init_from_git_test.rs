@@ -17,7 +17,7 @@ fn create_simple_git_repo() -> (tempfile::TempDir, std::path::PathBuf) {
 
     assert!(
         Command::new("git")
-            .args(["init", git_dir.to_str().unwrap()])
+            .args(["init", "-b", "main", git_dir.to_str().unwrap()])
             .status()
             .unwrap()
             .success()
@@ -179,7 +179,7 @@ async fn test_init_from_git_repository_multiple_branches() {
 
     assert!(
         Command::new("git")
-            .args(["init", git_dir.to_str().unwrap()])
+            .args(["init", "-b", "main", git_dir.to_str().unwrap()])
             .status()
             .unwrap()
             .success()
@@ -249,7 +249,7 @@ async fn test_init_from_git_repository_multiple_branches() {
     assert!(
         Command::new("git")
             .current_dir(&git_dir)
-            .args(["checkout", "master"])
+            .args(["checkout", "main"])
             .status()
             .unwrap()
             .success()
@@ -277,13 +277,16 @@ async fn test_init_from_git_repository_multiple_branches() {
 #[tokio::test]
 #[serial]
 async fn test_init_from_git_repository_bare_source_repo() {
-    let temp_root = tempdir().unwrap();
+    let (temp_root, git_workdir) = create_simple_git_repo();
     let git_dir = temp_root.path().join("git-src-bare");
-    fs::create_dir_all(&git_dir).unwrap();
-
     assert!(
         Command::new("git")
-            .args(["init", "--bare", git_dir.to_str().unwrap()])
+            .args([
+                "clone",
+                "--bare",
+                git_workdir.to_str().unwrap(),
+                git_dir.to_str().unwrap()
+            ])
             .status()
             .unwrap()
             .success()
