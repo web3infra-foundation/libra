@@ -29,26 +29,41 @@ pub struct WorktreeArgs {
 /// semantics (for example, `remove` does not delete directories on disk).
 #[derive(Subcommand, Debug)]
 pub enum WorktreeSubcommand {
+    /// Create a new linked worktree at the given path.
     Add {
+        /// Filesystem path at which to create the new worktree.
         path: String,
     },
+    /// List all known worktrees and their state.
     List,
+    /// Mark a worktree as locked to prevent it from being pruned or removed.
     Lock {
+        /// Filesystem path of the worktree to lock.
         path: String,
+        /// Optional explanation for why this worktree is locked.
         #[clap(long)]
         reason: Option<String>,
     },
+    /// Remove the lock from a previously locked worktree.
     Unlock {
+        /// Filesystem path of the worktree to unlock.
         path: String,
     },
+    /// Move or rename an existing worktree.
     Move {
+        /// Current filesystem path of the worktree.
         src: String,
+        /// New filesystem path for the worktree.
         dest: String,
     },
+    /// Prune worktrees that are no longer valid or reachable.
     Prune,
+    /// Unregister a worktree without deleting its directory on disk.
     Remove {
+        /// Filesystem path of the worktree to unregister.
         path: String,
     },
+    /// Repair worktree metadata, attempting to recover from inconsistencies.
     Repair,
 }
 
