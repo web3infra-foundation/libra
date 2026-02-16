@@ -984,6 +984,42 @@ async fn test_worktree_prune_removes_missing_non_main_worktrees() {
 
 #[tokio::test]
 #[serial]
+/// `worktree prune` keeps locked worktrees even when their directories are missing.
+async fn test_worktree_prune_keeps_locked_worktrees() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    exec_async(vec!["worktree", "add", "wt_locked_prune"])
+        .await
+        .expect("worktree add should succeed");
+    exec_async(vec!["worktree", "lock", "wt_locked_prune"])
+        .await
+        .expect("worktree lock should succeed");
+
+    let wt_path = repo_dir.path().join("wt_locked_prune");
+    let canonical = wt_path
+        .canonicalize()
+        .expect("locked worktree path should canonicalize before removal")
+        .to_string_lossy()
+        .to_string();
+    fs::remove_dir_all(&wt_path).expect("failed to remove locked worktree directory");
+
+    exec_async(vec!["worktree", "prune"])
+        .await
+        .expect("worktree prune should succeed");
+
+    let state = read_worktree_state();
+    let locked_entry = state
+        .worktrees
+        .into_iter()
+        .find(|w| w.path == canonical)
+        .expect("locked worktree should remain registered");
+    assert!(locked_entry.locked, "locked worktree should remain locked");
+}
+
+#[tokio::test]
+#[serial]
 /// Removing a locked worktree is rejected without changing state or directory.
 async fn test_worktree_remove_locked_is_rejected_without_side_effects() {
     let repo_dir = tempdir().unwrap();

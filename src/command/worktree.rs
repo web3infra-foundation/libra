@@ -619,7 +619,7 @@ fn prune_worktrees() -> io::Result<()> {
         .iter()
         .filter(|w| {
             let path = Path::new(&w.path);
-            !path.exists() && !w.is_main
+            !path.exists() && !w.is_main && !w.locked
         })
         .map(|w| w.path.clone())
         .collect();
@@ -636,7 +636,7 @@ fn prune_worktrees() -> io::Result<()> {
 
     state.worktrees.retain(|w| {
         let path = Path::new(&w.path);
-        path.exists() || w.is_main
+        path.exists() || w.is_main || w.locked
     });
     save_state(&state)?;
 
