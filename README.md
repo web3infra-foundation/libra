@@ -209,6 +209,24 @@ This section documents the compatibility between **Libra**’s CLI and **Git** a
 |  | `--bare` | Yes | Yes | ✅ | - | Bare clone for server‑side usage |
 |  | `--mirror` | Yes | No | ⛔ | P1 | Full mirror including refs, for replication scenarios |
 
+### Initializing from an existing Git repository
+
+Libra can initialize a new repository by importing history from an existing local Git repository:
+
+- `libra init --from-git-repository /path/to/git-repo` converts `/path/to/git-repo` into a Libra repository in the current directory.
+- `libra init --bare --from-git-repository /path/to/git-repo` creates a bare Libra repository that tracks the given Git repository.
+
+Use `libra init --from-git-repository` when:
+
+- You already have a local Git repository and want to keep using it as the source of truth while experimenting with Libra.
+- You want to attach Libra’s storage and metadata model to an existing project without changing its working tree.
+
+Use `libra clone` when:
+
+- You want to create a new working copy from a remote Libra or Git repository (HTTP/SSH/local path).
+- You do not need to keep the original repository layout or local configuration.
+
+The original Git repository is not modified by `--from-git-repository`; Libra configures it as the `origin` remote and fetches objects and refs into the new Libra repository.
 ---
 
 ### Working Tree & Index: `add`, `rm`, `restore`, `status`

@@ -211,10 +211,13 @@ pub async fn execute(args: InitArgs) {
         } else {
             current_dir.join(path)
         };
-        Some(joined.canonicalize().map_err(|e| {
-            eprintln!("Error: failed to resolve from-git-repository path: {e}");
-            e
-        }))
+        match joined.canonicalize() {
+            Ok(canonical) => Some(canonical),
+            Err(e) => {
+                eprintln!("Error: failed to resolve from-git-repository path: {e}");
+                std::process::exit(1);
+            }
+        }
     } else {
         None
     };
@@ -227,10 +230,11 @@ pub async fn execute(args: InitArgs) {
         return;
     }
 
-    if let Some(Ok(source_git)) = from_git_abs
+    if let Some(source_git) = from_git_abs
         && let Err(e) = convert::convert_from_git_repository(&source_git, is_bare).await
     {
         eprintln!("Error: {e}");
+        std::process::exit(1);
     }
 }
 

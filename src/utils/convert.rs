@@ -4,7 +4,7 @@ use std::{io, path::Path};
 
 use crate::{
     command::{clone, fetch},
-    internal::config::RemoteConfig,
+    internal::{branch::Branch, config::RemoteConfig},
 };
 
 /// Convert an existing local Git repository into the current Libra repository.
@@ -30,8 +30,21 @@ pub async fn convert_from_git_repository(
     }
 
     let git_dir = if git_repo.join(".git").exists() {
-        git_repo.join(".git")
-    } else if git_repo.join("HEAD").exists() && git_repo.join("objects").exists() {
+        let dot_git = git_repo.join(".git");
+        if !dot_git.join("HEAD").exists()
+            || !dot_git.join("config").exists()
+            || !dot_git.join("objects").exists()
+        {
+            return Err(crate::command::init::InitError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("'{}' is not a valid git repository", git_repo.display()),
+            )));
+        }
+        dot_git
+    } else if git_repo.join("HEAD").exists()
+        && git_repo.join("config").exists()
+        && git_repo.join("objects").exists()
+    {
         git_repo.to_path_buf()
     } else {
         return Err(crate::command::init::InitError::Io(io::Error::new(
@@ -56,6 +69,13 @@ pub async fn convert_from_git_repository(
     };
 
     fetch::fetch_repository(remote.clone(), None, false, None).await;
+
+    let remote_branches = Branch::list_branches(Some(&remote.name)).await;
+    if remote_branches.is_empty() {
+        return Err(crate::command::init::InitError::ConversionFailed(
+            "no refs fetched from source git repository".to_string(),
+        ));
+    }
 
     clone::setup_repository(remote, None, !is_bare)
         .await
