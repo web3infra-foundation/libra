@@ -15,7 +15,10 @@ use crate::{
         db,
         model::{config, reference},
     },
-    utils::util::{DATABASE, ROOT_DIR, cur_dir},
+    utils::{
+        convert,
+        util::{DATABASE, ROOT_DIR, cur_dir},
+    },
 };
 
 const DEFAULT_BRANCH: &str = "master";
@@ -172,10 +175,21 @@ pub struct InitArgs {
     /// - `filesystem`: Use filesystem-friendly reference name validation.
     #[clap(long = "ref-format", value_enum, required = false)]
     pub ref_format: Option<RefFormat>,
+
+    /// Convert from an existing local Git repository during initialization.
+    ///
+    /// When provided, Libra will fetch objects and references from the given
+    /// Git repository and configure the current repository to track it as
+    /// `origin` after the basic Libra layout and database are created.
+    #[clap(long = "from-git-repository", value_name = "path", required = false)]
+    pub from_git_repository: Option<String>,
 }
 
 /// Execute the init function
 pub async fn execute(args: InitArgs) {
+    let from_git = args.from_git_repository.clone();
+    let is_bare = args.bare;
+
     let used_separate_git_dir = std::env::args()
         .any(|arg| arg == "--separate-git-dir" || arg.starts_with("--separate-git-dir="));
     if used_separate_git_dir {
@@ -184,12 +198,28 @@ pub async fn execute(args: InitArgs) {
         );
     }
 
-    let target_path = cur_dir().join(Path::new(&args.repo_directory));
+    let current_dir = cur_dir();
+    let target_path = current_dir.join(Path::new(&args.repo_directory));
+    let from_git_abs = from_git.map(|p| {
+        let path = Path::new(&p);
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            current_dir.join(path)
+        }
+    });
+
     match init(args)
         .await
-        .and_then(|_| Ok(env::set_current_dir(target_path)?))
+        .and_then(|_| Ok(env::set_current_dir(&target_path)?))
     {
-        Ok(_) => {}
+        Ok(_) => {
+            if let Some(source_git) = from_git_abs {
+                if let Err(e) = convert::convert_from_git_repository(&source_git, is_bare).await {
+                    eprintln!("Error: {e}");
+                }
+            }
+        }
         Err(e) => {
             eprintln!("Error: {e}");
         }

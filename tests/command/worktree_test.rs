@@ -1190,6 +1190,7 @@ async fn test_worktree_main_flag_stable_with_separate_libra_dir() {
         shared: None,
         object_format: None,
         ref_format: None,
+        from_git_repository: None,
         separate_libra_dir: Some(storage.to_string_lossy().to_string()),
     })
     .await
@@ -1239,6 +1240,7 @@ async fn test_worktree_main_flag_stable_across_both_worktrees_in_separate_layout
         shared: None,
         object_format: None,
         ref_format: None,
+        from_git_repository: None,
         separate_libra_dir: Some(storage.to_string_lossy().to_string()),
     })
     .await
@@ -1308,6 +1310,7 @@ async fn test_worktree_remove_main_is_rejected_with_separate_libra_dir() {
         shared: None,
         object_format: None,
         ref_format: None,
+        from_git_repository: None,
         separate_libra_dir: Some(storage.to_string_lossy().to_string()),
     })
     .await
@@ -1359,6 +1362,7 @@ async fn test_worktree_recovers_invalid_main_storage_parent_in_separate_layout()
         shared: None,
         object_format: None,
         ref_format: None,
+        from_git_repository: None,
         separate_libra_dir: Some(storage.to_string_lossy().to_string()),
     })
     .await
