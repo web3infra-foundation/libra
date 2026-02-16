@@ -366,8 +366,8 @@ fn find_entry<'a>(state: &'a WorktreeState, path: &Path) -> Option<&'a WorktreeE
 /// - rejects paths that canonicalize inside `.libra` (with cleanup),
 /// - ensures the worktree is not already registered,
 /// - writes a `.libra` link file pointing at the shared storage, and
-/// - when `HEAD` exists, populates the new worktree from the index without
-///   touching the shared index itself.
+/// - when `HEAD` exists, populates the new worktree from committed `HEAD`
+///   content (not staged-only index changes).
 async fn add_worktree(path: String) -> io::Result<()> {
     let storage = util::storage_path();
     let target = canonicalize(&path)?;
@@ -378,7 +378,8 @@ async fn add_worktree(path: String) -> io::Result<()> {
         ));
     }
 
-    if target.exists() && !target.is_dir() {
+    let target_exists = target.exists();
+    if target_exists && !target.is_dir() {
         return Err(io::Error::other("target exists and is not a directory"));
     }
 
@@ -397,6 +398,10 @@ async fn add_worktree(path: String) -> io::Result<()> {
     {
         println!("worktree already exists at {}", canonical_target.display());
         return Ok(());
+    }
+
+    if target_exists && fs::read_dir(&target)?.next().transpose()?.is_some() {
+        return Err(io::Error::other("target directory exists and is not empty"));
     }
 
     let mut created_target = false;
@@ -418,6 +423,15 @@ async fn add_worktree(path: String) -> io::Result<()> {
         let _ = fs::remove_file(&link_path);
         if created_target {
             let _ = fs::remove_dir_all(&target);
+        } else if let Ok(entries) = fs::read_dir(&target) {
+            for entry in entries.flatten() {
+                let entry_path = entry.path();
+                let _ = if entry_path.is_dir() {
+                    fs::remove_dir_all(&entry_path)
+                } else {
+                    fs::remove_file(&entry_path)
+                };
+            }
         }
     };
 
@@ -429,12 +443,11 @@ async fn add_worktree(path: String) -> io::Result<()> {
                 return Err(e);
             }
         };
-        // Use restore-from-index mode to populate the new worktree. This path
-        // is expected to leave the shared index unchanged (covered by
-        // `test_worktree_add_does_not_reset_index`).
+        // Populate from HEAD so new worktrees reflect committed state instead
+        // of carrying staged-but-uncommitted index content.
         if let Err(e) = restore::execute_checked(RestoreArgs {
             pathspec: vec![util::working_dir_string()],
-            source: None,
+            source: Some("HEAD".to_string()),
             worktree: true,
             staged: false,
         })
@@ -547,6 +560,13 @@ fn move_worktree(src: String, dest: String) -> io::Result<()> {
     let mut state = load_state()?;
     let src_path = canonicalize(&src)?;
     let dest_path = canonicalize(&dest)?;
+    let storage = util::storage_path();
+
+    if util::is_sub_path(&dest_path, &storage) {
+        return Err(io::Error::other(
+            "destination cannot be inside .libra storage",
+        ));
+    }
 
     if find_entry(&state, &dest_path).is_some() {
         return Err(io::Error::other(

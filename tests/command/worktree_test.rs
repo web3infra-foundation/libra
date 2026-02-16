@@ -2,7 +2,7 @@
 
 use std::fs;
 #[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, symlink};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 
 use libra::{
     exec_async,
@@ -256,6 +256,60 @@ async fn test_worktree_add_symlink_and_real_path_are_deduplicated() {
 
 #[tokio::test]
 #[serial]
+/// Adding into an existing non-empty directory is rejected and preserves local files.
+async fn test_worktree_add_rejects_existing_non_empty_directory() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    test::ensure_file("a.txt", Some("repo-version"));
+    add::execute(AddArgs {
+        pathspec: vec!["a.txt".to_string()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+    exec_async(vec!["commit", "-m", "initial"])
+        .await
+        .expect("initial commit should succeed");
+
+    let wt_path = repo_dir.path().join("wt_non_empty");
+    fs::create_dir_all(&wt_path).expect("failed to create pre-existing worktree target");
+    fs::write(wt_path.join("a.txt"), b"local-data")
+        .expect("failed to seed pre-existing target content");
+
+    exec_async(vec!["worktree", "add", "wt_non_empty"])
+        .await
+        .expect("worktree add command itself should not fail");
+
+    assert!(
+        !wt_path.join(".libra").exists(),
+        "rejected add should not create .libra link in non-empty target"
+    );
+    let preserved =
+        fs::read_to_string(wt_path.join("a.txt")).expect("target file should still exist");
+    assert_eq!(
+        preserved, "local-data",
+        "rejected add should preserve existing directory contents"
+    );
+
+    let canonical_target = wt_path.canonicalize().unwrap();
+    let paths = worktree_paths();
+    assert!(
+        !paths
+            .iter()
+            .any(|p| p == canonical_target.to_string_lossy().as_ref()),
+        "rejected add should not register the non-empty target as a worktree"
+    );
+}
+
+#[tokio::test]
+#[serial]
 /// Duplicate `worktree add` should not recreate a missing directory when the path is already registered.
 async fn test_worktree_add_duplicate_registered_path_does_not_create_directory() {
     let repo_dir = tempdir().unwrap();
@@ -337,6 +391,87 @@ async fn test_worktree_add_rolls_back_link_on_restore_failure() {
     assert!(
         wt_path.join("conflict").is_file(),
         "pre-existing target content should be preserved on rollback"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+/// If state persistence fails after restore, rollback removes partially restored files in an existing target.
+async fn test_worktree_add_rolls_back_populated_files_when_state_save_fails() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    test::ensure_file("tracked.txt", Some("v1"));
+    add::execute(AddArgs {
+        pathspec: vec!["tracked.txt".to_string()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+    exec_async(vec!["commit", "-m", "initial"])
+        .await
+        .expect("initial commit should succeed");
+
+    let wt_path = repo_dir.path().join("wt_state_save_fail");
+    fs::create_dir_all(&wt_path).expect("failed to create existing empty target");
+
+    exec_async(vec!["worktree", "list"])
+        .await
+        .expect("worktree list should initialize worktree state");
+    assert!(
+        util::storage_path().join("worktrees.json").exists(),
+        "worktrees.json should exist before forcing save_state failure"
+    );
+
+    let storage_dir = util::storage_path();
+    let original_mode = fs::metadata(&storage_dir)
+        .expect("failed to stat storage directory")
+        .permissions()
+        .mode();
+    let mut read_only = fs::metadata(&storage_dir)
+        .expect("failed to stat storage directory")
+        .permissions();
+    read_only.set_mode(original_mode & !0o222);
+    fs::set_permissions(&storage_dir, read_only)
+        .expect("failed to set storage directory read-only");
+
+    exec_async(vec!["worktree", "add", "wt_state_save_fail"])
+        .await
+        .expect("worktree add command itself should not fail");
+
+    let mut restore_mode = fs::metadata(&storage_dir)
+        .expect("failed to stat storage directory")
+        .permissions();
+    restore_mode.set_mode(original_mode);
+    fs::set_permissions(&storage_dir, restore_mode)
+        .expect("failed to restore storage directory permissions");
+
+    assert!(
+        !wt_path.join(".libra").exists(),
+        "failed save_state should remove the partial .libra link"
+    );
+    assert!(
+        fs::read_dir(&wt_path)
+            .expect("target directory should still exist")
+            .next()
+            .is_none(),
+        "rollback should clear partially restored files from existing target directory"
+    );
+
+    let canonical_target = wt_path.canonicalize().unwrap();
+    let paths = worktree_paths();
+    assert!(
+        !paths
+            .iter()
+            .any(|p| p == canonical_target.to_string_lossy().as_ref()),
+        "failed save_state should not register the worktree in state"
     );
 }
 
@@ -509,6 +644,55 @@ async fn test_worktree_add_does_not_reset_index() {
             .iter()
             .any(|p| p.to_str().unwrap() == "tracked.txt"),
         "tracked.txt should remain staged after worktree add"
+    );
+}
+
+#[tokio::test]
+#[serial]
+/// New worktree population should use `HEAD` content instead of staged index-only updates.
+async fn test_worktree_add_populates_from_head_not_staged_index() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    test::ensure_file("tracked.txt", Some("v1"));
+    add::execute(AddArgs {
+        pathspec: vec!["tracked.txt".to_string()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+    exec_async(vec!["commit", "-m", "initial"])
+        .await
+        .expect("initial commit should succeed");
+
+    test::ensure_file("tracked.txt", Some("v2"));
+    add::execute(AddArgs {
+        pathspec: vec!["tracked.txt".to_string()],
+        all: false,
+        update: false,
+        refresh: false,
+        force: false,
+        verbose: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+
+    exec_async(vec!["worktree", "add", "wt_head_content"])
+        .await
+        .expect("worktree add should succeed");
+
+    let linked_content =
+        fs::read_to_string(repo_dir.path().join("wt_head_content").join("tracked.txt")).unwrap();
+    assert_eq!(
+        linked_content, "v1",
+        "new worktree should be populated from HEAD, not staged index updates"
     );
 }
 
@@ -717,6 +901,50 @@ async fn test_worktree_move_rejects_duplicate_destination() {
         before_paths.len(),
         after_paths.len(),
         "duplicate-destination move should not change number of registered worktrees"
+    );
+}
+
+#[tokio::test]
+#[serial]
+/// Moving a worktree into `.libra` storage is rejected without mutating filesystem or state.
+async fn test_worktree_move_rejects_destination_inside_storage() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    exec_async(vec!["worktree", "add", "wt_storage_src"])
+        .await
+        .expect("worktree add should succeed");
+
+    let src = repo_dir.path().join("wt_storage_src");
+    let blocked_dest = repo_dir.path().join(".libra").join("moved_inside_storage");
+    assert!(src.is_dir());
+    assert!(!blocked_dest.exists());
+
+    let before_paths = worktree_paths();
+
+    exec_async(vec![
+        "worktree",
+        "move",
+        "wt_storage_src",
+        ".libra/moved_inside_storage",
+    ])
+    .await
+    .expect("worktree move command itself should not fail");
+
+    assert!(
+        src.is_dir(),
+        "source directory should remain after rejected move into storage"
+    );
+    assert!(
+        !blocked_dest.exists(),
+        "destination inside storage should not be created"
+    );
+
+    let after_paths = worktree_paths();
+    assert_eq!(
+        before_paths, after_paths,
+        "rejected move into storage should not mutate worktree registry"
     );
 }
 
