@@ -48,7 +48,7 @@ pub enum CodeProvider {
 #[derive(Parser, Debug)]
 pub struct CodeArgs {
     /// Run the web server only (no TUI). Alias: `--web`.
-    #[arg(long, alias = "web")]
+    #[arg(long, alias = "web", conflicts_with = "stdio")]
     pub web_only: bool,
 
     /// Port to listen on (web server)
@@ -80,7 +80,7 @@ pub struct CodeArgs {
     pub mcp_port: u16,
 
     /// Run the MCP server over Stdio (for Claude Desktop integration)
-    #[arg(long, alias = "mcp-stdio")]
+    #[arg(long, alias = "mcp-stdio", conflicts_with = "web_only")]
     pub stdio: bool,
 }
 
@@ -398,7 +398,7 @@ async fn run_tui_with_model(
     let version = env!("CARGO_PKG_VERSION");
     let model_name = model.name();
     let _provider = model.provider(); // Unused variable, prefixed with underscore
-    let current_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("~"));
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("~"));
     let current_dir_display = current_dir.display();
 
     let welcome = format!(
@@ -515,20 +515,22 @@ fn load_or_create_repo_id(working_dir: &std::path::Path) -> Uuid {
 }
 
 fn init_mcp_server(working_dir: &std::path::Path, is_stdio: bool) -> Arc<LibraMcpServer> {
-    let repo_id = load_or_create_repo_id(working_dir);
-
     // Determine storage paths based on mode
-    let (objects_dir, dot_libra) = if is_stdio {
-        // Stdio mode (e.g. Claude Desktop): Use global ~/.libra/storage to avoid sandbox permission issues.
-        let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+    let (objects_dir, dot_libra, repo_id) = if is_stdio {
+        // Stdio mode (e.g. Claude Desktop): Use ~/.libra/mcp/<repo_id>/ per-repo namespace
+        // to avoid sandbox permission issues and isolate concurrent sessions.
+        let repo_id = load_or_create_repo_id(working_dir);
+        let home_dir = dirs::home_dir().unwrap_or_else(std::env::temp_dir);
         let libra_home = home_dir.join(".libra");
-        (libra_home.join("objects"), libra_home)
+        let mcp_root = libra_home.join("mcp").join(repo_id.to_string());
+        (mcp_root.join("objects"), mcp_root, repo_id)
     } else {
-        // TUI/Web mode: Use local project .libra directory for isolation.
-        (
-            working_dir.join(".libra").join("objects"),
-            working_dir.join(".libra"),
-        )
+        // TUI/Web mode: Use the resolved .libra storage directory for isolation,
+        // supporting linked worktrees via try_get_storage_path.
+        let storage_dir = crate::utils::util::try_get_storage_path(Some(working_dir.to_path_buf()))
+            .unwrap_or_else(|_| working_dir.join(".libra"));
+        let repo_id = load_or_create_repo_id(working_dir);
+        (storage_dir.join("objects"), storage_dir, repo_id)
     };
 
     // Try to create the directory. If it fails, we assume read-only or permission issues.

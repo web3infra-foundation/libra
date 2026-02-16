@@ -56,7 +56,7 @@ Runs the Model Context Protocol (MCP) server over standard input/output. This mo
 ```bash
 libra code --stdio
 ```
-- **Storage**: Uses the global user directory (`~/.libra/`) to avoid sandbox permission issues commonly encountered with desktop AI apps.
+- **Storage**: Uses the local project directory (`.libra/`) for history persistence (same as TUI/Web modes). The directory must be writable by the calling process (including sandboxed desktop AI apps).
 
 #### Claude Desktop Configuration
 To use Libra with Claude Desktop, add the following to your `claude_desktop_config.json`:
