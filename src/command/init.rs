@@ -106,6 +106,9 @@ pub enum InitError {
 
     #[error("Database error: {0}")]
     Database(#[from] DbErr),
+
+    #[error("conversion from git repository failed: {0}")]
+    ConversionFailed(String),
 }
 
 /// Reference format validation modes
@@ -200,29 +203,34 @@ pub async fn execute(args: InitArgs) {
 
     let current_dir = cur_dir();
     let target_path = current_dir.join(Path::new(&args.repo_directory));
-    let from_git_abs = from_git.map(|p| {
+
+    let from_git_abs = if let Some(p) = from_git {
         let path = Path::new(&p);
-        if path.is_absolute() {
+        let joined = if path.is_absolute() {
             path.to_path_buf()
         } else {
             current_dir.join(path)
-        }
-    });
+        };
+        Some(joined.canonicalize().map_err(|e| {
+            eprintln!("Error: failed to resolve from-git-repository path: {e}");
+            e
+        }))
+    } else {
+        None
+    };
 
-    match init(args)
+    if let Err(e) = init(args)
         .await
         .and_then(|_| Ok(env::set_current_dir(&target_path)?))
     {
-        Ok(_) => {
-            if let Some(source_git) = from_git_abs {
-                if let Err(e) = convert::convert_from_git_repository(&source_git, is_bare).await {
-                    eprintln!("Error: {e}");
-                }
-            }
-        }
-        Err(e) => {
-            eprintln!("Error: {e}");
-        }
+        eprintln!("Error: {e}");
+        return;
+    }
+
+    if let Some(Ok(source_git)) = from_git_abs
+        && let Err(e) = convert::convert_from_git_repository(&source_git, is_bare).await
+    {
+        eprintln!("Error: {e}");
     }
 }
 

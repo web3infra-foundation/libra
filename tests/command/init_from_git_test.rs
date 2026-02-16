@@ -1,6 +1,6 @@
 //! Tests `libra init --from-git-repository` for converting an existing Git repository into a Libra repo.
 
-use std::{fs, process::Command};
+use std::{fs, path::Path, process::Command};
 
 use libra::{
     internal::{branch::Branch, config::Config, head::Head},
@@ -8,8 +8,6 @@ use libra::{
 };
 use serial_test::serial;
 use tempfile::tempdir;
-
-use super::*;
 
 /// Helper to create a simple local Git repository with a single commit and return its path.
 fn create_simple_git_repo() -> (tempfile::TempDir, std::path::PathBuf) {
@@ -82,11 +80,9 @@ async fn test_init_from_git_repository_converts_repo() {
     let remote = Config::remote_config("origin").await;
     assert!(remote.is_some(), "origin remote should be configured");
     let remote = remote.unwrap();
-    assert_eq!(
-        remote.url,
-        git_dir.to_str().unwrap(),
-        "origin url should match source Git repository path"
-    );
+    let expected_remote = git_dir.join(".git").canonicalize().unwrap();
+    let actual_remote = Path::new(&remote.url).canonicalize().unwrap();
+    assert_eq!(actual_remote, expected_remote);
 
     let head = Head::current().await;
     let branch_name = match head {

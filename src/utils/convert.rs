@@ -29,12 +29,23 @@ pub async fn convert_from_git_repository(
         )));
     }
 
-    let url = git_repo.to_str().ok_or_else(|| {
+    let git_dir = if git_repo.join(".git").exists() {
+        git_repo.join(".git")
+    } else if git_repo.join("HEAD").exists() && git_repo.join("objects").exists() {
+        git_repo.to_path_buf()
+    } else {
+        return Err(crate::command::init::InitError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("'{}' is not a valid git repository", git_repo.display()),
+        )));
+    };
+
+    let url = git_dir.to_str().ok_or_else(|| {
         crate::command::init::InitError::Io(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
                 "source git repository path '{}' contains invalid UTF-8",
-                git_repo.display()
+                git_dir.display()
             ),
         ))
     })?;
@@ -44,16 +55,11 @@ pub async fn convert_from_git_repository(
         url: url.to_string(),
     };
 
-    // Fetch all refs and objects from the source Git repository into the
-    // current Libra repository storage.
     fetch::fetch_repository(remote.clone(), None, false, None).await;
 
-    // Reuse the clone setup logic to configure branches, HEAD, and remote.
     clone::setup_repository(remote, None, !is_bare)
         .await
-        .map_err(|e| {
-            crate::command::init::InitError::Io(io::Error::new(io::ErrorKind::Other, e))
-        })?;
+        .map_err(|e| crate::command::init::InitError::ConversionFailed(e.to_string()))?;
 
     Ok(())
 }
