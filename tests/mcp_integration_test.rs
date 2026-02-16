@@ -14,8 +14,8 @@ use libra::{
     internal::ai::{
         history::HistoryManager,
         mcp::{
+            resource::{CreateTaskParams, ListTasksParams},
             server::LibraMcpServer,
-            tools::{CreateTaskParams, ListTasksParams},
         },
     },
     utils::{storage::local::LocalStorage, storage_ext::StorageExt},
@@ -78,6 +78,8 @@ async fn test_mcp_integration_create_and_read_task() {
         requested_by_id: None,
         dependencies: None,
         status: None,
+        tags: None,
+        external_ids: None,
         actor_kind: None,
         actor_id: None,
     };
@@ -213,7 +215,7 @@ async fn test_list_context_snapshots_with_summary() {
     snap.set_summary(Some("test summary".to_string()));
     storage.put_tracked(&snap, &history_manager).await.unwrap();
 
-    use libra::internal::ai::mcp::tools::ListContextSnapshotsParams;
+    use libra::internal::ai::mcp::resource::ListContextSnapshotsParams;
     let result = server
         .list_context_snapshots(Parameters(ListContextSnapshotsParams { limit: None }))
         .await
@@ -243,7 +245,7 @@ async fn test_list_plans_with_summary() {
     });
     storage.put_tracked(&plan, &history_manager).await.unwrap();
 
-    use libra::internal::ai::mcp::tools::ListPlansParams;
+    use libra::internal::ai::mcp::resource::ListPlansParams;
     let result = server
         .list_plans(Parameters(ListPlansParams { limit: None }))
         .await
@@ -267,7 +269,7 @@ async fn test_list_patchsets_with_summary() {
     ps.add_touched_file(tf);
     storage.put_tracked(&ps, &history_manager).await.unwrap();
 
-    use libra::internal::ai::mcp::tools::ListPatchSetsParams;
+    use libra::internal::ai::mcp::resource::ListPatchSetsParams;
     let result = server
         .list_patchsets(Parameters(ListPatchSetsParams { limit: None }))
         .await
@@ -291,7 +293,7 @@ async fn test_list_evidences_with_summary() {
     ev.set_summary(Some("all tests passed".to_string()));
     storage.put_tracked(&ev, &history_manager).await.unwrap();
 
-    use libra::internal::ai::mcp::tools::ListEvidencesParams;
+    use libra::internal::ai::mcp::resource::ListEvidencesParams;
     let result = server
         .list_evidences(Parameters(ListEvidencesParams { limit: None }))
         .await
@@ -316,7 +318,7 @@ async fn test_list_tool_invocations_with_summary() {
     inv.set_result_summary(Some("read 100 lines".to_string()));
     storage.put_tracked(&inv, &history_manager).await.unwrap();
 
-    use libra::internal::ai::mcp::tools::ListToolInvocationsParams;
+    use libra::internal::ai::mcp::resource::ListToolInvocationsParams;
     let result = server
         .list_tool_invocations(Parameters(ListToolInvocationsParams { limit: None }))
         .await
@@ -338,7 +340,7 @@ async fn test_list_provenances_with_summary() {
     let prov = Provenance::new(repo_id, actor, run_id, "openai", "gpt-4o").unwrap();
     storage.put_tracked(&prov, &history_manager).await.unwrap();
 
-    use libra::internal::ai::mcp::tools::ListProvenancesParams;
+    use libra::internal::ai::mcp::resource::ListProvenancesParams;
     let result = server
         .list_provenances(Parameters(ListProvenancesParams { limit: None }))
         .await
@@ -360,7 +362,7 @@ async fn test_list_decisions_with_summary() {
     dec.set_rationale(Some("all tests pass".to_string()));
     storage.put_tracked(&dec, &history_manager).await.unwrap();
 
-    use libra::internal::ai::mcp::tools::ListDecisionsParams;
+    use libra::internal::ai::mcp::resource::ListDecisionsParams;
     let result = server
         .list_decisions(Parameters(ListDecisionsParams { limit: None }))
         .await
@@ -387,6 +389,8 @@ async fn test_create_task_with_explicit_human_actor() {
         requested_by_id: None,
         dependencies: None,
         status: None,
+        tags: None,
+        external_ids: None,
         actor_kind: Some("human".to_string()),
         actor_id: Some("jackie".to_string()),
     };
@@ -402,7 +406,7 @@ async fn test_create_task_with_explicit_human_actor() {
 
     // Verify the stored object has Human actor kind
     let task_id = text.split("ID: ").nth(1).unwrap().trim();
-    use libra::internal::ai::mcp::tools::ListTasksParams;
+    use libra::internal::ai::mcp::resource::ListTasksParams;
     let list = server
         .list_tasks(Parameters(ListTasksParams {
             limit: None,
@@ -435,6 +439,8 @@ async fn test_create_task_with_agent_actor() {
         requested_by_id: None,
         dependencies: None,
         status: None,
+        tags: None,
+        external_ids: None,
         actor_kind: Some("agent".to_string()),
         actor_id: Some("coder-bot".to_string()),
     };
@@ -461,6 +467,8 @@ async fn test_create_task_default_actor_is_mcp() {
         requested_by_id: None,
         dependencies: None,
         status: None,
+        tags: None,
+        external_ids: None,
         actor_kind: None,
         actor_id: None,
     };

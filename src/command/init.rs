@@ -599,6 +599,21 @@ pub async fn init(args: InitArgs) -> Result<(), InitError> {
     // Set .libra as hidden
     set_dir_hidden(root_dir.to_str().unwrap())?;
 
+    // Initialize the AI history orphan branch (refs/libra/intent) so it exists
+    // in parallel with the code branch from the very start.
+    // This also acts as a GC root — objects reachable from this ref will
+    // not be garbage-collected.
+    {
+        use crate::{internal::ai::history::HistoryManager, utils::storage::local::LocalStorage};
+
+        let objects_dir = root_dir.join("objects");
+        let storage = std::sync::Arc::new(LocalStorage::new(objects_dir));
+        let ai_history = HistoryManager::new(storage, root_dir.clone());
+        if let Err(e) = ai_history.init_branch().await {
+            eprintln!("Warning: failed to initialize AI history branch: {}", e);
+        }
+    }
+
     // Apply shared permissions if requested
     if let Some(shared_mode) = &args.shared {
         apply_shared(&root_dir, shared_mode)?;
