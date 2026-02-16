@@ -3,7 +3,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fs, io,
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use clap::Parser;
@@ -44,8 +44,14 @@ pub struct RestoreArgs {
 }
 
 pub async fn execute(args: RestoreArgs) {
+    if let Err(e) = execute_checked(args).await {
+        eprintln!("fatal: {e}");
+    }
+}
+
+pub async fn execute_checked(args: RestoreArgs) -> io::Result<()> {
     if !util::check_repo_exist() {
-        return;
+        return Ok(());
     }
     let staged = args.staged;
     let mut worktree = args.worktree;
@@ -76,7 +82,10 @@ pub async fn execute(args: RestoreArgs) {
                 Head::current_commit().await
             } else if Branch::exists(src).await {
                 // Branch Name, e.g. master
-                Some(Branch::find_branch(src, None).await.unwrap().commit)
+                let branch = Branch::find_branch(src, None)
+                    .await
+                    .ok_or_else(|| io::Error::other(format!("could not resolve {src}")))?;
+                Some(branch.commit)
             } else {
                 // [Commit Hash, e.g. a1b2c3d4] || [Wrong Branch Name]
                 let objs = storage.search(src).await;
@@ -96,7 +105,8 @@ pub async fn execute(args: RestoreArgs) {
             (None, _) => {
                 // only this situation, restore from [Index]
                 assert!(!staged);
-                let index = Index::load(path::index()).unwrap();
+                let index =
+                    Index::load(path::index()).map_err(|e| io::Error::other(e.to_string()))?;
                 index
                     .tracked_entries(0)
                     .into_iter()
@@ -111,11 +121,12 @@ pub async fn execute(args: RestoreArgs) {
             }
             (Some(src), None) => {
                 if storage.search(src).await.len() != 1 {
-                    eprintln!("fatal: could not resolve {src}");
+                    return Err(io::Error::other(format!("could not resolve {src}")));
                 } else {
-                    eprintln!("fatal: reference is not a commit: {src}");
+                    return Err(io::Error::other(format!(
+                        "reference is not a commit: {src}"
+                    )));
                 }
-                return;
             }
         }
     };
@@ -130,11 +141,12 @@ pub async fn execute(args: RestoreArgs) {
     // The order is very important
     // `restore_worktree` will decide whether to delete the file based on whether it is tracked in the index.
     if worktree {
-        restore_worktree(&paths, &target_blobs).await;
+        restore_worktree(&paths, &target_blobs).await?;
     }
     if staged {
-        restore_index(&paths, &target_blobs);
+        restore_index(&paths, &target_blobs)?;
     }
+    Ok(())
 }
 
 /// to HashMap
@@ -145,6 +157,15 @@ fn preprocess_blobs(blobs: &[(PathBuf, ObjectHash)]) -> HashMap<PathBuf, ObjectH
         .iter()
         .map(|(path, hash)| (path.clone(), *hash))
         .collect()
+}
+
+fn path_to_utf8(path: &Path) -> io::Result<&str> {
+    path.to_str().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("non-UTF8 path: {}", path.display()),
+        )
+    })
 }
 
 /// Restore a blob to file.
@@ -170,7 +191,7 @@ async fn restore_to_file(hash: &ObjectHash, path: &PathBuf) -> io::Result<()> {
                     .download_object(&oid, size, &path_abs, None)
                     .await
                 {
-                    eprintln!("fatal: {e}");
+                    return Err(io::Error::other(e.to_string()));
                 }
             }
         }
@@ -202,7 +223,10 @@ fn get_worktree_deleted_files_in_filters(
 /// Restore the worktree
 /// - `filter`: abs or relative to current (user input)
 /// - `target_blobs`: to workdir path
-pub async fn restore_worktree(filter: &Vec<PathBuf>, target_blobs: &[(PathBuf, ObjectHash)]) {
+pub async fn restore_worktree(
+    filter: &Vec<PathBuf>,
+    target_blobs: &[(PathBuf, ObjectHash)],
+) -> io::Result<()> {
     let target_blobs = preprocess_blobs(target_blobs);
     let deleted_files = get_worktree_deleted_files_in_filters(filter, &target_blobs);
 
@@ -217,11 +241,10 @@ pub async fn restore_worktree(filter: &Vec<PathBuf>, target_blobs: &[(PathBuf, O
                     .any(|(p, _)| util::is_sub_path(p.workdir_to_absolute(), path))
                 {
                     // not in target_blobs & worktree, illegal path
-                    eprintln!(
-                        "fatal: pathspec '{}' did not match any files",
+                    return Err(io::Error::other(format!(
+                        "pathspec '{}' did not match any files",
                         path.display()
-                    );
-                    return; // once fatal occurs, nothing should be done
+                    )));
                 }
             }
         }
@@ -231,42 +254,40 @@ pub async fn restore_worktree(filter: &Vec<PathBuf>, target_blobs: &[(PathBuf, O
     let mut file_paths = util::integrate_pathspec(filter);
     file_paths.extend(deleted_files);
 
-    let index = Index::load(path::index()).unwrap();
+    let index = Index::load(path::index()).map_err(|e| io::Error::other(e.to_string()))?;
     for path_wd in &file_paths {
         let path_abs = util::workdir_to_absolute(path_wd);
         if !path_abs.exists() {
             // file not exist, deleted or illegal
             if target_blobs.contains_key(path_wd) {
                 // file in target_blobs (deleted), need to restore
-                restore_to_file(&target_blobs[path_wd], path_wd)
-                    .await
-                    .unwrap();
+                restore_to_file(&target_blobs[path_wd], path_wd).await?;
             } else {
                 // not in target_commit and workdir (illegal path), user input
                 unreachable!("It should be checked before");
             }
         } else {
             // file exists
-            let path_wd_str = path_wd.to_string_or_panic();
-            let hash = calc_file_blob_hash(&path_abs).unwrap();
+            let path_wd_str = path_to_utf8(path_wd)?;
+            let hash =
+                calc_file_blob_hash(&path_abs).map_err(|e| io::Error::other(e.to_string()))?;
             if target_blobs.contains_key(path_wd) {
                 // both in target & worktree: 1. modified 2. same
                 if hash != target_blobs[path_wd] {
                     // modified
-                    restore_to_file(&target_blobs[path_wd], path_wd)
-                        .await
-                        .unwrap();
+                    restore_to_file(&target_blobs[path_wd], path_wd).await?;
                 } // else: same, keep
             } else {
                 // not in target but in worktree: New file
-                if index.tracked(&path_wd_str, 0) {
+                if index.tracked(path_wd_str, 0) {
                     // tracked, need to delete
-                    fs::remove_file(&path_abs).unwrap();
+                    fs::remove_file(&path_abs)?;
                     util::clear_empty_dir(&path_abs); // clean empty dir in cascade
                 } // else: untracked, keep
             }
         }
     }
+    Ok(())
 }
 
 /// Get the deleted files in the `index`(vs target_blobs), filtered by `filters`
@@ -274,68 +295,72 @@ fn get_index_deleted_files_in_filters(
     index: &Index,
     filters: &Vec<PathBuf>,
     target_blobs: &HashMap<PathBuf, ObjectHash>,
-) -> HashSet<PathBuf> {
-    target_blobs
-        .iter()
-        .filter(|(path_wd, _)| {
-            // to workdir
-            let path_abs = util::workdir_to_absolute(path_wd); // to absolute path
-            !index.tracked(&path_wd.to_string_or_panic(), 0)
-                && util::is_sub_of_paths(path_abs, filters)
-        })
-        .map(|(path, _)| path.clone())
-        .collect() // HashSet auto deduplication
+) -> io::Result<HashSet<PathBuf>> {
+    let mut deleted = HashSet::new();
+    for path_wd in target_blobs.keys() {
+        let path_wd_str = path_to_utf8(path_wd)?;
+        let path_abs = util::workdir_to_absolute(path_wd); // to absolute path
+        if !index.tracked(path_wd_str, 0) && util::is_sub_of_paths(path_abs, filters) {
+            deleted.insert(path_wd.clone());
+        }
+    }
+    Ok(deleted)
 }
 
-pub fn restore_index(filter: &Vec<PathBuf>, target_blobs: &[(PathBuf, ObjectHash)]) {
+pub fn restore_index(
+    filter: &Vec<PathBuf>,
+    target_blobs: &[(PathBuf, ObjectHash)],
+) -> io::Result<()> {
     let target_blobs = preprocess_blobs(target_blobs);
 
     let idx_file = path::index();
-    let mut index = Index::load(&idx_file).unwrap();
-    let deleted_files_index = get_index_deleted_files_in_filters(&index, filter, &target_blobs);
+    let mut index = Index::load(&idx_file).map_err(|e| io::Error::other(e.to_string()))?;
+    let deleted_files_index = get_index_deleted_files_in_filters(&index, filter, &target_blobs)?;
 
     let mut file_paths = util::filter_to_fit_paths(&index.tracked_files(), filter);
     file_paths.extend(deleted_files_index); // maybe we should not integrate them rater than deal separately
 
     for path in &file_paths {
         // to workdir
-        let path_str = path.to_string_or_panic();
-        if !index.tracked(&path_str, 0) {
+        let path_str = path_to_utf8(path)?;
+        if !index.tracked(path_str, 0) {
             // file not exist in index
             if target_blobs.contains_key(path) {
                 // file in target_blobs (deleted), need to restore
                 let hash = target_blobs[path];
                 let blob = Blob::load(&hash);
                 index.add(IndexEntry::new_from_blob(
-                    path_str,
+                    path_str.to_string(),
                     hash,
                     blob.data.len() as u32,
                 ));
             } else {
-                eprintln!(
-                    "fatal: pathspec '{}' did not match any files",
+                return Err(io::Error::other(format!(
+                    "pathspec '{}' did not match any files",
                     path.display()
-                );
-                continue; // TODO once fatal occurs, nothing should be done
+                )));
             }
         } else {
             // file exists in index: 1. modified 2. same 3. need to deleted
             if target_blobs.contains_key(path) {
                 let hash = target_blobs[path];
-                if !index.verify_hash(&path_str, 0, &hash) {
+                if !index.verify_hash(path_str, 0, &hash) {
                     // modified
                     let blob = Blob::load(&hash);
                     index.update(IndexEntry::new_from_blob(
-                        path_str,
+                        path_str.to_string(),
                         hash,
                         blob.data.len() as u32,
                     ));
                 } // else: same, keep
             } else {
                 // not in target but in index: need to delete
-                index.remove(&path_str, 0); // TODO all stages
+                index.remove(path_str, 0); // TODO all stages
             }
         }
     }
-    index.save(&idx_file).unwrap(); // DO NOT forget to save
+    index
+        .save(&idx_file)
+        .map_err(|e| io::Error::other(e.to_string()))?; // DO NOT forget to save
+    Ok(())
 }

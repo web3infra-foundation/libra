@@ -7,7 +7,7 @@
 - Buck2/Buckal metadata is in `third-party/`; prefer Cargo and regenerate BUCK files when dependencies change.
 
 ## Build, Test, and Development Commands
-- `cargo fmt --all` then `cargo clippy --all-targets --all-features` keep formatting and linting aligned (`rustfmt.toml` groups imports by crate).
+- `cargo +nightly fmt --all` then `cargo clippy --all-targets --all-features` keep formatting and linting aligned (`rustfmt.toml` groups imports by crate).
 - `cargo build` or `cargo check` for quick compile checks; `cargo run -- <cmd>` exercises the CLI (e.g., `cargo run -- status` in a temp repo).
 - `cargo test` runs the suite; filter with `cargo test command::init_test` or `cargo test add_test`. Integration cases rely on temp dirs; run serial if flaky.
 - After editing `Cargo.toml` deps, run `cargo buckal migrate` to sync Buck2 files (see `third-party/README.md`).
@@ -27,5 +27,5 @@
 ## Commit & Pull Request Guidelines
 - History uses short, typed summaries with optional scope and PR reference, e.g., `feat(status): support porcelain v2 (#82)` or `fix(push): record tracking reflog (#81)`.
 - Commits must include DCO and PGP signing: `git commit -S -s -m "feat(...): ..."`; ensure the `Signed-off-by` trailer is present.
-- PRs should state intent, linked issues, and tests run (`cargo fmt`, `cargo clippy`, `cargo test ...`); include repro steps or sample CLI output when touching user-visible behavior.
+- PRs should state intent, linked issues, and tests run (`cargo +nightly fmt`, `cargo clippy`, `cargo test ...`); include repro steps or sample CLI output when touching user-visible behavior.
 - Keep changes small and cohesive; update README/CLI docs when adding flags or altering compatibility tables.
