@@ -98,12 +98,13 @@ async fn test_status_rejects_bare_repository() {
     init(InitArgs {
         bare: true,
         initial_branch: None,
+        template: None,
         repo_directory: temp_path.path().to_str().unwrap().to_string(),
         quiet: false,
-        template: None,
         shared: None,
         object_format: None,
         ref_format: None,
+        from_git_repository: None,
         separate_libra_dir: None,
     })
     .await
