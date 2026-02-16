@@ -68,6 +68,7 @@ pub async fn convert_from_git_repository(
         url: url.to_string(),
     };
 
+    eprintln!("Converting from Git repository...");
     fetch::fetch_repository(remote.clone(), None, false, None).await;
 
     let remote_branches = Branch::list_branches(Some(&remote.name)).await;

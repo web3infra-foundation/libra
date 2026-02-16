@@ -219,6 +219,8 @@ fn validate_depth(s: &str) -> Result<usize, String> {
 /// Sets up the local repository after a clone by configuring the remote,
 /// setting up the initial branch and HEAD, and creating the first reflog entry.
 /// Skips checking out the worktree when `checkout_worktree` is `false` (bare clone).
+/// This function is `pub(crate)` to allow reuse by the `convert` module for
+/// importing existing Git repositories during `libra init --from-git-repository`.
 pub(crate) async fn setup_repository(
     remote_config: RemoteConfig,
     specified_branch: Option<String>,
