@@ -20,18 +20,23 @@
 //! # object_type (history directory name)
 //!
 //! List tools call `HistoryManager::list_objects(object_type)` using the following types:
-//! `task`, `run`, `snapshot`, `plan`, `patchset`, `evidence`, `invocation`, `provenance`, `decision`.
-use git_internal::internal::object::{
-    context::{ContextItem, ContextItemKind, ContextSnapshot, SelectionStrategy},
-    decision::{Decision, DecisionType},
-    evidence::{Evidence, EvidenceKind},
-    patchset::{ApplyStatus, ChangeType, PatchSet, TouchedFile},
-    plan::{Plan, PlanStatus, PlanStep},
-    provenance::Provenance,
-    run::{AgentInstance, Run, RunStatus},
-    task::{GoalType, Task, TaskStatus},
-    tool::{IoFootprint, ToolInvocation, ToolStatus},
-    types::{ActorKind, ActorRef},
+//! `task`, `run`, `snapshot`, `plan`, `patchset`, `evidence`, `invocation`, `provenance`, `decision`, `intent`.
+use std::collections::HashMap;
+
+use git_internal::{
+    hash::ObjectHash,
+    internal::object::{
+        context::{ContextItem, ContextItemKind, ContextSnapshot, SelectionStrategy},
+        decision::{Decision, DecisionType},
+        evidence::{Evidence, EvidenceKind},
+        patchset::{ApplyStatus, ChangeType, PatchSet, TouchedFile},
+        plan::{Plan, PlanStatus, PlanStep},
+        provenance::Provenance,
+        run::{AgentInstance, Run, RunStatus},
+        task::{GoalType, Task, TaskStatus},
+        tool::{IoFootprint, ToolInvocation, ToolStatus},
+        types::{ActorKind, ActorRef, ArtifactRef},
+    },
 };
 use rmcp::{
     RoleServer,
@@ -43,7 +48,10 @@ use rmcp::{
 };
 use uuid::Uuid;
 
-use crate::{internal::ai::mcp::server::LibraMcpServer, utils::storage_ext::StorageExt};
+use crate::{
+    internal::ai::{intent::Intent, mcp::server::LibraMcpServer},
+    utils::storage_ext::{Identifiable, StorageExt},
+};
 
 impl LibraMcpServer {
     /// Default actor for MCP tool calls. Extracted for testability.
@@ -97,6 +105,65 @@ impl LibraMcpServer {
     }
 }
 
+/// Helper to convert local ArtifactParams to git_internal::ArtifactRef
+fn convert_artifact(p: ArtifactParams) -> Result<ArtifactRef, ErrorData> {
+    let mut artifact =
+        ArtifactRef::new(p.store, p.key).map_err(|e| ErrorData::invalid_params(e, None))?;
+
+    artifact.set_content_type(p.content_type);
+    artifact.set_size_bytes(p.size_bytes);
+
+    if let Some(hash_hex) = p.hash {
+        artifact = artifact
+            .with_hash_hex(hash_hex)
+            .map_err(|e| ErrorData::invalid_params(e, None))?;
+    }
+
+    Ok(artifact)
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ArtifactParams {
+    pub store: String,
+    pub key: String,
+    pub content_type: Option<String>,
+    pub size_bytes: Option<u64>,
+    pub hash: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CreateIntentParams {
+    /// The prompt or goal content.
+    pub content: String,
+    /// ID of the parent intent, forming the history chain.
+    pub parent_id: Option<String>,
+    /// Status: "draft", "active", "completed", "discarded".
+    pub status: Option<String>,
+    /// Optional ID of the task derived from this intent.
+    pub task_id: Option<String>,
+    /// SHA of the code commit this intent resulted in (cross-reference to the code branch).
+    pub commit_sha: Option<String>,
+    /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
+    pub actor_kind: Option<String>,
+    /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
+    pub actor_id: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct UpdateIntentParams {
+    /// ID of the intent to update.
+    pub intent_id: String,
+    /// New status: "draft", "active", "completed", "discarded".
+    pub status: Option<String>,
+    /// SHA of the code commit this intent resulted in (cross-reference to the code branch).
+    pub commit_sha: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ListIntentsParams {
+    pub limit: Option<usize>,
+}
+
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct CreateTaskParams {
     pub title: String,
@@ -112,6 +179,10 @@ pub struct CreateTaskParams {
     pub dependencies: Option<Vec<String>>,
     /// Task status: "draft", "running", "done", "failed", "cancelled". Defaults to "draft".
     pub status: Option<String>,
+    /// Search tags (key-value pairs)
+    pub tags: Option<HashMap<String, String>>,
+    /// External ID mapping
+    pub external_ids: Option<HashMap<String, String>>,
     /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
     pub actor_kind: Option<String>,
     /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
@@ -135,6 +206,12 @@ pub struct CreateRunParams {
     pub agent_instances: Option<Vec<AgentInstanceParams>>,
     /// Arbitrary metrics JSON (e.g. token counts, timings).
     pub metrics_json: Option<String>,
+    /// Orchestrator version (default: libra-builtin)
+    pub orchestrator_version: Option<String>,
+    /// Search tags (key-value pairs)
+    pub tags: Option<HashMap<String, String>>,
+    /// External ID mapping
+    pub external_ids: Option<HashMap<String, String>>,
     /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
     pub actor_kind: Option<String>,
     /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
@@ -159,6 +236,10 @@ pub struct CreateContextSnapshotParams {
     pub selection_strategy: String,
     pub items: Option<Vec<ContextItemParams>>,
     pub summary: Option<String>,
+    /// Search tags (key-value pairs)
+    pub tags: Option<HashMap<String, String>>,
+    /// External ID mapping
+    pub external_ids: Option<HashMap<String, String>>,
     /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
     pub actor_kind: Option<String>,
     /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
@@ -181,6 +262,10 @@ pub struct CreatePlanParams {
     pub run_id: String,
     pub plan_version: Option<u32>,
     pub steps: Option<Vec<PlanStepParams>>,
+    /// Search tags (key-value pairs)
+    pub tags: Option<HashMap<String, String>>,
+    /// External ID mapping
+    pub external_ids: Option<HashMap<String, String>>,
     /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
     pub actor_kind: Option<String>,
     /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
@@ -190,6 +275,9 @@ pub struct CreatePlanParams {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct PlanStepParams {
     pub intent: String,
+    pub inputs: Option<serde_json::Value>,
+    pub outputs: Option<serde_json::Value>,
+    pub checks: Option<serde_json::Value>,
     pub status: Option<String>,
     pub owner_role: Option<String>,
 }
@@ -207,6 +295,12 @@ pub struct CreatePatchSetParams {
     pub touched_files: Option<Vec<TouchedFileParams>>,
     pub rationale: Option<String>,
     pub apply_status: Option<String>,
+    pub diff_format: Option<String>,
+    pub diff_artifact: Option<ArtifactParams>,
+    /// Search tags (key-value pairs)
+    pub tags: Option<HashMap<String, String>>,
+    /// External ID mapping
+    pub external_ids: Option<HashMap<String, String>>,
     /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
     pub actor_kind: Option<String>,
     /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
@@ -235,6 +329,11 @@ pub struct CreateEvidenceParams {
     pub command: Option<String>,
     pub exit_code: Option<i32>,
     pub summary: Option<String>,
+    pub report_artifacts: Option<Vec<ArtifactParams>>,
+    /// Search tags (key-value pairs)
+    pub tags: Option<HashMap<String, String>>,
+    /// External ID mapping
+    pub external_ids: Option<HashMap<String, String>>,
     /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
     pub actor_kind: Option<String>,
     /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
@@ -254,6 +353,11 @@ pub struct CreateToolInvocationParams {
     pub args_json: Option<String>,
     pub io_footprint: Option<IoFootprintParams>,
     pub result_summary: Option<String>,
+    pub artifacts: Option<Vec<ArtifactParams>>,
+    /// Search tags (key-value pairs)
+    pub tags: Option<HashMap<String, String>>,
+    /// External ID mapping
+    pub external_ids: Option<HashMap<String, String>>,
     /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
     pub actor_kind: Option<String>,
     /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
@@ -278,6 +382,10 @@ pub struct CreateProvenanceParams {
     pub model: String,
     pub parameters_json: Option<String>,
     pub token_usage_json: Option<String>,
+    /// Search tags (key-value pairs)
+    pub tags: Option<HashMap<String, String>>,
+    /// External ID mapping
+    pub external_ids: Option<HashMap<String, String>>,
     /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
     pub actor_kind: Option<String>,
     /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
@@ -298,6 +406,10 @@ pub struct CreateDecisionParams {
     pub result_commit_sha: Option<String>,
     pub checkpoint_id: Option<String>,
     pub rationale: Option<String>,
+    /// Search tags (key-value pairs)
+    pub tags: Option<HashMap<String, String>>,
+    /// External ID mapping
+    pub external_ids: Option<HashMap<String, String>>,
     /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
     pub actor_kind: Option<String>,
     /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
@@ -311,6 +423,242 @@ pub struct ListDecisionsParams {
 
 #[tool_router]
 impl LibraMcpServer {
+    #[tool(description = "Create a new Intent (Prompt/Goal)")]
+    pub async fn create_intent(
+        &self,
+        ctx: RequestContext<RoleServer>,
+        Parameters(params): Parameters<CreateIntentParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let actor = self.resolve_actor(
+            &ctx,
+            params.actor_kind.as_deref(),
+            params.actor_id.as_deref(),
+        )?;
+        self.create_intent_impl(params, actor).await
+    }
+
+    pub async fn create_intent_impl(
+        &self,
+        params: CreateIntentParams,
+        actor: ActorRef,
+    ) -> Result<CallToolResult, ErrorData> {
+        use std::str::FromStr;
+
+        use crate::internal::ai::intent::IntentStatus;
+
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
+
+        let parent_id = if let Some(pid) = params.parent_id {
+            Some(
+                pid.parse::<Uuid>()
+                    .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?,
+            )
+        } else {
+            None
+        };
+
+        let task_id = if let Some(tid) = params.task_id {
+            Some(
+                tid.parse::<Uuid>()
+                    .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?,
+            )
+        } else {
+            None
+        };
+
+        let mut intent = Intent::new(
+            self.repo_id,
+            params.content,
+            parent_id,
+            task_id,
+            Some(actor),
+        );
+        if let Some(status) = params.status {
+            intent.set_status(match status.as_str() {
+                "draft" => IntentStatus::Draft,
+                "active" => IntentStatus::Active,
+                "completed" => IntentStatus::Completed,
+                "discarded" => IntentStatus::Discarded,
+                _ => return Err(ErrorData::invalid_params("invalid intent status", None)),
+            });
+        }
+        if let Some(sha) = params.commit_sha {
+            let normalized = crate::internal::ai::util::normalize_commit_anchor(&sha)
+                .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+            let hash_val = ObjectHash::from_str(&normalized)
+                .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+            intent.set_commit_sha(hash_val);
+        }
+
+        let hash = storage
+            .put_json(&intent)
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        // Track in the unified AI history branch
+        let history = self
+            .intent_history_manager
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
+
+        history
+            .append(&intent.object_type(), &intent.object_id(), hash)
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Intent created with ID: {}",
+            intent.id
+        ))]))
+    }
+
+    #[tool(description = "List recent intents")]
+    pub async fn list_intents(
+        &self,
+        Parameters(params): Parameters<ListIntentsParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.list_intents_impl(params).await
+    }
+
+    pub async fn list_intents_impl(
+        &self,
+        params: ListIntentsParams,
+    ) -> Result<CallToolResult, ErrorData> {
+        let history = self
+            .intent_history_manager
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
+
+        let objects = history
+            .list_objects("intent")
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        let mut intents = Vec::new();
+        for (_id, hash) in objects {
+            if let Ok(intent) = storage.get_json::<Intent>(&hash).await {
+                intents.push(intent);
+            }
+        }
+
+        // Sort by created_at descending
+        intents.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+        let limit = params.limit.unwrap_or(10);
+        let out: Vec<String> = intents
+            .into_iter()
+            .take(limit)
+            .map(|i| {
+                format!(
+                    "ID: {} | Status: {} | Content: {:.50}",
+                    i.id,
+                    i.status,
+                    i.content.replace('\n', " ")
+                )
+            })
+            .collect();
+
+        if out.is_empty() {
+            Ok(CallToolResult::success(vec![Content::text(
+                "No intents found.",
+            )]))
+        } else {
+            Ok(CallToolResult::success(vec![Content::text(out.join("\n"))]))
+        }
+    }
+
+    #[tool(description = "Update an existing Intent (set commit_sha or status)")]
+    pub async fn update_intent(
+        &self,
+        Parameters(params): Parameters<UpdateIntentParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.update_intent_impl(params).await
+    }
+
+    pub async fn update_intent_impl(
+        &self,
+        params: UpdateIntentParams,
+    ) -> Result<CallToolResult, ErrorData> {
+        use std::str::FromStr;
+
+        use crate::internal::ai::intent::IntentStatus;
+
+        let history = self
+            .intent_history_manager
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
+
+        // 1. Find the intent blob hash via history
+        let blob_hash = history
+            .get_object_hash("intent", &params.intent_id)
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?
+            .ok_or_else(|| {
+                ErrorData::invalid_params(format!("Intent not found: {}", params.intent_id), None)
+            })?;
+
+        // 2. Load the existing intent
+        let mut intent: Intent = storage
+            .get_json(&blob_hash)
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        // 3. Apply updates
+        let mut changed = false;
+
+        if let Some(status) = params.status {
+            intent.set_status(match status.as_str() {
+                "draft" => IntentStatus::Draft,
+                "active" => IntentStatus::Active,
+                "completed" => IntentStatus::Completed,
+                "discarded" => IntentStatus::Discarded,
+                _ => return Err(ErrorData::invalid_params("invalid intent status", None)),
+            });
+            changed = true;
+        }
+
+        if let Some(sha) = params.commit_sha {
+            let hash_val = ObjectHash::from_str(&sha)
+                .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+            intent.set_commit_sha(hash_val);
+            changed = true;
+        }
+
+        if !changed {
+            return Err(ErrorData::invalid_params(
+                "No fields to update. Provide at least 'status' or 'commit_sha'.",
+                None,
+            ));
+        }
+
+        // 4. Write updated intent blob and update history
+        let new_hash = storage
+            .put_json(&intent)
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        history
+            .append(&intent.object_type(), &intent.object_id(), new_hash)
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Intent {} updated successfully",
+            intent.id
+        ))]))
+    }
+
     #[tool(description = "Create a new Task")]
     pub async fn create_task(
         &self,
@@ -395,12 +743,21 @@ impl LibraMcpServer {
             });
         }
 
+        // Set tags and external_ids
+        // TODO: Enable these when git-internal is updated to expose header_mut/tags
+        // if let Some(tags) = params.tags {
+        //     task.header_mut().tags_mut().extend(tags);
+        // }
+        // if let Some(eids) = params.external_ids {
+        //     task.header_mut().external_ids_mut().extend(eids);
+        // }
+
         let hash = storage
             .put_json(&task)
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
-        if let Some(history) = &self.history_manager {
+        if let Some(history) = &self.intent_history_manager {
             history
                 .append(
                     &task.header().object_type().to_string(),
@@ -431,7 +788,7 @@ impl LibraMcpServer {
         params: ListTasksParams,
     ) -> Result<CallToolResult, ErrorData> {
         let history = self
-            .history_manager
+            .intent_history_manager
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
         let storage = self
@@ -555,12 +912,23 @@ impl LibraMcpServer {
             run.set_metrics(Some(v));
         }
 
+        // Set tags, external_ids, orchestrator_version
+        // orchestrator_version is currently hardcoded in Run::new but we can't change it easily without a setter
+        // However, we can set tags/external_ids
+        // TODO: Enable these when git-internal is updated to expose header_mut/tags
+        // if let Some(tags) = params.tags {
+        //     run.header_mut().tags_mut().extend(tags);
+        // }
+        // if let Some(eids) = params.external_ids {
+        //     run.header_mut().external_ids_mut().extend(eids);
+        // }
+
         let hash = storage
             .put_json(&run)
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
-        if let Some(history) = &self.history_manager {
+        if let Some(history) = &self.intent_history_manager {
             history
                 .append(
                     &run.header().object_type().to_string(),
@@ -591,7 +959,7 @@ impl LibraMcpServer {
         params: ListRunsParams,
     ) -> Result<CallToolResult, ErrorData> {
         let history = self
-            .history_manager
+            .intent_history_manager
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
         let storage = self
@@ -694,12 +1062,20 @@ impl LibraMcpServer {
             snapshot.set_summary(Some(summary));
         }
 
+        // TODO: Enable these when git-internal is updated to expose header_mut/tags
+        // if let Some(tags) = params.tags {
+        //     snapshot.header_mut().tags_mut().extend(tags);
+        // }
+        // if let Some(eids) = params.external_ids {
+        //     snapshot.header_mut().external_ids_mut().extend(eids);
+        // }
+
         let hash = storage
             .put_json(&snapshot)
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
-        if let Some(history) = &self.history_manager {
+        if let Some(history) = &self.intent_history_manager {
             history
                 .append(
                     &snapshot.header().object_type().to_string(),
@@ -730,7 +1106,7 @@ impl LibraMcpServer {
         params: ListContextSnapshotsParams,
     ) -> Result<CallToolResult, ErrorData> {
         let history = self
-            .history_manager
+            .intent_history_manager
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
         let storage = self
@@ -823,21 +1199,29 @@ impl LibraMcpServer {
                 };
                 plan.add_step(PlanStep {
                     intent: step.intent,
-                    inputs: None,
-                    outputs: None,
-                    checks: None,
+                    inputs: step.inputs,
+                    outputs: step.outputs,
+                    checks: step.checks,
                     owner_role: step.owner_role,
                     status,
                 });
             }
         }
 
+        // TODO: Enable these when git-internal is updated to expose header_mut/tags
+        // if let Some(tags) = params.tags {
+        //     plan.header_mut().tags_mut().extend(tags);
+        // }
+        // if let Some(eids) = params.external_ids {
+        //     plan.header_mut().external_ids_mut().extend(eids);
+        // }
+
         let hash = storage
             .put_json(&plan)
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
-        if let Some(history) = &self.history_manager {
+        if let Some(history) = &self.intent_history_manager {
             history
                 .append(
                     &plan.header().object_type().to_string(),
@@ -868,7 +1252,7 @@ impl LibraMcpServer {
         params: ListPlansParams,
     ) -> Result<CallToolResult, ErrorData> {
         let history = self
-            .history_manager
+            .intent_history_manager
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
         let storage = self
@@ -971,13 +1355,27 @@ impl LibraMcpServer {
                 _ => return Err(ErrorData::invalid_params("invalid apply_status", None)),
             });
         }
+        if let Some(artifact_params) = params.diff_artifact {
+            let artifact = convert_artifact(artifact_params)?;
+            patchset.set_diff_artifact(Some(artifact));
+        }
+
+        // TODO: Set diff_format when git-internal supports it
+
+        // TODO: Enable these when git-internal is updated to expose header_mut/tags
+        // if let Some(tags) = params.tags {
+        //     patchset.header_mut().tags_mut().extend(tags);
+        // }
+        // if let Some(eids) = params.external_ids {
+        //     patchset.header_mut().external_ids_mut().extend(eids);
+        // }
 
         let hash = storage
             .put_json(&patchset)
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
-        if let Some(history) = &self.history_manager {
+        if let Some(history) = &self.intent_history_manager {
             history
                 .append(
                     &patchset.header().object_type().to_string(),
@@ -1008,7 +1406,7 @@ impl LibraMcpServer {
         params: ListPatchSetsParams,
     ) -> Result<CallToolResult, ErrorData> {
         let history = self
-            .history_manager
+            .intent_history_manager
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
         let storage = self
@@ -1098,13 +1496,27 @@ impl LibraMcpServer {
         evidence.set_command(params.command);
         evidence.set_exit_code(params.exit_code);
         evidence.set_summary(params.summary);
+        if let Some(artifacts) = params.report_artifacts {
+            for ap in artifacts {
+                let artifact = convert_artifact(ap)?;
+                evidence.add_report_artifact(artifact);
+            }
+        }
+
+        // TODO: Enable these when git-internal is updated to expose header_mut/tags
+        // if let Some(tags) = params.tags {
+        //     evidence.header_mut().tags_mut().extend(tags);
+        // }
+        // if let Some(eids) = params.external_ids {
+        //     evidence.header_mut().external_ids_mut().extend(eids);
+        // }
 
         let hash = storage
             .put_json(&evidence)
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
-        if let Some(history) = &self.history_manager {
+        if let Some(history) = &self.intent_history_manager {
             history
                 .append(
                     &evidence.header().object_type().to_string(),
@@ -1135,7 +1547,7 @@ impl LibraMcpServer {
         params: ListEvidencesParams,
     ) -> Result<CallToolResult, ErrorData> {
         let history = self
-            .history_manager
+            .intent_history_manager
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
         let storage = self
@@ -1225,13 +1637,27 @@ impl LibraMcpServer {
             paths_written: p.paths_written.unwrap_or_default(),
         }));
         inv.set_result_summary(params.result_summary);
+        if let Some(artifacts) = params.artifacts {
+            for ap in artifacts {
+                let artifact = convert_artifact(ap)?;
+                inv.add_artifact(artifact);
+            }
+        }
+
+        // TODO: Enable these when git-internal is updated to expose header_mut/tags
+        // if let Some(tags) = params.tags {
+        //     inv.header_mut().tags_mut().extend(tags);
+        // }
+        // if let Some(eids) = params.external_ids {
+        //     inv.header_mut().external_ids_mut().extend(eids);
+        // }
 
         let hash = storage
             .put_json(&inv)
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
-        if let Some(history) = &self.history_manager {
+        if let Some(history) = &self.intent_history_manager {
             history
                 .append(
                     &inv.header().object_type().to_string(),
@@ -1262,7 +1688,7 @@ impl LibraMcpServer {
         params: ListToolInvocationsParams,
     ) -> Result<CallToolResult, ErrorData> {
         let history = self
-            .history_manager
+            .intent_history_manager
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
         let storage = self
@@ -1345,12 +1771,20 @@ impl LibraMcpServer {
             prov.set_token_usage(Some(v));
         }
 
+        // TODO: Enable these when git-internal is updated to expose header_mut/tags
+        // if let Some(tags) = params.tags {
+        //     prov.header_mut().tags_mut().extend(tags);
+        // }
+        // if let Some(eids) = params.external_ids {
+        //     prov.header_mut().external_ids_mut().extend(eids);
+        // }
+
         let hash = storage
             .put_json(&prov)
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
-        if let Some(history) = &self.history_manager {
+        if let Some(history) = &self.intent_history_manager {
             history
                 .append(
                     &prov.header().object_type().to_string(),
@@ -1381,7 +1815,7 @@ impl LibraMcpServer {
         params: ListProvenancesParams,
     ) -> Result<CallToolResult, ErrorData> {
         let history = self
-            .history_manager
+            .intent_history_manager
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
         let storage = self
@@ -1481,12 +1915,20 @@ impl LibraMcpServer {
             decision.set_result_commit_sha(Some(hash_val));
         }
 
+        // TODO: Enable these when git-internal is updated to expose header_mut/tags
+        // if let Some(tags) = params.tags {
+        //     decision.header_mut().tags_mut().extend(tags);
+        // }
+        // if let Some(eids) = params.external_ids {
+        //     decision.header_mut().external_ids_mut().extend(eids);
+        // }
+
         let hash = storage
             .put_json(&decision)
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
-        if let Some(history) = &self.history_manager {
+        if let Some(history) = &self.intent_history_manager {
             history
                 .append(
                     &decision.header().object_type().to_string(),
@@ -1517,7 +1959,7 @@ impl LibraMcpServer {
         params: ListDecisionsParams,
     ) -> Result<CallToolResult, ErrorData> {
         let history = self
-            .history_manager
+            .intent_history_manager
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
         let storage = self

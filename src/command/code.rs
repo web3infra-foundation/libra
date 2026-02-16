@@ -171,9 +171,9 @@ async fn execute_web_only(args: CodeArgs) {
     let storage = Arc::new(crate::utils::storage::local::LocalStorage::new(
         cwd.join(".libra").join("objects"),
     ));
-    let history_manager = Arc::new(HistoryManager::new(storage.clone(), cwd.join(".libra")));
+    let intent_history_manager = Arc::new(HistoryManager::new(storage.clone(), cwd.join(".libra")));
     let mcp_server = Arc::new(LibraMcpServer::new(
-        Some(history_manager),
+        Some(intent_history_manager),
         Some(storage),
         repo_id,
     ));
@@ -221,12 +221,12 @@ async fn execute_tui(args: CodeArgs) {
     let storage = Arc::new(crate::utils::storage::local::LocalStorage::new(
         working_dir.join(".libra").join("objects"),
     ));
-    let history_manager = Arc::new(HistoryManager::new(
+    let intent_history_manager = Arc::new(HistoryManager::new(
         storage.clone(),
         working_dir.join(".libra"),
     ));
     let mcp_server = Arc::new(LibraMcpServer::new(
-        Some(history_manager),
+        Some(intent_history_manager),
         Some(storage),
         repo_id,
     ));

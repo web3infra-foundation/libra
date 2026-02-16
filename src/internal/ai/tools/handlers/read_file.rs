@@ -247,19 +247,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_file_nonexistent() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let working_dir = temp_dir.path().to_path_buf();
         let handler = ReadFileHandler;
         let invocation = ToolInvocation::new(
             "call-1",
             "read_file",
             ToolPayload::Function {
                 arguments: serde_json::json!({
-                    "file_path": "/nonexistent/file.txt",
+                    "file_path": working_dir.join("nonexistent.txt"),
                     "offset": 1,
                     "limit": 100
                 })
                 .to_string(),
             },
-            std::env::current_dir().unwrap(),
+            working_dir,
         );
 
         let result = handler.handle(invocation).await;

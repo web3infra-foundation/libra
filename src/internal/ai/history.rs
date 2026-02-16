@@ -15,29 +15,98 @@ use crate::utils::{
     storage::Storage,
 };
 
-const HISTORY_REF: &str = "refs/libra/history";
+/// Default Git reference for the AI history orphan branch.
+///
+/// All AI process objects (Intent, Task, Run, Plan, PatchSet, Evidence,
+/// ToolInvocation, Provenance, Decision) live on this single branch,
+/// running in parallel with the normal code branch (`refs/heads/*`).
+///
+/// By keeping AI objects reachable from this ref, they are protected
+/// from `git gc` — the branch acts as a GC root.
+pub const AI_REF: &str = "refs/libra/intent";
 
 /// Manages object history using an orphan branch and Git Tree structure.
 ///
-/// Structure:
-/// refs/libra/history -> Commit -> Tree
+/// The default branch (`refs/libra/intent`) stores **all** AI workflow objects,
+/// running in parallel with the normal code history (`refs/heads/*`).
+/// This is initialised during `libra init` so both branches exist from the start.
+///
+/// Structure (Commit -> Tree):
+///   ├── intent/
+///   │   └── <intent_id>
 ///   ├── task/
 ///   │   └── <task_id>
 ///   ├── run/
 ///   │   └── <run_id>
 ///   ├── plan/
 ///   │   └── <plan_id>
-///   └── artifact/
-///       └── <artifact_hash>
+///   └── …
 pub struct HistoryManager {
     #[allow(dead_code)]
     storage: Arc<dyn Storage + Send + Sync>,
     repo_path: PathBuf,
+    /// The Git reference name this manager writes to (e.g. "refs/libra/history").
+    ref_name: String,
 }
 
 impl HistoryManager {
     pub fn new(storage: Arc<dyn Storage + Send + Sync>, repo_path: PathBuf) -> Self {
-        Self { storage, repo_path }
+        Self::new_with_ref(storage, repo_path, AI_REF)
+    }
+
+    pub fn new_with_ref(
+        storage: Arc<dyn Storage + Send + Sync>,
+        repo_path: PathBuf,
+        ref_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            storage,
+            repo_path,
+            ref_name: ref_name.into(),
+        }
+    }
+
+    /// Initialise the AI orphan branch with an empty tree commit.
+    ///
+    /// This should be called once during `libra init` so that the AI ref
+    /// exists from the start (parallel to `refs/heads/<branch>`).
+    /// If the ref already exists this is a no-op.
+    pub async fn init_branch(&self) -> Result<(), GitError> {
+        // Already initialised — nothing to do.
+        if self.resolve_history_head().await?.is_some() {
+            return Ok(());
+        }
+
+        // Write an empty tree.
+        let empty_tree_hash = self.write_tree(&[])?;
+
+        let author = Signature::new(
+            SignatureType::Author,
+            "Libra".to_string(),
+            "ai@libra".to_string(),
+        );
+        let committer = Signature::new(
+            SignatureType::Committer,
+            "Libra".to_string(),
+            "ai@libra".to_string(),
+        );
+
+        let mut commit_content = String::new();
+        commit_content.push_str(&format!("tree {}\n", empty_tree_hash));
+        commit_content.push_str(&format!("author {}\n", author));
+        commit_content.push_str(&format!("committer {}\n", committer));
+        commit_content.push('\n');
+        commit_content.push_str("Initialize AI history branch");
+
+        let commit_hash = write_git_object(&self.repo_path, "commit", commit_content.as_bytes())?;
+        self.update_ref(&self.ref_name, commit_hash)?;
+
+        Ok(())
+    }
+
+    /// Return the ref name this manager writes to.
+    pub fn ref_name(&self) -> &str {
+        &self.ref_name
     }
 
     /// Append an object to the history log.
@@ -131,7 +200,7 @@ impl HistoryManager {
         let commit_hash = write_git_object(&self.repo_path, "commit", commit_content.as_bytes())?;
 
         // 4. Update Ref
-        self.update_ref(HISTORY_REF, commit_hash)?;
+        self.update_ref(&self.ref_name, commit_hash)?;
 
         Ok(())
     }
@@ -195,7 +264,7 @@ impl HistoryManager {
     }
 
     pub async fn resolve_history_head(&self) -> Result<Option<ObjectHash>, GitError> {
-        let ref_path = self.repo_path.join(HISTORY_REF);
+        let ref_path = self.repo_path.join(&self.ref_name);
         if !ref_path.exists() {
             return Ok(None);
         }
@@ -298,7 +367,7 @@ mod tests {
         manager.append("task", "task-1", blob_hash).await.unwrap();
 
         // Verify ref exists
-        let history_ref = repo_path.join("refs/libra/history");
+        let history_ref = repo_path.join("refs/libra/intent");
         assert!(history_ref.exists());
 
         // 2. Append second object (same type)

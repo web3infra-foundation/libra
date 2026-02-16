@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use rmcp::model::CallToolResult;
 
 use crate::internal::ai::{
-    mcp::{server::LibraMcpServer, tools::*},
+    mcp::{resource::*, server::LibraMcpServer},
     tools::{
         context::{ToolInvocation, ToolKind, ToolOutput, ToolPayload},
         error::{ToolError, ToolResult},
@@ -151,6 +151,11 @@ impl McpBridgeHandler {
         let defs: Vec<(&str, &str, FunctionParameters)> = vec![
             // ---- create tools ----
             (
+                "create_intent",
+                "Create a new Intent (Prompt/Goal)",
+                schema_to_params::<CreateIntentParams>(),
+            ),
+            (
                 "create_task",
                 "Create a new Task for tracking an AI coding goal",
                 schema_to_params::<CreateTaskParams>(),
@@ -195,7 +200,18 @@ impl McpBridgeHandler {
                 "Record a Decision (commit / checkpoint / abandon / retry)",
                 schema_to_params::<CreateDecisionParams>(),
             ),
+            // ---- update tools ----
+            (
+                "update_intent",
+                "Update an existing Intent (set commit_sha or status)",
+                schema_to_params::<UpdateIntentParams>(),
+            ),
             // ---- list tools ----
+            (
+                "list_intents",
+                "List recent intents",
+                schema_to_params::<ListIntentsParams>(),
+            ),
             (
                 "list_tasks",
                 "List recent tasks",
@@ -260,7 +276,7 @@ impl ToolHandler for McpBridgeHandler {
     }
 
     async fn is_mutating(&self, _invocation: &ToolInvocation) -> bool {
-        self.tool_name.starts_with("create_")
+        self.tool_name.starts_with("create_") || self.tool_name.starts_with("update_")
     }
 
     async fn handle(&self, invocation: ToolInvocation) -> ToolResult<ToolOutput> {
@@ -275,6 +291,17 @@ impl ToolHandler for McpBridgeHandler {
 
         let result: Result<CallToolResult, rmcp::model::ErrorData> = match self.tool_name.as_str() {
             // ---- create tools ----
+            "create_intent" => {
+                let params: CreateIntentParams = parse_args(&arguments)?;
+                let actor = self
+                    .server
+                    .resolve_actor_from_params(
+                        params.actor_kind.as_deref(),
+                        params.actor_id.as_deref(),
+                    )
+                    .map_err(mcp_error_to_tool_error)?;
+                self.server.create_intent_impl(params, actor).await
+            }
             "create_task" => {
                 let params: CreateTaskParams = parse_args(&arguments)?;
                 let actor = self
@@ -376,7 +403,16 @@ impl ToolHandler for McpBridgeHandler {
                     .map_err(mcp_error_to_tool_error)?;
                 self.server.create_decision_impl(params, actor).await
             }
+            // ---- update tools ----
+            "update_intent" => {
+                let params: UpdateIntentParams = parse_args(&arguments)?;
+                self.server.update_intent_impl(params).await
+            }
             // ---- list tools ----
+            "list_intents" => {
+                let params: ListIntentsParams = parse_args(&arguments)?;
+                self.server.list_intents_impl(params).await
+            }
             "list_tasks" => {
                 let params: ListTasksParams = parse_args(&arguments)?;
                 self.server.list_tasks_impl(params).await
