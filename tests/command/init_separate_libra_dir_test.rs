@@ -22,6 +22,7 @@ async fn test_init_with_separate_git_dir_creates_link_and_uses_storage() {
         shared: None,
         object_format: None,
         ref_format: None,
+        from_git_repository: None,
         separate_libra_dir: Some(storage.to_str().unwrap().to_string()),
     };
 
@@ -58,6 +59,7 @@ async fn test_repository_detection_with_separate_git_dir() {
         shared: None,
         object_format: None,
         ref_format: None,
+        from_git_repository: None,
         separate_libra_dir: Some(storage.to_str().unwrap().to_string()),
     };
 
@@ -96,6 +98,7 @@ async fn test_init_rejects_bare_with_separate_git_dir() {
         shared: None,
         object_format: None,
         ref_format: None,
+        from_git_repository: None,
         separate_libra_dir: Some(dir.join("storage").to_str().unwrap().to_string()),
     };
 

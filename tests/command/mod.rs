@@ -38,6 +38,7 @@ mod config_test;
 mod diff_test;
 mod fetch_test;
 mod index_pack_test;
+mod init_from_git_test;
 mod init_separate_libra_dir_test;
 mod init_test;
 mod lfs_test;

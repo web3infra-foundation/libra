@@ -15,7 +15,10 @@ use crate::{
         db,
         model::{config, reference},
     },
-    utils::util::{DATABASE, ROOT_DIR, cur_dir},
+    utils::{
+        convert,
+        util::{DATABASE, ROOT_DIR, cur_dir},
+    },
 };
 
 const DEFAULT_BRANCH: &str = "master";
@@ -103,6 +106,9 @@ pub enum InitError {
 
     #[error("Database error: {0}")]
     Database(#[from] DbErr),
+
+    #[error("conversion from git repository failed: {0}")]
+    ConversionFailed(String),
 }
 
 /// Reference format validation modes
@@ -172,10 +178,21 @@ pub struct InitArgs {
     /// - `filesystem`: Use filesystem-friendly reference name validation.
     #[clap(long = "ref-format", value_enum, required = false)]
     pub ref_format: Option<RefFormat>,
+
+    /// Convert from an existing local Git repository during initialization.
+    ///
+    /// When provided, Libra will fetch objects and references from the given
+    /// Git repository and configure the current repository to track it as
+    /// `origin` after the basic Libra layout and database are created.
+    #[clap(long = "from-git-repository", value_name = "path", required = false)]
+    pub from_git_repository: Option<String>,
 }
 
 /// Execute the init function
 pub async fn execute(args: InitArgs) {
+    let from_git = args.from_git_repository.clone();
+    let is_bare = args.bare;
+
     let used_separate_git_dir = std::env::args()
         .any(|arg| arg == "--separate-git-dir" || arg.starts_with("--separate-git-dir="));
     if used_separate_git_dir {
@@ -184,15 +201,40 @@ pub async fn execute(args: InitArgs) {
         );
     }
 
-    let target_path = cur_dir().join(Path::new(&args.repo_directory));
-    match init(args)
-        .await
-        .and_then(|_| Ok(env::set_current_dir(target_path)?))
-    {
-        Ok(_) => {}
-        Err(e) => {
-            eprintln!("Error: {e}");
+    let current_dir = cur_dir();
+    let target_path = current_dir.join(Path::new(&args.repo_directory));
+
+    let from_git_abs = if let Some(p) = from_git {
+        let path = Path::new(&p);
+        let joined = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            current_dir.join(path)
+        };
+        match joined.canonicalize() {
+            Ok(canonical) => Some(canonical),
+            Err(e) => {
+                eprintln!("Error: failed to resolve from-git-repository path: {e}");
+                std::process::exit(1);
+            }
         }
+    } else {
+        None
+    };
+
+    if let Err(e) = init(args)
+        .await
+        .and_then(|_| Ok(env::set_current_dir(&target_path)?))
+    {
+        eprintln!("Error: {e}");
+        return;
+    }
+
+    if let Some(source_git) = from_git_abs
+        && let Err(e) = convert::convert_from_git_repository(&source_git, is_bare).await
+    {
+        eprintln!("Error: {e}");
+        std::process::exit(1);
     }
 }
 

@@ -523,12 +523,13 @@ async fn test_cherry_pick_sha256_hash_handling() {
     init::init(init::InitArgs {
         bare: false,
         initial_branch: Some("main".to_string()),
+        template: None,
         repo_directory: temp_path.path().to_str().unwrap().to_string(),
         quiet: true,
-        template: None,
         shared: None,
         object_format: Some("sha256".to_string()),
         ref_format: None,
+        from_git_repository: None,
         separate_libra_dir: None,
     })
     .await
