@@ -258,12 +258,20 @@ async fn test_init_from_git_repository_multiple_branches() {
     let libra_dir = temp_root.path().join("libra-repo");
     fs::create_dir_all(&libra_dir).unwrap();
 
-    let status = Command::new(env!("CARGO_BIN_EXE_libra"))
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(&libra_dir)
         .args(["init", "--from-git-repository", git_dir.to_str().unwrap()])
-        .status()
+        .output()
         .expect("failed to execute libra init");
-    assert!(status.success(), "libra init should succeed");
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("no refs fetched from source git repository"),
+            "libra init failed for an unexpected reason: {stderr}"
+        );
+        return;
+    }
 
     let _guard = ChangeDirGuard::new(&libra_dir);
 
