@@ -16,7 +16,7 @@ pub fn validate_path(path: &Path, working_dir: &Path) -> ToolResult<()> {
         return Err(ToolError::PathNotAbsolute(path.to_path_buf()));
     }
 
-    // Check if path is within working directory
+    // Check if path is within working directory1
     if !utils::util::is_sub_path(path, working_dir) {
         return Err(ToolError::PathOutsideWorkingDir(path.to_path_buf()));
     }
