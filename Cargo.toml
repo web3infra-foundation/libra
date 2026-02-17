@@ -71,7 +71,8 @@ rig-core = { version = "0.30.0", default-features = false, features = ["rmcp", "
 rmcp = { version = "0.13", features = [
     "macros",
     "transport-streamable-http-server",
-    "transport-streamable-http-server-session"
+    "transport-streamable-http-server-session",
+    "transport-io"
 ] }
 hyper-util = { version = "0.1.18", features = ["full"] }
 axum = "0.8"
