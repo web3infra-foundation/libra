@@ -12,7 +12,7 @@ Usage: libra <COMMAND>
 Commands:
   init     Initialize a new repository
   clone    Clone a repository into a new directory
-  code     Start Libra Code interactive TUI (with background web server)
+  code     Start Libra Code interactive TUI (with a background web server)
   add      Add file contents to the index
   rm       Remove files from the working tree and from the index
   restore  Restore working tree files
@@ -33,6 +33,45 @@ Options:
   -h, --help     Print help
   -V, --version  Print version
 ```
+## Libra Code Modes
+
+Libra Code supports three operation modes, each designed for different use cases:
+
+### 1. TUI Mode (Default)
+Starts an interactive Terminal User Interface along with a background web server. This is the standard mode for developers who want to work directly in the terminal with AI assistance.
+```bash
+libra code
+```
+- **Storage**: Uses local project directory (`.libra/`) to isolate history and context per project.
+
+### 2. Web Mode
+Runs only the web server without the TUI. Useful for remote development or when you prefer using the browser interface exclusively.
+```bash
+libra code --web
+```
+- **Storage**: Uses local project directory (`.libra/`).
+
+### 3. Stdio Mode (MCP)
+Runs the Model Context Protocol (MCP) server over standard input/output. This mode is specifically designed for integration with AI clients like **Claude Desktop**.
+```bash
+libra code --stdio
+```
+- **Storage**: Uses the local project directory (`.libra/`) for history persistence (same as TUI/Web modes). The directory must be writable by the calling process (including sandboxed desktop AI apps).
+
+#### Claude Desktop Configuration
+To use Libra with Claude Desktop, add the following to your `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "libra": {
+      "command": "/path/to/libra",
+      "args": ["code", "--stdio"]
+    }
+  }
+}
+```
+
 ## Features
 
 ### Clean Code
