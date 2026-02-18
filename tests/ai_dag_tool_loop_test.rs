@@ -84,7 +84,7 @@ fn test_dag_tool_loop_action_applies_patch() {
                 function: Function {
                     name: "apply_patch".to_string(),
                     arguments: serde_json::json!({
-                        "patch": patch
+                        "input": patch
                     }),
                 },
             })],

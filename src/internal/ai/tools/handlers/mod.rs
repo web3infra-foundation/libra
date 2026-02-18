@@ -4,11 +4,13 @@ pub mod apply_patch;
 pub mod grep_files;
 pub mod list_dir;
 pub mod read_file;
+pub mod shell;
 
 pub use apply_patch::ApplyPatchHandler;
 pub use grep_files::GrepFilesHandler;
 pub use list_dir::ListDirHandler;
 pub use read_file::ReadFileHandler;
+pub use shell::ShellHandler;
 
 /// Helper function to parse JSON arguments for tool handlers.
 pub fn parse_arguments<T: serde::de::DeserializeOwned>(

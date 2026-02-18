@@ -208,25 +208,61 @@ fn default_limit() -> usize {
 pub struct ListDirArgs {
     /// Absolute path to the directory to list.
     pub dir_path: String,
-    /// Maximum depth for recursive listing (default: 1, non-recursive).
+    /// 1-indexed entry number to start listing from (default: 1).
+    #[serde(default = "default_dir_offset")]
+    pub offset: usize,
+    /// Maximum number of entries to return (default: 25).
+    #[serde(default = "default_dir_limit")]
+    pub limit: usize,
+    /// Maximum directory depth to traverse (default: 2, must be >= 1).
     #[serde(default = "default_depth")]
-    pub max_depth: usize,
+    pub depth: usize,
+}
+
+fn default_dir_offset() -> usize {
+    1
+}
+
+fn default_dir_limit() -> usize {
+    25
 }
 
 fn default_depth() -> usize {
-    1
+    2
+}
+
+/// Arguments for the shell tool.
+#[derive(Clone, Deserialize, Debug)]
+pub struct ShellArgs {
+    /// Shell command or script to execute (runs in the user's default shell).
+    pub command: String,
+    /// Working directory for the command. Must be an absolute path within the
+    /// sandbox working directory. Defaults to the registry's working directory.
+    #[serde(default)]
+    pub workdir: Option<String>,
+    /// Timeout in milliseconds. Defaults to 10,000 ms (10 seconds).
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
 }
 
 /// Arguments for the grep_files tool.
 #[derive(Clone, Deserialize, Debug)]
 pub struct GrepFilesArgs {
-    /// Search pattern (regex).
+    /// Regular expression pattern to search for.
     pub pattern: String,
-    /// Absolute path to search in.
-    pub path: String,
-    /// Case-insensitive search (default: false).
+    /// Optional glob limiting which files are searched (e.g. "*.rs" or "*.{ts,tsx}").
     #[serde(default)]
-    pub case_insensitive: bool,
+    pub include: Option<String>,
+    /// Directory or file path to search. Defaults to the working directory.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Maximum number of file paths to return (default: 100, max: 2000).
+    #[serde(default = "default_grep_limit")]
+    pub limit: usize,
+}
+
+fn default_grep_limit() -> usize {
+    100
 }
 
 #[cfg(test)]

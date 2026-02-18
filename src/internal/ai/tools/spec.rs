@@ -52,14 +52,15 @@ impl ToolSpec {
     pub fn list_dir() -> Self {
         Self::new(
             "list_dir",
-            "List the contents of a directory. Can list recursively with depth control.",
+            "Lists entries in a local directory with 1-indexed entry numbers and type labels (/ for dirs, @ for symlinks).",
         )
         .with_parameters(FunctionParameters::object(
-            [(
-                "dir_path",
-                "string",
-                "Absolute path to the directory to list",
-            )],
+            [
+                ("dir_path", "string", "Absolute path to the directory to list"),
+                ("offset", "integer", "1-indexed entry number to start listing from (default: 1)"),
+                ("limit", "integer", "Maximum number of entries to return (default: 25)"),
+                ("depth", "integer", "Maximum directory depth to traverse (default: 2, must be >= 1)"),
+            ],
             [("dir_path", true)],
         ))
     }
@@ -68,14 +69,38 @@ impl ToolSpec {
     pub fn grep_files() -> Self {
         Self::new(
             "grep_files",
-            "Search for a pattern in files using ripgrep. Supports regex patterns.",
+            "Finds files whose contents match the pattern and lists them sorted by modification time.",
         )
         .with_parameters(FunctionParameters::object(
             [
-                ("pattern", "string", "Search pattern (supports regex)"),
-                ("path", "string", "Absolute path to search in"),
+                ("pattern", "string", "Regular expression pattern to search for"),
+                ("include", "string", "Optional glob limiting which files are searched (e.g. \"*.rs\" or \"*.{ts,tsx}\")"),
+                ("path", "string", "Directory or file path to search (defaults to the working directory)"),
+                ("limit", "integer", "Maximum number of file paths to return (default: 100, max: 2000)"),
             ],
-            [("pattern", true), ("path", true)],
+            [("pattern", true)],
+        ))
+    }
+
+    /// Create a ToolSpec for shell.
+    pub fn shell() -> Self {
+        Self::new(
+            "shell",
+            "Execute a shell command or script in the user's default shell (e.g., bash, zsh). \
+             Returns the exit code and captured stdout/stderr. \
+             Use for running build commands, tests, scripts, and other shell operations.",
+        )
+        .with_parameters(FunctionParameters::object(
+            [
+                ("command", "string", "Shell command or script to execute"),
+                (
+                    "workdir",
+                    "string",
+                    "Working directory (must be absolute and within the sandbox)",
+                ),
+                ("timeout_ms", "number", "Timeout in milliseconds (default: 10000)"),
+            ],
+            [("command", true), ("workdir", false), ("timeout_ms", false)],
         ))
     }
 
@@ -83,14 +108,78 @@ impl ToolSpec {
     pub fn apply_patch() -> Self {
         Self::new(
             "apply_patch",
-            "Apply a patch to files using Codex-style format. \
-             Format: *** Begin Patch, followed by hunks (*** Add File:/Delete File:/Update File:), \
-             then *** End Patch. Supports adding, deleting, updating, and moving files. \
-             Paths are relative to the working directory.",
+            r#"Use the `apply_patch` tool to edit files.
+Your patch language is a stripped‑down, file‑oriented diff format designed to be easy to parse and safe to apply. You can think of it as a high‑level envelope:
+
+*** Begin Patch
+[ one or more file sections ]
+*** End Patch
+
+Within that envelope, you get a sequence of file operations.
+You MUST include a header to specify the action you are taking.
+Each operation starts with one of three headers:
+
+*** Add File: <path> - create a new file. Every following line is a + line (the initial contents).
+*** Delete File: <path> - remove an existing file. Nothing follows.
+*** Update File: <path> - patch an existing file in place (optionally with a rename).
+
+May be immediately followed by *** Move to: <new path> if you want to rename the file.
+Then one or more "hunks", each introduced by @@ (optionally followed by a hunk header).
+Within a hunk each line starts with:
+
+For instructions on [context_before] and [context_after]:
+- By default, show 3 lines of code immediately above and 3 lines immediately below each change. If a change is within 3 lines of a previous change, do NOT duplicate the first change's [context_after] lines in the second change's [context_before] lines.
+- If 3 lines of context is insufficient to uniquely identify the snippet of code within the file, use the @@ operator to indicate the class or function to which the snippet belongs. For instance, we might have:
+@@ class BaseClass
+[3 lines of pre-context]
+- [old_code]
++ [new_code]
+[3 lines of post-context]
+
+- If a code block is repeated so many times in a class or function such that even a single `@@` statement and 3 lines of context cannot uniquely identify the snippet of code, you can use multiple `@@` statements to jump to the right context. For instance:
+
+@@ class BaseClass
+@@ 	 def method():
+[3 lines of pre-context]
+- [old_code]
++ [new_code]
+[3 lines of post-context]
+
+The full grammar definition is below:
+Patch := Begin { FileOp } End
+Begin := "*** Begin Patch" NEWLINE
+End := "*** End Patch" NEWLINE
+FileOp := AddFile | DeleteFile | UpdateFile
+AddFile := "*** Add File: " path NEWLINE { "+" line NEWLINE }
+DeleteFile := "*** Delete File: " path NEWLINE
+UpdateFile := "*** Update File: " path NEWLINE [ MoveTo ] { Hunk }
+MoveTo := "*** Move to: " newPath NEWLINE
+Hunk := "@@" [ header ] NEWLINE { HunkLine } [ "*** End of File" NEWLINE ]
+HunkLine := (" " | "-" | "+") text NEWLINE
+
+A full patch can combine several operations:
+
+*** Begin Patch
+*** Add File: hello.txt
++Hello world
+*** Update File: src/app.py
+*** Move to: src/main.py
+@@ def greet():
+-print("Hi")
++print("Hello, world!")
+*** Delete File: obsolete.txt
+*** End Patch
+
+It is important to remember:
+
+- You must include a header with your intended action (Add/Delete/Update)
+- You must prefix new lines with `+` even when creating a new file
+- File references can only be relative, NEVER ABSOLUTE.
+"#,
         )
         .with_parameters(FunctionParameters::object(
-            [("patch", "string", "The patch in Codex format")],
-            [("patch", true)],
+            [("input", "string", "The entire contents of the apply_patch command")],
+            [("input", true)],
         ))
     }
 

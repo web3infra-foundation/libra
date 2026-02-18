@@ -107,7 +107,7 @@ pub struct UpdateFileChunk {
 #[derive(Debug, PartialEq, Clone, Deserialize)]
 pub struct ApplyPatchArgs {
     /// The patch string in Codex format.
-    pub patch: String,
+    pub input: String,
     #[serde(skip)]
     pub hunks: Vec<Hunk>,
 }
@@ -183,8 +183,8 @@ fn parse_patch_text(patch: &str, mode: ParseMode) -> Result<ApplyPatchArgs, Pars
         line_number += hunk_lines;
         remaining_lines = &remaining_lines[hunk_lines..]
     }
-    let patch = lines.join("\n");
-    Ok(ApplyPatchArgs { hunks, patch })
+    let input = lines.join("\n");
+    Ok(ApplyPatchArgs { hunks, input })
 }
 
 /// Checks the start and end lines of the patch text for `apply_patch`,
@@ -621,7 +621,7 @@ mod tests {
             parse_patch_text(&patch_text_in_heredoc, ParseMode::Lenient),
             Ok(ApplyPatchArgs {
                 hunks: expected_patch.clone(),
-                patch: patch_text.to_string(),
+                input: patch_text.to_string(),
             })
         );
 
@@ -634,7 +634,7 @@ mod tests {
             parse_patch_text(&patch_text_in_single_quoted_heredoc, ParseMode::Lenient),
             Ok(ApplyPatchArgs {
                 hunks: expected_patch.clone(),
-                patch: patch_text.to_string(),
+                input: patch_text.to_string(),
             })
         );
 
@@ -647,7 +647,7 @@ mod tests {
             parse_patch_text(&patch_text_in_double_quoted_heredoc, ParseMode::Lenient),
             Ok(ApplyPatchArgs {
                 hunks: expected_patch,
-                patch: patch_text.to_string(),
+                input: patch_text.to_string(),
             })
         );
 

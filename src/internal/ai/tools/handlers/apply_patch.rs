@@ -43,7 +43,7 @@ impl ToolHandler for ApplyPatchHandler {
         // Apply the patch (paths in patch content are relative to working_dir)
         let working_dir_clone = working_dir.clone();
         let result = tokio::task::spawn_blocking(move || {
-            apply_patch::apply_patch(&args.patch, &working_dir_clone)
+            apply_patch::apply_patch(&args.input, &working_dir_clone)
         })
         .await
         .map_err(|e| ToolError::ExecutionFailed(e.to_string()))??;
@@ -69,14 +69,78 @@ impl ToolHandler for ApplyPatchHandler {
     fn schema(&self) -> ToolSpec {
         ToolSpec::new(
             "apply_patch",
-            "Apply a patch to files using Codex-style format. \
-             Format: *** Begin Patch, followed by hunks (*** Add File:/Delete File:/Update File:), \
-             then *** End Patch. Supports adding, deleting, updating, and moving files. \
-             Paths are relative to the working directory.",
+            r#"Use the `apply_patch` tool to edit files.
+Your patch language is a stripped‑down, file‑oriented diff format designed to be easy to parse and safe to apply. You can think of it as a high‑level envelope:
+
+*** Begin Patch
+[ one or more file sections ]
+*** End Patch
+
+Within that envelope, you get a sequence of file operations.
+You MUST include a header to specify the action you are taking.
+Each operation starts with one of three headers:
+
+*** Add File: <path> - create a new file. Every following line is a + line (the initial contents).
+*** Delete File: <path> - remove an existing file. Nothing follows.
+*** Update File: <path> - patch an existing file in place (optionally with a rename).
+
+May be immediately followed by *** Move to: <new path> if you want to rename the file.
+Then one or more "hunks", each introduced by @@ (optionally followed by a hunk header).
+Within a hunk each line starts with:
+
+For instructions on [context_before] and [context_after]:
+- By default, show 3 lines of code immediately above and 3 lines immediately below each change. If a change is within 3 lines of a previous change, do NOT duplicate the first change's [context_after] lines in the second change's [context_before] lines.
+- If 3 lines of context is insufficient to uniquely identify the snippet of code within the file, use the @@ operator to indicate the class or function to which the snippet belongs. For instance, we might have:
+@@ class BaseClass
+[3 lines of pre-context]
+- [old_code]
++ [new_code]
+[3 lines of post-context]
+
+- If a code block is repeated so many times in a class or function such that even a single `@@` statement and 3 lines of context cannot uniquely identify the snippet of code, you can use multiple `@@` statements to jump to the right context. For instance:
+
+@@ class BaseClass
+@@ 	 def method():
+[3 lines of pre-context]
+- [old_code]
++ [new_code]
+[3 lines of post-context]
+
+The full grammar definition is below:
+Patch := Begin { FileOp } End
+Begin := "*** Begin Patch" NEWLINE
+End := "*** End Patch" NEWLINE
+FileOp := AddFile | DeleteFile | UpdateFile
+AddFile := "*** Add File: " path NEWLINE { "+" line NEWLINE }
+DeleteFile := "*** Delete File: " path NEWLINE
+UpdateFile := "*** Update File: " path NEWLINE [ MoveTo ] { Hunk }
+MoveTo := "*** Move to: " newPath NEWLINE
+Hunk := "@@" [ header ] NEWLINE { HunkLine } [ "*** End of File" NEWLINE ]
+HunkLine := (" " | "-" | "+") text NEWLINE
+
+A full patch can combine several operations:
+
+*** Begin Patch
+*** Add File: hello.txt
++Hello world
+*** Update File: src/app.py
+*** Move to: src/main.py
+@@ def greet():
+-print("Hi")
++print("Hello, world!")
+*** Delete File: obsolete.txt
+*** End Patch
+
+It is important to remember:
+
+- You must include a header with your intended action (Add/Delete/Update)
+- You must prefix new lines with `+` even when creating a new file
+- File references can only be relative, NEVER ABSOLUTE.
+"#,
         )
         .with_parameters(FunctionParameters::object(
-            [("patch", "string", "The patch in Codex format")],
-            [("patch", true)],
+            [("input", "string", "The entire contents of the apply_patch command")],
+            [("input", true)],
         ))
     }
 }
@@ -105,7 +169,7 @@ mod tests {
             "apply_patch",
             ToolPayload::Function {
                 arguments: serde_json::json!({
-                    "patch": wrap_patch(
+                    "input": wrap_patch(
                         r#"*** Add File: new_file.txt
 +line 1
 +line 2"#
@@ -141,7 +205,7 @@ mod tests {
             "apply_patch",
             ToolPayload::Function {
                 arguments: serde_json::json!({
-                    "patch": wrap_patch("*** Delete File: to_delete.txt")
+                    "input": wrap_patch("*** Delete File: to_delete.txt")
                 })
                 .to_string(),
             },
@@ -168,7 +232,7 @@ mod tests {
             "apply_patch",
             ToolPayload::Function {
                 arguments: serde_json::json!({
-                    "patch": wrap_patch(
+                    "input": wrap_patch(
                         r#"*** Update File: test.txt
 @@
  line 1
@@ -204,7 +268,7 @@ mod tests {
             "apply_patch",
             ToolPayload::Function {
                 arguments: serde_json::json!({
-                    "patch": wrap_patch(
+                    "input": wrap_patch(
                         r#"*** Update File: src.txt
 *** Move to: dst.txt
 @@
@@ -239,7 +303,7 @@ mod tests {
             "apply_patch",
             ToolPayload::Function {
                 arguments: serde_json::json!({
-                    "patch": wrap_patch(
+                    "input": wrap_patch(
                         r#"*** Add File: new.txt
 +new content
 *** Update File: file1.txt
@@ -275,7 +339,7 @@ mod tests {
             "apply_patch",
             ToolPayload::Function {
                 arguments: serde_json::json!({
-                    "patch": wrap_patch(
+                    "input": wrap_patch(
                         r#"*** Update File: test.txt
 @@
 -Hello 世界
@@ -308,7 +372,7 @@ mod tests {
             "apply_patch",
             ToolPayload::Function {
                 arguments: serde_json::json!({
-                    "patch": wrap_patch(&format!(
+                    "input": wrap_patch(&format!(
                         "*** Delete File: {}",
                         outside.path().display()
                     ))
@@ -330,13 +394,13 @@ mod tests {
         assert_eq!(schema.function.name, "apply_patch");
         assert!(
             schema.function.description.contains("Codex")
-                || schema.function.description.contains("patch")
+                || schema.function.description.contains("apply_patch")
         );
         // Verify only 'patch' parameter is required
         if let crate::internal::ai::tools::spec::FunctionParameters::Object { required, .. } =
             schema.function.parameters
         {
-            assert!(required.contains(&"patch".to_string()));
+            assert!(required.contains(&"input".to_string()));
             assert!(!required.contains(&"file_path".to_string()));
         } else {
             panic!("Expected Object parameters");
