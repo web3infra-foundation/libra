@@ -92,24 +92,28 @@ impl ChatWidget {
 
     /// Render the chat widget.
     pub fn render(&mut self, area: Rect, buf: &mut Buffer) -> Option<Position> {
+        // Dynamically size the bottom pane based on current state.
+        let bottom_height = self.bottom_pane.desired_height();
+
         // Split into chat area and bottom pane
         let chunks = Layout::vertical([
-            Constraint::Min(5),    // Chat area
-            Constraint::Length(5), // Bottom pane (3 lines + status + help)
+            Constraint::Min(3),                    // Chat area (min 3 lines)
+            Constraint::Length(bottom_height),      // Bottom pane (dynamic)
         ])
         .split(area);
 
         // Render chat area
         self.render_chat_area(chunks[0], buf);
 
-        // Render bottom pane
-        let bottom_chunks = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(3),
-            Constraint::Length(1),
-        ])
-        .split(chunks[1]);
-        self.last_input_area = Some(bottom_chunks[1]);
+        // Track input area for mouse hit-testing (approximate: the input box
+        // is at roughly rows 1..4 within the bottom pane).
+        let input_y = chunks[1].y.saturating_add(1);
+        self.last_input_area = Some(Rect {
+            x: chunks[1].x,
+            y: input_y,
+            width: chunks[1].width,
+            height: 3.min(chunks[1].height.saturating_sub(2)),
+        });
 
         self.bottom_pane.render(chunks[1], buf)
     }

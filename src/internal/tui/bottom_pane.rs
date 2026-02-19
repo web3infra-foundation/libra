@@ -158,6 +158,41 @@ impl BottomPane {
         self.input.is_empty()
     }
 
+    /// Return the height (in lines) the bottom pane needs for the current state.
+    pub fn desired_height(&self) -> u16 {
+        if self.status != AgentStatus::AwaitingUserInput {
+            // Normal mode: status(1) + input(3) + help(1) = 5
+            return 5;
+        }
+
+        let questions = match &self.user_input_questions {
+            Some(q) => q,
+            None => return 5,
+        };
+
+        let q_idx = self.user_input_current_question;
+        let question = match questions.get(q_idx) {
+            Some(q) => q,
+            None => return 5,
+        };
+
+        let options = question.options.as_deref().unwrap_or_default();
+        let is_freeform = options.is_empty();
+
+        let option_lines = if is_freeform {
+            0u16
+        } else {
+            let extra = if question.is_other { 1 } else { 0 };
+            options.len() as u16 + extra
+        };
+
+        let question_area = 1 + 1 + option_lines; // header + question + options
+        let notes_height = if !is_freeform { 3u16 } else { 0 };
+
+        // status(1) + question_area + input(3) + notes + help(1)
+        1 + question_area + 3 + notes_height + 1
+    }
+
     /// Render the bottom pane.
     pub fn render(&self, area: Rect, buf: &mut Buffer) -> Option<Position> {
         if self.status == AgentStatus::AwaitingUserInput {
