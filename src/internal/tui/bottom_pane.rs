@@ -15,7 +15,13 @@ use super::app_event::AgentStatus;
 struct UserInputQuestionSnapshot {
     header: String,
     question: String,
-    options: Vec<(String, String)>, // (label, description)
+    /// `None` means freeform (text-only).
+    options: Option<Vec<(String, String)>>, // (label, description)
+    /// Whether a "None of the above" option should be appended.
+    is_other: bool,
+    /// Whether typed text should be masked (reserved for future use).
+    #[allow(dead_code)]
+    is_secret: bool,
 }
 
 /// The bottom pane containing input area and status.
@@ -34,6 +40,10 @@ pub struct BottomPane {
     pub user_input_current_question: usize,
     /// Currently selected option index (driven by App).
     pub user_input_selected_option: usize,
+    /// Whether the notes input is currently focused (driven by App).
+    pub user_input_notes_focused: bool,
+    /// Current notes text (driven by App).
+    pub user_input_notes_text: String,
 }
 
 impl BottomPane {
@@ -47,6 +57,8 @@ impl BottomPane {
             user_input_questions: None,
             user_input_current_question: 0,
             user_input_selected_option: 0,
+            user_input_notes_focused: false,
+            user_input_notes_text: String::new(),
         }
     }
 
@@ -60,16 +72,20 @@ impl BottomPane {
                 .map(|q| UserInputQuestionSnapshot {
                     header: q.header.clone(),
                     question: q.question.clone(),
-                    options: q
-                        .options
-                        .iter()
-                        .map(|o| (o.label.clone(), o.description.clone()))
-                        .collect(),
+                    options: q.options.as_ref().map(|opts| {
+                        opts.iter()
+                            .map(|o| (o.label.clone(), o.description.clone()))
+                            .collect()
+                    }),
+                    is_other: q.is_other,
+                    is_secret: q.is_secret,
                 })
                 .collect()
         });
         self.user_input_current_question = 0;
         self.user_input_selected_option = 0;
+        self.user_input_notes_focused = false;
+        self.user_input_notes_text.clear();
     }
 
     /// Handle a character input.
@@ -177,25 +193,41 @@ impl BottomPane {
 
         let q_idx = self.user_input_current_question;
         let question = questions.get(q_idx)?;
+        let total_questions = questions.len();
 
-        // Count how many lines we need for the question display:
-        // 1 status bar + 1 header + 1 question + N options + 1 custom + 1 input + 1 help
-        let option_lines = question.options.len() as u16 + 1; // +1 for "Other"
-        let question_area_height = 1 + 1 + option_lines; // header + question + options
+        let options = question.options.as_deref().unwrap_or_default();
+        let is_freeform = options.is_empty();
+
+        // Count how many lines we need for the question display
+        let option_lines = if is_freeform {
+            0u16
+        } else {
+            let extra = if question.is_other { 1u16 } else { 0 };
+            options.len() as u16 + extra
+        };
+        let question_area_height = 1 + 1 + option_lines; // progress + question + options
+        let notes_height = if !is_freeform { 3u16 } else { 0 }; // notes area (only for option questions)
 
         let chunks = Layout::vertical([
             Constraint::Length(1),                    // Status bar
             Constraint::Length(question_area_height), // Question + options
-            Constraint::Length(3),                    // Input area (for custom text)
+            Constraint::Length(3),                    // Input area (freeform or notes)
+            Constraint::Length(notes_height),         // Notes area (for option questions)
             Constraint::Length(1),                    // Help text
         ])
         .split(area);
 
         // Status bar
-        let status_line = Line::styled(
-            "● Awaiting input...",
-            Style::default().fg(Color::Magenta).bold(),
-        );
+        let progress = if total_questions > 1 {
+            format!(
+                "● Question {}/{} — Awaiting input...",
+                q_idx + 1,
+                total_questions
+            )
+        } else {
+            "● Awaiting input...".to_string()
+        };
+        let status_line = Line::styled(progress, Style::default().fg(Color::Magenta).bold());
         Paragraph::new(status_line).render(chunks[0], buf);
 
         // Question display
@@ -213,33 +245,50 @@ impl BottomPane {
             Style::default().fg(Color::White),
         ));
 
-        // Options
         let selected = self.user_input_selected_option;
-        for (i, (label, description)) in question.options.iter().enumerate() {
-            let marker = if i == selected { "▸" } else { " " };
-            let style = if i == selected {
-                Style::default().fg(Color::Cyan).bold()
-            } else {
-                Style::default().fg(Color::White)
-            };
-            lines.push(Line::styled(
-                format!("  {} {}. {} - {}", marker, i + 1, label, description),
-                style,
-            ));
-        }
 
-        // "Other (custom)" option
-        let other_idx = question.options.len();
-        let marker = if selected == other_idx { "▸" } else { " " };
-        let style = if selected == other_idx {
-            Style::default().fg(Color::Cyan).bold()
-        } else {
-            Style::default().fg(Color::DarkGray)
-        };
-        lines.push(Line::styled(
-            format!("  {} {}. Other (type below)", marker, other_idx + 1),
-            style,
-        ));
+        if !is_freeform {
+            // Render predefined options
+            for (i, (label, description)) in options.iter().enumerate() {
+                let marker = if i == selected && !self.user_input_notes_focused {
+                    "›"
+                } else {
+                    " "
+                };
+                let style = if i == selected {
+                    Style::default().fg(Color::Cyan).bold()
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                lines.push(Line::styled(
+                    format!("  {} {}. {}  {}", marker, i + 1, label, description),
+                    style,
+                ));
+            }
+
+            // "None of the above" option (when is_other is set)
+            if question.is_other {
+                let other_idx = options.len();
+                let marker = if selected == other_idx && !self.user_input_notes_focused {
+                    "›"
+                } else {
+                    " "
+                };
+                let style = if selected == other_idx {
+                    Style::default().fg(Color::Cyan).bold()
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+                lines.push(Line::styled(
+                    format!(
+                        "  {} {}. None of the above  Optionally, add details in notes (tab).",
+                        marker,
+                        other_idx + 1
+                    ),
+                    style,
+                ));
+            }
+        }
 
         // Render question area (clip to available height)
         let max_lines = chunks[1].height as usize;
@@ -247,17 +296,68 @@ impl BottomPane {
         let text = Text::from(display_lines);
         Paragraph::new(text).render(chunks[1], buf);
 
-        // Input area (for custom text entry)
-        let cursor_pos = self.render_input_area(chunks[2], buf);
+        // Input area — for freeform questions, this is the primary input.
+        // For option questions, this area is used for notes when Tab is pressed.
+        let cursor_pos = if is_freeform {
+            self.render_input_area(chunks[2], buf)
+        } else {
+            // Show notes input area
+            self.render_notes_area(chunks[3], buf)
+        };
 
         // Help text
-        let help = "[↑/↓: Select] [1-9: Quick select] [Enter: Submit] [Esc: Cancel]";
+        let help = if is_freeform {
+            "[Enter: Submit] [Esc: Cancel]"
+        } else {
+            "[↑/↓: Select] [1-9: Quick select] [Tab: Notes] [Enter: Submit] [Esc: Cancel]"
+        };
         let help_line = Line::styled(help, Style::default().fg(Color::DarkGray));
-        Paragraph::new(help_line).render(chunks[3], buf);
+        Paragraph::new(help_line).render(chunks[4], buf);
 
-        // Only show cursor when "Other" is selected
-        if selected == other_idx {
+        // Show cursor: for freeform always, for options only when notes focused
+        if is_freeform || self.user_input_notes_focused {
             cursor_pos
+        } else {
+            None
+        }
+    }
+
+    /// Render the notes input area for option questions.
+    fn render_notes_area(&self, area: Rect, buf: &mut Buffer) -> Option<Position> {
+        if area.height == 0 {
+            return None;
+        }
+
+        let border_style = if self.user_input_notes_focused {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .title(" Notes ");
+
+        let inner = block.inner(area);
+
+        let display = if self.user_input_notes_text.is_empty() {
+            Text::styled(
+                "Tab to add notes...",
+                Style::default().fg(Color::DarkGray),
+            )
+        } else {
+            Text::raw(&self.user_input_notes_text)
+        };
+
+        Paragraph::new(display).block(block).render(area, buf);
+
+        if self.user_input_notes_focused && inner.width > 0 && inner.height > 0 {
+            let cursor_x = self.user_input_notes_text.width().min(inner.width as usize) as u16;
+            Some(Position {
+                x: inner.x.saturating_add(cursor_x),
+                y: inner.y,
+            })
         } else {
             None
         }

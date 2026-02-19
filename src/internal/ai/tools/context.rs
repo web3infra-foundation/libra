@@ -301,9 +301,9 @@ pub struct UpdatePlanArgs {
 /// A selectable option presented to the user.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UserInputOption {
-    /// Short label for the option.
+    /// Short label for the option (1-5 words).
     pub label: String,
-    /// Longer description shown alongside the label.
+    /// Longer description of the impact/tradeoff.
     pub description: String,
 }
 
@@ -312,25 +312,45 @@ pub struct UserInputOption {
 pub struct UserInputQuestion {
     /// Machine-readable identifier for the question (unique within a request).
     pub id: String,
-    /// Short header displayed above the question.
+    /// Short header displayed above the question (≤12 chars).
     pub header: String,
-    /// The full question text.
+    /// The full question text (single sentence).
     pub question: String,
+    /// Whether to auto-add a "None of the above" option.
+    #[serde(default)]
+    pub is_other: bool,
+    /// Whether to mask user-typed text with '*' (for secrets).
+    #[serde(default)]
+    pub is_secret: bool,
     /// Predefined options the user can choose from.
-    pub options: Vec<UserInputOption>,
+    /// When `None` or empty, the question is freeform (text input only).
+    #[serde(default)]
+    pub options: Option<Vec<UserInputOption>>,
 }
 
 /// Arguments for the `request_user_input` tool.
 #[derive(Clone, Debug, Deserialize)]
 pub struct RequestUserInputArgs {
-    /// Questions to present to the user.
+    /// Questions to present to the user (1-3, prefer 1).
     pub questions: Vec<UserInputQuestion>,
+}
+
+/// A single answer, potentially containing the selected option label
+/// and/or user notes.
+///
+/// - If an option was selected: `answers[0]` = selected label
+/// - If notes were added: last entry = `"user_note: {text}"`
+/// - For freeform questions: `answers[0]` = user-typed text
+/// - Empty `answers` means the user skipped the question
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UserInputAnswer {
+    pub answers: Vec<String>,
 }
 
 /// User's responses to a set of questions, keyed by question id.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UserInputResponse {
-    pub answers: HashMap<String, String>,
+    pub answers: HashMap<String, UserInputAnswer>,
 }
 
 /// A request sent from the tool handler to the TUI, carrying the questions

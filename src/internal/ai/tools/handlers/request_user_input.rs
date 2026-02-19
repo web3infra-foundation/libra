@@ -51,12 +51,20 @@ impl ToolHandler for RequestUserInputHandler {
             }
         };
 
-        let args: RequestUserInputArgs = parse_arguments(&arguments)?;
+        let mut args: RequestUserInputArgs = parse_arguments(&arguments)?;
 
         if args.questions.is_empty() {
             return Err(ToolError::InvalidArguments(
                 "At least one question is required".into(),
             ));
+        }
+
+        // Enable "None of the above" on all questions that have options,
+        // matching the Codex reference behaviour.
+        for q in &mut args.questions {
+            if q.options.as_ref().is_some_and(|o| !o.is_empty()) {
+                q.is_other = true;
+            }
         }
 
         // Create a oneshot channel for the response.
@@ -97,6 +105,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
+    use crate::internal::ai::tools::context::UserInputAnswer;
 
     fn make_invocation(json: &str) -> ToolInvocation {
         ToolInvocation::new(
@@ -110,7 +119,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_valid_request() {
+    async fn test_valid_request_with_options() {
         let (tx, mut rx) = mpsc::unbounded_channel::<UserInputRequest>();
         let handler = RequestUserInputHandler::new(tx);
 
@@ -121,24 +130,32 @@ mod tests {
                     "header": "Auth",
                     "question": "Which auth method?",
                     "options": [
-                        {"label": "JWT", "description": "JSON Web Tokens"},
+                        {"label": "JWT (Recommended)", "description": "JSON Web Tokens"},
                         {"label": "OAuth", "description": "OAuth 2.0"}
                     ]
                 }]
             }"#,
         );
 
-        // Spawn the handler so it blocks on the oneshot.
         let handle = tokio::spawn(async move { handler.handle(inv).await });
 
-        // Simulate TUI answering.
         let request = rx.recv().await.expect("should receive request");
         assert_eq!(request.call_id, "call-input-1");
         assert_eq!(request.questions.len(), 1);
         assert_eq!(request.questions[0].id, "q1");
+        // Handler should have set is_other = true
+        assert!(request.questions[0].is_other);
 
         let mut answers = HashMap::new();
-        answers.insert("q1".to_string(), "JWT".to_string());
+        answers.insert(
+            "q1".to_string(),
+            UserInputAnswer {
+                answers: vec![
+                    "JWT (Recommended)".to_string(),
+                    "user_note: looks good".to_string(),
+                ],
+            },
+        );
         request
             .response_tx
             .send(UserInputResponse { answers })
@@ -149,7 +166,48 @@ mod tests {
         let output = result.unwrap();
         assert!(output.is_success());
         let text = output.as_text().unwrap();
-        assert!(text.contains("JWT"));
+        assert!(text.contains("JWT (Recommended)"));
+        assert!(text.contains("user_note"));
+    }
+
+    #[tokio::test]
+    async fn test_freeform_question() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<UserInputRequest>();
+        let handler = RequestUserInputHandler::new(tx);
+
+        let inv = make_invocation(
+            r#"{
+                "questions": [{
+                    "id": "q1",
+                    "header": "Name",
+                    "question": "What is the project name?"
+                }]
+            }"#,
+        );
+
+        let handle = tokio::spawn(async move { handler.handle(inv).await });
+
+        let request = rx.recv().await.unwrap();
+        // No options => is_other should NOT be forced
+        assert!(!request.questions[0].is_other);
+        assert!(request.questions[0].options.is_none());
+
+        let mut answers = HashMap::new();
+        answers.insert(
+            "q1".to_string(),
+            UserInputAnswer {
+                answers: vec!["my-project".to_string()],
+            },
+        );
+        request
+            .response_tx
+            .send(UserInputResponse { answers })
+            .unwrap();
+
+        let result = handle.await.unwrap();
+        assert!(result.is_ok());
+        let text = result.unwrap().as_text().unwrap().to_string();
+        assert!(text.contains("my-project"));
     }
 
     #[tokio::test]
@@ -173,14 +231,16 @@ mod tests {
                     "id": "q1",
                     "header": "Test",
                     "question": "Pick one",
-                    "options": [{"label": "A", "description": "Option A"}]
+                    "options": [
+                        {"label": "A", "description": "Option A"},
+                        {"label": "B", "description": "Option B"}
+                    ]
                 }]
             }"#,
         );
 
         let handle = tokio::spawn(async move { handler.handle(inv).await });
 
-        // Drop the response_tx to simulate cancellation.
         let request = rx.recv().await.unwrap();
         drop(request.response_tx);
 

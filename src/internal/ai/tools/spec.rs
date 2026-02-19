@@ -160,9 +160,11 @@ impl ToolSpec {
             spec_type: "function".to_string(),
             function: FunctionDefinition {
                 name: "request_user_input".to_string(),
-                description: "Ask the user a question and wait for their response. \
-                    Use this when you need clarification, confirmation, or the user to choose \
-                    between options."
+                description: "Request user input for one to three short questions and wait \
+                    for the response. Each question can have 2-3 predefined options (the \
+                    client auto-adds 'None of the above'). Do NOT include an 'Other' option \
+                    yourself. The first option should be marked '(Recommended)'. Prefer \
+                    sending only 1 question at a time."
                     .to_string(),
                 parameters: FunctionParameters::Object {
                     param_type: "object".to_string(),
@@ -172,42 +174,54 @@ impl ToolSpec {
                             "questions".to_string(),
                             json!({
                                 "type": "array",
-                                "description": "Questions to present to the user",
+                                "description": "Questions to present to the user (1-3, prefer 1)",
+                                "minItems": 1,
+                                "maxItems": 3,
                                 "items": {
                                     "type": "object",
                                     "properties": {
                                         "id": {
                                             "type": "string",
-                                            "description": "Machine-readable identifier for the question"
+                                            "description": "Stable snake_case identifier for the question"
                                         },
                                         "header": {
                                             "type": "string",
-                                            "description": "Short header displayed above the question"
+                                            "description": "Short header displayed above the question (max 12 chars)"
                                         },
                                         "question": {
                                             "type": "string",
-                                            "description": "The full question text"
+                                            "description": "Single-sentence question prompt"
+                                        },
+                                        "is_other": {
+                                            "type": "boolean",
+                                            "description": "Whether to auto-add a 'None of the above' option (default: true)"
+                                        },
+                                        "is_secret": {
+                                            "type": "boolean",
+                                            "description": "Whether to mask typed input with '*' (default: false)"
                                         },
                                         "options": {
                                             "type": "array",
-                                            "description": "Predefined options the user can choose from",
+                                            "description": "2-3 mutually exclusive options. Omit for freeform text input.",
+                                            "minItems": 2,
+                                            "maxItems": 3,
                                             "items": {
                                                 "type": "object",
                                                 "properties": {
                                                     "label": {
                                                         "type": "string",
-                                                        "description": "Short label for the option"
+                                                        "description": "User-facing label (1-5 words)"
                                                     },
                                                     "description": {
                                                         "type": "string",
-                                                        "description": "Longer description of the option"
+                                                        "description": "Impact/tradeoff explanation"
                                                     }
                                                 },
                                                 "required": ["label", "description"]
                                             }
                                         }
                                     },
-                                    "required": ["id", "header", "question", "options"]
+                                    "required": ["id", "header", "question"]
                                 }
                             }),
                         );

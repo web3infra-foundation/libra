@@ -26,7 +26,7 @@ use crate::internal::ai::{
     completion::{CompletionModel, Message},
     tools::{
         ToolOutput, ToolRegistry,
-        context::{UpdatePlanArgs, UserInputRequest, UserInputResponse},
+        context::{UpdatePlanArgs, UserInputAnswer, UserInputRequest, UserInputResponse},
     },
 };
 
@@ -53,9 +53,16 @@ struct PendingUserInput {
     /// Index of the question currently being answered.
     current_question: usize,
     /// Answers collected so far, keyed by question id.
-    answers: HashMap<String, String>,
+    answers: HashMap<String, UserInputAnswer>,
     /// Currently selected option index (0-based) for the active question.
+    /// For questions with options, the last index is "None of the above" (if
+    /// `is_other`), and one past that is "custom/freeform". For freeform
+    /// questions (no options), this is always 0.
     selected_option: usize,
+    /// Whether the notes input is currently focused (Tab toggles).
+    notes_focused: bool,
+    /// Notes text being composed for the current question.
+    notes_text: String,
 }
 
 /// The main application struct.
@@ -327,45 +334,97 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
     /// Handle keyboard input while in the AwaitingUserInput state.
     fn handle_user_input_key(&mut self, key: crossterm::event::KeyEvent) {
+        let is_freeform = self
+            .pending_user_input
+            .as_ref()
+            .is_some_and(|p| {
+                let q = &p.request.questions[p.current_question];
+                q.options.as_ref().is_none_or(|o| o.is_empty())
+            });
+
+        // If notes are focused, route most keys to the input field.
+        let notes_focused = self
+            .pending_user_input
+            .as_ref()
+            .is_some_and(|p| p.notes_focused);
+
         match key.code {
-            // Navigate options with Up/Down
-            KeyCode::Up => {
+            // Tab: toggle between options and notes
+            KeyCode::Tab if !is_freeform => {
+                if let Some(ref mut pending) = self.pending_user_input {
+                    pending.notes_focused = !pending.notes_focused;
+                }
+                self.sync_user_input_to_pane();
+                self.schedule_draw();
+            }
+            // Navigate options with Up/Down (only when options focused)
+            KeyCode::Up if !notes_focused => {
                 if let Some(ref mut pending) = self.pending_user_input
                     && pending.selected_option > 0
                 {
                     pending.selected_option -= 1;
                 }
+                self.sync_user_input_to_pane();
                 self.schedule_draw();
             }
-            KeyCode::Down => {
+            KeyCode::Down if !notes_focused => {
                 if let Some(ref mut pending) = self.pending_user_input {
                     let q = &pending.request.questions[pending.current_question];
-                    // +1 for the "Other (custom)" option
-                    let max = q.options.len();
+                    let base = q.options.as_ref().map_or(0, |o| o.len());
+                    let max = if q.is_other {
+                        base
+                    } else if base > 0 {
+                        base - 1
+                    } else {
+                        0
+                    };
                     if pending.selected_option < max {
                         pending.selected_option += 1;
                     }
                 }
+                self.sync_user_input_to_pane();
                 self.schedule_draw();
             }
-            // Quick-select by number key (1-9)
-            KeyCode::Char(c @ '1'..='9') => {
+            // Quick-select by number key (1-9), only when options focused
+            KeyCode::Char(c @ '1'..='9') if !notes_focused && !is_freeform => {
                 let idx = (c as usize) - ('1' as usize);
                 if let Some(ref mut pending) = self.pending_user_input {
                     let q = &pending.request.questions[pending.current_question];
-                    // +1 for custom option
-                    if idx <= q.options.len() {
+                    let base = q.options.as_ref().map_or(0, |o| o.len());
+                    let max = if q.is_other {
+                        base
+                    } else if base > 0 {
+                        base - 1
+                    } else {
+                        0
+                    };
+                    if idx <= max {
                         pending.selected_option = idx;
                     }
                 }
+                self.sync_user_input_to_pane();
                 self.schedule_draw();
             }
-            // Type custom answer text
-            KeyCode::Char(c) => {
-                self.widget.bottom_pane.insert_char(c);
+            // Type text (notes when notes_focused, or freeform input)
+            KeyCode::Char(c) if notes_focused || is_freeform => {
+                if notes_focused {
+                    if let Some(ref mut pending) = self.pending_user_input {
+                        pending.notes_text.push(c);
+                    }
+                    self.sync_user_input_to_pane();
+                } else {
+                    self.widget.bottom_pane.insert_char(c);
+                }
                 self.schedule_draw();
             }
-            KeyCode::Backspace => {
+            KeyCode::Backspace if notes_focused => {
+                if let Some(ref mut pending) = self.pending_user_input {
+                    pending.notes_text.pop();
+                }
+                self.sync_user_input_to_pane();
+                self.schedule_draw();
+            }
+            KeyCode::Backspace if is_freeform => {
                 self.widget.bottom_pane.backspace();
                 self.schedule_draw();
             }
@@ -387,16 +446,30 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
     fn submit_user_input_answer(&mut self) {
         let answer = if let Some(ref pending) = self.pending_user_input {
             let q = &pending.request.questions[pending.current_question];
-            if pending.selected_option < q.options.len() {
-                // Predefined option selected
-                q.options[pending.selected_option].label.clone()
-            } else {
-                // Custom text from input field
+            let options = q.options.as_deref().unwrap_or_default();
+            let mut answer_list: Vec<String> = Vec::new();
+
+            if options.is_empty() {
+                // Freeform question: take text from input field
                 let text = self.widget.bottom_pane.take_input();
-                if text.is_empty() {
-                    return; // Don't submit empty custom answer
+                if !text.is_empty() {
+                    answer_list.push(text);
                 }
-                text
+            } else if pending.selected_option < options.len() {
+                // Predefined option selected
+                answer_list.push(options[pending.selected_option].label.clone());
+            } else if q.is_other && pending.selected_option == options.len() {
+                // "None of the above"
+                answer_list.push("None of the above".to_string());
+            }
+
+            // Append notes if present
+            if !pending.notes_text.is_empty() {
+                answer_list.push(format!("user_note: {}", pending.notes_text));
+            }
+
+            UserInputAnswer {
+                answers: answer_list,
             }
         } else {
             return;
@@ -409,6 +482,8 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         pending.answers.insert(question_id, answer);
         pending.current_question += 1;
         pending.selected_option = 0;
+        pending.notes_focused = false;
+        pending.notes_text.clear();
         self.widget.bottom_pane.clear();
 
         // Check if all questions have been answered.
@@ -428,6 +503,8 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 .bottom_pane
                 .set_status(AgentStatus::ExecutingTool);
             self.widget.bottom_pane.set_user_input_questions(None);
+        } else {
+            self.sync_user_input_to_pane();
         }
         self.schedule_draw();
     }
@@ -438,6 +515,16 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             // Dropping response_tx signals cancellation to the handler.
             drop(pending.request.response_tx);
             self.widget.bottom_pane.set_user_input_questions(None);
+        }
+    }
+
+    /// Sync the pending user-input state to the bottom pane for rendering.
+    fn sync_user_input_to_pane(&mut self) {
+        if let Some(ref pending) = self.pending_user_input {
+            self.widget.bottom_pane.user_input_current_question = pending.current_question;
+            self.widget.bottom_pane.user_input_selected_option = pending.selected_option;
+            self.widget.bottom_pane.user_input_notes_focused = pending.notes_focused;
+            self.widget.bottom_pane.user_input_notes_text = pending.notes_text.clone();
         }
     }
 
@@ -453,11 +540,14 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             current_question: 0,
             answers: HashMap::new(),
             selected_option: 0,
+            notes_focused: false,
+            notes_text: String::new(),
         });
         self.widget
             .bottom_pane
             .set_status(AgentStatus::AwaitingUserInput);
         self.widget.bottom_pane.clear();
+        self.sync_user_input_to_pane();
         self.schedule_draw();
     }
 
