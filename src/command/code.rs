@@ -20,7 +20,10 @@ use crate::internal::{
         },
         tools::{
             ToolRegistry, ToolRegistryBuilder,
-            handlers::{ApplyPatchHandler, GrepFilesHandler, ListDirHandler, ReadFileHandler},
+            handlers::{
+                ApplyPatchHandler, GrepFilesHandler, ListDirHandler, ReadFileHandler,
+                ShellHandler,
+            },
         },
     },
     tui::{App, Tui, tui_init, tui_restore},
@@ -173,6 +176,7 @@ async fn execute_tui(args: CodeArgs) {
             .register("list_dir", Arc::new(ListDirHandler))
             .register("grep_files", Arc::new(GrepFilesHandler))
             .register("apply_patch", Arc::new(ApplyPatchHandler))
+            .register("shell", Arc::new(ShellHandler))
             .build(),
     );
 
