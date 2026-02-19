@@ -24,7 +24,9 @@ impl AgentRouter {
 
         for agent in &self.agents {
             let score = Self::match_score(&input_lower, agent);
-            if score > 0
+            // Require at least 2 keyword matches to avoid false positives
+            // on short or generic inputs like "test", "build", etc.
+            if score >= 2
                 && best.as_ref().is_none_or(|(_, best_score)| score > *best_score)
             {
                 best = Some((agent, score));
@@ -156,7 +158,7 @@ mod tests {
         let agents = load_embedded_agents();
         let router = AgentRouter::new(agents);
 
-        let selected = router.select("plan the implementation of the new feature");
+        let selected = router.select("plan the implementation and identify dependencies for the new feature");
         assert!(selected.is_some());
         assert_eq!(selected.unwrap().name, "planner");
     }

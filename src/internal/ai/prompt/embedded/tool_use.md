@@ -13,10 +13,10 @@ You have access to the following tools for interacting with the codebase. Use th
 
 ### Key Principles
 
-1. **Read before write** — ALWAYS use `read_file` before using `apply_patch` on a file. You must understand the current content to write a correct patch.
-2. **Explore before assuming** — Use `list_dir` and `grep_files` to understand the codebase structure before making changes. Do not guess file locations or contents.
-3. **Parallel execution** — When you need to read multiple independent files, read them all at once rather than sequentially.
-4. **Minimal patches** — Keep patches small and focused. Each patch should address one logical change.
+1. **Read before write** -- ALWAYS use `read_file` before using `apply_patch` on a file. You must understand the current content to write a correct patch.
+2. **Explore before assuming** -- Use `list_dir` and `grep_files` to understand the codebase structure before making changes. Do not guess file locations or contents.
+3. **Parallel execution** -- When you need to read multiple independent files, read them all at once rather than sequentially.
+4. **Minimal patches** -- Keep patches small and focused. Each patch should address one logical change.
 
 ### Tool Usage Patterns
 

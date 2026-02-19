@@ -13,7 +13,7 @@ Before any commit, verify:
 
 - NEVER hardcode secrets in source code.
 - Use environment variables or a secret manager for all credentials.
-- Validate that required secrets are present at startup — fail fast if missing.
+- Validate that required secrets are present at startup -- fail fast if missing.
 - If a secret may have been exposed, rotate it immediately.
 
 ### Path Safety
@@ -28,8 +28,8 @@ Before any commit, verify:
 - No `unsafe` blocks unless absolutely necessary and justified.
 - Run `cargo audit` to check for known vulnerabilities in dependencies.
 - Prefer well-maintained crates from the Rust ecosystem.
-- Use parameterized queries for any database operations — never string formatting.
-- Be cautious with `std::process::Command` — validate and sanitize all arguments.
+- Use parameterized queries for any database operations -- never string formatting.
+- Be cautious with `std::process::Command` -- validate and sanitize all arguments.
 
 ### Severity Classification
 

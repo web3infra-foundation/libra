@@ -16,11 +16,11 @@ Types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `perf`, `ci`
 
 ### Implementation Workflow
 
-1. **Plan** — Understand the requirements. Identify affected files and potential risks.
-2. **Implement** — Write the code. Follow existing patterns in the codebase.
-3. **Test** — Verify the change compiles (`cargo build`) and passes tests (`cargo test`).
-4. **Lint** — Run `cargo clippy` and `cargo fmt --check`. Fix all warnings.
-5. **Commit** — Write a clear commit message following the format above.
+1. **Plan** -- Understand the requirements. Identify affected files and potential risks.
+2. **Implement** -- Write the code. Follow existing patterns in the codebase.
+3. **Test** -- Verify the change compiles (`cargo build`) and passes tests (`cargo test`).
+4. **Lint** -- Run `cargo clippy` and `cargo fmt --check`. Fix all warnings.
+5. **Commit** -- Write a clear commit message following the format above.
 
 ### Pull Request Guidelines
 

@@ -44,5 +44,5 @@ Group imports in this order, separated by blank lines:
 - Code is read more than written. Optimize for readability.
 - Self-documenting code preferred over comments.
 - Comments should explain WHY, not WHAT.
-- No hardcoded values — use constants or configuration.
-- No magic numbers — name them as constants.
+- No hardcoded values -- use constants or configuration.
+- No magic numbers -- name them as constants.

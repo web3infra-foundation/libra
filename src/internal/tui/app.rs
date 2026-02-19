@@ -824,11 +824,10 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 (text.clone(), None)
             };
 
-        // Resolve agent: from command, or auto-select via router
+        // Agent is only selected via slash command, not auto-detected
         let agent = agent_name
             .as_deref()
-            .and_then(|name| self.agent_router.get(name))
-            .or_else(|| self.agent_router.select(&effective_text));
+            .and_then(|name| self.agent_router.get(name));
 
         let agent_prompt = agent.map(|a| a.system_prompt.clone());
         let allowed_tools = agent.map(|a| a.tools.clone()).filter(|t| !t.is_empty());

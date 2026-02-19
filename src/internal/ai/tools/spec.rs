@@ -248,7 +248,7 @@ IMPORTANT:
 - When writing context/removed/added lines from `read_file` output, strip the `L{n}: ` line-number prefix (preserve indentation after the prefix).
 - Blank lines MUST be included as context lines. Represent a blank context line as a single space ` ` on its own line.
 
-Your patch language is a stripped‑down, file‑oriented diff format designed to be easy to parse and safe to apply. You can think of it as a high‑level envelope:
+Your patch language is a stripped-down, file-oriented diff format designed to be easy to parse and safe to apply. You can think of it as a high-level envelope:
 
 *** Begin Patch
 [ one or more file sections ]
@@ -265,9 +265,9 @@ Each operation starts with one of three headers:
 May be immediately followed by *** Move to: <new path> if you want to rename the file.
 Then one or more "hunks", each introduced by @@ (optionally followed by a hunk header).
 Within a hunk each line starts with:
-' ' (space) – unchanged context line (line already exists in the file, kept as-is)
-'-'         – removed line (line exists in the file and will be deleted)
-'+'         – added line (new line to be inserted)
+' ' (space) - unchanged context line (line already exists in the file, kept as-is)
+'-'         - removed line (line exists in the file and will be deleted)
+'+'         - added line (new line to be inserted)
 
 For instructions on [context_before] and [context_after]:
 - By default, show 3 lines of code immediately above and 3 lines immediately below each change. If a change is within 3 lines of a previous change, do NOT duplicate the first change's [context_after] lines in the second change's [context_before] lines.
@@ -318,7 +318,7 @@ It is important to remember:
 - You must prefix new lines with `+` even when creating a new file
 - File references can only be relative, NEVER ABSOLUTE.
 - IMPORTANT: When writing context or removed lines from `read_file` output, strip the `L{n}: ` line-number prefix. For example, `L3:     my_func():` becomes `    my_func():` (preserve any indentation that follows the prefix).
-- IMPORTANT: Blank lines MUST be included as context lines. In `read_file` output a blank line appears as `L{n}: ` (nothing after the space). Represent it in the patch as a single space ` ` on its own line. Do NOT skip blank lines — omitting them will cause the patch to fail to locate the target region.
+- IMPORTANT: Blank lines MUST be included as context lines. In `read_file` output a blank line appears as `L{n}: ` (nothing after the space). Represent it in the patch as a single space ` ` on its own line. Do NOT skip blank lines -- omitting them will cause the patch to fail to locate the target region.
 "#,
         )
         .with_parameters(FunctionParameters::object(
