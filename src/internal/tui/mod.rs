@@ -11,7 +11,7 @@ mod diff;
 mod history_cell;
 mod terminal;
 
-pub use app::{App, AppExitInfo, ExitReason};
+pub use app::{App, AppConfig, AppExitInfo, ExitReason};
 pub use app_event::{AgentEvent, AgentStatus, AppEvent, ExitMode};
 pub use diff::{DiffSummary, FileChange};
 pub use history_cell::DiffHistoryCell;

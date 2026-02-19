@@ -57,7 +57,11 @@ pub enum AppEvent {
     /// Request to exit the application.
     Exit(ExitMode),
     /// Submit a user message.
-    SubmitUserMessage { text: String },
+    SubmitUserMessage {
+        text: String,
+        /// If set, restrict tools for this message (agent tool restriction).
+        allowed_tools: Option<Vec<String>>,
+    },
     /// Insert a history cell into the chat.
     InsertHistoryCell(Box<dyn HistoryCell>),
     /// Tool call is starting.
