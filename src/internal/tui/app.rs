@@ -21,7 +21,10 @@ use super::{
 };
 use crate::internal::ai::{
     agent::{ToolLoopConfig, run_tool_loop_with_history_and_observer},
+    agents::AgentRouter,
+    commands::CommandDispatcher,
     completion::{CompletionModel, Message},
+    session::{SessionState, SessionStore},
     tools::{ToolOutput, ToolRegistry},
 };
 
@@ -39,6 +42,15 @@ pub enum ExitReason {
 pub struct AppExitInfo {
     /// The reason for exiting.
     pub reason: ExitReason,
+}
+
+/// Configuration for creating an App.
+pub struct AppConfig {
+    pub welcome_message: String,
+    pub command_dispatcher: CommandDispatcher,
+    pub agent_router: AgentRouter,
+    pub session: SessionState,
+    pub session_store: SessionStore,
 }
 
 /// The main application struct.
@@ -71,6 +83,14 @@ pub struct App<M: CompletionModel> {
     scheduled_draw_task: Option<JoinHandle<()>>,
     /// Initial welcome message.
     welcome_message: String,
+    /// Slash command dispatcher.
+    command_dispatcher: CommandDispatcher,
+    /// Agent router for auto-selection.
+    agent_router: AgentRouter,
+    /// Session state for persistence.
+    session: SessionState,
+    /// Session store for saving/loading.
+    session_store: SessionStore,
 }
 
 impl<M: CompletionModel + Clone + 'static> App<M> {
@@ -80,7 +100,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         model: M,
         registry: Arc<ToolRegistry>,
         config: ToolLoopConfig,
-        welcome_message: String,
+        app_config: AppConfig,
     ) -> Self {
         let (app_event_tx, app_event_rx) = mpsc::unbounded_channel();
         Self {
@@ -97,7 +117,11 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             last_draw_time: Instant::now(),
             agent_task: None,
             scheduled_draw_task: None,
-            welcome_message,
+            welcome_message: app_config.welcome_message,
+            command_dispatcher: app_config.command_dispatcher,
+            agent_router: app_config.agent_router,
+            session: app_config.session,
+            session_store: app_config.session_store,
         }
     }
 
@@ -107,6 +131,13 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         self.tui.enter_alt_screen()?;
         let run_result = self.run_in_alt_screen().await;
         let leave_result = self.tui.leave_alt_screen();
+
+        // Save session on exit (best-effort)
+        if self.session.message_count() > 0
+            && let Err(e) = self.session_store.save(&self.session)
+        {
+            tracing::warn!("Failed to save session: {}", e);
+        }
 
         match (run_result, leave_result) {
             (Ok(exit_info), Ok(())) => Ok(exit_info),
@@ -317,7 +348,13 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     return Ok(true);
                 }
             },
-            AppEvent::SubmitUserMessage { text } => {
+            AppEvent::SubmitUserMessage {
+                text,
+                allowed_tools,
+            } => {
+                // Track in session
+                self.session.add_user_message(&text);
+
                 // Add user cell immediately
                 self.widget
                     .add_cell(Box::new(UserHistoryCell::new(text.clone())));
@@ -331,7 +368,8 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 // Prepare components for background task
                 let model = self.model.clone();
                 let registry = self.registry.clone();
-                let config = self.config.clone();
+                let mut config = self.config.clone();
+                config.allowed_tools = allowed_tools;
                 let history = self.history.clone();
                 let tx = self.app_event_tx.clone();
                 let user_text = text.clone();
@@ -423,6 +461,10 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     AgentEvent::ResponseComplete { text, new_history } => {
                         self.agent_task = None;
                         self.history = new_history;
+
+                        // Track in session
+                        self.session.add_assistant_message(&text);
+
                         // Find and complete the streaming assistant cell
                         // (may not be the last cell if tool calls were made)
                         for cell in self.widget.cells.iter_mut().rev() {
@@ -490,9 +532,35 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         Ok(false)
     }
 
-    /// Submit a user message.
+    /// Submit a user message, expanding slash commands and applying agent context.
     fn submit_message(&mut self, text: String) {
-        let _ = self.app_event_tx.send(AppEvent::SubmitUserMessage { text });
+        let (effective_text, agent_name) =
+            if let Some(result) = self.command_dispatcher.dispatch(&text) {
+                (result.prompt, result.agent)
+            } else {
+                (text.clone(), None)
+            };
+
+        // Resolve agent: from command, or auto-select via router
+        let agent = agent_name
+            .as_deref()
+            .and_then(|name| self.agent_router.get(name))
+            .or_else(|| self.agent_router.select(&effective_text));
+
+        let agent_prompt = agent.map(|a| a.system_prompt.clone());
+        let allowed_tools = agent.map(|a| a.tools.clone()).filter(|t| !t.is_empty());
+
+        // If an agent was selected, prepend its system prompt to the user message
+        let final_text = if let Some(prompt) = agent_prompt {
+            format!("{prompt}\n\n---\n\n{effective_text}")
+        } else {
+            effective_text
+        };
+
+        let _ = self.app_event_tx.send(AppEvent::SubmitUserMessage {
+            text: final_text,
+            allowed_tools,
+        });
     }
 
     fn interrupt_agent_task(&mut self) {

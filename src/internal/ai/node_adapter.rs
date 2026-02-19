@@ -108,6 +108,8 @@ impl<M: CompletionModel> ToolLoopAction<M> {
                 preamble,
                 temperature,
                 max_steps,
+                hook_runner: None,
+                allowed_tools: None,
             },
         }
     }

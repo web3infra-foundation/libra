@@ -153,12 +153,12 @@ fn parse_results(stdout: &[u8], limit: usize) -> Vec<String> {
         if line.is_empty() {
             continue;
         }
-        if let Ok(text) = std::str::from_utf8(line) {
-            if !text.is_empty() {
-                results.push(text.to_string());
-                if results.len() == limit {
-                    break;
-                }
+        if let Ok(text) = std::str::from_utf8(line)
+            && !text.is_empty()
+        {
+            results.push(text.to_string());
+            if results.len() == limit {
+                break;
             }
         }
     }

@@ -23,7 +23,7 @@ use crate::internal::{
             handlers::{ApplyPatchHandler, GrepFilesHandler, ListDirHandler, ReadFileHandler},
         },
     },
-    tui::{App, Tui, tui_init, tui_restore},
+    tui::{App, AppConfig, Tui, tui_init, tui_restore},
 };
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -62,6 +62,14 @@ pub struct CodeArgs {
     /// Sampling temperature
     #[arg(long)]
     pub temperature: Option<f64>,
+
+    /// Operating context mode (dev, review, research)
+    #[arg(long)]
+    pub context: Option<String>,
+
+    /// Resume the most recent session
+    #[arg(long)]
+    pub resume: bool,
 }
 
 pub async fn execute(args: CodeArgs) {
@@ -163,9 +171,10 @@ async fn execute_tui(args: CodeArgs) {
         }
     };
 
-    let preamble = system_preamble(&working_dir);
+    let preamble = system_preamble(&working_dir, args.context.as_deref());
     let temperature = args.temperature;
     let max_steps = args.max_steps;
+    let resume = args.resume;
 
     let registry = Arc::new(
         ToolRegistryBuilder::with_working_dir(working_dir)
@@ -189,13 +198,16 @@ async fn execute_tui(args: CodeArgs) {
             let model_name = args.model.unwrap_or_else(|| GEMINI_2_5_FLASH.to_string());
             let model = client.completion_model(&model_name);
             run_tui_with_model(
-                args.host,
-                args.port,
                 model,
-                registry.clone(),
-                preamble,
-                temperature,
-                max_steps,
+                TuiParams {
+                    host: args.host,
+                    port: args.port,
+                    registry: registry.clone(),
+                    preamble,
+                    temperature,
+                    max_steps,
+                    resume,
+                },
             )
             .await;
         }
@@ -210,13 +222,16 @@ async fn execute_tui(args: CodeArgs) {
             let model_name = args.model.unwrap_or_else(|| GPT_4O_MINI.to_string());
             let model = client.completion_model(&model_name);
             run_tui_with_model(
-                args.host,
-                args.port,
                 model,
-                registry.clone(),
-                preamble,
-                temperature,
-                max_steps,
+                TuiParams {
+                    host: args.host,
+                    port: args.port,
+                    registry: registry.clone(),
+                    preamble,
+                    temperature,
+                    max_steps,
+                    resume,
+                },
             )
             .await;
         }
@@ -231,34 +246,54 @@ async fn execute_tui(args: CodeArgs) {
             let model_name = args.model.unwrap_or_else(|| CLAUDE_3_5_SONNET.to_string());
             let model = client.completion_model(&model_name);
             run_tui_with_model(
-                args.host,
-                args.port,
                 model,
-                registry.clone(),
-                preamble,
-                temperature,
-                max_steps,
+                TuiParams {
+                    host: args.host,
+                    port: args.port,
+                    registry: registry.clone(),
+                    preamble,
+                    temperature,
+                    max_steps,
+                    resume,
+                },
             )
             .await;
         }
     }
 }
 
-async fn run_tui_with_model<M>(
+struct TuiParams {
     host: String,
     port: u16,
-    model: M,
     registry: Arc<ToolRegistry>,
     preamble: String,
     temperature: Option<f64>,
     max_steps: usize,
+    resume: bool,
+}
+
+async fn run_tui_with_model<M>(
+    model: M,
+    params: TuiParams,
 ) where
     M: crate::internal::ai::completion::CompletionModel + 'static,
 {
+    let registry = params.registry;
+    let hook_runner = {
+        let runner = crate::internal::ai::hooks::HookRunner::load(registry.working_dir());
+        if runner.has_hooks() {
+            Some(std::sync::Arc::new(runner))
+        } else {
+            None
+        }
+    };
+
     let config = crate::internal::ai::agent::ToolLoopConfig {
-        preamble: Some(preamble),
-        temperature,
-        max_steps,
+        preamble: Some(params.preamble),
+        temperature: params.temperature,
+        max_steps: params.max_steps,
+        hook_runner,
+        allowed_tools: None,
     };
 
     // Initialize terminal
@@ -277,7 +312,7 @@ async fn run_tui_with_model<M>(
 
     let tui = Tui::new(terminal);
 
-    let (web_handle, web_line) = match start_web_server(&host, port).await {
+    let (web_handle, web_line) = match start_web_server(&params.host, params.port).await {
         Ok(handle) => {
             let line = format!("Web: http://{}", handle.addr);
             (Some(handle), line)
@@ -290,8 +325,41 @@ async fn run_tui_with_model<M>(
         web_line
     );
 
+    // Load slash commands
+    let commands = crate::internal::ai::commands::load_commands(registry.working_dir());
+    let command_dispatcher = crate::internal::ai::commands::CommandDispatcher::new(commands);
+
+    // Load agent definitions
+    let agents = crate::internal::ai::agents::load_agents(registry.working_dir());
+    let agent_router = crate::internal::ai::agents::AgentRouter::new(agents);
+
+    // Set up session persistence
+    let working_dir_str = registry.working_dir().to_string_lossy().to_string();
+    let session_store =
+        crate::internal::ai::session::SessionStore::new(registry.working_dir());
+    let session = if params.resume {
+        match session_store.load_latest() {
+            Ok(Some(s)) => s,
+            _ => crate::internal::ai::session::SessionState::new(&working_dir_str),
+        }
+    } else {
+        crate::internal::ai::session::SessionState::new(&working_dir_str)
+    };
+
     // Create and run app
-    let mut app = App::new(tui, model, registry, config, welcome);
+    let mut app = App::new(
+        tui,
+        model,
+        registry,
+        config,
+        AppConfig {
+            welcome_message: welcome,
+            command_dispatcher,
+            agent_router,
+            session,
+            session_store,
+        },
+    );
 
     match app.run().await {
         Ok(exit_info) => {
@@ -309,11 +377,14 @@ async fn run_tui_with_model<M>(
     }
 }
 
-fn system_preamble(working_dir: &std::path::Path) -> String {
-    format!(
-        "You are a coding assistant. You help with programming tasks, code review, and file operations. \
-Working directory: {}. \
-Be concise and helpful in your responses.",
-        working_dir.display()
-    )
+fn system_preamble(working_dir: &std::path::Path, context: Option<&str>) -> String {
+    let mut builder = crate::internal::ai::prompt::SystemPromptBuilder::new(working_dir);
+    if let Some(ctx_str) = context {
+        if let Ok(mode) = ctx_str.parse::<crate::internal::ai::prompt::ContextMode>() {
+            builder = builder.with_context(mode);
+        } else {
+            tracing::warn!(context = ctx_str, "unknown context mode, ignoring");
+        }
+    }
+    builder.build()
 }

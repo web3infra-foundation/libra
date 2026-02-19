@@ -23,10 +23,15 @@
 //! ```
 
 pub mod agent;
+pub mod agents;
 pub mod client;
+pub mod commands;
 pub mod completion;
+pub mod hooks;
 pub mod node_adapter;
+pub mod prompt;
 pub mod providers;
+pub mod session;
 pub mod tools;
 
 pub use agent::{Agent, AgentBuilder, ChatAgent};
