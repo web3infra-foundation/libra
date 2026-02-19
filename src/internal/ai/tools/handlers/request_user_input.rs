@@ -87,8 +87,9 @@ impl ToolHandler for RequestUserInputHandler {
             .map_err(|_| ToolError::ExecutionFailed("User input was cancelled".into()))?;
 
         // Serialize the response as JSON for the model.
-        let json = serde_json::to_string(&response)
-            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to serialize response: {e}")))?;
+        let json = serde_json::to_string(&response).map_err(|e| {
+            ToolError::ExecutionFailed(format!("Failed to serialize response: {e}"))
+        })?;
 
         Ok(ToolOutput::success(json))
     }

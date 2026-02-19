@@ -120,7 +120,12 @@ impl HistoryCell for UserHistoryCell {
         )];
 
         for line in self.message.lines() {
-            lines.extend(wrap_text(line, "  ", width, Style::default().fg(Color::White)));
+            lines.extend(wrap_text(
+                line,
+                "  ",
+                width,
+                Style::default().fg(Color::White),
+            ));
         }
 
         lines.push(Line::raw("")); // Empty line for spacing

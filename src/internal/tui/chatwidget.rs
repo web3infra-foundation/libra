@@ -97,8 +97,8 @@ impl ChatWidget {
 
         // Split into chat area and bottom pane
         let chunks = Layout::vertical([
-            Constraint::Min(3),                    // Chat area (min 3 lines)
-            Constraint::Length(bottom_height),      // Bottom pane (dynamic)
+            Constraint::Min(3),                // Chat area (min 3 lines)
+            Constraint::Length(bottom_height), // Bottom pane (dynamic)
         ])
         .split(area);
 

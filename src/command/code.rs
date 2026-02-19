@@ -166,8 +166,9 @@ async fn execute_tui(args: CodeArgs) {
     let temperature = args.temperature;
 
     // Create the bridge channel for request_user_input tool <-> TUI communication.
-    let (user_input_tx, user_input_rx) =
-        tokio::sync::mpsc::unbounded_channel::<crate::internal::ai::tools::context::UserInputRequest>();
+    let (user_input_tx, user_input_rx) = tokio::sync::mpsc::unbounded_channel::<
+        crate::internal::ai::tools::context::UserInputRequest,
+    >();
 
     let registry = Arc::new(
         ToolRegistryBuilder::with_working_dir(working_dir)

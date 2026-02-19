@@ -377,10 +377,7 @@ impl BottomPane {
         let inner = block.inner(area);
 
         let display = if self.user_input_notes_text.is_empty() {
-            Text::styled(
-                "Tab to add notes...",
-                Style::default().fg(Color::DarkGray),
-            )
+            Text::styled("Tab to add notes...", Style::default().fg(Color::DarkGray))
         } else {
             Text::raw(&self.user_input_notes_text)
         };

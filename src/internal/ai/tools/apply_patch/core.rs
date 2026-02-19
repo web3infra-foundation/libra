@@ -82,7 +82,11 @@ pub fn apply_patch(patch: &str, cwd: &Path) -> Result<AffectedPaths, ApplyPatchE
 }
 
 /// Applies hunks to the filesystem.
-fn apply_hunks(hunks: &[Hunk], cwd: &Path) -> Result<AffectedPaths, ApplyPatchError> {
+///
+/// **Caller must validate** that all paths in `hunks` are within the intended
+/// sandbox directory before calling this function — it performs filesystem I/O
+/// immediately with no path containment checks.
+pub fn apply_hunks(hunks: &[Hunk], cwd: &Path) -> Result<AffectedPaths, ApplyPatchError> {
     if hunks.is_empty() {
         return Err(ApplyPatchError::ComputeReplacements(
             "No files were modified.".to_string(),
@@ -687,15 +691,18 @@ mod tests {
             concat!(
                 "*** Update File: {}\n",
                 "@@\n",
-                "## Libra\n",      // context without space prefix
-                "\n",              // empty context
+                "## Libra\n", // context without space prefix
+                "\n",         // empty context
                 "-`Libra` is old\n",
                 "+`Libra` is new",
             ),
             path.display()
         ));
         let result = apply_patch(&patch, dir.path());
-        assert!(result.is_ok(), "missing-space context should work: {result:?}");
+        assert!(
+            result.is_ok(),
+            "missing-space context should work: {result:?}"
+        );
         let contents = fs::read_to_string(&path).unwrap();
         assert_eq!(contents, "## Libra\n\n`Libra` is new\n");
     }
@@ -712,15 +719,18 @@ mod tests {
             concat!(
                 "*** Update File: {}\n",
                 "@@\n",
-                "L1:  fn main() {{\n",   // L1: + space + content
-                "L2: -    old();\n",     // L2: + removal
-                "L3: +    new();\n",     // L3: + addition
-                "L4:  }}\n",             // L4: + space + content
+                "L1:  fn main() {{\n", // L1: + space + content
+                "L2: -    old();\n",   // L2: + removal
+                "L3: +    new();\n",   // L3: + addition
+                "L4:  }}\n",           // L4: + space + content
             ),
             path.display()
         ));
         let result = apply_patch(&patch, dir.path());
-        assert!(result.is_ok(), "L{{n}}: prefix should be stripped: {result:?}");
+        assert!(
+            result.is_ok(),
+            "L{{n}}: prefix should be stripped: {result:?}"
+        );
         let contents = fs::read_to_string(&path).unwrap();
         assert_eq!(contents, "fn main() {\n    new();\n}\n");
     }

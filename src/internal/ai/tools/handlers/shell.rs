@@ -3,13 +3,10 @@
 //! Executes shell commands in the user's default shell with configurable
 //! working directory and timeout. Output is capped to prevent memory issues.
 
-use std::path::Path;
-use std::process::Stdio;
+use std::{path::Path, process::Stdio};
 
 use async_trait::async_trait;
-use tokio::io::AsyncReadExt;
-use tokio::process::Command;
-use tokio::time::Duration;
+use tokio::{io::AsyncReadExt, process::Command, time::Duration};
 
 use super::parse_arguments;
 use crate::internal::ai::tools::{
@@ -70,7 +67,12 @@ impl ToolHandler for ShellHandler {
 
         let output = run_shell(&args.command, &cwd, args.timeout_ms).await?;
 
-        let formatted = format_output(output.exit_code, &output.stdout, &output.stderr, output.timed_out);
+        let formatted = format_output(
+            output.exit_code,
+            &output.stdout,
+            &output.stderr,
+            output.timed_out,
+        );
         if output.exit_code == 0 {
             Ok(ToolOutput::success(formatted))
         } else {
@@ -116,11 +118,7 @@ fn format_output(exit_code: i32, stdout: &str, stderr: &str, timed_out: bool) ->
 
 // ── Execution ─────────────────────────────────────────────────────────────────
 
-async fn run_shell(
-    command: &str,
-    cwd: &Path,
-    timeout_ms: Option<u64>,
-) -> ToolResult<ExecOutput> {
+async fn run_shell(command: &str, cwd: &Path, timeout_ms: Option<u64>) -> ToolResult<ExecOutput> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
     let timeout_dur = Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
 
@@ -141,8 +139,10 @@ async fn run_shell(
 
     // Drain both streams concurrently. Continuing to drain after MAX_OUTPUT_BYTES
     // prevents the process from blocking on a full pipe buffer.
-    let stdout_task = tokio::spawn(async move { drain_reader(stdout_pipe, MAX_OUTPUT_BYTES).await });
-    let stderr_task = tokio::spawn(async move { drain_reader(stderr_pipe, MAX_OUTPUT_BYTES).await });
+    let stdout_task =
+        tokio::spawn(async move { drain_reader(stdout_pipe, MAX_OUTPUT_BYTES).await });
+    let stderr_task =
+        tokio::spawn(async move { drain_reader(stderr_pipe, MAX_OUTPUT_BYTES).await });
 
     let (exit_code, timed_out) = tokio::select! {
         status = child.wait() => {
@@ -184,10 +184,7 @@ async fn run_shell(
 
 /// Reads from `reader` into a byte buffer, capping at `max_bytes`.
 /// Continues draining after the cap to prevent pipe-buffer deadlock.
-async fn drain_reader(
-    mut reader: impl AsyncReadExt + Unpin,
-    max_bytes: usize,
-) -> Vec<u8> {
+async fn drain_reader(mut reader: impl AsyncReadExt + Unpin, max_bytes: usize) -> Vec<u8> {
     let mut buf = Vec::with_capacity(4096_usize.min(max_bytes));
     let mut tmp = [0u8; 8192];
     let mut buf_full = false;
@@ -309,7 +306,10 @@ mod tests {
         );
         let result = ShellHandler.handle(inv).await.unwrap();
         let text = result.as_text().unwrap();
-        assert!(text.contains("[stderr]"), "expected [stderr] label:\n{text}");
+        assert!(
+            text.contains("[stderr]"),
+            "expected [stderr] label:\n{text}"
+        );
         assert!(text.contains("out"), "{text}");
         assert!(text.contains("err"), "{text}");
     }
@@ -320,15 +320,15 @@ mod tests {
     async fn test_shell_workdir_default() {
         let temp = TempDir::new().unwrap();
         let working_dir = temp.path().to_path_buf();
-        let inv = make_invocation(
-            serde_json::json!({ "command": "pwd" }),
-            working_dir.clone(),
-        );
+        let inv = make_invocation(serde_json::json!({ "command": "pwd" }), working_dir.clone());
         let result = ShellHandler.handle(inv).await.unwrap();
         let text = result.as_text().unwrap();
         // Compare the last path component to avoid macOS /tmp → /private/tmp symlink issues.
         let dir_name = working_dir.file_name().unwrap().to_str().unwrap();
-        assert!(text.contains(dir_name), "expected dir name in output:\n{text}");
+        assert!(
+            text.contains(dir_name),
+            "expected dir name in output:\n{text}"
+        );
     }
 
     #[tokio::test]
@@ -346,7 +346,10 @@ mod tests {
         );
         let result = ShellHandler.handle(inv).await.unwrap();
         let text = result.as_text().unwrap();
-        assert!(text.contains("inner_subdir"), "expected inner_subdir in output:\n{text}");
+        assert!(
+            text.contains("inner_subdir"),
+            "expected inner_subdir in output:\n{text}"
+        );
     }
 
     #[tokio::test]

@@ -128,9 +128,7 @@ async fn run_rg_search(
 
     let output = timeout(GREP_TIMEOUT, cmd.output())
         .await
-        .map_err(|_| {
-            ToolError::ExecutionFailed("rg timed out after 30 seconds".to_string())
-        })?
+        .map_err(|_| ToolError::ExecutionFailed("rg timed out after 30 seconds".to_string()))?
         .map_err(|e| {
             ToolError::ExecutionFailed(format!(
                 "failed to launch rg: {e}. Ensure ripgrep is installed and on PATH."
@@ -153,12 +151,12 @@ fn parse_results(stdout: &[u8], limit: usize) -> Vec<String> {
         if line.is_empty() {
             continue;
         }
-        if let Ok(text) = std::str::from_utf8(line) {
-            if !text.is_empty() {
-                results.push(text.to_string());
-                if results.len() == limit {
-                    break;
-                }
+        if let Ok(text) = std::str::from_utf8(line)
+            && !text.is_empty()
+        {
+            results.push(text.to_string());
+            if results.len() == limit {
+                break;
             }
         }
     }
@@ -362,6 +360,9 @@ mod tests {
     #[test]
     fn test_parse_results_truncates_at_limit() {
         let stdout = b"/a\n/b\n/c\n";
-        assert_eq!(parse_results(stdout, 2), vec!["/a".to_string(), "/b".to_string()]);
+        assert_eq!(
+            parse_results(stdout, 2),
+            vec!["/a".to_string(), "/b".to_string()]
+        );
     }
 }

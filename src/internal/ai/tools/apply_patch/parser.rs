@@ -83,6 +83,24 @@ impl Hunk {
             Hunk::UpdateFile { path, .. } => cwd.join(path),
         }
     }
+
+    /// Return every resolved path that this hunk will touch on the filesystem,
+    /// including `move_path` targets for `UpdateFile` hunks.
+    pub fn all_resolved_paths(&self, cwd: &Path) -> Vec<PathBuf> {
+        match self {
+            Hunk::AddFile { path, .. } => vec![cwd.join(path)],
+            Hunk::DeleteFile { path } => vec![cwd.join(path)],
+            Hunk::UpdateFile {
+                path, move_path, ..
+            } => {
+                let mut paths = vec![cwd.join(path)];
+                if let Some(dest) = move_path {
+                    paths.push(cwd.join(dest));
+                }
+                paths
+            }
+        }
+    }
 }
 
 use Hunk::*;
@@ -167,7 +185,7 @@ fn parse_patch_text(patch: &str, mode: ParseMode) -> Result<ApplyPatchArgs, Pars
     // In lenient mode, auto-complete a truncated patch that is missing the
     // closing *** End Patch marker. This handles the common model failure of
     // stopping generation before the patch is fully written.
-    let mut auto_completed = String::new();
+    let auto_completed;
     let effective_text = if matches!(mode, ParseMode::Lenient) {
         let first_line = trimmed.lines().next().map(str::trim).unwrap_or("");
         let last_line = trimmed.lines().last().map(str::trim).unwrap_or("");
@@ -399,10 +417,10 @@ fn strip_line_number_prefix_optional_space(s: &str) -> &str {
     if let Some(stripped) = strip_line_number_prefix(s) {
         return stripped;
     }
-    if let Some(rest) = s.strip_prefix(' ') {
-        if let Some(stripped) = strip_line_number_prefix(rest) {
-            return stripped;
-        }
+    if let Some(rest) = s.strip_prefix(' ')
+        && let Some(stripped) = strip_line_number_prefix(rest)
+    {
+        return stripped;
     }
     s
 }
@@ -898,7 +916,10 @@ mod tests {
         // A truncated patch (missing *** End Patch) should be auto-completed in lenient mode.
         let truncated = "*** Begin Patch\n*** Update File: foo.txt\n@@\n-old\n+new";
         let result = parse_patch_text(truncated, ParseMode::Lenient);
-        assert!(result.is_ok(), "expected lenient mode to auto-complete: {result:?}");
+        assert!(
+            result.is_ok(),
+            "expected lenient mode to auto-complete: {result:?}"
+        );
         let args = result.unwrap();
         assert_eq!(args.hunks.len(), 1);
         match &args.hunks[0] {
@@ -942,7 +963,7 @@ mod tests {
             "@@\n",
             "-# Old Title\n",
             "+# New Title\n",
-            " \n",            // empty context line (single space)
+            " \n",           // empty context line (single space)
             " Some text.\n", // context line (space + content)
             "## Next Section\n",
             "*** End Patch",
@@ -970,10 +991,10 @@ mod tests {
             "*** Begin Patch\n",
             "*** Update File: test.rs\n",
             "@@\n",
-            "L1:  fn main() {\n",   // context line: L1: then space + content
-            "L2: -    old();\n",     // removal: L2: then -content
-            "L3: +    new();\n",     // addition: L3: then +content
-            "L4:  }\n",             // context line
+            "L1:  fn main() {\n", // context line: L1: then space + content
+            "L2: -    old();\n",  // removal: L2: then -content
+            "L3: +    new();\n",  // addition: L3: then +content
+            "L4:  }\n",           // context line
             "*** End Patch",
         );
         let result = parse_patch_text(patch, ParseMode::Lenient);
@@ -1000,7 +1021,7 @@ mod tests {
             "*** Update File: test.txt\n",
             "@@\n",
             "L1:  first\n",
-            "L2: \n",           // blank line: L2: then nothing → empty after strip
+            "L2: \n", // blank line: L2: then nothing → empty after strip
             "L3: -old\n",
             "L4: +new\n",
             "*** End Patch",

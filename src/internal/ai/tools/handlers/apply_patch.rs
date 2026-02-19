@@ -21,7 +21,10 @@ impl ToolHandler for ApplyPatchHandler {
     }
 
     fn matches_kind(&self, payload: &ToolPayload) -> bool {
-        matches!(payload, ToolPayload::Function { .. } | ToolPayload::Custom { .. })
+        matches!(
+            payload,
+            ToolPayload::Function { .. } | ToolPayload::Custom { .. }
+        )
     }
 
     async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, ToolError> {
@@ -39,26 +42,24 @@ impl ToolHandler for ApplyPatchHandler {
             _ => unreachable!("matches_kind limits payload types"),
         };
 
-        // Apply the patch (paths in patch content are relative to working_dir)
-        let working_dir_clone = working_dir.clone();
+        // Parse the patch first, then validate all paths BEFORE any filesystem I/O.
+        let parsed = apply_patch::parse_patch(&patch_text)
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+
+        for hunk in &parsed.hunks {
+            for path in hunk.all_resolved_paths(&working_dir) {
+                validate_path(&path, &working_dir)?;
+            }
+        }
+
+        // All paths validated — safe to apply.
+        let working_dir_for_task = working_dir.clone();
+        let hunks = parsed.hunks.clone();
         let result = tokio::task::spawn_blocking(move || {
-            apply_patch::apply_patch(&patch_text, &working_dir_clone)
+            apply_patch::apply_hunks(&hunks, &working_dir_for_task)
         })
         .await
         .map_err(|e| ToolError::ExecutionFailed(e.to_string()))??;
-
-        // Validate all affected paths are within working directory
-        // Note: We don't canonicalize paths because deleted files won't exist,
-        // and symlink resolution can cause path mismatches on macOS.
-        // The apply_patch function already constructs absolute paths from relative ones.
-        for path in result
-            .added
-            .iter()
-            .chain(result.modified.iter())
-            .chain(result.deleted.iter())
-        {
-            validate_path(path, &working_dir)?;
-        }
 
         // Format result
         let output = apply_patch::format_summary(&result);
@@ -324,6 +325,70 @@ mod tests {
 
         let result = handler.handle(invocation).await;
         assert!(matches!(result, Err(ToolError::PathOutsideWorkingDir(_))));
+
+        // Verify the file was NOT deleted (path validation prevented the operation)
+        assert!(
+            outside.path().exists(),
+            "File outside working dir should NOT be deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_traversal_add_file_blocked() {
+        let temp_dir = TempDir::new().unwrap();
+        let outside_dir = TempDir::new().unwrap();
+        let target = outside_dir.path().join("evil.txt");
+
+        let handler = ApplyPatchHandler;
+        let invocation = ToolInvocation::new(
+            "call-1",
+            "apply_patch",
+            ToolPayload::Function {
+                arguments: serde_json::json!({
+                    "input": wrap_patch(&format!(
+                        "*** Add File: {}\n+malicious content",
+                        target.display()
+                    ))
+                })
+                .to_string(),
+            },
+            temp_dir.path().to_path_buf(),
+        );
+
+        let result = handler.handle(invocation).await;
+        assert!(matches!(result, Err(ToolError::PathOutsideWorkingDir(_))));
+
+        // Verify the file was NOT created
+        assert!(
+            !target.exists(),
+            "File outside working dir should NOT be created"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_relative_traversal_blocked() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let handler = ApplyPatchHandler;
+        let invocation = ToolInvocation::new(
+            "call-1",
+            "apply_patch",
+            ToolPayload::Function {
+                arguments: serde_json::json!({
+                    "input": wrap_patch(
+                        "*** Add File: ../../etc/evil.txt\n+malicious"
+                    )
+                })
+                .to_string(),
+            },
+            temp_dir.path().to_path_buf(),
+        );
+
+        let result = handler.handle(invocation).await;
+        assert!(
+            result.is_err(),
+            "Relative path traversal should be rejected"
+        );
     }
 
     #[tokio::test]
@@ -396,7 +461,7 @@ mod tests {
 @@
  x
 -y
-+z"#
++z"#,
                 ),
             },
             working_dir,

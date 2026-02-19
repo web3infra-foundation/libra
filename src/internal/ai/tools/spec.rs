@@ -98,7 +98,11 @@ impl ToolSpec {
                     "string",
                     "Working directory (must be absolute and within the sandbox)",
                 ),
-                ("timeout_ms", "number", "Timeout in milliseconds (default: 10000)"),
+                (
+                    "timeout_ms",
+                    "number",
+                    "Timeout in milliseconds (default: 10000)",
+                ),
             ],
             [("command", true), ("workdir", false), ("timeout_ms", false)],
         ))

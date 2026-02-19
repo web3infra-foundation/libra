@@ -334,13 +334,10 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
     /// Handle keyboard input while in the AwaitingUserInput state.
     fn handle_user_input_key(&mut self, key: crossterm::event::KeyEvent) {
-        let is_freeform = self
-            .pending_user_input
-            .as_ref()
-            .is_some_and(|p| {
-                let q = &p.request.questions[p.current_question];
-                q.options.as_ref().is_none_or(|o| o.is_empty())
-            });
+        let is_freeform = self.pending_user_input.as_ref().is_some_and(|p| {
+            let q = &p.request.questions[p.current_question];
+            q.options.as_ref().is_none_or(|o| o.is_empty())
+        });
 
         // If notes are focused, route most keys to the input field.
         let notes_focused = self
@@ -730,12 +727,10 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         } else {
                             (None, Vec::new())
                         };
-                    let cell =
-                        Box::new(PlanUpdateHistoryCell::new(call_id, explanation, steps));
+                    let cell = Box::new(PlanUpdateHistoryCell::new(call_id, explanation, steps));
                     self.insert_before_streaming_assistant(cell);
                 } else {
-                    let cell =
-                        Box::new(ToolCallHistoryCell::new(call_id, tool_name, arguments));
+                    let cell = Box::new(ToolCallHistoryCell::new(call_id, tool_name, arguments));
                     self.insert_before_streaming_assistant(cell);
                 }
                 self.widget

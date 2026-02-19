@@ -194,9 +194,10 @@ async fn collect_entries(
         while let Some(entry) = read_dir.next_entry().await.map_err(|e| {
             ToolError::ExecutionFailed(format!("failed to read directory entry: {e}"))
         })? {
-            let file_type = entry.file_type().await.map_err(|e| {
-                ToolError::ExecutionFailed(format!("failed to inspect entry: {e}"))
-            })?;
+            let file_type = entry
+                .file_type()
+                .await
+                .map_err(|e| ToolError::ExecutionFailed(format!("failed to inspect entry: {e}")))?;
 
             let file_name = entry.file_name();
             let relative = if current_prefix.as_os_str().is_empty() {
@@ -422,7 +423,10 @@ mod tests {
             .unwrap();
         let text = shallow.as_text().unwrap();
         assert!(text.contains("sub/"), "{text}");
-        assert!(!text.contains("leaf.txt"), "depth=1 should not show leaf: {text}");
+        assert!(
+            !text.contains("leaf.txt"),
+            "depth=1 should not show leaf: {text}"
+        );
 
         // depth=3: leaf visible
         let deep = ListDirHandler
@@ -486,7 +490,11 @@ mod tests {
             .unwrap();
         // Only the header line, no entries.
         let text = result.as_text().unwrap();
-        assert_eq!(text.lines().count(), 1, "empty dir should have only header: {text}");
+        assert_eq!(
+            text.lines().count(),
+            1,
+            "empty dir should have only header: {text}"
+        );
     }
 
     // ── Schema ────────────────────────────────────────────────────────────────

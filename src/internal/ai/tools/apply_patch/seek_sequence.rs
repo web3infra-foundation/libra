@@ -141,10 +141,10 @@ pub(crate) fn seek_sequence(
         if let Some(stripped) = strip_line_number_prefix(s) {
             return stripped;
         }
-        if let Some(rest) = s.strip_prefix(' ') {
-            if let Some(stripped) = strip_line_number_prefix(rest) {
-                return stripped;
-            }
+        if let Some(rest) = s.strip_prefix(' ')
+            && let Some(stripped) = strip_line_number_prefix(rest)
+        {
+            return stripped;
         }
         s
     }
@@ -226,7 +226,11 @@ mod tests {
     fn test_line_number_prefix_stripped_sequence() {
         // Multi-line pattern where every line has an L{n}: prefix.
         let lines = to_vec(&["## Libra", "", "`Libra` is a partial implementation"]);
-        let pattern = to_vec(&["L1: ## Libra", "L2: ", "L3: `Libra` is a partial implementation"]);
+        let pattern = to_vec(&[
+            "L1: ## Libra",
+            "L2: ",
+            "L3: `Libra` is a partial implementation",
+        ]);
         assert_eq!(seek_sequence(&lines, &pattern, 0, false), Some(0));
     }
 
