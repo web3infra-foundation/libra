@@ -3,13 +3,14 @@
 //! Executes shell commands in the user's default shell with configurable
 //! working directory and timeout. Output is capped to prevent memory issues.
 
-use std::path::Path;
-use std::process::Stdio;
+use std::{
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::Arc,
+};
 
 use async_trait::async_trait;
-use tokio::io::AsyncReadExt;
-use tokio::process::Command;
-use tokio::time::Duration;
+use tokio::{io::AsyncReadExt, process::Command, sync::Mutex, time::Duration};
 
 use super::parse_arguments;
 use crate::internal::ai::tools::{
@@ -29,6 +30,8 @@ const DEFAULT_TIMEOUT_MS: u64 = 10_000;
 const MAX_OUTPUT_BYTES: usize = 100 * 1024; // 100 KiB
 /// Exit code emitted when a command is killed due to timeout (matches GNU timeout).
 const TIMEOUT_EXIT_CODE: i32 = 124;
+/// Max wait for stream-drain tasks after process exit before forcing completion.
+const STREAM_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[async_trait]
 impl ToolHandler for ShellHandler {
@@ -60,17 +63,16 @@ impl ToolHandler for ShellHandler {
         let args: ShellArgs = parse_arguments(&arguments)?;
 
         // Resolve and validate the execution working directory.
-        let cwd = if let Some(ref workdir) = args.workdir {
-            let p = Path::new(workdir);
-            validate_path(p, &working_dir)?;
-            p.to_path_buf()
-        } else {
-            working_dir
-        };
+        let cwd = resolve_workdir(args.workdir.as_deref(), &working_dir)?;
 
         let output = run_shell(&args.command, &cwd, args.timeout_ms).await?;
 
-        let formatted = format_output(output.exit_code, &output.stdout, &output.stderr, output.timed_out);
+        let formatted = format_output(
+            output.exit_code,
+            &output.stdout,
+            &output.stderr,
+            output.timed_out,
+        );
         if output.exit_code == 0 {
             Ok(ToolOutput::success(formatted))
         } else {
@@ -90,6 +92,12 @@ struct ExecOutput {
     stdout: String,
     stderr: String,
     timed_out: bool,
+}
+
+#[derive(Default, Clone)]
+struct StreamState {
+    bytes: Vec<u8>,
+    truncated: bool,
 }
 
 // ── Output formatting ─────────────────────────────────────────────────────────
@@ -116,11 +124,7 @@ fn format_output(exit_code: i32, stdout: &str, stderr: &str, timed_out: bool) ->
 
 // ── Execution ─────────────────────────────────────────────────────────────────
 
-async fn run_shell(
-    command: &str,
-    cwd: &Path,
-    timeout_ms: Option<u64>,
-) -> ToolResult<ExecOutput> {
+async fn run_shell(command: &str, cwd: &Path, timeout_ms: Option<u64>) -> ToolResult<ExecOutput> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
     let timeout_dur = Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
 
@@ -141,8 +145,18 @@ async fn run_shell(
 
     // Drain both streams concurrently. Continuing to drain after MAX_OUTPUT_BYTES
     // prevents the process from blocking on a full pipe buffer.
-    let stdout_task = tokio::spawn(async move { drain_reader(stdout_pipe, MAX_OUTPUT_BYTES).await });
-    let stderr_task = tokio::spawn(async move { drain_reader(stderr_pipe, MAX_OUTPUT_BYTES).await });
+    let stdout_state = Arc::new(Mutex::new(StreamState::default()));
+    let stderr_state = Arc::new(Mutex::new(StreamState::default()));
+    let stdout_task = tokio::spawn(drain_reader(
+        stdout_pipe,
+        MAX_OUTPUT_BYTES,
+        stdout_state.clone(),
+    ));
+    let stderr_task = tokio::spawn(drain_reader(
+        stderr_pipe,
+        MAX_OUTPUT_BYTES,
+        stderr_state.clone(),
+    ));
 
     let (exit_code, timed_out) = tokio::select! {
         status = child.wait() => {
@@ -160,18 +174,24 @@ async fn run_shell(
         }
     };
 
-    // Both tasks finish once the pipe write-ends are closed (process exit or kill).
-    let stdout_bytes = stdout_task.await.unwrap_or_default();
-    let stderr_bytes = stderr_task.await.unwrap_or_default();
-
-    let (mut stdout, stdout_truncated) = bytes_to_string(stdout_bytes, MAX_OUTPUT_BYTES);
-    let (mut stderr, stderr_truncated) = bytes_to_string(stderr_bytes, MAX_OUTPUT_BYTES);
+    // Background descendants can inherit stdout/stderr; avoid hanging forever waiting
+    // for EOF by bounding how long we wait for the stream readers after process exit.
+    let (mut stdout, stdout_truncated, stdout_incomplete) =
+        collect_stream(stdout_task, stdout_state).await;
+    let (mut stderr, stderr_truncated, stderr_incomplete) =
+        collect_stream(stderr_task, stderr_state).await;
 
     if stdout_truncated {
         stdout.push_str("\n[stdout truncated]");
     }
     if stderr_truncated {
         stderr.push_str("\n[stderr truncated]");
+    }
+    if stdout_incomplete {
+        stdout.push_str("\n[stdout stream incomplete]");
+    }
+    if stderr_incomplete {
+        stderr.push_str("\n[stderr stream incomplete]");
     }
 
     Ok(ExecOutput {
@@ -182,36 +202,82 @@ async fn run_shell(
     })
 }
 
-/// Reads from `reader` into a byte buffer, capping at `max_bytes`.
+/// Reads from `reader` into shared state, capping at `max_bytes`.
 /// Continues draining after the cap to prevent pipe-buffer deadlock.
 async fn drain_reader(
     mut reader: impl AsyncReadExt + Unpin,
     max_bytes: usize,
-) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(4096_usize.min(max_bytes));
+    state: Arc<Mutex<StreamState>>,
+) {
     let mut tmp = [0u8; 8192];
-    let mut buf_full = false;
     loop {
         match reader.read(&mut tmp).await {
             Ok(0) | Err(_) => break,
             Ok(n) => {
-                if !buf_full {
-                    let take = max_bytes.saturating_sub(buf.len()).min(n);
-                    buf.extend_from_slice(&tmp[..take]);
-                    if buf.len() >= max_bytes {
-                        buf_full = true;
-                    }
-                }
-                // When buf_full, keep reading and discarding to unblock the writer.
+                let mut guard = state.lock().await;
+                append_chunk(&mut guard, &tmp[..n], max_bytes);
             }
         }
     }
-    buf
 }
 
-fn bytes_to_string(bytes: Vec<u8>, max_bytes: usize) -> (String, bool) {
-    let truncated = bytes.len() >= max_bytes;
-    (String::from_utf8_lossy(&bytes).into_owned(), truncated)
+fn append_chunk(state: &mut StreamState, chunk: &[u8], max_bytes: usize) {
+    let remaining = max_bytes.saturating_sub(state.bytes.len());
+    let to_take = remaining.min(chunk.len());
+    if to_take > 0 {
+        state.bytes.extend_from_slice(&chunk[..to_take]);
+    }
+    if to_take < chunk.len() {
+        state.truncated = true;
+    }
+}
+
+async fn collect_stream(
+    mut task: tokio::task::JoinHandle<()>,
+    state: Arc<Mutex<StreamState>>,
+) -> (String, bool, bool) {
+    let completed = tokio::time::timeout(STREAM_DRAIN_TIMEOUT, &mut task)
+        .await
+        .is_ok();
+    if !completed {
+        task.abort();
+        let _ = task.await;
+    }
+
+    let snapshot = state.lock().await.clone();
+    (
+        String::from_utf8_lossy(&snapshot.bytes).into_owned(),
+        snapshot.truncated,
+        !completed,
+    )
+}
+
+fn resolve_workdir(requested_workdir: Option<&str>, working_dir: &Path) -> ToolResult<PathBuf> {
+    let Some(workdir) = requested_workdir else {
+        return Ok(working_dir.to_path_buf());
+    };
+
+    let requested = Path::new(workdir);
+    validate_path(requested, working_dir)?;
+
+    let requested_canon = std::fs::canonicalize(requested).map_err(|e| {
+        ToolError::ExecutionFailed(format!(
+            "failed to canonicalize workdir '{}': {e}",
+            requested.display()
+        ))
+    })?;
+    let working_dir_canon = std::fs::canonicalize(working_dir).map_err(|e| {
+        ToolError::ExecutionFailed(format!(
+            "failed to canonicalize working_dir '{}': {e}",
+            working_dir.display()
+        ))
+    })?;
+
+    if !crate::utils::util::is_sub_path(&requested_canon, &working_dir_canon) {
+        return Err(ToolError::PathOutsideWorkingDir(requested.to_path_buf()));
+    }
+
+    Ok(requested_canon)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -309,7 +375,10 @@ mod tests {
         );
         let result = ShellHandler.handle(inv).await.unwrap();
         let text = result.as_text().unwrap();
-        assert!(text.contains("[stderr]"), "expected [stderr] label:\n{text}");
+        assert!(
+            text.contains("[stderr]"),
+            "expected [stderr] label:\n{text}"
+        );
         assert!(text.contains("out"), "{text}");
         assert!(text.contains("err"), "{text}");
     }
@@ -320,15 +389,15 @@ mod tests {
     async fn test_shell_workdir_default() {
         let temp = TempDir::new().unwrap();
         let working_dir = temp.path().to_path_buf();
-        let inv = make_invocation(
-            serde_json::json!({ "command": "pwd" }),
-            working_dir.clone(),
-        );
+        let inv = make_invocation(serde_json::json!({ "command": "pwd" }), working_dir.clone());
         let result = ShellHandler.handle(inv).await.unwrap();
         let text = result.as_text().unwrap();
         // Compare the last path component to avoid macOS /tmp → /private/tmp symlink issues.
         let dir_name = working_dir.file_name().unwrap().to_str().unwrap();
-        assert!(text.contains(dir_name), "expected dir name in output:\n{text}");
+        assert!(
+            text.contains(dir_name),
+            "expected dir name in output:\n{text}"
+        );
     }
 
     #[tokio::test]
@@ -346,7 +415,10 @@ mod tests {
         );
         let result = ShellHandler.handle(inv).await.unwrap();
         let text = result.as_text().unwrap();
-        assert!(text.contains("inner_subdir"), "expected inner_subdir in output:\n{text}");
+        assert!(
+            text.contains("inner_subdir"),
+            "expected inner_subdir in output:\n{text}"
+        );
     }
 
     #[tokio::test]
@@ -358,6 +430,30 @@ mod tests {
             serde_json::json!({
                 "command": "pwd",
                 "workdir": outside.path().to_str().unwrap()
+            }),
+            sandbox.path().to_path_buf(),
+        );
+        let result = ShellHandler.handle(inv).await;
+        assert!(
+            matches!(result, Err(ToolError::PathOutsideWorkingDir(_))),
+            "expected PathOutsideWorkingDir, got: {result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_shell_workdir_symlink_escape_fails() {
+        use std::os::unix::fs::symlink;
+
+        let sandbox = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let link_path = sandbox.path().join("escape");
+        symlink(outside.path(), &link_path).unwrap();
+
+        let inv = make_invocation(
+            serde_json::json!({
+                "command": "pwd",
+                "workdir": link_path.to_str().unwrap()
             }),
             sandbox.path().to_path_buf(),
         );
@@ -405,6 +501,23 @@ mod tests {
             "expected exit code {TIMEOUT_EXIT_CODE}:\n{text}"
         );
         assert!(!result.is_success());
+    }
+
+    #[tokio::test]
+    async fn test_shell_background_child_does_not_hang() {
+        let temp = TempDir::new().unwrap();
+        let inv = make_invocation(
+            serde_json::json!({ "command": "sleep 5 & echo done", "timeout_ms": 5000 }),
+            temp.path().to_path_buf(),
+        );
+
+        let result = tokio::time::timeout(Duration::from_secs(2), ShellHandler.handle(inv))
+            .await
+            .expect("shell handler should not hang")
+            .unwrap();
+        let text = result.as_text().unwrap();
+        assert!(text.contains("Exit code: 0"), "{text}");
+        assert!(text.contains("done"), "{text}");
     }
 
     // ── Output truncation ─────────────────────────────────────────────────────
@@ -510,5 +623,22 @@ mod tests {
         assert!(text.contains("stdout content"));
         assert!(text.contains("[stderr]"));
         assert!(text.contains("stderr content"));
+    }
+
+    #[test]
+    fn test_append_chunk_exact_limit_not_truncated() {
+        let mut state = StreamState::default();
+        append_chunk(&mut state, &[b'a'; MAX_OUTPUT_BYTES], MAX_OUTPUT_BYTES);
+        assert_eq!(state.bytes.len(), MAX_OUTPUT_BYTES);
+        assert!(!state.truncated);
+    }
+
+    #[test]
+    fn test_append_chunk_over_limit_is_truncated() {
+        let mut state = StreamState::default();
+        append_chunk(&mut state, &[b'a'; MAX_OUTPUT_BYTES], MAX_OUTPUT_BYTES);
+        append_chunk(&mut state, b"z", MAX_OUTPUT_BYTES);
+        assert_eq!(state.bytes.len(), MAX_OUTPUT_BYTES);
+        assert!(state.truncated);
     }
 }

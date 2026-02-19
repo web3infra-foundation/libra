@@ -164,7 +164,14 @@ async fn list_dir_slice(
     let end = start + capped;
     let selected = &entries[start..end];
 
-    let mut formatted: Vec<String> = selected.iter().map(format_entry).collect();
+    let mut formatted: Vec<String> = selected
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let entry_number = start + index + 1;
+            format_entry(entry, entry_number)
+        })
+        .collect();
     if end < entries.len() {
         formatted.push(format!("More than {capped} entries found"));
     }
@@ -194,9 +201,10 @@ async fn collect_entries(
         while let Some(entry) = read_dir.next_entry().await.map_err(|e| {
             ToolError::ExecutionFailed(format!("failed to read directory entry: {e}"))
         })? {
-            let file_type = entry.file_type().await.map_err(|e| {
-                ToolError::ExecutionFailed(format!("failed to inspect entry: {e}"))
-            })?;
+            let file_type = entry
+                .file_type()
+                .await
+                .map_err(|e| ToolError::ExecutionFailed(format!("failed to inspect entry: {e}")))?;
 
             let file_name = entry.file_name();
             let relative = if current_prefix.as_os_str().is_empty() {
@@ -236,7 +244,7 @@ async fn collect_entries(
     Ok(())
 }
 
-fn format_entry(entry: &DirEntry) -> String {
+fn format_entry(entry: &DirEntry, entry_number: usize) -> String {
     let indent = " ".repeat(entry.depth * INDENTATION);
     let mut name = entry.display_name.clone();
     match entry.kind {
@@ -245,25 +253,32 @@ fn format_entry(entry: &DirEntry) -> String {
         EntryKind::Other => name.push('?'),
         EntryKind::File => {}
     }
-    format!("{indent}{name}")
+    format!("{entry_number}. {indent}{name}")
 }
 
 fn truncate_path(path: &Path) -> String {
     let s = path.to_string_lossy().replace('\\', "/");
-    if s.len() > MAX_ENTRY_LENGTH {
-        s[..MAX_ENTRY_LENGTH].to_string()
-    } else {
-        s
-    }
+    truncate_to_utf8_boundary(&s, MAX_ENTRY_LENGTH)
 }
 
 fn truncate_name(name: &OsStr) -> String {
     let s = name.to_string_lossy();
-    if s.len() > MAX_ENTRY_LENGTH {
-        s[..MAX_ENTRY_LENGTH].to_string()
-    } else {
-        s.to_string()
+    truncate_to_utf8_boundary(&s, MAX_ENTRY_LENGTH)
+}
+
+fn truncate_to_utf8_boundary(input: &str, max_bytes: usize) -> String {
+    if input.len() <= max_bytes {
+        return input.to_string();
     }
+
+    let mut cut = 0usize;
+    for (index, _) in input.char_indices() {
+        if index > max_bytes {
+            break;
+        }
+        cut = index;
+    }
+    input[..cut].to_string()
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -309,6 +324,25 @@ mod tests {
         assert!(text.contains("subdir/"), "expected trailing /: {text}");
         assert!(text.contains("file.txt"), "expected plain file: {text}");
         assert!(!text.contains("[DIR]"), "should not contain [DIR] label");
+    }
+
+    #[tokio::test]
+    async fn test_entries_are_numbered() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path();
+        fs::write(dir.join("a.txt"), "").unwrap();
+
+        let result = ListDirHandler
+            .handle(make_invocation(
+                serde_json::json!({ "dir_path": dir, "depth": 1 }),
+                dir.to_path_buf(),
+            ))
+            .await
+            .unwrap();
+
+        let text = result.as_text().unwrap();
+        let first_entry = text.lines().nth(1).unwrap();
+        assert!(first_entry.starts_with("1. "), "{text}");
     }
 
     #[cfg(unix)]
@@ -397,7 +431,7 @@ mod tests {
 
         let text = result.as_text().unwrap();
         assert!(!text.contains("a.txt"), "should skip first entry: {text}");
-        assert!(text.contains("b.txt"), "{text}");
+        assert!(text.contains("2. b.txt"), "{text}");
         assert!(text.contains("c.txt"), "{text}");
     }
 
@@ -422,7 +456,10 @@ mod tests {
             .unwrap();
         let text = shallow.as_text().unwrap();
         assert!(text.contains("sub/"), "{text}");
-        assert!(!text.contains("leaf.txt"), "depth=1 should not show leaf: {text}");
+        assert!(
+            !text.contains("leaf.txt"),
+            "depth=1 should not show leaf: {text}"
+        );
 
         // depth=3: leaf visible
         let deep = ListDirHandler
@@ -486,7 +523,11 @@ mod tests {
             .unwrap();
         // Only the header line, no entries.
         let text = result.as_text().unwrap();
-        assert_eq!(text.lines().count(), 1, "empty dir should have only header: {text}");
+        assert_eq!(
+            text.lines().count(),
+            1,
+            "empty dir should have only header: {text}"
+        );
     }
 
     // ── Schema ────────────────────────────────────────────────────────────────
@@ -503,5 +544,13 @@ mod tests {
         assert!(required.iter().any(|v| v == "dir_path"));
         assert!(!required.iter().any(|v| v == "depth"));
         assert!(!required.iter().any(|v| v == "max_depth"));
+    }
+
+    #[test]
+    fn test_truncate_to_utf8_boundary_handles_unicode() {
+        let unicode = "🙂".repeat(600);
+        let truncated = truncate_to_utf8_boundary(&unicode, MAX_ENTRY_LENGTH);
+        assert!(truncated.len() <= MAX_ENTRY_LENGTH);
+        assert!(truncated.is_char_boundary(truncated.len()));
     }
 }
