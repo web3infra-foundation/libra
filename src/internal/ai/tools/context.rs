@@ -1,8 +1,9 @@
 //! Context types for tool invocation and execution.
 
-use std::path::PathBuf;
+use std::{collections::HashMap, fmt, path::PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use tokio::sync::oneshot;
 
 /// The kind of tool payload.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -263,6 +264,94 @@ pub struct GrepFilesArgs {
 
 fn default_grep_limit() -> usize {
     100
+}
+
+// ── update_plan types ──────────────────────────────────────────────────
+
+/// Status of a single plan step.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StepStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+/// A single step in a plan.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PlanStep {
+    /// Human-readable description of the step.
+    pub step: String,
+    /// Current status of the step.
+    pub status: StepStatus,
+}
+
+/// Arguments for the `update_plan` tool.
+#[derive(Clone, Debug, Deserialize)]
+pub struct UpdatePlanArgs {
+    /// Optional explanation of what changed since the last plan update.
+    #[serde(default)]
+    pub explanation: Option<String>,
+    /// The full plan, expressed as an ordered list of steps.
+    pub plan: Vec<PlanStep>,
+}
+
+// ── request_user_input types ───────────────────────────────────────────
+
+/// A selectable option presented to the user.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UserInputOption {
+    /// Short label for the option.
+    pub label: String,
+    /// Longer description shown alongside the label.
+    pub description: String,
+}
+
+/// A single question to present to the user.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UserInputQuestion {
+    /// Machine-readable identifier for the question (unique within a request).
+    pub id: String,
+    /// Short header displayed above the question.
+    pub header: String,
+    /// The full question text.
+    pub question: String,
+    /// Predefined options the user can choose from.
+    pub options: Vec<UserInputOption>,
+}
+
+/// Arguments for the `request_user_input` tool.
+#[derive(Clone, Debug, Deserialize)]
+pub struct RequestUserInputArgs {
+    /// Questions to present to the user.
+    pub questions: Vec<UserInputQuestion>,
+}
+
+/// User's responses to a set of questions, keyed by question id.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UserInputResponse {
+    pub answers: HashMap<String, String>,
+}
+
+/// A request sent from the tool handler to the TUI, carrying the questions
+/// and a one-shot channel for the user's response.
+pub struct UserInputRequest {
+    /// The call_id of the originating tool invocation (for correlation).
+    pub call_id: String,
+    /// Questions to display.
+    pub questions: Vec<UserInputQuestion>,
+    /// Channel the TUI uses to send back the response.
+    pub response_tx: oneshot::Sender<UserInputResponse>,
+}
+
+impl fmt::Debug for UserInputRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UserInputRequest")
+            .field("call_id", &self.call_id)
+            .field("questions", &self.questions)
+            .field("response_tx", &"<oneshot::Sender>")
+            .finish()
+    }
 }
 
 #[cfg(test)]

@@ -3,7 +3,7 @@
 //! The `App` struct manages the TUI state and coordinates between
 //! user input, agent execution, and UI rendering.
 
-use std::{sync::Arc, time::Instant};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use crossterm::event::{KeyCode, KeyModifiers};
 use tokio::{
@@ -16,13 +16,18 @@ use tokio_stream::StreamExt;
 use super::{
     app_event::{AgentEvent, AgentStatus, AppEvent, ExitMode},
     chatwidget::ChatWidget,
-    history_cell::{AssistantHistoryCell, ToolCallHistoryCell, UserHistoryCell},
+    history_cell::{
+        AssistantHistoryCell, PlanUpdateHistoryCell, ToolCallHistoryCell, UserHistoryCell,
+    },
     terminal::{TARGET_FRAME_INTERVAL, Tui, TuiEvent},
 };
 use crate::internal::ai::{
     agent::{ToolLoopConfig, run_tool_loop_with_history_and_observer},
     completion::{CompletionModel, Message},
-    tools::{ToolOutput, ToolRegistry},
+    tools::{
+        ToolOutput, ToolRegistry,
+        context::{UpdatePlanArgs, UserInputRequest, UserInputResponse},
+    },
 };
 
 /// The reason for exiting the application.
@@ -39,6 +44,18 @@ pub enum ExitReason {
 pub struct AppExitInfo {
     /// The reason for exiting.
     pub reason: ExitReason,
+}
+
+/// Pending user-input state while the TUI waits for the user to answer.
+struct PendingUserInput {
+    /// The original request (questions, etc.).
+    request: UserInputRequest,
+    /// Index of the question currently being answered.
+    current_question: usize,
+    /// Answers collected so far, keyed by question id.
+    answers: HashMap<String, String>,
+    /// Currently selected option index (0-based) for the active question.
+    selected_option: usize,
 }
 
 /// The main application struct.
@@ -71,6 +88,10 @@ pub struct App<M: CompletionModel> {
     scheduled_draw_task: Option<JoinHandle<()>>,
     /// Initial welcome message.
     welcome_message: String,
+    /// Receiver for user-input requests from the `request_user_input` tool handler.
+    user_input_rx: UnboundedReceiver<UserInputRequest>,
+    /// Currently pending user-input interaction, if any.
+    pending_user_input: Option<PendingUserInput>,
 }
 
 impl<M: CompletionModel + Clone + 'static> App<M> {
@@ -81,6 +102,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         registry: Arc<ToolRegistry>,
         config: ToolLoopConfig,
         welcome_message: String,
+        user_input_rx: UnboundedReceiver<UserInputRequest>,
     ) -> Self {
         let (app_event_tx, app_event_rx) = mpsc::unbounded_channel();
         Self {
@@ -98,6 +120,8 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             agent_task: None,
             scheduled_draw_task: None,
             welcome_message,
+            user_input_rx,
+            pending_user_input: None,
         }
     }
 
@@ -148,6 +172,11 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         break;
                     }
                 }
+
+                // Handle user-input requests from the tool handler
+                Some(request) = self.user_input_rx.recv() => {
+                    self.handle_user_input_request(request);
+                }
             }
         }
 
@@ -163,8 +192,15 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 self.handle_key_event(key).await?;
             }
             TuiEvent::Paste(text) => {
-                for c in text.chars() {
-                    self.widget.bottom_pane.insert_char(c);
+                if self.pending_user_input.is_some() {
+                    // During user-input mode, paste into the input field
+                    for c in text.chars() {
+                        self.widget.bottom_pane.insert_char(c);
+                    }
+                } else {
+                    for c in text.chars() {
+                        self.widget.bottom_pane.insert_char(c);
+                    }
                 }
                 self.schedule_draw();
             }
@@ -188,6 +224,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
     async fn handle_key_event(&mut self, key: crossterm::event::KeyEvent) -> anyhow::Result<()> {
         // Check for Ctrl+C first (always handled)
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            self.cancel_pending_user_input();
             self.interrupt_agent_task();
             self.exit_info = Some(AppExitInfo {
                 reason: ExitReason::UserRequested,
@@ -270,6 +307,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 }
                 _ => {}
             },
+            AgentStatus::AwaitingUserInput => {
+                self.handle_user_input_key(key);
+            }
             AgentStatus::Thinking | AgentStatus::ExecutingTool => {
                 // During processing, only handle Escape for interrupt
                 if key.code == KeyCode::Esc {
@@ -283,6 +323,142 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         }
 
         Ok(())
+    }
+
+    /// Handle keyboard input while in the AwaitingUserInput state.
+    fn handle_user_input_key(&mut self, key: crossterm::event::KeyEvent) {
+        match key.code {
+            // Navigate options with Up/Down
+            KeyCode::Up => {
+                if let Some(ref mut pending) = self.pending_user_input
+                    && pending.selected_option > 0
+                {
+                    pending.selected_option -= 1;
+                }
+                self.schedule_draw();
+            }
+            KeyCode::Down => {
+                if let Some(ref mut pending) = self.pending_user_input {
+                    let q = &pending.request.questions[pending.current_question];
+                    // +1 for the "Other (custom)" option
+                    let max = q.options.len();
+                    if pending.selected_option < max {
+                        pending.selected_option += 1;
+                    }
+                }
+                self.schedule_draw();
+            }
+            // Quick-select by number key (1-9)
+            KeyCode::Char(c @ '1'..='9') => {
+                let idx = (c as usize) - ('1' as usize);
+                if let Some(ref mut pending) = self.pending_user_input {
+                    let q = &pending.request.questions[pending.current_question];
+                    // +1 for custom option
+                    if idx <= q.options.len() {
+                        pending.selected_option = idx;
+                    }
+                }
+                self.schedule_draw();
+            }
+            // Type custom answer text
+            KeyCode::Char(c) => {
+                self.widget.bottom_pane.insert_char(c);
+                self.schedule_draw();
+            }
+            KeyCode::Backspace => {
+                self.widget.bottom_pane.backspace();
+                self.schedule_draw();
+            }
+            // Submit answer
+            KeyCode::Enter => {
+                self.submit_user_input_answer();
+            }
+            // Cancel
+            KeyCode::Esc => {
+                self.cancel_pending_user_input();
+                self.widget.bottom_pane.set_status(AgentStatus::Thinking);
+                self.schedule_draw();
+            }
+            _ => {}
+        }
+    }
+
+    /// Submit the currently selected answer for the active question.
+    fn submit_user_input_answer(&mut self) {
+        let answer = if let Some(ref pending) = self.pending_user_input {
+            let q = &pending.request.questions[pending.current_question];
+            if pending.selected_option < q.options.len() {
+                // Predefined option selected
+                q.options[pending.selected_option].label.clone()
+            } else {
+                // Custom text from input field
+                let text = self.widget.bottom_pane.take_input();
+                if text.is_empty() {
+                    return; // Don't submit empty custom answer
+                }
+                text
+            }
+        } else {
+            return;
+        };
+
+        let pending = self.pending_user_input.as_mut().unwrap();
+        let question_id = pending.request.questions[pending.current_question]
+            .id
+            .clone();
+        pending.answers.insert(question_id, answer);
+        pending.current_question += 1;
+        pending.selected_option = 0;
+        self.widget.bottom_pane.clear();
+
+        // Check if all questions have been answered.
+        let done = {
+            let p = self.pending_user_input.as_ref().unwrap();
+            p.current_question >= p.request.questions.len()
+        };
+
+        if done {
+            // Send the response back to the handler.
+            let pending = self.pending_user_input.take().unwrap();
+            let response = UserInputResponse {
+                answers: pending.answers,
+            };
+            let _ = pending.request.response_tx.send(response);
+            self.widget
+                .bottom_pane
+                .set_status(AgentStatus::ExecutingTool);
+            self.widget.bottom_pane.set_user_input_questions(None);
+        }
+        self.schedule_draw();
+    }
+
+    /// Cancel the pending user-input interaction (drops the oneshot sender).
+    fn cancel_pending_user_input(&mut self) {
+        if let Some(pending) = self.pending_user_input.take() {
+            // Dropping response_tx signals cancellation to the handler.
+            drop(pending.request.response_tx);
+            self.widget.bottom_pane.set_user_input_questions(None);
+        }
+    }
+
+    /// Handle a user-input request from the tool handler.
+    fn handle_user_input_request(&mut self, request: UserInputRequest) {
+        // Store question info for the bottom pane to render.
+        self.widget
+            .bottom_pane
+            .set_user_input_questions(Some(&request.questions));
+
+        self.pending_user_input = Some(PendingUserInput {
+            request,
+            current_question: 0,
+            answers: HashMap::new(),
+            selected_option: 0,
+        });
+        self.widget
+            .bottom_pane
+            .set_status(AgentStatus::AwaitingUserInput);
+        self.widget.bottom_pane.clear();
+        self.schedule_draw();
     }
 
     fn handle_mouse_event(&mut self, mouse: crossterm::event::MouseEvent) {
@@ -456,8 +632,22 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 tool_name,
                 arguments,
             } => {
-                let cell = Box::new(ToolCallHistoryCell::new(call_id, tool_name, arguments));
-                self.insert_before_streaming_assistant(cell);
+                if tool_name == "update_plan" {
+                    // Parse the plan arguments and render a specialised cell.
+                    let (explanation, steps) =
+                        if let Ok(args) = serde_json::from_value::<UpdatePlanArgs>(arguments) {
+                            (args.explanation, args.plan)
+                        } else {
+                            (None, Vec::new())
+                        };
+                    let cell =
+                        Box::new(PlanUpdateHistoryCell::new(call_id, explanation, steps));
+                    self.insert_before_streaming_assistant(cell);
+                } else {
+                    let cell =
+                        Box::new(ToolCallHistoryCell::new(call_id, tool_name, arguments));
+                    self.insert_before_streaming_assistant(cell);
+                }
                 self.widget
                     .bottom_pane
                     .set_status(AgentStatus::ExecutingTool);
@@ -468,14 +658,29 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 tool_name: _,
                 result,
             } => {
-                // Update the tool call cell
+                // Try to find a PlanUpdateHistoryCell first, then fall back to ToolCallHistoryCell.
+                let mut found = false;
                 for cell in self.widget.cells.iter_mut().rev() {
-                    if let Some(tool_cell) = cell.as_any_mut().downcast_mut::<ToolCallHistoryCell>()
-                        && tool_cell.call_id == call_id
-                        && tool_cell.is_running
+                    if let Some(plan_cell) =
+                        cell.as_any_mut().downcast_mut::<PlanUpdateHistoryCell>()
+                        && plan_cell.call_id == call_id
+                        && plan_cell.is_running
                     {
-                        tool_cell.complete(result);
+                        plan_cell.complete();
+                        found = true;
                         break;
+                    }
+                }
+                if !found {
+                    for cell in self.widget.cells.iter_mut().rev() {
+                        if let Some(tool_cell) =
+                            cell.as_any_mut().downcast_mut::<ToolCallHistoryCell>()
+                            && tool_cell.call_id == call_id
+                            && tool_cell.is_running
+                        {
+                            tool_cell.complete(result);
+                            break;
+                        }
                     }
                 }
                 self.widget.bottom_pane.set_status(AgentStatus::Thinking);
@@ -484,6 +689,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             AppEvent::AgentStatusUpdate { status } => {
                 self.widget.bottom_pane.set_status(status);
                 self.schedule_draw();
+            }
+            AppEvent::RequestUserInput { request } => {
+                self.handle_user_input_request(request);
             }
         }
 

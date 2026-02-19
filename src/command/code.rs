@@ -21,8 +21,8 @@ use crate::internal::{
         tools::{
             ToolRegistry, ToolRegistryBuilder,
             handlers::{
-                ApplyPatchHandler, GrepFilesHandler, ListDirHandler, ReadFileHandler,
-                ShellHandler,
+                ApplyPatchHandler, GrepFilesHandler, ListDirHandler, PlanHandler, ReadFileHandler,
+                RequestUserInputHandler, ShellHandler,
             },
         },
     },
@@ -170,6 +170,10 @@ async fn execute_tui(args: CodeArgs) {
     let temperature = args.temperature;
     let max_steps = args.max_steps;
 
+    // Create the bridge channel for request_user_input tool <-> TUI communication.
+    let (user_input_tx, user_input_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::internal::ai::tools::context::UserInputRequest>();
+
     let registry = Arc::new(
         ToolRegistryBuilder::with_working_dir(working_dir)
             .register("read_file", Arc::new(ReadFileHandler))
@@ -177,6 +181,11 @@ async fn execute_tui(args: CodeArgs) {
             .register("grep_files", Arc::new(GrepFilesHandler))
             .register("apply_patch", Arc::new(ApplyPatchHandler))
             .register("shell", Arc::new(ShellHandler))
+            .register("update_plan", Arc::new(PlanHandler))
+            .register(
+                "request_user_input",
+                Arc::new(RequestUserInputHandler::new(user_input_tx)),
+            )
             .build(),
     );
 
@@ -200,6 +209,7 @@ async fn execute_tui(args: CodeArgs) {
                 preamble,
                 temperature,
                 max_steps,
+                user_input_rx,
             )
             .await;
         }
@@ -221,6 +231,7 @@ async fn execute_tui(args: CodeArgs) {
                 preamble,
                 temperature,
                 max_steps,
+                user_input_rx,
             )
             .await;
         }
@@ -242,12 +253,14 @@ async fn execute_tui(args: CodeArgs) {
                 preamble,
                 temperature,
                 max_steps,
+                user_input_rx,
             )
             .await;
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_tui_with_model<M>(
     host: String,
     port: u16,
@@ -256,6 +269,9 @@ async fn run_tui_with_model<M>(
     preamble: String,
     temperature: Option<f64>,
     max_steps: usize,
+    user_input_rx: tokio::sync::mpsc::UnboundedReceiver<
+        crate::internal::ai::tools::context::UserInputRequest,
+    >,
 ) where
     M: crate::internal::ai::completion::CompletionModel + 'static,
 {
@@ -295,7 +311,7 @@ async fn run_tui_with_model<M>(
     );
 
     // Create and run app
-    let mut app = App::new(tui, model, registry, config, welcome);
+    let mut app = App::new(tui, model, registry, config, welcome, user_input_rx);
 
     match app.run().await {
         Ok(exit_info) => {

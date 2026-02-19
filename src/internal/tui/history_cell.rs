@@ -9,7 +9,10 @@ use ratatui::prelude::*;
 use serde_json::Value;
 
 use super::diff::{DiffSummary, FileChange, create_diff_summary};
-use crate::internal::ai::tools::ToolOutput;
+use crate::internal::ai::tools::{
+    ToolOutput,
+    context::{PlanStep, StepStatus},
+};
 
 fn truncate_utf8(text: &str, max_bytes: usize) -> String {
     if text.len() <= max_bytes {
@@ -380,6 +383,96 @@ impl DiffHistoryCell {
 impl HistoryCell for DiffHistoryCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         create_diff_summary(&self.summary.changes, &self.summary.cwd, width as usize)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+/// A plan update displayed as a checkbox list.
+#[derive(Debug, Clone)]
+pub struct PlanUpdateHistoryCell {
+    /// Optional explanation from the model.
+    pub explanation: Option<String>,
+    /// The plan steps with their statuses.
+    pub steps: Vec<PlanStep>,
+    /// Whether the tool call is still running.
+    pub is_running: bool,
+    /// Unique id for this tool call.
+    pub call_id: String,
+}
+
+impl PlanUpdateHistoryCell {
+    /// Create a new plan update cell.
+    pub fn new(call_id: String, explanation: Option<String>, steps: Vec<PlanStep>) -> Self {
+        Self {
+            explanation,
+            steps,
+            is_running: true,
+            call_id,
+        }
+    }
+
+    /// Mark the tool call as complete.
+    pub fn complete(&mut self) {
+        self.is_running = false;
+    }
+}
+
+impl HistoryCell for PlanUpdateHistoryCell {
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let mut lines: Vec<Line<'static>> = Vec::new();
+
+        // Header
+        let status_icon = if self.is_running { "⏳" } else { "✓" };
+        let status_color = if self.is_running {
+            Color::Yellow
+        } else {
+            Color::Green
+        };
+        lines.push(Line::styled(
+            format!("{} Plan:", status_icon),
+            Style::default().fg(status_color).bold(),
+        ));
+
+        // Optional explanation
+        if let Some(ref explanation) = self.explanation {
+            lines.extend(wrap_text(
+                explanation,
+                "  ",
+                width,
+                Style::default().fg(Color::DarkGray).italic(),
+            ));
+        }
+
+        // Steps with checkboxes
+        for step in &self.steps {
+            let (icon, style) = match step.status {
+                StepStatus::Completed => (
+                    "✔",
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::CROSSED_OUT),
+                ),
+                StepStatus::InProgress => ("◐", Style::default().fg(Color::Cyan).bold()),
+                StepStatus::Pending => ("□", Style::default().fg(Color::DarkGray)),
+            };
+
+            lines.extend(wrap_text(
+                &format!("{} {}", icon, step.step),
+                "  ",
+                width,
+                style,
+            ));
+        }
+
+        lines.push(Line::raw("")); // Spacing
+        lines
     }
 
     fn as_any(&self) -> &dyn Any {

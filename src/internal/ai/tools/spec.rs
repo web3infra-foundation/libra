@@ -104,6 +104,121 @@ impl ToolSpec {
         ))
     }
 
+    /// Create a ToolSpec for update_plan.
+    pub fn update_plan() -> Self {
+        Self {
+            spec_type: "function".to_string(),
+            function: FunctionDefinition {
+                name: "update_plan".to_string(),
+                description: "Update the current plan with a list of steps and their status. \
+                    Use this tool to track progress on multi-step tasks."
+                    .to_string(),
+                parameters: FunctionParameters::Object {
+                    param_type: "object".to_string(),
+                    properties: {
+                        let mut props = Map::new();
+                        props.insert(
+                            "explanation".to_string(),
+                            json!({
+                                "type": "string",
+                                "description": "Optional explanation of what changed since the last plan update"
+                            }),
+                        );
+                        props.insert(
+                            "plan".to_string(),
+                            json!({
+                                "type": "array",
+                                "description": "The full plan, expressed as an ordered list of steps",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "step": {
+                                            "type": "string",
+                                            "description": "Human-readable description of the step"
+                                        },
+                                        "status": {
+                                            "type": "string",
+                                            "enum": ["pending", "in_progress", "completed"],
+                                            "description": "Current status of the step"
+                                        }
+                                    },
+                                    "required": ["step", "status"]
+                                }
+                            }),
+                        );
+                        props
+                    },
+                    required: vec!["plan".to_string()],
+                },
+            },
+        }
+    }
+
+    /// Create a ToolSpec for request_user_input.
+    pub fn request_user_input() -> Self {
+        Self {
+            spec_type: "function".to_string(),
+            function: FunctionDefinition {
+                name: "request_user_input".to_string(),
+                description: "Ask the user a question and wait for their response. \
+                    Use this when you need clarification, confirmation, or the user to choose \
+                    between options."
+                    .to_string(),
+                parameters: FunctionParameters::Object {
+                    param_type: "object".to_string(),
+                    properties: {
+                        let mut props = Map::new();
+                        props.insert(
+                            "questions".to_string(),
+                            json!({
+                                "type": "array",
+                                "description": "Questions to present to the user",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": {
+                                            "type": "string",
+                                            "description": "Machine-readable identifier for the question"
+                                        },
+                                        "header": {
+                                            "type": "string",
+                                            "description": "Short header displayed above the question"
+                                        },
+                                        "question": {
+                                            "type": "string",
+                                            "description": "The full question text"
+                                        },
+                                        "options": {
+                                            "type": "array",
+                                            "description": "Predefined options the user can choose from",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "label": {
+                                                        "type": "string",
+                                                        "description": "Short label for the option"
+                                                    },
+                                                    "description": {
+                                                        "type": "string",
+                                                        "description": "Longer description of the option"
+                                                    }
+                                                },
+                                                "required": ["label", "description"]
+                                            }
+                                        }
+                                    },
+                                    "required": ["id", "header", "question", "options"]
+                                }
+                            }),
+                        );
+                        props
+                    },
+                    required: vec!["questions".to_string()],
+                },
+            },
+        }
+    }
+
     /// Create a ToolSpec for apply_patch.
     pub fn apply_patch() -> Self {
         Self::new(

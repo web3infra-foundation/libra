@@ -10,6 +10,14 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::app_event::AgentStatus;
 
+/// Snapshot of user-input question data for rendering (avoids borrowing the request).
+#[derive(Clone)]
+struct UserInputQuestionSnapshot {
+    header: String,
+    question: String,
+    options: Vec<(String, String)>, // (label, description)
+}
+
 /// The bottom pane containing input area and status.
 pub struct BottomPane {
     /// Current input text.
@@ -20,6 +28,12 @@ pub struct BottomPane {
     pub status: AgentStatus,
     /// Whether the input is focused.
     pub focused: bool,
+    /// Snapshot of the current user-input questions (while awaiting input).
+    user_input_questions: Option<Vec<UserInputQuestionSnapshot>>,
+    /// Index of the question currently being answered (driven by App).
+    pub user_input_current_question: usize,
+    /// Currently selected option index (driven by App).
+    pub user_input_selected_option: usize,
 }
 
 impl BottomPane {
@@ -30,7 +44,32 @@ impl BottomPane {
             cursor_pos: 0,
             status: AgentStatus::Idle,
             focused: true,
+            user_input_questions: None,
+            user_input_current_question: 0,
+            user_input_selected_option: 0,
         }
+    }
+
+    /// Store (or clear) the user-input questions to render.
+    pub fn set_user_input_questions(
+        &mut self,
+        questions: Option<&[crate::internal::ai::tools::context::UserInputQuestion]>,
+    ) {
+        self.user_input_questions = questions.map(|qs| {
+            qs.iter()
+                .map(|q| UserInputQuestionSnapshot {
+                    header: q.header.clone(),
+                    question: q.question.clone(),
+                    options: q
+                        .options
+                        .iter()
+                        .map(|o| (o.label.clone(), o.description.clone()))
+                        .collect(),
+                })
+                .collect()
+        });
+        self.user_input_current_question = 0;
+        self.user_input_selected_option = 0;
     }
 
     /// Handle a character input.
@@ -105,6 +144,10 @@ impl BottomPane {
 
     /// Render the bottom pane.
     pub fn render(&self, area: Rect, buf: &mut Buffer) -> Option<Position> {
+        if self.status == AgentStatus::AwaitingUserInput {
+            return self.render_user_input_mode(area, buf);
+        }
+
         // Split area into status bar and input area
         let chunks = Layout::vertical([
             Constraint::Length(1), // Status bar
@@ -125,16 +168,113 @@ impl BottomPane {
         cursor_pos
     }
 
+    /// Render the bottom pane in user-input mode (questions + options).
+    fn render_user_input_mode(&self, area: Rect, buf: &mut Buffer) -> Option<Position> {
+        let questions = match &self.user_input_questions {
+            Some(q) => q,
+            None => return None,
+        };
+
+        let q_idx = self.user_input_current_question;
+        let question = questions.get(q_idx)?;
+
+        // Count how many lines we need for the question display:
+        // 1 status bar + 1 header + 1 question + N options + 1 custom + 1 input + 1 help
+        let option_lines = question.options.len() as u16 + 1; // +1 for "Other"
+        let question_area_height = 1 + 1 + option_lines; // header + question + options
+
+        let chunks = Layout::vertical([
+            Constraint::Length(1),                    // Status bar
+            Constraint::Length(question_area_height), // Question + options
+            Constraint::Length(3),                    // Input area (for custom text)
+            Constraint::Length(1),                    // Help text
+        ])
+        .split(area);
+
+        // Status bar
+        let status_line = Line::styled(
+            "● Awaiting input...",
+            Style::default().fg(Color::Magenta).bold(),
+        );
+        Paragraph::new(status_line).render(chunks[0], buf);
+
+        // Question display
+        let mut lines: Vec<Line<'static>> = Vec::new();
+
+        // Header
+        lines.push(Line::styled(
+            format!("  {}", question.header),
+            Style::default().fg(Color::Cyan).bold(),
+        ));
+
+        // Question text
+        lines.push(Line::styled(
+            format!("  {}", question.question),
+            Style::default().fg(Color::White),
+        ));
+
+        // Options
+        let selected = self.user_input_selected_option;
+        for (i, (label, description)) in question.options.iter().enumerate() {
+            let marker = if i == selected { "▸" } else { " " };
+            let style = if i == selected {
+                Style::default().fg(Color::Cyan).bold()
+            } else {
+                Style::default().fg(Color::White)
+            };
+            lines.push(Line::styled(
+                format!("  {} {}. {} - {}", marker, i + 1, label, description),
+                style,
+            ));
+        }
+
+        // "Other (custom)" option
+        let other_idx = question.options.len();
+        let marker = if selected == other_idx { "▸" } else { " " };
+        let style = if selected == other_idx {
+            Style::default().fg(Color::Cyan).bold()
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        lines.push(Line::styled(
+            format!("  {} {}. Other (type below)", marker, other_idx + 1),
+            style,
+        ));
+
+        // Render question area (clip to available height)
+        let max_lines = chunks[1].height as usize;
+        let display_lines: Vec<Line<'static>> = lines.into_iter().take(max_lines).collect();
+        let text = Text::from(display_lines);
+        Paragraph::new(text).render(chunks[1], buf);
+
+        // Input area (for custom text entry)
+        let cursor_pos = self.render_input_area(chunks[2], buf);
+
+        // Help text
+        let help = "[↑/↓: Select] [1-9: Quick select] [Enter: Submit] [Esc: Cancel]";
+        let help_line = Line::styled(help, Style::default().fg(Color::DarkGray));
+        Paragraph::new(help_line).render(chunks[3], buf);
+
+        // Only show cursor when "Other" is selected
+        if selected == other_idx {
+            cursor_pos
+        } else {
+            None
+        }
+    }
+
     fn render_status_bar(&self, area: Rect, buf: &mut Buffer) {
         let status_text = match self.status {
             AgentStatus::Idle => "● Ready",
             AgentStatus::Thinking => "● Thinking...",
             AgentStatus::ExecutingTool => "● Executing tool...",
+            AgentStatus::AwaitingUserInput => "● Awaiting input...",
         };
 
         let status_color = match self.status {
             AgentStatus::Idle => Color::Green,
             AgentStatus::Thinking | AgentStatus::ExecutingTool => Color::Yellow,
+            AgentStatus::AwaitingUserInput => Color::Magenta,
         };
 
         let status_line = Line::styled(status_text, Style::default().fg(status_color).bold());
@@ -156,8 +296,13 @@ impl BottomPane {
 
         let content_width = inner.width as usize;
         let (display_text, cursor_x) = if self.input.is_empty() {
+            let placeholder = if self.status == AgentStatus::AwaitingUserInput {
+                "Type custom answer..."
+            } else {
+                "Type your message..."
+            };
             (
-                Text::styled("Type your message...", Style::default().fg(Color::DarkGray)),
+                Text::styled(placeholder, Style::default().fg(Color::DarkGray)),
                 0u16,
             )
         } else {
@@ -184,6 +329,9 @@ impl BottomPane {
             }
             AgentStatus::Thinking | AgentStatus::ExecutingTool => {
                 "[Esc: Interrupt] [PgUp/PgDn/↑/↓: Scroll] [Ctrl+C: Exit]"
+            }
+            AgentStatus::AwaitingUserInput => {
+                "[↑/↓: Select] [1-9: Quick select] [Enter: Submit] [Esc: Cancel]"
             }
         };
 
