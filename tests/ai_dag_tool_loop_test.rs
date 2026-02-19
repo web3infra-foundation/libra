@@ -102,7 +102,7 @@ fn test_dag_tool_loop_action_applies_patch() {
         .register("apply_patch", Arc::new(ApplyPatchHandler))
         .build();
 
-    let action = ToolLoopAction::new(scripted, registry, None, Some(0.0), 4);
+    let action = ToolLoopAction::new(scripted, registry, None, Some(0.0), Some(4));
 
     let mut node_table = NodeTable::new();
     let a = DefaultNode::with_action(

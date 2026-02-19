@@ -43,7 +43,8 @@ impl ToolLoopObserver for NoopObserver {}
 pub struct ToolLoopConfig {
     pub preamble: Option<String>,
     pub temperature: Option<f64>,
-    pub max_steps: usize,
+    /// Maximum number of model/tool round-trips. `None` means unlimited.
+    pub max_steps: Option<usize>,
 }
 
 impl Default for ToolLoopConfig {
@@ -51,7 +52,7 @@ impl Default for ToolLoopConfig {
         Self {
             preamble: None,
             temperature: Some(0.0),
-            max_steps: 8,
+            max_steps: Some(8),
         }
     }
 }
@@ -86,7 +87,7 @@ pub async fn run_tool_loop_with_history_and_observer<M: CompletionModel, O: Tool
     config: ToolLoopConfig,
     observer: &mut O,
 ) -> Result<ToolLoopTurn, CompletionError> {
-    if config.max_steps == 0 {
+    if config.max_steps == Some(0) {
         return Err(CompletionError::RequestError(
             "max_steps must be greater than 0".into(),
         ));
@@ -97,7 +98,17 @@ pub async fn run_tool_loop_with_history_and_observer<M: CompletionModel, O: Tool
 
     let tools = registry_tool_definitions(registry);
 
-    for _ in 0..config.max_steps {
+    let mut step = 0usize;
+    loop {
+        if let Some(limit) = config.max_steps
+            && step >= limit
+        {
+            return Err(CompletionError::ResponseError(format!(
+                "Agent reached max_steps={limit} without producing a final text response",
+            )));
+        }
+        step += 1;
+
         let request = CompletionRequest {
             preamble: config.preamble.clone(),
             chat_history: history.clone(),
@@ -199,11 +210,6 @@ pub async fn run_tool_loop_with_history_and_observer<M: CompletionModel, O: Tool
             ));
         }
     }
-
-    Err(CompletionError::ResponseError(format!(
-        "Agent reached max_steps={} without producing a final text response",
-        config.max_steps
-    )))
 }
 
 fn tool_arguments_json(arguments: &Value) -> String {
@@ -363,7 +369,7 @@ mod tests {
             ToolLoopConfig {
                 preamble: None,
                 temperature: Some(0.0),
-                max_steps: 4,
+                max_steps: Some(4),
             },
             &mut observer,
         )

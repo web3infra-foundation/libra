@@ -58,10 +58,6 @@ pub struct CodeArgs {
     #[arg(long)]
     pub model: Option<String>,
 
-    /// Maximum model/tool turns
-    #[arg(long, default_value_t = 8)]
-    pub max_steps: usize,
-
     /// Sampling temperature
     #[arg(long)]
     pub temperature: Option<f64>,
@@ -168,7 +164,6 @@ async fn execute_tui(args: CodeArgs) {
 
     let preamble = system_preamble(&working_dir);
     let temperature = args.temperature;
-    let max_steps = args.max_steps;
 
     // Create the bridge channel for request_user_input tool <-> TUI communication.
     let (user_input_tx, user_input_rx) =
@@ -208,7 +203,6 @@ async fn execute_tui(args: CodeArgs) {
                 registry.clone(),
                 preamble,
                 temperature,
-                max_steps,
                 user_input_rx,
             )
             .await;
@@ -230,7 +224,6 @@ async fn execute_tui(args: CodeArgs) {
                 registry.clone(),
                 preamble,
                 temperature,
-                max_steps,
                 user_input_rx,
             )
             .await;
@@ -252,7 +245,6 @@ async fn execute_tui(args: CodeArgs) {
                 registry.clone(),
                 preamble,
                 temperature,
-                max_steps,
                 user_input_rx,
             )
             .await;
@@ -260,7 +252,6 @@ async fn execute_tui(args: CodeArgs) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_tui_with_model<M>(
     host: String,
     port: u16,
@@ -268,7 +259,6 @@ async fn run_tui_with_model<M>(
     registry: Arc<ToolRegistry>,
     preamble: String,
     temperature: Option<f64>,
-    max_steps: usize,
     user_input_rx: tokio::sync::mpsc::UnboundedReceiver<
         crate::internal::ai::tools::context::UserInputRequest,
     >,
@@ -278,7 +268,7 @@ async fn run_tui_with_model<M>(
     let config = crate::internal::ai::agent::ToolLoopConfig {
         preamble: Some(preamble),
         temperature,
-        max_steps,
+        max_steps: None, // TUI mode: unlimited tool steps
     };
 
     // Initialize terminal
