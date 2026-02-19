@@ -107,6 +107,7 @@ pub struct UpdateFileChunk {
 #[derive(Debug, PartialEq, Clone, Deserialize)]
 pub struct ApplyPatchArgs {
     /// The patch string in Codex format.
+    #[serde(alias = "patch", alias = "text")]
     pub input: String,
     #[serde(skip)]
     pub hunks: Vec<Hunk>,
@@ -161,7 +162,29 @@ enum ParseMode {
 }
 
 fn parse_patch_text(patch: &str, mode: ParseMode) -> Result<ApplyPatchArgs, ParseError> {
-    let lines: Vec<&str> = patch.trim().lines().collect();
+    let trimmed = patch.trim();
+
+    // In lenient mode, auto-complete a truncated patch that is missing the
+    // closing *** End Patch marker. This handles the common model failure of
+    // stopping generation before the patch is fully written.
+    let mut auto_completed = String::new();
+    let effective_text = if matches!(mode, ParseMode::Lenient) {
+        let first_line = trimmed.lines().next().map(str::trim).unwrap_or("");
+        let last_line = trimmed.lines().last().map(str::trim).unwrap_or("");
+        // Only auto-complete when the patch is NOT heredoc-wrapped (heredoc form
+        // is handled by check_patch_boundaries_lenient and must not be modified).
+        let is_heredoc = first_line.starts_with("<<");
+        if !is_heredoc && trimmed.contains(BEGIN_PATCH_MARKER) && last_line != END_PATCH_MARKER {
+            auto_completed = format!("{trimmed}\n{END_PATCH_MARKER}");
+            auto_completed.as_str()
+        } else {
+            trimmed
+        }
+    } else {
+        trimmed
+    };
+
+    let lines: Vec<&str> = effective_text.lines().collect();
     let lines: &[&str] = match check_patch_boundaries_strict(&lines) {
         Ok(()) => &lines,
         Err(e) => match mode {
@@ -345,6 +368,45 @@ fn parse_one_hunk(lines: &[&str], line_number: usize) -> Result<(Hunk, usize), P
     })
 }
 
+/// Strip the read_file `L{n}:` line-number prefix if present.
+///
+/// Matches `L` followed by one or more ASCII digits then `:` and an optional
+/// single space. Returns the remainder of the string after the prefix.
+fn strip_line_number_prefix(s: &str) -> Option<&str> {
+    let bytes = s.as_bytes();
+    if bytes.first() != Some(&b'L') {
+        return None;
+    }
+    let mut i = 1;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i <= 1 || bytes.get(i) != Some(&b':') {
+        return None;
+    }
+
+    let mut j = i + 1;
+    if bytes.get(j) == Some(&b' ') {
+        j += 1;
+    }
+
+    Some(&s[j..])
+}
+
+/// Strip a read_file line-number prefix, allowing a single leading space
+/// (common when the model writes `- L{n}: ...` or `  L{n}: ...`).
+fn strip_line_number_prefix_optional_space(s: &str) -> &str {
+    if let Some(stripped) = strip_line_number_prefix(s) {
+        return stripped;
+    }
+    if let Some(rest) = s.strip_prefix(' ') {
+        if let Some(stripped) = strip_line_number_prefix(rest) {
+            return stripped;
+        }
+    }
+    s
+}
+
 fn parse_update_file_chunk(
     lines: &[&str],
     line_number: usize,
@@ -361,7 +423,15 @@ fn parse_update_file_chunk(
     let (change_context, start_index) = if lines[0] == EMPTY_CHANGE_CONTEXT_MARKER {
         (None, 1)
     } else if let Some(context) = lines[0].strip_prefix(CHANGE_CONTEXT_MARKER) {
-        (Some(context.to_string()), 1)
+        // If the text after "@@ " is empty (model wrote "@@ " with trailing space
+        // instead of just "@@"), treat it as no context to avoid matching a random
+        // empty line and mis-advancing the file position.
+        let context = if context.trim().is_empty() {
+            None
+        } else {
+            Some(context.to_string())
+        };
+        (context, 1)
     } else {
         if !allow_missing_context {
             return Err(InvalidHunkError {
@@ -400,36 +470,84 @@ fn parse_update_file_chunk(
                 parsed_lines += 1;
                 break;
             }
-            line_contents => {
-                match line_contents.chars().next() {
-                    None => {
-                        // Interpret this as an empty line.
-                        chunk.old_lines.push(String::new());
-                        chunk.new_lines.push(String::new());
-                    }
-                    Some(' ') => {
-                        chunk.old_lines.push(line_contents[1..].to_string());
-                        chunk.new_lines.push(line_contents[1..].to_string());
-                    }
-                    Some('+') => {
-                        chunk.new_lines.push(line_contents[1..].to_string());
-                    }
-                    Some('-') => {
-                        chunk.old_lines.push(line_contents[1..].to_string());
-                    }
-                    _ => {
-                        if parsed_lines == 0 {
-                            return Err(InvalidHunkError {
-                                message: format!(
-                                    "Unexpected line found in update hunk: '{line_contents}'. Every line should start with ' ' (context line), '+' (added line), or '-' (removed line)"
-                                ),
-                                line_number: line_number + 1,
-                            });
-                        }
-                        // Assume this is the start of the next hunk.
-                        break;
-                    }
+            raw_line => {
+                let mut effective = raw_line;
+
+                if effective.is_empty() {
+                    chunk.old_lines.push(String::new());
+                    chunk.new_lines.push(String::new());
+                    parsed_lines += 1;
+                    continue;
                 }
+
+                // Handle lines that start with the diff marker directly.
+                // Also strip an optional `L{n}:` prefix from the *content*
+                // portion (common model mistake: `-L12: foo` / `- L12: foo`).
+                match effective.as_bytes().first().copied() {
+                    Some(b' ') | Some(b'+') | Some(b'-') => {
+                        let marker = effective.as_bytes()[0] as char;
+                        let mut content = &effective[1..];
+                        content = strip_line_number_prefix_optional_space(content);
+
+                        match marker {
+                            ' ' => {
+                                chunk.old_lines.push(content.to_string());
+                                chunk.new_lines.push(content.to_string());
+                            }
+                            '+' => chunk.new_lines.push(content.to_string()),
+                            '-' => chunk.old_lines.push(content.to_string()),
+                            _ => {}
+                        }
+
+                        parsed_lines += 1;
+                        continue;
+                    }
+                    _ => {}
+                }
+
+                // Otherwise, first strip a read_file prefix from the whole line
+                // (handles `L12: -foo` / `L12:  foo`, etc).
+                effective = strip_line_number_prefix_optional_space(effective);
+
+                if effective.is_empty() {
+                    chunk.old_lines.push(String::new());
+                    chunk.new_lines.push(String::new());
+                    parsed_lines += 1;
+                    continue;
+                }
+
+                // After stripping, the line may now start with a diff marker
+                // (e.g. `L2: -remove` → `-remove`).
+                match effective.as_bytes().first().copied() {
+                    Some(b' ') | Some(b'+') | Some(b'-') => {
+                        let marker = effective.as_bytes()[0] as char;
+                        let content = &effective[1..];
+                        match marker {
+                            ' ' => {
+                                chunk.old_lines.push(content.to_string());
+                                chunk.new_lines.push(content.to_string());
+                            }
+                            '+' => chunk.new_lines.push(content.to_string()),
+                            '-' => chunk.old_lines.push(content.to_string()),
+                            _ => {}
+                        }
+                        parsed_lines += 1;
+                        continue;
+                    }
+                    _ => {}
+                }
+
+                // Structural markers end the chunk.
+                if effective.starts_with("***") || effective.starts_with("@@") {
+                    break;
+                }
+
+                // Treat as a context line without the leading space.
+                // Models sometimes omit the required space prefix on
+                // context lines; interpreting them as context lets
+                // seek_sequence validate against the actual file.
+                chunk.old_lines.push(effective.to_string());
+                chunk.new_lines.push(effective.to_string());
                 parsed_lines += 1;
             }
         }
@@ -690,6 +808,7 @@ mod tests {
 
     #[test]
     fn test_update_file_chunk() {
+        // "bad" line without @@ marker and allow_missing_context=false errors.
         assert_eq!(
             parse_update_file_chunk(&["bad"], 123, false),
             Err(InvalidHunkError {
@@ -705,13 +824,19 @@ mod tests {
                 line_number: 124
             })
         );
+        // "bad" after @@ is treated as a context line (lenient: model forgot
+        // the leading space).  seek_sequence will catch actual mismatches.
         assert_eq!(
             parse_update_file_chunk(&["@@", "bad"], 123, false),
-            Err(InvalidHunkError {
-                message:  "Unexpected line found in update hunk: 'bad'. \
-                           Every line should start with ' ' (context line), '+' (added line), or '-' (removed line)".to_string(),
-                line_number: 124
-            })
+            Ok((
+                (UpdateFileChunk {
+                    change_context: None,
+                    old_lines: vec!["bad".to_string()],
+                    new_lines: vec!["bad".to_string()],
+                    is_end_of_file: false
+                }),
+                2
+            ))
         );
         assert_eq!(
             parse_update_file_chunk(&["@@", "*** End of File"], 123, false),
@@ -764,6 +889,147 @@ mod tests {
                     is_end_of_file: true
                 }),
                 3
+            ))
+        );
+    }
+
+    #[test]
+    fn test_lenient_mode_auto_completes_missing_end_patch() {
+        // A truncated patch (missing *** End Patch) should be auto-completed in lenient mode.
+        let truncated = "*** Begin Patch\n*** Update File: foo.txt\n@@\n-old\n+new";
+        let result = parse_patch_text(truncated, ParseMode::Lenient);
+        assert!(result.is_ok(), "expected lenient mode to auto-complete: {result:?}");
+        let args = result.unwrap();
+        assert_eq!(args.hunks.len(), 1);
+        match &args.hunks[0] {
+            UpdateFile { path, chunks, .. } => {
+                assert_eq!(path, &PathBuf::from("foo.txt"));
+                assert_eq!(chunks[0].old_lines, vec!["old"]);
+                assert_eq!(chunks[0].new_lines, vec!["new"]);
+            }
+            _ => panic!("expected UpdateFile hunk"),
+        }
+    }
+
+    #[test]
+    fn test_lenient_mode_does_not_auto_complete_when_end_patch_present() {
+        // Lenient mode must NOT double-append *** End Patch when already present.
+        let complete = "*** Begin Patch\n*** Add File: bar.txt\n+hello\n*** End Patch";
+        let result = parse_patch_text(complete, ParseMode::Lenient);
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(result.unwrap().hunks.len(), 1);
+    }
+
+    #[test]
+    fn test_strict_mode_rejects_missing_end_patch() {
+        // Strict mode must still reject a truncated patch.
+        let truncated = "*** Begin Patch\n*** Update File: foo.txt\n@@\n-old\n+new";
+        assert!(matches!(
+            parse_patch_text(truncated, ParseMode::Strict),
+            Err(InvalidPatchError(_))
+        ));
+    }
+
+    #[test]
+    fn test_non_at_line_treated_as_context() {
+        // When the model includes a non-diff line like "## Next Section" after
+        // the first chunk, the parser treats it as a context line (lenient mode:
+        // the model forgot the leading space). seek_sequence will catch any
+        // actual mismatch with the file later.
+        let patch = concat!(
+            "*** Begin Patch\n",
+            "*** Update File: readme.md\n",
+            "@@\n",
+            "-# Old Title\n",
+            "+# New Title\n",
+            " \n",            // empty context line (single space)
+            " Some text.\n", // context line (space + content)
+            "## Next Section\n",
+            "*** End Patch",
+        );
+        let result = parse_patch_text(patch, ParseMode::Lenient);
+        // "## Next Section" is treated as a context line, not rejected.
+        assert!(result.is_ok(), "failed to parse: {result:?}");
+        let args = result.unwrap();
+        assert_eq!(args.hunks.len(), 1);
+        if let Hunk::UpdateFile { chunks, .. } = &args.hunks[0] {
+            assert_eq!(chunks.len(), 1);
+            // "## Next Section" should be in old_lines and new_lines as context.
+            assert!(chunks[0].old_lines.contains(&"## Next Section".to_string()));
+        } else {
+            panic!("expected UpdateFile hunk");
+        }
+    }
+
+    #[test]
+    fn test_line_number_prefix_stripped_in_chunk() {
+        // When the model copies lines from read_file output (L{n}: prefix)
+        // directly into the patch, the parser should strip the prefix and
+        // interpret the line correctly.
+        let patch = concat!(
+            "*** Begin Patch\n",
+            "*** Update File: test.rs\n",
+            "@@\n",
+            "L1:  fn main() {\n",   // context line: L1: then space + content
+            "L2: -    old();\n",     // removal: L2: then -content
+            "L3: +    new();\n",     // addition: L3: then +content
+            "L4:  }\n",             // context line
+            "*** End Patch",
+        );
+        let result = parse_patch_text(patch, ParseMode::Lenient);
+        assert!(result.is_ok(), "failed to parse with L prefix: {result:?}");
+        let args = result.unwrap();
+        assert_eq!(args.hunks.len(), 1);
+        if let Hunk::UpdateFile { chunks, .. } = &args.hunks[0] {
+            assert_eq!(chunks.len(), 1);
+            // old_lines: context "fn main() {", removed "    old();", context "}"
+            assert_eq!(chunks[0].old_lines, vec!["fn main() {", "    old();", "}"]);
+            // new_lines: context "fn main() {", added "    new();", context "}"
+            assert_eq!(chunks[0].new_lines, vec!["fn main() {", "    new();", "}"]);
+        } else {
+            panic!("expected UpdateFile hunk");
+        }
+    }
+
+    #[test]
+    fn test_line_number_prefix_blank_line() {
+        // A blank line from read_file output appears as "L{n}: " (nothing after space).
+        // After stripping the prefix, this should be treated as an empty context line.
+        let patch = concat!(
+            "*** Begin Patch\n",
+            "*** Update File: test.txt\n",
+            "@@\n",
+            "L1:  first\n",
+            "L2: \n",           // blank line: L2: then nothing → empty after strip
+            "L3: -old\n",
+            "L4: +new\n",
+            "*** End Patch",
+        );
+        let result = parse_patch_text(patch, ParseMode::Lenient);
+        assert!(result.is_ok(), "failed to parse blank L-prefix: {result:?}");
+        let args = result.unwrap();
+        if let Hunk::UpdateFile { chunks, .. } = &args.hunks[0] {
+            assert_eq!(chunks[0].old_lines, vec!["first", "", "old"]);
+            assert_eq!(chunks[0].new_lines, vec!["first", "", "new"]);
+        } else {
+            panic!("expected UpdateFile hunk");
+        }
+    }
+
+    #[test]
+    fn test_line_number_prefix_stripped_after_diff_marker() {
+        // Common model mistake: include the read_file L{n}: prefix *after* the
+        // diff marker (e.g. `-L2: foo` or `- L2: foo`).
+        assert_eq!(
+            parse_update_file_chunk(&["@@", " L1: keep", "-L2: remove", "+ L3: add"], 10, false),
+            Ok((
+                UpdateFileChunk {
+                    change_context: None,
+                    old_lines: vec!["keep".to_string(), "remove".to_string()],
+                    new_lines: vec!["keep".to_string(), "add".to_string()],
+                    is_end_of_file: false,
+                },
+                4
             ))
         );
     }

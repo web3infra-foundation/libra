@@ -2,13 +2,12 @@
 
 use async_trait::async_trait;
 
-use super::parse_arguments;
 use crate::internal::ai::tools::{
     apply_patch::{self, ApplyPatchArgs},
-    context::{ToolInvocation, ToolKind, ToolOutput},
+    context::{ToolInvocation, ToolKind, ToolOutput, ToolPayload},
     error::ToolError,
     registry::ToolHandler,
-    spec::{FunctionParameters, ToolSpec},
+    spec::ToolSpec,
     utils::validate_path,
 };
 
@@ -21,6 +20,10 @@ impl ToolHandler for ApplyPatchHandler {
         ToolKind::Function
     }
 
+    fn matches_kind(&self, payload: &ToolPayload) -> bool {
+        matches!(payload, ToolPayload::Function { .. } | ToolPayload::Custom { .. })
+    }
+
     async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, ToolError> {
         let ToolInvocation {
             payload,
@@ -28,22 +31,18 @@ impl ToolHandler for ApplyPatchHandler {
             ..
         } = invocation;
 
-        let arguments = match payload {
-            crate::internal::ai::tools::context::ToolPayload::Function { arguments } => arguments,
-            _ => {
-                return Err(ToolError::IncompatiblePayload(
-                    "apply_patch handler only accepts Function payloads".to_string(),
-                ));
-            }
+        // Accept both Function-style JSON arguments and Custom/freeform input to
+        // stay compatible with Codex-style tool calls.
+        let patch_text = match payload {
+            ToolPayload::Function { arguments } => parse_patch_text_from_arguments(&arguments)?,
+            ToolPayload::Custom { input } => input,
+            _ => unreachable!("matches_kind limits payload types"),
         };
-
-        // Parse arguments (new format: only needs patch string)
-        let args: ApplyPatchArgs = parse_arguments(&arguments)?;
 
         // Apply the patch (paths in patch content are relative to working_dir)
         let working_dir_clone = working_dir.clone();
         let result = tokio::task::spawn_blocking(move || {
-            apply_patch::apply_patch(&args.input, &working_dir_clone)
+            apply_patch::apply_patch(&patch_text, &working_dir_clone)
         })
         .await
         .map_err(|e| ToolError::ExecutionFailed(e.to_string()))??;
@@ -67,82 +66,23 @@ impl ToolHandler for ApplyPatchHandler {
     }
 
     fn schema(&self) -> ToolSpec {
-        ToolSpec::new(
-            "apply_patch",
-            r#"Use the `apply_patch` tool to edit files.
-Your patch language is a stripped‑down, file‑oriented diff format designed to be easy to parse and safe to apply. You can think of it as a high‑level envelope:
-
-*** Begin Patch
-[ one or more file sections ]
-*** End Patch
-
-Within that envelope, you get a sequence of file operations.
-You MUST include a header to specify the action you are taking.
-Each operation starts with one of three headers:
-
-*** Add File: <path> - create a new file. Every following line is a + line (the initial contents).
-*** Delete File: <path> - remove an existing file. Nothing follows.
-*** Update File: <path> - patch an existing file in place (optionally with a rename).
-
-May be immediately followed by *** Move to: <new path> if you want to rename the file.
-Then one or more "hunks", each introduced by @@ (optionally followed by a hunk header).
-Within a hunk each line starts with:
-
-For instructions on [context_before] and [context_after]:
-- By default, show 3 lines of code immediately above and 3 lines immediately below each change. If a change is within 3 lines of a previous change, do NOT duplicate the first change's [context_after] lines in the second change's [context_before] lines.
-- If 3 lines of context is insufficient to uniquely identify the snippet of code within the file, use the @@ operator to indicate the class or function to which the snippet belongs. For instance, we might have:
-@@ class BaseClass
-[3 lines of pre-context]
-- [old_code]
-+ [new_code]
-[3 lines of post-context]
-
-- If a code block is repeated so many times in a class or function such that even a single `@@` statement and 3 lines of context cannot uniquely identify the snippet of code, you can use multiple `@@` statements to jump to the right context. For instance:
-
-@@ class BaseClass
-@@ 	 def method():
-[3 lines of pre-context]
-- [old_code]
-+ [new_code]
-[3 lines of post-context]
-
-The full grammar definition is below:
-Patch := Begin { FileOp } End
-Begin := "*** Begin Patch" NEWLINE
-End := "*** End Patch" NEWLINE
-FileOp := AddFile | DeleteFile | UpdateFile
-AddFile := "*** Add File: " path NEWLINE { "+" line NEWLINE }
-DeleteFile := "*** Delete File: " path NEWLINE
-UpdateFile := "*** Update File: " path NEWLINE [ MoveTo ] { Hunk }
-MoveTo := "*** Move to: " newPath NEWLINE
-Hunk := "@@" [ header ] NEWLINE { HunkLine } [ "*** End of File" NEWLINE ]
-HunkLine := (" " | "-" | "+") text NEWLINE
-
-A full patch can combine several operations:
-
-*** Begin Patch
-*** Add File: hello.txt
-+Hello world
-*** Update File: src/app.py
-*** Move to: src/main.py
-@@ def greet():
--print("Hi")
-+print("Hello, world!")
-*** Delete File: obsolete.txt
-*** End Patch
-
-It is important to remember:
-
-- You must include a header with your intended action (Add/Delete/Update)
-- You must prefix new lines with `+` even when creating a new file
-- File references can only be relative, NEVER ABSOLUTE.
-"#,
-        )
-        .with_parameters(FunctionParameters::object(
-            [("input", "string", "The entire contents of the apply_patch command")],
-            [("input", true)],
-        ))
+        ToolSpec::apply_patch()
     }
+}
+
+fn parse_patch_text_from_arguments(arguments: &str) -> Result<String, ToolError> {
+    // 1) Preferred: JSON object, supports aliases like `patch`.
+    if let Ok(args) = serde_json::from_str::<ApplyPatchArgs>(arguments) {
+        return Ok(args.input);
+    }
+
+    // 2) JSON string (Codex-style freeform patch encoded as JSON).
+    if let Ok(s) = serde_json::from_str::<String>(arguments) {
+        return Ok(s);
+    }
+
+    // 3) Raw text (non-JSON) – accept for compatibility.
+    Ok(arguments.to_string())
 }
 
 #[cfg(test)]
@@ -405,5 +345,66 @@ mod tests {
         } else {
             panic!("Expected Object parameters");
         }
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_accepts_patch_alias() {
+        let temp_dir = TempDir::new().unwrap();
+        let working_dir = temp_dir.path().to_path_buf();
+        let file_path = working_dir.join("test.txt");
+        fs::write(&file_path, "a\nb\n").unwrap();
+
+        let handler = ApplyPatchHandler;
+        let invocation = ToolInvocation::new(
+            "call-1",
+            "apply_patch",
+            ToolPayload::Function {
+                arguments: serde_json::json!({
+                    "patch": wrap_patch(
+                        r#"*** Update File: test.txt
+@@
+ a
+-b
++c"#
+                    )
+                })
+                .to_string(),
+            },
+            working_dir,
+        );
+
+        let result = handler.handle(invocation).await;
+        assert!(result.is_ok());
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, "a\nc\n");
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_accepts_custom_payload() {
+        let temp_dir = TempDir::new().unwrap();
+        let working_dir = temp_dir.path().to_path_buf();
+        let file_path = working_dir.join("test.txt");
+        fs::write(&file_path, "x\ny\n").unwrap();
+
+        let handler = ApplyPatchHandler;
+        let invocation = ToolInvocation::new(
+            "call-1",
+            "apply_patch",
+            ToolPayload::Custom {
+                input: wrap_patch(
+                    r#"*** Update File: test.txt
+@@
+ x
+-y
++z"#
+                ),
+            },
+            working_dir,
+        );
+
+        let result = handler.handle(invocation).await;
+        assert!(result.is_ok());
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, "x\nz\n");
     }
 }

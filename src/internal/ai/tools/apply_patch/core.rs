@@ -653,4 +653,75 @@ mod tests {
         let result = apply_patch(&patch, dir.path());
         assert!(result.is_err());
     }
+
+    /// Regression: patches with "@@ " (trailing space, no context) should not
+    /// match a random empty line and advance the file position past the real
+    /// target.
+    #[test]
+    fn test_empty_context_marker_with_trailing_space() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("readme.md");
+        fs::write(&path, "## Libra\n\n`Libra` is a tool\n").unwrap();
+
+        // Model writes "@@ " (trailing space) when it means "no context".
+        let patch = wrap_patch(&format!(
+            "*** Update File: {}\n@@ \n-## Libra\n+# Libra",
+            path.display()
+        ));
+        let result = apply_patch(&patch, dir.path());
+        assert!(result.is_ok(), "empty-context @@ should work: {result:?}");
+        let contents = fs::read_to_string(&path).unwrap();
+        assert_eq!(contents, "# Libra\n\n`Libra` is a tool\n");
+    }
+
+    /// Regression: context lines without leading space prefix should be treated
+    /// leniently (the model forgot the space).
+    #[test]
+    fn test_context_line_without_space_prefix() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("readme.md");
+        fs::write(&path, "## Libra\n\n`Libra` is old\n").unwrap();
+
+        // Model writes context line without leading space.
+        let patch = wrap_patch(&format!(
+            concat!(
+                "*** Update File: {}\n",
+                "@@\n",
+                "## Libra\n",      // context without space prefix
+                "\n",              // empty context
+                "-`Libra` is old\n",
+                "+`Libra` is new",
+            ),
+            path.display()
+        ));
+        let result = apply_patch(&patch, dir.path());
+        assert!(result.is_ok(), "missing-space context should work: {result:?}");
+        let contents = fs::read_to_string(&path).unwrap();
+        assert_eq!(contents, "## Libra\n\n`Libra` is new\n");
+    }
+
+    /// Regression: model copies L{n}: prefixed lines from read_file output
+    /// directly into the patch.
+    #[test]
+    fn test_line_number_prefix_in_patch() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.rs");
+        fs::write(&path, "fn main() {\n    old();\n}\n").unwrap();
+
+        let patch = wrap_patch(&format!(
+            concat!(
+                "*** Update File: {}\n",
+                "@@\n",
+                "L1:  fn main() {{\n",   // L1: + space + content
+                "L2: -    old();\n",     // L2: + removal
+                "L3: +    new();\n",     // L3: + addition
+                "L4:  }}\n",             // L4: + space + content
+            ),
+            path.display()
+        ));
+        let result = apply_patch(&patch, dir.path());
+        assert!(result.is_ok(), "L{{n}}: prefix should be stripped: {result:?}");
+        let contents = fs::read_to_string(&path).unwrap();
+        assert_eq!(contents, "fn main() {\n    new();\n}\n");
+    }
 }

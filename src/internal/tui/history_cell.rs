@@ -31,6 +31,52 @@ fn truncate_utf8(text: &str, max_bytes: usize) -> String {
     text[..end].to_string()
 }
 
+/// Wrap `text` into styled ratatui `Line`s, splitting at `width` columns.
+///
+/// `prefix` is prepended to the first segment of every logical line.
+/// Continuation segments (when wrapping occurs) receive a blank indent of
+/// the same display width so the text stays aligned.
+fn wrap_text(text: &str, prefix: &str, width: u16, style: Style) -> Vec<Line<'static>> {
+    let mut out: Vec<Line<'static>> = Vec::new();
+    // Guard against unreasonably small widths.
+    let total_cols = (width as usize).max(8);
+    let prefix_cols = prefix.chars().count();
+    let cont_prefix = " ".repeat(prefix_cols);
+
+    for logical_line in text.lines() {
+        let mut remaining = logical_line;
+        let mut first = true;
+        loop {
+            let pfx: &str = if first { prefix } else { &cont_prefix };
+            let available = total_cols.saturating_sub(prefix_cols).max(1);
+            let char_count = remaining.chars().count();
+            if char_count <= available {
+                out.push(Line::styled(format!("{pfx}{remaining}"), style));
+                break;
+            }
+            // Split at the character boundary that fits within `available` columns.
+            let split_byte = remaining
+                .char_indices()
+                .nth(available)
+                .map(|(i, _)| i)
+                .unwrap_or(remaining.len());
+            out.push(Line::styled(
+                format!("{pfx}{}", &remaining[..split_byte]),
+                style,
+            ));
+            remaining = &remaining[split_byte..];
+            first = false;
+        }
+    }
+
+    // Produce at least one line so the caller always gets something.
+    if out.is_empty() {
+        out.push(Line::styled(prefix.to_string(), style));
+    }
+
+    out
+}
+
 /// Trait for cells displayed in the chat history.
 pub trait HistoryCell: Debug + Send + Sync {
     /// Render the cell as lines for display.
@@ -64,17 +110,14 @@ impl UserHistoryCell {
 }
 
 impl HistoryCell for UserHistoryCell {
-    fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         let mut lines = vec![Line::styled(
             "User:",
             Style::default().fg(Color::Cyan).bold(),
         )];
 
         for line in self.message.lines() {
-            lines.push(Line::styled(
-                format!("  {}", line),
-                Style::default().fg(Color::White),
-            ));
+            lines.extend(wrap_text(line, "  ", width, Style::default().fg(Color::White)));
         }
 
         lines.push(Line::raw("")); // Empty line for spacing
@@ -128,7 +171,7 @@ impl AssistantHistoryCell {
 }
 
 impl HistoryCell for AssistantHistoryCell {
-    fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         let mut lines = vec![Line::styled(
             "Assistant:",
             Style::default().fg(Color::Green).bold(),
@@ -147,19 +190,25 @@ impl HistoryCell for AssistantHistoryCell {
             for line in content.lines() {
                 // Simple code block detection
                 if line.starts_with("```") {
-                    lines.push(Line::styled(
-                        line.to_string(),
+                    lines.extend(wrap_text(
+                        line,
+                        "",
+                        width,
                         Style::default().fg(Color::Yellow),
                     ));
                 } else if line.starts_with("    ") || line.starts_with("\t") {
                     // Code indent
-                    lines.push(Line::styled(
-                        format!("  {}", line),
+                    lines.extend(wrap_text(
+                        line,
+                        "  ",
+                        width,
                         Style::default().fg(Color::Yellow),
                     ));
                 } else {
-                    lines.push(Line::styled(
-                        format!("  {}", line),
+                    lines.extend(wrap_text(
+                        line,
+                        "  ",
+                        width,
                         Style::default().fg(Color::White),
                     ));
                 }
@@ -224,7 +273,7 @@ impl ToolCallHistoryCell {
 }
 
 impl HistoryCell for ToolCallHistoryCell {
-    fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         let mut lines: Vec<Line<'static>> = Vec::new();
 
         // Status icon
@@ -288,8 +337,11 @@ impl HistoryCell for ToolCallHistoryCell {
                     ));
                 }
                 Err(e) => {
-                    lines.push(Line::styled(
-                        format!("  Error: {}", e),
+                    // Wrap error messages so they don't overflow the terminal width.
+                    lines.extend(wrap_text(
+                        e,
+                        "  Error: ",
+                        width,
                         Style::default().fg(Color::Red),
                     ));
                 }

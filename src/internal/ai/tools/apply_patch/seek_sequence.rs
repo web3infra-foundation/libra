@@ -109,6 +109,60 @@ pub(crate) fn seek_sequence(
         }
     }
 
+    // ------------------------------------------------------------------
+    // Fifth pass: strip the read_file "L{n}: " line-number prefix from
+    // pattern lines before comparing. This handles the common model error
+    // of copying context lines verbatim from `read_file` output (which
+    // prefixes every line with "L{n}: ") directly into the patch. Only the
+    // prefix is stripped — the actual file content is matched as-is.
+    // ------------------------------------------------------------------
+
+    fn strip_line_number_prefix(s: &str) -> Option<&str> {
+        // Matches `L` + digits + `:` and an optional single space.
+        let bytes = s.as_bytes();
+        if bytes.first() != Some(&b'L') {
+            return None;
+        }
+        let mut i = 1;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i <= 1 || bytes.get(i) != Some(&b':') {
+            return None;
+        }
+        let mut j = i + 1;
+        if bytes.get(j) == Some(&b' ') {
+            j += 1;
+        }
+        Some(&s[j..])
+    }
+
+    fn strip_line_number_prefix_optional_space(s: &str) -> &str {
+        if let Some(stripped) = strip_line_number_prefix(s) {
+            return stripped;
+        }
+        if let Some(rest) = s.strip_prefix(' ') {
+            if let Some(stripped) = strip_line_number_prefix(rest) {
+                return stripped;
+            }
+        }
+        s
+    }
+
+    for i in search_start..=lines.len().saturating_sub(pattern.len()) {
+        let mut ok = true;
+        for (p_idx, pat) in pattern.iter().enumerate() {
+            let stripped = strip_line_number_prefix_optional_space(pat).trim();
+            if lines[i + p_idx].trim() != stripped {
+                ok = false;
+                break;
+            }
+        }
+        if ok {
+            return Some(i);
+        }
+    }
+
     None
 }
 
@@ -151,5 +205,38 @@ mod tests {
         let pattern = to_vec(&["too", "many", "lines"]);
         // Should not panic – must return None when pattern cannot possibly fit.
         assert_eq!(seek_sequence(&lines, &pattern, 0, false), None);
+    }
+
+    #[test]
+    fn test_line_number_prefix_stripped_single_line() {
+        // Pattern line includes the L{n}: prefix from read_file output.
+        let lines = to_vec(&["## Libra"]);
+        let pattern = to_vec(&["L1: ## Libra"]);
+        assert_eq!(seek_sequence(&lines, &pattern, 0, false), Some(0));
+    }
+
+    #[test]
+    fn test_line_number_prefix_stripped_multi_digit() {
+        let lines = to_vec(&["fn main() {"]);
+        let pattern = to_vec(&["L123: fn main() {"]);
+        assert_eq!(seek_sequence(&lines, &pattern, 0, false), Some(0));
+    }
+
+    #[test]
+    fn test_line_number_prefix_stripped_sequence() {
+        // Multi-line pattern where every line has an L{n}: prefix.
+        let lines = to_vec(&["## Libra", "", "`Libra` is a partial implementation"]);
+        let pattern = to_vec(&["L1: ## Libra", "L2: ", "L3: `Libra` is a partial implementation"]);
+        assert_eq!(seek_sequence(&lines, &pattern, 0, false), Some(0));
+    }
+
+    #[test]
+    fn test_no_false_positive_for_literal_l_prefix() {
+        // Lines that genuinely contain "L1:" as content should still match via
+        // the earlier exact-match pass; the stripping pass should not corrupt them.
+        let lines = to_vec(&["L1: some log entry"]);
+        let pattern = to_vec(&["L1: some log entry"]);
+        // Exact match succeeds on the first pass — no stripping involved.
+        assert_eq!(seek_sequence(&lines, &pattern, 0, false), Some(0));
     }
 }
