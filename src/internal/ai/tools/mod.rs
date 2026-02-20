@@ -14,7 +14,8 @@ pub mod spec;
 pub mod utils;
 
 pub use context::{
-    GrepFilesArgs, ListDirArgs, ReadFileArgs, ToolInvocation, ToolKind, ToolOutput, ToolPayload,
+    GrepFilesArgs, ListDirArgs, ReadFileArgs, ShellArgs, ToolInvocation, ToolKind, ToolOutput,
+    ToolPayload,
 };
 pub use error::{ToolError, ToolResult};
 pub use registry::{ToolHandler, ToolRegistry, ToolRegistryBuilder};
@@ -63,5 +64,8 @@ mod tests {
 
         let patch_spec = ToolSpec::apply_patch();
         assert_eq!(patch_spec.function.name, "apply_patch");
+
+        let shell_spec = ToolSpec::shell();
+        assert_eq!(shell_spec.function.name, "shell");
     }
 }

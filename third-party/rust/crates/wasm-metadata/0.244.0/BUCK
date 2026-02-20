@@ -26,7 +26,7 @@ rust_library(
     rustc_flags = ["@$(location :wasm-metadata-manifest[env_flags])"],
     visibility = ["PUBLIC"],
     deps = [
-        "//third-party/rust/crates/anyhow/1.0.101:anyhow",
+        "//third-party/rust/crates/anyhow/1.0.102:anyhow",
         "//third-party/rust/crates/indexmap/2.13.0:indexmap",
         "//third-party/rust/crates/wasm-encoder/0.244.0:wasm-encoder",
         "//third-party/rust/crates/wasmparser/0.244.0:wasmparser",

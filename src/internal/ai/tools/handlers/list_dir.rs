@@ -1,6 +1,18 @@
 //! Handler for the list_dir tool.
+//!
+//! Lists entries in a local directory with pagination, sorted alphabetically.
+//! Mirrors the behaviour of the codex list_dir tool:
+//!   - Directories shown with a trailing `/`
+//!   - Symlinks shown with a trailing `@`
+//!   - Supports `offset` + `limit` pagination
+//!   - `depth` controls recursive traversal (default: 2)
 
-use std::path::Path;
+use std::{
+    collections::VecDeque,
+    ffi::OsStr,
+    fs::FileType,
+    path::{Path, PathBuf},
+};
 
 use async_trait::async_trait;
 use tokio::fs;
@@ -14,8 +26,10 @@ use crate::internal::ai::tools::{
     utils::validate_path,
 };
 
-/// Handler for listing directory contents.
 pub struct ListDirHandler;
+
+const MAX_ENTRY_LENGTH: usize = 500;
+const INDENTATION: usize = 2;
 
 #[async_trait]
 impl ToolHandler for ListDirHandler {
@@ -41,125 +55,233 @@ impl ToolHandler for ListDirHandler {
 
         let args: ListDirArgs = parse_arguments(&arguments)?;
 
-        // Validate path
+        if args.offset == 0 {
+            return Err(ToolError::InvalidArguments(
+                "offset must be a 1-indexed entry number".to_string(),
+            ));
+        }
+        if args.limit == 0 {
+            return Err(ToolError::InvalidArguments(
+                "limit must be greater than zero".to_string(),
+            ));
+        }
+        if args.depth == 0 {
+            return Err(ToolError::InvalidArguments(
+                "depth must be greater than zero".to_string(),
+            ));
+        }
+
         let path = Path::new(&args.dir_path);
         if !path.is_absolute() {
             return Err(ToolError::PathNotAbsolute(path.to_path_buf()));
         }
-
         validate_path(path, &working_dir)?;
 
-        // List directory contents
-        let entries = list_directory(path, args.max_depth).await?;
+        let entries = list_dir_slice(path, args.offset, args.limit, args.depth).await?;
 
-        Ok(ToolOutput::success(entries))
+        let mut output = Vec::with_capacity(entries.len() + 1);
+        output.push(format!("Absolute path: {}", path.display()));
+        output.extend(entries);
+
+        Ok(ToolOutput::success(output.join("\n")))
     }
 
     fn schema(&self) -> ToolSpec {
         ToolSpec::new(
             "list_dir",
-            "List the contents of a directory. Can list recursively with depth control. Returns a formatted list with entry types (DIR, FILE) and names.",
+            "Lists entries in a local directory with 1-indexed entry numbers and type labels (/ for dirs, @ for symlinks).",
         )
         .with_parameters(FunctionParameters::object(
             [
                 ("dir_path", "string", "Absolute path to the directory to list"),
-                ("max_depth", "integer", "Maximum depth for recursive listing (default: 1, non-recursive)"),
+                ("offset", "integer", "1-indexed entry number to start listing from (default: 1)"),
+                ("limit", "integer", "Maximum number of entries to return (default: 25)"),
+                ("depth", "integer", "Maximum directory depth to traverse (default: 2, must be >= 1)"),
             ],
             [("dir_path", true)],
         ))
     }
 }
 
-/// List directory contents with optional recursion.
-async fn list_directory(path: &Path, max_depth: usize) -> Result<String, ToolError> {
-    let mut entries = Vec::new();
+// ── Entry collection ──────────────────────────────────────────────────────────
 
-    // Check if path exists and is a directory
-    let metadata = fs::metadata(path).await.map_err(|e| {
-        ToolError::ExecutionFailed(format!("Failed to access '{}': {}", path.display(), e))
-    })?;
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EntryKind {
+    Directory,
+    File,
+    Symlink,
+    Other,
+}
 
-    if !metadata.is_dir() {
-        return Err(ToolError::ExecutionFailed(format!(
-            "Path '{}' is not a directory",
-            path.display()
-        )));
-    }
-
-    // List entries
-    list_directory_recursive(path, 0, max_depth, &mut entries).await?;
-
-    if entries.is_empty() {
-        Ok("(empty directory)".to_string())
-    } else {
-        Ok(entries.join("\n"))
+impl From<&FileType> for EntryKind {
+    fn from(ft: &FileType) -> Self {
+        if ft.is_symlink() {
+            EntryKind::Symlink
+        } else if ft.is_dir() {
+            EntryKind::Directory
+        } else if ft.is_file() {
+            EntryKind::File
+        } else {
+            EntryKind::Other
+        }
     }
 }
 
-/// Recursively list directory contents.
-fn list_directory_recursive<'a>(
-    path: &'a Path,
-    current_depth: usize,
+struct DirEntry {
+    /// Sort key (normalised relative path).
+    sort_key: String,
+    /// Display name (just the filename component).
+    display_name: String,
+    /// Nesting depth relative to root (0 = root's children).
+    depth: usize,
+    kind: EntryKind,
+}
+
+async fn list_dir_slice(
+    root: &Path,
+    offset: usize,
+    limit: usize,
     max_depth: usize,
-    entries: &'a mut Vec<String>,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), ToolError>> + Send + 'a>> {
-    Box::pin(async move {
-        let mut read_dir = fs::read_dir(path).await.map_err(|e| {
+) -> Result<Vec<String>, ToolError> {
+    let mut entries = Vec::new();
+    collect_entries(root, Path::new(""), max_depth, &mut entries).await?;
+
+    if entries.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    entries.sort_unstable_by(|a, b| a.sort_key.cmp(&b.sort_key));
+
+    let start = offset - 1;
+    if start >= entries.len() {
+        return Err(ToolError::ExecutionFailed(
+            "offset exceeds directory entry count".to_string(),
+        ));
+    }
+
+    let remaining = entries.len() - start;
+    let capped = limit.min(remaining);
+    let end = start + capped;
+    let selected = &entries[start..end];
+
+    let mut formatted: Vec<String> = selected
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let entry_number = start + index + 1;
+            format_entry(entry, entry_number)
+        })
+        .collect();
+    if end < entries.len() {
+        formatted.push(format!("More than {capped} entries found"));
+    }
+
+    Ok(formatted)
+}
+
+async fn collect_entries(
+    dir: &Path,
+    prefix: &Path,
+    depth: usize,
+    out: &mut Vec<DirEntry>,
+) -> Result<(), ToolError> {
+    let mut queue: VecDeque<(PathBuf, PathBuf, usize)> = VecDeque::new();
+    queue.push_back((dir.to_path_buf(), prefix.to_path_buf(), depth));
+
+    while let Some((current_dir, current_prefix, remaining)) = queue.pop_front() {
+        let mut read_dir = fs::read_dir(&current_dir).await.map_err(|e| {
             ToolError::ExecutionFailed(format!(
-                "Failed to read directory '{}': {}",
-                path.display(),
-                e
+                "failed to read directory '{}': {e}",
+                current_dir.display()
             ))
         })?;
 
-        let mut entry_infos = Vec::new();
+        let mut batch: Vec<(PathBuf, PathBuf, EntryKind, DirEntry)> = Vec::new();
 
         while let Some(entry) = read_dir.next_entry().await.map_err(|e| {
-            ToolError::ExecutionFailed(format!("Failed to read directory entry: {}", e))
+            ToolError::ExecutionFailed(format!("failed to read directory entry: {e}"))
         })? {
-            let entry_path = entry.path();
-            let name = entry.file_name().to_string_lossy().to_string();
+            let file_type = entry
+                .file_type()
+                .await
+                .map_err(|e| ToolError::ExecutionFailed(format!("failed to inspect entry: {e}")))?;
 
-            let metadata = entry.metadata().await.map_err(|e| {
-                ToolError::ExecutionFailed(format!(
-                    "Failed to get metadata for '{}': {}",
-                    entry_path.display(),
-                    e
-                ))
-            })?;
+            let file_name = entry.file_name();
+            let relative = if current_prefix.as_os_str().is_empty() {
+                PathBuf::from(&file_name)
+            } else {
+                current_prefix.join(&file_name)
+            };
 
-            let entry_type = if metadata.is_dir() { "DIR" } else { "FILE" };
+            let display_depth = current_prefix.components().count();
+            let sort_key = truncate_path(&relative);
+            let display_name = truncate_name(&file_name);
+            let kind = EntryKind::from(&file_type);
 
-            let indent = "  ".repeat(current_depth);
-            entry_infos.push((
-                format!("{}[{}] {}", indent, entry_type, name),
-                entry_path,
-                metadata.is_dir(),
+            batch.push((
+                entry.path(),
+                relative,
+                kind,
+                DirEntry {
+                    sort_key,
+                    display_name,
+                    depth: display_depth,
+                    kind,
+                },
             ));
         }
 
-        // Sort entries: directories first, then files, both alphabetically
-        entry_infos.sort_by(|a, b| {
-            match (a.2, b.2) {
-                (true, true) | (false, false) => a.0.cmp(&b.0), // Both same type, sort by name
-                (true, false) => std::cmp::Ordering::Less,      // Directory comes before file
-                (false, true) => std::cmp::Ordering::Greater,   // File comes after directory
-            }
-        });
+        batch.sort_unstable_by(|a, b| a.3.sort_key.cmp(&b.3.sort_key));
 
-        for (display, entry_path, is_dir) in entry_infos {
-            entries.push(display);
-
-            // Recurse into subdirectories if depth allows
-            if is_dir && current_depth < max_depth {
-                list_directory_recursive(&entry_path, current_depth + 1, max_depth, entries)
-                    .await?;
+        for (abs_path, rel_path, kind, dir_entry) in batch {
+            if kind == EntryKind::Directory && remaining > 1 {
+                queue.push_back((abs_path, rel_path, remaining - 1));
             }
+            out.push(dir_entry);
         }
+    }
 
-        Ok(())
-    })
+    Ok(())
 }
+
+fn format_entry(entry: &DirEntry, entry_number: usize) -> String {
+    let indent = " ".repeat(entry.depth * INDENTATION);
+    let mut name = entry.display_name.clone();
+    match entry.kind {
+        EntryKind::Directory => name.push('/'),
+        EntryKind::Symlink => name.push('@'),
+        EntryKind::Other => name.push('?'),
+        EntryKind::File => {}
+    }
+    format!("{entry_number}. {indent}{name}")
+}
+
+fn truncate_path(path: &Path) -> String {
+    let s = path.to_string_lossy().replace('\\', "/");
+    truncate_to_utf8_boundary(&s, MAX_ENTRY_LENGTH)
+}
+
+fn truncate_name(name: &OsStr) -> String {
+    let s = name.to_string_lossy();
+    truncate_to_utf8_boundary(&s, MAX_ENTRY_LENGTH)
+}
+
+fn truncate_to_utf8_boundary(input: &str, max_bytes: usize) -> String {
+    if input.len() <= max_bytes {
+        return input.to_string();
+    }
+
+    let mut cut = 0usize;
+    for (index, _) in input.char_indices() {
+        if index > max_bytes {
+            break;
+        }
+        cut = index;
+    }
+    input[..cut].to_string()
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -170,296 +292,277 @@ mod tests {
     use super::*;
     use crate::internal::ai::tools::{ToolKind, context::ToolPayload};
 
-    #[tokio::test]
-    async fn test_list_dir_basic() {
-        let temp_dir = TempDir::new().unwrap();
-        let dir_path = temp_dir.path();
-        let working_dir = dir_path.to_path_buf();
-
-        // Create some test files
-        fs::write(dir_path.join("file1.txt"), "content").unwrap();
-        fs::write(dir_path.join("file2.txt"), "content").unwrap();
-
-        // Create a subdirectory
-        fs::create_dir(dir_path.join("subdir")).unwrap();
-
-        let handler = ListDirHandler;
-        let invocation = ToolInvocation::new(
+    fn make_invocation(args: serde_json::Value, working_dir: PathBuf) -> ToolInvocation {
+        ToolInvocation::new(
             "call-1",
             "list_dir",
             ToolPayload::Function {
-                arguments: serde_json::json!({
-                    "dir_path": dir_path,
-                    "max_depth": 1
-                })
-                .to_string(),
+                arguments: args.to_string(),
             },
             working_dir,
-        );
+        )
+    }
 
-        let result = handler.handle(invocation).await;
-        assert!(result.is_ok());
+    // ── Output format ─────────────────────────────────────────────────────────
 
-        let output = result.unwrap();
-        let text = output.as_text().unwrap();
-        assert!(text.contains("DIR") || text.contains("FILE"));
+    #[tokio::test]
+    async fn test_dirs_have_trailing_slash() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path();
+        fs::create_dir(dir.join("subdir")).unwrap();
+        fs::write(dir.join("file.txt"), "").unwrap();
+
+        let result = ListDirHandler
+            .handle(make_invocation(
+                serde_json::json!({ "dir_path": dir, "depth": 1 }),
+                dir.to_path_buf(),
+            ))
+            .await
+            .unwrap();
+
+        let text = result.as_text().unwrap();
+        assert!(text.contains("subdir/"), "expected trailing /: {text}");
+        assert!(text.contains("file.txt"), "expected plain file: {text}");
+        assert!(!text.contains("[DIR]"), "should not contain [DIR] label");
     }
 
     #[tokio::test]
-    async fn test_list_dir_recursive() {
-        let temp_dir = TempDir::new().unwrap();
-        let dir_path = temp_dir.path();
-        let working_dir = dir_path.to_path_buf();
+    async fn test_entries_are_numbered() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path();
+        fs::write(dir.join("a.txt"), "").unwrap();
 
-        // Create nested structure
-        fs::create_dir(dir_path.join("level1")).unwrap();
-        fs::create_dir(dir_path.join("level1").join("level2")).unwrap();
-        fs::write(
-            dir_path.join("level1").join("level2").join("file.txt"),
-            "content",
-        )
-        .unwrap();
+        let result = ListDirHandler
+            .handle(make_invocation(
+                serde_json::json!({ "dir_path": dir, "depth": 1 }),
+                dir.to_path_buf(),
+            ))
+            .await
+            .unwrap();
 
-        let handler = ListDirHandler;
-        let invocation = ToolInvocation::new(
-            "call-1",
-            "list_dir",
-            ToolPayload::Function {
-                arguments: serde_json::json!({
-                    "dir_path": dir_path,
-                    "max_depth": 3
-                })
-                .to_string(),
-            },
-            working_dir,
-        );
-
-        let result = handler.handle(invocation).await;
-        assert!(result.is_ok());
-
-        let output = result.unwrap();
-        let text = output.as_text().unwrap();
-        // Should contain nested entries
-        assert!(text.contains("level1") || !text.is_empty());
+        let text = result.as_text().unwrap();
+        let first_entry = text.lines().nth(1).unwrap();
+        assert!(first_entry.starts_with("1. "), "{text}");
     }
 
     #[tokio::test]
     async fn test_list_dir_nonexistent() {
-        let temp_dir = TempDir::new().unwrap();
-        let handler = ListDirHandler;
-        let invocation = ToolInvocation::new(
-            "call-1",
-            "list_dir",
-            ToolPayload::Function {
-                arguments: serde_json::json!({
-                    "dir_path": "/nonexistent/directory",
-                    "max_depth": 1
-                })
-                .to_string(),
-            },
-            temp_dir.path().to_path_buf(),
-        );
-
-        let result = handler.handle(invocation).await;
+        let temp = TempDir::new().unwrap();
+        let result = ListDirHandler
+            .handle(make_invocation(
+                serde_json::json!({ "dir_path": "/nonexistent/directory" }),
+                temp.path().to_path_buf(),
+            ))
+            .await;
         assert!(result.is_err());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
-    async fn test_list_dir_file_instead_of_directory() {
-        let temp_dir = TempDir::new().unwrap();
-        let working_dir = temp_dir.path().to_path_buf();
-        let temp_file = tempfile::NamedTempFile::new_in(&working_dir).unwrap();
+    async fn test_symlinks_have_at_suffix() {
+        use std::os::unix::fs::symlink;
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path();
+        fs::write(dir.join("target.txt"), "").unwrap();
+        symlink(dir.join("target.txt"), dir.join("link")).unwrap();
 
-        let handler = ListDirHandler;
-        let invocation = ToolInvocation::new(
-            "call-1",
-            "list_dir",
-            ToolPayload::Function {
-                arguments: serde_json::json!({
-                    "dir_path": temp_file.path(),
-                    "max_depth": 1
-                })
-                .to_string(),
-            },
-            working_dir,
-        );
+        let result = ListDirHandler
+            .handle(make_invocation(
+                serde_json::json!({ "dir_path": dir, "depth": 1 }),
+                dir.to_path_buf(),
+            ))
+            .await
+            .unwrap();
 
-        let result = handler.handle(invocation).await;
-        assert!(matches!(result, Err(ToolError::ExecutionFailed(_))));
+        let text = result.as_text().unwrap();
+        assert!(text.contains("link@"), "expected @ suffix: {text}");
     }
 
     #[tokio::test]
-    async fn test_list_dir_empty_directory() {
-        let temp_dir = TempDir::new().unwrap();
-        let dir_path = temp_dir.path();
-        let working_dir = dir_path.to_path_buf();
+    async fn test_absolute_path_header() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path();
+        fs::write(dir.join("a.txt"), "").unwrap();
 
-        let handler = ListDirHandler;
-        let invocation = ToolInvocation::new(
-            "call-1",
-            "list_dir",
-            ToolPayload::Function {
-                arguments: serde_json::json!({
-                    "dir_path": dir_path,
-                    "max_depth": 1
-                })
-                .to_string(),
-            },
-            working_dir,
+        let result = ListDirHandler
+            .handle(make_invocation(
+                serde_json::json!({ "dir_path": dir }),
+                dir.to_path_buf(),
+            ))
+            .await
+            .unwrap();
+
+        let text = result.as_text().unwrap();
+        let first_line = text.lines().next().unwrap();
+        assert!(
+            first_line.starts_with("Absolute path:"),
+            "expected 'Absolute path:' header: {text}"
         );
-
-        let result = handler.handle(invocation).await;
-        assert!(result.is_ok());
-
-        let output = result.unwrap();
-        let text = output.as_text().unwrap();
-        assert_eq!(text, "(empty directory)");
     }
 
-    #[tokio::test]
-    async fn test_list_dir_depth_zero() {
-        let temp_dir = TempDir::new().unwrap();
-        let dir_path = temp_dir.path();
-        let working_dir = dir_path.to_path_buf();
-
-        fs::write(dir_path.join("file.txt"), "content").unwrap();
-
-        let handler = ListDirHandler;
-        let invocation = ToolInvocation::new(
-            "call-1",
-            "list_dir",
-            ToolPayload::Function {
-                arguments: serde_json::json!({
-                    "dir_path": dir_path,
-                    "max_depth": 0
-                })
-                .to_string(),
-            },
-            working_dir,
-        );
-
-        let result = handler.handle(invocation).await;
-        assert!(result.is_ok());
-
-        let output = result.unwrap();
-        let text = output.as_text().unwrap();
-        assert!(!text.is_empty());
-    }
+    // ── Pagination ────────────────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn test_list_dir_many_files() {
-        let temp_dir = TempDir::new().unwrap();
-        let dir_path = temp_dir.path();
-        let working_dir = dir_path.to_path_buf();
-
-        for i in 0..20 {
-            fs::write(dir_path.join(format!("file{}.txt", i)), "content").unwrap();
+    async fn test_limit_truncates_and_adds_notice() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path();
+        for i in 0..10 {
+            fs::write(dir.join(format!("file{i:02}.txt")), "").unwrap();
         }
 
-        let handler = ListDirHandler;
-        let invocation = ToolInvocation::new(
-            "call-1",
-            "list_dir",
-            ToolPayload::Function {
-                arguments: serde_json::json!({
-                    "dir_path": dir_path,
-                    "max_depth": 1
-                })
-                .to_string(),
-            },
-            working_dir,
-        );
+        let result = ListDirHandler
+            .handle(make_invocation(
+                serde_json::json!({ "dir_path": dir, "limit": 3, "depth": 1 }),
+                dir.to_path_buf(),
+            ))
+            .await
+            .unwrap();
 
-        let result = handler.handle(invocation).await;
-        assert!(result.is_ok());
-
-        let output = result.unwrap();
-        let text = output.as_text().unwrap();
-        assert!(text.matches("FILE").count() >= 20);
+        let text = result.as_text().unwrap();
+        // 1 header + 3 entries + 1 "More than..." notice = 5 lines
+        assert_eq!(text.lines().count(), 5, "{text}");
+        assert!(text.contains("More than 3 entries found"), "{text}");
     }
 
     #[tokio::test]
-    async fn test_list_dir_hidden_files() {
-        let temp_dir = TempDir::new().unwrap();
-        let dir_path = temp_dir.path();
-        let working_dir = dir_path.to_path_buf();
+    async fn test_offset_skips_entries() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path();
+        // Create files that sort as a.txt, b.txt, c.txt
+        fs::write(dir.join("a.txt"), "").unwrap();
+        fs::write(dir.join("b.txt"), "").unwrap();
+        fs::write(dir.join("c.txt"), "").unwrap();
 
-        fs::write(dir_path.join(".hidden"), "hidden").unwrap();
-        fs::write(dir_path.join("visible.txt"), "visible").unwrap();
+        let result = ListDirHandler
+            .handle(make_invocation(
+                serde_json::json!({ "dir_path": dir, "offset": 2, "limit": 10, "depth": 1 }),
+                dir.to_path_buf(),
+            ))
+            .await
+            .unwrap();
 
-        let handler = ListDirHandler;
-        let invocation = ToolInvocation::new(
-            "call-1",
-            "list_dir",
-            ToolPayload::Function {
-                arguments: serde_json::json!({
-                    "dir_path": dir_path,
-                    "max_depth": 1
-                })
-                .to_string(),
-            },
-            working_dir,
+        let text = result.as_text().unwrap();
+        assert!(!text.contains("a.txt"), "should skip first entry: {text}");
+        assert!(text.contains("2. b.txt"), "{text}");
+        assert!(text.contains("c.txt"), "{text}");
+    }
+
+    // ── Depth ────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_depth_controls_recursion() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path();
+        let nested = dir.join("sub");
+        let deeper = nested.join("deeper");
+        fs::create_dir_all(&deeper).unwrap();
+        fs::write(deeper.join("leaf.txt"), "").unwrap();
+
+        // depth=1: only top-level entries visible
+        let shallow = ListDirHandler
+            .handle(make_invocation(
+                serde_json::json!({ "dir_path": dir, "depth": 1 }),
+                dir.to_path_buf(),
+            ))
+            .await
+            .unwrap();
+        let text = shallow.as_text().unwrap();
+        assert!(text.contains("sub/"), "{text}");
+        assert!(
+            !text.contains("leaf.txt"),
+            "depth=1 should not show leaf: {text}"
         );
 
-        let result = handler.handle(invocation).await;
-        assert!(result.is_ok());
+        // depth=3: leaf visible
+        let deep = ListDirHandler
+            .handle(make_invocation(
+                serde_json::json!({ "dir_path": dir, "depth": 3 }),
+                dir.to_path_buf(),
+            ))
+            .await
+            .unwrap();
+        assert!(deep.as_text().unwrap().contains("leaf.txt"));
+    }
 
-        let output = result.unwrap();
-        let text = output.as_text().unwrap();
-        assert!(text.contains(".hidden"));
-        assert!(text.contains("visible.txt"));
+    // ── Parameter validation ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_depth_zero_rejected() {
+        let temp = TempDir::new().unwrap();
+        let result = ListDirHandler
+            .handle(make_invocation(
+                serde_json::json!({ "dir_path": temp.path(), "depth": 0 }),
+                temp.path().to_path_buf(),
+            ))
+            .await;
+        assert!(matches!(result, Err(ToolError::InvalidArguments(_))));
     }
 
     #[tokio::test]
-    async fn test_list_dir_relative_path_fails() {
-        let temp_dir = TempDir::new().unwrap();
-        let handler = ListDirHandler;
-        let invocation = ToolInvocation::new(
-            "call-1",
-            "list_dir",
-            ToolPayload::Function {
-                arguments: serde_json::json!({
-                    "dir_path": "relative/path",
-                    "max_depth": 1
-                })
-                .to_string(),
-            },
-            temp_dir.path().to_path_buf(),
-        );
-
-        let result = handler.handle(invocation).await;
-        assert!(matches!(result, Err(ToolError::PathNotAbsolute(_))));
-    }
-
-    #[tokio::test]
-    async fn test_list_dir_outside_working_dir_fails() {
-        let temp_dir = TempDir::new().unwrap();
-        let other_dir = TempDir::new().unwrap();
-
-        let handler = ListDirHandler;
-        let invocation = ToolInvocation::new(
-            "call-1",
-            "list_dir",
-            ToolPayload::Function {
-                arguments: serde_json::json!({
-                    "dir_path": other_dir.path(),
-                    "max_depth": 1
-                })
-                .to_string(),
-            },
-            temp_dir.path().to_path_buf(),
-        );
-
-        let result = handler.handle(invocation).await;
+    async fn test_path_outside_working_dir_fails() {
+        let sandbox = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let result = ListDirHandler
+            .handle(make_invocation(
+                serde_json::json!({ "dir_path": outside.path() }),
+                sandbox.path().to_path_buf(),
+            ))
+            .await;
         assert!(matches!(result, Err(ToolError::PathOutsideWorkingDir(_))));
     }
 
     #[tokio::test]
-    async fn test_list_dir_kind_and_schema() {
-        let handler = ListDirHandler;
-        assert_eq!(handler.kind(), ToolKind::Function);
-        let schema = handler.schema();
+    async fn test_relative_path_fails() {
+        let temp = TempDir::new().unwrap();
+        let result = ListDirHandler
+            .handle(make_invocation(
+                serde_json::json!({ "dir_path": "relative/path" }),
+                temp.path().to_path_buf(),
+            ))
+            .await;
+        assert!(matches!(result, Err(ToolError::PathNotAbsolute(_))));
+    }
+
+    #[tokio::test]
+    async fn test_empty_directory() {
+        let temp = TempDir::new().unwrap();
+        let result = ListDirHandler
+            .handle(make_invocation(
+                serde_json::json!({ "dir_path": temp.path() }),
+                temp.path().to_path_buf(),
+            ))
+            .await
+            .unwrap();
+        // Only the header line, no entries.
+        let text = result.as_text().unwrap();
+        assert_eq!(
+            text.lines().count(),
+            1,
+            "empty dir should have only header: {text}"
+        );
+    }
+
+    // ── Schema ────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_kind_and_schema() {
+        assert_eq!(ListDirHandler.kind(), ToolKind::Function);
+        let schema = ListDirHandler.schema();
         assert_eq!(schema.function.name, "list_dir");
-        assert!(schema.function.description.contains("directory"));
+        let json = schema.to_json();
+        let required = json["function"]["parameters"]["required"]
+            .as_array()
+            .unwrap();
+        assert!(required.iter().any(|v| v == "dir_path"));
+        assert!(!required.iter().any(|v| v == "depth"));
+        assert!(!required.iter().any(|v| v == "max_depth"));
+    }
+
+    #[test]
+    fn test_truncate_to_utf8_boundary_handles_unicode() {
+        let unicode = "🙂".repeat(600);
+        let truncated = truncate_to_utf8_boundary(&unicode, MAX_ENTRY_LENGTH);
+        assert!(truncated.len() <= MAX_ENTRY_LENGTH);
+        assert!(truncated.is_char_boundary(truncated.len()));
     }
 }

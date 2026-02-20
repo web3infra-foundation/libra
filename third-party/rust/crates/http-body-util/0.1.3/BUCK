@@ -28,7 +28,7 @@ rust_library(
     visibility = ["PUBLIC"],
     deps = [
         "//third-party/rust/crates/bytes/1.11.1:bytes",
-        "//third-party/rust/crates/futures-core/0.3.31:futures-core",
+        "//third-party/rust/crates/futures-core/0.3.32:futures-core",
         "//third-party/rust/crates/http-body/1.0.1:http-body",
         "//third-party/rust/crates/http/1.4.0:http",
         "//third-party/rust/crates/pin-project-lite/0.2.16:pin-project-lite",

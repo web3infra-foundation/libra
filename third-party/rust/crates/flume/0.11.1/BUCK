@@ -34,7 +34,7 @@ rust_library(
     },
     visibility = ["PUBLIC"],
     deps = [
-        "//third-party/rust/crates/futures-core/0.3.31:futures-core",
-        "//third-party/rust/crates/futures-sink/0.3.31:futures-sink",
+        "//third-party/rust/crates/futures-core/0.3.32:futures-core",
+        "//third-party/rust/crates/futures-sink/0.3.32:futures-sink",
     ],
 )

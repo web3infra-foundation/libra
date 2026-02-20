@@ -37,8 +37,8 @@ pub struct Agent<M: CompletionModel> {
     preamble: Option<String>,
     /// Sampling temperature (0.0 to 2.0). Higher values mean more creativity.
     temperature: Option<f64>,
-    /// Maximum number of steps for tool execution loops.
-    max_steps: usize,
+    /// Maximum number of steps for tool execution loops. `None` means unlimited.
+    max_steps: Option<usize>,
     /// Set of tools available to the agent.
     /// Tools available to the agent.
     tools: ToolSet,
@@ -54,7 +54,7 @@ impl<M: CompletionModel> Agent<M> {
             model: Arc::new(model),
             preamble: None,
             temperature: None,
-            max_steps: 4,
+            max_steps: Some(4),
             tools: ToolSet::default(),
         }
     }
@@ -112,10 +112,11 @@ impl<M: CompletionModel> Agent<M> {
             }
 
             steps += 1;
-            if steps >= self.max_steps {
+            if let Some(limit) = self.max_steps
+                && steps >= limit
+            {
                 return Err(CompletionError::ResponseError(format!(
-                    "Tool calling exceeded max steps ({})",
-                    self.max_steps
+                    "Tool calling exceeded max steps ({limit})",
                 )));
             }
 

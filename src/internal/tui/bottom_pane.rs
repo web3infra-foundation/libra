@@ -2,10 +2,37 @@
 //!
 //! Provides the user input area and status display at the bottom of the TUI.
 
-use ratatui::{prelude::*, widgets::Paragraph};
+use ratatui::{
+    prelude::*,
+    widgets::{Block, Borders, Clear, Paragraph},
+};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::{app_event::AgentStatus, command_popup::CommandPopup};
+use super::app_event::AgentStatus;
+
+/// Snapshot of user-input question data for rendering (avoids borrowing the request).
+#[derive(Clone)]
+struct UserInputQuestionSnapshot {
+    header: String,
+    question: String,
+    /// `None` means freeform (text-only).
+    options: Option<Vec<(String, String)>>, // (label, description)
+    /// Whether a "None of the above" option should be appended.
+    is_other: bool,
+    /// Whether typed text should be masked (reserved for future use).
+    #[allow(dead_code)]
+    is_secret: bool,
+}
+
+/// State for the slash-command autocomplete popup.
+struct CommandPopupState {
+    /// Known commands: `(name, description)`, set once at startup.
+    commands: Vec<(String, String)>,
+    /// Whether the popup is currently visible.
+    visible: bool,
+    /// Index of the currently highlighted command in the *filtered* list.
+    selected: usize,
+}
 
 /// The bottom pane containing input area and status.
 pub struct BottomPane {
@@ -17,8 +44,18 @@ pub struct BottomPane {
     pub status: AgentStatus,
     /// Whether the input is focused.
     pub focused: bool,
-    /// Command popup for slash command autocomplete.
-    pub command_popup: CommandPopup,
+    /// Snapshot of the current user-input questions (while awaiting input).
+    user_input_questions: Option<Vec<UserInputQuestionSnapshot>>,
+    /// Index of the question currently being answered (driven by App).
+    pub user_input_current_question: usize,
+    /// Currently selected option index (driven by App).
+    pub user_input_selected_option: usize,
+    /// Whether the notes input is currently focused (driven by App).
+    pub user_input_notes_focused: bool,
+    /// Current notes text (driven by App).
+    pub user_input_notes_text: String,
+    /// Slash-command autocomplete popup state.
+    command_popup: CommandPopupState,
 }
 
 impl BottomPane {
@@ -29,60 +66,58 @@ impl BottomPane {
             cursor_pos: 0,
             status: AgentStatus::Idle,
             focused: true,
-            command_popup: CommandPopup::new(),
+            user_input_questions: None,
+            user_input_current_question: 0,
+            user_input_selected_option: 0,
+            user_input_notes_focused: false,
+            user_input_notes_text: String::new(),
+            command_popup: CommandPopupState {
+                commands: Vec::new(),
+                visible: false,
+                selected: 0,
+            },
         }
     }
 
-    /// Update command popup based on current input.
-    pub fn update_command_popup(&mut self) {
-        self.command_popup.update(&self.input);
-    }
-
-    /// Move selection up in command popup.
-    pub fn popup_move_up(&mut self) {
-        self.command_popup.move_up();
-    }
-
-    /// Move selection down in command popup.
-    pub fn popup_move_down(&mut self) {
-        self.command_popup.move_down();
-    }
-
-    /// Apply selected command to input.
-    pub fn apply_selected_command(&mut self) -> bool {
-        if let Some((name, _)) = self.command_popup.selected_command() {
-            self.input = format!("/{}", name);
-            self.cursor_pos = self.input.len();
-            self.command_popup.hide();
-            return true;
-        }
-        false
-    }
-
-    /// Hide command popup.
-    pub fn hide_popup(&mut self) {
-        self.command_popup.hide();
-    }
-
-    /// Check if popup is visible.
-    pub fn is_popup_visible(&self) -> bool {
-        self.command_popup.is_visible()
+    /// Store (or clear) the user-input questions to render.
+    pub fn set_user_input_questions(
+        &mut self,
+        questions: Option<&[crate::internal::ai::tools::context::UserInputQuestion]>,
+    ) {
+        self.user_input_questions = questions.map(|qs| {
+            qs.iter()
+                .map(|q| UserInputQuestionSnapshot {
+                    header: q.header.clone(),
+                    question: q.question.clone(),
+                    options: q.options.as_ref().map(|opts| {
+                        opts.iter()
+                            .map(|o| (o.label.clone(), o.description.clone()))
+                            .collect()
+                    }),
+                    is_other: q.is_other,
+                    is_secret: q.is_secret,
+                })
+                .collect()
+        });
+        self.user_input_current_question = 0;
+        self.user_input_selected_option = 0;
+        self.user_input_notes_focused = false;
+        self.user_input_notes_text.clear();
     }
 
     /// Handle a character input.
     pub fn insert_char(&mut self, c: char) {
         self.input.insert(self.cursor_pos, c);
         self.cursor_pos += c.len_utf8();
-        self.update_command_popup();
     }
 
     /// Handle backspace.
     pub fn backspace(&mut self) {
         if self.cursor_pos > 0 {
+            // Find the start of the previous character
             let prev_pos = self.prev_char_pos();
             self.input.remove(prev_pos);
             self.cursor_pos = prev_pos;
-            self.update_command_popup();
         }
     }
 
@@ -90,7 +125,6 @@ impl BottomPane {
     pub fn delete(&mut self) {
         if self.cursor_pos < self.input.len() {
             self.input.remove(self.cursor_pos);
-            self.update_command_popup();
         }
     }
 
@@ -122,14 +156,12 @@ impl BottomPane {
     pub fn clear(&mut self) {
         self.input.clear();
         self.cursor_pos = 0;
-        self.hide_popup();
     }
 
     /// Get the current input text and clear.
     pub fn take_input(&mut self) -> String {
         let input = std::mem::take(&mut self.input);
         self.cursor_pos = 0;
-        self.hide_popup();
         input
     }
 
@@ -138,88 +170,442 @@ impl BottomPane {
         self.status = status;
     }
 
-    /// Check if the input is empty.
+    // ── Slash-command autocomplete popup ────────────────────────────
+
+    /// Set the known slash commands (called once at startup).
+    pub fn set_command_hints(&mut self, commands: Vec<(String, String)>) {
+        self.command_popup.commands = commands;
+    }
+
+    /// Whether the command popup is currently visible.
+    pub fn is_command_popup_visible(&self) -> bool {
+        self.command_popup.visible
+    }
+
+    /// Synchronise popup visibility after every input mutation.
+    ///
+    /// Shows the popup when the input starts with `/` and contains no space;
+    /// hides it otherwise. Clamps the selection index to the filtered list.
+    pub fn sync_command_popup(&mut self) {
+        let should_show = self.input.starts_with('/')
+            && !self.input.contains(' ')
+            && !self.command_popup.commands.is_empty();
+
+        self.command_popup.visible = should_show;
+
+        if should_show {
+            let count = self.filtered_commands().len();
+            if count == 0 {
+                self.command_popup.visible = false;
+            } else if self.command_popup.selected >= count {
+                self.command_popup.selected = count.saturating_sub(1);
+            }
+        } else {
+            self.command_popup.selected = 0;
+        }
+    }
+
+    /// Hide the popup (Esc).
+    pub fn dismiss_command_popup(&mut self) {
+        self.command_popup.visible = false;
+        self.command_popup.selected = 0;
+    }
+
+    /// Move selection up in the popup.
+    pub fn command_popup_up(&mut self) {
+        if self.command_popup.selected > 0 {
+            self.command_popup.selected -= 1;
+        }
+    }
+
+    /// Move selection down in the popup.
+    pub fn command_popup_down(&mut self) {
+        let count = self.filtered_commands().len();
+        if count > 0 && self.command_popup.selected < count - 1 {
+            self.command_popup.selected += 1;
+        }
+    }
+
+    /// Complete the selected command (Tab).
+    ///
+    /// Replaces the input with `/<name> ` and moves cursor to end.
+    /// Returns `true` if a completion was performed.
+    pub fn complete_command(&mut self) -> bool {
+        let filtered = self.filtered_commands();
+        if let Some((name, _)) = filtered.get(self.command_popup.selected) {
+            let completed = format!("/{} ", name);
+            self.input = completed;
+            self.cursor_pos = self.input.len();
+            self.command_popup.visible = false;
+            self.command_popup.selected = 0;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Return the commands matching the current prefix (after `/`), case-insensitive.
+    fn filtered_commands(&self) -> Vec<(String, String)> {
+        let prefix = self.input.strip_prefix('/').unwrap_or("");
+        let prefix_lower = prefix.to_lowercase();
+        self.command_popup
+            .commands
+            .iter()
+            .filter(|(name, _)| name.to_lowercase().starts_with(&prefix_lower))
+            .cloned()
+            .collect()
+    }
+
+    /// Check if input is empty.
     pub fn is_empty(&self) -> bool {
         self.input.is_empty()
     }
 
+    /// Return the height (in lines) the bottom pane needs for the current state.
+    pub fn desired_height(&self) -> u16 {
+        if self.status != AgentStatus::AwaitingUserInput {
+            // Normal mode: status(1) + input(3) + help(1) = 5
+            return 5;
+        }
+
+        let questions = match &self.user_input_questions {
+            Some(q) => q,
+            None => return 5,
+        };
+
+        let q_idx = self.user_input_current_question;
+        let question = match questions.get(q_idx) {
+            Some(q) => q,
+            None => return 5,
+        };
+
+        let options = question.options.as_deref().unwrap_or_default();
+        let is_freeform = options.is_empty();
+
+        let option_lines = if is_freeform {
+            0u16
+        } else {
+            let extra = if question.is_other { 1 } else { 0 };
+            options.len() as u16 + extra
+        };
+
+        let question_area = 1 + 1 + option_lines; // header + question + options
+        let notes_height = if !is_freeform { 3u16 } else { 0 };
+
+        // status(1) + question_area + input(3) + notes + help(1)
+        1 + question_area + 3 + notes_height + 1
+    }
+
     /// Render the bottom pane.
     pub fn render(&self, area: Rect, buf: &mut Buffer) -> Option<Position> {
-        let input_height = 3; // Fixed input height
-        let status_height = 1;
-        let popup_height = self.command_popup.height();
-        let bottom_height = status_height + input_height + popup_height + 1;
-
-        let chunks =
-            Layout::vertical([Constraint::Min(1), Constraint::Length(bottom_height)]).split(area);
-
-        let bottom = chunks[1];
-        let mut constraints = Vec::new();
-        constraints.push(Constraint::Length(status_height));
-        constraints.push(Constraint::Length(input_height));
-        if popup_height > 0 {
-            constraints.push(Constraint::Length(popup_height));
+        if self.status == AgentStatus::AwaitingUserInput {
+            return self.render_user_input_mode(area, buf);
         }
-        constraints.push(Constraint::Length(1)); // Help text
-        let bottom_chunks = Layout::vertical(constraints).split(bottom);
 
-        let mut idx = 0usize;
+        // Split area into status bar and input area
+        let chunks = Layout::vertical([
+            Constraint::Length(1), // Status bar
+            Constraint::Length(3), // Input area
+            Constraint::Length(1), // Help text
+        ])
+        .split(area);
+
         // Render status bar
-        self.render_status_bar(bottom_chunks[idx], buf);
-        idx += 1;
+        self.render_status_bar(chunks[0], buf);
 
         // Render input area
-        let cursor_pos = self.render_input_area(bottom_chunks[idx], buf);
-        idx += 1;
-
-        // Render command popup
-        if popup_height > 0 {
-            self.command_popup.render(bottom_chunks[idx], buf);
-            idx += 1;
-        }
+        let cursor_pos = self.render_input_area(chunks[1], buf);
 
         // Render help text
-        self.render_help_text(bottom_chunks[idx], buf);
+        self.render_help_text(chunks[2], buf);
+
+        // Render command popup (floats above the bottom pane)
+        if self.command_popup.visible && self.status == AgentStatus::Idle {
+            self.render_command_popup(area, buf);
+        }
 
         cursor_pos
     }
 
-    fn render_status_bar(&self, area: Rect, buf: &mut Buffer) {
-        let (status_text, status_color) = match self.status {
-            AgentStatus::Idle => ("Ready", Color::DarkGray),
-            AgentStatus::Thinking => ("Thinking...", Color::DarkGray),
-            AgentStatus::ExecutingTool => ("Executing...", Color::DarkGray),
+    /// Render the bottom pane in user-input mode (questions + options).
+    fn render_user_input_mode(&self, area: Rect, buf: &mut Buffer) -> Option<Position> {
+        let questions = match &self.user_input_questions {
+            Some(q) => q,
+            None => return None,
         };
 
-        let status_line = Line::styled(status_text, Style::default().fg(status_color));
-        Paragraph::new(status_line).render(area, buf);
+        let q_idx = self.user_input_current_question;
+        let question = questions.get(q_idx)?;
+        let total_questions = questions.len();
+
+        let options = question.options.as_deref().unwrap_or_default();
+        let is_freeform = options.is_empty();
+
+        // Count how many lines we need for the question display
+        let option_lines = if is_freeform {
+            0u16
+        } else {
+            let extra = if question.is_other { 1u16 } else { 0 };
+            options.len() as u16 + extra
+        };
+        let question_area_height = 1 + 1 + option_lines; // progress + question + options
+        let notes_height = if !is_freeform { 3u16 } else { 0 }; // notes area (only for option questions)
+
+        let chunks = Layout::vertical([
+            Constraint::Length(1),                    // Status bar
+            Constraint::Length(question_area_height), // Question + options
+            Constraint::Length(3),                    // Input area (freeform or notes)
+            Constraint::Length(notes_height),         // Notes area (for option questions)
+            Constraint::Length(1),                    // Help text
+        ])
+        .split(area);
+
+        // Status bar
+        let progress = if total_questions > 1 {
+            format!(
+                "● Question {}/{} — Awaiting input...",
+                q_idx + 1,
+                total_questions
+            )
+        } else {
+            "● Awaiting input...".to_string()
+        };
+        let status_line = Line::styled(progress, Style::default().fg(Color::Magenta).bold());
+        Paragraph::new(status_line).render(chunks[0], buf);
+
+        // Question display
+        let mut lines: Vec<Line<'static>> = Vec::new();
+
+        // Header
+        lines.push(Line::styled(
+            format!("  {}", question.header),
+            Style::default().fg(Color::Cyan).bold(),
+        ));
+
+        // Question text
+        lines.push(Line::styled(
+            format!("  {}", question.question),
+            Style::default().fg(Color::White),
+        ));
+
+        let selected = self.user_input_selected_option;
+
+        if !is_freeform {
+            // Render predefined options
+            for (i, (label, description)) in options.iter().enumerate() {
+                let marker = if i == selected && !self.user_input_notes_focused {
+                    "›"
+                } else {
+                    " "
+                };
+                let style = if i == selected {
+                    Style::default().fg(Color::Cyan).bold()
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                lines.push(Line::styled(
+                    format!("  {} {}. {}  {}", marker, i + 1, label, description),
+                    style,
+                ));
+            }
+
+            // "None of the above" option (when is_other is set)
+            if question.is_other {
+                let other_idx = options.len();
+                let marker = if selected == other_idx && !self.user_input_notes_focused {
+                    "›"
+                } else {
+                    " "
+                };
+                let style = if selected == other_idx {
+                    Style::default().fg(Color::Cyan).bold()
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+                lines.push(Line::styled(
+                    format!(
+                        "  {} {}. None of the above  Optionally, add details in notes (tab).",
+                        marker,
+                        other_idx + 1
+                    ),
+                    style,
+                ));
+            }
+        }
+
+        // Render question area (clip to available height)
+        let max_lines = chunks[1].height as usize;
+        let display_lines: Vec<Line<'static>> = lines.into_iter().take(max_lines).collect();
+        let text = Text::from(display_lines);
+        Paragraph::new(text).render(chunks[1], buf);
+
+        // Input area — for freeform questions, this is the primary input.
+        // For option questions, this area is used for notes when Tab is pressed.
+        let cursor_pos = if is_freeform {
+            self.render_input_area(chunks[2], buf)
+        } else {
+            // Show notes input area
+            self.render_notes_area(chunks[3], buf)
+        };
+
+        // Help text
+        let help = if is_freeform {
+            "[Enter: Submit] [Esc: Cancel]"
+        } else {
+            "[↑/↓: Select] [1-9: Quick select] [Tab: Notes] [Enter: Submit] [Esc: Cancel]"
+        };
+        let help_line = Line::styled(help, Style::default().fg(Color::DarkGray));
+        Paragraph::new(help_line).render(chunks[4], buf);
+
+        // Show cursor: for freeform always, for options only when notes focused
+        if is_freeform || self.user_input_notes_focused {
+            cursor_pos
+        } else {
+            None
+        }
     }
 
-    fn render_input_area(&self, area: Rect, buf: &mut Buffer) -> Option<Position> {
-        // Codex style: no border, just a simple input area with a prompt indicator
-        let prompt = "›";
-        let prompt_style = if self.focused {
-            Style::default().fg(Color::White).bold()
+    /// Render the notes input area for option questions.
+    fn render_notes_area(&self, area: Rect, buf: &mut Buffer) -> Option<Position> {
+        if area.height == 0 {
+            return None;
+        }
+
+        let border_style = if self.user_input_notes_focused {
+            Style::default().fg(Color::Cyan)
         } else {
             Style::default().fg(Color::DarkGray)
         };
 
-        // Render prompt indicator at the start
-        let span = Span::styled(prompt, prompt_style);
-        buf.set_span(area.x, area.y, &span, 1);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .title(" Notes ");
 
-        // Input area starts after the prompt
-        let input_area = Rect::new(
-            area.x + 1,
-            area.y,
-            area.width.saturating_sub(1),
-            area.height,
-        );
+        let inner = block.inner(area);
 
-        let content_width = input_area.width as usize;
+        let display = if self.user_input_notes_text.is_empty() {
+            Text::styled("Tab to add notes...", Style::default().fg(Color::DarkGray))
+        } else {
+            Text::raw(&self.user_input_notes_text)
+        };
+
+        Paragraph::new(display).block(block).render(area, buf);
+
+        if self.user_input_notes_focused && inner.width > 0 && inner.height > 0 {
+            let cursor_x = self.user_input_notes_text.width().min(inner.width as usize) as u16;
+            Some(Position {
+                x: inner.x.saturating_add(cursor_x),
+                y: inner.y,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Render the slash-command autocomplete popup floating above the bottom pane.
+    fn render_command_popup(&self, bottom_area: Rect, buf: &mut Buffer) {
+        let filtered = self.filtered_commands();
+        if filtered.is_empty() {
+            return;
+        }
+
+        let max_visible: u16 = 8;
+        let item_count = filtered.len() as u16;
+        // +2 for border top/bottom
+        let popup_height = item_count.min(max_visible) + 2;
+
+        // Position the popup just above the bottom pane area.
+        let popup_y = bottom_area.y.saturating_sub(popup_height);
+        let popup_area = Rect {
+            x: bottom_area.x,
+            y: popup_y,
+            width: bottom_area.width,
+            height: popup_height,
+        };
+
+        // Ensure the popup area is within the buffer bounds.
+        let buf_area = *buf.area();
+        let clamped = popup_area.intersection(buf_area);
+        if clamped.width == 0 || clamped.height == 0 {
+            return;
+        }
+
+        // Clear the region behind the popup.
+        Clear.render(clamped, buf);
+
+        // Build the list lines.
+        let inner_width = clamped.width.saturating_sub(2) as usize; // borders
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        for (i, (name, desc)) in filtered.iter().enumerate() {
+            let is_selected = i == self.command_popup.selected;
+            let prefix = format!("  /{:<16}", name);
+            let remaining = inner_width.saturating_sub(prefix.len());
+            let truncated_desc: String = if desc.len() > remaining {
+                let max_chars = remaining.saturating_sub(2);
+                let truncated: String = desc.chars().take(max_chars).collect();
+                format!("{truncated}..")
+            } else {
+                desc.clone()
+            };
+            let text = format!("{}{}", prefix, truncated_desc);
+            let style = if is_selected {
+                Style::default().fg(Color::White).bg(Color::DarkGray)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            lines.push(Line::styled(text, style));
+        }
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray))
+            .title(" Commands ");
+
+        let paragraph = Paragraph::new(Text::from(lines)).block(block);
+        paragraph.render(clamped, buf);
+    }
+
+    fn render_status_bar(&self, area: Rect, buf: &mut Buffer) {
+        let status_text = match self.status {
+            AgentStatus::Idle => "● Ready",
+            AgentStatus::Thinking => "● Thinking...",
+            AgentStatus::ExecutingTool => "● Executing tool...",
+            AgentStatus::AwaitingUserInput => "● Awaiting input...",
+        };
+
+        let status_color = match self.status {
+            AgentStatus::Idle => Color::Green,
+            AgentStatus::Thinking | AgentStatus::ExecutingTool => Color::Yellow,
+            AgentStatus::AwaitingUserInput => Color::Magenta,
+        };
+
+        let status_line = Line::styled(status_text, Style::default().fg(status_color).bold());
+        Paragraph::new(status_line).render(area, buf);
+    }
+
+    fn render_input_area(&self, area: Rect, buf: &mut Buffer) -> Option<Position> {
+        let border_style = if self.focused {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style);
+
+        let inner = block.inner(area);
+
+        let content_width = inner.width as usize;
         let (display_text, cursor_x) = if self.input.is_empty() {
+            let placeholder = if self.status == AgentStatus::AwaitingUserInput {
+                "Type custom answer..."
+            } else {
+                "Type your message..."
+            };
             (
-                Text::styled("Type your message...", Style::default().fg(Color::DarkGray)),
+                Text::styled(placeholder, Style::default().fg(Color::DarkGray)),
                 0u16,
             )
         } else {
@@ -227,25 +613,32 @@ impl BottomPane {
             (Text::raw(visible), cursor_x)
         };
 
-        Paragraph::new(display_text).render(input_area, buf);
+        Paragraph::new(display_text).block(block).render(area, buf);
 
-        if !self.focused || input_area.width == 0 {
+        if !self.focused || inner.width == 0 || inner.height == 0 {
             return None;
         }
 
         Some(Position {
-            x: input_area.x.saturating_add(cursor_x),
-            y: input_area.y,
+            x: inner.x.saturating_add(cursor_x),
+            y: inner.y,
         })
     }
 
     fn render_help_text(&self, area: Rect, buf: &mut Buffer) {
         let help = match self.status {
             AgentStatus::Idle => {
-                "[Enter: Send] [PgUp/PgDn/↑/↓: Scroll] [Ctrl+K: Clear] [Ctrl+C: Exit]"
+                if self.command_popup.visible {
+                    "[Tab: Complete] [Up/Down: Select] [Esc: Dismiss] [Enter: Send]"
+                } else {
+                    "[Enter: Send] [PgUp/PgDn/Up/Down: Scroll] [Ctrl+K: Clear] [Ctrl+C: Exit]"
+                }
             }
             AgentStatus::Thinking | AgentStatus::ExecutingTool => {
-                "[Esc: Interrupt] [PgUp/PgDn/↑/↓: Scroll] [Ctrl+C: Exit]"
+                "[Esc: Interrupt] [PgUp/PgDn/Up/Down: Scroll] [Ctrl+C: Exit]"
+            }
+            AgentStatus::AwaitingUserInput => {
+                "[Up/Down: Select] [1-9: Quick select] [Enter: Submit] [Esc: Cancel]"
             }
         };
 

@@ -41,7 +41,7 @@ rust_library(
     visibility = ["PUBLIC"],
     deps = [
         "//third-party/rust/crates/filetime/0.2.27:filetime",
-        "//third-party/rust/crates/futures-core/0.3.31:futures-core",
+        "//third-party/rust/crates/futures-core/0.3.32:futures-core",
         "//third-party/rust/crates/portable-atomic/1.13.1:portable-atomic",
         "//third-party/rust/crates/rustc-hash/2.1.1:rustc-hash",
         "//third-party/rust/crates/tokio-stream/0.1.18:tokio-stream",

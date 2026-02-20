@@ -60,6 +60,22 @@ pub struct AffectedPaths {
     pub deleted: Vec<PathBuf>,
 }
 
+/// Per-file before/after content for unified diff generation.
+#[derive(Debug, Clone)]
+pub struct FileDiff {
+    pub path: PathBuf,
+    pub old_content: String,
+    pub new_content: String,
+}
+
+/// Result of applying a set of hunks, including both affected paths and content
+/// diffs for display.
+#[derive(Debug)]
+pub struct ApplyResult {
+    pub affected: AffectedPaths,
+    pub file_diffs: Vec<FileDiff>,
+}
+
 /// Applies the patch to files in the given working directory.
 ///
 /// The patch uses the Codex-style format:
@@ -78,11 +94,16 @@ pub struct AffectedPaths {
 /// or an error if the patch could not be parsed or applied.
 pub fn apply_patch(patch: &str, cwd: &Path) -> Result<AffectedPaths, ApplyPatchError> {
     let args = parse_patch(patch)?;
-    apply_hunks(&args.hunks, cwd)
+    let result = apply_hunks(&args.hunks, cwd)?;
+    Ok(result.affected)
 }
 
 /// Applies hunks to the filesystem.
-fn apply_hunks(hunks: &[Hunk], cwd: &Path) -> Result<AffectedPaths, ApplyPatchError> {
+///
+/// **Caller must validate** that all paths in `hunks` are within the intended
+/// sandbox directory before calling this function — it performs filesystem I/O
+/// immediately with no path containment checks.
+pub fn apply_hunks(hunks: &[Hunk], cwd: &Path) -> Result<ApplyResult, ApplyPatchError> {
     if hunks.is_empty() {
         return Err(ApplyPatchError::ComputeReplacements(
             "No files were modified.".to_string(),
@@ -92,6 +113,7 @@ fn apply_hunks(hunks: &[Hunk], cwd: &Path) -> Result<AffectedPaths, ApplyPatchEr
     let mut added: Vec<PathBuf> = Vec::new();
     let mut modified: Vec<PathBuf> = Vec::new();
     let mut deleted: Vec<PathBuf> = Vec::new();
+    let mut file_diffs: Vec<FileDiff> = Vec::new();
 
     for hunk in hunks {
         match hunk {
@@ -116,16 +138,27 @@ fn apply_hunks(hunks: &[Hunk], cwd: &Path) -> Result<AffectedPaths, ApplyPatchEr
                         source: e,
                     })
                 })?;
+                file_diffs.push(FileDiff {
+                    path: abs_path.clone(),
+                    old_content: String::new(),
+                    new_content: contents.clone(),
+                });
                 added.push(abs_path);
             }
             Hunk::DeleteFile { path } => {
                 let abs_path = cwd.join(path);
+                let old_content = std::fs::read_to_string(&abs_path).unwrap_or_default();
                 std::fs::remove_file(&abs_path).map_err(|e| {
                     ApplyPatchError::IoError(IoError {
                         context: format!("Failed to delete file {}", abs_path.display()),
                         source: e,
                     })
                 })?;
+                file_diffs.push(FileDiff {
+                    path: abs_path.clone(),
+                    old_content,
+                    new_content: String::new(),
+                });
                 deleted.push(abs_path);
             }
             Hunk::UpdateFile {
@@ -134,8 +167,10 @@ fn apply_hunks(hunks: &[Hunk], cwd: &Path) -> Result<AffectedPaths, ApplyPatchEr
                 chunks,
             } => {
                 let abs_path = cwd.join(path);
-                let AppliedPatch { new_contents, .. } =
-                    derive_new_contents_from_chunks(&abs_path, chunks)?;
+                let AppliedPatch {
+                    original_contents,
+                    new_contents,
+                } = derive_new_contents_from_chunks(&abs_path, chunks)?;
 
                 if let Some(dest) = move_path {
                     let dest_abs = cwd.join(dest);
@@ -152,7 +187,7 @@ fn apply_hunks(hunks: &[Hunk], cwd: &Path) -> Result<AffectedPaths, ApplyPatchEr
                             })
                         })?;
                     }
-                    std::fs::write(&dest_abs, new_contents).map_err(|e| {
+                    std::fs::write(&dest_abs, &new_contents).map_err(|e| {
                         ApplyPatchError::IoError(IoError {
                             context: format!("Failed to write file {}", dest_abs.display()),
                             source: e,
@@ -164,24 +199,37 @@ fn apply_hunks(hunks: &[Hunk], cwd: &Path) -> Result<AffectedPaths, ApplyPatchEr
                             source: e,
                         })
                     })?;
+                    file_diffs.push(FileDiff {
+                        path: dest_abs.clone(),
+                        old_content: original_contents,
+                        new_content: new_contents,
+                    });
                     modified.push(dest_abs);
                 } else {
-                    std::fs::write(&abs_path, new_contents).map_err(|e| {
+                    std::fs::write(&abs_path, &new_contents).map_err(|e| {
                         ApplyPatchError::IoError(IoError {
                             context: format!("Failed to write file {}", abs_path.display()),
                             source: e,
                         })
                     })?;
+                    file_diffs.push(FileDiff {
+                        path: abs_path.clone(),
+                        old_content: original_contents,
+                        new_content: new_contents,
+                    });
                     modified.push(abs_path);
                 }
             }
         }
     }
 
-    Ok(AffectedPaths {
-        added,
-        modified,
-        deleted,
+    Ok(ApplyResult {
+        affected: AffectedPaths {
+            added,
+            modified,
+            deleted,
+        },
+        file_diffs,
     })
 }
 
@@ -652,5 +700,82 @@ mod tests {
 
         let result = apply_patch(&patch, dir.path());
         assert!(result.is_err());
+    }
+
+    /// Regression: patches with "@@ " (trailing space, no context) should not
+    /// match a random empty line and advance the file position past the real
+    /// target.
+    #[test]
+    fn test_empty_context_marker_with_trailing_space() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("readme.md");
+        fs::write(&path, "## Libra\n\n`Libra` is a tool\n").unwrap();
+
+        // Model writes "@@ " (trailing space) when it means "no context".
+        let patch = wrap_patch(&format!(
+            "*** Update File: {}\n@@ \n-## Libra\n+# Libra",
+            path.display()
+        ));
+        let result = apply_patch(&patch, dir.path());
+        assert!(result.is_ok(), "empty-context @@ should work: {result:?}");
+        let contents = fs::read_to_string(&path).unwrap();
+        assert_eq!(contents, "# Libra\n\n`Libra` is a tool\n");
+    }
+
+    /// Regression: context lines without leading space prefix should be treated
+    /// leniently (the model forgot the space).
+    #[test]
+    fn test_context_line_without_space_prefix() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("readme.md");
+        fs::write(&path, "## Libra\n\n`Libra` is old\n").unwrap();
+
+        // Model writes context line without leading space.
+        let patch = wrap_patch(&format!(
+            concat!(
+                "*** Update File: {}\n",
+                "@@\n",
+                "## Libra\n", // context without space prefix
+                "\n",         // empty context
+                "-`Libra` is old\n",
+                "+`Libra` is new",
+            ),
+            path.display()
+        ));
+        let result = apply_patch(&patch, dir.path());
+        assert!(
+            result.is_ok(),
+            "missing-space context should work: {result:?}"
+        );
+        let contents = fs::read_to_string(&path).unwrap();
+        assert_eq!(contents, "## Libra\n\n`Libra` is new\n");
+    }
+
+    /// Regression: model copies L{n}: prefixed lines from read_file output
+    /// directly into the patch.
+    #[test]
+    fn test_line_number_prefix_in_patch() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.rs");
+        fs::write(&path, "fn main() {\n    old();\n}\n").unwrap();
+
+        let patch = wrap_patch(&format!(
+            concat!(
+                "*** Update File: {}\n",
+                "@@\n",
+                "L1:  fn main() {{\n", // L1: + space + content
+                "L2: -    old();\n",   // L2: + removal
+                "L3: +    new();\n",   // L3: + addition
+                "L4:  }}\n",           // L4: + space + content
+            ),
+            path.display()
+        ));
+        let result = apply_patch(&patch, dir.path());
+        assert!(
+            result.is_ok(),
+            "L{{n}}: prefix should be stripped: {result:?}"
+        );
+        let contents = fs::read_to_string(&path).unwrap();
+        assert_eq!(contents, "fn main() {\n    new();\n}\n");
     }
 }

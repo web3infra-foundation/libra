@@ -7,9 +7,7 @@ use ratatui::{
     widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState},
 };
 
-use super::{
-    bottom_pane::BottomPane, history_cell::HistoryCell, status_indicator::StatusIndicator,
-};
+use super::{bottom_pane::BottomPane, history_cell::HistoryCell};
 
 /// The main chat widget displaying conversation history.
 pub struct ChatWidget {
@@ -19,8 +17,6 @@ pub struct ChatWidget {
     pub scroll_from_bottom_lines: usize,
     /// Bottom pane for input.
     pub bottom_pane: BottomPane,
-    /// Status indicator shown between chat area and input.
-    pub status_indicator: StatusIndicator,
     /// Last rendered input area rectangle (for mouse hit-testing).
     last_input_area: Option<Rect>,
     /// Last rendered chat area width used to estimate added line count.
@@ -34,7 +30,6 @@ impl ChatWidget {
             cells: Vec::new(),
             scroll_from_bottom_lines: 0,
             bottom_pane: BottomPane::new(),
-            status_indicator: StatusIndicator::default(),
             last_input_area: None,
             last_chat_area_width: 80,
         }
@@ -97,23 +92,30 @@ impl ChatWidget {
 
     /// Render the chat widget.
     pub fn render(&mut self, area: Rect, buf: &mut Buffer) -> Option<Position> {
-        // Split into chat area, status indicator, and bottom pane
-        // Layout: Chat → Status Indicator (1) → Bottom Pane (5)
+        // Dynamically size the bottom pane based on current state.
+        let bottom_height = self.bottom_pane.desired_height();
+
+        // Split into chat area and bottom pane
         let chunks = Layout::vertical([
-            Constraint::Min(5),    // Chat area
-            Constraint::Length(1), // Status indicator (shows only when running)
-            Constraint::Length(5), // Bottom pane
+            Constraint::Min(3),                // Chat area (min 3 lines)
+            Constraint::Length(bottom_height), // Bottom pane (dynamic)
         ])
         .split(area);
 
         // Render chat area
         self.render_chat_area(chunks[0], buf);
 
-        // Render status indicator (between chat and input)
-        self.status_indicator.render(chunks[1], buf);
+        // Track input area for mouse hit-testing (approximate: the input box
+        // is at roughly rows 1..4 within the bottom pane).
+        let input_y = chunks[1].y.saturating_add(1);
+        self.last_input_area = Some(Rect {
+            x: chunks[1].x,
+            y: input_y,
+            width: chunks[1].width,
+            height: 3.min(chunks[1].height.saturating_sub(2)),
+        });
 
-        // Render bottom pane (Input → Status → Help)
-        self.bottom_pane.render(chunks[2], buf)
+        self.bottom_pane.render(chunks[1], buf)
     }
 
     fn render_chat_area(&mut self, area: Rect, buf: &mut Buffer) {

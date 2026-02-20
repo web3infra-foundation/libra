@@ -29,5 +29,5 @@ rust_library(
     ],
     rustc_flags = ["@$(location :sync_wrapper-manifest[env_flags])"],
     visibility = ["PUBLIC"],
-    deps = ["//third-party/rust/crates/futures-core/0.3.31:futures-core"],
+    deps = ["//third-party/rust/crates/futures-core/0.3.32:futures-core"],
 )

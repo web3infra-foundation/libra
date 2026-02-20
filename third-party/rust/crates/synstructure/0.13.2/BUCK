@@ -32,6 +32,6 @@ rust_library(
     deps = [
         "//third-party/rust/crates/proc-macro2/1.0.106:proc-macro2",
         "//third-party/rust/crates/quote/1.0.44:quote",
-        "//third-party/rust/crates/syn/2.0.115:syn",
+        "//third-party/rust/crates/syn/2.0.117:syn",
     ],
 )

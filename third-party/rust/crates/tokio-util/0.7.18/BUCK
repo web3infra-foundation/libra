@@ -32,8 +32,8 @@ rust_library(
     visibility = ["PUBLIC"],
     deps = [
         "//third-party/rust/crates/bytes/1.11.1:bytes",
-        "//third-party/rust/crates/futures-core/0.3.31:futures-core",
-        "//third-party/rust/crates/futures-sink/0.3.31:futures-sink",
+        "//third-party/rust/crates/futures-core/0.3.32:futures-core",
+        "//third-party/rust/crates/futures-sink/0.3.32:futures-sink",
         "//third-party/rust/crates/pin-project-lite/0.2.16:pin-project-lite",
         "//third-party/rust/crates/tokio/1.49.0:tokio",
     ],
