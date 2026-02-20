@@ -17,6 +17,7 @@ use crate::internal::{
         client::CompletionClient,
         history::HistoryManager,
         mcp::{resource::CreateIntentParams, server::LibraMcpServer},
+        mcp::{resource::CreateIntentParams, server::LibraMcpServer},
         providers::{
             anthropic::{CLAUDE_3_5_SONNET, Client as AnthropicClient},
             deepseek::client::Client as DeepSeekClient,
@@ -187,6 +188,44 @@ async fn create_initial_intent(mcp_server: &Arc<LibraMcpServer>) {
     }
 }
 
+/// MCP write helper: create initial intent
+async fn create_initial_intent(mcp_server: &Arc<LibraMcpServer>) {
+    let params = CreateIntentParams {
+        content: "Libra Code session started".to_string(),
+        parent_id: None,
+        status: Some("active".to_string()),
+        task_id: None,
+        commit_sha: None,
+        actor_kind: Some("system".to_string()),
+        actor_id: Some("libra-code".to_string()),
+    };
+
+    // Resolve actor
+    let actor = match mcp_server
+        .resolve_actor_from_params(params.actor_kind.as_deref(), params.actor_id.as_deref())
+    {
+        Ok(actor) => actor,
+        Err(e) => {
+            eprintln!("Failed to resolve actor: {:?}", e);
+            return;
+        }
+    };
+
+    // Call MCP interface to create intent
+    match mcp_server.create_intent_impl(params, actor).await {
+        Ok(result) => {
+            if !result.is_error.unwrap_or(false) {
+                // Initial intent created successfully
+            } else {
+                eprintln!("Failed to create initial intent: {:?}", result.content);
+            }
+        }
+        Err(e) => {
+            eprintln!("Error creating initial intent: {:?}", e);
+        }
+    }
+}
+
 async fn execute_web_only(args: CodeArgs) {
     let addr: SocketAddr = match format!("{}:{}", args.host, args.port).parse() {
         Ok(addr) => addr,
@@ -209,6 +248,7 @@ async fn execute_web_only(args: CodeArgs) {
 
     // Prepare MCP server instance shared between the HTTP transport and TUI bridge
     let cwd = match std::env::current_dir() {
+        Ok(path) => path,
         Ok(path) => path,
         Err(e) => {
             eprintln!("Failed to get current directory: {}", e);
@@ -493,14 +533,25 @@ where
     };
 
     // Start MCP Server
-    let (mcp_handle, mcp_line) =
-        match start_mcp_server(&params.host, params.mcp_port, params.mcp_server.clone()).await {
-            Ok(handle) => {
-                let line = format!("MCP: http://{}", handle.addr);
-                (Some(handle), line)
-            }
-            Err(err) => (None, format!("MCP: failed to start ({err})")),
-        };
+    let (mcp_handle, mcp_line) = match start_mcp_server(&host, mcp_port, mcp_server.clone()).await {
+        Ok(handle) => {
+            let line = format!("MCP: http://{}", handle.addr);
+            (Some(handle), line)
+        }
+        Err(err) => (None, format!("MCP: failed to start ({err})")),
+    };
+
+    // Get current working directory
+    let _working_dir = match std::env::current_dir() {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("Failed to get current directory: {}", e);
+            return;
+        }
+    };
+
+    // Create initial intent via MCP
+    create_initial_intent(&mcp_server).await;
 
     // Create initial intent via MCP
     create_initial_intent(&params.mcp_server).await;
@@ -531,23 +582,7 @@ where
     };
 
     // Create and run app
-    let mut app = App::new(
-        tui,
-        model,
-        registry,
-        config,
-        AppConfig {
-            welcome_message: welcome,
-            command_dispatcher,
-            agent_router,
-            session,
-            session_store,
-            user_input_rx: params.user_input_rx,
-            model_name: params.model_name,
-            provider_name: params.provider_name,
-            mcp_server: Some(params.mcp_server),
-        },
-    );
+    let mut app = App::new(tui, model, registry, config, welcome, Some(mcp_server));
 
     match app.run().await {
         Ok(exit_info) => {

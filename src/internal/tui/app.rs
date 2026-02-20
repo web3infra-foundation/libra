@@ -25,9 +25,13 @@ use super::{
 };
 use crate::internal::ai::{
     agent::{ToolLoopConfig, run_tool_loop_with_history_and_observer},
+<<<<<<< HEAD
     agents::AgentRouter,
     commands::CommandDispatcher,
     completion::{CompletionModel, Message},
+=======
+    completion::Message,
+>>>>>>> d8a130f (invoke mcp interfaces in command code (#212))
     mcp::{
         resource::{
             CreateContextSnapshotParams, CreateDecisionParams, CreateRunParams,
@@ -35,11 +39,15 @@ use crate::internal::ai::{
         },
         server::LibraMcpServer,
     },
+<<<<<<< HEAD
     session::{SessionState, SessionStore},
     tools::{
         ToolOutput, ToolRegistry,
         context::{UpdatePlanArgs, UserInputAnswer, UserInputRequest, UserInputResponse},
     },
+=======
+    tools::{ToolOutput, ToolRegistry},
+>>>>>>> d8a130f (invoke mcp interfaces in command code (#212))
 };
 
 /// MCP resource IDs for tracking the workflow
@@ -129,6 +137,7 @@ pub struct App<M: CompletionModel> {
     scheduled_draw_task: Option<JoinHandle<()>>,
     /// Initial welcome message.
     welcome_message: String,
+<<<<<<< HEAD
     /// Slash command dispatcher.
     command_dispatcher: CommandDispatcher,
     /// Agent router for auto-selection.
@@ -145,6 +154,8 @@ pub struct App<M: CompletionModel> {
     model_name: String,
     /// Provider identifier.
     provider_name: String,
+=======
+>>>>>>> d8a130f (invoke mcp interfaces in command code (#212))
     /// MCP server instance for writing data.
     mcp_server: Option<Arc<LibraMcpServer>>,
     /// MCP resource IDs for tracking the workflow
@@ -158,7 +169,12 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         model: M,
         registry: Arc<ToolRegistry>,
         config: ToolLoopConfig,
+<<<<<<< HEAD
         app_config: AppConfig,
+=======
+        welcome_message: String,
+        mcp_server: Option<Arc<LibraMcpServer>>,
+>>>>>>> d8a130f (invoke mcp interfaces in command code (#212))
     ) -> Self {
         let (app_event_tx, app_event_rx) = mpsc::unbounded_channel();
         let history = app_config.session.to_history();
@@ -176,6 +192,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             last_draw_time: Instant::now(),
             agent_task: None,
             scheduled_draw_task: None,
+<<<<<<< HEAD
             welcome_message: app_config.welcome_message,
             command_dispatcher: app_config.command_dispatcher,
             agent_router: app_config.agent_router,
@@ -186,6 +203,10 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             model_name: app_config.model_name,
             provider_name: app_config.provider_name,
             mcp_server: app_config.mcp_server,
+=======
+            welcome_message,
+            mcp_server,
+>>>>>>> d8a130f (invoke mcp interfaces in command code (#212))
             mcp_ids: McpIds::default(),
         }
     }
