@@ -49,8 +49,8 @@ rust_library(
     rustc_flags = ["@$(location :tower-manifest[env_flags])"],
     visibility = ["PUBLIC"],
     deps = [
-        "//third-party/rust/crates/futures-core/0.3.31:futures-core",
-        "//third-party/rust/crates/futures-util/0.3.31:futures-util",
+        "//third-party/rust/crates/futures-core/0.3.32:futures-core",
+        "//third-party/rust/crates/futures-util/0.3.32:futures-util",
         "//third-party/rust/crates/indexmap/2.13.0:indexmap",
         "//third-party/rust/crates/pin-project-lite/0.2.16:pin-project-lite",
         "//third-party/rust/crates/slab/0.4.12:slab",

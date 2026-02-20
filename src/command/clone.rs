@@ -169,13 +169,15 @@ pub async fn execute(args: CloneArgs) {
     env::set_current_dir(&local_path).unwrap();
     let init_args = command::init::InitArgs {
         bare: args.bare,
+        template: None,
         initial_branch: args.branch.clone(),
         repo_directory: local_path.to_str().unwrap().to_string(),
         quiet: false,
-        template: None,
         shared: None,
         object_format: Some(object_format),
         ref_format: None,
+        from_git_repository: None,
+        separate_libra_dir: None,
     };
     command::init::execute(init_args).await;
 
@@ -217,7 +219,9 @@ fn validate_depth(s: &str) -> Result<usize, String> {
 /// Sets up the local repository after a clone by configuring the remote,
 /// setting up the initial branch and HEAD, and creating the first reflog entry.
 /// Skips checking out the worktree when `checkout_worktree` is `false` (bare clone).
-async fn setup_repository(
+/// This function is `pub(crate)` to allow reuse by the `convert` module for
+/// importing existing Git repositories during `libra init --from-git-repository`.
+pub(crate) async fn setup_repository(
     remote_config: RemoteConfig,
     specified_branch: Option<String>,
     checkout_worktree: bool,

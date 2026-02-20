@@ -26,11 +26,16 @@ rust_library(
     env = {
         "OUT_DIR": "$(location :wit-bindgen-build-script-run[out_dir])",
     },
+    features = [
+        "async",
+        "std",
+    ],
     rustc_flags = [
         "@$(location :wit-bindgen-build-script-run[rustc_flags])",
         "@$(location :wit-bindgen-manifest[env_flags])",
     ],
     visibility = ["PUBLIC"],
+    deps = ["//third-party/rust/crates/wit-bindgen-rust-macro/0.51.0:wit-bindgen-rust-macro"],
 )
 
 rust_binary(
@@ -39,6 +44,10 @@ rust_binary(
     crate = "build_script_build",
     crate_root = "vendor/build.rs",
     edition = "2024",
+    features = [
+        "async",
+        "std",
+    ],
     rustc_flags = ["@$(location :wit-bindgen-manifest[env_flags])"],
     visibility = [],
 )
@@ -48,6 +57,10 @@ buildscript_run(
     package_name = "wit-bindgen",
     buildscript_rule = ":wit-bindgen-build-script-build",
     env_srcs = [":wit-bindgen-manifest[env_dict]"],
+    features = [
+        "async",
+        "std",
+    ],
     version = "0.51.0",
     manifest_dir = ":wit-bindgen-vendor",
     visibility = ["PUBLIC"],

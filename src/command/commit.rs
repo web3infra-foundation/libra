@@ -516,10 +516,7 @@ mod test {
     use git_internal::internal::object::{ObjectTrait, signature::Signature};
     use serial_test::serial;
     use tempfile::tempdir;
-    use tokio::{
-        fs::{self, File},
-        io::AsyncWriteExt,
-    };
+    use tokio::{fs::File, io::AsyncWriteExt};
 
     use super::*;
     use crate::utils::test::*;
@@ -686,25 +683,19 @@ mod test {
     #[tokio::test]
     #[serial]
     async fn test_commit_message_from_file() {
-        let test_path = "test_data.txt";
+        let temp_dir = tempdir().unwrap();
+        let test_path = temp_dir.path().join("test_data.txt");
 
-        // All sorts of edge cases
         let test_cases = vec![
-            // Regular string
             "Hello, World! 你好，世界！",
-            // Special characters
             "Special chars: \n\t\r\\\"'",
-            // Unicode
             "Emoji: 😀🎉🚀, Unicode:  Café café",
-            // Empty
             "",
-            // Mixed
             "Mix: 中文\n\tEmoji😀\rSpecial\\\"'",
         ];
 
         for test_data in test_cases {
             let bytes = test_data.as_bytes();
-            // Async write file
             let mut file = File::create(&test_path).await.expect("create file failed");
             file.write_all(bytes)
                 .await
@@ -713,10 +704,8 @@ mod test {
                 .await
                 .expect("write test data to file failed");
 
-            // Async read file
-            let content = tokio::fs::read_to_string(test_path).await.unwrap();
+            let content = tokio::fs::read_to_string(&test_path).await.unwrap();
 
-            // Mock author
             let author = Signature {
                 signature_type: git_internal::internal::object::signature::SignatureType::Author,
                 name: "test".to_string(),
@@ -725,7 +714,6 @@ mod test {
                 timezone: "test".to_string(),
             };
 
-            // Mock commiter
             let commiter = Signature {
                 signature_type: git_internal::internal::object::signature::SignatureType::Committer,
                 name: "test".to_string(),
@@ -734,23 +722,14 @@ mod test {
                 timezone: "test".to_string(),
             };
 
-            // Mock commit
             let zero = ObjectHash::from_bytes(&vec![0u8; get_hash_kind().size()]).unwrap();
             let commit = Commit::new(author, commiter, zero, Vec::new(), &content);
 
-            // Commit to data
             let commit_data = commit.to_data().unwrap();
 
-            // Parse data
             let message = Commit::from_bytes(&commit_data, commit.id).unwrap().message;
 
-            // Test eq
             assert_eq!(message, test_data);
-
-            // Clean up
-            fs::remove_file(&test_path)
-                .await
-                .expect("cleaning test file failed, please remove test file manually");
         }
     }
 

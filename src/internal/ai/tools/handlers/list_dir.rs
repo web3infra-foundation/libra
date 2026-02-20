@@ -345,6 +345,18 @@ mod tests {
         assert!(first_entry.starts_with("1. "), "{text}");
     }
 
+    #[tokio::test]
+    async fn test_list_dir_nonexistent() {
+        let temp = TempDir::new().unwrap();
+        let result = ListDirHandler
+            .handle(make_invocation(
+                serde_json::json!({ "dir_path": "/nonexistent/directory" }),
+                temp.path().to_path_buf(),
+            ))
+            .await;
+        assert!(result.is_err());
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn test_symlinks_have_at_suffix() {

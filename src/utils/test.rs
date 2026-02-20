@@ -104,11 +104,13 @@ pub async fn setup_with_new_libra_in(temp_path: impl AsRef<Path>) {
         bare: false,
         initial_branch: None,
         repo_directory: temp_path.as_ref().to_str().unwrap().to_string(),
-        quiet: false,
         template: None,
+        quiet: false,
         shared: None,
         object_format: None,
         ref_format: None,
+        separate_libra_dir: None,
+        from_git_repository: None,
     };
     command::init::init(args).await.unwrap();
 }

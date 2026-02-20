@@ -15,7 +15,10 @@ use crate::{
         db,
         model::{config, reference},
     },
-    utils::util::{DATABASE, ROOT_DIR, cur_dir},
+    utils::{
+        convert,
+        util::{DATABASE, ROOT_DIR, cur_dir},
+    },
 };
 
 const DEFAULT_BRANCH: &str = "master";
@@ -103,6 +106,9 @@ pub enum InitError {
 
     #[error("Database error: {0}")]
     Database(#[from] DbErr),
+
+    #[error("conversion from git repository failed: {0}")]
+    ConversionFailed(String),
 }
 
 /// Reference format validation modes
@@ -148,6 +154,15 @@ pub struct InitArgs {
     #[clap(long, required = false, value_name = "MODE")]
     pub shared: Option<String>,
 
+    /// Use a separate directory for repository storage instead of `.libra` inside the working tree
+    #[clap(
+        long = "separate-libra-dir",
+        visible_alias = "separate-git-dir",
+        value_name = "dir",
+        required = false
+    )]
+    pub separate_libra_dir: Option<String>,
+
     /// Specify the object format (hash algorithm) for the repository.
     ///
     /// Supported values:
@@ -163,25 +178,69 @@ pub struct InitArgs {
     /// - `filesystem`: Use filesystem-friendly reference name validation.
     #[clap(long = "ref-format", value_enum, required = false)]
     pub ref_format: Option<RefFormat>,
+
+    /// Convert from an existing local Git repository during initialization.
+    ///
+    /// When provided, Libra will fetch objects and references from the given
+    /// Git repository and configure the current repository to track it as
+    /// `origin` after the basic Libra layout and database are created.
+    #[clap(long = "from-git-repository", value_name = "path", required = false)]
+    pub from_git_repository: Option<String>,
 }
 
 /// Execute the init function
 pub async fn execute(args: InitArgs) {
-    let target_path = cur_dir().join(Path::new(&args.repo_directory));
-    match init(args)
-        .await
-        .and_then(|_| Ok(env::set_current_dir(target_path)?))
-    {
-        Ok(_) => {}
-        Err(e) => {
-            eprintln!("Error: {e}");
+    let from_git = args.from_git_repository.clone();
+    let is_bare = args.bare;
+
+    let used_separate_git_dir = std::env::args()
+        .any(|arg| arg == "--separate-git-dir" || arg.starts_with("--separate-git-dir="));
+    if used_separate_git_dir {
+        eprintln!(
+            "warning: `--separate-git-dir` is deprecated; use `--separate-libra-dir` instead"
+        );
+    }
+
+    let current_dir = cur_dir();
+    let target_path = current_dir.join(Path::new(&args.repo_directory));
+
+    let from_git_abs = if let Some(p) = from_git {
+        let path = Path::new(&p);
+        let joined = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            current_dir.join(path)
+        };
+        match joined.canonicalize() {
+            Ok(canonical) => Some(canonical),
+            Err(e) => {
+                eprintln!("Error: failed to resolve from-git-repository path: {e}");
+                std::process::exit(1);
+            }
         }
+    } else {
+        None
+    };
+
+    if let Err(e) = init(args)
+        .await
+        .and_then(|_| Ok(env::set_current_dir(&target_path)?))
+    {
+        eprintln!("Error: {e}");
+        return;
+    }
+
+    if let Some(source_git) = from_git_abs
+        && let Err(e) = convert::convert_from_git_repository(&source_git, is_bare).await
+    {
+        eprintln!("Error: {e}");
+        std::process::exit(1);
     }
 }
 
 /// Check if the repository has already been initialized based on the presence of the .libra directory.
 fn is_reinit(cur_dir: &Path) -> bool {
-    cur_dir.join(".libra").exists()
+    cur_dir.join(ROOT_DIR).exists()
 }
 
 /// Check if the target directory is writable
@@ -412,9 +471,17 @@ fn validate_filesystem_branch_name(branch_name: &str) -> Result<(), InitError> {
 pub async fn init(args: InitArgs) -> Result<(), InitError> {
     // Get the current directory
     let cur_dir = Path::new(&args.repo_directory).to_path_buf();
-    // Join the current directory with the root directory
+    if args.bare && args.separate_libra_dir.is_some() {
+        return Err(InitError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "cannot specify both --bare and --separate-libra-dir",
+        )));
+    }
+    // Determine storage root directory
     let root_dir = if args.bare {
         cur_dir.clone()
+    } else if let Some(ref separate) = args.separate_libra_dir {
+        Path::new(separate).to_path_buf()
     } else {
         cur_dir.join(ROOT_DIR)
     };
@@ -447,7 +514,6 @@ pub async fn init(args: InitArgs) -> Result<(), InitError> {
         )));
     }
 
-    // Check if the target directory is writable
     match is_writable(&cur_dir) {
         Ok(_) => {}
         Err(e) => {
@@ -455,8 +521,26 @@ pub async fn init(args: InitArgs) -> Result<(), InitError> {
         }
     }
 
-    // ensure root dir exists
+    if !args.bare && args.separate_libra_dir.is_some() && !cur_dir.exists() {
+        fs::create_dir_all(&cur_dir)?;
+    }
+
     fs::create_dir_all(&root_dir)?;
+
+    if !args.bare && args.separate_libra_dir.is_some() {
+        let link_path = cur_dir.join(ROOT_DIR);
+        let storage_abs = root_dir.canonicalize().map_err(|e| {
+            InitError::Io(io::Error::new(
+                e.kind(),
+                format!(
+                    "failed to resolve storage directory {}: {e}",
+                    root_dir.display()
+                ),
+            ))
+        })?;
+        let content = format!("gitdir: {}\n", storage_abs.display());
+        fs::write(link_path, content)?;
+    }
 
     // If a template path is provided, copy the template files to the root directory
     if let Some(template_path) = &args.template {
@@ -556,6 +640,21 @@ pub async fn init(args: InitArgs) -> Result<(), InitError> {
 
     // Set .libra as hidden
     set_dir_hidden(root_dir.to_str().unwrap())?;
+
+    // Initialize the AI history orphan branch (refs/libra/intent) so it exists
+    // in parallel with the code branch from the very start.
+    // This also acts as a GC root — objects reachable from this ref will
+    // not be garbage-collected.
+    {
+        use crate::{internal::ai::history::HistoryManager, utils::storage::local::LocalStorage};
+
+        let objects_dir = root_dir.join("objects");
+        let storage = std::sync::Arc::new(LocalStorage::new(objects_dir));
+        let ai_history = HistoryManager::new(storage, root_dir.clone());
+        if let Err(e) = ai_history.init_branch().await {
+            eprintln!("Warning: failed to initialize AI history branch: {}", e);
+        }
+    }
 
     // Apply shared permissions if requested
     if let Some(shared_mode) = &args.shared {

@@ -27,7 +27,7 @@ rust_library(
     visibility = ["PUBLIC"],
     deps = [
         "//third-party/rust/crates/async-stream-impl/0.3.6:async-stream-impl",
-        "//third-party/rust/crates/futures-core/0.3.31:futures-core",
+        "//third-party/rust/crates/futures-core/0.3.32:futures-core",
         "//third-party/rust/crates/pin-project-lite/0.2.16:pin-project-lite",
     ],
 )

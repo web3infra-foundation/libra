@@ -82,7 +82,9 @@ impl ConfigScope {
     /// # Returns
     ///
     /// - `Some(PathBuf)` - The path to the configuration database file
-    /// - `None` - For Local scope (uses repository database) or if home directory cannot be determined
+    /// - `None` - For `Local` scope (uses repository database), or when a path
+    ///   cannot be determined (e.g. missing home directory, unsupported
+    ///   platform, or invalid environment configuration)
     ///
     /// # Examples
     ///
@@ -294,16 +296,18 @@ pub struct ConfigArgs {
     #[clap(value_name("value_pattern"), required_unless_present("mode"))]
     pub valuepattern: Option<String>,
     /// If the target key is not present, return the given default value.
-    /// This is only valid when `get` is set.
-    #[clap(long, short = 'd', requires = "get")]
+    /// This is only valid when `get` or `get-all` is set.
+    #[clap(long, short = 'd')]
     pub default: Option<String>,
 }
 
+// argument-level tests live in the args_tests module near ConfigArgs
+
 impl ConfigArgs {
     pub fn validate(&self) -> Result<(), String> {
-        // validate the default value is only present when get is set
+        // validate the default value is only present when get or get_all is set
         if self.default.is_some() && !(self.get || self.get_all) {
-            return Err("default value is only valid when get (get_all) is set".to_string());
+            return Err("--default is only valid when --get or --get-all is set".to_string());
         }
         // validate that name_only is only valid when list is set
         if self.name_only && !self.list {
@@ -533,12 +537,16 @@ impl ScopedConfig {
     }
 }
 
+/// Parsed configuration key broken into `configuration`, optional `name`, and
+/// leaf `key` components.
 pub struct Key {
     configuration: String,
     name: Option<String>,
     key: String,
 }
 
+/// Execute the `config` command using parsed CLI arguments, printing any error
+/// to stderr instead of bubbling it up to the caller.
 pub async fn execute(args: ConfigArgs) {
     if let Err(e) = execute_impl(args).await {
         eprintln!("error: {e}");
@@ -727,6 +735,10 @@ async fn get_all_config(
     Ok(())
 }
 
+/// Get the first matching configuration value using `CASCADE_ORDER`
+/// (`Local → Global → System`), skipping scopes whose backing storage is
+/// missing or invalid. Errors from individual scopes are ignored so that a
+/// later scope can still satisfy the lookup.
 async fn get_config_cascaded(
     configuration: &str,
     name: Option<&str>,
@@ -751,6 +763,9 @@ async fn get_config_cascaded(
     Ok(None)
 }
 
+/// Get all configuration values for a key across every scope in
+/// `CASCADE_ORDER`, skipping scopes whose backing storage is missing or
+/// invalid. Values from all scopes are appended in precedence order.
 async fn get_all_config_cascaded(
     configuration: &str,
     name: Option<&str>,
@@ -827,6 +842,10 @@ async fn list_config(name_only: bool, scope: ConfigScope, use_cascade: bool) -> 
     Ok(())
 }
 
+/// List an effective, precedence-aware view of all configuration entries
+/// merged across scopes. Lower precedence entries are loaded first so that
+/// higher precedence scopes can overwrite them, then the result is returned
+/// sorted by key.
 async fn list_all_config_cascaded() -> Result<Vec<(String, String)>, String> {
     use std::collections::HashMap;
 
@@ -853,4 +872,31 @@ async fn list_all_config_cascaded() -> Result<Vec<(String, String)>, String> {
     let mut out: Vec<(String, String)> = merged.into_iter().collect();
     out.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(out)
+}
+
+#[cfg(test)]
+mod args_tests {
+    use clap::Parser;
+
+    use super::*;
+
+    #[test]
+    fn default_works_with_get_all() {
+        let args =
+            ConfigArgs::try_parse_from(["config", "--get-all", "-d", "fallback", "user.name"])
+                .unwrap();
+
+        assert!(args.get_all);
+        assert_eq!(args.default.as_deref(), Some("fallback"));
+    }
+
+    #[test]
+    fn scope_flags_are_mutually_exclusive() {
+        let args = ConfigArgs::try_parse_from(["config", "--global", "--system", "user.name"]);
+        assert!(args.is_err());
+        assert!(matches!(
+            args.err().unwrap().kind(),
+            clap::error::ErrorKind::ArgumentConflict
+        ));
+    }
 }

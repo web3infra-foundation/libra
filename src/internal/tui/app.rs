@@ -73,6 +73,10 @@ pub struct AppConfig {
     pub session: SessionState,
     pub session_store: SessionStore,
     pub user_input_rx: UnboundedReceiver<UserInputRequest>,
+    /// Display name of the active model (e.g. "gemini-2.5-flash").
+    pub model_name: String,
+    /// Provider identifier (e.g. "gemini", "anthropic").
+    pub provider_name: String,
 }
 
 /// The main application struct.
@@ -117,6 +121,10 @@ pub struct App<M: CompletionModel> {
     user_input_rx: UnboundedReceiver<UserInputRequest>,
     /// Currently pending user-input interaction, if any.
     pending_user_input: Option<PendingUserInput>,
+    /// Display name of the active model.
+    model_name: String,
+    /// Provider identifier.
+    provider_name: String,
 }
 
 impl<M: CompletionModel + Clone + 'static> App<M> {
@@ -150,6 +158,8 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             session_store: app_config.session_store,
             user_input_rx: app_config.user_input_rx,
             pending_user_input: None,
+            model_name: app_config.model_name,
+            provider_name: app_config.provider_name,
         }
     }
 
@@ -178,13 +188,15 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
     async fn run_in_alt_screen(&mut self) -> anyhow::Result<AppExitInfo> {
         self.tui.clear()?;
 
-        // Set up slash-command autocomplete hints.
-        let hints: Vec<(String, String)> = self
-            .command_dispatcher
-            .commands()
-            .iter()
-            .map(|c| (c.name.clone(), c.description.clone()))
-            .collect();
+        // Set up slash-command autocomplete hints (built-in + YAML-defined).
+        let mut hints: Vec<(String, String)> =
+            super::slash_command::BuiltinCommand::all_hints();
+        hints.extend(
+            self.command_dispatcher
+                .commands()
+                .iter()
+                .map(|c| (c.name.clone(), c.description.clone())),
+        );
         self.widget.bottom_pane.set_command_hints(hints);
 
         // Welcome message
@@ -850,6 +862,13 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
     /// Submit a user message, expanding slash commands and applying agent context.
     fn submit_message(&mut self, text: String) {
+        // 1. Check for built-in TUI commands first.
+        if let Some((cmd, _args)) = super::slash_command::parse_builtin(&text) {
+            self.handle_builtin_command(cmd);
+            return;
+        }
+
+        // 2. Try YAML-defined slash commands (sent to model).
         let (effective_text, agent_name) =
             if let Some(result) = self.command_dispatcher.dispatch(&text) {
                 (result.prompt, result.agent)
@@ -876,6 +895,54 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             text: final_text,
             allowed_tools,
         });
+    }
+
+    /// Handle a built-in TUI command (does not send to model).
+    fn handle_builtin_command(&mut self, cmd: super::slash_command::BuiltinCommand) {
+        use super::slash_command::BuiltinCommand;
+        match cmd {
+            BuiltinCommand::Help => {
+                let mut lines = String::from("Available commands:\n");
+                // Built-in commands
+                for b in BuiltinCommand::all() {
+                    lines.push_str(&format!("  /{:<14} {}\n", b.name(), b.description()));
+                }
+                // YAML-defined commands
+                for c in self.command_dispatcher.commands() {
+                    lines.push_str(&format!("  /{:<14} {}\n", c.name, c.description));
+                }
+                self.widget.add_cell(Box::new(AssistantHistoryCell::new(lines)));
+            }
+            BuiltinCommand::Clear => {
+                self.widget.clear();
+                self.history.clear();
+                self.session = SessionState::new(
+                    &self.registry.working_dir().to_string_lossy(),
+                );
+            }
+            BuiltinCommand::Model => {
+                let info = format!(
+                    "Provider: {}\nModel: {}",
+                    self.provider_name, self.model_name,
+                );
+                self.widget.add_cell(Box::new(AssistantHistoryCell::new(info)));
+            }
+            BuiltinCommand::Status => {
+                let status = format!(
+                    "Status: {:?}\nHistory: {} messages\nWorking dir: {}",
+                    self.widget.bottom_pane.status,
+                    self.history.len(),
+                    self.registry.working_dir().display(),
+                );
+                self.widget.add_cell(Box::new(AssistantHistoryCell::new(status)));
+            }
+            BuiltinCommand::Quit => {
+                self.should_exit = true;
+                self.exit_info = Some(AppExitInfo {
+                    reason: ExitReason::UserRequested,
+                });
+            }
+        }
     }
 
     fn interrupt_agent_task(&mut self) {

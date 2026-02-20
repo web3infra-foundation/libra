@@ -1,6 +1,7 @@
 //! Tests config command read/write behaviors, scope handling, and edge cases.
-
-use libra::command::config;
+//
+use git_internal::errors::GitError;
+use libra::{command::config, exec_async};
 use serial_test::serial;
 use tempfile::tempdir;
 
@@ -14,6 +15,90 @@ use super::*;
 struct EnvVarGuard {
     key: &'static str,
     original: Option<std::ffi::OsString>,
+}
+
+#[tokio::test]
+#[serial]
+async fn test_cli_config_global_without_repo() {
+    let temp_dir = tempdir().unwrap();
+    let _guard = test::ChangeDirGuard::new(temp_dir.path());
+
+    let global_db_dir = tempdir().unwrap();
+    let system_db_dir = tempdir().unwrap();
+    let _scoped = ScopedConfigPathGuard::new(
+        &global_db_dir.path().join("global_config_cli.db"),
+        &system_db_dir.path().join("system_config_cli.db"),
+    );
+
+    let result = exec_async(vec!["config", "--global", "user.name", "cli_global_user"]).await;
+    assert!(result.is_ok());
+
+    let read_result = exec_async(vec!["config", "--global", "--get", "user.name"]).await;
+    assert!(read_result.is_ok());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_cli_config_list_global_without_repo() {
+    let temp_dir = tempdir().unwrap();
+    let _guard = test::ChangeDirGuard::new(temp_dir.path());
+
+    let global_db_dir = tempdir().unwrap();
+    let system_db_dir = tempdir().unwrap();
+    let _scoped = ScopedConfigPathGuard::new(
+        &global_db_dir.path().join("global_config_cli_list.db"),
+        &system_db_dir.path().join("system_config_cli_list.db"),
+    );
+
+    let result = exec_async(vec!["config", "--list", "--global"]).await;
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_cli_config_system_without_repo() {
+    let temp_dir = tempdir().unwrap();
+    let _guard = test::ChangeDirGuard::new(temp_dir.path());
+
+    let global_db_dir = tempdir().unwrap();
+    let system_db_dir = tempdir().unwrap();
+    let _scoped = ScopedConfigPathGuard::new(
+        &global_db_dir.path().join("global_config_cli_sys.db"),
+        &system_db_dir.path().join("system_config_cli_sys.db"),
+    );
+
+    let result = exec_async(vec!["config", "--system", "user.name", "cli_system_user"]).await;
+    assert!(result.is_ok());
+
+    let read_result = exec_async(vec!["config", "--system", "--get", "user.name"]).await;
+    assert!(read_result.is_ok());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_cli_config_list_system_without_repo() {
+    let temp_dir = tempdir().unwrap();
+    let _guard = test::ChangeDirGuard::new(temp_dir.path());
+
+    let global_db_dir = tempdir().unwrap();
+    let system_db_dir = tempdir().unwrap();
+    let _scoped = ScopedConfigPathGuard::new(
+        &global_db_dir.path().join("global_config_cli_sys_list.db"),
+        &system_db_dir.path().join("system_config_cli_sys_list.db"),
+    );
+
+    let result = exec_async(vec!["config", "--list", "--system"]).await;
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_cli_config_local_requires_repo() {
+    let temp_dir = tempdir().unwrap();
+    let _guard = test::ChangeDirGuard::new(temp_dir.path());
+
+    let result = exec_async(vec!["config", "--local", "--list"]).await;
+    assert!(matches!(result, Err(GitError::RepoNotFound)));
 }
 
 impl EnvVarGuard {
@@ -78,7 +163,7 @@ async fn test_config_get_failed() {
     let err = args.validate().unwrap_err();
     assert_eq!(
         err,
-        "default value is only valid when get (get_all) is set".to_string()
+        "--default is only valid when --get or --get-all is set".to_string()
     );
 }
 
@@ -861,4 +946,12 @@ async fn test_config_cross_platform_paths() {
         // On unsupported platforms, should return None
         assert_eq!(system_path, None);
     }
+}
+
+#[cfg(windows)]
+#[test]
+#[serial]
+fn test_config_system_rejects_relative_programdata() {
+    let _guard = EnvVarGuard::set("PROGRAMDATA", std::ffi::OsStr::new("relative/path"));
+    assert_eq!(config::ConfigScope::System.get_config_path(), None);
 }

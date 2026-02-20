@@ -3,6 +3,7 @@
 pub mod apply_patch;
 pub mod grep_files;
 pub mod list_dir;
+pub mod mcp_bridge;
 pub mod plan;
 pub mod read_file;
 pub mod request_user_input;
@@ -11,6 +12,7 @@ pub mod shell;
 pub use apply_patch::ApplyPatchHandler;
 pub use grep_files::GrepFilesHandler;
 pub use list_dir::ListDirHandler;
+pub use mcp_bridge::McpBridgeHandler;
 pub use plan::PlanHandler;
 pub use read_file::ReadFileHandler;
 pub use request_user_input::RequestUserInputHandler;

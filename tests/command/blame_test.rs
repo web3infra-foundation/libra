@@ -22,11 +22,13 @@ async fn setup_repo_with_hash(
         bare: false,
         initial_branch: None,
         repo_directory: temp.path().to_str().unwrap().to_string(),
-        quiet: true,
         template: None,
+        quiet: true,
         shared: None,
         object_format: Some(object_format.to_string()),
         ref_format: None,
+        from_git_repository: None,
+        separate_libra_dir: None,
     })
     .await
     .unwrap();

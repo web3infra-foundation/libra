@@ -65,6 +65,8 @@ enum Commands {
     Restore(command::restore::RestoreArgs),
     #[command(about = "Show the working tree status")]
     Status(command::status::StatusArgs),
+    #[command(about = "Remove untracked files from the working tree")]
+    Clean(command::clean::CleanArgs),
     #[command(
         subcommand,
         about = "Stash the changes in a dirty working directory away"
@@ -112,6 +114,8 @@ enum Commands {
     Config(command::config::ConfigArgs),
     #[command(about = "Manage the log of reference changes (e.g., HEAD, branches)")]
     Reflog(command::reflog::ReflogArgs),
+    #[command(about = "Manage multiple working trees attached to this repository")]
+    Worktree(command::worktree::WorktreeArgs),
 
     // other hidden commands
     #[command(
@@ -254,10 +258,10 @@ pub async fn parse_async(args: Option<&[&str]>) -> Result<(), GitError> {
             Cli::parse_from(argv)
         }
     };
-    // TODO: try check repo before parsing
-    // For commands that don't initialize a repo, set the hash kind first.
     match &args.command {
         Commands::Init(_) | Commands::Clone(_) | Commands::Code(_) => {}
+        // Config global/system scopes don't require a repository
+        Commands::Config(cfg) if cfg.global || cfg.system => {}
         _ => {
             if !utils::util::check_repo_exist() {
                 return Err(GitError::RepoNotFound);
@@ -279,6 +283,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> Result<(), GitError> {
         Commands::Rm(args) => command::remove::execute(args).await,
         Commands::Restore(args) => command::restore::execute(args).await,
         Commands::Status(args) => command::status::execute(args).await,
+        Commands::Clean(args) => command::clean::execute(args).await,
         Commands::Stash(cmd) => command::stash::execute(cmd).await,
         Commands::Lfs(cmd) => command::lfs::execute(cmd).await,
         Commands::Log(args) => command::log::execute(args).await,
@@ -303,6 +308,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> Result<(), GitError> {
         Commands::Config(args) => command::config::execute(args).await,
         Commands::Checkout(args) => command::checkout::execute(args).await,
         Commands::Reflog(args) => command::reflog::execute(args).await,
+        Commands::Worktree(args) => command::worktree::execute(args).await,
     }
     Ok(())
 }

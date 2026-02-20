@@ -5,6 +5,7 @@ pub mod blame;
 pub mod branch;
 pub mod checkout;
 pub mod cherry_pick;
+pub mod clean;
 pub mod clone;
 pub mod code;
 pub mod commit;
@@ -28,6 +29,7 @@ pub mod restore;
 pub mod revert;
 pub mod show;
 pub mod tag;
+pub mod worktree;
 
 pub mod stash;
 pub mod status;

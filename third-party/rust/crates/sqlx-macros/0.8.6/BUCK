@@ -43,6 +43,6 @@ rust_library(
         "//third-party/rust/crates/quote/1.0.44:quote",
         "//third-party/rust/crates/sqlx-core/0.8.6:sqlx-core",
         "//third-party/rust/crates/sqlx-macros-core/0.8.6:sqlx-macros-core",
-        "//third-party/rust/crates/syn/2.0.114:syn",
+        "//third-party/rust/crates/syn/2.0.117:syn",
     ],
 )
