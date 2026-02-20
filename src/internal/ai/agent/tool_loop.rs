@@ -200,6 +200,35 @@ pub async fn run_tool_loop_with_history_and_observer<M: CompletionModel, O: Tool
                     }
                 }
 
+                // Enforce allowed_tools at execution time (not just definition filtering)
+                if let Some(ref allowed) = config.allowed_tools
+                    && !allowed.iter().any(|a| a == &call.function.name)
+                {
+                    let blocked_msg = format!(
+                        "Tool '{}' is not in the allowed_tools list for this agent",
+                        call.function.name
+                    );
+                    let blocked_result: Result<ToolOutput, String> =
+                        Err(blocked_msg.clone());
+                    observer.on_tool_call_end(
+                        &call.id,
+                        &call.function.name,
+                        &blocked_result,
+                    );
+
+                    let result_json =
+                        ToolOutput::failure(blocked_msg).into_response();
+
+                    history.push(Message::User {
+                        content: OneOrMany::One(UserContent::ToolResult(ToolResult {
+                            id: call.id,
+                            name: call.function.name,
+                            result: result_json,
+                        })),
+                    });
+                    continue;
+                }
+
                 let invocation = ToolInvocation::new(
                     call.id.clone(),
                     call.function.name.clone(),
@@ -724,5 +753,43 @@ mod tests {
         let allowed = vec!["mock_tool".to_string()];
         filtered.retain(|t| allowed.iter().any(|a| a == &t.name));
         assert_eq!(filtered.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn tool_loop_allowed_tools_blocks_execution() {
+        // MockModel always calls "mock_tool" on first turn.
+        // allowed_tools = ["other_tool"] should block "mock_tool" at execution time,
+        // returning an error to the model which then produces "done".
+        let temp_dir = TempDir::new().unwrap();
+        let mut registry = ToolRegistry::with_working_dir(temp_dir.path().to_path_buf());
+        registry.register("mock_tool", Arc::new(MockHandler));
+
+        let mut observer = RecordingObserver::default();
+        let turn = run_tool_loop_with_history_and_observer(
+            &MockModel,
+            Vec::new(),
+            "hello",
+            &registry,
+            ToolLoopConfig {
+                preamble: None,
+                temperature: Some(0.0),
+                max_steps: Some(4),
+                hook_runner: None,
+                allowed_tools: Some(vec!["other_tool".to_string()]),
+            },
+            &mut observer,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(turn.final_text, "done");
+
+        // The tool call should have been begun (observer fires before the check)
+        assert_eq!(observer.begins.len(), 1);
+        assert_eq!(observer.begins[0].1, "mock_tool");
+
+        // The tool call should have ended with failure (blocked)
+        assert_eq!(observer.ends.len(), 1);
+        assert!(!observer.ends[0].2, "blocked tool call should report as not successful");
     }
 }

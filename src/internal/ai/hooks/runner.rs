@@ -147,6 +147,7 @@ impl HookRunner {
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true)
                 .spawn()?;
 
             if let Some(mut stdin) = child.stdin.take() {

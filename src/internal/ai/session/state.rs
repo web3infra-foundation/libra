@@ -84,6 +84,23 @@ impl SessionState {
     pub fn message_count(&self) -> usize {
         self.messages.len()
     }
+
+    /// Convert session messages to model-facing conversation history.
+    ///
+    /// Only "user" and "assistant" messages produce entries; other roles are
+    /// skipped because the model API doesn't accept them inline.
+    pub fn to_history(&self) -> Vec<crate::internal::ai::completion::Message> {
+        use crate::internal::ai::completion::Message;
+
+        self.messages
+            .iter()
+            .filter_map(|m| match m.role.as_str() {
+                "user" => Some(Message::user(&m.content)),
+                "assistant" => Some(Message::assistant(&m.content)),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 /// Generate a short, unique session ID.
@@ -148,5 +165,27 @@ mod tests {
         let s1 = SessionState::new("/tmp");
         let s2 = SessionState::new("/tmp");
         assert_ne!(s1.id, s2.id);
+    }
+
+    #[test]
+    fn test_to_history() {
+        use crate::internal::ai::completion::Message;
+
+        let mut session = SessionState::new("/tmp");
+        session.add_user_message("hello");
+        session.add_assistant_message("hi there");
+        session.add_user_message("bye");
+
+        let history = session.to_history();
+        assert_eq!(history.len(), 3);
+        assert!(matches!(&history[0], Message::User { .. }));
+        assert!(matches!(&history[1], Message::Assistant { .. }));
+        assert!(matches!(&history[2], Message::User { .. }));
+    }
+
+    #[test]
+    fn test_to_history_empty() {
+        let session = SessionState::new("/tmp");
+        assert!(session.to_history().is_empty());
     }
 }

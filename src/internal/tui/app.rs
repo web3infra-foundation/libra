@@ -139,13 +139,14 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         app_config: AppConfig,
     ) -> Self {
         let (app_event_tx, app_event_rx) = mpsc::unbounded_channel();
+        let history = app_config.session.to_history();
         Self {
             tui,
             widget: ChatWidget::new(),
             model,
             registry,
             config,
-            history: Vec::new(),
+            history,
             app_event_rx,
             app_event_tx,
             should_exit: false,
@@ -247,7 +248,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
     async fn handle_tui_event(&mut self, event: TuiEvent) -> anyhow::Result<()> {
         match event {
             TuiEvent::Key(key) => {
-                self.handle_key_event(key).await?;
+                if key.kind == crossterm::event::KeyEventKind::Press {
+                    self.handle_key_event(key).await?;
+                }
             }
             TuiEvent::Paste(text) => {
                 for c in text.chars() {

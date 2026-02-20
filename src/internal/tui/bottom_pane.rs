@@ -542,7 +542,9 @@ impl BottomPane {
             let prefix = format!("  /{:<16}", name);
             let remaining = inner_width.saturating_sub(prefix.len());
             let truncated_desc: String = if desc.len() > remaining {
-                format!("{}..", &desc[..remaining.saturating_sub(2)])
+                let max_chars = remaining.saturating_sub(2);
+                let truncated: String = desc.chars().take(max_chars).collect();
+                format!("{truncated}..")
             } else {
                 desc.clone()
             };
