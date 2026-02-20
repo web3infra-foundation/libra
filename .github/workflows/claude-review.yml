@@ -71,15 +71,26 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           PR_NUMBER=${{ github.event.issue.number }}
-          echo "Resolving HEAD SHA for PR #$PR_NUMBER..."
-          PR_SHA=$(gh pr view $PR_NUMBER --repo ${{ github.repository }} --json headRefOid -q .headRefOid)
+          echo "Resolving HEAD SHA and Repo for PR #$PR_NUMBER..."
+          
+          # Get SHA and Repo Name using gh
+          RESOLVED=$(gh pr view $PR_NUMBER --repo ${{ github.repository }} --json headRefOid,headRepository --template '{{.headRefOid}} {{.headRepository.owner.login}}/{{.headRepository.name}}')
+          
+          PR_SHA=$(echo "$RESOLVED" | awk '{print $1}')
+          PR_REPO=$(echo "$RESOLVED" | awk '{print $2}')
+          
           echo "Resolved SHA: $PR_SHA"
+          echo "Resolved Repo: $PR_REPO"
+          
           echo "pr_sha=$PR_SHA" >> $GITHUB_OUTPUT
+          echo "pr_repo=$PR_REPO" >> $GITHUB_OUTPUT
 
       # Checkout the repository at the appropriate commit for review
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
+          # Checkout the PR source repository (fork) to ensure branches exist for the action
+          repository: ${{ steps.resolve-pr-ref.outputs.pr_repo || github.event.pull_request.head.repo.full_name || github.repository }}
           # Use PR head SHA for pull_request_target to review the actual PR code
           # For comment events, this will default to the base branch (PR context is inferred by Claude action)
           ref: ${{ steps.resolve-pr-ref.outputs.pr_sha || github.event.pull_request.head.sha || github.sha }}
