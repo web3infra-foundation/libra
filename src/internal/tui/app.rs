@@ -178,6 +178,15 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
     async fn run_in_alt_screen(&mut self) -> anyhow::Result<AppExitInfo> {
         self.tui.clear()?;
 
+        // Set up slash-command autocomplete hints.
+        let hints: Vec<(String, String)> = self
+            .command_dispatcher
+            .commands()
+            .iter()
+            .map(|c| (c.name.clone(), c.description.clone()))
+            .collect();
+        self.widget.bottom_pane.set_command_hints(hints);
+
         // Welcome message
         self.widget.add_cell(Box::new(AssistantHistoryCell::new(
             self.welcome_message.clone(),
@@ -230,6 +239,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 for c in text.chars() {
                     self.widget.bottom_pane.insert_char(c);
                 }
+                self.widget.bottom_pane.sync_command_popup();
                 self.schedule_draw();
             }
             TuiEvent::Mouse(mouse) => {
@@ -264,6 +274,25 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         // Handle input based on agent status
         match self.widget.bottom_pane.status {
             AgentStatus::Idle => match key.code {
+                // ── Command popup intercepts (when visible) ──────────
+                KeyCode::Tab if self.widget.bottom_pane.is_command_popup_visible() => {
+                    self.widget.bottom_pane.complete_command();
+                    self.widget.bottom_pane.sync_command_popup();
+                    self.schedule_draw();
+                }
+                KeyCode::Up if self.widget.bottom_pane.is_command_popup_visible() => {
+                    self.widget.bottom_pane.command_popup_up();
+                    self.schedule_draw();
+                }
+                KeyCode::Down if self.widget.bottom_pane.is_command_popup_visible() => {
+                    self.widget.bottom_pane.command_popup_down();
+                    self.schedule_draw();
+                }
+                KeyCode::Esc if self.widget.bottom_pane.is_command_popup_visible() => {
+                    self.widget.bottom_pane.dismiss_command_popup();
+                    self.schedule_draw();
+                }
+                // ── Normal idle handlers ─────────────────────────────
                 KeyCode::Enter => {
                     if !self.widget.bottom_pane.is_empty() {
                         let text = self.widget.bottom_pane.take_input();
@@ -274,6 +303,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.widget.clear();
                     self.widget.bottom_pane.clear();
+                    self.widget.bottom_pane.sync_command_popup();
                     self.schedule_draw();
                 }
                 // Scroll to top (Home)
@@ -315,14 +345,17 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 }
                 KeyCode::Char(c) => {
                     self.widget.bottom_pane.insert_char(c);
+                    self.widget.bottom_pane.sync_command_popup();
                     self.schedule_draw();
                 }
                 KeyCode::Backspace => {
                     self.widget.bottom_pane.backspace();
+                    self.widget.bottom_pane.sync_command_popup();
                     self.schedule_draw();
                 }
                 KeyCode::Delete => {
                     self.widget.bottom_pane.delete();
+                    self.widget.bottom_pane.sync_command_popup();
                     self.schedule_draw();
                 }
                 KeyCode::Left => {

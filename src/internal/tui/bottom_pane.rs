@@ -4,7 +4,7 @@
 
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -22,6 +22,16 @@ struct UserInputQuestionSnapshot {
     /// Whether typed text should be masked (reserved for future use).
     #[allow(dead_code)]
     is_secret: bool,
+}
+
+/// State for the slash-command autocomplete popup.
+struct CommandPopupState {
+    /// Known commands: `(name, description)`, set once at startup.
+    commands: Vec<(String, String)>,
+    /// Whether the popup is currently visible.
+    visible: bool,
+    /// Index of the currently highlighted command in the *filtered* list.
+    selected: usize,
 }
 
 /// The bottom pane containing input area and status.
@@ -44,6 +54,8 @@ pub struct BottomPane {
     pub user_input_notes_focused: bool,
     /// Current notes text (driven by App).
     pub user_input_notes_text: String,
+    /// Slash-command autocomplete popup state.
+    command_popup: CommandPopupState,
 }
 
 impl BottomPane {
@@ -59,6 +71,11 @@ impl BottomPane {
             user_input_selected_option: 0,
             user_input_notes_focused: false,
             user_input_notes_text: String::new(),
+            command_popup: CommandPopupState {
+                commands: Vec::new(),
+                visible: false,
+                selected: 0,
+            },
         }
     }
 
@@ -153,6 +170,92 @@ impl BottomPane {
         self.status = status;
     }
 
+    // ── Slash-command autocomplete popup ────────────────────────────
+
+    /// Set the known slash commands (called once at startup).
+    pub fn set_command_hints(&mut self, commands: Vec<(String, String)>) {
+        self.command_popup.commands = commands;
+    }
+
+    /// Whether the command popup is currently visible.
+    pub fn is_command_popup_visible(&self) -> bool {
+        self.command_popup.visible
+    }
+
+    /// Synchronise popup visibility after every input mutation.
+    ///
+    /// Shows the popup when the input starts with `/` and contains no space;
+    /// hides it otherwise. Clamps the selection index to the filtered list.
+    pub fn sync_command_popup(&mut self) {
+        let should_show = self.input.starts_with('/')
+            && !self.input.contains(' ')
+            && !self.command_popup.commands.is_empty();
+
+        self.command_popup.visible = should_show;
+
+        if should_show {
+            let count = self.filtered_commands().len();
+            if count == 0 {
+                self.command_popup.visible = false;
+            } else if self.command_popup.selected >= count {
+                self.command_popup.selected = count.saturating_sub(1);
+            }
+        } else {
+            self.command_popup.selected = 0;
+        }
+    }
+
+    /// Hide the popup (Esc).
+    pub fn dismiss_command_popup(&mut self) {
+        self.command_popup.visible = false;
+        self.command_popup.selected = 0;
+    }
+
+    /// Move selection up in the popup.
+    pub fn command_popup_up(&mut self) {
+        if self.command_popup.selected > 0 {
+            self.command_popup.selected -= 1;
+        }
+    }
+
+    /// Move selection down in the popup.
+    pub fn command_popup_down(&mut self) {
+        let count = self.filtered_commands().len();
+        if count > 0 && self.command_popup.selected < count - 1 {
+            self.command_popup.selected += 1;
+        }
+    }
+
+    /// Complete the selected command (Tab).
+    ///
+    /// Replaces the input with `/<name> ` and moves cursor to end.
+    /// Returns `true` if a completion was performed.
+    pub fn complete_command(&mut self) -> bool {
+        let filtered = self.filtered_commands();
+        if let Some((name, _)) = filtered.get(self.command_popup.selected) {
+            let completed = format!("/{} ", name);
+            self.input = completed;
+            self.cursor_pos = self.input.len();
+            self.command_popup.visible = false;
+            self.command_popup.selected = 0;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Return the commands matching the current prefix (after `/`), case-insensitive.
+    fn filtered_commands(&self) -> Vec<(String, String)> {
+        let prefix = self.input.strip_prefix('/').unwrap_or("");
+        let prefix_lower = prefix.to_lowercase();
+        self.command_popup
+            .commands
+            .iter()
+            .filter(|(name, _)| name.to_lowercase().starts_with(&prefix_lower))
+            .cloned()
+            .collect()
+    }
+
     /// Check if input is empty.
     pub fn is_empty(&self) -> bool {
         self.input.is_empty()
@@ -215,6 +318,11 @@ impl BottomPane {
 
         // Render help text
         self.render_help_text(chunks[2], buf);
+
+        // Render command popup (floats above the bottom pane)
+        if self.command_popup.visible && self.status == AgentStatus::Idle {
+            self.render_command_popup(area, buf);
+        }
 
         cursor_pos
     }
@@ -395,6 +503,67 @@ impl BottomPane {
         }
     }
 
+    /// Render the slash-command autocomplete popup floating above the bottom pane.
+    fn render_command_popup(&self, bottom_area: Rect, buf: &mut Buffer) {
+        let filtered = self.filtered_commands();
+        if filtered.is_empty() {
+            return;
+        }
+
+        let max_visible: u16 = 8;
+        let item_count = filtered.len() as u16;
+        // +2 for border top/bottom
+        let popup_height = item_count.min(max_visible) + 2;
+
+        // Position the popup just above the bottom pane area.
+        let popup_y = bottom_area.y.saturating_sub(popup_height);
+        let popup_area = Rect {
+            x: bottom_area.x,
+            y: popup_y,
+            width: bottom_area.width,
+            height: popup_height,
+        };
+
+        // Ensure the popup area is within the buffer bounds.
+        let buf_area = *buf.area();
+        let clamped = popup_area.intersection(buf_area);
+        if clamped.width == 0 || clamped.height == 0 {
+            return;
+        }
+
+        // Clear the region behind the popup.
+        Clear.render(clamped, buf);
+
+        // Build the list lines.
+        let inner_width = clamped.width.saturating_sub(2) as usize; // borders
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        for (i, (name, desc)) in filtered.iter().enumerate() {
+            let is_selected = i == self.command_popup.selected;
+            let prefix = format!("  /{:<16}", name);
+            let remaining = inner_width.saturating_sub(prefix.len());
+            let truncated_desc: String = if desc.len() > remaining {
+                format!("{}..", &desc[..remaining.saturating_sub(2)])
+            } else {
+                desc.clone()
+            };
+            let text = format!("{}{}", prefix, truncated_desc);
+            let style = if is_selected {
+                Style::default().fg(Color::White).bg(Color::DarkGray)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            lines.push(Line::styled(text, style));
+        }
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray))
+            .title(" Commands ");
+
+        let paragraph = Paragraph::new(Text::from(lines)).block(block);
+        paragraph.render(clamped, buf);
+    }
+
     fn render_status_bar(&self, area: Rect, buf: &mut Buffer) {
         let status_text = match self.status {
             AgentStatus::Idle => "● Ready",
@@ -457,13 +626,17 @@ impl BottomPane {
     fn render_help_text(&self, area: Rect, buf: &mut Buffer) {
         let help = match self.status {
             AgentStatus::Idle => {
-                "[Enter: Send] [PgUp/PgDn/↑/↓: Scroll] [Ctrl+K: Clear] [Ctrl+C: Exit]"
+                if self.command_popup.visible {
+                    "[Tab: Complete] [Up/Down: Select] [Esc: Dismiss] [Enter: Send]"
+                } else {
+                    "[Enter: Send] [PgUp/PgDn/Up/Down: Scroll] [Ctrl+K: Clear] [Ctrl+C: Exit]"
+                }
             }
             AgentStatus::Thinking | AgentStatus::ExecutingTool => {
-                "[Esc: Interrupt] [PgUp/PgDn/↑/↓: Scroll] [Ctrl+C: Exit]"
+                "[Esc: Interrupt] [PgUp/PgDn/Up/Down: Scroll] [Ctrl+C: Exit]"
             }
             AgentStatus::AwaitingUserInput => {
-                "[↑/↓: Select] [1-9: Quick select] [Enter: Submit] [Esc: Cancel]"
+                "[Up/Down: Select] [1-9: Quick select] [Enter: Submit] [Esc: Cancel]"
             }
         };
 

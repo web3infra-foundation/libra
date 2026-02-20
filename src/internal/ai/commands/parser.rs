@@ -152,5 +152,15 @@ Create a plan for: $ARGUMENTS
         let cmd = parse_command_definition(tdd).unwrap();
         assert_eq!(cmd.name, "tdd");
         assert!(cmd.agent.is_none());
+
+        let architect = include_str!("embedded/architect.md");
+        let cmd = parse_command_definition(architect).unwrap();
+        assert_eq!(cmd.name, "architect");
+        assert_eq!(cmd.agent.as_deref(), Some("architect"));
+
+        let build_fix = include_str!("embedded/build_fix.md");
+        let cmd = parse_command_definition(build_fix).unwrap();
+        assert_eq!(cmd.name, "build-fix");
+        assert_eq!(cmd.agent.as_deref(), Some("build_error_resolver"));
     }
 }

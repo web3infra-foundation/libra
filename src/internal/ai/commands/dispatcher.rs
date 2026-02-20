@@ -64,6 +64,8 @@ pub fn load_embedded_commands() -> Vec<CommandDefinition> {
         include_str!("embedded/code_review.md"),
         include_str!("embedded/verify.md"),
         include_str!("embedded/tdd.md"),
+        include_str!("embedded/architect.md"),
+        include_str!("embedded/build_fix.md"),
     ];
 
     sources
@@ -126,12 +128,14 @@ mod tests {
     #[test]
     fn test_load_embedded_commands() {
         let commands = load_embedded_commands();
-        assert_eq!(commands.len(), 4);
+        assert_eq!(commands.len(), 6);
         let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
         assert!(names.contains(&"plan"));
         assert!(names.contains(&"code-review"));
         assert!(names.contains(&"verify"));
         assert!(names.contains(&"tdd"));
+        assert!(names.contains(&"architect"));
+        assert!(names.contains(&"build-fix"));
     }
 
     #[test]
