@@ -40,7 +40,7 @@ impl ToolSpec {
     pub fn read_file() -> Self {
         Self::new(
             "read_file",
-            "Read the contents of a file. Returns the file content with line numbers.",
+            "Read the contents of a file. Returns the file content with each line prefixed as 'L{n}: content'. Blank lines appear as 'L{n}: ' (nothing after the space).",
         )
         .with_parameters(FunctionParameters::object(
             [("file_path", "string", "Absolute path to the file to read")],
@@ -52,14 +52,15 @@ impl ToolSpec {
     pub fn list_dir() -> Self {
         Self::new(
             "list_dir",
-            "List the contents of a directory. Can list recursively with depth control.",
+            "Lists entries in a local directory with 1-indexed entry numbers and type labels (/ for dirs, @ for symlinks).",
         )
         .with_parameters(FunctionParameters::object(
-            [(
-                "dir_path",
-                "string",
-                "Absolute path to the directory to list",
-            )],
+            [
+                ("dir_path", "string", "Absolute path to the directory to list"),
+                ("offset", "integer", "1-indexed entry number to start listing from (default: 1)"),
+                ("limit", "integer", "Maximum number of entries to return (default: 25)"),
+                ("depth", "integer", "Maximum directory depth to traverse (default: 2, must be >= 1)"),
+            ],
             [("dir_path", true)],
         ))
     }
@@ -68,29 +69,261 @@ impl ToolSpec {
     pub fn grep_files() -> Self {
         Self::new(
             "grep_files",
-            "Search for a pattern in files using ripgrep. Supports regex patterns.",
+            "Finds files whose contents match the pattern and lists them sorted by modification time.",
         )
         .with_parameters(FunctionParameters::object(
             [
-                ("pattern", "string", "Search pattern (supports regex)"),
-                ("path", "string", "Absolute path to search in"),
+                ("pattern", "string", "Regular expression pattern to search for"),
+                ("include", "string", "Optional glob limiting which files are searched (e.g. \"*.rs\" or \"*.{ts,tsx}\")"),
+                ("path", "string", "Directory or file path to search (defaults to the working directory)"),
+                ("limit", "integer", "Maximum number of file paths to return (default: 100, max: 2000)"),
             ],
-            [("pattern", true), ("path", true)],
+            [("pattern", true)],
         ))
+    }
+
+    /// Create a ToolSpec for shell.
+    pub fn shell() -> Self {
+        Self::new(
+            "shell",
+            "Execute a shell command or script in the user's default shell (e.g., bash, zsh). \
+             Returns the exit code and captured stdout/stderr. \
+             Use for running build commands, tests, scripts, and other shell operations.",
+        )
+        .with_parameters(FunctionParameters::object(
+            [
+                ("command", "string", "Shell command or script to execute"),
+                (
+                    "workdir",
+                    "string",
+                    "Working directory (must be absolute and within the sandbox)",
+                ),
+                (
+                    "timeout_ms",
+                    "number",
+                    "Timeout in milliseconds (default: 10000)",
+                ),
+            ],
+            [("command", true), ("workdir", false), ("timeout_ms", false)],
+        ))
+    }
+
+    /// Create a ToolSpec for update_plan.
+    pub fn update_plan() -> Self {
+        Self {
+            spec_type: "function".to_string(),
+            function: FunctionDefinition {
+                name: "update_plan".to_string(),
+                description: "Update the current plan with a list of steps and their status. \
+                    Use this tool to track progress on multi-step tasks."
+                    .to_string(),
+                parameters: FunctionParameters::Object {
+                    param_type: "object".to_string(),
+                    properties: {
+                        let mut props = Map::new();
+                        props.insert(
+                            "explanation".to_string(),
+                            json!({
+                                "type": "string",
+                                "description": "Optional explanation of what changed since the last plan update"
+                            }),
+                        );
+                        props.insert(
+                            "plan".to_string(),
+                            json!({
+                                "type": "array",
+                                "description": "The full plan, expressed as an ordered list of steps",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "step": {
+                                            "type": "string",
+                                            "description": "Human-readable description of the step"
+                                        },
+                                        "status": {
+                                            "type": "string",
+                                            "enum": ["pending", "in_progress", "completed"],
+                                            "description": "Current status of the step"
+                                        }
+                                    },
+                                    "required": ["step", "status"]
+                                }
+                            }),
+                        );
+                        props
+                    },
+                    required: vec!["plan".to_string()],
+                },
+            },
+        }
+    }
+
+    /// Create a ToolSpec for request_user_input.
+    pub fn request_user_input() -> Self {
+        Self {
+            spec_type: "function".to_string(),
+            function: FunctionDefinition {
+                name: "request_user_input".to_string(),
+                description: "Request user input for one to three short questions and wait \
+                    for the response. Each question can have 2-3 predefined options (the \
+                    client auto-adds 'None of the above'). Do NOT include an 'Other' option \
+                    yourself. The first option should be marked '(Recommended)'. Prefer \
+                    sending only 1 question at a time."
+                    .to_string(),
+                parameters: FunctionParameters::Object {
+                    param_type: "object".to_string(),
+                    properties: {
+                        let mut props = Map::new();
+                        props.insert(
+                            "questions".to_string(),
+                            json!({
+                                "type": "array",
+                                "description": "Questions to present to the user (1-3, prefer 1)",
+                                "minItems": 1,
+                                "maxItems": 3,
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": {
+                                            "type": "string",
+                                            "description": "Stable snake_case identifier for the question"
+                                        },
+                                        "header": {
+                                            "type": "string",
+                                            "description": "Short header displayed above the question (max 12 chars)"
+                                        },
+                                        "question": {
+                                            "type": "string",
+                                            "description": "Single-sentence question prompt"
+                                        },
+                                        "is_other": {
+                                            "type": "boolean",
+                                            "description": "Whether to auto-add a 'None of the above' option (default: true)"
+                                        },
+                                        "is_secret": {
+                                            "type": "boolean",
+                                            "description": "Whether to mask typed input with '*' (default: false)"
+                                        },
+                                        "options": {
+                                            "type": "array",
+                                            "description": "2-3 mutually exclusive options. Omit for freeform text input.",
+                                            "minItems": 2,
+                                            "maxItems": 3,
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "label": {
+                                                        "type": "string",
+                                                        "description": "User-facing label (1-5 words)"
+                                                    },
+                                                    "description": {
+                                                        "type": "string",
+                                                        "description": "Impact/tradeoff explanation"
+                                                    }
+                                                },
+                                                "required": ["label", "description"]
+                                            }
+                                        }
+                                    },
+                                    "required": ["id", "header", "question"]
+                                }
+                            }),
+                        );
+                        props
+                    },
+                    required: vec!["questions".to_string()],
+                },
+            },
+        }
     }
 
     /// Create a ToolSpec for apply_patch.
     pub fn apply_patch() -> Self {
         Self::new(
             "apply_patch",
-            "Apply a patch to files using Codex-style format. \
-             Format: *** Begin Patch, followed by hunks (*** Add File:/Delete File:/Update File:), \
-             then *** End Patch. Supports adding, deleting, updating, and moving files. \
-             Paths are relative to the working directory.",
+            r#"Use the `apply_patch` tool to edit files.
+IMPORTANT:
+- File references can only be relative, NEVER ABSOLUTE.
+- When deleting or changing a line, do NOT also include that same line as an unchanged context line.
+- When writing context/removed/added lines from `read_file` output, strip the `L{n}: ` line-number prefix (preserve indentation after the prefix).
+- Blank lines MUST be included as context lines. Represent a blank context line as a single space ` ` on its own line.
+
+Your patch language is a stripped-down, file-oriented diff format designed to be easy to parse and safe to apply. You can think of it as a high-level envelope:
+
+*** Begin Patch
+[ one or more file sections ]
+*** End Patch
+
+Within that envelope, you get a sequence of file operations.
+You MUST include a header to specify the action you are taking.
+Each operation starts with one of three headers:
+
+*** Add File: <path> - create a new file. Every following line is a + line (the initial contents).
+*** Delete File: <path> - remove an existing file. Nothing follows.
+*** Update File: <path> - patch an existing file in place (optionally with a rename).
+
+May be immediately followed by *** Move to: <new path> if you want to rename the file.
+Then one or more "hunks", each introduced by @@ (optionally followed by a hunk header).
+Within a hunk each line starts with:
+' ' (space) - unchanged context line (line already exists in the file, kept as-is)
+'-'         - removed line (line exists in the file and will be deleted)
+'+'         - added line (new line to be inserted)
+
+For instructions on [context_before] and [context_after]:
+- By default, show 3 lines of code immediately above and 3 lines immediately below each change. If a change is within 3 lines of a previous change, do NOT duplicate the first change's [context_after] lines in the second change's [context_before] lines.
+- If 3 lines of context is insufficient to uniquely identify the snippet of code within the file, use the @@ operator to indicate the class or function to which the snippet belongs. For instance, we might have:
+@@ class BaseClass
+[3 lines of pre-context]
+- [old_code]
++ [new_code]
+[3 lines of post-context]
+
+- If a code block is repeated so many times in a class or function such that even a single `@@` statement and 3 lines of context cannot uniquely identify the snippet of code, you can use multiple `@@` statements to jump to the right context. For instance:
+
+@@ class BaseClass
+@@ 	 def method():
+[3 lines of pre-context]
+- [old_code]
++ [new_code]
+[3 lines of post-context]
+
+The full grammar definition is below:
+Patch := Begin { FileOp } End
+Begin := "*** Begin Patch" NEWLINE
+End := "*** End Patch" NEWLINE
+FileOp := AddFile | DeleteFile | UpdateFile
+AddFile := "*** Add File: " path NEWLINE { "+" line NEWLINE }
+DeleteFile := "*** Delete File: " path NEWLINE
+UpdateFile := "*** Update File: " path NEWLINE [ MoveTo ] { Hunk }
+MoveTo := "*** Move to: " newPath NEWLINE
+Hunk := "@@" [ header ] NEWLINE { HunkLine } [ "*** End of File" NEWLINE ]
+HunkLine := (" " | "-" | "+") text NEWLINE
+
+A full patch can combine several operations:
+
+*** Begin Patch
+*** Add File: hello.txt
++Hello world
+*** Update File: src/app.py
+*** Move to: src/main.py
+@@ def greet():
+-print("Hi")
++print("Hello, world!")
+*** Delete File: obsolete.txt
+*** End Patch
+
+It is important to remember:
+
+- You must include a header with your intended action (Add/Delete/Update)
+- You must prefix new lines with `+` even when creating a new file
+- File references can only be relative, NEVER ABSOLUTE.
+- IMPORTANT: When writing context or removed lines from `read_file` output, strip the `L{n}: ` line-number prefix. For example, `L3:     my_func():` becomes `    my_func():` (preserve any indentation that follows the prefix).
+- IMPORTANT: Blank lines MUST be included as context lines. In `read_file` output a blank line appears as `L{n}: ` (nothing after the space). Represent it in the patch as a single space ` ` on its own line. Do NOT skip blank lines -- omitting them will cause the patch to fail to locate the target region.
+"#,
         )
         .with_parameters(FunctionParameters::object(
-            [("patch", "string", "The patch in Codex format")],
-            [("patch", true)],
+            [("input", "string", "The entire contents of the apply_patch command")],
+            [("input", true)],
         ))
     }
 

@@ -29,7 +29,7 @@ rust_library(
     },
     os_deps = {
         "linux": ["//third-party/rust/crates/openssl-probe/0.2.1:openssl-probe"],
-        "macos": ["//third-party/rust/crates/security-framework/3.6.0:security-framework"],
+        "macos": ["//third-party/rust/crates/security-framework/3.7.0:security-framework"],
         "windows": ["//third-party/rust/crates/schannel/0.1.28:schannel"],
     },
     visibility = ["PUBLIC"],

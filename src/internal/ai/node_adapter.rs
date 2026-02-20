@@ -99,7 +99,7 @@ impl<M: CompletionModel> ToolLoopAction<M> {
         registry: ToolRegistry,
         preamble: Option<String>,
         temperature: Option<f64>,
-        max_steps: usize,
+        max_steps: Option<usize>,
     ) -> Self {
         Self {
             model,
@@ -108,6 +108,8 @@ impl<M: CompletionModel> ToolLoopAction<M> {
                 preamble,
                 temperature,
                 max_steps,
+                hook_runner: None,
+                allowed_tools: None,
             },
         }
     }

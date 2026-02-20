@@ -1,8 +1,9 @@
 //! Context types for tool invocation and execution.
 
-use std::path::PathBuf;
+use std::{collections::HashMap, fmt, path::PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use tokio::sync::oneshot;
 
 /// The kind of tool payload.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -104,6 +105,8 @@ pub enum ToolOutput {
         content: String,
         /// Whether the tool execution succeeded.
         success: Option<bool>,
+        /// Optional structured data for the TUI (not sent to the model).
+        metadata: Option<serde_json::Value>,
     },
     /// MCP tool output.
     Mcp {
@@ -118,6 +121,7 @@ impl ToolOutput {
         Self::Function {
             content: content.into(),
             success: Some(true),
+            metadata: None,
         }
     }
 
@@ -126,6 +130,7 @@ impl ToolOutput {
         Self::Function {
             content: content.into(),
             success: Some(false),
+            metadata: None,
         }
     }
 
@@ -134,7 +139,19 @@ impl ToolOutput {
         Self::Function {
             content: content.into(),
             success: None,
+            metadata: None,
         }
+    }
+
+    /// Attach structured metadata (for TUI display, not sent to the model).
+    pub fn with_metadata(mut self, meta: serde_json::Value) -> Self {
+        if let ToolOutput::Function {
+            ref mut metadata, ..
+        } = self
+        {
+            *metadata = Some(meta);
+        }
+        self
     }
 
     /// Get the text content of this output.
@@ -154,9 +171,14 @@ impl ToolOutput {
     }
 
     /// Convert this output to a JSON value for sending to the model.
+    ///
+    /// The `metadata` field is intentionally excluded — it is for TUI display
+    /// only and must not be sent to the model.
     pub fn into_response(self) -> serde_json::Value {
         match self {
-            ToolOutput::Function { content, success } => {
+            ToolOutput::Function {
+                content, success, ..
+            } => {
                 serde_json::json!({
                     "content": content,
                     "success": success
@@ -208,25 +230,169 @@ fn default_limit() -> usize {
 pub struct ListDirArgs {
     /// Absolute path to the directory to list.
     pub dir_path: String,
-    /// Maximum depth for recursive listing (default: 1, non-recursive).
+    /// 1-indexed entry number to start listing from (default: 1).
+    #[serde(default = "default_dir_offset")]
+    pub offset: usize,
+    /// Maximum number of entries to return (default: 25).
+    #[serde(default = "default_dir_limit")]
+    pub limit: usize,
+    /// Maximum directory depth to traverse (default: 2, must be >= 1).
     #[serde(default = "default_depth")]
-    pub max_depth: usize,
+    pub depth: usize,
+}
+
+fn default_dir_offset() -> usize {
+    1
+}
+
+fn default_dir_limit() -> usize {
+    25
 }
 
 fn default_depth() -> usize {
-    1
+    2
+}
+
+/// Arguments for the shell tool.
+#[derive(Clone, Deserialize, Debug)]
+pub struct ShellArgs {
+    /// Shell command or script to execute (runs in the user's default shell).
+    pub command: String,
+    /// Working directory for the command. Must be an absolute path within the
+    /// sandbox working directory. Defaults to the registry's working directory.
+    #[serde(default)]
+    pub workdir: Option<String>,
+    /// Timeout in milliseconds. Defaults to 10,000 ms (10 seconds).
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
 }
 
 /// Arguments for the grep_files tool.
 #[derive(Clone, Deserialize, Debug)]
 pub struct GrepFilesArgs {
-    /// Search pattern (regex).
+    /// Regular expression pattern to search for.
     pub pattern: String,
-    /// Absolute path to search in.
-    pub path: String,
-    /// Case-insensitive search (default: false).
+    /// Optional glob limiting which files are searched (e.g. "*.rs" or "*.{ts,tsx}").
     #[serde(default)]
-    pub case_insensitive: bool,
+    pub include: Option<String>,
+    /// Directory or file path to search. Defaults to the working directory.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Maximum number of file paths to return (default: 100, max: 2000).
+    #[serde(default = "default_grep_limit")]
+    pub limit: usize,
+}
+
+fn default_grep_limit() -> usize {
+    100
+}
+
+// ── update_plan types ──────────────────────────────────────────────────
+
+/// Status of a single plan step.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StepStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+/// A single step in a plan.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PlanStep {
+    /// Human-readable description of the step.
+    pub step: String,
+    /// Current status of the step.
+    pub status: StepStatus,
+}
+
+/// Arguments for the `update_plan` tool.
+#[derive(Clone, Debug, Deserialize)]
+pub struct UpdatePlanArgs {
+    /// Optional explanation of what changed since the last plan update.
+    #[serde(default)]
+    pub explanation: Option<String>,
+    /// The full plan, expressed as an ordered list of steps.
+    pub plan: Vec<PlanStep>,
+}
+
+// ── request_user_input types ───────────────────────────────────────────
+
+/// A selectable option presented to the user.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UserInputOption {
+    /// Short label for the option (1-5 words).
+    pub label: String,
+    /// Longer description of the impact/tradeoff.
+    pub description: String,
+}
+
+/// A single question to present to the user.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UserInputQuestion {
+    /// Machine-readable identifier for the question (unique within a request).
+    pub id: String,
+    /// Short header displayed above the question (≤12 chars).
+    pub header: String,
+    /// The full question text (single sentence).
+    pub question: String,
+    /// Whether to auto-add a "None of the above" option.
+    #[serde(default)]
+    pub is_other: bool,
+    /// Whether to mask user-typed text with '*' (for secrets).
+    #[serde(default)]
+    pub is_secret: bool,
+    /// Predefined options the user can choose from.
+    /// When `None` or empty, the question is freeform (text input only).
+    #[serde(default)]
+    pub options: Option<Vec<UserInputOption>>,
+}
+
+/// Arguments for the `request_user_input` tool.
+#[derive(Clone, Debug, Deserialize)]
+pub struct RequestUserInputArgs {
+    /// Questions to present to the user (1-3, prefer 1).
+    pub questions: Vec<UserInputQuestion>,
+}
+
+/// A single answer, potentially containing the selected option label
+/// and/or user notes.
+///
+/// - If an option was selected: `answers[0]` = selected label
+/// - If notes were added: last entry = `"user_note: {text}"`
+/// - For freeform questions: `answers[0]` = user-typed text
+/// - Empty `answers` means the user skipped the question
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UserInputAnswer {
+    pub answers: Vec<String>,
+}
+
+/// User's responses to a set of questions, keyed by question id.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UserInputResponse {
+    pub answers: HashMap<String, UserInputAnswer>,
+}
+
+/// A request sent from the tool handler to the TUI, carrying the questions
+/// and a one-shot channel for the user's response.
+pub struct UserInputRequest {
+    /// The call_id of the originating tool invocation (for correlation).
+    pub call_id: String,
+    /// Questions to display.
+    pub questions: Vec<UserInputQuestion>,
+    /// Channel the TUI uses to send back the response.
+    pub response_tx: oneshot::Sender<UserInputResponse>,
+}
+
+impl fmt::Debug for UserInputRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UserInputRequest")
+            .field("call_id", &self.call_id)
+            .field("questions", &self.questions)
+            .field("response_tx", &"<oneshot::Sender>")
+            .finish()
+    }
 }
 
 #[cfg(test)]

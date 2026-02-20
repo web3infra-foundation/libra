@@ -9,7 +9,10 @@ use ratatui::prelude::*;
 use serde_json::Value;
 
 use super::diff::{DiffSummary, FileChange, create_diff_summary};
-use crate::internal::ai::tools::ToolOutput;
+use crate::internal::ai::tools::{
+    ToolOutput,
+    context::{PlanStep, StepStatus},
+};
 
 fn truncate_utf8(text: &str, max_bytes: usize) -> String {
     if text.len() <= max_bytes {
@@ -29,6 +32,52 @@ fn truncate_utf8(text: &str, max_bytes: usize) -> String {
     }
 
     text[..end].to_string()
+}
+
+/// Wrap `text` into styled ratatui `Line`s, splitting at `width` columns.
+///
+/// `prefix` is prepended to the first segment of every logical line.
+/// Continuation segments (when wrapping occurs) receive a blank indent of
+/// the same display width so the text stays aligned.
+fn wrap_text(text: &str, prefix: &str, width: u16, style: Style) -> Vec<Line<'static>> {
+    let mut out: Vec<Line<'static>> = Vec::new();
+    // Guard against unreasonably small widths.
+    let total_cols = (width as usize).max(8);
+    let prefix_cols = prefix.chars().count();
+    let cont_prefix = " ".repeat(prefix_cols);
+
+    for logical_line in text.lines() {
+        let mut remaining = logical_line;
+        let mut first = true;
+        loop {
+            let pfx: &str = if first { prefix } else { &cont_prefix };
+            let available = total_cols.saturating_sub(prefix_cols).max(1);
+            let char_count = remaining.chars().count();
+            if char_count <= available {
+                out.push(Line::styled(format!("{pfx}{remaining}"), style));
+                break;
+            }
+            // Split at the character boundary that fits within `available` columns.
+            let split_byte = remaining
+                .char_indices()
+                .nth(available)
+                .map(|(i, _)| i)
+                .unwrap_or(remaining.len());
+            out.push(Line::styled(
+                format!("{pfx}{}", &remaining[..split_byte]),
+                style,
+            ));
+            remaining = &remaining[split_byte..];
+            first = false;
+        }
+    }
+
+    // Produce at least one line so the caller always gets something.
+    if out.is_empty() {
+        out.push(Line::styled(prefix.to_string(), style));
+    }
+
+    out
 }
 
 /// Trait for cells displayed in the chat history.
@@ -64,38 +113,22 @@ impl UserHistoryCell {
 }
 
 impl HistoryCell for UserHistoryCell {
-    fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
-        let mut lines = Vec::new();
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let mut lines = vec![Line::styled(
+            "User:",
+            Style::default().fg(Color::Cyan).bold(),
+        )];
 
-        lines.push(Line::raw(""));
-
-        let message_lines = self.message.lines();
-        let mut is_first_line = true;
-
-        for line in message_lines {
-            if line.trim().is_empty() {
-                lines.push(Line::raw(""));
-            } else if line.starts_with("```") || line.starts_with("    ") || line.starts_with("\t")
-            {
-                lines.push(Line::styled(
-                    format!("  {}", line),
-                    Style::default().fg(Color::Yellow),
-                ));
-            } else {
-                let prefix = if is_first_line {
-                    "› ".to_string()
-                } else {
-                    "  ".to_string()
-                };
-                lines.push(Line::from(vec![
-                    Span::styled(prefix, Style::default().fg(Color::Green)),
-                    Span::styled(line.to_owned(), Style::default().fg(Color::White)),
-                ]));
-                is_first_line = false;
-            }
+        for line in self.message.lines() {
+            lines.extend(wrap_text(
+                line,
+                "  ",
+                width,
+                Style::default().fg(Color::White),
+            ));
         }
 
-        lines.push(Line::raw(""));
+        lines.push(Line::raw("")); // Empty line for spacing
         lines
     }
 
@@ -146,52 +179,56 @@ impl AssistantHistoryCell {
 }
 
 impl HistoryCell for AssistantHistoryCell {
-    fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
-        let mut lines = Vec::new();
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let mut lines = vec![Line::styled(
+            "Assistant:",
+            Style::default().fg(Color::Green).bold(),
+        )];
 
-        lines.push(Line::raw(""));
-
+        // Simple markdown-like rendering
         let content = self.content.trim();
         if content.is_empty() {
             if self.is_streaming {
                 lines.push(Line::styled(
-                    "• Thinking...",
+                    "  Thinking...",
                     Style::default().fg(Color::DarkGray),
                 ));
             }
         } else {
-            let mut is_first_line = true;
             for line in content.lines() {
-                if line.trim().is_empty() {
-                    lines.push(Line::raw(""));
-                } else if line.starts_with("```")
-                    || line.starts_with("    ")
-                    || line.starts_with("\t")
-                {
-                    lines.push(Line::styled(
-                        format!("  {}", line),
+                // Simple code block detection
+                if line.starts_with("```") {
+                    lines.extend(wrap_text(
+                        line,
+                        "",
+                        width,
+                        Style::default().fg(Color::Yellow),
+                    ));
+                } else if line.starts_with("    ") || line.starts_with("\t") {
+                    // Code indent
+                    lines.extend(wrap_text(
+                        line,
+                        "  ",
+                        width,
                         Style::default().fg(Color::Yellow),
                     ));
                 } else {
-                    let prefix = if is_first_line {
-                        "• ".to_string()
-                    } else {
-                        "  ".to_string()
-                    };
-                    lines.push(Line::from(vec![
-                        Span::styled(prefix, Style::default().fg(Color::Blue)),
-                        Span::styled(line.to_owned(), Style::default().fg(Color::White)),
-                    ]));
-                    is_first_line = false;
+                    lines.extend(wrap_text(
+                        line,
+                        "  ",
+                        width,
+                        Style::default().fg(Color::White),
+                    ));
                 }
             }
         }
 
         if self.is_streaming {
-            lines.push(Line::styled("• ▌", Style::default().fg(Color::Green)));
+            lines.push(Line::styled("  ▌", Style::default().fg(Color::Green)));
+        } else {
+            lines.push(Line::raw("")); // Empty line for spacing
         }
 
-        lines.push(Line::raw(""));
         lines
     }
 
@@ -244,10 +281,10 @@ impl ToolCallHistoryCell {
 }
 
 impl HistoryCell for ToolCallHistoryCell {
-    fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         let mut lines: Vec<Line<'static>> = Vec::new();
 
-        // Status icon and tool name (codex-style)
+        // Status icon
         let status_icon = if self.is_running {
             "⏳"
         } else if self.is_success() {
@@ -264,7 +301,7 @@ impl HistoryCell for ToolCallHistoryCell {
             Color::Red
         };
 
-        // Tool header with codex-style
+        // Tool name line
         lines.push(Line::styled(
             format!("{} Tool: {}", status_icon, self.tool_name),
             Style::default().fg(status_color).bold(),
@@ -287,7 +324,9 @@ impl HistoryCell for ToolCallHistoryCell {
             match result {
                 Ok(output) => {
                     let result_str = match output {
-                        ToolOutput::Function { content, success } => {
+                        ToolOutput::Function {
+                            content, success, ..
+                        } => {
                             let status = success
                                 .map(|s| if s { "success" } else { "failed" })
                                 .unwrap_or("done");
@@ -308,8 +347,11 @@ impl HistoryCell for ToolCallHistoryCell {
                     ));
                 }
                 Err(e) => {
-                    lines.push(Line::styled(
-                        format!("  Error: {}", e),
+                    // Wrap error messages so they don't overflow the terminal width.
+                    lines.extend(wrap_text(
+                        e,
+                        "  Error: ",
+                        width,
                         Style::default().fg(Color::Red),
                     ));
                 }
@@ -348,6 +390,96 @@ impl DiffHistoryCell {
 impl HistoryCell for DiffHistoryCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         create_diff_summary(&self.summary.changes, &self.summary.cwd, width as usize)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+/// A plan update displayed as a checkbox list.
+#[derive(Debug, Clone)]
+pub struct PlanUpdateHistoryCell {
+    /// Optional explanation from the model.
+    pub explanation: Option<String>,
+    /// The plan steps with their statuses.
+    pub steps: Vec<PlanStep>,
+    /// Whether the tool call is still running.
+    pub is_running: bool,
+    /// Unique id for this tool call.
+    pub call_id: String,
+}
+
+impl PlanUpdateHistoryCell {
+    /// Create a new plan update cell.
+    pub fn new(call_id: String, explanation: Option<String>, steps: Vec<PlanStep>) -> Self {
+        Self {
+            explanation,
+            steps,
+            is_running: true,
+            call_id,
+        }
+    }
+
+    /// Mark the tool call as complete.
+    pub fn complete(&mut self) {
+        self.is_running = false;
+    }
+}
+
+impl HistoryCell for PlanUpdateHistoryCell {
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let mut lines: Vec<Line<'static>> = Vec::new();
+
+        // Header
+        let status_icon = if self.is_running { "⏳" } else { "✓" };
+        let status_color = if self.is_running {
+            Color::Yellow
+        } else {
+            Color::Green
+        };
+        lines.push(Line::styled(
+            format!("{} Plan:", status_icon),
+            Style::default().fg(status_color).bold(),
+        ));
+
+        // Optional explanation
+        if let Some(ref explanation) = self.explanation {
+            lines.extend(wrap_text(
+                explanation,
+                "  ",
+                width,
+                Style::default().fg(Color::DarkGray).italic(),
+            ));
+        }
+
+        // Steps with checkboxes
+        for step in &self.steps {
+            let (icon, style) = match step.status {
+                StepStatus::Completed => (
+                    "✔",
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::CROSSED_OUT),
+                ),
+                StepStatus::InProgress => ("◐", Style::default().fg(Color::Cyan).bold()),
+                StepStatus::Pending => ("□", Style::default().fg(Color::DarkGray)),
+            };
+
+            lines.extend(wrap_text(
+                &format!("{} {}", icon, step.step),
+                "  ",
+                width,
+                style,
+            ));
+        }
+
+        lines.push(Line::raw("")); // Spacing
+        lines
     }
 
     fn as_any(&self) -> &dyn Any {
