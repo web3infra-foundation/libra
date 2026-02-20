@@ -297,7 +297,11 @@ pub async fn parse_async(args: Option<&[&str]>) -> Result<(), GitError> {
         Commands::Rebase(args) => command::rebase::execute(args).await,
         Commands::Merge(args) => command::merge::execute(args).await,
         Commands::Reset(args) => command::reset::execute(args).await,
-        Commands::Mv(args) => command::mv::execute(args).await,
+        Commands::Mv(args) => {
+            if !command::mv::execute(args).await {
+                std::process::exit(1); // 'libra mv' returns non-zero exit code when it fails
+            }
+        }
         Commands::CherryPick(args) => command::cherry_pick::execute(args).await,
         Commands::Push(args) => command::push::execute(args).await,
         Commands::IndexPack(args) => command::index_pack::execute(args),
