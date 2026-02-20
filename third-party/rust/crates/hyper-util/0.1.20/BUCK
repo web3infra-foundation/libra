@@ -49,8 +49,8 @@ rust_library(
     deps = [
         "//third-party/rust/crates/base64/0.22.1:base64",
         "//third-party/rust/crates/bytes/1.11.1:bytes",
-        "//third-party/rust/crates/futures-channel/0.3.31:futures-channel",
-        "//third-party/rust/crates/futures-util/0.3.31:futures-util",
+        "//third-party/rust/crates/futures-channel/0.3.32:futures-channel",
+        "//third-party/rust/crates/futures-util/0.3.32:futures-util",
         "//third-party/rust/crates/http-body/1.0.1:http-body",
         "//third-party/rust/crates/http/1.4.0:http",
         "//third-party/rust/crates/hyper/1.8.1:hyper",

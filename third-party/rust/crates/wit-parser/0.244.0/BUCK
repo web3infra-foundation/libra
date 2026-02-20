@@ -32,7 +32,7 @@ rust_library(
     rustc_flags = ["@$(location :wit-parser-manifest[env_flags])"],
     visibility = ["PUBLIC"],
     deps = [
-        "//third-party/rust/crates/anyhow/1.0.101:anyhow",
+        "//third-party/rust/crates/anyhow/1.0.102:anyhow",
         "//third-party/rust/crates/id-arena/2.3.0:id-arena",
         "//third-party/rust/crates/indexmap/2.13.0:indexmap",
         "//third-party/rust/crates/log/0.4.29:log",

@@ -35,8 +35,8 @@ rust_library(
     rustc_flags = ["@$(location :tracing-futures-manifest[env_flags])"],
     visibility = ["PUBLIC"],
     deps = [
-        "//third-party/rust/crates/futures-task/0.3.31:futures-task",
-        "//third-party/rust/crates/futures/0.3.31:futures",
+        "//third-party/rust/crates/futures-task/0.3.32:futures-task",
+        "//third-party/rust/crates/futures/0.3.32:futures",
         "//third-party/rust/crates/pin-project/1.1.10:pin-project",
         "//third-party/rust/crates/tracing/0.1.44:tracing",
     ],

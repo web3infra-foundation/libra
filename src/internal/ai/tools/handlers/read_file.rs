@@ -76,7 +76,7 @@ impl ToolHandler for ReadFileHandler {
     fn schema(&self) -> ToolSpec {
         ToolSpec::new(
             "read_file",
-            "Read the contents of a file. Returns the file content with line numbers prefixed (e.g., 'L1: content'). Supports pagination with offset and limit parameters.",
+            "Read the contents of a file. Returns the file content with each line prefixed as 'L{n}: content'. Blank lines appear as 'L{n}: ' (nothing after the space). Supports pagination with offset and limit parameters.",
         )
         .with_parameters(FunctionParameters::object(
             [

@@ -6,7 +6,10 @@
 use serde_json::Value;
 
 use super::history_cell::HistoryCell;
-use crate::internal::ai::{completion::Message, tools::ToolOutput};
+use crate::internal::ai::{
+    completion::Message,
+    tools::{ToolOutput, context::UserInputRequest},
+};
 
 /// Events emitted by agent execution to notify the UI.
 #[derive(Debug, Clone)]
@@ -32,6 +35,8 @@ pub enum AgentStatus {
     Thinking,
     /// Agent is executing a tool.
     ExecutingTool,
+    /// Agent is waiting for user input (via `request_user_input` tool).
+    AwaitingUserInput,
 }
 
 /// The exit strategy requested by the UI layer.
@@ -52,7 +57,11 @@ pub enum AppEvent {
     /// Request to exit the application.
     Exit(ExitMode),
     /// Submit a user message.
-    SubmitUserMessage { text: String },
+    SubmitUserMessage {
+        text: String,
+        /// If set, restrict tools for this message (agent tool restriction).
+        allowed_tools: Option<Vec<String>>,
+    },
     /// Insert a history cell into the chat.
     InsertHistoryCell(Box<dyn HistoryCell>),
     /// Tool call is starting.
@@ -69,4 +78,6 @@ pub enum AppEvent {
     },
     /// Agent status has changed.
     AgentStatusUpdate { status: AgentStatus },
+    /// The agent is requesting user input via the `request_user_input` tool.
+    RequestUserInput { request: UserInputRequest },
 }

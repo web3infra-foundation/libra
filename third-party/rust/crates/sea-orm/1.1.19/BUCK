@@ -53,7 +53,7 @@ rust_library(
         "//third-party/rust/crates/bigdecimal/0.4.10:bigdecimal",
         "//third-party/rust/crates/chrono/0.4.43:chrono",
         "//third-party/rust/crates/derive_more/2.1.1:derive_more",
-        "//third-party/rust/crates/futures-util/0.3.31:futures-util",
+        "//third-party/rust/crates/futures-util/0.3.32:futures-util",
         "//third-party/rust/crates/log/0.4.29:log",
         "//third-party/rust/crates/ouroboros/0.18.5:ouroboros",
         "//third-party/rust/crates/pgvector/0.4.1:pgvector",

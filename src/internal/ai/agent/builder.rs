@@ -77,7 +77,7 @@ impl<M: CompletionModel> AgentBuilder<M> {
             model: Arc::new(self.model),
             preamble: self.preamble,
             temperature: self.temperature,
-            max_steps: self.max_steps.unwrap_or(4),
+            max_steps: self.max_steps.or(Some(4)),
             tools: self.tools,
         }
     }

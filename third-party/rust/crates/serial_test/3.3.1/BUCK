@@ -31,8 +31,8 @@ rust_library(
     rustc_flags = ["@$(location :serial_test-manifest[env_flags])"],
     visibility = ["PUBLIC"],
     deps = [
-        "//third-party/rust/crates/futures-executor/0.3.31:futures-executor",
-        "//third-party/rust/crates/futures-util/0.3.31:futures-util",
+        "//third-party/rust/crates/futures-executor/0.3.32:futures-executor",
+        "//third-party/rust/crates/futures-util/0.3.32:futures-util",
         "//third-party/rust/crates/log/0.4.29:log",
         "//third-party/rust/crates/once_cell/1.21.3:once_cell",
         "//third-party/rust/crates/parking_lot/0.12.5:parking_lot",
