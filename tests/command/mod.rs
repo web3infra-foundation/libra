@@ -15,6 +15,7 @@ use libra::{
         init::{InitArgs, init},
         load_object,
         log::{LogArgs, get_reachable_commits},
+        mv::{self, MvArgs},
         remove::{self, RemoveArgs},
         save_object,
         status::{changes_to_be_committed, changes_to_be_staged},
@@ -44,6 +45,7 @@ mod init_test;
 mod lfs_test;
 mod log_test;
 mod merge_test;
+mod mv_test;
 mod open_test;
 mod pull_test;
 mod push_test;
