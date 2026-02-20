@@ -476,6 +476,7 @@ impl LibraMcpServer {
             task_id,
             Some(actor),
         );
+
         if let Some(status) = params.status {
             intent.set_status(match status.as_str() {
                 "draft" => IntentStatus::Draft,
@@ -863,10 +864,14 @@ impl LibraMcpServer {
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
         let repo_id = self.repo_id;
-        let task_id = params
-            .task_id
-            .parse::<Uuid>()
-            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+        // Handle both regular UUID and uuid:... format
+        let task_id_str = params.task_id.trim();
+        let task_id = if let Some(stripped) = task_id_str.strip_prefix("uuid:") {
+            stripped.parse::<Uuid>()
+        } else {
+            task_id_str.parse::<Uuid>()
+        }
+        .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
 
         let base_commit_sha =
             crate::internal::ai::util::normalize_commit_anchor(&params.base_commit_sha)
@@ -886,9 +891,14 @@ impl LibraMcpServer {
             });
         }
         if let Some(id) = params.context_snapshot_id {
-            let parsed = id
-                .parse::<Uuid>()
-                .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+            // Handle both regular UUID and uuid:... format
+            let id_str = id.trim();
+            let parsed = if let Some(stripped) = id_str.strip_prefix("uuid:") {
+                stripped.parse::<Uuid>()
+            } else {
+                id_str.parse::<Uuid>()
+            }
+            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
             run.set_context_snapshot_id(Some(parsed));
         }
         if let Some(err) = params.error {
@@ -1879,10 +1889,14 @@ impl LibraMcpServer {
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
         let repo_id = self.repo_id;
-        let run_id = params
-            .run_id
-            .parse::<Uuid>()
-            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+        // Handle both regular UUID and uuid:... format
+        let run_id_str = params.run_id.trim();
+        let run_id = if let Some(stripped) = run_id_str.strip_prefix("uuid:") {
+            stripped.parse::<Uuid>()
+        } else {
+            run_id_str.parse::<Uuid>()
+        }
+        .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
 
         let decision_type = match params.decision_type.as_str() {
             "commit" => DecisionType::Commit,
