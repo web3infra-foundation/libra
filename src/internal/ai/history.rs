@@ -119,8 +119,9 @@ impl HistoryManager {
     ) -> Result<(), GitError> {
         // 1. Resolve current history head
         let parent_commit_id = self.resolve_history_head().await?;
+
         let mut root_items = if let Some(parent_id) = parent_commit_id {
-            self.load_commit_tree(&parent_id)?
+            self.load_commit_tree(&parent_id).unwrap_or_default()
         } else {
             Vec::new()
         };
