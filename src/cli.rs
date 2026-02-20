@@ -61,6 +61,8 @@ enum Commands {
     Add(command::add::AddArgs),
     #[command(about = "Remove files from the working tree and from the index")]
     Rm(command::remove::RemoveArgs),
+    #[command(about = "Move or rename a file, a directory, or a symbolic link")]
+    Mv(command::mv::MvArgs),
     #[command(about = "Restore working tree files")]
     Restore(command::restore::RestoreArgs),
     #[command(about = "Show the working tree status")]
@@ -295,6 +297,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> Result<(), GitError> {
         Commands::Rebase(args) => command::rebase::execute(args).await,
         Commands::Merge(args) => command::merge::execute(args).await,
         Commands::Reset(args) => command::reset::execute(args).await,
+        Commands::Mv(args) => command::mv::execute(args).await,
         Commands::CherryPick(args) => command::cherry_pick::execute(args).await,
         Commands::Push(args) => command::push::execute(args).await,
         Commands::IndexPack(args) => command::index_pack::execute(args),
