@@ -6,6 +6,7 @@
 //! - Stdio Mode (`--stdio`): MCP server over standard input/output, designed for integration with AI clients like Claude Desktop.
 
 use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc};
 
 use axum::{Router, response::Html, routing::get};
 use clap::{Parser, ValueEnum};
@@ -30,9 +31,12 @@ use crate::internal::{
             handlers::{
                 ApplyPatchHandler, GrepFilesHandler, ListDirHandler, McpBridgeHandler, PlanHandler,
                 ReadFileHandler, RequestUserInputHandler, ShellHandler,
+                ApplyPatchHandler, GrepFilesHandler, ListDirHandler, McpBridgeHandler, PlanHandler,
+                ReadFileHandler, RequestUserInputHandler, ShellHandler,
             },
         },
     },
+    tui::{App, AppConfig, Tui, tui_init, tui_restore},
     tui::{App, AppConfig, Tui, tui_init, tui_restore},
 };
 
@@ -70,6 +74,14 @@ pub struct CodeArgs {
     /// Sampling temperature
     #[arg(long)]
     pub temperature: Option<f64>,
+
+    /// Operating context mode (dev, review, research)
+    #[arg(long)]
+    pub context: Option<String>,
+
+    /// Resume the most recent session
+    #[arg(long)]
+    pub resume: bool,
 
     /// Operating context mode (dev, review, research)
     #[arg(long)]
@@ -293,11 +305,18 @@ async fn execute_tui(args: CodeArgs) {
     };
 
     let preamble = system_preamble(&working_dir, args.context.as_deref());
+    let preamble = system_preamble(&working_dir, args.context.as_deref());
     let temperature = args.temperature;
+    let resume = args.resume;
     let resume = args.resume;
 
     // Prepare MCP server instance shared between the HTTP transport and TUI bridge
     let mcp_server = init_mcp_server(&working_dir, false);
+
+    // Create the bridge channel for request_user_input tool <-> TUI communication.
+    let (user_input_tx, user_input_rx) = tokio::sync::mpsc::unbounded_channel::<
+        crate::internal::ai::tools::context::UserInputRequest,
+    >();
 
     // Create the bridge channel for request_user_input tool <-> TUI communication.
     let (user_input_tx, user_input_rx) = tokio::sync::mpsc::unbounded_channel::<
@@ -316,6 +335,13 @@ async fn execute_tui(args: CodeArgs) {
             "request_user_input",
             Arc::new(RequestUserInputHandler::new(user_input_tx)),
         );
+        .register("apply_patch", Arc::new(ApplyPatchHandler))
+        .register("shell", Arc::new(ShellHandler))
+        .register("update_plan", Arc::new(PlanHandler))
+        .register(
+            "request_user_input",
+            Arc::new(RequestUserInputHandler::new(user_input_tx)),
+        );
 
     for (name, handler) in McpBridgeHandler::all_handlers(mcp_server.clone()) {
         builder = builder.register(name, handler);
@@ -323,6 +349,8 @@ async fn execute_tui(args: CodeArgs) {
 
     let registry = Arc::new(builder.build());
 
+    // Resolve model name before entering the provider match
+    let provider_name = format!("{:?}", args.provider).to_lowercase();
     // Resolve model name before entering the provider match
     let provider_name = format!("{:?}", args.provider).to_lowercase();
 
@@ -339,6 +367,20 @@ async fn execute_tui(args: CodeArgs) {
             let model_name = args.model.unwrap_or_else(|| GEMINI_2_5_FLASH.to_string());
             let model = client.completion_model(&model_name);
             run_tui_with_model(
+                model,
+                TuiParams {
+                    host: args.host,
+                    port: args.port,
+                    mcp_port: args.mcp_port,
+                    registry: registry.clone(),
+                    preamble,
+                    temperature,
+                    resume,
+                    user_input_rx,
+                    mcp_server,
+                    model_name,
+                    provider_name,
+                },
                 model,
                 TuiParams {
                     host: args.host,
@@ -381,6 +423,20 @@ async fn execute_tui(args: CodeArgs) {
                     model_name,
                     provider_name,
                 },
+                model,
+                TuiParams {
+                    host: args.host,
+                    port: args.port,
+                    mcp_port: args.mcp_port,
+                    registry: registry.clone(),
+                    preamble,
+                    temperature,
+                    resume,
+                    user_input_rx,
+                    mcp_server,
+                    model_name,
+                    provider_name,
+                },
             )
             .await;
         }
@@ -409,6 +465,20 @@ async fn execute_tui(args: CodeArgs) {
                     model_name,
                     provider_name,
                 },
+                model,
+                TuiParams {
+                    host: args.host,
+                    port: args.port,
+                    mcp_port: args.mcp_port,
+                    registry: registry.clone(),
+                    preamble,
+                    temperature,
+                    resume,
+                    user_input_rx,
+                    mcp_server,
+                    model_name,
+                    provider_name,
+                },
             )
             .await;
         }
@@ -422,7 +492,23 @@ async fn execute_tui(args: CodeArgs) {
             };
             let model_name = "deepseek-chat".to_string();
             let model = client.completion_model(&model_name);
+            let model_name = "deepseek-chat".to_string();
+            let model = client.completion_model(&model_name);
             run_tui_with_model(
+                model,
+                TuiParams {
+                    host: args.host,
+                    port: args.port,
+                    mcp_port: args.mcp_port,
+                    registry: registry.clone(),
+                    preamble,
+                    temperature,
+                    resume,
+                    user_input_rx,
+                    mcp_server,
+                    model_name,
+                    provider_name,
+                },
                 model,
                 TuiParams {
                     host: args.host,
@@ -465,12 +551,27 @@ async fn execute_tui(args: CodeArgs) {
                     model_name,
                     provider_name,
                 },
+                model,
+                TuiParams {
+                    host: args.host,
+                    port: args.port,
+                    mcp_port: args.mcp_port,
+                    registry: registry.clone(),
+                    preamble,
+                    temperature,
+                    resume,
+                    user_input_rx,
+                    mcp_server,
+                    model_name,
+                    provider_name,
+                },
             )
             .await;
         }
     }
 }
 
+struct TuiParams {
 struct TuiParams {
     host: String,
     port: u16,
@@ -481,7 +582,38 @@ struct TuiParams {
     resume: bool,
     user_input_rx:
         tokio::sync::mpsc::UnboundedReceiver<crate::internal::ai::tools::context::UserInputRequest>,
+    preamble: String,
+    temperature: Option<f64>,
+    resume: bool,
+    user_input_rx:
+        tokio::sync::mpsc::UnboundedReceiver<crate::internal::ai::tools::context::UserInputRequest>,
     mcp_server: Arc<LibraMcpServer>,
+    model_name: String,
+    provider_name: String,
+}
+
+async fn run_tui_with_model<M>(model: M, params: TuiParams)
+where
+    M: crate::internal::ai::completion::CompletionModel + 'static,
+{
+    let registry = params.registry;
+    let hook_runner = {
+        let runner = crate::internal::ai::hooks::HookRunner::load(registry.working_dir());
+        if runner.has_hooks() {
+            Some(std::sync::Arc::new(runner))
+        } else {
+            None
+        }
+    };
+
+    let config = crate::internal::ai::agent::ToolLoopConfig {
+        preamble: Some(params.preamble),
+        temperature: params.temperature,
+        max_steps: None, // TUI mode: unlimited tool steps
+        hook_runner,
+        allowed_tools: None,
+    };
+
     model_name: String,
     provider_name: String,
 }
@@ -525,6 +657,7 @@ where
     let tui = Tui::new(terminal);
 
     let (web_handle, web_line) = match start_web_server(&params.host, params.port).await {
+    let (web_handle, web_line) = match start_web_server(&params.host, params.port).await {
         Ok(handle) => {
             let line = format!("Web: http://{}", handle.addr);
             (Some(handle), line)
@@ -533,25 +666,14 @@ where
     };
 
     // Start MCP Server
-    let (mcp_handle, mcp_line) = match start_mcp_server(&host, mcp_port, mcp_server.clone()).await {
-        Ok(handle) => {
-            let line = format!("MCP: http://{}", handle.addr);
-            (Some(handle), line)
-        }
-        Err(err) => (None, format!("MCP: failed to start ({err})")),
-    };
-
-    // Get current working directory
-    let _working_dir = match std::env::current_dir() {
-        Ok(path) => path,
-        Err(e) => {
-            eprintln!("Failed to get current directory: {}", e);
-            return;
-        }
-    };
-
-    // Create initial intent via MCP
-    create_initial_intent(&mcp_server).await;
+    let (mcp_handle, mcp_line) =
+        match start_mcp_server(&params.host, params.mcp_port, params.mcp_server.clone()).await {
+            Ok(handle) => {
+                let line = format!("MCP: http://{}", handle.addr);
+                (Some(handle), line)
+            }
+            Err(err) => (None, format!("MCP: failed to start ({err})")),
+        };
 
     // Create initial intent via MCP
     create_initial_intent(&params.mcp_server).await;
@@ -580,9 +702,48 @@ where
     } else {
         crate::internal::ai::session::SessionState::new(&working_dir_str)
     };
+        "Welcome to Libra Code! Type your message and press Enter to chat with the AI assistant.\n{}\n{}",
+        web_line, mcp_line
+    );
+
+    // Load slash commands
+    let commands = crate::internal::ai::commands::load_commands(registry.working_dir());
+    let command_dispatcher = crate::internal::ai::commands::CommandDispatcher::new(commands);
+
+    // Load agent definitions
+    let agents = crate::internal::ai::agents::load_agents(registry.working_dir());
+    let agent_router = crate::internal::ai::agents::AgentRouter::new(agents);
+
+    // Set up session persistence
+    let working_dir_str = registry.working_dir().to_string_lossy().to_string();
+    let session_store = crate::internal::ai::session::SessionStore::new(registry.working_dir());
+    let session = if params.resume {
+        match session_store.load_latest() {
+            Ok(Some(s)) => s,
+            _ => crate::internal::ai::session::SessionState::new(&working_dir_str),
+        }
+    } else {
+        crate::internal::ai::session::SessionState::new(&working_dir_str)
+    };
 
     // Create and run app
-    let mut app = App::new(tui, model, registry, config, welcome, Some(mcp_server));
+    let mut app = App::new(
+        tui,
+        model,
+        registry,
+        config,
+        AppConfig {
+            welcome_message: welcome,
+            command_dispatcher,
+            agent_router,
+            session,
+            session_store,
+            user_input_rx: params.user_input_rx,
+            model_name: params.model_name,
+            provider_name: params.provider_name,
+            mcp_server: Some(params.mcp_server),
+        },
+    );
 
     match app.run().await {
         Ok(exit_info) => {
@@ -665,6 +826,16 @@ async fn start_mcp_server(
     })
 }
 
+fn system_preamble(working_dir: &std::path::Path, context: Option<&str>) -> String {
+    let mut builder = crate::internal::ai::prompt::SystemPromptBuilder::new(working_dir);
+    if let Some(ctx_str) = context {
+        if let Ok(mode) = ctx_str.parse::<crate::internal::ai::prompt::ContextMode>() {
+            builder = builder.with_context(mode);
+        } else {
+            tracing::warn!(context = ctx_str, "unknown context mode, ignoring");
+        }
+    }
+    builder.build()
 fn system_preamble(working_dir: &std::path::Path, context: Option<&str>) -> String {
     let mut builder = crate::internal::ai::prompt::SystemPromptBuilder::new(working_dir);
     if let Some(ctx_str) = context {

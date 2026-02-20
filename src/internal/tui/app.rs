@@ -4,7 +4,9 @@
 //! user input, agent execution, and UI rendering.
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Instant};
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Instant};
 
+use crossterm::event::{KeyCode, KeyModifiers};
 use crossterm::event::{KeyCode, KeyModifiers};
 use tokio::{
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
@@ -21,17 +23,18 @@ use super::{
         AssistantHistoryCell, DiffHistoryCell, PlanUpdateHistoryCell, ToolCallHistoryCell,
         UserHistoryCell,
     },
+    diff::FileChange,
+    history_cell::{
+        AssistantHistoryCell, DiffHistoryCell, PlanUpdateHistoryCell, ToolCallHistoryCell,
+        UserHistoryCell,
+    },
     terminal::{TARGET_FRAME_INTERVAL, Tui, TuiEvent},
 };
 use crate::internal::ai::{
     agent::{ToolLoopConfig, run_tool_loop_with_history_and_observer},
-<<<<<<< HEAD
     agents::AgentRouter,
     commands::CommandDispatcher,
     completion::{CompletionModel, Message},
-=======
-    completion::Message,
->>>>>>> d8a130f (invoke mcp interfaces in command code (#212))
     mcp::{
         resource::{
             CreateContextSnapshotParams, CreateDecisionParams, CreateRunParams,
@@ -39,15 +42,11 @@ use crate::internal::ai::{
         },
         server::LibraMcpServer,
     },
-<<<<<<< HEAD
     session::{SessionState, SessionStore},
     tools::{
         ToolOutput, ToolRegistry,
         context::{UpdatePlanArgs, UserInputAnswer, UserInputRequest, UserInputResponse},
     },
-=======
-    tools::{ToolOutput, ToolRegistry},
->>>>>>> d8a130f (invoke mcp interfaces in command code (#212))
 };
 
 /// MCP resource IDs for tracking the workflow
@@ -107,13 +106,47 @@ pub struct AppConfig {
     pub mcp_server: Option<Arc<LibraMcpServer>>,
 }
 
+/// Pending user-input state while the TUI waits for the user to answer.
+struct PendingUserInput {
+    /// The original request (questions, etc.).
+    request: UserInputRequest,
+    /// Index of the question currently being answered.
+    current_question: usize,
+    /// Answers collected so far, keyed by question id.
+    answers: HashMap<String, UserInputAnswer>,
+    /// Currently selected option index (0-based) for the active question.
+    selected_option: usize,
+    /// Whether the notes input is currently focused (Tab toggles).
+    notes_focused: bool,
+    /// Notes text being composed for the current question.
+    notes_text: String,
+}
+
+/// Configuration for creating an App.
+pub struct AppConfig {
+    pub welcome_message: String,
+    pub command_dispatcher: CommandDispatcher,
+    pub agent_router: AgentRouter,
+    pub session: SessionState,
+    pub session_store: SessionStore,
+    pub user_input_rx: UnboundedReceiver<UserInputRequest>,
+    /// Display name of the active model (e.g. "gemini-2.5-flash").
+    pub model_name: String,
+    /// Provider identifier (e.g. "gemini", "anthropic").
+    pub provider_name: String,
+    /// MCP server instance for workflow tracking.
+    pub mcp_server: Option<Arc<LibraMcpServer>>,
+}
+
 /// The main application struct.
+pub struct App<M: CompletionModel> {
 pub struct App<M: CompletionModel> {
     /// The TUI instance.
     tui: Tui,
     /// The chat widget.
     widget: ChatWidget,
     /// The completion model used by the agent loop.
+    model: M,
     model: M,
     /// The tool registry.
     registry: Arc<ToolRegistry>,
@@ -137,7 +170,6 @@ pub struct App<M: CompletionModel> {
     scheduled_draw_task: Option<JoinHandle<()>>,
     /// Initial welcome message.
     welcome_message: String,
-<<<<<<< HEAD
     /// Slash command dispatcher.
     command_dispatcher: CommandDispatcher,
     /// Agent router for auto-selection.
@@ -154,8 +186,6 @@ pub struct App<M: CompletionModel> {
     model_name: String,
     /// Provider identifier.
     provider_name: String,
-=======
->>>>>>> d8a130f (invoke mcp interfaces in command code (#212))
     /// MCP server instance for writing data.
     mcp_server: Option<Arc<LibraMcpServer>>,
     /// MCP resource IDs for tracking the workflow
@@ -163,20 +193,18 @@ pub struct App<M: CompletionModel> {
 }
 
 impl<M: CompletionModel + Clone + 'static> App<M> {
+impl<M: CompletionModel + Clone + 'static> App<M> {
     /// Create a new App instance.
     pub fn new(
         tui: Tui,
         model: M,
+        model: M,
         registry: Arc<ToolRegistry>,
         config: ToolLoopConfig,
-<<<<<<< HEAD
         app_config: AppConfig,
-=======
-        welcome_message: String,
-        mcp_server: Option<Arc<LibraMcpServer>>,
->>>>>>> d8a130f (invoke mcp interfaces in command code (#212))
     ) -> Self {
         let (app_event_tx, app_event_rx) = mpsc::unbounded_channel();
+        let history = app_config.session.to_history();
         let history = app_config.session.to_history();
         Self {
             tui,
@@ -185,6 +213,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             registry,
             config,
             history,
+            history,
             app_event_rx,
             app_event_tx,
             should_exit: false,
@@ -192,7 +221,6 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             last_draw_time: Instant::now(),
             agent_task: None,
             scheduled_draw_task: None,
-<<<<<<< HEAD
             welcome_message: app_config.welcome_message,
             command_dispatcher: app_config.command_dispatcher,
             agent_router: app_config.agent_router,
@@ -203,10 +231,6 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             model_name: app_config.model_name,
             provider_name: app_config.provider_name,
             mcp_server: app_config.mcp_server,
-=======
-            welcome_message,
-            mcp_server,
->>>>>>> d8a130f (invoke mcp interfaces in command code (#212))
             mcp_ids: McpIds::default(),
         }
     }
@@ -225,6 +249,13 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             tracing::warn!("Failed to save session: {}", e);
         }
 
+        // Save session on exit (best-effort)
+        if self.session.message_count() > 0
+            && let Err(e) = self.session_store.save(&self.session)
+        {
+            tracing::warn!("Failed to save session: {}", e);
+        }
+
         match (run_result, leave_result) {
             (Ok(exit_info), Ok(())) => Ok(exit_info),
             (Err(run_err), Ok(())) => Err(run_err),
@@ -235,6 +266,16 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
     async fn run_in_alt_screen(&mut self) -> anyhow::Result<AppExitInfo> {
         self.tui.clear()?;
+
+        // Set up slash-command autocomplete hints (built-in + YAML-defined).
+        let mut hints: Vec<(String, String)> = super::slash_command::BuiltinCommand::all_hints();
+        hints.extend(
+            self.command_dispatcher
+                .commands()
+                .iter()
+                .map(|c| (c.name.clone(), c.description.clone())),
+        );
+        self.widget.bottom_pane.set_command_hints(hints);
 
         // Set up slash-command autocomplete hints (built-in + YAML-defined).
         let mut hints: Vec<(String, String)> = super::slash_command::BuiltinCommand::all_hints();
@@ -274,6 +315,11 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     if self.handle_app_event(event).await? {
                         break;
                     }
+                }
+
+                // Handle user-input requests from the tool handler
+                Some(request) = self.user_input_rx.recv() => {
+                    self.handle_user_input_request(request);
                 }
 
                 // Handle user-input requests from the tool handler
@@ -347,6 +393,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         match event {
             TuiEvent::Key(key) => {
                 if key.kind == crossterm::event::KeyEventKind::Press {
+                if key.kind == crossterm::event::KeyEventKind::Press {
                     self.handle_key_event(key).await?;
                 }
             }
@@ -354,6 +401,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 for c in text.chars() {
                     self.widget.bottom_pane.insert_char(c);
                 }
+                self.widget.bottom_pane.sync_command_popup();
                 self.widget.bottom_pane.sync_command_popup();
                 self.schedule_draw();
             }
@@ -378,6 +426,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         // Check for Ctrl+C first (always handled)
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.cancel_pending_user_input();
+            self.cancel_pending_user_input();
             self.interrupt_agent_task();
             self.exit_info = Some(AppExitInfo {
                 reason: ExitReason::UserRequested,
@@ -393,8 +442,17 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 KeyCode::Tab if self.widget.bottom_pane.is_command_popup_visible() => {
                     self.widget.bottom_pane.complete_command();
                     self.widget.bottom_pane.sync_command_popup();
+        // Handle input based on agent status
+        match self.widget.bottom_pane.status {
+            AgentStatus::Idle => match key.code {
+                // ── Command popup intercepts (when visible) ──────────
+                KeyCode::Tab if self.widget.bottom_pane.is_command_popup_visible() => {
+                    self.widget.bottom_pane.complete_command();
+                    self.widget.bottom_pane.sync_command_popup();
                     self.schedule_draw();
                 }
+                KeyCode::Up if self.widget.bottom_pane.is_command_popup_visible() => {
+                    self.widget.bottom_pane.command_popup_up();
                 KeyCode::Up if self.widget.bottom_pane.is_command_popup_visible() => {
                     self.widget.bottom_pane.command_popup_up();
                     self.schedule_draw();
@@ -405,7 +463,15 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 }
                 KeyCode::Esc if self.widget.bottom_pane.is_command_popup_visible() => {
                     self.widget.bottom_pane.dismiss_command_popup();
+                KeyCode::Down if self.widget.bottom_pane.is_command_popup_visible() => {
+                    self.widget.bottom_pane.command_popup_down();
                     self.schedule_draw();
+                }
+                KeyCode::Esc if self.widget.bottom_pane.is_command_popup_visible() => {
+                    self.widget.bottom_pane.dismiss_command_popup();
+                    self.schedule_draw();
+                }
+                // ── Normal idle handlers ─────────────────────────────
                 }
                 // ── Normal idle handlers ─────────────────────────────
                 KeyCode::Enter => {
@@ -418,6 +484,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.widget.clear();
                     self.widget.bottom_pane.clear();
+                    self.widget.bottom_pane.sync_command_popup();
                     self.widget.bottom_pane.sync_command_popup();
                     self.schedule_draw();
                 }
@@ -461,15 +528,18 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 KeyCode::Char(c) => {
                     self.widget.bottom_pane.insert_char(c);
                     self.widget.bottom_pane.sync_command_popup();
+                    self.widget.bottom_pane.sync_command_popup();
                     self.schedule_draw();
                 }
                 KeyCode::Backspace => {
                     self.widget.bottom_pane.backspace();
                     self.widget.bottom_pane.sync_command_popup();
+                    self.widget.bottom_pane.sync_command_popup();
                     self.schedule_draw();
                 }
                 KeyCode::Delete => {
                     self.widget.bottom_pane.delete();
+                    self.widget.bottom_pane.sync_command_popup();
                     self.widget.bottom_pane.sync_command_popup();
                     self.schedule_draw();
                 }
@@ -486,6 +556,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             AgentStatus::AwaitingUserInput => {
                 self.handle_user_input_key(key);
             }
+            AgentStatus::AwaitingUserInput => {
+                self.handle_user_input_key(key);
+            }
             AgentStatus::Thinking | AgentStatus::ExecutingTool => {
                 // During processing, only handle Escape for interrupt
                 if key.code == KeyCode::Esc {
@@ -499,6 +572,222 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         }
 
         Ok(())
+    }
+
+    /// Handle keyboard input while in the AwaitingUserInput state.
+    fn handle_user_input_key(&mut self, key: crossterm::event::KeyEvent) {
+        let is_freeform = self.pending_user_input.as_ref().is_some_and(|p| {
+            let q = &p.request.questions[p.current_question];
+            q.options.as_ref().is_none_or(|o| o.is_empty())
+        });
+
+        // If notes are focused, route most keys to the input field.
+        let notes_focused = self
+            .pending_user_input
+            .as_ref()
+            .is_some_and(|p| p.notes_focused);
+
+        match key.code {
+            // Tab: toggle between options and notes
+            KeyCode::Tab if !is_freeform => {
+                if let Some(ref mut pending) = self.pending_user_input {
+                    pending.notes_focused = !pending.notes_focused;
+                }
+                self.sync_user_input_to_pane();
+                self.schedule_draw();
+            }
+            // Navigate options with Up/Down (only when options focused)
+            KeyCode::Up if !notes_focused => {
+                if let Some(ref mut pending) = self.pending_user_input
+                    && pending.selected_option > 0
+                {
+                    pending.selected_option -= 1;
+                }
+                self.sync_user_input_to_pane();
+                self.schedule_draw();
+            }
+            KeyCode::Down if !notes_focused => {
+                if let Some(ref mut pending) = self.pending_user_input {
+                    let q = &pending.request.questions[pending.current_question];
+                    let base = q.options.as_ref().map_or(0, |o| o.len());
+                    let max = if q.is_other {
+                        base
+                    } else if base > 0 {
+                        base - 1
+                    } else {
+                        0
+                    };
+                    if pending.selected_option < max {
+                        pending.selected_option += 1;
+                    }
+                }
+                self.sync_user_input_to_pane();
+                self.schedule_draw();
+            }
+            // Quick-select by number key (1-9), only when options focused
+            KeyCode::Char(c @ '1'..='9') if !notes_focused && !is_freeform => {
+                let idx = (c as usize) - ('1' as usize);
+                if let Some(ref mut pending) = self.pending_user_input {
+                    let q = &pending.request.questions[pending.current_question];
+                    let base = q.options.as_ref().map_or(0, |o| o.len());
+                    let max = if q.is_other {
+                        base
+                    } else if base > 0 {
+                        base - 1
+                    } else {
+                        0
+                    };
+                    if idx <= max {
+                        pending.selected_option = idx;
+                    }
+                }
+                self.sync_user_input_to_pane();
+                self.schedule_draw();
+            }
+            // Type text (notes when notes_focused, or freeform input)
+            KeyCode::Char(c) if notes_focused || is_freeform => {
+                if notes_focused {
+                    if let Some(ref mut pending) = self.pending_user_input {
+                        pending.notes_text.push(c);
+                    }
+                    self.sync_user_input_to_pane();
+                } else {
+                    self.widget.bottom_pane.insert_char(c);
+                }
+                self.schedule_draw();
+            }
+            KeyCode::Backspace if notes_focused => {
+                if let Some(ref mut pending) = self.pending_user_input {
+                    pending.notes_text.pop();
+                }
+                self.sync_user_input_to_pane();
+                self.schedule_draw();
+            }
+            KeyCode::Backspace if is_freeform => {
+                self.widget.bottom_pane.backspace();
+                self.schedule_draw();
+            }
+            // Submit answer
+            KeyCode::Enter => {
+                self.submit_user_input_answer();
+            }
+            // Cancel
+            KeyCode::Esc => {
+                self.cancel_pending_user_input();
+                self.widget.bottom_pane.set_status(AgentStatus::Thinking);
+                self.schedule_draw();
+            }
+            _ => {}
+        }
+    }
+
+    /// Submit the currently selected answer for the active question.
+    fn submit_user_input_answer(&mut self) {
+        let answer = if let Some(ref pending) = self.pending_user_input {
+            let q = &pending.request.questions[pending.current_question];
+            let options = q.options.as_deref().unwrap_or_default();
+            let mut answer_list: Vec<String> = Vec::new();
+
+            if options.is_empty() {
+                // Freeform question: take text from input field
+                let text = self.widget.bottom_pane.take_input();
+                if !text.is_empty() {
+                    answer_list.push(text);
+                }
+            } else if pending.selected_option < options.len() {
+                // Predefined option selected
+                answer_list.push(options[pending.selected_option].label.clone());
+            } else if q.is_other && pending.selected_option == options.len() {
+                // "None of the above"
+                answer_list.push("None of the above".to_string());
+            }
+
+            // Append notes if present
+            if !pending.notes_text.is_empty() {
+                answer_list.push(format!("user_note: {}", pending.notes_text));
+            }
+
+            UserInputAnswer {
+                answers: answer_list,
+            }
+        } else {
+            return;
+        };
+
+        let pending = self.pending_user_input.as_mut().unwrap();
+        let question_id = pending.request.questions[pending.current_question]
+            .id
+            .clone();
+        pending.answers.insert(question_id, answer);
+        pending.current_question += 1;
+        pending.selected_option = 0;
+        pending.notes_focused = false;
+        pending.notes_text.clear();
+        self.widget.bottom_pane.clear();
+
+        // Check if all questions have been answered.
+        let done = {
+            let p = self.pending_user_input.as_ref().unwrap();
+            p.current_question >= p.request.questions.len()
+        };
+
+        if done {
+            // Send the response back to the handler.
+            let pending = self.pending_user_input.take().unwrap();
+            let response = UserInputResponse {
+                answers: pending.answers,
+            };
+            let _ = pending.request.response_tx.send(response);
+            self.widget
+                .bottom_pane
+                .set_status(AgentStatus::ExecutingTool);
+            self.widget.bottom_pane.set_user_input_questions(None);
+        } else {
+            self.sync_user_input_to_pane();
+        }
+        self.schedule_draw();
+    }
+
+    /// Cancel the pending user-input interaction (drops the oneshot sender).
+    fn cancel_pending_user_input(&mut self) {
+        if let Some(pending) = self.pending_user_input.take() {
+            // Dropping response_tx signals cancellation to the handler.
+            drop(pending.request.response_tx);
+            self.widget.bottom_pane.set_user_input_questions(None);
+        }
+    }
+
+    /// Sync the pending user-input state to the bottom pane for rendering.
+    fn sync_user_input_to_pane(&mut self) {
+        if let Some(ref pending) = self.pending_user_input {
+            self.widget.bottom_pane.user_input_current_question = pending.current_question;
+            self.widget.bottom_pane.user_input_selected_option = pending.selected_option;
+            self.widget.bottom_pane.user_input_notes_focused = pending.notes_focused;
+            self.widget.bottom_pane.user_input_notes_text = pending.notes_text.clone();
+        }
+    }
+
+    /// Handle a user-input request from the tool handler.
+    fn handle_user_input_request(&mut self, request: UserInputRequest) {
+        // Store question info for the bottom pane to render.
+        self.widget
+            .bottom_pane
+            .set_user_input_questions(Some(&request.questions));
+
+        self.pending_user_input = Some(PendingUserInput {
+            request,
+            current_question: 0,
+            answers: HashMap::new(),
+            selected_option: 0,
+            notes_focused: false,
+            notes_text: String::new(),
+        });
+        self.widget
+            .bottom_pane
+            .set_status(AgentStatus::AwaitingUserInput);
+        self.widget.bottom_pane.clear();
+        self.sync_user_input_to_pane();
+        self.schedule_draw();
     }
 
     /// Handle keyboard input while in the AwaitingUserInput state.
@@ -756,6 +1045,13 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 // Track in session
                 self.session.add_user_message(&text);
 
+            AppEvent::SubmitUserMessage {
+                text,
+                allowed_tools,
+            } => {
+                // Track in session
+                self.session.add_user_message(&text);
+
                 // Add user cell immediately
                 self.widget
                     .add_cell(Box::new(UserHistoryCell::new(text.clone())));
@@ -863,6 +1159,8 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 // Prepare components for background task
                 let model = self.model.clone();
                 let registry = self.registry.clone();
+                let mut config = self.config.clone();
+                config.allowed_tools = allowed_tools;
                 let mut config = self.config.clone();
                 config.allowed_tools = allowed_tools;
                 let history = self.history.clone();
@@ -1021,6 +1319,10 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         // Track in session
                         self.session.add_assistant_message(&text);
 
+
+                        // Track in session
+                        self.session.add_assistant_message(&text);
+
                         // Find and complete the streaming assistant cell
                         // (may not be the last cell if tool calls were made)
                         for cell in self.widget.cells.iter_mut().rev() {
@@ -1068,6 +1370,20 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     let cell = Box::new(ToolCallHistoryCell::new(call_id, tool_name, arguments));
                     self.insert_before_streaming_assistant(cell);
                 }
+                if tool_name == "update_plan" {
+                    // Parse the plan arguments and render a specialised cell.
+                    let (explanation, steps) =
+                        if let Ok(args) = serde_json::from_value::<UpdatePlanArgs>(arguments) {
+                            (args.explanation, args.plan)
+                        } else {
+                            (None, Vec::new())
+                        };
+                    let cell = Box::new(PlanUpdateHistoryCell::new(call_id, explanation, steps));
+                    self.insert_before_streaming_assistant(cell);
+                } else {
+                    let cell = Box::new(ToolCallHistoryCell::new(call_id, tool_name, arguments));
+                    self.insert_before_streaming_assistant(cell);
+                }
                 self.widget
                     .bottom_pane
                     .set_status(AgentStatus::ExecutingTool);
@@ -1075,6 +1391,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             }
             AppEvent::ToolCallEnd {
                 call_id,
+                tool_name,
                 tool_name,
                 result,
             } => {
@@ -1087,7 +1404,36 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
                 // Try to find a PlanUpdateHistoryCell first, then fall back to ToolCallHistoryCell.
                 let mut found = false;
+                // For successful apply_patch, insert a visual diff cell.
+                if tool_name == "apply_patch"
+                    && let Ok(ref output) = result
+                {
+                    self.try_insert_diff_cell(output);
+                }
+
+                // Try to find a PlanUpdateHistoryCell first, then fall back to ToolCallHistoryCell.
+                let mut found = false;
                 for cell in self.widget.cells.iter_mut().rev() {
+                    if let Some(plan_cell) =
+                        cell.as_any_mut().downcast_mut::<PlanUpdateHistoryCell>()
+                        && plan_cell.call_id == call_id
+                        && plan_cell.is_running
+                    {
+                        plan_cell.complete();
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    for cell in self.widget.cells.iter_mut().rev() {
+                        if let Some(tool_cell) =
+                            cell.as_any_mut().downcast_mut::<ToolCallHistoryCell>()
+                            && tool_cell.call_id == call_id
+                            && tool_cell.is_running
+                        {
+                            tool_cell.complete(result);
+                            break;
+                        }
                     if let Some(plan_cell) =
                         cell.as_any_mut().downcast_mut::<PlanUpdateHistoryCell>()
                         && plan_cell.call_id == call_id
@@ -1120,13 +1466,20 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             AppEvent::RequestUserInput { request } => {
                 self.handle_user_input_request(request);
             }
+            AppEvent::RequestUserInput { request } => {
+                self.handle_user_input_request(request);
+            }
         }
 
         Ok(false)
     }
 
     /// Submit a user message, expanding slash commands and applying agent context.
+    /// Submit a user message, expanding slash commands and applying agent context.
     fn submit_message(&mut self, text: String) {
+        // 1. Check for built-in TUI commands first.
+        if let Some((cmd, _args)) = super::slash_command::parse_builtin(&text) {
+            self.handle_builtin_command(cmd);
         // 1. Check for built-in TUI commands first.
         if let Some((cmd, _args)) = super::slash_command::parse_builtin(&text) {
             self.handle_builtin_command(cmd);
@@ -1171,6 +1524,49 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 // Built-in commands
                 for b in BuiltinCommand::all() {
                     lines.push_str(&format!("  /{:<14} {}\n", b.name(), b.description()));
+
+        // 2. Try YAML-defined slash commands (sent to model).
+        let (effective_text, agent_name) =
+            if let Some(result) = self.command_dispatcher.dispatch(&text) {
+                (result.prompt, result.agent)
+            } else {
+                (text.clone(), None)
+            };
+
+        // Agent is only selected via slash command, not auto-detected
+        let agent = agent_name
+            .as_deref()
+            .and_then(|name| self.agent_router.get(name));
+
+        let agent_prompt = agent.map(|a| a.system_prompt.clone());
+        let allowed_tools = agent.map(|a| a.tools.clone()).filter(|t| !t.is_empty());
+
+        // If an agent was selected, prepend its system prompt to the user message
+        let final_text = if let Some(prompt) = agent_prompt {
+            format!("{prompt}\n\n---\n\n{effective_text}")
+        } else {
+            effective_text
+        };
+
+        let _ = self.app_event_tx.send(AppEvent::SubmitUserMessage {
+            text: final_text,
+            allowed_tools,
+        });
+    }
+
+    /// Handle a built-in TUI command (does not send to model).
+    fn handle_builtin_command(&mut self, cmd: super::slash_command::BuiltinCommand) {
+        use super::slash_command::BuiltinCommand;
+        match cmd {
+            BuiltinCommand::Help => {
+                let mut lines = String::from("Available commands:\n");
+                // Built-in commands
+                for b in BuiltinCommand::all() {
+                    lines.push_str(&format!("  /{:<14} {}\n", b.name(), b.description()));
+                }
+                // YAML-defined commands
+                for c in self.command_dispatcher.commands() {
+                    lines.push_str(&format!("  /{:<14} {}\n", c.name, c.description));
                 }
                 // YAML-defined commands
                 for c in self.command_dispatcher.commands() {
@@ -1183,13 +1579,38 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 self.widget.clear();
                 self.history.clear();
                 self.session = SessionState::new(&self.registry.working_dir().to_string_lossy());
+                    .add_cell(Box::new(AssistantHistoryCell::new(lines)));
+            }
+            BuiltinCommand::Clear => {
+                self.widget.clear();
+                self.history.clear();
+                self.session = SessionState::new(&self.registry.working_dir().to_string_lossy());
             }
             BuiltinCommand::Model => {
                 let info = format!(
                     "Provider: {}\nModel: {}",
                     self.provider_name, self.model_name,
                 );
+            BuiltinCommand::Model => {
+                let info = format!(
+                    "Provider: {}\nModel: {}",
+                    self.provider_name, self.model_name,
+                );
                 self.widget
+                    .add_cell(Box::new(AssistantHistoryCell::new(info)));
+            }
+            BuiltinCommand::Status => {
+                let status = format!(
+                    "Status: {:?}\nHistory: {} messages\nWorking dir: {}",
+                    self.widget.bottom_pane.status,
+                    self.history.len(),
+                    self.registry.working_dir().display(),
+                );
+                self.widget
+                    .add_cell(Box::new(AssistantHistoryCell::new(status)));
+            }
+            BuiltinCommand::Quit => {
+                self.should_exit = true;
                     .add_cell(Box::new(AssistantHistoryCell::new(info)));
             }
             BuiltinCommand::Status => {
@@ -1229,6 +1650,57 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             self.widget.insert_cell(index, cell);
         } else {
             self.widget.add_cell(cell);
+        }
+    }
+
+    /// Extract diff metadata from a successful `apply_patch` result and insert
+    /// a [`DiffHistoryCell`] for visual diff rendering.
+    fn try_insert_diff_cell(&mut self, result: &ToolOutput) {
+        let ToolOutput::Function {
+            metadata: Some(meta),
+            ..
+        } = result
+        else {
+            return;
+        };
+        let Some(diffs) = meta.get("diffs").and_then(|v| v.as_array()) else {
+            return;
+        };
+
+        let cwd = self.registry.working_dir().to_path_buf();
+        let mut changes: HashMap<PathBuf, FileChange> = HashMap::new();
+
+        for entry in diffs {
+            let Some(path_str) = entry.get("path").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(diff_type) = entry.get("type").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let diff_text = entry
+                .get("diff")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let path = PathBuf::from(path_str);
+
+            let change = match diff_type {
+                "add" => FileChange::Add {
+                    unified_diff: diff_text.to_string(),
+                },
+                "delete" => FileChange::Delete {
+                    unified_diff: diff_text.to_string(),
+                },
+                _ => FileChange::Update {
+                    unified_diff: diff_text.to_string(),
+                    move_path: None,
+                },
+            };
+            changes.insert(path, change);
+        }
+
+        if !changes.is_empty() {
+            let cell = Box::new(DiffHistoryCell::new(changes, cwd));
+            self.insert_before_streaming_assistant(cell);
         }
     }
 
