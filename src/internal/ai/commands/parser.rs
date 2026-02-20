@@ -117,7 +117,10 @@ Create a plan for: $ARGUMENTS
         };
 
         let expanded = cmd.expand("add user auth");
-        assert_eq!(expanded, "Plan for: add user auth\n\nDetails about add user auth");
+        assert_eq!(
+            expanded,
+            "Plan for: add user auth\n\nDetails about add user auth"
+        );
     }
 
     #[test]

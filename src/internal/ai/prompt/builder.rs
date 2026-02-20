@@ -83,15 +83,22 @@ impl SystemPromptBuilder {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     #[test]
     fn test_build_contains_base_content() {
         let tmp = TempDir::new().unwrap();
         let prompt = SystemPromptBuilder::new(tmp.path()).build();
-        assert!(prompt.contains("Libra"), "prompt should contain Libra identity");
-        assert!(prompt.contains("coding assistant"), "prompt should contain role description");
+        assert!(
+            prompt.contains("Libra"),
+            "prompt should contain Libra identity"
+        );
+        assert!(
+            prompt.contains("coding assistant"),
+            "prompt should contain role description"
+        );
     }
 
     #[test]
@@ -114,9 +121,18 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let prompt = SystemPromptBuilder::new(tmp.path()).build();
 
-        assert!(prompt.contains("Coding Style"), "missing coding style section");
-        assert!(prompt.contains("Error Handling"), "missing error handling section");
-        assert!(prompt.contains("Git Workflow"), "missing git workflow section");
+        assert!(
+            prompt.contains("Coding Style"),
+            "missing coding style section"
+        );
+        assert!(
+            prompt.contains("Error Handling"),
+            "missing error handling section"
+        );
+        assert!(
+            prompt.contains("Git Workflow"),
+            "missing git workflow section"
+        );
         assert!(prompt.contains("Testing"), "missing testing section");
         assert!(prompt.contains("Security"), "missing security section");
         assert!(prompt.contains("Tool Use"), "missing tool use section");
@@ -220,8 +236,13 @@ mod tests {
             .build();
 
         let tool_use_pos = prompt.find("Tool Use").expect("should contain Tool Use");
-        let context_pos = prompt.find("Development Mode").expect("should contain context");
-        assert!(context_pos > tool_use_pos, "context should appear after rules");
+        let context_pos = prompt
+            .find("Development Mode")
+            .expect("should contain context");
+        assert!(
+            context_pos > tool_use_pos,
+            "context should appear after rules"
+        );
     }
 
     #[test]

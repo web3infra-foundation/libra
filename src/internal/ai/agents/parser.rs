@@ -90,12 +90,7 @@ fn parse_string_list(s: &str) -> Vec<String> {
     let s = s.strip_prefix('[').unwrap_or(s);
     let s = s.strip_suffix(']').unwrap_or(s);
     s.split(',')
-        .map(|item| {
-            item.trim()
-                .trim_matches('"')
-                .trim_matches('\'')
-                .to_string()
-        })
+        .map(|item| item.trim().trim_matches('"').trim_matches('\'').to_string())
         .filter(|s| !s.is_empty())
         .collect()
 }
@@ -142,10 +137,7 @@ You are an implementation planner.
 
     #[test]
     fn test_parse_string_list() {
-        assert_eq!(
-            parse_string_list(r#"["a", "b", "c"]"#),
-            vec!["a", "b", "c"]
-        );
+        assert_eq!(parse_string_list(r#"["a", "b", "c"]"#), vec!["a", "b", "c"]);
         assert_eq!(parse_string_list("[]"), Vec::<String>::new());
         assert_eq!(parse_string_list(r#"["single"]"#), vec!["single"]);
     }

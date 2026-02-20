@@ -89,8 +89,7 @@ impl SessionStore {
                 match std::fs::read_to_string(&path)
                     .map_err(|e| e.to_string())
                     .and_then(|content| {
-                        serde_json::from_str::<SessionState>(&content)
-                            .map_err(|e| e.to_string())
+                        serde_json::from_str::<SessionState>(&content).map_err(|e| e.to_string())
                     }) {
                     Ok(session) => {
                         sessions.push(SessionInfo {
@@ -225,10 +224,9 @@ mod tests {
         session
             .metadata
             .insert("provider".to_string(), serde_json::json!("anthropic"));
-        session.metadata.insert(
-            "model".to_string(),
-            serde_json::json!("claude-3-5-sonnet"),
-        );
+        session
+            .metadata
+            .insert("model".to_string(), serde_json::json!("claude-3-5-sonnet"));
 
         store.save(&session).unwrap();
 

@@ -1,7 +1,6 @@
 //! Context modes for mode-specific system prompt injection.
 
-use std::fmt;
-use std::path::Path;
+use std::{fmt, path::Path};
 
 /// Operating context that adjusts the AI agent's behavior and priorities.
 ///
@@ -102,8 +101,9 @@ impl std::str::FromStr for ContextMode {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     #[test]
     fn test_embedded_content_nonempty() {
@@ -130,11 +130,26 @@ mod tests {
     #[test]
     fn test_from_str() {
         assert_eq!("dev".parse::<ContextMode>().unwrap(), ContextMode::Dev);
-        assert_eq!("review".parse::<ContextMode>().unwrap(), ContextMode::Review);
-        assert_eq!("research".parse::<ContextMode>().unwrap(), ContextMode::Research);
-        assert_eq!("development".parse::<ContextMode>().unwrap(), ContextMode::Dev);
-        assert_eq!("code-review".parse::<ContextMode>().unwrap(), ContextMode::Review);
-        assert_eq!("explore".parse::<ContextMode>().unwrap(), ContextMode::Research);
+        assert_eq!(
+            "review".parse::<ContextMode>().unwrap(),
+            ContextMode::Review
+        );
+        assert_eq!(
+            "research".parse::<ContextMode>().unwrap(),
+            ContextMode::Research
+        );
+        assert_eq!(
+            "development".parse::<ContextMode>().unwrap(),
+            ContextMode::Dev
+        );
+        assert_eq!(
+            "code-review".parse::<ContextMode>().unwrap(),
+            ContextMode::Review
+        );
+        assert_eq!(
+            "explore".parse::<ContextMode>().unwrap(),
+            ContextMode::Research
+        );
         assert!("unknown".parse::<ContextMode>().is_err());
     }
 

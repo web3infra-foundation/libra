@@ -1,13 +1,13 @@
 //! Hook runner: executes hooks and evaluates results.
 
-use std::path::Path;
-use std::time::Duration;
+use std::{path::Path, time::Duration};
 
-use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
+use tokio::{io::AsyncWriteExt, process::Command};
 
-use super::config::{HookConfig, HookDefinition};
-use super::event::{HookAction, HookEvent, HookInput, HookOutput};
+use super::{
+    config::{HookConfig, HookDefinition},
+    event::{HookAction, HookEvent, HookInput, HookOutput},
+};
 
 /// Executes hooks based on configuration.
 #[derive(Debug)]
@@ -53,11 +53,8 @@ impl HookRunner {
             return HookAction::Allow;
         }
 
-        let input = HookInput::pre_tool_use(
-            tool_name,
-            tool_input,
-            &self.working_dir.to_string_lossy(),
-        );
+        let input =
+            HookInput::pre_tool_use(tool_name, tool_input, &self.working_dir.to_string_lossy());
 
         for hook in matching {
             match self.execute_hook(hook, &input).await {
@@ -85,9 +82,7 @@ impl HookRunner {
             .config
             .hooks
             .iter()
-            .filter(|h| {
-                h.enabled && h.event == HookEvent::PostToolUse && h.matches_tool(tool_name)
-            })
+            .filter(|h| h.enabled && h.event == HookEvent::PostToolUse && h.matches_tool(tool_name))
             .collect();
 
         if matching.is_empty() {
@@ -192,10 +187,7 @@ impl HookRunner {
                 }
             }
             Ok(Err(e)) => HookResult::Error(format!("Failed to run hook: {e}")),
-            Err(_) => HookResult::Error(format!(
-                "Hook timed out after {}ms",
-                hook.timeout_ms
-            )),
+            Err(_) => HookResult::Error(format!("Hook timed out after {}ms", hook.timeout_ms)),
         }
     }
 }
@@ -209,15 +201,11 @@ enum HookResult {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use super::super::config::HookConfig;
+    use super::{super::config::HookConfig, *};
 
     fn make_runner(hooks: Vec<HookDefinition>) -> (HookRunner, tempfile::TempDir) {
         let tmp = tempfile::TempDir::new().unwrap();
-        let runner = HookRunner::new(
-            HookConfig { hooks },
-            tmp.path().to_path_buf(),
-        );
+        let runner = HookRunner::new(HookConfig { hooks }, tmp.path().to_path_buf());
         (runner, tmp)
     }
 
@@ -265,11 +253,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pre_tool_use_no_matching_hooks() {
-        let (runner, _tmp) = make_runner(vec![make_hook(
-            HookEvent::PreToolUse,
-            "shell",
-            "exit 2",
-        )]);
+        let (runner, _tmp) = make_runner(vec![make_hook(HookEvent::PreToolUse, "shell", "exit 2")]);
 
         let action = runner
             .run_pre_tool_use("read_file", serde_json::json!({}))
@@ -317,11 +301,7 @@ mod tests {
         let (runner, _tmp) = make_runner(vec![]);
         assert!(!runner.has_hooks());
 
-        let (runner, _tmp) = make_runner(vec![make_hook(
-            HookEvent::PreToolUse,
-            "*",
-            "echo ok",
-        )]);
+        let (runner, _tmp) = make_runner(vec![make_hook(HookEvent::PreToolUse, "*", "echo ok")]);
         assert!(runner.has_hooks());
     }
 }

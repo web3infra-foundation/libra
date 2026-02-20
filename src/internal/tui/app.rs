@@ -192,8 +192,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         self.tui.clear()?;
 
         // Set up slash-command autocomplete hints (built-in + YAML-defined).
-        let mut hints: Vec<(String, String)> =
-            super::slash_command::BuiltinCommand::all_hints();
+        let mut hints: Vec<(String, String)> = super::slash_command::BuiltinCommand::all_hints();
         hints.extend(
             self.command_dispatcher
                 .commands()
@@ -923,21 +922,21 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 for c in self.command_dispatcher.commands() {
                     lines.push_str(&format!("  /{:<14} {}\n", c.name, c.description));
                 }
-                self.widget.add_cell(Box::new(AssistantHistoryCell::new(lines)));
+                self.widget
+                    .add_cell(Box::new(AssistantHistoryCell::new(lines)));
             }
             BuiltinCommand::Clear => {
                 self.widget.clear();
                 self.history.clear();
-                self.session = SessionState::new(
-                    &self.registry.working_dir().to_string_lossy(),
-                );
+                self.session = SessionState::new(&self.registry.working_dir().to_string_lossy());
             }
             BuiltinCommand::Model => {
                 let info = format!(
                     "Provider: {}\nModel: {}",
                     self.provider_name, self.model_name,
                 );
-                self.widget.add_cell(Box::new(AssistantHistoryCell::new(info)));
+                self.widget
+                    .add_cell(Box::new(AssistantHistoryCell::new(info)));
             }
             BuiltinCommand::Status => {
                 let status = format!(
@@ -946,7 +945,8 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     self.history.len(),
                     self.registry.working_dir().display(),
                 );
-                self.widget.add_cell(Box::new(AssistantHistoryCell::new(status)));
+                self.widget
+                    .add_cell(Box::new(AssistantHistoryCell::new(status)));
             }
             BuiltinCommand::Quit => {
                 self.should_exit = true;

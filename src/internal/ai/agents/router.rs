@@ -27,7 +27,9 @@ impl AgentRouter {
             // Require at least 2 keyword matches to avoid false positives
             // on short or generic inputs like "test", "build", etc.
             if score >= 2
-                && best.as_ref().is_none_or(|(_, best_score)| score > *best_score)
+                && best
+                    .as_ref()
+                    .is_none_or(|(_, best_score)| score > *best_score)
             {
                 best = Some((agent, score));
             }
@@ -58,12 +60,11 @@ impl AgentRouter {
     /// Extract meaningful keywords from a description string.
     fn extract_keywords(description: &str) -> Vec<String> {
         let stop_words = [
-            "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
-            "have", "has", "had", "do", "does", "did", "will", "would", "could",
-            "should", "may", "might", "shall", "can", "for", "and", "but", "or",
-            "nor", "not", "so", "yet", "to", "of", "in", "on", "at", "by", "with",
-            "from", "up", "about", "into", "through", "during", "before", "after",
-            "above", "below", "between", "use", "that", "this", "it", "its",
+            "a", "an", "the", "is", "are", "was", "were", "be", "been", "being", "have", "has",
+            "had", "do", "does", "did", "will", "would", "could", "should", "may", "might",
+            "shall", "can", "for", "and", "but", "or", "nor", "not", "so", "yet", "to", "of", "in",
+            "on", "at", "by", "with", "from", "up", "about", "into", "through", "during", "before",
+            "after", "above", "below", "between", "use", "that", "this", "it", "its",
         ];
 
         description
@@ -158,7 +159,8 @@ mod tests {
         let agents = load_embedded_agents();
         let router = AgentRouter::new(agents);
 
-        let selected = router.select("plan the implementation and identify dependencies for the new feature");
+        let selected =
+            router.select("plan the implementation and identify dependencies for the new feature");
         assert!(selected.is_some());
         assert_eq!(selected.unwrap().name, "planner");
     }

@@ -18,10 +18,7 @@ pub fn load_rule(category: RuleCategory, working_dir: &Path) -> RuleFile {
     let project_path = working_dir.join(".libra").join("rules").join(&filename);
     if let Some(content) = read_non_empty(&project_path) {
         debug!(category = %category, path = %project_path.display(), "loaded project-local rule override");
-        return RuleFile {
-            category,
-            content,
-        };
+        return RuleFile { category, content };
     }
 
     // 2. User-global override
@@ -29,10 +26,7 @@ pub fn load_rule(category: RuleCategory, working_dir: &Path) -> RuleFile {
         let user_path = config_dir.join("libra").join("rules").join(&filename);
         if let Some(content) = read_non_empty(&user_path) {
             debug!(category = %category, path = %user_path.display(), "loaded user-global rule override");
-            return RuleFile {
-                category,
-                content,
-            };
+            return RuleFile { category, content };
         }
     }
 
@@ -62,8 +56,9 @@ fn read_non_empty(path: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     #[test]
     fn test_load_rule_returns_embedded_default() {
@@ -112,7 +107,11 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         for &category in RuleCategory::all_in_order() {
             let rule = load_rule(category, tmp.path());
-            assert!(!rule.content.is_empty(), "{:?} should have content", category);
+            assert!(
+                !rule.content.is_empty(),
+                "{:?} should have content",
+                category
+            );
         }
     }
 }

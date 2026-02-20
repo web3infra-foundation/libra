@@ -171,23 +171,15 @@ pub async fn run_tool_loop_with_history_and_observer<M: CompletionModel, O: Tool
                 // Run PreToolUse hooks (may block the tool call)
                 if let Some(ref hook_runner) = config.hook_runner {
                     let action = hook_runner
-                        .run_pre_tool_use(
-                            &call.function.name,
-                            call.function.arguments.clone(),
-                        )
+                        .run_pre_tool_use(&call.function.name, call.function.arguments.clone())
                         .await;
                     if let crate::internal::ai::hooks::HookAction::Block(reason) = action {
                         let blocked_result: Result<ToolOutput, String> =
                             Err(format!("Blocked by hook: {reason}"));
-                        observer.on_tool_call_end(
-                            &call.id,
-                            &call.function.name,
-                            &blocked_result,
-                        );
+                        observer.on_tool_call_end(&call.id, &call.function.name, &blocked_result);
 
-                        let result_json =
-                            ToolOutput::failure(format!("Blocked by hook: {reason}"))
-                                .into_response();
+                        let result_json = ToolOutput::failure(format!("Blocked by hook: {reason}"))
+                            .into_response();
 
                         history.push(Message::User {
                             content: OneOrMany::One(UserContent::ToolResult(ToolResult {
@@ -208,16 +200,10 @@ pub async fn run_tool_loop_with_history_and_observer<M: CompletionModel, O: Tool
                         "Tool '{}' is not in the allowed_tools list for this agent",
                         call.function.name
                     );
-                    let blocked_result: Result<ToolOutput, String> =
-                        Err(blocked_msg.clone());
-                    observer.on_tool_call_end(
-                        &call.id,
-                        &call.function.name,
-                        &blocked_result,
-                    );
+                    let blocked_result: Result<ToolOutput, String> = Err(blocked_msg.clone());
+                    observer.on_tool_call_end(&call.id, &call.function.name, &blocked_result);
 
-                    let result_json =
-                        ToolOutput::failure(blocked_msg).into_response();
+                    let result_json = ToolOutput::failure(blocked_msg).into_response();
 
                     history.push(Message::User {
                         content: OneOrMany::One(UserContent::ToolResult(ToolResult {
@@ -537,7 +523,10 @@ mod tests {
         assert_eq!(observer.begins[0].1, "mock_tool");
         assert_eq!(observer.ends.len(), 1);
         // The end should show failure (blocked)
-        assert!(!observer.ends[0].2, "blocked tool call should report as not successful");
+        assert!(
+            !observer.ends[0].2,
+            "blocked tool call should report as not successful"
+        );
 
         // Model should still produce final text after seeing the block result
         assert_eq!(turn.final_text, "done");
@@ -595,7 +584,10 @@ mod tests {
         let err = result.unwrap_err();
         match err {
             CompletionError::ResponseError(msg) => {
-                assert!(msg.contains("max_steps=2"), "error should mention max_steps");
+                assert!(
+                    msg.contains("max_steps=2"),
+                    "error should mention max_steps"
+                );
             }
             other => panic!("expected ResponseError, got {:?}", other),
         }
@@ -692,7 +684,10 @@ mod tests {
         // Tool call should have been attempted and failed
         assert_eq!(observer.begins.len(), 1);
         assert_eq!(observer.ends.len(), 1);
-        assert!(!observer.ends[0].2, "failed tool should report as not successful");
+        assert!(
+            !observer.ends[0].2,
+            "failed tool should report as not successful"
+        );
 
         // Model should still get the error and produce final text
         assert_eq!(turn.final_text, "handled error");
@@ -790,6 +785,9 @@ mod tests {
 
         // The tool call should have ended with failure (blocked)
         assert_eq!(observer.ends.len(), 1);
-        assert!(!observer.ends[0].2, "blocked tool call should report as not successful");
+        assert!(
+            !observer.ends[0].2,
+            "blocked tool call should report as not successful"
+        );
     }
 }

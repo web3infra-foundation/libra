@@ -12,8 +12,7 @@ mod parser;
 mod seek_sequence;
 
 pub use core::{
-    AffectedPaths, ApplyPatchError, ApplyResult, FileDiff, apply_hunks, apply_patch,
-    format_summary,
+    AffectedPaths, ApplyPatchError, ApplyResult, FileDiff, apply_hunks, apply_patch, format_summary,
 };
 
 pub use parser::{ApplyPatchArgs, Hunk, UpdateFileChunk, parse_patch};

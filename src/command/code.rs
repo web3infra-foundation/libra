@@ -27,8 +27,8 @@ use crate::internal::{
         tools::{
             ToolRegistry, ToolRegistryBuilder,
             handlers::{
-                ApplyPatchHandler, GrepFilesHandler, ListDirHandler, McpBridgeHandler,
-                PlanHandler, ReadFileHandler, RequestUserInputHandler, ShellHandler,
+                ApplyPatchHandler, GrepFilesHandler, ListDirHandler, McpBridgeHandler, PlanHandler,
+                ReadFileHandler, RequestUserInputHandler, ShellHandler,
             },
         },
     },
@@ -401,18 +401,15 @@ struct TuiParams {
     preamble: String,
     temperature: Option<f64>,
     resume: bool,
-    user_input_rx: tokio::sync::mpsc::UnboundedReceiver<
-        crate::internal::ai::tools::context::UserInputRequest,
-    >,
+    user_input_rx:
+        tokio::sync::mpsc::UnboundedReceiver<crate::internal::ai::tools::context::UserInputRequest>,
     mcp_server: Arc<LibraMcpServer>,
     model_name: String,
     provider_name: String,
 }
 
-async fn run_tui_with_model<M>(
-    model: M,
-    params: TuiParams,
-) where
+async fn run_tui_with_model<M>(model: M, params: TuiParams)
+where
     M: crate::internal::ai::completion::CompletionModel + 'static,
 {
     let registry = params.registry;
@@ -482,8 +479,7 @@ async fn run_tui_with_model<M>(
 
     // Set up session persistence
     let working_dir_str = registry.working_dir().to_string_lossy().to_string();
-    let session_store =
-        crate::internal::ai::session::SessionStore::new(registry.working_dir());
+    let session_store = crate::internal::ai::session::SessionStore::new(registry.working_dir());
     let session = if params.resume {
         match session_store.load_latest() {
             Ok(Some(s)) => s,

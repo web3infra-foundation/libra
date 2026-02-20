@@ -105,8 +105,10 @@ impl SessionState {
 
 /// Generate a short, unique session ID.
 fn generate_session_id() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::{
+        sync::atomic::{AtomicU64, Ordering},
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 

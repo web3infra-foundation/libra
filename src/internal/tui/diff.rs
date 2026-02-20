@@ -161,7 +161,11 @@ fn render_changes_block(rows: Vec<Row>, wrap_cols: usize, cwd: &Path) -> Vec<Lin
 
         // Diff content
         let mut lines = vec![];
-        render_change(&r.change, &mut lines, wrap_cols.saturating_sub(content_indent.len()));
+        render_change(
+            &r.change,
+            &mut lines,
+            wrap_cols.saturating_sub(content_indent.len()),
+        );
         out.extend(prefix_lines(lines, &content_indent, &content_indent));
     }
 
