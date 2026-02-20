@@ -61,9 +61,30 @@ impl ToolHandler for ApplyPatchHandler {
         .await
         .map_err(|e| ToolError::ExecutionFailed(e.to_string()))??;
 
-        // Format result
-        let output = apply_patch::format_summary(&result);
-        Ok(ToolOutput::success(output))
+        // Build unified diffs for TUI display (metadata — not sent to model).
+        let diffs_json: Vec<serde_json::Value> = result
+            .file_diffs
+            .iter()
+            .map(|fd| {
+                let patch = diffy::create_patch(&fd.old_content, &fd.new_content);
+                let kind = if fd.old_content.is_empty() {
+                    "add"
+                } else if fd.new_content.is_empty() {
+                    "delete"
+                } else {
+                    "update"
+                };
+                serde_json::json!({
+                    "path": fd.path.display().to_string(),
+                    "diff": patch.to_string(),
+                    "type": kind,
+                })
+            })
+            .collect();
+
+        let output = apply_patch::format_summary(&result.affected);
+        let metadata = serde_json::json!({ "diffs": diffs_json });
+        Ok(ToolOutput::success(output).with_metadata(metadata))
     }
 
     fn schema(&self) -> ToolSpec {

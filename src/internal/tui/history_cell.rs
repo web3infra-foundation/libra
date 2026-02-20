@@ -324,7 +324,9 @@ impl HistoryCell for ToolCallHistoryCell {
             match result {
                 Ok(output) => {
                     let result_str = match output {
-                        ToolOutput::Function { content, success } => {
+                        ToolOutput::Function {
+                            content, success, ..
+                        } => {
                             let status = success
                                 .map(|s| if s { "success" } else { "failed" })
                                 .unwrap_or("done");

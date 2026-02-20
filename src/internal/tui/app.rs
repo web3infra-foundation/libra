@@ -3,7 +3,7 @@
 //! The `App` struct manages the TUI state and coordinates between
 //! user input, agent execution, and UI rendering.
 
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Instant};
 
 use crossterm::event::{KeyCode, KeyModifiers};
 use tokio::{
@@ -16,8 +16,10 @@ use tokio_stream::StreamExt;
 use super::{
     app_event::{AgentEvent, AgentStatus, AppEvent, ExitMode},
     chatwidget::ChatWidget,
+    diff::FileChange,
     history_cell::{
-        AssistantHistoryCell, PlanUpdateHistoryCell, ToolCallHistoryCell, UserHistoryCell,
+        AssistantHistoryCell, DiffHistoryCell, PlanUpdateHistoryCell, ToolCallHistoryCell,
+        UserHistoryCell,
     },
     terminal::{TARGET_FRAME_INTERVAL, Tui, TuiEvent},
 };
@@ -817,9 +819,16 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             }
             AppEvent::ToolCallEnd {
                 call_id,
-                tool_name: _,
+                tool_name,
                 result,
             } => {
+                // For successful apply_patch, insert a visual diff cell.
+                if tool_name == "apply_patch"
+                    && let Ok(ref output) = result
+                {
+                    self.try_insert_diff_cell(output);
+                }
+
                 // Try to find a PlanUpdateHistoryCell first, then fall back to ToolCallHistoryCell.
                 let mut found = false;
                 for cell in self.widget.cells.iter_mut().rev() {
@@ -963,6 +972,57 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             self.widget.insert_cell(index, cell);
         } else {
             self.widget.add_cell(cell);
+        }
+    }
+
+    /// Extract diff metadata from a successful `apply_patch` result and insert
+    /// a [`DiffHistoryCell`] for visual diff rendering.
+    fn try_insert_diff_cell(&mut self, result: &ToolOutput) {
+        let ToolOutput::Function {
+            metadata: Some(meta),
+            ..
+        } = result
+        else {
+            return;
+        };
+        let Some(diffs) = meta.get("diffs").and_then(|v| v.as_array()) else {
+            return;
+        };
+
+        let cwd = self.registry.working_dir().to_path_buf();
+        let mut changes: HashMap<PathBuf, FileChange> = HashMap::new();
+
+        for entry in diffs {
+            let Some(path_str) = entry.get("path").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(diff_type) = entry.get("type").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let diff_text = entry
+                .get("diff")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let path = PathBuf::from(path_str);
+
+            let change = match diff_type {
+                "add" => FileChange::Add {
+                    unified_diff: diff_text.to_string(),
+                },
+                "delete" => FileChange::Delete {
+                    unified_diff: diff_text.to_string(),
+                },
+                _ => FileChange::Update {
+                    unified_diff: diff_text.to_string(),
+                    move_path: None,
+                },
+            };
+            changes.insert(path, change);
+        }
+
+        if !changes.is_empty() {
+            let cell = Box::new(DiffHistoryCell::new(changes, cwd));
+            self.insert_before_streaming_assistant(cell);
         }
     }
 

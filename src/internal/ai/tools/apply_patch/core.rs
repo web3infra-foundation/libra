@@ -60,6 +60,22 @@ pub struct AffectedPaths {
     pub deleted: Vec<PathBuf>,
 }
 
+/// Per-file before/after content for unified diff generation.
+#[derive(Debug, Clone)]
+pub struct FileDiff {
+    pub path: PathBuf,
+    pub old_content: String,
+    pub new_content: String,
+}
+
+/// Result of applying a set of hunks, including both affected paths and content
+/// diffs for display.
+#[derive(Debug)]
+pub struct ApplyResult {
+    pub affected: AffectedPaths,
+    pub file_diffs: Vec<FileDiff>,
+}
+
 /// Applies the patch to files in the given working directory.
 ///
 /// The patch uses the Codex-style format:
@@ -78,7 +94,8 @@ pub struct AffectedPaths {
 /// or an error if the patch could not be parsed or applied.
 pub fn apply_patch(patch: &str, cwd: &Path) -> Result<AffectedPaths, ApplyPatchError> {
     let args = parse_patch(patch)?;
-    apply_hunks(&args.hunks, cwd)
+    let result = apply_hunks(&args.hunks, cwd)?;
+    Ok(result.affected)
 }
 
 /// Applies hunks to the filesystem.
@@ -86,7 +103,7 @@ pub fn apply_patch(patch: &str, cwd: &Path) -> Result<AffectedPaths, ApplyPatchE
 /// **Caller must validate** that all paths in `hunks` are within the intended
 /// sandbox directory before calling this function — it performs filesystem I/O
 /// immediately with no path containment checks.
-pub fn apply_hunks(hunks: &[Hunk], cwd: &Path) -> Result<AffectedPaths, ApplyPatchError> {
+pub fn apply_hunks(hunks: &[Hunk], cwd: &Path) -> Result<ApplyResult, ApplyPatchError> {
     if hunks.is_empty() {
         return Err(ApplyPatchError::ComputeReplacements(
             "No files were modified.".to_string(),
@@ -96,6 +113,7 @@ pub fn apply_hunks(hunks: &[Hunk], cwd: &Path) -> Result<AffectedPaths, ApplyPat
     let mut added: Vec<PathBuf> = Vec::new();
     let mut modified: Vec<PathBuf> = Vec::new();
     let mut deleted: Vec<PathBuf> = Vec::new();
+    let mut file_diffs: Vec<FileDiff> = Vec::new();
 
     for hunk in hunks {
         match hunk {
@@ -120,16 +138,27 @@ pub fn apply_hunks(hunks: &[Hunk], cwd: &Path) -> Result<AffectedPaths, ApplyPat
                         source: e,
                     })
                 })?;
+                file_diffs.push(FileDiff {
+                    path: abs_path.clone(),
+                    old_content: String::new(),
+                    new_content: contents.clone(),
+                });
                 added.push(abs_path);
             }
             Hunk::DeleteFile { path } => {
                 let abs_path = cwd.join(path);
+                let old_content = std::fs::read_to_string(&abs_path).unwrap_or_default();
                 std::fs::remove_file(&abs_path).map_err(|e| {
                     ApplyPatchError::IoError(IoError {
                         context: format!("Failed to delete file {}", abs_path.display()),
                         source: e,
                     })
                 })?;
+                file_diffs.push(FileDiff {
+                    path: abs_path.clone(),
+                    old_content,
+                    new_content: String::new(),
+                });
                 deleted.push(abs_path);
             }
             Hunk::UpdateFile {
@@ -138,8 +167,10 @@ pub fn apply_hunks(hunks: &[Hunk], cwd: &Path) -> Result<AffectedPaths, ApplyPat
                 chunks,
             } => {
                 let abs_path = cwd.join(path);
-                let AppliedPatch { new_contents, .. } =
-                    derive_new_contents_from_chunks(&abs_path, chunks)?;
+                let AppliedPatch {
+                    original_contents,
+                    new_contents,
+                } = derive_new_contents_from_chunks(&abs_path, chunks)?;
 
                 if let Some(dest) = move_path {
                     let dest_abs = cwd.join(dest);
@@ -156,7 +187,7 @@ pub fn apply_hunks(hunks: &[Hunk], cwd: &Path) -> Result<AffectedPaths, ApplyPat
                             })
                         })?;
                     }
-                    std::fs::write(&dest_abs, new_contents).map_err(|e| {
+                    std::fs::write(&dest_abs, &new_contents).map_err(|e| {
                         ApplyPatchError::IoError(IoError {
                             context: format!("Failed to write file {}", dest_abs.display()),
                             source: e,
@@ -168,24 +199,37 @@ pub fn apply_hunks(hunks: &[Hunk], cwd: &Path) -> Result<AffectedPaths, ApplyPat
                             source: e,
                         })
                     })?;
+                    file_diffs.push(FileDiff {
+                        path: dest_abs.clone(),
+                        old_content: original_contents,
+                        new_content: new_contents,
+                    });
                     modified.push(dest_abs);
                 } else {
-                    std::fs::write(&abs_path, new_contents).map_err(|e| {
+                    std::fs::write(&abs_path, &new_contents).map_err(|e| {
                         ApplyPatchError::IoError(IoError {
                             context: format!("Failed to write file {}", abs_path.display()),
                             source: e,
                         })
                     })?;
+                    file_diffs.push(FileDiff {
+                        path: abs_path.clone(),
+                        old_content: original_contents,
+                        new_content: new_contents,
+                    });
                     modified.push(abs_path);
                 }
             }
         }
     }
 
-    Ok(AffectedPaths {
-        added,
-        modified,
-        deleted,
+    Ok(ApplyResult {
+        affected: AffectedPaths {
+            added,
+            modified,
+            deleted,
+        },
+        file_diffs,
     })
 }
 

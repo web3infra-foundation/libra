@@ -105,6 +105,8 @@ pub enum ToolOutput {
         content: String,
         /// Whether the tool execution succeeded.
         success: Option<bool>,
+        /// Optional structured data for the TUI (not sent to the model).
+        metadata: Option<serde_json::Value>,
     },
     /// MCP tool output.
     Mcp {
@@ -119,6 +121,7 @@ impl ToolOutput {
         Self::Function {
             content: content.into(),
             success: Some(true),
+            metadata: None,
         }
     }
 
@@ -127,6 +130,7 @@ impl ToolOutput {
         Self::Function {
             content: content.into(),
             success: Some(false),
+            metadata: None,
         }
     }
 
@@ -135,7 +139,19 @@ impl ToolOutput {
         Self::Function {
             content: content.into(),
             success: None,
+            metadata: None,
         }
+    }
+
+    /// Attach structured metadata (for TUI display, not sent to the model).
+    pub fn with_metadata(mut self, meta: serde_json::Value) -> Self {
+        if let ToolOutput::Function {
+            ref mut metadata, ..
+        } = self
+        {
+            *metadata = Some(meta);
+        }
+        self
     }
 
     /// Get the text content of this output.
@@ -155,9 +171,14 @@ impl ToolOutput {
     }
 
     /// Convert this output to a JSON value for sending to the model.
+    ///
+    /// The `metadata` field is intentionally excluded — it is for TUI display
+    /// only and must not be sent to the model.
     pub fn into_response(self) -> serde_json::Value {
         match self {
-            ToolOutput::Function { content, success } => {
+            ToolOutput::Function {
+                content, success, ..
+            } => {
                 serde_json::json!({
                     "content": content,
                     "success": success

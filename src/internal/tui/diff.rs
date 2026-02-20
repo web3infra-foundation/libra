@@ -14,12 +14,14 @@ use ratatui::{
 };
 
 /// File change type for diff display.
+///
+/// All variants store a unified diff string produced by `diffy::create_patch`.
 #[derive(Debug, Clone)]
 pub enum FileChange {
     /// New file being added.
-    Add { content: String },
+    Add { unified_diff: String },
     /// File being deleted.
-    Delete { content: String },
+    Delete { unified_diff: String },
     /// File being modified.
     Update {
         unified_diff: String,
@@ -76,11 +78,12 @@ struct Row {
 fn collect_rows(changes: &HashMap<PathBuf, FileChange>) -> Vec<Row> {
     let mut rows: Vec<Row> = Vec::new();
     for (path, change) in changes.iter() {
-        let (added, removed) = match change {
-            FileChange::Add { content } => (content.lines().count(), 0),
-            FileChange::Delete { content } => (0, content.lines().count()),
-            FileChange::Update { unified_diff, .. } => calculate_add_remove_from_diff(unified_diff),
+        let unified_diff = match change {
+            FileChange::Add { unified_diff }
+            | FileChange::Delete { unified_diff }
+            | FileChange::Update { unified_diff, .. } => unified_diff,
         };
+        let (added, removed) = calculate_add_remove_from_diff(unified_diff);
         let move_path = match change {
             FileChange::Update {
                 move_path: Some(new),
@@ -100,176 +103,151 @@ fn collect_rows(changes: &HashMap<PathBuf, FileChange>) -> Vec<Row> {
     rows
 }
 
-fn render_line_count_summary(added: usize, removed: usize) -> Vec<Span<'static>> {
-    let mut spans = Vec::new();
-    spans.push("(".into());
-    spans.push(format!("+{added}").green());
-    spans.push(" ".into());
-    spans.push(format!("-{removed}").red());
-    spans.push(")".into());
-    spans
+fn render_line_count_summary_text(added: usize, removed: usize) -> String {
+    let mut parts = Vec::new();
+    if added > 0 {
+        let noun = if added == 1 { "line" } else { "lines" };
+        parts.push(format!("Added {added} {noun}"));
+    }
+    if removed > 0 {
+        let noun = if removed == 1 { "line" } else { "lines" };
+        parts.push(format!("removed {removed} {noun}"));
+    }
+    if parts.is_empty() {
+        return String::new();
+    }
+    parts.join(", ")
 }
 
 fn render_changes_block(rows: Vec<Row>, wrap_cols: usize, cwd: &Path) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
+    let indent = if rows.len() > 1 { "  " } else { "" };
+    let content_indent = format!("{indent}  ");
 
-    let render_path = |row: &Row| -> Vec<Span<'static>> {
-        let mut spans = Vec::new();
-        spans.push(display_path_for(&row.path, cwd).into());
-        if let Some(move_path) = &row.move_path {
-            spans.push(format!(" -> {}", display_path_for(move_path, cwd)).into());
-        }
-        spans
-    };
-
-    // Header
-    let total_added: usize = rows.iter().map(|r| r.added).sum();
-    let total_removed: usize = rows.iter().map(|r| r.removed).sum();
-    let file_count = rows.len();
-    let noun = if file_count == 1 { "file" } else { "files" };
-    let mut header_spans: Vec<Span<'static>> = vec!["* ".dim()];
-    if let [row] = &rows[..] {
-        let verb = match &row.change {
-            FileChange::Add { .. } => "Added",
-            FileChange::Delete { .. } => "Deleted",
-            _ => "Edited",
-        };
-        header_spans.push(verb.bold());
-        header_spans.push(" ".into());
-        header_spans.extend(render_path(row));
-        header_spans.push(" ".into());
-        header_spans.extend(render_line_count_summary(row.added, row.removed));
-    } else {
-        header_spans.push("Edited".bold());
-        header_spans.push(format!(" {file_count} {noun} ").into());
-        header_spans.extend(render_line_count_summary(total_added, total_removed));
-    }
-    out.push(Line::from(header_spans));
-
-    for (idx, r) in rows.into_iter().enumerate() {
-        // Insert a blank separator between file chunks (except before the first)
+    for (idx, r) in rows.iter().enumerate() {
         if idx > 0 {
             out.push("".into());
         }
-        // File header line (skip when single-file header already shows the name)
-        let skip_file_header = file_count == 1;
-        if !skip_file_header {
-            let mut header: Vec<Span<'static>> = Vec::new();
-            header.push("  |- ".dim());
-            header.extend(render_path(&r));
-            header.push(" ".into());
-            header.extend(render_line_count_summary(r.added, r.removed));
-            out.push(Line::from(header));
+
+        // File header: ● Update(path) / ● Added(path) / ● Deleted(path)
+        let (verb, bullet_color) = match &r.change {
+            FileChange::Add { .. } => ("Added", Color::Green),
+            FileChange::Delete { .. } => ("Deleted", Color::Red),
+            FileChange::Update { .. } => ("Update", Color::Yellow),
+        };
+        let path_display = display_path_for(&r.path, cwd);
+        let move_suffix = r
+            .move_path
+            .as_ref()
+            .map(|mp| format!(" -> {}", display_path_for(mp, cwd)))
+            .unwrap_or_default();
+        out.push(Line::from(vec![
+            Span::raw(indent.to_string()),
+            Span::styled("● ", Style::default().fg(bullet_color).bold()),
+            Span::styled(
+                format!("{verb}({path_display}{move_suffix})"),
+                Style::default().bold(),
+            ),
+        ]));
+
+        // Summary: └ Added N lines, removed M lines
+        let summary = render_line_count_summary_text(r.added, r.removed);
+        if !summary.is_empty() {
+            out.push(Line::from(vec![
+                Span::raw(format!("{indent}\u{2514} ")),
+                Span::styled(summary, Style::default().fg(Color::DarkGray)),
+            ]));
         }
 
+        // Diff content
         let mut lines = vec![];
-        render_change(&r.change, &mut lines, wrap_cols.saturating_sub(4));
-        out.extend(prefix_lines(lines, "    ", "    "));
+        render_change(&r.change, &mut lines, wrap_cols.saturating_sub(content_indent.len()));
+        out.extend(prefix_lines(lines, &content_indent, &content_indent));
     }
 
     out
 }
 
 fn render_change(change: &FileChange, out: &mut Vec<Line<'static>>, width: usize) {
-    match change {
-        FileChange::Add { content } => {
-            let line_number_width = line_number_width(content.lines().count());
-            for (i, raw) in content.lines().enumerate() {
-                out.extend(push_wrapped_diff_line(
-                    i + 1,
-                    DiffLineType::Insert,
-                    raw,
-                    width,
-                    line_number_width,
-                ));
-            }
-        }
-        FileChange::Delete { content } => {
-            let line_number_width = line_number_width(content.lines().count());
-            for (i, raw) in content.lines().enumerate() {
-                out.extend(push_wrapped_diff_line(
-                    i + 1,
-                    DiffLineType::Delete,
-                    raw,
-                    width,
-                    line_number_width,
-                ));
-            }
-        }
-        FileChange::Update { unified_diff, .. } => {
-            if let Ok(patch) = diffy::Patch::from_str(unified_diff) {
-                let mut max_line_number = 0;
-                for h in patch.hunks() {
-                    let mut old_ln = h.old_range().start();
-                    let mut new_ln = h.new_range().start();
-                    for l in h.lines() {
-                        match l {
-                            diffy::Line::Insert(_) => {
-                                max_line_number = max_line_number.max(new_ln);
-                                new_ln += 1;
-                            }
-                            diffy::Line::Delete(_) => {
-                                max_line_number = max_line_number.max(old_ln);
-                                old_ln += 1;
-                            }
-                            diffy::Line::Context(_) => {
-                                max_line_number = max_line_number.max(new_ln);
-                                old_ln += 1;
-                                new_ln += 1;
-                            }
-                        }
-                    }
-                }
-                let line_number_width = line_number_width(max_line_number);
-                let mut is_first_hunk = true;
-                for h in patch.hunks() {
-                    if !is_first_hunk {
-                        let spacer = format!("{:width$} ", "", width = line_number_width.max(1));
-                        let spacer_span = Span::styled(spacer, style_gutter());
-                        out.push(Line::from(vec![spacer_span, "...".dim()]));
-                    }
-                    is_first_hunk = false;
+    let unified_diff = match change {
+        FileChange::Add { unified_diff }
+        | FileChange::Delete { unified_diff }
+        | FileChange::Update { unified_diff, .. } => unified_diff,
+    };
 
-                    let mut old_ln = h.old_range().start();
-                    let mut new_ln = h.new_range().start();
-                    for l in h.lines() {
-                        match l {
-                            diffy::Line::Insert(text) => {
-                                let s = text.trim_end_matches('\n');
-                                out.extend(push_wrapped_diff_line(
-                                    new_ln,
-                                    DiffLineType::Insert,
-                                    s,
-                                    width,
-                                    line_number_width,
-                                ));
-                                new_ln += 1;
-                            }
-                            diffy::Line::Delete(text) => {
-                                let s = text.trim_end_matches('\n');
-                                out.extend(push_wrapped_diff_line(
-                                    old_ln,
-                                    DiffLineType::Delete,
-                                    s,
-                                    width,
-                                    line_number_width,
-                                ));
-                                old_ln += 1;
-                            }
-                            diffy::Line::Context(text) => {
-                                let s = text.trim_end_matches('\n');
-                                out.extend(push_wrapped_diff_line(
-                                    new_ln,
-                                    DiffLineType::Context,
-                                    s,
-                                    width,
-                                    line_number_width,
-                                ));
-                                old_ln += 1;
-                                new_ln += 1;
-                            }
-                        }
-                    }
+    let Ok(patch) = diffy::Patch::from_str(unified_diff) else {
+        return;
+    };
+
+    let mut max_line_number = 0;
+    for h in patch.hunks() {
+        let mut old_ln = h.old_range().start();
+        let mut new_ln = h.new_range().start();
+        for l in h.lines() {
+            match l {
+                diffy::Line::Insert(_) => {
+                    max_line_number = max_line_number.max(new_ln);
+                    new_ln += 1;
+                }
+                diffy::Line::Delete(_) => {
+                    max_line_number = max_line_number.max(old_ln);
+                    old_ln += 1;
+                }
+                diffy::Line::Context(_) => {
+                    max_line_number = max_line_number.max(new_ln);
+                    old_ln += 1;
+                    new_ln += 1;
+                }
+            }
+        }
+    }
+    let line_number_width = line_number_width(max_line_number);
+    let mut is_first_hunk = true;
+    for h in patch.hunks() {
+        if !is_first_hunk {
+            let spacer = format!("{:w$} ", "", w = line_number_width.max(1));
+            let spacer_span = Span::styled(spacer, style_gutter());
+            out.push(Line::from(vec![spacer_span, "...".dim()]));
+        }
+        is_first_hunk = false;
+
+        let mut old_ln = h.old_range().start();
+        let mut new_ln = h.new_range().start();
+        for l in h.lines() {
+            match l {
+                diffy::Line::Insert(text) => {
+                    let s = text.trim_end_matches('\n');
+                    out.extend(push_wrapped_diff_line(
+                        new_ln,
+                        DiffLineType::Insert,
+                        s,
+                        width,
+                        line_number_width,
+                    ));
+                    new_ln += 1;
+                }
+                diffy::Line::Delete(text) => {
+                    let s = text.trim_end_matches('\n');
+                    out.extend(push_wrapped_diff_line(
+                        old_ln,
+                        DiffLineType::Delete,
+                        s,
+                        width,
+                        line_number_width,
+                    ));
+                    old_ln += 1;
+                }
+                diffy::Line::Context(text) => {
+                    let s = text.trim_end_matches('\n');
+                    out.extend(push_wrapped_diff_line(
+                        new_ln,
+                        DiffLineType::Context,
+                        s,
+                        width,
+                        line_number_width,
+                    ));
+                    old_ln += 1;
+                    new_ln += 1;
                 }
             }
         }
@@ -410,15 +388,15 @@ fn style_del() -> Style {
 /// Add a prefix to each line in the vector.
 fn prefix_lines(
     lines: Vec<Line<'static>>,
-    first_prefix: &'static str,
-    rest_prefix: &'static str,
+    first_prefix: &str,
+    rest_prefix: &str,
 ) -> Vec<Line<'static>> {
     lines
         .into_iter()
         .enumerate()
         .map(|(i, line)| {
             let prefix = if i == 0 { first_prefix } else { rest_prefix };
-            let mut spans = vec![Span::raw(prefix)];
+            let mut spans = vec![Span::raw(prefix.to_string())];
             spans.extend(line.spans);
             Line::from(spans)
         })
@@ -461,16 +439,17 @@ mod tests {
     #[test]
     fn test_create_diff_summary_single_file() {
         let mut changes: HashMap<PathBuf, FileChange> = HashMap::new();
+        let patch = diffy::create_patch("", "hello\nworld\n").to_string();
         changes.insert(
             PathBuf::from("example.txt"),
             FileChange::Add {
-                content: "hello\nworld\n".to_string(),
+                unified_diff: patch,
             },
         );
 
         let lines = create_diff_summary(&changes, &PathBuf::from("/"), 80);
 
-        // Should have header + spacing + 2 content lines
+        // Should have header + summary + content lines
         assert!(!lines.is_empty());
     }
 
@@ -535,21 +514,23 @@ mod tests {
         );
 
         // File b.txt: add
+        let patch_b = diffy::create_patch("", "new\n").to_string();
         changes.insert(
             PathBuf::from("b.txt"),
             FileChange::Add {
-                content: "new\n".to_string(),
+                unified_diff: patch_b,
             },
         );
 
         let lines = create_diff_summary(&changes, &PathBuf::from("/"), 80);
 
-        // Should have header showing "2 files"
-        let header_text: String = lines[0]
-            .spans
+        // Should have separate per-file headers
+        let all_text: String = lines
             .iter()
+            .flat_map(|l| l.spans.iter())
             .map(|s| s.content.to_string())
             .collect::<String>();
-        assert!(header_text.contains("2 files"));
+        assert!(all_text.contains("a.txt"));
+        assert!(all_text.contains("b.txt"));
     }
 }
