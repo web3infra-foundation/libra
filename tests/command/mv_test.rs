@@ -321,6 +321,40 @@ async fn test_mv_rejects_directory_without_tracked_files() {
 
 #[tokio::test]
 #[serial]
+/// Successfully moves a directory containing tracked files, updating paths accordingly.
+async fn test_mv_moves_directory_with_tracked_files() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    // Create and stage tracked files within the source directory (including a nested file).
+    stage_file("src_dir/tracked1.txt", "content-1").await;
+    stage_file("src_dir/nested/tracked2.txt", "content-2").await;
+
+    // Prepare destination directory.
+    fs::create_dir_all("dest").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .args(["mv", "src_dir", "dest"])
+        .output()
+        .expect("failed to execute libra mv directory with tracked files");
+
+    // The mv command itself should succeed.
+    assert!(output.status.success());
+
+    // Source directory and its tracked contents should no longer exist at the original paths.
+    assert!(!temp_path.path().join("src_dir").exists());
+    assert!(!temp_path.path().join("src_dir/tracked1.txt").exists());
+    assert!(!temp_path.path().join("src_dir/nested/tracked2.txt").exists());
+
+    // Destination should now contain the moved directory and all tracked files.
+    assert!(temp_path.path().join("dest/src_dir").exists());
+    assert!(temp_path.path().join("dest/src_dir/tracked1.txt").exists());
+    assert!(temp_path.path().join("dest/src_dir/nested/tracked2.txt").exists());
+}
+
+#[tokio::test]
+#[serial]
 /// Rejects moving a directory to a non-directory destination path.
 async fn test_mv_rejects_directory_to_non_directory_destination() {
     let temp_path = tempdir().unwrap();
