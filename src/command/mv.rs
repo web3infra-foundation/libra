@@ -59,7 +59,13 @@ pub async fn execute(args: MvArgs) {
     // Check the validity of all sources and collect the valid move operations.
     let mut valid_moves: Vec<(PathBuf, PathBuf)> = Vec::new();
     let index_file = path::index();
-    let mut index = Index::load(&index_file).unwrap();
+    let mut index = match Index::load(&index_file) {
+        Ok(index) => index,
+        Err(err) => {
+            eprintln!("fatal: {}", err);
+            return;
+        }
+    };
     for src in &sources {
         match validate_source_and_collect_moves(
             src,
