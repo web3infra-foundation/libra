@@ -1,0 +1,462 @@
+{
+  "apiVersion": "intentspec.io/v1alpha1",
+  "kind": "IntentSpec",
+  "metadata": {
+    "id": "b0a1b6b6-62d1-4c8e-9b8d-1ef5a7b8d7b1",
+    "createdAt": "2026-02-19T11:00:00Z",
+    "createdBy": {
+      "type": "user",
+      "id": "bob",
+      "displayName": "Bob Li"
+    },
+    "target": {
+      "repo": {
+        "type": "git",
+        "locator": "git@company.internal:data/report-api.git"
+      },
+      "baseRef": "main",
+      "workspaceId": "ws-report-v2",
+      "labels": {
+        "ticket": "REPORT-891",
+        "epic": "export-v2",
+        "team": "data-platform"
+      }
+    }
+  },
+  "intent": {
+    "summary": "Add field-allowlist filter capability to the /v2/report export endpoint",
+    "problemStatement": "The current GET /v2/report export endpoint returns all fields, causing large report requests to exceed 50 MB bandwidth and 30 seconds processing time. We need to add an optional `fields` query parameter supporting a comma-separated field allowlist, while maintaining backwards compatibility (omitting fields returns all fields). Related JIRA epic: REPORT-800.",
+    "changeType": "feature",
+    "objectives": [
+      "Add optional `fields` query parameter to GET /v2/report accepting a comma-separated field allowlist",
+      "Backend filtering logic: return only listed fields; return all fields when the parameter is absent",
+      "Update OpenAPI documentation (openapi.yaml) with the new `fields` parameter description",
+      "Add contract tests covering normal paths and edge cases for both with and without the `fields` parameter"
+    ],
+    "inScope": [
+      "Handler and filter logic under src/report/",
+      "Parameter definition for /v2/report in openapi.yaml",
+      "Contract tests under tests/contract/"
+    ],
+    "outOfScope": [
+      "Do not modify the authorisation model (existing permission checks unchanged)",
+      "Do not introduce external data sources (no new DB tables or external API calls)",
+      "Do not change the response structure (existing field semantics and types unchanged)"
+    ],
+    "touchHints": {
+      "files": [
+        "src/report/handler.py",
+        "src/report/filter.py",
+        "openapi.yaml",
+        "tests/contract/test_report_v2.py"
+      ],
+      "symbols": [
+        "get_report",
+        "apply_field_filter",
+        "ReportHandler"
+      ],
+      "apis": [
+        "/v2/report"
+      ]
+    }
+  },
+  "acceptance": {
+    "successCriteria": [
+      "Response body contains only name and date when called with fields=name,date",
+      "Response body is identical to current behaviour when fields parameter is absent (backwards compatible)",
+      "HTTP 400 with error code ERR_INVALID_FIELD returned when fields contains a non-existent field name",
+      "All contract tests pass",
+      "No High or above severity findings from SAST/SCA",
+      "SBOM generated and all licences comply with the allowlist"
+    ],
+    "verificationPlan": {
+      "fastChecks": [
+        {
+          "id": "unit",
+          "kind": "command",
+          "command": "pytest -q tests/unit/test_report_filter.py",
+          "timeoutSeconds": 300,
+          "expectedExitCode": 0,
+          "required": true,
+          "artifactsProduced": [
+            "test-log"
+          ]
+        },
+        {
+          "id": "mypy",
+          "kind": "command",
+          "command": "mypy src/report/ --ignore-missing-imports",
+          "timeoutSeconds": 120,
+          "expectedExitCode": 0,
+          "required": true,
+          "artifactsProduced": []
+        }
+      ],
+      "integrationChecks": [
+        {
+          "id": "contract",
+          "kind": "command",
+          "command": "pytest -q tests/contract/test_report_v2.py -v --tb=short",
+          "timeoutSeconds": 1800,
+          "expectedExitCode": 0,
+          "required": true,
+          "artifactsProduced": [
+            "test-log"
+          ]
+        },
+        {
+          "id": "openapi-lint",
+          "kind": "command",
+          "command": "spectral lint openapi.yaml --ruleset .spectral.yaml",
+          "timeoutSeconds": 60,
+          "expectedExitCode": 0,
+          "required": true,
+          "artifactsProduced": []
+        }
+      ],
+      "securityChecks": [
+        {
+          "id": "sast",
+          "kind": "policy",
+          "command": "semgrep --config auto src/report/ --sarif --output reports/sast-report.sarif",
+          "timeoutSeconds": 900,
+          "expectedExitCode": 0,
+          "required": true,
+          "artifactsProduced": [
+            "sast-report"
+          ]
+        },
+        {
+          "id": "sca",
+          "kind": "policy",
+          "command": "pip-audit --format json --output reports/sca-report.json && cyclonedx-py -o reports/sbom.json",
+          "timeoutSeconds": 600,
+          "expectedExitCode": 0,
+          "required": true,
+          "artifactsProduced": [
+            "sca-report",
+            "sbom"
+          ]
+        }
+      ],
+      "releaseChecks": [
+        {
+          "id": "changelog",
+          "kind": "policy",
+          "command": "changelog-check --require-entry --version-from pyproject.toml",
+          "timeoutSeconds": 30,
+          "expectedExitCode": 0,
+          "required": true,
+          "artifactsProduced": [
+            "release-notes"
+          ]
+        },
+        {
+          "id": "human-approval",
+          "kind": "policy",
+          "command": "require-approvers --min 1 --group data-platform-reviewers",
+          "timeoutSeconds": 86400,
+          "expectedExitCode": 0,
+          "required": true,
+          "artifactsProduced": []
+        },
+        {
+          "id": "provenance-attest",
+          "kind": "policy",
+          "command": "generate-attestation --intentspec-digest $INTENTSPEC_DIGEST --output reports/provenance.json",
+          "timeoutSeconds": 120,
+          "expectedExitCode": 0,
+          "required": true,
+          "artifactsProduced": [
+            "provenance-attestation"
+          ]
+        }
+      ]
+    }
+  },
+  "constraints": {
+    "security": {
+      "networkPolicy": "deny",
+      "dependencyPolicy": "allow-with-review",
+      "cryptoPolicy": ""
+    },
+    "privacy": {
+      "dataClassesAllowed": [
+        "public",
+        "internal"
+      ],
+      "redactionRequired": true,
+      "retentionDays": 30
+    },
+    "licensing": {
+      "allowedSpdx": [
+        "Apache-2.0",
+        "MIT",
+        "BSD-3-Clause",
+        "ISC"
+      ],
+      "forbidNewLicenses": true
+    },
+    "platform": {
+      "languageRuntime": "python3.11",
+      "supportedOS": [
+        "linux"
+      ]
+    },
+    "resources": {
+      "maxWallClockSeconds": 14400,
+      "maxCostUnits": 500
+    }
+  },
+  "risk": {
+    "level": "medium",
+    "rationale": "Adds a new API query parameter and backend filter path involving changes to multiple files. Contract tests are required to verify backwards compatibility. New dependency (filter library) requires SCA review. No authentication/authorisation changes; impact is bounded.",
+    "factors": [
+      "new-api-param",
+      "multi-file",
+      "new-dependency-possible",
+      "data-path"
+    ],
+    "humanInLoop": {
+      "required": true,
+      "minApprovers": 1
+    }
+  },
+  "evidence": {
+    "strategy": "pinned-official",
+    "trustTiers": [
+      "repo",
+      "standards",
+      "vendor-doc"
+    ],
+    "domainAllowlistMode": "allowlist-only",
+    "allowedDomains": [
+      "docs.python.org",
+      "fastapi.tiangolo.com",
+      "docs.pydantic.dev",
+      "nvlpubs.nist.gov",
+      "slsa.dev"
+    ],
+    "blockedDomains": [],
+    "minCitationsPerDecision": 2
+  },
+  "security": {
+    "toolAcl": {
+      "allow": [
+        {
+          "tool": "workspace.fs",
+          "actions": [
+            "read",
+            "write"
+          ],
+          "constraints": {
+            "writeRoots": [
+              "./src/report",
+              "./tests/contract",
+              "./openapi.yaml",
+              "./reports"
+            ],
+            "maxWriteBytes": 5242880
+          }
+        },
+        {
+          "tool": "workspace.command",
+          "actions": [
+            "execute"
+          ],
+          "constraints": {
+            "allowCommands": [
+              "pytest",
+              "mypy",
+              "semgrep",
+              "pip-audit",
+              "cyclonedx-py",
+              "spectral lint",
+              "changelog-check",
+              "require-approvers",
+              "generate-attestation"
+            ],
+            "maxOutputBytes": 10485760
+          }
+        },
+        {
+          "tool": "workspace.search",
+          "actions": [
+            "search"
+          ],
+          "constraints": {}
+        },
+        {
+          "tool": "workspace.lsp",
+          "actions": [
+            "hover",
+            "goto-definition",
+            "find-references"
+          ],
+          "constraints": {}
+        }
+      ],
+      "deny": [
+        {
+          "tool": "workspace.command",
+          "actions": [
+            "execute"
+          ],
+          "constraints": {
+            "denySubstrings": [
+              "curl ",
+              "wget ",
+              "pip install ",
+              "apt-get",
+              "sudo"
+            ]
+          }
+        }
+      ]
+    },
+    "secrets": {
+      "policy": "deny-all",
+      "allowedScopes": []
+    },
+    "promptInjection": {
+      "treatRetrievedContentAsUntrusted": true,
+      "enforceOutputSchema": true,
+      "disallowInstructionFromEvidence": true
+    },
+    "outputHandling": {
+      "encodingPolicy": "contextual-escape",
+      "noDirectEval": true
+    }
+  },
+  "execution": {
+    "retry": {
+      "maxRetries": 3,
+      "backoffSeconds": 15
+    },
+    "replan": {
+      "triggers": [
+        "repeated-test-fail",
+        "security-gate-fail",
+        "evidence-conflict",
+        "scope-creep"
+      ]
+    },
+    "concurrency": {
+      "maxParallelTasks": 4
+    }
+  },
+  "artifacts": {
+    "required": [
+      {
+        "name": "patchset",
+        "stage": "per-task",
+        "required": true,
+        "format": "git-diff"
+      },
+      {
+        "name": "test-log",
+        "stage": "integration",
+        "required": true,
+        "format": "junit+xml"
+      },
+      {
+        "name": "sast-report",
+        "stage": "security",
+        "required": true,
+        "format": "sarif"
+      },
+      {
+        "name": "sca-report",
+        "stage": "security",
+        "required": true,
+        "format": "json"
+      },
+      {
+        "name": "sbom",
+        "stage": "security",
+        "required": true,
+        "format": "cyclonedx-json"
+      },
+      {
+        "name": "release-notes",
+        "stage": "release",
+        "required": true,
+        "format": "markdown"
+      },
+      {
+        "name": "provenance-attestation",
+        "stage": "release",
+        "required": true,
+        "format": "in-toto+json"
+      }
+    ],
+    "retention": {
+      "days": 180
+    }
+  },
+  "provenance": {
+    "requireSlsaProvenance": true,
+    "requireSbom": true,
+    "transparencyLog": {
+      "mode": "rekor"
+    },
+    "bindings": {
+      "embedIntentSpecDigest": true,
+      "embedEvidenceDigests": true
+    }
+  },
+  "lifecycle": {
+    "schemaVersion": "1.0.0",
+    "status": "active",
+    "changeLog": []
+  },
+  "libra": {
+    "objectStore": {
+      "backend": "git-native",
+      "blobRetentionStrategy": "ref-anchoring",
+      "aiRefPrefix": "refs/ai/"
+    },
+    "contextPipeline": {
+      "maxFrames": 64,
+      "seedFrameKind": "IntentAnalysis",
+      "checkpointOnReplan": true
+    },
+    "planGeneration": {
+      "decompositionMode": "per-objective",
+      "conflictResolution": "force-serial",
+      "gateTaskPerStage": true
+    },
+    "runPolicy": {
+      "patchsetFormat": "GitDiff",
+      "snapshotOnRunStart": true,
+      "metricsSchema": {
+        "wall_clock_seconds": {
+          "type": "integer"
+        },
+        "cost_usd": {
+          "type": "number"
+        },
+        "tokens_used": {
+          "type": "integer"
+        },
+        "patchsets_generated": {
+          "type": "integer"
+        }
+      }
+    },
+    "actorMapping": {
+      "orchestratorActorId": "libra-orchestrator",
+      "coderActorId": "libra-coder",
+      "reviewerActorId": "libra-reviewer"
+    },
+    "decisionPolicy": {
+      "abandonOnSecurityGateFail": true,
+      "checkpointBeforeReplan": true,
+      "rollbackOnProvenanceFail": true
+    }
+  },
+  "extensions": {
+    "data-platform.io/slo-impact": "medium",
+    "data-platform.io/runbook": "https://wiki.company.internal/report-api/runbook"
+  }
+}
