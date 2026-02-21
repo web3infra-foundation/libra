@@ -221,7 +221,16 @@ fn resolve_move_directory(
     dst: &Path,
     index: &Index,
 ) -> Result<Vec<(PathBuf, PathBuf)>, String> {
-    let files = util::list_files(src).unwrap();
+    let files = match util::list_files(src) {
+        Ok(files) => files,
+        Err(e) => {
+            return Err(format!(
+                "fatal: failed to list files in source directory, source={}, error={}",
+                util::to_workdir_path(src).display(),
+                e
+            ));
+        }
+    };
 
     // Determine the name of the source directory so we can preserve it under the destination,
     // matching `git mv src_dir dest` -> `dest/src_dir/...`.
