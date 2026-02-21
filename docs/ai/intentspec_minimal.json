@@ -78,6 +78,15 @@
           "artifactsProduced": [
             "test-log"
           ]
+        },
+        {
+          "id": "lint",
+          "kind": "command",
+          "command": "npm run lint",
+          "timeoutSeconds": 60,
+          "expectedExitCode": 0,
+          "required": true,
+          "artifactsProduced": []
         }
       ],
       "integrationChecks": [],
