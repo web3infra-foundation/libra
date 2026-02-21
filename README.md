@@ -1,221 +1,196 @@
-## Git Internal Module
+# Libra
 
-Git-Internal is a high-performance Rust library for Git internal objects, Pack files, and AI-assisted development workflows. It provides comprehensive support for Git's internal object storage format with delta compression, memory management, concurrent processing, and a structured AI object model that captures the full lifecycle of AI-driven code changes — from user intent through planning, execution, validation, and final decision.
+Libra is a partial implementation of a **Git** client, developed in **Rust**.
 
-## Overview
+The goal is **not** to build a perfect, 100% feature-complete reimplementation of Git (if you want that, take a look at [gitoxide](https://github.com/Byron/gitoxide)). Instead, Libra is evolving into an **AI agent–native version control system**.
 
-This library handles Git internal objects and Pack files efficiently, supporting both reading and writing with optimized memory usage and multi-threaded processing. Beyond the standard Git object model (Blob, Tree, Commit, Tag), it introduces a suite of **AI objects** (Intent, Plan, Task, Run, PatchSet, Evidence, Decision, and more) that record and audit every step of an AI agent's interaction with a codebase. These AI objects are stored as content-addressed JSON blobs in the Git object database, enabling reproducibility, auditability, and provenance tracking for AI-generated code changes.
+The `libra code` command starts an interactive TUI (with a background web server) that is designed to be driven collaboratively by AI agents and humans.
 
-## Quickstart
+---
 
-Decode a pack (offline):
+## Example
 
-```rust
-use std::{fs::File, io::BufReader};
-use git_internal::internal::pack::Pack;
-use git_internal::hash::{set_hash_kind, HashKind};
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // In production, hash kind is configured at the repository level. Set here for demonstration only.
-    set_hash_kind(HashKind::Sha1);
-    let f = File::open("tests/data/packs/small-sha1.pack")?;
-    let mut reader = BufReader::new(f);
-    let mut pack = Pack::new(None, Some(64 * 1024 * 1024), None, true);
+```bash
+$ libra --help
+Simulates git commands
 
-    pack.decode(&mut reader, |_entry| {
-        // Process each decoded object here (MetaAttached<Entry, EntryMeta>).
-        // For example, index it, persist it, or feed it into your build pipeline.
-    }, None::<fn(git_internal::hash::ObjectHash)>)?;
-    Ok(())
+Usage: libra <COMMAND>
+
+Commands:
+  init     Initialize a new repository
+  clone    Clone a repository into a new directory
+  code     Start Libra Code interactive TUI (with a background web server)
+  add      Add file contents to the index
+  rm       Remove files from the working tree and from the index
+  restore  Restore working tree files
+  status   Show the working tree status
+  log      Show commit logs
+  diff     Show changes between commits, commit and working tree, etc
+  branch   List, create, or delete branches
+  commit   Record changes to the repository
+  switch   Switch branches
+  merge    Merge changes
+  push     Update remote refs along with associated objects
+  fetch    Download objects and refs from another repository
+  pull     Fetch from and integrate with another repository or a local branch
+  remote   Manage set of tracked repositories
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
+```
+
+---
+
+## Libra Code Modes
+
+Libra Code supports three operation modes, each designed for different use cases.
+
+### 1. TUI Mode (Default)
+
+Starts an interactive Terminal User Interface along with a background web server.  
+This is the standard mode for developers who want to work directly in the terminal with AI assistance.
+
+```bash
+libra code
+```
+
+- **Storage**: Uses the local project directory (`.libra/`) to isolate history and context per project.
+
+### 2. Web Mode
+
+Runs only the web server without the TUI.  
+Useful for remote development or when you prefer using the browser interface exclusively.
+
+```bash
+libra code --web
+```
+
+- **Storage**: Uses the local project directory (`.libra/`).
+
+### 3. Stdio Mode (MCP)
+
+Runs the Model Context Protocol (MCP) server over standard input/output.  
+This mode is designed for integration with AI clients like **Claude Desktop**.
+
+```bash
+libra code --stdio
+```
+
+- **Storage**: Uses the local project directory (`.libra/`) for history persistence (same as TUI/Web modes).  
+  The directory must be writable by the calling process (including sandboxed desktop AI apps).
+
+#### Claude Desktop Configuration
+
+To use Libra with Claude Desktop, add the following to your `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "libra": {
+      "command": "/path/to/libra",
+      "args": ["code", "--stdio"]
+    }
+  }
 }
 ```
 
-## Modules at a glance
+---
 
-- `hash.rs`: object IDs and hash algorithm selection (thread-local), set once by your app.
-- `internal/object`: object parse/serialize — standard Git objects (Blob, Tree, Commit, Tag) and AI objects (Intent, Plan, Task, Run, etc.).
-- `internal/index` / `internal/metadata`: .git/index IO, path/offset/CRC metadata.
-- `delta` / `zstdelta` / `diff.rs`: delta compression, zstd dictionary delta, line-level diff.
-- `internal/pack`: pack decode/encode, waitlist, cache, idx building.
-- `protocol/*`: smart protocol + HTTP/SSH adapters, wrapping info-refs/upload-pack/receive-pack.
-- Docs: ARCHITECTURE.md (architecture, coming soon), GIT_OBJECTS.md (objects, coming soon), GIT_PROTOCOL_GUIDE.md (protocol, coming soon), [docs/ai/ai.md (AI objects)](docs/ai/ai.md), [docs/ai/INTENTSPEC.md (IntentSpec design)](docs/ai/INTENTSPEC.md).
+## Features
 
-## Key Features
+### Clean Code
 
-### 1. Multi-threaded Processing
+The codebase is designed to be clean and easy to read, making it maintainable and approachable for developers of all skill levels.
 
-- Configurable thread pool for parallel object processing
-- Concurrent delta resolution with dependency management
-- Asynchronous I/O operations for improved performance
+### Cross-Platform
 
-### 2. Advanced Memory Management
+- [x] Windows  
+- [x] Linux  
+- [x] macOS
 
-- LRU-based memory cache with configurable limits
-- Automatic disk spillover for large objects
-- Memory usage tracking and optimization
-- Heap size calculation for accurate memory accounting
+### Compatibility with Git
 
-### 3. Delta Compression Support
+Libra’s core implementation is essentially compatible with **Git** (developed with reference to Git’s own documentation), including support for on-disk formats such as:
 
-- Offset Delta : References objects by pack file offset
-- Hash Delta : References objects by SHA-1 hash
-- Zstd Delta : Enhanced compression using Zstandard algorithm
-- Intelligent delta chain resolution
+- `objects`
+- `index`
+- `pack`
+- `pack-index`
 
-### 4. Streaming Support
+This allows Libra to interact seamlessly with Git servers (for example, `push` and `pull` work with standard Git remotes).
 
-- Stream-based pack file processing
-- Memory-efficient handling of large pack files
-- Support for network streams and file streams
+### Differences from Git
 
-### 5. AI Object Model
+While maintaining compatibility with Git, Libra intentionally diverges in some areas:
 
-A structured object graph that captures the full lifecycle of AI-assisted code changes:
+- Uses an **SQLite** database to manage loosely structured files such as `config`, `HEAD`, and `refs`, providing unified and transactional management instead of plain-text files.
 
-```
- ①  User input
-      │
-      ▼
- ②  Intent (Draft → Active → Completed)
-      │
-      ▼
- ③  Plan (steps + context pipeline)
-      │
-      ▼
- ④  Task (unit of work with acceptance criteria)
-      │
-      ▼
- ⑤  Run (execution attempt: patching → validating)
-      │
-      ├── ⑥ ToolInvocation (action log)
-      ├── ⑦ PatchSet (candidate diff)
-      ├── ⑧ Evidence (test/lint/build results)
-      │
-      ▼
- ⑨  Decision (commit / retry / abandon / rollback)
-      │
-      ▼
- ⑩  Intent (Completed, commit hash recorded)
-```
+---
 
-| Object | Role |
-|--------|------|
-| **Intent** | Captures user prompt and AI interpretation; entry/exit point of the workflow |
-| **Plan** | Ordered sequence of steps derived from an Intent; supports revision chains |
-| **Task** | Stable work identity with constraints and acceptance criteria |
-| **Run** | Single execution attempt of a Task; accumulates artifacts |
-| **ToolInvocation** | Records each tool call (file read, shell command, etc.) |
-| **PatchSet** | Candidate code diff (unified format) relative to a baseline commit |
-| **Evidence** | Validation result (test pass/fail, lint output, build log) |
-| **Decision** | Terminal verdict on a Run (commit, retry, abandon, rollback) |
-| **Provenance** | LLM configuration and token usage metadata for a Run |
-| **ContextSnapshot** | Static capture of files/URLs/snippets at Run start |
-| **ContextPipeline** | Dynamic sliding-window context accumulated during planning |
+## Worktree Management
 
-All AI objects share a common `Header` (UUID, timestamps, creator) and are serialized as JSON. See [docs/ai/ai.md](docs/ai/ai.md) for the full lifecycle, field-level documentation, and usage examples.
+Libra implements a `worktree` subcommand that is broadly compatible with `git worktree`, allowing you to manage multiple working directories attached to the same repository storage.
 
-For authoring AI-driven code changes, see **[IntentSpec](docs/ai/INTENTSPEC.md)** — a machine-readable intent contract format (JSON Schema Draft 2020-12) that drives the orchestrator to produce a Task DAG, enforce verification gates, and bind SLSA provenance artefacts to every change. The doc includes the complete schema, field-by-field reference, and three worked examples (low / medium / high-assurance).
+Unlike `git worktree remove`, Libra does **not** delete worktree directories on disk by default.
 
-## Core Algorithms
+Supported subcommands:
 
-### Pack Decoding Algorithm
+- `libra worktree add <path>` – create a new linked working tree at `<path>`
+- `libra worktree list` – list all registered working trees (including the main worktree)
+- `libra worktree lock <path> [--reason <msg>]` – mark a worktree as locked with an optional reason
+- `libra worktree unlock <path>` – unlock a previously locked worktree
+- `libra worktree move <src> <dest>` – move a worktree directory to a new location
+- `libra worktree prune` – prune missing or non-existent worktrees from the registry
+- `libra worktree remove <path>` – remove a worktree from the registry without deleting its directory on disk (the main worktree cannot be removed)
+- `libra worktree repair` – repair inconsistent worktree state if the registry and directories get out of sync
 
-1. Read and validate pack header (PACK signature, version, object count)
-2. For each object in the pack:
-   a. Parse object header (type, size)
-   b. Handle based on object type:
-      - Base objects: Decompress and store directly
-      - Delta objects: Add to waitlist until base is available
-   c. Resolve delta chains when base objects become available
-3. Verify pack checksum
+---
 
-### Delta Resolution Strategy
+## Object Storage Configuration
 
-- Waitlist Management : Delta objects wait for their base objects
-- Dependency Tracking : Maintains offset and hash-based dependency maps
-- Chain Resolution : Recursively applies delta operations
-- Memory Optimization : Calculates expanded object sizes to prevent OOM
+Libra supports using S3-compatible object storage (AWS S3, Cloudflare R2, MinIO, etc.) as an alternative or supplement to local storage.  
+This feature implements a **tiered storage architecture**:
 
-### Cache Management
+- **Small objects** (< threshold) – stored in both local and remote storage
+- **Large objects** (≥ threshold) – stored in remote storage with a local LRU cache
 
-- Two-tier Caching : Memory cache with disk spillover
-- LRU Eviction : Least recently used objects are evicted first
-- Size-based Limits : Configurable memory limits with accurate tracking
-- Async Persistence : Background threads handle disk operations
+If `LIBRA_STORAGE_TYPE` is **not** set, Libra falls back to local-only storage under `.libra/objects`.
 
-### Object Processing Pipeline
+### Environment Variables
 
-```
-Input Stream → Header Parsing → Object Decoding → Delta Resolution → Cache Storage → Output
-                     ↓              ↓              ↓              ↓
-                Validation    Decompression   Waitlist Mgmt   Memory Mgmt
-```
+Configure object storage by setting these environment variables:
 
-## Performance Optimizations
+| Variable                     | Description                                                   | Required (for S3/R2) | Default              |
+|-----------------------------|---------------------------------------------------------------|----------------------|----------------------|
+| `LIBRA_STORAGE_TYPE`        | Storage backend type: `s3` or `r2`                            | Yes                  | –                    |
+| `LIBRA_STORAGE_BUCKET`      | Bucket name                                                   | Yes                  | `libra`              |
+| `LIBRA_STORAGE_ENDPOINT`    | S3-compatible endpoint URL (required for R2)                  | Yes (for R2)         | AWS S3 default       |
+| `LIBRA_STORAGE_REGION`      | Region for bucket                                             | No                   | `auto`               |
+| `LIBRA_STORAGE_ACCESS_KEY`  | Access key ID                                                 | Yes                  | –                    |
+| `LIBRA_STORAGE_SECRET_KEY`  | Secret access key                                             | Yes                  | –                    |
+| `LIBRA_STORAGE_THRESHOLD`   | Size threshold in bytes for tiering                           | No                   | `1048576` (1 MB)     |
+| `LIBRA_STORAGE_CACHE_SIZE`  | Local cache size limit in bytes                               | No                   | `209715200` (200 MB) |
+| `LIBRA_STORAGE_ALLOW_HTTP`  | Allow HTTP (non-TLS) endpoints for testing (not for prod)     | No                   | `false`              |
 
-### Memory Allocator Recommendations
+> Note: If any mandatory variable is invalid or empty (for example, empty bucket or credentials), Libra automatically falls back to local storage and logs an error message.
 
-> [!TIP]
-> Here are some performance tips that you can use to significantly improve performance when using `git-internal` crates as a dependency.
+---
 
-In certain versions of Rust, using `HashMap` on Windows can lead to performance issues. This is due to the allocation strategy of the internal heap memory allocator. To mitigate these performance issues on Windows, you can use [mimalloc](https://github.com/microsoft/mimalloc). (See [this issue](https://github.com/rust-lang/rust/issues/121747) for more details.)
-
-On other platforms, you can also experiment with [jemalloc](https://github.com/jemalloc/jemalloc) or [mimalloc](https://github.com/microsoft/mimalloc) to potentially improve performance.
-
-A simple approach:
-
-1. Change Cargo.toml to use mimalloc on Windows and jemalloc on other platforms.
-
-   ```toml
-   [target.'cfg(not(windows))'.dependencies]
-   jemallocator = "0.5.4"
-
-   [target.'cfg(windows)'.dependencies]
-   mimalloc = "0.1.43"
-   ```
-
-2. Add `#[global_allocator]` to the main.rs file of the program to specify the allocator.
-
-   ```rust
-   #[cfg(not(target_os = "windows"))]
-   #[global_allocator]
-   static GLOBAL: jemallocator::Jemalloc = jemallocator::Jemalloc;
-
-   #[cfg(target_os = "windows")]
-   #[global_allocator]
-   static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-   ```
-
-### Concurrent Processing
-
-- Configurable thread pools for CPU-intensive operations
-- Lock-free data structures where possible (DashMap for waitlists)
-- Parallel delta application using Rayon
-
-### 3. I/O Optimization
-
-- Buffered reading with configurable buffer sizes
-- Asynchronous file operations for cache persistence
-- Stream-based processing to minimize memory footprint
-
-### Benchmark
-
-**TODO**
-
-## Contributing
-
-### Pre-submission Checks
+## Contributing & Development
 
 Before submitting a Pull Request, please ensure your code passes the following checks:
 
 ```bash
-# Run clippy with all warnings treated as errors (warnings will be treated as errors)
+# Run clippy with all warnings treated as errors
 cargo clippy --all-targets --all-features -- -D warnings
 
 # Check code formatting (requires nightly toolchain)
 cargo +nightly fmt --all --check
 ```
 
-**Both commands must complete without any warnings.** The clippy check treats all warnings as errors, and the formatter check ensures code follows the project style guide. Only PRs that pass these checks will be accepted for merge.
+Both commands must complete without any warnings. The clippy check treats all warnings as errors, and the formatter check ensures code follows the project style guide.
 
 If the formatting check fails, you can automatically fix formatting issues by running:
 
@@ -246,7 +221,7 @@ Pull Requests must also pass the Buck2 build:
 cargo buckal build
 ```
 
-When you update dependencies in Cargo.toml, regenerate Buck metadata and third-party lockfiles:
+When you update dependencies in `Cargo.toml`, regenerate Buck metadata and third-party lockfiles:
 
 ```bash
 cargo buckal migrate

@@ -58,7 +58,7 @@ git commit + SBOM + attestation + Rekor proof
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:libra:intentspec:v1",
   "title": "IntentSpec (Libra Edition)",
-  "description": "Machine-readable AI code-change intent contract. Drives the orchestrator to produce a Task DAG, execute verification gates, and bind provenance artefacts.",
+  "description": "Machine-readable AI code-change intent contract. Drives the orchestrator to produce a Task DAG, execute verification gates, and bind provenance artifacts.",
   "type": "object",
   "required": [
     "apiVersion", "kind", "metadata", "intent", "acceptance",
@@ -340,7 +340,7 @@ git commit + SBOM + attestation + Rekor proof
             },
             "retentionDays": {
               "type": "integer", "minimum": 0, "maximum": 3650, "default": 30,
-              "description": "Artefact retention period (days) from Decision.Commit. 0=delete immediately. The lower of this value and artifacts.retention.days is used."
+              "description": "Artifact retention period (days) from Decision.Commit. 0=delete immediately. The lower of this value and artifacts.retention.days is used."
             }
           }
         },
@@ -1123,4 +1123,4 @@ See files:
 | `blockedDomains` | `[]` | `[]` | `["*"]` |
 | Number of securityChecks | `0` | `2` | `4` |
 | Number of releaseChecks | `0` | `3` | `4` |
-| Number of required artefacts | `2` | `7` | `8` |
+| Number of required artifacts | `2` | `7` | `8` |
