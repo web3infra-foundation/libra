@@ -98,14 +98,14 @@ async fn test_mv_moves_directory_with_tracked_files() {
 
     assert!(!temp_path.path().join("src_dir/a.txt").exists());
     assert!(!temp_path.path().join("src_dir/sub/b.txt").exists());
-    assert!(temp_path.path().join("dest/a.txt").exists());
-    assert!(temp_path.path().join("dest/sub/b.txt").exists());
+    assert!(temp_path.path().join("dest/src_dir/a.txt").exists());
+    assert!(temp_path.path().join("dest/src_dir/sub/b.txt").exists());
 
     let index = Index::load(path::index()).unwrap();
     assert!(!index.tracked("src_dir/a.txt", 0));
     assert!(!index.tracked("src_dir/sub/b.txt", 0));
-    assert!(index.tracked("dest/a.txt", 0));
-    assert!(index.tracked("dest/sub/b.txt", 0));
+    assert!(index.tracked("dest/src_dir/a.txt", 0));
+    assert!(index.tracked("dest/src_dir/sub/b.txt", 0));
 }
 
 #[tokio::test]
