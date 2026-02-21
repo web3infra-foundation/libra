@@ -208,9 +208,14 @@ fn to_absolute_path(path: impl AsRef<Path>) -> PathBuf {
     util::workdir_to_absolute(path.as_ref())
 }
 
-///check if there are tracked files in the source directory
-/// if there are tracked files, we will record the moves of these tracked files,
-///  the move of the directory itself will be handled by filesystem and we don't need to record it.
+/// Checks if there are tracked files in the source directory.
+///
+/// If there are tracked files, records the moves of these tracked files.
+/// The move of the directory itself will be handled by the filesystem
+/// and doesn't need to be recorded.
+///
+/// Returns a vector of (source, destination) pairs for tracked files,
+/// or an error if the directory contains no tracked files.
 fn resolve_move_directory(
     src: &Path,
     dst: &Path,
