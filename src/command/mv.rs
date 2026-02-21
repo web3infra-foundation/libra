@@ -348,10 +348,19 @@ async fn perform_moves(
     for (src, dst) in &moved_pairs {
         let src_rel = util::path_to_string(&util::to_workdir_path(src));
         let dst_rel = util::path_to_string(&util::to_workdir_path(dst));
-        if let Some(mut entry) = index.remove(&src_rel, 0) {
-            entry.name = dst_rel;
-            entry.flags.name_length = entry.name.len() as u16;
-            index.add(entry);
+        match index.remove(&src_rel, 0) {
+            Some(mut entry) => {
+                entry.name = dst_rel;
+                entry.flags.name_length = entry.name.len() as u16;
+                index.add(entry);
+            }
+            None => {
+                eprintln!(
+                    "warning: source path '{}' not found in index during mv to '{}'; index not updated for this entry",
+                    src_rel,
+                    dst_rel
+                );
+            }
         }
     }
 
