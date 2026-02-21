@@ -64,7 +64,7 @@
       "No High or above severity findings from SAST/SCA; no secrets scan alerts",
       "SBOM generated and licence allowlist validated",
       "SLSA provenance attestation generated with IntentSpec digest embedded",
-      "Rekor inclusion proof obtained and written to artefacts",
+      "Rekor inclusion proof obtained and written to artifacts",
       "At least 2 members of the security team have approved"
     ],
     "verificationPlan": {
