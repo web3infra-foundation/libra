@@ -108,6 +108,7 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          allowed_non_write_users: "*"
 
           # Enable progress tracking and show full Claude output in logs
           track_progress: true
