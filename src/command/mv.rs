@@ -273,9 +273,9 @@ fn is_conflicted_in_index(index: &Index, src: &Path) -> bool {
 }
 /// Checks whether multiple move operations target the same destination path.
 fn has_duplicate_target(moves: &[(PathBuf, PathBuf)]) -> bool {
-    let mut target_paths = HashSet::new();
+    let mut target_paths: HashSet<&PathBuf> = HashSet::new();
     for (_, target) in moves {
-        if !target_paths.insert(target.clone()) {
+        if !target_paths.insert(target) {
             return true;
         }
     }
