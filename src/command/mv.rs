@@ -137,7 +137,14 @@ fn validate_source_directory(
         ));
     }
 
-    if destination.join(src.file_name().unwrap()).exists() {
+    let src_file_name = src.file_name().ok_or_else(|| {
+        format!(
+            "fatal: invalid source directory '{}': no file name component",
+            util::to_workdir_path(src).display()
+        )
+    })?;
+
+    if destination.join(src_file_name).exists() {
         return Err(format!(
             "fatal: destination already exists, source={}, destination={}",
             util::to_workdir_path(src).display(),
