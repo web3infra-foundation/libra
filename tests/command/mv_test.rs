@@ -344,6 +344,37 @@ async fn test_mv_rejects_directory_to_non_directory_destination() {
 
 #[tokio::test]
 #[serial]
+/// Rejects forcing an overwrite when the destination path is an existing directory.
+async fn test_mv_force_rejects_overwrite_directory_destination() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    // Create a tracked source file.
+    stage_file("source.txt", "content").await;
+
+    // Create a destination that is a directory at the conflicting path.
+    fs::create_dir_all("dest_path").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .args(["mv", "--force", "source.txt", "dest_path"])
+        .output()
+        .expect("failed to execute libra mv --force with directory destination");
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Cannot overwrite") || stderr.contains("cannot overwrite"),
+        "unexpected stderr: {stderr}"
+    );
+
+    // Ensure that neither the source file nor the destination directory was altered.
+    assert!(temp_path.path().join("source.txt").exists());
+    assert!(temp_path.path().join("dest_path").exists());
+}
+
+#[tokio::test]
+#[serial]
 /// Rejects moving a conflicted source file with a 'conflicted' error.
 async fn test_mv_rejects_conflicted_source_file() {
     let temp_path = tempdir().unwrap();
