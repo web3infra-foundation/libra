@@ -27,7 +27,7 @@ IntentSpec is a **machine-readable intent contract**. It transforms a natural-la
 - **Constraints** — hard boundaries around security, privacy, licensing, and resources
 - **Gates** — the checks that must pass before each pipeline stage advances
 - **Evidence policy** — where to source information and how much to trust each source
-- **Provenance bindings** — how to cryptographically link intent, execution, and final artefacts
+- **Provenance bindings** — how to cryptographically link intent, execution, and final artifacts
 
 Within the Libra system IntentSpec occupies the **control plane**; the Libra AI Object Model occupies the **execution plane**:
 
@@ -246,7 +246,7 @@ git commit + SBOM + attestation + Rekor proof
             "integrationChecks": { "$ref": "#/$defs/CheckList",
                                    "description": "Integration checks (10–60 min): contract tests, E2E tests, performance regression. Run after all implementation Tasks complete." },
             "securityChecks":    { "$ref": "#/$defs/CheckList",
-                                   "description": "Security checks: SAST, SCA, secrets scanning. Must produce sast-report, sca-report, sbom artefacts." },
+          "description": "Security checks: SAST, SCA, secrets scanning. Must produce sast-report, sca-report, sbom artifacts." },
             "releaseChecks":     { "$ref": "#/$defs/CheckList",
                                    "description": "Release checks: human approval (require-approvers), provenance verification. All must pass before Decision.Commit." }
           }
@@ -292,7 +292,7 @@ git commit + SBOM + attestation + Rekor proof
                       "description": "true=failure fails the entire gate stage; false=failure is reported but does not block." },
         "artifactsProduced": {
           "type": "array", "default": [],
-          "description": "Artefact names produced by this check. Must match entries in artifacts.required[].name. Missing artefacts fail the gate.",
+          "description": "Artifact names produced by this check. Must match entries in artifacts.required[].name. Missing artifacts fail the gate.",
           "items": { "type": "string", "minLength": 1, "maxLength": 128 }
         }
       }
@@ -613,21 +613,21 @@ git commit + SBOM + attestation + Rekor proof
 
     "Artifacts": {
       "type": "object",
-      "description": "Required artefact manifest. The orchestrator checks for valid ArtifactRef entries in Evidence.report_artifacts at each gate stage. Any missing required artefact is a gate fail.",
+      "description": "Required artifact manifest. The orchestrator checks for valid ArtifactRef entries in Evidence.report_artifacts at each gate stage. Any missing required artifact is a gate fail.",
       "required": ["required"],
       "additionalProperties": false,
       "properties": {
         "required": {
           "type": "array", "minItems": 1,
           "items": { "$ref": "#/$defs/ArtifactReq" },
-          "description": "Required artefact list. Minimum: patchset and test-log. High-assurance scenarios should include sast-report, sca-report, sbom, provenance-attestation, and transparency-proof."
+          "description": "Required artifact list. Minimum: patchset and test-log. High-assurance scenarios should include sast-report, sca-report, sbom, provenance-attestation, and transparency-proof."
         },
         "retention": {
           "type": "object", "additionalProperties": false, "default": {},
           "properties": {
             "days": {
               "type": "integer", "minimum": 0, "maximum": 3650, "default": 90,
-              "description": "Artefact retention days from Decision.Commit. 0=do not retain; 90 (default); 365=compliance scenarios. The lower of this and constraints.privacy.retentionDays is used."
+              "description": "Artifact retention days from Decision.Commit. 0=do not retain; 90 (default); 365=compliance scenarios. The lower of this and constraints.privacy.retentionDays is used."
             }
           }
         }
@@ -643,23 +643,23 @@ git commit + SBOM + attestation + Rekor proof
           "type": "string",
           "enum": ["patchset","test-log","build-log","sast-report","sca-report",
                    "sbom","provenance-attestation","transparency-proof","release-notes"],
-          "description": "Artefact type. patchset=code diff; test-log=test execution log; build-log=build log; sast-report=SAST scan report (SARIF); sca-report=dependency vulnerability report; sbom=Software Bill of Materials; provenance-attestation=SLSA provenance (in-toto); transparency-proof=Rekor inclusion proof; release-notes=release notes."
+          "description": "Artifact type. patchset=code diff; test-log=test execution log; build-log=build log; sast-report=SAST scan report (SARIF); sca-report=dependency vulnerability report; sbom=Software Bill of Materials; provenance-attestation=SLSA provenance (in-toto); transparency-proof=Rekor inclusion proof; release-notes=release notes."
         },
         "stage": {
           "type": "string", "enum": ["per-task", "integration", "security", "release"],
-          "description": "Gate stage at which this artefact's existence is checked. per-task=after each implementation Task; integration=after integration checks; security=after security checks; release=final gate before Decision.Commit."
+          "description": "Gate stage at which this artifact's existence is checked. per-task=after each implementation Task; integration=after integration checks; security=after security checks; release=final gate before Decision.Commit."
         },
         "required": { "type": "boolean", "default": true },
         "format": {
           "type": "string", "maxLength": 64, "default": "",
-          "description": "Artefact format identifier: 'git-diff', 'junit+xml', 'sarif', 'spdx-json', 'cyclonedx-json', 'in-toto+json', 'rekor-inclusion-proof', 'markdown', 'text'. Written to ArtifactRef.content_type. Open set: additional formats may be used by convention."
+          "description": "Artifact format identifier: 'git-diff', 'junit+xml', 'sarif', 'spdx-json', 'cyclonedx-json', 'in-toto+json', 'rekor-inclusion-proof', 'markdown', 'text'. Written to ArtifactRef.content_type. Open set: additional formats may be used by convention."
         }
       }
     },
 
     "ProvenancePolicy": {
       "type": "object",
-      "description": "Provenance binding policy. The goal is to make the IntentSpec a verifiable input parameter in the supply-chain evidence chain, strongly bound to the output attestation. Consumers can verify the IntentSpec digest in provenance to confirm 'artefact built from this specific IntentSpec'.",
+      "description": "Provenance binding policy. The goal is to make the IntentSpec a verifiable input parameter in the supply-chain evidence chain, strongly bound to the output attestation. Consumers can verify the IntentSpec digest in provenance to confirm 'artifact built from this specific IntentSpec'.",
       "required": ["requireSlsaProvenance", "requireSbom", "transparencyLog", "bindings"],
       "additionalProperties": false,
       "properties": {
@@ -685,7 +685,7 @@ git commit + SBOM + attestation + Rekor proof
           "properties": {
             "embedIntentSpecDigest": {
               "type": "boolean", "default": true,
-              "description": "true = embed the sha256 digest of the canonical IntentSpec JSON in Provenance.parameters[\"externalParameters\"][\"intentspec_digest\"]. Enables consumers to verify IntentSpec integrity and achieve intent–artefact strong binding."
+              "description": "true = embed the sha256 digest of the canonical IntentSpec JSON in Provenance.parameters[\"externalParameters\"][\"intentspec_digest\"]. Enables consumers to verify IntentSpec integrity and achieve intent–artifact strong binding."
             },
             "embedEvidenceDigests": {
               "type": "boolean", "default": true,
@@ -746,7 +746,7 @@ git commit + SBOM + attestation + Rekor proof
           "properties": {
             "backend": {
               "type": "string", "enum": ["git-native", "external-s3", "external-local"], "default": "git-native",
-              "description": "AI object storage backend. git-native=store in git object DB under refs/ai/* (Libra native, best for open-source); external-s3=store in S3-compatible storage, git keeps only ArtifactRef (best for large artefacts); external-local=local filesystem (dev/test only)."
+              "description": "AI object storage backend. git-native=store in git object DB under refs/ai/* (Libra native, best for open-source); external-s3=store in S3-compatible storage, git keeps only ArtifactRef (best for large artifacts); external-local=local filesystem (dev/test only)."
             },
             "blobRetentionStrategy": {
               "type": "string",
@@ -855,7 +855,7 @@ git commit + SBOM + attestation + Rekor proof
 
 `metadata` is the immutable audit anchor. All fields are set at creation time and must not be mutated — modifications mean creating a new IntentSpec.
 
-**`metadata.id`** stores the globally unique identifier. The orchestrator writes it to `Libra Intent.external_ids["intentspec_id"]`. When `provenance.bindings.embedIntentSpecDigest=true`, the orchestrator freezes the canonical JSON (sorted keys, no whitespace), computes a SHA-256 digest, and embeds both the `id` and the digest in `Provenance.parameters.externalParameters`. This achieves **intent–artefact strong binding**: consumers can re-derive the digest from the IntentSpec file and compare it to the Provenance to verify nothing was tampered.
+**`metadata.id`** stores the globally unique identifier. The orchestrator writes it to `Libra Intent.external_ids["intentspec_id"]`. When `provenance.bindings.embedIntentSpecDigest=true`, the orchestrator freezes the canonical JSON (sorted keys, no whitespace), computes a SHA-256 digest, and embeds both the `id` and the digest in `Provenance.parameters.externalParameters`. This achieves **intent–artifact strong binding**: consumers can re-derive the digest from the IntentSpec file and compare it to the Provenance to verify nothing was tampered.
 
 **`metadata.createdBy.type`** governs which Libra `ActorRef` factory is used (`human`, `agent`, `system`). High-risk IntentSpecs should originate from `user` or an `agent` that has received human approval.
 
@@ -889,7 +889,7 @@ git commit + SBOM + attestation + Rekor proof
 
 **`constraints.security.networkPolicy=deny`** is the default and maps directly to ToolInvocation pre-flight ACL: the orchestrator rejects any tool call that would make external network contact unless `security.toolAcl.allow` contains an explicit whitelisted command with a stated reason. This is the "minimal network footprint" baseline (aligned with SLSA isolated-build requirements).
 
-**`constraints.security.dependencyPolicy`** drives SCA gate behaviour: `no-new` means the SCA report is scanned for any newly introduced package; any new package is a gate fail. `allow-with-review` permits additions but mandates an `sca-report` artefact for human review and a licence check against `allowedSpdx`.
+**`constraints.security.dependencyPolicy`** drives SCA gate behaviour: `no-new` means the SCA report is scanned for any newly introduced package; any new package is a gate fail. `allow-with-review` permits additions but mandates an `sca-report` artifact for human review and a licence check against `allowedSpdx`.
 
 **`constraints.resources`** fields are enforced at runtime — not just recorded. `maxWallClockSeconds` sets the Run timeout; `maxCostUnits` caps `Provenance.token_usage.cost_usd` accumulation. When the cost cap is approached, the orchestrator reduces `maxParallelTasks` to 1 before deciding whether to continue or checkpoint. This directly addresses the OWASP "Unbounded Consumption" risk.
 
@@ -945,12 +945,12 @@ Every entry in `artifacts.required[]` creates a contract between a `verification
 Check.command executes
   → ToolInvocation records io_footprint
   → Evidence.report_artifacts[] populated with ArtifactRef (key, hash, expires_at)
-  → Gate checker verifies: for each required artefact at this stage,
+  → Gate checker verifies: for each required artifact at this stage,
     Evidence.report_artifacts must contain a matching ArtifactRef with valid hash
-  → Missing or hash-invalid artefact → gate fail
+  → Missing or hash-invalid artifact → gate fail
 ```
 
-`artifacts.retention.days` is written to `ArtifactRef.expires_at` at creation time. The lower of this value and `constraints.privacy.retentionDays` is used. This ensures artefact lifecycle matches data-privacy commitments.
+`artifacts.retention.days` is written to `ArtifactRef.expires_at` at creation time. The lower of this value and `constraints.privacy.retentionDays` is used. This ensures artifact lifecycle matches data-privacy commitments.
 
 ---
 
