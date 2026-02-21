@@ -1122,5 +1122,5 @@ See files:
 | `rollbackOnProvenanceFail` | `false` | `true` | `true` |
 | `blockedDomains` | `[]` | `[]` | `["*"]` |
 | Number of securityChecks | `0` | `2` | `4` |
-| Number of releaseChecks | `1` | `3` | `4` |
+| Number of releaseChecks | `0` | `3` | `4` |
 | Number of required artefacts | `2` | `7` | `8` |
