@@ -33,9 +33,9 @@ pub async fn execute(args: MvArgs) {
     if args.paths.len() < 2 {
         eprintln!("usage: libra mv [<options>] <source>... <destination>");
         eprintln!();
-        eprintln!("-v, --[no-]verbose    be verbose");
-        eprintln!("-n, --[no-]dry-run    dry run");
-        eprintln!("-f, --[no-]force      force move/rename even if target exists");
+        eprintln!("-v, --verbose         be verbose");
+        eprintln!("-n, --dry-run         dry run");
+        eprintln!("-f, --force           force move/rename even if target exists");
         return;
     }
 
