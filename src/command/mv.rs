@@ -167,7 +167,14 @@ fn validate_source_file(
     }
 
     let target = if destination_is_dir {
-        destination.join(src.file_name().unwrap())
+        let file_name = src.file_name().ok_or_else(|| {
+            format!(
+                "fatal: invalid source path (no file name), source={}, destination={}",
+                util::to_workdir_path(src).display(),
+                util::to_workdir_path(destination).display()
+            )
+        })?;
+        destination.join(file_name)
     } else {
         destination.to_path_buf()
     };
