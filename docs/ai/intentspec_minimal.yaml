@@ -1,0 +1,220 @@
+apiVersion: intentspec.io/v1alpha1
+kind: IntentSpec
+metadata:
+  id: 01J0R2W9K9G9N5W1QZ8YQ1M8P3
+  createdAt: '2026-02-19T10:00:00Z'
+  createdBy:
+    type: user
+    id: alice
+    displayName: Alice Zhang
+  target:
+    repo:
+      type: git
+      locator: git@company.internal:backend/user-service.git
+    baseRef: main
+    labels:
+      ticket: US-4521
+      team: backend
+intent:
+  summary: Fix null pointer dereference causing HTTP 500 in handleRequest
+  problemStatement: 'Production monitoring shows that when the request body is missing the `userId` field, `handleRequest`
+    in `src/handler.ts` (line 47) throws TypeError: Cannot read properties of undefined, resulting in HTTP 500 responses and
+    alerts. Expected behaviour: return HTTP 400 Bad Request with a diagnostic error code. Related Sentry event: SENTRY-8821.'
+  changeType: bugfix
+  objectives:
+  - Validate the presence of userId at the handleRequest entry point; return HTTP 400 with error code ERR_MISSING_USER_ID
+    when absent
+  - Add at least 2 unit test cases covering missing and invalid userId scenarios
+  inScope:
+  - Input validation logic in src/handler.ts
+  - Corresponding test cases in test/handler.test.ts
+  outOfScope:
+  - Do not introduce any new dependencies
+  - Do not change the API response structure (existing field semantics unchanged)
+  - Do not modify authentication or authorisation logic
+  touchHints:
+    files:
+    - src/handler.ts
+    - test/handler.test.ts
+    symbols:
+    - handleRequest
+    - validateRequest
+    apis: []
+acceptance:
+  successCriteria:
+  - 'Missing userId returns HTTP 400 with body containing code: ERR_MISSING_USER_ID'
+  - Invalid userId (non-string type) also returns HTTP 400
+  - New test cases pass in CI
+  - No regression in existing test cases
+  verificationPlan:
+    fastChecks:
+    - id: typecheck
+      kind: command
+      command: npx tsc --noEmit
+      timeoutSeconds: 120
+      expectedExitCode: 0
+      required: true
+      artifactsProduced: []
+    - id: unit-test
+      kind: command
+      command: npm test -- --testPathPattern=handler
+      timeoutSeconds: 300
+      expectedExitCode: 0
+      required: true
+      artifactsProduced:
+      - test-log
+    integrationChecks: []
+    securityChecks: []
+    releaseChecks:
+    - id: lint
+      kind: command
+      command: npm run lint
+      timeoutSeconds: 60
+      expectedExitCode: 0
+      required: true
+      artifactsProduced: []
+  qualityGates:
+    requireNewTestsWhenBugfix: true
+    maxAllowedRegression: none
+constraints:
+  security:
+    networkPolicy: deny
+    dependencyPolicy: no-new
+    cryptoPolicy: ''
+  privacy:
+    dataClassesAllowed:
+    - public
+    redactionRequired: false
+    retentionDays: 7
+  licensing:
+    allowedSpdx: []
+    forbidNewLicenses: false
+  platform:
+    languageRuntime: node20
+    supportedOS:
+    - linux
+  resources:
+    maxWallClockSeconds: 1800
+    maxCostUnits: 0
+risk:
+  level: low
+  rationale: Modifies only the input validation logic in a single file. No business logic changes, no new dependencies, no
+    API semantic changes. Failure mode is confined to the same error path and does not affect normal request handling.
+  factors:
+  - no-new-deps
+  - single-file
+  - input-validation-only
+  humanInLoop:
+    required: false
+    minApprovers: 0
+evidence:
+  strategy: repo-first
+  trustTiers:
+  - repo
+  - vendor-doc
+  domainAllowlistMode: allowlist-only
+  allowedDomains:
+  - nodejs.org
+  - www.typescriptlang.org
+  blockedDomains: []
+  minCitationsPerDecision: 0
+security:
+  toolAcl:
+    allow:
+    - tool: workspace.fs
+      actions:
+      - read
+      - write
+      constraints:
+        writeRoots:
+        - ./src
+        - ./test
+        maxWriteBytes: 51200
+    - tool: workspace.command
+      actions:
+      - execute
+      constraints:
+        allowCommands:
+        - npx tsc --noEmit
+        - npm test
+        - npm run lint
+        maxOutputBytes: 1048576
+    - tool: workspace.search
+      actions:
+      - search
+      constraints: {}
+    deny: []
+  secrets:
+    policy: deny-all
+    allowedScopes: []
+  promptInjection:
+    treatRetrievedContentAsUntrusted: true
+    enforceOutputSchema: true
+    disallowInstructionFromEvidence: true
+  outputHandling:
+    encodingPolicy: contextual-escape
+    noDirectEval: true
+execution:
+  retry:
+    maxRetries: 3
+    backoffSeconds: 5
+  replan:
+    triggers:
+    - repeated-test-fail
+    - evidence-conflict
+  concurrency:
+    maxParallelTasks: 2
+artifacts:
+  required:
+  - name: patchset
+    stage: per-task
+    required: true
+    format: git-diff
+  - name: test-log
+    stage: per-task
+    required: true
+    format: text
+  retention:
+    days: 7
+provenance:
+  requireSlsaProvenance: false
+  requireSbom: false
+  transparencyLog:
+    mode: none
+  bindings:
+    embedIntentSpecDigest: true
+    embedEvidenceDigests: false
+lifecycle:
+  schemaVersion: 1.0.0
+  status: active
+  changeLog: []
+libra:
+  objectStore:
+    backend: git-native
+    blobRetentionStrategy: ref-anchoring
+    aiRefPrefix: refs/ai/
+  contextPipeline:
+    maxFrames: 32
+    seedFrameKind: IntentAnalysis
+    checkpointOnReplan: false
+  planGeneration:
+    decompositionMode: per-objective
+    conflictResolution: force-serial
+    gateTaskPerStage: false
+  runPolicy:
+    patchsetFormat: GitDiff
+    snapshotOnRunStart: true
+    metricsSchema:
+      wall_clock_seconds:
+        type: integer
+      tokens_used:
+        type: integer
+  actorMapping:
+    orchestratorActorId: libra-orchestrator
+    coderActorId: libra-coder
+    reviewerActorId: libra-reviewer
+  decisionPolicy:
+    abandonOnSecurityGateFail: true
+    checkpointBeforeReplan: false
+    rollbackOnProvenanceFail: false
+extensions: {}

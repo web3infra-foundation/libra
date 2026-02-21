@@ -1,0 +1,531 @@
+{
+  "apiVersion": "intentspec.io/v1alpha1",
+  "kind": "IntentSpec",
+  "metadata": {
+    "id": "01J0R3C7J0S8K1KQX8J4VQKJ1A",
+    "createdAt": "2026-02-19T12:00:00Z",
+    "createdBy": {
+      "type": "user",
+      "id": "security-lead",
+      "displayName": "Carol Security Lead"
+    },
+    "target": {
+      "repo": {
+        "type": "git",
+        "locator": "git@company.internal:security/auth-service.git"
+      },
+      "baseRef": "main",
+      "labels": {
+        "change": "AUTHZ-CRITICAL",
+        "cve": "CVE-2026-XXXX",
+        "severity": "HIGH",
+        "team": "security"
+      }
+    }
+  },
+  "intent": {
+    "summary": "Fix auth middleware conditional bypass vulnerability (CVE-2026-XXXX) and add regression tests",
+    "problemStatement": "A security audit found that the JWT validation logic in src/auth/middleware.py contains a conditional bypass under a specific HTTP header combination (when both X-Forwarded-For and Authorization are present): an attacker can bypass JWT verification and gain unauthorised API access. CVSS score: 8.1 (High). Related CVE: CVE-2026-XXXX, internal bug AUTHZ-9901. Required actions: (1) fix the bypass path; (2) add regression tests covering the bypass scenario; (3) generate a complete auditable provenance chain.",
+    "changeType": "security",
+    "objectives": [
+      "Fix the JWT validation conditional bypass path in src/auth/middleware.py — ensure the Authorization header is always validated first and cannot be influenced by X-Forwarded-For",
+      "Add at least 3 regression test cases in tests/security/test_auth_bypass.py that reproduce the bypass scenario and verify all bypass paths are blocked",
+      "Generate a complete SBOM + SLSA provenance attestation + Rekor inclusion proof for compliance audit"
+    ],
+    "inScope": [
+      "Middleware and JWT validation logic under src/auth/",
+      "Security regression tests under tests/security/",
+      "Audit log module (src/audit/) — read-only, logic must not be modified"
+    ],
+    "outOfScope": [
+      "Do not change permission model semantics (fix JWT validation implementation only, do not alter permission assignment logic)",
+      "Do not introduce any new dependencies (enforced by dependencyPolicy: no-new)",
+      "Do not modify API response structures or interface contracts"
+    ],
+    "touchHints": {
+      "files": [
+        "src/auth/middleware.py",
+        "src/auth/jwt_validator.py",
+        "tests/security/test_auth_bypass.py"
+      ],
+      "symbols": [
+        "verify_jwt",
+        "check_permission",
+        "AuthMiddleware",
+        "extract_token"
+      ],
+      "apis": []
+    }
+  },
+  "acceptance": {
+    "successCriteria": [
+      "All bypass reproduction test cases (at least 3) are blocked (pytest passes)",
+      "Full unit tests and E2E tests show no regression",
+      "No High or above severity findings from SAST/SCA; no secrets scan alerts",
+      "SBOM generated and licence allowlist validated",
+      "SLSA provenance attestation generated with IntentSpec digest embedded",
+      "Rekor inclusion proof obtained and written to artefacts",
+      "At least 2 members of the security team have approved"
+    ],
+    "verificationPlan": {
+      "fastChecks": [
+        {
+          "id": "unit",
+          "kind": "command",
+          "command": "pytest -q tests/unit/test_auth.py -v",
+          "timeoutSeconds": 900,
+          "expectedExitCode": 0,
+          "required": true,
+          "artifactsProduced": [
+            "test-log"
+          ]
+        },
+        {
+          "id": "mypy",
+          "kind": "command",
+          "command": "mypy src/auth/ --strict",
+          "timeoutSeconds": 180,
+          "expectedExitCode": 0,
+          "required": true,
+          "artifactsProduced": []
+        }
+      ],
+      "integrationChecks": [
+        {
+          "id": "e2e-bypass",
+          "kind": "command",
+          "command": "pytest -q tests/security/test_auth_bypass.py -v --tb=long",
+          "timeoutSeconds": 3600,
+          "expectedExitCode": 0,
+          "required": true,
+          "artifactsProduced": [
+            "test-log"
+          ]
+        },
+        {
+          "id": "e2e-full",
+          "kind": "command",
+          "command": "pytest -q tests/e2e/ -v --tb=short -x",
+          "timeoutSeconds": 7200,
+          "expectedExitCode": 0,
+          "required": true,
+          "artifactsProduced": []
+        }
+      ],
+      "securityChecks": [
+        {
+          "id": "sast",
+          "kind": "policy",
+          "command": "semgrep --config p/owasp-top-ten --config p/python --config r/python.jwt --sarif --output reports/sast-report.sarif src/auth/",
+          "timeoutSeconds": 1200,
+          "expectedExitCode": 0,
+          "required": true,
+          "artifactsProduced": [
+            "sast-report"
+          ]
+        },
+        {
+          "id": "sca",
+          "kind": "policy",
+          "command": "pip-audit --format json --output reports/sca-report.json",
+          "timeoutSeconds": 600,
+          "expectedExitCode": 0,
+          "required": true,
+          "artifactsProduced": [
+            "sca-report"
+          ]
+        },
+        {
+          "id": "sbom-generate",
+          "kind": "policy",
+          "command": "cyclonedx-py --format json --output reports/sbom.json",
+          "timeoutSeconds": 300,
+          "expectedExitCode": 0,
+          "required": true,
+          "artifactsProduced": [
+            "sbom"
+          ]
+        },
+        {
+          "id": "secrets-scan",
+          "kind": "policy",
+          "command": "detect-secrets scan --all-files --only-allowlisted --baseline .secrets.baseline",
+          "timeoutSeconds": 300,
+          "expectedExitCode": 0,
+          "required": true,
+          "artifactsProduced": []
+        }
+      ],
+      "releaseChecks": [
+        {
+          "id": "human-approval",
+          "kind": "policy",
+          "command": "require-approvers --min 2 --group security-reviewers --require-security-team",
+          "timeoutSeconds": 172800,
+          "expectedExitCode": 0,
+          "required": true,
+          "artifactsProduced": []
+        },
+        {
+          "id": "release-notes-security",
+          "kind": "policy",
+          "command": "security-advisory-check --require-cve-entry --require-cvss-score",
+          "timeoutSeconds": 60,
+          "expectedExitCode": 0,
+          "required": true,
+          "artifactsProduced": [
+            "release-notes"
+          ]
+        },
+        {
+          "id": "provenance-attest",
+          "kind": "policy",
+          "command": "generate-slsa-attestation --intentspec-digest $INTENTSPEC_DIGEST --slsa-level 3 --output reports/provenance.json",
+          "timeoutSeconds": 300,
+          "expectedExitCode": 0,
+          "required": true,
+          "artifactsProduced": [
+            "provenance-attestation"
+          ]
+        },
+        {
+          "id": "rekor-submit",
+          "kind": "policy",
+          "command": "rekor-cli upload --artifact reports/provenance.json --signature reports/provenance.json.sig --public-key cosign.pub --output reports/rekor-proof.json",
+          "timeoutSeconds": 120,
+          "expectedExitCode": 0,
+          "required": true,
+          "artifactsProduced": [
+            "transparency-proof"
+          ]
+        }
+      ]
+    },
+    "qualityGates": {
+      "requireNewTestsWhenBugfix": true,
+      "maxAllowedRegression": "none"
+    }
+  },
+  "constraints": {
+    "security": {
+      "networkPolicy": "deny",
+      "dependencyPolicy": "no-new",
+      "cryptoPolicy": "Prohibit custom cryptographic primitives; only use audited libraries (PyJWT >= 2.8.0) and stdlib hmac/hashlib; algorithms other than HS256 require security architect approval."
+    },
+    "privacy": {
+      "dataClassesAllowed": [
+        "confidential",
+        "pii"
+      ],
+      "redactionRequired": true,
+      "retentionDays": 14
+    },
+    "licensing": {
+      "allowedSpdx": [
+        "Apache-2.0",
+        "MIT"
+      ],
+      "forbidNewLicenses": true
+    },
+    "platform": {
+      "languageRuntime": "python3.11",
+      "supportedOS": [
+        "linux"
+      ]
+    },
+    "resources": {
+      "maxWallClockSeconds": 28800,
+      "maxCostUnits": 3000
+    }
+  },
+  "risk": {
+    "level": "high",
+    "rationale": "Authorisation bypass vulnerability (CVSS 8.1 High), capable of enabling unauthorised access to all protected APIs. CVE is public; rapid remediation is required with full provenance for compliance audit. This touches core security infrastructure — changes carry high risk and require two-person review.",
+    "factors": [
+      "authz",
+      "cve-assigned",
+      "cvss-high",
+      "security-critical",
+      "release-blocking",
+      "compliance-required"
+    ],
+    "humanInLoop": {
+      "required": true,
+      "minApprovers": 2
+    }
+  },
+  "evidence": {
+    "strategy": "repo-first",
+    "trustTiers": [
+      "repo",
+      "standards"
+    ],
+    "domainAllowlistMode": "allowlist-only",
+    "allowedDomains": [
+      "nvlpubs.nist.gov",
+      "slsa.dev",
+      "owasp.org",
+      "pyjwt.readthedocs.io",
+      "docs.python.org"
+    ],
+    "blockedDomains": [
+      "*"
+    ],
+    "minCitationsPerDecision": 3
+  },
+  "security": {
+    "toolAcl": {
+      "allow": [
+        {
+          "tool": "workspace.fs",
+          "actions": [
+            "read",
+            "write"
+          ],
+          "constraints": {
+            "writeRoots": [
+              "./src/auth",
+              "./tests/security",
+              "./reports"
+            ],
+            "maxWriteBytes": 10485760
+          }
+        },
+        {
+          "tool": "workspace.command",
+          "actions": [
+            "execute"
+          ],
+          "constraints": {
+            "allowCommands": [
+              "pytest",
+              "mypy",
+              "semgrep",
+              "pip-audit",
+              "cyclonedx-py",
+              "detect-secrets",
+              "require-approvers",
+              "security-advisory-check",
+              "generate-slsa-attestation",
+              "rekor-cli"
+            ],
+            "maxOutputBytes": 20971520
+          }
+        },
+        {
+          "tool": "workspace.search",
+          "actions": [
+            "search"
+          ],
+          "constraints": {
+            "maxResultBytes": 524288
+          }
+        },
+        {
+          "tool": "workspace.lsp",
+          "actions": [
+            "hover",
+            "goto-definition",
+            "find-references"
+          ],
+          "constraints": {}
+        }
+      ],
+      "deny": [
+        {
+          "tool": "workspace.command",
+          "actions": [
+            "execute"
+          ],
+          "constraints": {
+            "denySubstrings": [
+              "curl ",
+              "wget ",
+              "pip install ",
+              "apt-get",
+              "ssh ",
+              "nc ",
+              "ncat ",
+              "bash -c",
+              "python -c",
+              "eval(",
+              "exec("
+            ]
+          }
+        },
+        {
+          "tool": "workspace.fs",
+          "actions": [
+            "write",
+            "delete"
+          ],
+          "constraints": {
+            "denyPaths": [
+              "./src/api/",
+              "./src/models/",
+              "./migrations/",
+              "./.secrets.baseline"
+            ]
+          }
+        }
+      ]
+    },
+    "secrets": {
+      "policy": "deny-all",
+      "allowedScopes": []
+    },
+    "promptInjection": {
+      "treatRetrievedContentAsUntrusted": true,
+      "enforceOutputSchema": true,
+      "disallowInstructionFromEvidence": true
+    },
+    "outputHandling": {
+      "encodingPolicy": "contextual-escape",
+      "noDirectEval": true
+    }
+  },
+  "execution": {
+    "retry": {
+      "maxRetries": 2,
+      "backoffSeconds": 60
+    },
+    "replan": {
+      "triggers": [
+        "repeated-test-fail",
+        "security-gate-fail",
+        "evidence-conflict",
+        "unknown-api",
+        "scope-creep"
+      ]
+    },
+    "concurrency": {
+      "maxParallelTasks": 1
+    }
+  },
+  "artifacts": {
+    "required": [
+      {
+        "name": "patchset",
+        "stage": "per-task",
+        "required": true,
+        "format": "git-diff"
+      },
+      {
+        "name": "test-log",
+        "stage": "integration",
+        "required": true,
+        "format": "junit+xml"
+      },
+      {
+        "name": "sast-report",
+        "stage": "security",
+        "required": true,
+        "format": "sarif"
+      },
+      {
+        "name": "sca-report",
+        "stage": "security",
+        "required": true,
+        "format": "json"
+      },
+      {
+        "name": "sbom",
+        "stage": "security",
+        "required": true,
+        "format": "cyclonedx-json"
+      },
+      {
+        "name": "release-notes",
+        "stage": "release",
+        "required": true,
+        "format": "markdown"
+      },
+      {
+        "name": "provenance-attestation",
+        "stage": "release",
+        "required": true,
+        "format": "in-toto+json"
+      },
+      {
+        "name": "transparency-proof",
+        "stage": "release",
+        "required": true,
+        "format": "rekor-inclusion-proof"
+      }
+    ],
+    "retention": {
+      "days": 365
+    }
+  },
+  "provenance": {
+    "requireSlsaProvenance": true,
+    "requireSbom": true,
+    "transparencyLog": {
+      "mode": "rekor"
+    },
+    "bindings": {
+      "embedIntentSpecDigest": true,
+      "embedEvidenceDigests": true
+    }
+  },
+  "lifecycle": {
+    "schemaVersion": "1.0.0",
+    "status": "active",
+    "changeLog": []
+  },
+  "libra": {
+    "objectStore": {
+      "backend": "git-native",
+      "blobRetentionStrategy": "ref-anchoring",
+      "aiRefPrefix": "refs/ai/"
+    },
+    "contextPipeline": {
+      "maxFrames": 64,
+      "seedFrameKind": "IntentAnalysis",
+      "checkpointOnReplan": true
+    },
+    "planGeneration": {
+      "decompositionMode": "per-objective",
+      "conflictResolution": "force-serial",
+      "gateTaskPerStage": true
+    },
+    "runPolicy": {
+      "patchsetFormat": "GitDiff",
+      "snapshotOnRunStart": true,
+      "metricsSchema": {
+        "wall_clock_seconds": {
+          "type": "integer"
+        },
+        "cost_usd": {
+          "type": "number"
+        },
+        "tokens_used": {
+          "type": "integer"
+        },
+        "patchsets_generated": {
+          "type": "integer"
+        },
+        "retries": {
+          "type": "integer"
+        }
+      }
+    },
+    "actorMapping": {
+      "orchestratorActorId": "libra-orchestrator",
+      "coderActorId": "libra-security-coder",
+      "reviewerActorId": "libra-security-reviewer"
+    },
+    "decisionPolicy": {
+      "abandonOnSecurityGateFail": true,
+      "checkpointBeforeReplan": true,
+      "rollbackOnProvenanceFail": true
+    }
+  },
+  "extensions": {
+    "security.io/cve-id": "CVE-2026-XXXX",
+    "security.io/cvss-score": "8.1",
+    "security.io/patch-priority": "critical",
+    "security.io/notification-required": "true",
+    "security.io/compliance-frameworks": "SOC2,ISO27001"
+  }
+}
