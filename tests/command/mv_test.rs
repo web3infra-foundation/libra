@@ -341,3 +341,40 @@ async fn test_mv_rejects_directory_to_non_directory_destination() {
     assert!(temp_path.path().join("dir/x.txt").exists());
     assert!(temp_path.path().join("dest_file.txt").exists());
 }
+
+#[tokio::test]
+#[serial]
+/// Rejects moving a conflicted source file with a 'conflicted' error.
+async fn test_mv_rejects_conflicted_source_file() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    // Create and stage a file that simulates a merge conflict.
+    let conflicted_content = "\
+<<<<<<< HEAD
+ours
+=======
+theirs
+>>>>>>> BRANCH
+";
+    stage_file("conflicted.txt", conflicted_content).await;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .args(["mv", "conflicted.txt", "moved.txt"])
+        .output()
+        .expect("failed to execute libra mv conflicted source case");
+
+    // The mv command reports the error via stderr but still exits successfully,
+    // consistent with the other mv tests in this module.
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("conflicted"),
+        "expected conflicted error in stderr, got: {stderr}"
+    );
+
+    // Ensure no move took place on disk.
+    assert!(temp_path.path().join("conflicted.txt").exists());
+    assert!(!temp_path.path().join("moved.txt").exists());
+}
