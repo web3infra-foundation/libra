@@ -205,14 +205,28 @@ fn resolve_move_directory(
     index: &Index,
 ) -> Result<Vec<(PathBuf, PathBuf)>, String> {
     let files = util::list_files(src).unwrap();
+
+    // Determine the name of the source directory so we can preserve it under the destination,
+    // matching `git mv src_dir dest` -> `dest/src_dir/...`.
+    let src_dir_name = src.file_name().ok_or_else(|| {
+        format!(
+            "fatal: invalid source directory path: {}",
+            util::to_workdir_path(src).display()
+        )
+    })?;
+    let dst_with_src = dst.join(src_dir_name);
+
     //only consider tracked files for move.
     //If there are untracked files in the source directory
     let tracked_moves: Vec<(PathBuf, PathBuf)> = files
         .into_iter()
         .filter(|file| index.tracked(&util::path_to_string(file), 0))
-        .map(|file| {
+        .map(move |file| {
             let relative_path = util::to_relative(&file, src);
-            (util::workdir_to_absolute(&file), dst.join(relative_path))
+            (
+                util::workdir_to_absolute(&file),
+                dst_with_src.join(relative_path),
+            )
         })
         .collect();
     // If there are no tracked files in the source directory, we consider it an error and do not perform the move.
