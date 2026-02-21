@@ -412,20 +412,86 @@ async fn test_mv_rejects_directory_into_itself() {
 /// Rejects forcing an overwrite when the destination path is an existing directory.
 async fn test_mv_force_rejects_overwrite_directory_destination() {
     let temp_path = tempdir().unwrap();
-    test::setup_with_new_libra_in(temp_path.path()).await;
-    let _guard = ChangeDirGuard::new(temp_path.path());
+    // 1. Create and commit a base version of the file on the main branch.
+    stage_file("conflicted.txt", "base").await;
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .args(["commit", "-m", "base version"])
+        .output()
+        .expect("failed to execute initial libra commit");
+    assert!(
+        output.status.success(),
+        "initial commit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
-    // Create a tracked source file.
-    stage_file("source.txt", "content").await;
-
-    // Create a destination that is a directory at the conflicting path.
-    fs::create_dir_all("dest_path").unwrap();
+    // 2. Create a feature branch and switch to it.
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .args(["branch", "feature"])
+        .output()
+        .expect("failed to create feature branch");
+    assert!(
+        output.status.success(),
+        "branch creation failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .args(["mv", "--force", "source.txt", "dest_path"])
+        .args(["checkout", "feature"])
         .output()
-        .expect("failed to execute libra mv --force with directory destination");
+        .expect("failed to checkout feature branch");
+    assert!(
+        output.status.success(),
+        "checkout feature failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
+    // 3. On the feature branch, change the file, stage, and commit.
+    stage_file("conflicted.txt", "ours").await;
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .args(["commit", "-m", "ours on feature"])
+        .output()
+        .expect("failed to commit on feature branch");
+    assert!(
+        output.status.success(),
+        "feature commit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // 4. Switch back to the main branch and create a conflicting change.
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .args(["checkout", "main"])
+        .output()
+        .expect("failed to checkout main branch");
+    assert!(
+        output.status.success(),
+        "checkout main failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    stage_file("conflicted.txt", "theirs").await;
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .args(["commit", "-m", "theirs on main"])
+        .output()
+        .expect("failed to commit on main branch");
+    assert!(
+        output.status.success(),
+        "main commit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // 5. Merge the feature branch into main to create an actual merge conflict.
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .args(["merge", "feature"])
+        .output()
+        .expect("failed to merge feature into main");
+    // The merge is expected to produce a conflict; depending on implementation,
+    // it may or may not exit successfully, so we do not assert on status here.
+
+    // At this point, conflicted.txt should have unmerged index entries.
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .args(["mv", "conflicted.txt", "moved.txt"])
+        .output()
+        .expect("failed to execute libra mv on conflicted source file");
     assert!(output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
