@@ -266,7 +266,7 @@ fn resolve_move_directory(
     Ok(tracked_moves)
 }
 
-/// Check if the source file is in conflict in the index
+/// Checks if the source file is in conflict in the index.
 fn is_conflicted_in_index(index: &Index, src: &Path) -> bool {
     let src_str = util::path_to_string(&util::to_workdir_path(src));
     (1..=3).any(|stage| index.tracked(&src_str, stage))
