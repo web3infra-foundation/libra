@@ -130,6 +130,10 @@ async fn test_mv_force_overwrites_existing_file() {
     assert!(!temp_path.path().join("src.txt").exists());
     let dst_content = fs::read_to_string(temp_path.path().join("dst.txt")).unwrap();
     assert_eq!(dst_content, "new-content");
+
+    let index = Index::load(path::index()).unwrap();
+    assert!(!index.tracked("src.txt", 0));
+    assert!(index.tracked("dst.txt", 0));
 }
 
 #[tokio::test]
