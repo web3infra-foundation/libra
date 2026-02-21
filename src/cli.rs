@@ -92,6 +92,8 @@ enum Commands {
     Merge(command::merge::MergeArgs),
     #[command(about = "Reset current HEAD to specified state")]
     Reset(command::reset::ResetArgs),
+    #[command(about = "Move or rename a file, a directory, or a symlink")]
+    Mv(command::mv::MvArgs),
     #[command(about = "Apply the changes introduced by some existing commits")]
     CherryPick(command::cherry_pick::CherryPickArgs),
     #[command(about = "Update remote refs along with associated objects")]
@@ -295,6 +297,11 @@ pub async fn parse_async(args: Option<&[&str]>) -> Result<(), GitError> {
         Commands::Rebase(args) => command::rebase::execute(args).await,
         Commands::Merge(args) => command::merge::execute(args).await,
         Commands::Reset(args) => command::reset::execute(args).await,
+        Commands::Mv(args) => {
+            command::mv::execute(args)
+                .await
+                .map_err(GitError::CustomError)?;
+        }
         Commands::CherryPick(args) => command::cherry_pick::execute(args).await,
         Commands::Push(args) => command::push::execute(args).await,
         Commands::IndexPack(args) => command::index_pack::execute(args),
