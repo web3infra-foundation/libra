@@ -131,9 +131,6 @@ acceptance:
       required: true
       artifactsProduced:
       - provenance-attestation
-  qualityGates:
-    requireNewTestsWhenBugfix: true
-    maxAllowedRegression: low
 constraints:
   security:
     networkPolicy: deny
@@ -198,6 +195,7 @@ security:
         writeRoots:
         - ./src/report
         - ./tests/contract
+        - ./openapi.yaml
         - ./reports
         maxWriteBytes: 5242880
     - tool: workspace.command

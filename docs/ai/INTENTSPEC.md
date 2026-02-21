@@ -56,7 +56,7 @@ git commit + SBOM + attestation + Rekor proof
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://intentspec.io/schemas/v1/intent-spec-libra.schema.json",
+  "$id": "urn:libra:intentspec:v1",
   "title": "IntentSpec (Libra Edition)",
   "description": "Machine-readable AI code-change intent contract. Drives the orchestrator to produce a Task DAG, execute verification gates, and bind provenance artefacts.",
   "type": "object",
@@ -454,7 +454,7 @@ git commit + SBOM + attestation + Rekor proof
           "type": "array",
           "items": { "type": "string", "minLength": 1, "maxLength": 256 },
           "default": [],
-          "description": "Explicitly blocked domains (higher priority than allowedDomains). Use '*' to block all external domains and rely solely on the allowedDomains whitelist."
+          "description": "Explicitly blocked domains used to further restrict allowedDomains. When domainAllowlistMode=allowlist-only and blockedDomains=[\"*\"], only domains explicitly listed in allowedDomains are reachable; all other domains are blocked."
         },
         "minCitationsPerDecision": {
           "type": "integer", "minimum": 0, "maximum": 20, "default": 1,
@@ -652,7 +652,7 @@ git commit + SBOM + attestation + Rekor proof
         "required": { "type": "boolean", "default": true },
         "format": {
           "type": "string", "maxLength": 64, "default": "",
-          "description": "Artefact format identifier: 'git-diff', 'junit+xml', 'sarif', 'spdx-json', 'cyclonedx-json', 'in-toto+json', 'rekor-inclusion-proof', 'markdown'. Written to ArtifactRef.content_type."
+          "description": "Artefact format identifier: 'git-diff', 'junit+xml', 'sarif', 'spdx-json', 'cyclonedx-json', 'in-toto+json', 'rekor-inclusion-proof', 'markdown', 'text'. Written to ArtifactRef.content_type. Open set: additional formats may be used by convention."
         }
       }
     },
@@ -913,7 +913,7 @@ git commit + SBOM + attestation + Rekor proof
 
 **`strategy=repo-first`** means the orchestrator prioritises information from within the target repository (code, comments, README, existing tests). External network access is minimised. This reduces the attack surface for malicious content embedded in external documentation.
 
-**`domainAllowlistMode=allowlist-only`** with `blockedDomains=["*"]` is the strictest configuration: only domains explicitly listed in `allowedDomains` can be accessed. No wildcard expansion. Url-type `ContextItem` enqueuing is pre-flight checked; blocked items are rejected without being added to the pipeline.
+**`domainAllowlistMode=allowlist-only`** with `blockedDomains=["*"]` is the strictest configuration: only domains explicitly listed in `allowedDomains` can be accessed. Evaluation order is: check `allowedDomains` first, then apply `blockedDomains` as a subtractive deny-list for any non-allowlisted domains. Url-type `ContextItem` enqueuing is pre-flight checked; blocked items are rejected without being added to the pipeline.
 
 **`minCitationsPerDecision`** forces the orchestrator to log evidence provenance for key decisions. When set to 3, the orchestrator refuses to select an algorithm or library without having at least 3 supporting sources in the ContextPipeline, which creates an auditable evidence chain.
 
@@ -1061,7 +1061,7 @@ This log, combined with `Libra Intent.statuses`, provides a complete audit trail
 
 See files:
 - [`intentspec_minimal.json`](intentspec_minimal.json) — machine-readable, for testing and validation
-- [`intentspec_minimal.yaml`](intentspec_minimal.yaml) — human-readable, annotated with inline comments
+- [`intentspec_minimal.yaml`](intentspec_minimal.yaml) — human-readable YAML representation
 
 ---
 

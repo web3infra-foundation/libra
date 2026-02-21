@@ -37,7 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 - `delta` / `zstdelta` / `diff.rs`: delta compression, zstd dictionary delta, line-level diff.
 - `internal/pack`: pack decode/encode, waitlist, cache, idx building.
 - `protocol/*`: smart protocol + HTTP/SSH adapters, wrapping info-refs/upload-pack/receive-pack.
-- Docs: [docs/ARCHITECTURE.md (architecture)](docs/ARCHITECTURE.md), [docs/GIT_OBJECTS.md (objects)](docs/GIT_OBJECTS.md), [docs/GIT_PROTOCOL_GUIDE.md (protocol)](docs/GIT_PROTOCOL_GUIDE.md), [docs/ai.md (AI objects)](docs/ai.md), [docs/intentspec/INTENTSPEC.md (IntentSpec design)](docs/intentspec/INTENTSPEC.md).
+- Docs: [docs/ARCHITECTURE.md (architecture)](docs/ARCHITECTURE.md), [docs/GIT_OBJECTS.md (objects)](docs/GIT_OBJECTS.md), [docs/GIT_PROTOCOL_GUIDE.md (protocol)](docs/GIT_PROTOCOL_GUIDE.md), [docs/ai/ai.md (AI objects)](docs/ai/ai.md), [docs/ai/INTENTSPEC.md (IntentSpec design)](docs/ai/INTENTSPEC.md).
 
 ## Key Features
 
@@ -111,9 +111,9 @@ A structured object graph that captures the full lifecycle of AI-assisted code c
 | **ContextSnapshot** | Static capture of files/URLs/snippets at Run start |
 | **ContextPipeline** | Dynamic sliding-window context accumulated during planning |
 
-All AI objects share a common `Header` (UUID, timestamps, creator) and are serialized as JSON. See [docs/ai.md](docs/ai.md) for the full lifecycle, field-level documentation, and usage examples.
+All AI objects share a common `Header` (UUID, timestamps, creator) and are serialized as JSON. See [docs/ai.md](docs/ai/ai.md) for the full lifecycle, field-level documentation, and usage examples.
 
-For authoring AI-driven code changes, see **[IntentSpec](docs/intentspec/INTENTSPEC.md)** — a machine-readable intent contract format (JSON Schema Draft 2020-12) that drives the orchestrator to produce a Task DAG, enforce verification gates, and bind SLSA provenance artefacts to every change. The doc includes the complete schema, field-by-field reference, and three worked examples (low / medium / high-assurance).
+For authoring AI-driven code changes, see **[IntentSpec](docs/ai/INTENTSPEC.md)** — a machine-readable intent contract format (JSON Schema Draft 2020-12) that drives the orchestrator to produce a Task DAG, enforce verification gates, and bind SLSA provenance artefacts to every change. The doc includes the complete schema, field-by-field reference, and three worked examples (low / medium / high-assurance).
 
 ## Core Algorithms
 

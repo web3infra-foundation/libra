@@ -172,10 +172,6 @@
           ]
         }
       ]
-    },
-    "qualityGates": {
-      "requireNewTestsWhenBugfix": true,
-      "maxAllowedRegression": "low"
     }
   },
   "constraints": {
@@ -257,6 +253,7 @@
             "writeRoots": [
               "./src/report",
               "./tests/contract",
+              "./openapi.yaml",
               "./reports"
             ],
             "maxWriteBytes": 5242880
