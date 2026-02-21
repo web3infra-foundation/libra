@@ -739,13 +739,13 @@ mod tests {
 
         // Filter with allowed_tools
         let mut filtered = registry_tool_definitions(&registry);
-        let allowed = ["nonexistent_tool".to_string()];
+        let allowed = vec!["nonexistent_tool".to_string()];
         filtered.retain(|t| allowed.iter().any(|a| a == &t.name));
         assert!(filtered.is_empty());
 
         // Filter with allowed_tools that includes mock_tool
         let mut filtered = registry_tool_definitions(&registry);
-        let allowed = ["mock_tool".to_string()];
+        let allowed = vec!["mock_tool".to_string()];
         filtered.retain(|t| allowed.iter().any(|a| a == &t.name));
         assert_eq!(filtered.len(), 1);
     }
