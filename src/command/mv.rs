@@ -4,7 +4,6 @@ use clap::Parser;
 use git_internal::internal::index::Index;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-// use std::env;
 #[derive(Parser, Debug)]
 pub struct MvArgs {
     /// Path list: one or more <source> followed by <destination>
