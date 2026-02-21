@@ -34,13 +34,13 @@
     ],
     "inScope": [
       "Middleware and JWT validation logic under src/auth/",
-      "Security regression tests under tests/security/",
-      "Audit log module (src/audit/) — read-only, logic must not be modified"
+      "Security regression tests under tests/security/"
     ],
     "outOfScope": [
       "Do not change permission model semantics (fix JWT validation implementation only, do not alter permission assignment logic)",
       "Do not introduce any new dependencies (enforced by dependencyPolicy: no-new)",
-      "Do not modify API response structures or interface contracts"
+      "Do not modify API response structures or interface contracts",
+      "Audit log module (src/audit/) — read-only, logic must not be modified"
     ],
     "touchHints": {
       "files": [
@@ -202,7 +202,6 @@
       ]
     },
     "qualityGates": {
-      "requireNewTestsWhenBugfix": true,
       "maxAllowedRegression": "none"
     }
   },

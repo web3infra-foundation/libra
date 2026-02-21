@@ -63,9 +63,6 @@ acceptance:
       required: true
       artifactsProduced:
       - test-log
-    integrationChecks: []
-    securityChecks: []
-    releaseChecks:
     - id: lint
       kind: command
       command: npm run lint
@@ -73,6 +70,8 @@ acceptance:
       expectedExitCode: 0
       required: true
       artifactsProduced: []
+    integrationChecks: []
+    securityChecks: []
   qualityGates:
     requireNewTestsWhenBugfix: true
     maxAllowedRegression: none

@@ -37,7 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 - `delta` / `zstdelta` / `diff.rs`: delta compression, zstd dictionary delta, line-level diff.
 - `internal/pack`: pack decode/encode, waitlist, cache, idx building.
 - `protocol/*`: smart protocol + HTTP/SSH adapters, wrapping info-refs/upload-pack/receive-pack.
-- Docs: [docs/ARCHITECTURE.md (architecture)](docs/ARCHITECTURE.md), [docs/GIT_OBJECTS.md (objects)](docs/GIT_OBJECTS.md), [docs/GIT_PROTOCOL_GUIDE.md (protocol)](docs/GIT_PROTOCOL_GUIDE.md), [docs/ai/ai.md (AI objects)](docs/ai/ai.md), [docs/ai/INTENTSPEC.md (IntentSpec design)](docs/ai/INTENTSPEC.md).
+- Docs: ARCHITECTURE.md (architecture, coming soon), GIT_OBJECTS.md (objects, coming soon), GIT_PROTOCOL_GUIDE.md (protocol, coming soon), [docs/ai/ai.md (AI objects)](docs/ai/ai.md), [docs/ai/INTENTSPEC.md (IntentSpec design)](docs/ai/INTENTSPEC.md).
 
 ## Key Features
 
@@ -251,4 +251,3 @@ When you update dependencies in Cargo.toml, regenerate Buck metadata and third-p
 ```bash
 cargo buckal migrate
 ```
-
