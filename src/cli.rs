@@ -39,7 +39,6 @@ async fn set_local_hash_kind() -> Result<(), GitError> {
     about = "Libra: An AI native version control system for monorepo and trunk-based development.",
     version = "0.1.0"
 )]
-
 struct Cli {
     #[command(subcommand)]
     command: Commands,
