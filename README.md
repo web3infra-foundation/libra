@@ -39,7 +39,7 @@ Commands:
   push         Update remote refs along with associated objects
   fetch        Download objects and refs from another repository
   pull         Fetch from and integrate with another repository or a local branch
-  diff         Show differences between files
+  diff         Show changes between commits, commit and working tree, etc
   blame        Show author and history of each line of a file
   revert       Revert some existing commits
   remote       Manage set of tracked repositories
@@ -193,9 +193,9 @@ Configure object storage by setting these environment variables:
 
 ## 🚧 Pending Git commands (not yet supported)
 
-The following Git top‑level commands are currently **not implemented** in Libra (excluding `submodule` and `subtree`, which are intentionally omitted):
+The following Git top-level commands are currently **not implemented** in Libra (excluding `submodule` and `subtree`, which are intentionally omitted):
 
-- `gc` – garbage‑collect unreachable objects and pack files
+- `gc` – garbage-collect unreachable objects and pack files
 - `prune` – remove loose objects that are no longer reachable
 - `fsck` – verify repository integrity
 - `maintenance` – periodic maintenance tasks
@@ -203,30 +203,29 @@ The following Git top‑level commands are currently **not implemented** in Libr
 - `hash-object` – compute object hash for raw data
 - `rev-parse` – resolve revisions, refs, and object IDs
 - `rev-list` – list reachable commits
-- `describe` – human‑readable description based on tags
+- `describe` – human-readable description based on tags
 - `show-ref` – list all refs
 - `symbolic-ref` – read/write symbolic refs
 - `verify-pack` – validate pack files
 - `pack-objects` / `unpack-objects` – pack and unpack object collections
 - `ls-remote` – list remote references
 - `remote-show` – show detailed remote info
-- `remote-prune` – prune stale remote‑tracking branches
-- `fetch-pack` / `push-pack` – low‑level fetch/push operations
+- `remote-prune` – prune stale remote-tracking branches
+- `fetch-pack` / `push-pack` – low-level fetch/push operations
 - `grep` – search file contents with regex
 - `bisect` – binary search for a bad commit
 - `filter-branch` (or `git filter-repo`) – rewrite history
 - `notes` – attach arbitrary metadata to objects
 - `archive` – create tar/zip archives of tree snapshots
 - `rebase --autosquash` / `rebase --reapply-cherry-picks` – advanced rebase options
-- `worktree prune` / `worktree lock` / `worktree unlock` – full worktree lifecycle management
 
 These commands are slated for future implementation according to the project roadmap.
 
 ## Note on Submodule and Subtree
 
-Libra does **not** provide the `submodule` or `subtree` commands. Because Libra stores objects in an S3‑compatible backend and is designed around a **Monorepo** layout with **Trunk‑based Development**, the use‑cases that `git submodule`/`git subtree` address (embedding separate repositories) are handled differently – large external data lives in S3 and all code lives in a single repository.
+Libra does **not** provide the `submodule` or `subtree` commands. Because Libra stores objects in an S3-compatible backend and is designed around a **Monorepo** layout with **Trunk-based Development**, the use-cases that `git submodule`/`git subtree` address (embedding separate repositories) are handled differently – large external data lives in S3 and all code lives in a single repository.
 
-This design choice simplifies dependency management and aligns with Libra’s goal of supporting ultra‑large repositories while keeping a single source of truth.
+This design choice simplifies dependency management and aligns with Libra’s goal of supporting ultra-large repositories while keeping a single source of truth.
 
 ## Contributing & Development
 

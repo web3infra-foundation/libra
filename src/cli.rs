@@ -43,7 +43,7 @@ struct Cli {
     command: Commands,
 }
 
-/// THe Commands enum represents the subcommands that can be used with the CLI.
+/// The Commands enum represents the subcommands that can be used with the CLI.
 /// subcommand's execute and args are defined in `command` module
 #[derive(Subcommand, Debug)]
 enum Commands {
