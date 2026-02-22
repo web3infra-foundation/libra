@@ -1,4 +1,6 @@
-//! CLI entry for Libra, defining clap subcommands, setting the hash algorithm from config, and dispatching each command handler.
+//! CLI entry for Libra, defining clap subcommands, setting the hash algorithm from config,
+//! and dispatching each command handler.
+
 use std::env;
 
 use clap::{Parser, Subcommand};
@@ -8,6 +10,7 @@ use git_internal::{
 };
 
 use crate::{command, utils};
+
 /// Reads the repository's configuration and sets the global hash kind.
 /// This must be called for any command that operates within an existing repository.
 async fn set_local_hash_kind() -> Result<(), GitError> {
@@ -32,7 +35,7 @@ async fn set_local_hash_kind() -> Result<(), GitError> {
 // The Cli struct represents the root of the command line interface.
 #[derive(Parser, Debug)]
 #[command(
-    about = "Libra: A partial Git implemented in Rust",
+    about = "Libra: An AI‑agent‑friendly, S3‑backed Git‑compatible version control system for monorepos and trunk‑based development",
     version = "0.1.0-pre"
 )]
 struct Cli {
