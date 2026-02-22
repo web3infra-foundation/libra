@@ -11,30 +11,43 @@ The `libra code` command starts an interactive TUI (with a background web server
 ## Example
 
 ```bash
-$ libra --help
-Simulates git commands
+$ libra
 
 Usage: libra <COMMAND>
 
 Commands:
-  init     Initialize a new repository
-  clone    Clone a repository into a new directory
-  code     Start Libra Code interactive TUI (with a background web server)
-  add      Add file contents to the index
-  rm       Remove files from the working tree and from the index
-  restore  Restore working tree files
-  status   Show the working tree status
-  log      Show commit logs
-  diff     Show changes between commits, commit and working tree, etc
-  branch   List, create, or delete branches
-  commit   Record changes to the repository
-  switch   Switch branches
-  merge    Merge changes
-  push     Update remote refs along with associated objects
-  fetch    Download objects and refs from another repository
-  pull     Fetch from and integrate with another repository or a local branch
-  remote   Manage set of tracked repositories
-  help     Print this message or the help of the given subcommand(s)
+  init         Initialize a new repository
+  clone        Clone a repository into a new directory
+  code         Start Libra Code interactive TUI (with background web server)
+  add          Add file contents to the index
+  rm           Remove files from the working tree and from the index
+  restore      Restore working tree files
+  status       Show the working tree status
+  clean        Remove untracked files from the working tree
+  stash        Stash the changes in a dirty working directory away
+  lfs          Large File Storage
+  log          Show commit logs
+  show         Show various types of objects
+  branch       List, create, or delete branches
+  tag          Create a new tag
+  commit       Record changes to the repository
+  switch       Switch branches
+  rebase       Reapply commits on top of another base tip
+  merge        Merge changes
+  reset        Reset current HEAD to specified state
+  cherry-pick  Apply the changes introduced by some existing commits
+  push         Update remote refs along with associated objects
+  fetch        Download objects and refs from another repository
+  pull         Fetch from and integrate with another repository or a local branch
+  diff         Show differences between files
+  blame        Show author and history of each line of a file
+  revert       Revert some existing commits
+  remote       Manage set of tracked repositories
+  open         Open the repository in the browser
+  config       Manage repository configurations
+  reflog       Manage the log of reference changes (e.g., HEAD, branches)
+  worktree     Manage multiple working trees attached to this repository
+  help         Print this message or the help of the given subcommand(s)
 
 Options:
   -h, --help     Print help
