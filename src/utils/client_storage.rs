@@ -364,7 +364,6 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::ClientStorage;
-    use crate::utils::test;
 
     // Helper to build packs (copied from previous version for tests)
     async fn encode_entries_to_pack_bytes(entries: Vec<Entry>) -> Result<Vec<u8>, GitError> {
@@ -454,13 +453,13 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[serial]
     fn test_content_store() {
         let content = "Hello, world!";
         let blob = Blob::from_content(content);
 
-        let mut source = PathBuf::from(test::find_cargo_dir().parent().unwrap());
-        source.push("tests/objects");
+        let _tmp = tempdir().unwrap();
+        let source = _tmp.path().join("objects");
 
         let client_storage = ClientStorage::init(source.clone());
         assert!(
@@ -479,8 +478,8 @@ mod tests {
     async fn test_search() {
         let blob = Blob::from_content("Hello, world!");
 
-        let mut source = PathBuf::from(test::find_cargo_dir().parent().unwrap());
-        source.push("tests/objects");
+        let _tmp = tempdir().unwrap();
+        let source = _tmp.path().join("objects");
 
         let client_storage = ClientStorage::init(source.clone());
         assert!(
