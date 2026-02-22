@@ -11,30 +11,43 @@ The `libra code` command starts an interactive TUI (with a background web server
 ## Example
 
 ```bash
-$ libra --help
-Simulates git commands
+$ libra
 
 Usage: libra <COMMAND>
 
 Commands:
-  init     Initialize a new repository
-  clone    Clone a repository into a new directory
-  code     Start Libra Code interactive TUI (with a background web server)
-  add      Add file contents to the index
-  rm       Remove files from the working tree and from the index
-  restore  Restore working tree files
-  status   Show the working tree status
-  log      Show commit logs
-  diff     Show changes between commits, commit and working tree, etc
-  branch   List, create, or delete branches
-  commit   Record changes to the repository
-  switch   Switch branches
-  merge    Merge changes
-  push     Update remote refs along with associated objects
-  fetch    Download objects and refs from another repository
-  pull     Fetch from and integrate with another repository or a local branch
-  remote   Manage set of tracked repositories
-  help     Print this message or the help of the given subcommand(s)
+  init         Initialize a new repository
+  clone        Clone a repository into a new directory
+  code         Start Libra Code interactive TUI (with background web server)
+  add          Add file contents to the index
+  rm           Remove files from the working tree and from the index
+  restore      Restore working tree files
+  status       Show the working tree status
+  clean        Remove untracked files from the working tree
+  stash        Stash the changes in a dirty working directory away
+  lfs          Large File Storage
+  log          Show commit logs
+  show         Show various types of objects
+  branch       List, create, or delete branches
+  tag          Create a new tag
+  commit       Record changes to the repository
+  switch       Switch branches
+  rebase       Reapply commits on top of another base tip
+  merge        Merge changes
+  reset        Reset current HEAD to specified state
+  cherry-pick  Apply the changes introduced by some existing commits
+  push         Update remote refs along with associated objects
+  fetch        Download objects and refs from another repository
+  pull         Fetch from and integrate with another repository or a local branch
+  diff         Show changes between commits, commit and working tree, etc
+  blame        Show author and history of each line of a file
+  revert       Revert some existing commits
+  remote       Manage set of tracked repositories
+  open         Open the repository in the browser
+  config       Manage repository configurations
+  reflog       Manage the log of reference changes (e.g., HEAD, branches)
+  worktree     Manage multiple working trees attached to this repository
+  help         Print this message or the help of the given subcommand(s)
 
 Options:
   -h, --help     Print help
@@ -177,6 +190,42 @@ Configure object storage by setting these environment variables:
 > Note: If any mandatory variable is invalid or empty (for example, empty bucket or credentials), Libra automatically falls back to local storage and logs an error message.
 
 ---
+
+## 🚧 Pending Git commands (not yet supported)
+
+The following Git top-level commands are currently **not implemented** in Libra (excluding `submodule` and `subtree`, which are intentionally omitted):
+
+- `gc` – garbage-collect unreachable objects and pack files
+- `prune` – remove loose objects that are no longer reachable
+- `fsck` – verify repository integrity
+- `maintenance` – periodic maintenance tasks
+- `cat-file` – display raw object contents
+- `hash-object` – compute object hash for raw data
+- `rev-parse` – resolve revisions, refs, and object IDs
+- `rev-list` – list reachable commits
+- `describe` – human-readable description based on tags
+- `show-ref` – list all refs
+- `symbolic-ref` – read/write symbolic refs
+- `verify-pack` – validate pack files
+- `pack-objects` / `unpack-objects` – pack and unpack object collections
+- `ls-remote` – list remote references
+- `remote-show` – show detailed remote info
+- `remote-prune` – prune stale remote-tracking branches
+- `fetch-pack` / `push-pack` – low-level fetch/push operations
+- `grep` – search file contents with regex
+- `bisect` – binary search for a bad commit
+- `filter-branch` (or `git filter-repo`) – rewrite history
+- `notes` – attach arbitrary metadata to objects
+- `archive` – create tar/zip archives of tree snapshots
+- `rebase --autosquash` / `rebase --reapply-cherry-picks` – advanced rebase options
+
+These commands are slated for future implementation according to the project roadmap.
+
+## Note on Submodule and Subtree
+
+Libra does **not** provide the `submodule` or `subtree` commands. Because Libra stores objects in an S3-compatible backend and is designed around a **Monorepo** layout with **Trunk-based Development**, the use-cases that `git submodule`/`git subtree` address (embedding separate repositories) are handled differently – large external data lives in S3 and all code lives in a single repository.
+
+This design choice simplifies dependency management and aligns with Libra’s goal of supporting ultra-large repositories while keeping a single source of truth.
 
 ## Contributing & Development
 

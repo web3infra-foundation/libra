@@ -1,4 +1,6 @@
-//! CLI entry for Libra, defining clap subcommands, setting the hash algorithm from config, and dispatching each command handler.
+//! CLI entry for Libra, defining clap subcommands, setting the hash algorithm from config,
+//! and dispatching each command handler.
+
 use std::env;
 
 use clap::{Parser, Subcommand};
@@ -8,6 +10,7 @@ use git_internal::{
 };
 
 use crate::{command, utils};
+
 /// Reads the repository's configuration and sets the global hash kind.
 /// This must be called for any command that operates within an existing repository.
 async fn set_local_hash_kind() -> Result<(), GitError> {
@@ -29,18 +32,19 @@ async fn set_local_hash_kind() -> Result<(), GitError> {
     set_hash_kind(hash_kind);
     Ok(())
 }
+
 // The Cli struct represents the root of the command line interface.
 #[derive(Parser, Debug)]
 #[command(
-    about = "Libra: A partial Git implemented in Rust",
-    version = "0.1.0-pre"
+    about = "Libra: An AI native version control system for monorepo and trunk-based development.",
+    version = "0.1.0"
 )]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
 }
 
-/// THe Commands enum represents the subcommands that can be used with the CLI.
+/// The Commands enum represents the subcommands that can be used with the CLI.
 /// subcommand's execute and args are defined in `command` module
 #[derive(Subcommand, Debug)]
 enum Commands {
@@ -102,7 +106,7 @@ enum Commands {
     Fetch(command::fetch::FetchArgs),
     #[command(about = "Fetch from and integrate with another repository or a local branch")]
     Pull(command::pull::PullArgs),
-    #[command(about = "Show differences between files")]
+    #[command(about = "Show changes between commits, commit and working tree, etc")]
     Diff(command::diff::DiffArgs),
     #[command(about = "Show author and history of each line of a file")]
     Blame(command::blame::BlameArgs),

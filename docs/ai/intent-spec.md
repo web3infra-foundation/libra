@@ -1,4 +1,4 @@
-# IntentSpec Design Reference
+# IntentSpec Design
 
 **Version:** 1.0.0  
 **Spec foundations:** JSON Schema Draft 2020-12 · NIST SSDF · SLSA v1.0 · OWASP LLM Top 10 (2025)  
