@@ -36,7 +36,7 @@ async fn set_local_hash_kind() -> Result<(), GitError> {
 // The Cli struct represents the root of the command line interface.
 #[derive(Parser, Debug)]
 #[command(
-    about = "Libra: An ai native version control system for monorepo and trunk-based development.",
+    about = "Libra: An AI native version control system for monorepo and trunk-based development.",
     version = "0.1.0"
 )]
 
