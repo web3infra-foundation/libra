@@ -32,12 +32,14 @@ async fn set_local_hash_kind() -> Result<(), GitError> {
     set_hash_kind(hash_kind);
     Ok(())
 }
+
 // The Cli struct represents the root of the command line interface.
 #[derive(Parser, Debug)]
 #[command(
-    about = "Libra: An AI‑agent‑friendly, S3‑backed Git‑compatible version control system for monorepos and trunk‑based development",
-    version = "0.1.0-pre"
+    about = "Libra: An agent native, S3 backed git‑compatible version control system for monorepos and trunk‑based development",
+    version = "0.1.0"
 )]
+
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -103,7 +105,7 @@ enum Commands {
     Fetch(command::fetch::FetchArgs),
     #[command(about = "Fetch from and integrate with another repository or a local branch")]
     Pull(command::pull::PullArgs),
-    #[command(about = "Show differences between files")]
+    #[command(about = "Show changes between commits, commit and working tree, etc")]
     Diff(command::diff::DiffArgs),
     #[command(about = "Show author and history of each line of a file")]
     Blame(command::blame::BlameArgs),
