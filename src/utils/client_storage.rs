@@ -453,13 +453,13 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[serial]
     fn test_content_store() {
         let content = "Hello, world!";
         let blob = Blob::from_content(content);
 
-        let tmp = tempdir().unwrap();
-        let source = tmp.path().join("objects");
+        let _tmp = tempdir().unwrap();
+        let source = _tmp.path().join("objects");
 
         let client_storage = ClientStorage::init(source.clone());
         assert!(
@@ -478,8 +478,8 @@ mod tests {
     async fn test_search() {
         let blob = Blob::from_content("Hello, world!");
 
-        let tmp = tempdir().unwrap();
-        let source = tmp.path().join("objects");
+        let _tmp = tempdir().unwrap();
+        let source = _tmp.path().join("objects");
 
         let client_storage = ClientStorage::init(source.clone());
         assert!(
