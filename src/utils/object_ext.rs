@@ -21,6 +21,7 @@ use crate::utils::{lfs, util};
 
 pub trait TreeExt {
     fn load(hash: &ObjectHash) -> Tree;
+    fn try_load(hash: &ObjectHash) -> Option<Tree>;
     fn get_plain_items(&self) -> Vec<(PathBuf, ObjectHash)>;
     /// Get all the items in the tree recursively with mode information
     /// Returns (path, hash, mode) tuples
@@ -45,6 +46,14 @@ impl TreeExt for Tree {
         let storage = util::objects_storage();
         let tree_data = storage.get(hash).unwrap();
         Tree::from_bytes(&tree_data, *hash).unwrap()
+    }
+
+    fn try_load(hash: &ObjectHash) -> Option<Tree> {
+        let storage = util::objects_storage();
+        storage
+            .get(hash)
+            .ok()
+            .and_then(|tree_data| Tree::from_bytes(&tree_data, *hash).ok())
     }
 
     /// Get all the items in the tree recursively (to workdir path)

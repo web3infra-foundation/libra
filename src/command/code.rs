@@ -10,8 +10,8 @@ use std::{net::SocketAddr, sync::Arc};
 use axum::{Router, response::Html, routing::get};
 use clap::{Parser, ValueEnum};
 use tokio::sync::oneshot;
-use uuid::Uuid;
 
+// use uuid::Uuid;
 use crate::internal::{
     ai::{
         client::CompletionClient,
@@ -208,25 +208,24 @@ async fn execute_web_only(args: CodeArgs) {
     println!("Libra Code server running at http://{}", addr);
 
     // Prepare MCP server instance shared between the HTTP transport and TUI bridge
-    let cwd = match std::env::current_dir() {
-        Ok(path) => path,
-        Err(e) => {
-            eprintln!("Failed to get current directory: {}", e);
-            return;
-        }
-    };
+    // Use repository working directory to ensure correct initialization of .libra resources.
+    let working_dir = crate::utils::util::working_dir();
 
-    let mcp_server = init_mcp_server(&cwd, false);
+    let mcp_server = init_mcp_server(&working_dir);
 
     // Start MCP Server
-    let (mcp_handle, mcp_line) = match start_mcp_server(&args.host, args.mcp_port, mcp_server).await
-    {
-        Ok(handle) => {
-            let line = format!("MCP: http://{}", handle.addr);
-            (Some(handle), line)
-        }
-        Err(err) => (None, format!("MCP: failed to start ({err})")),
-    };
+    let (mcp_handle, mcp_line) =
+        match start_mcp_server(&args.host, args.mcp_port, mcp_server.clone()).await {
+            Ok(handle) => {
+                let line = format!("MCP: http://{}", handle.addr);
+                (Some(handle), line)
+            }
+            Err(err) => (None, format!("MCP: failed to start ({err})")),
+        };
+
+    // Create initial intent via MCP
+    create_initial_intent(&mcp_server).await;
+
     println!("{}", mcp_line);
 
     if let Err(e) = axum::serve(listener, app)
@@ -244,20 +243,15 @@ async fn execute_web_only(args: CodeArgs) {
 }
 
 async fn execute_tui(args: CodeArgs) {
-    let working_dir = match std::env::current_dir() {
-        Ok(path) => path,
-        Err(err) => {
-            eprintln!("error: failed to get current working directory: {}", err);
-            return;
-        }
-    };
+    // Use repository working directory to ensure correct initialization of .libra resources.
+    let working_dir = crate::utils::util::working_dir();
 
     let preamble = system_preamble(&working_dir, args.context.as_deref());
     let temperature = args.temperature;
     let resume = args.resume;
 
     // Prepare MCP server instance shared between the HTTP transport and TUI bridge
-    let mcp_server = init_mcp_server(&working_dir, false);
+    let mcp_server = init_mcp_server(&working_dir);
 
     // Create the bridge channel for request_user_input tool <-> TUI communication.
     let (user_input_tx, user_input_rx) = tokio::sync::mpsc::unbounded_channel::<
@@ -642,39 +636,12 @@ fn system_preamble(working_dir: &std::path::Path, context: Option<&str>) -> Stri
     builder.build()
 }
 
-/// Load the repo UUID from `.libra/repo_id`, or create one if not present.
-fn load_or_create_repo_id(working_dir: &std::path::Path) -> Uuid {
-    let repo_id_path = working_dir.join(".libra").join("repo_id");
-    if let Ok(content) = std::fs::read_to_string(&repo_id_path)
-        && let Ok(id) = content.trim().parse::<Uuid>()
-    {
-        return id;
-    }
-    let id = Uuid::new_v4();
-    // Best-effort persist; ignore errors (e.g. .libra dir missing)
-    let _ = std::fs::create_dir_all(repo_id_path.parent().unwrap());
-    let _ = std::fs::write(&repo_id_path, id.to_string());
-    id
-}
-
-fn init_mcp_server(working_dir: &std::path::Path, is_stdio: bool) -> Arc<LibraMcpServer> {
-    // Determine storage paths based on mode
-    let (objects_dir, dot_libra, repo_id) = if is_stdio {
-        // Stdio mode (e.g. Claude Desktop): Use ~/.libra/mcp/<repo_id>/ per-repo namespace
-        // to avoid sandbox permission issues and isolate concurrent sessions.
-        let repo_id = load_or_create_repo_id(working_dir);
-        let home_dir = dirs::home_dir().unwrap_or_else(std::env::temp_dir);
-        let libra_home = home_dir.join(".libra");
-        let mcp_root = libra_home.join("mcp").join(repo_id.to_string());
-        (mcp_root.join("objects"), mcp_root, repo_id)
-    } else {
-        // TUI/Web mode: Use the resolved .libra storage directory for isolation,
-        // supporting linked worktrees via try_get_storage_path.
-        let storage_dir = crate::utils::util::try_get_storage_path(Some(working_dir.to_path_buf()))
-            .unwrap_or_else(|_| working_dir.join(".libra"));
-        let repo_id = load_or_create_repo_id(working_dir);
-        (storage_dir.join("objects"), storage_dir, repo_id)
-    };
+fn init_mcp_server(working_dir: &std::path::Path) -> Arc<LibraMcpServer> {
+    // Use the resolved .libra storage directory for isolation, supporting
+    // linked worktrees via try_get_storage_path.
+    let storage_dir = crate::utils::util::try_get_storage_path(Some(working_dir.to_path_buf()))
+        .unwrap_or_else(|_| working_dir.join(".libra"));
+    let (objects_dir, dot_libra) = (storage_dir.join("objects"), storage_dir);
 
     // Try to create the directory. If it fails, we assume read-only or permission issues.
     if let Err(e) = std::fs::create_dir_all(&objects_dir) {
@@ -683,7 +650,7 @@ fn init_mcp_server(working_dir: &std::path::Path, is_stdio: bool) -> Arc<LibraMc
             objects_dir.display(),
             e
         );
-        return Arc::new(LibraMcpServer::new(None, None, repo_id));
+        return Arc::new(LibraMcpServer::new(None, None));
     }
 
     let storage = Arc::new(crate::utils::storage::local::LocalStorage::new(objects_dir));
@@ -691,20 +658,14 @@ fn init_mcp_server(working_dir: &std::path::Path, is_stdio: bool) -> Arc<LibraMc
     Arc::new(LibraMcpServer::new(
         Some(intent_history_manager),
         Some(storage),
-        repo_id,
     ))
 }
 
 async fn execute_stdio(_args: CodeArgs) {
-    let cwd = match std::env::current_dir() {
-        Ok(cwd) => cwd,
-        Err(e) => {
-            eprintln!("Failed to get current directory: {}", e);
-            return;
-        }
-    };
+    // Use repository working directory to ensure correct initialization of .libra resources
+    let working_dir = crate::utils::util::working_dir();
 
-    let mcp_server = init_mcp_server(&cwd, true);
+    let mcp_server = init_mcp_server(&working_dir);
 
     use rmcp::{
         service::serve_server,

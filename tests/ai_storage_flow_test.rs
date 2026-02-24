@@ -38,7 +38,7 @@ async fn test_ai_flow_local() {
     let history_manager = HistoryManager::new(storage.clone(), libra_dir.clone());
 
     // 2. User creates a Task
-    let repo_id = Uuid::new_v4();
+    // let _repo_id = Uuid::new_v4();
     let actor = ActorRef::human("jackie").unwrap();
     let mut task = Task::new(actor.clone(), "Refactor Storage", Some(GoalType::Refactor)).unwrap();
     task.add_constraint("Must use StorageExt");
@@ -169,7 +169,7 @@ async fn test_ai_flow_r2() {
     let storage = Arc::new(RemoteStorage::new(Arc::new(s3)));
 
     // 3. User creates a Task
-    let repo_id = Uuid::new_v4();
+    let _repo_id = Uuid::new_v4();
     let actor = ActorRef::human("jackie-r2").unwrap();
     let task = Task::new(actor, "Test R2 Storage", Some(GoalType::Chore)).unwrap();
 

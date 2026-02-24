@@ -7,7 +7,7 @@
 - Buck2/Buckal metadata is in `third-party/`; prefer Cargo and regenerate BUCK files when dependencies change.
 
 ## Build, Test, and Development Commands
-- `cargo +nightly fmt --all` then `cargo clippy --all-targets --all-features` keep formatting and linting aligned (`rustfmt.toml` groups imports by crate).
+- `cargo +nightly fmt --all` then `cargo clippy --all-targets --all-features` keep formatting and linting aligned (`rustfmt.toml` groups imports by crate). **All `cargo clippy` warnings must be resolved before committing; treat clippy warnings as errors.**
 - `cargo build` or `cargo check` for quick compile checks; `cargo run -- <cmd>` exercises the CLI (e.g., `cargo run -- status` in a temp repo).
 - `cargo test` runs the suite; filter with `cargo test command::init_test` or `cargo test add_test`. Integration cases rely on temp dirs; run serial if flaky.
 - After editing `Cargo.toml` deps, run `cargo buckal migrate` to sync Buck2 files (see `third-party/README.md`).

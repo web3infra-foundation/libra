@@ -19,8 +19,8 @@ use rmcp::{
     RoleServer, ServerHandler, handler::server::router::tool::ToolRouter, model::*,
     service::RequestContext, tool_handler,
 };
-use uuid::Uuid;
 
+// use uuid::Uuid;
 use crate::{
     internal::ai::history::HistoryManager,
     utils::{storage::Storage, storage_ext::StorageExt},
@@ -30,7 +30,7 @@ use crate::{
 pub struct LibraMcpServer {
     pub intent_history_manager: Option<Arc<HistoryManager>>,
     pub storage: Option<Arc<dyn Storage + Send + Sync>>,
-    pub repo_id: Uuid,
+    // pub repo_id: Uuid,
     tool_router: ToolRouter<LibraMcpServer>,
 }
 
@@ -38,12 +38,10 @@ impl LibraMcpServer {
     pub fn new(
         intent_history_manager: Option<Arc<HistoryManager>>,
         storage: Option<Arc<dyn Storage + Send + Sync>>,
-        repo_id: Uuid,
     ) -> Self {
         Self {
             intent_history_manager,
             storage,
-            repo_id,
             tool_router: Self::build_tool_router(),
         }
     }
