@@ -1,7 +1,12 @@
 use std::sync::Arc;
 
+use git_internal::internal::object::{
+    intent::{Intent, IntentStatus},
+    task::Task,
+    types::ActorRef,
+};
 use libra::{
-    internal::ai::{history::HistoryManager, intent::Intent},
+    internal::ai::history::HistoryManager,
     utils::{storage::local::LocalStorage, storage_ext::StorageExt, test},
 };
 use tempfile::tempdir;
@@ -45,14 +50,9 @@ async fn test_intent_flow() {
     );
 
     // 3. Create Root Intent
-    let actor = git_internal::internal::object::types::ActorRef::human("jackie").unwrap();
-    let root_intent = Intent::new(
-        uuid::Uuid::new_v4(),
-        "Initial high-level goal: Refactor system".to_string(),
-        None,
-        None,
-        Some(actor.clone()),
-    );
+    let actor = ActorRef::human("jackie").unwrap();
+    let root_intent = Intent::new(actor.clone(), "Initial high-level goal: Refactor system")
+        .expect("root intent");
 
     let root_hash = storage
         .put_tracked(&root_intent, &ai_history)
@@ -61,13 +61,11 @@ async fn test_intent_flow() {
     println!("Stored Root Intent: {}", root_hash);
 
     // 4. Create Child Intent
-    let child_intent = Intent::new(
-        uuid::Uuid::new_v4(),
-        "Sub-goal: Move Intent struct to libra".to_string(),
-        Some(root_intent.id),
-        None,
-        Some(actor.clone()),
-    );
+    let mut child_intent =
+        Intent::new(actor.clone(), "Sub-goal: Move Intent struct to libra").expect("child intent");
+
+    child_intent.set_parent(Some(root_intent.header().object_id()));
+    child_intent.set_status(IntentStatus::Active);
 
     let child_hash = storage
         .put_tracked(&child_intent, &ai_history)
@@ -77,21 +75,20 @@ async fn test_intent_flow() {
 
     // 5. Verify Retrieval
     let loaded_child: Intent = storage.get_json(&child_hash).await.unwrap();
-    assert_eq!(loaded_child.id, child_intent.id);
-    assert_eq!(loaded_child.parent_id, Some(root_intent.id));
-    assert_eq!(loaded_child.content, child_intent.content);
-    assert_eq!(loaded_child.created_by.unwrap().id(), "jackie");
-    use libra::internal::ai::intent::IntentStatus;
-    assert_eq!(loaded_child.status, IntentStatus::Active);
+    assert_eq!(
+        loaded_child.header().object_id(),
+        child_intent.header().object_id()
+    );
+    assert_eq!(
+        loaded_child.parent(),
+        Some(root_intent.header().object_id())
+    );
+    assert_eq!(loaded_child.prompt(), child_intent.prompt());
+    assert_eq!(loaded_child.header().created_by().id(), "jackie");
+    assert_eq!(loaded_child.status(), Some(&IntentStatus::Active));
 
     // 6. Create a Task object on the SAME branch
-    let task = git_internal::internal::object::task::Task::new(
-        uuid::Uuid::new_v4(),
-        git_internal::internal::object::types::ActorRef::human("me").unwrap(),
-        "Main Task",
-        None,
-    )
-    .unwrap();
+    let task = Task::new(ActorRef::human("me").unwrap(), "Main Task", None).unwrap();
 
     storage.put_tracked(&task, &ai_history).await.unwrap();
 

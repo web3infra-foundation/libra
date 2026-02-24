@@ -40,13 +40,7 @@ async fn test_ai_flow_local() {
     // 2. User creates a Task
     let repo_id = Uuid::new_v4();
     let actor = ActorRef::human("jackie").unwrap();
-    let mut task = Task::new(
-        repo_id,
-        actor.clone(),
-        "Refactor Storage",
-        Some(GoalType::Refactor),
-    )
-    .unwrap();
+    let mut task = Task::new(actor.clone(), "Refactor Storage", Some(GoalType::Refactor)).unwrap();
     task.add_constraint("Must use StorageExt");
 
     // Use put_tracked to ensure History Log is updated (Orphan Branch)
@@ -75,9 +69,7 @@ async fn test_ai_flow_local() {
     let base_commit_sha = libra::internal::ai::util::normalize_commit_anchor(&head_commit).unwrap();
 
     let snapshot = git_internal::internal::object::context::ContextSnapshot::new(
-        repo_id,
         actor.clone(),
-        &base_commit_sha,
         git_internal::internal::object::context::SelectionStrategy::Heuristic,
     )
     .unwrap();
@@ -89,20 +81,14 @@ async fn test_ai_flow_local() {
     println!("Stored Snapshot: {}", snapshot_hash);
 
     // 2.6. User creates a Run
-    let mut run = Run::new(
-        repo_id,
-        actor.clone(),
-        task.header().object_id(),
-        &base_commit_sha,
-    )
-    .unwrap();
-    run.set_context_snapshot_id(Some(snapshot.header().object_id()));
+    let mut run = Run::new(actor.clone(), task.header().object_id(), &base_commit_sha).unwrap();
+    run.set_snapshot(Some(snapshot.header().object_id()));
 
     let run_hash = storage.put_tracked(&run, &history_manager).await.unwrap();
     println!("Stored Run: {}", run_hash);
 
     // 2.7. User creates a Plan
-    let plan = Plan::new(repo_id, actor.clone(), run.header().object_id()).unwrap();
+    let plan = Plan::new(actor.clone()).unwrap();
     let plan_hash = storage.put_tracked(&plan, &history_manager).await.unwrap();
     println!("Stored Plan: {}", plan_hash);
 
@@ -185,7 +171,7 @@ async fn test_ai_flow_r2() {
     // 3. User creates a Task
     let repo_id = Uuid::new_v4();
     let actor = ActorRef::human("jackie-r2").unwrap();
-    let task = Task::new(repo_id, actor, "Test R2 Storage", Some(GoalType::Chore)).unwrap();
+    let task = Task::new(actor, "Test R2 Storage", Some(GoalType::Chore)).unwrap();
 
     let task_hash = storage.put_json(&task).await.unwrap();
     println!("Stored Task to R2: {}", task_hash);

@@ -5,7 +5,7 @@ use git_internal::internal::object::{
     decision::{Decision, DecisionType},
     evidence::{Evidence, EvidenceKind},
     patchset::{ChangeType, PatchSet, TouchedFile},
-    plan::{Plan, PlanStatus, PlanStep},
+    plan::{Plan, PlanStep, StepStatus},
     provenance::Provenance,
     tool::{ToolInvocation, ToolStatus},
     types::ActorRef,
@@ -70,6 +70,7 @@ async fn test_mcp_integration_create_and_read_task() {
     // 1. Create Task
     let params = CreateTaskParams {
         title: "Integration Test Task".to_string(),
+        intent_id: None,
         description: Some("Description".to_string()),
         goal_type: Some("feature".to_string()),
         constraints: Some(vec!["Must use Rust".to_string()]),
@@ -170,8 +171,7 @@ async fn test_history_latest_returns_real_hash() {
     // Create a task to produce a history commit
     let actor = ActorRef::human("tester").unwrap();
     let task =
-        git_internal::internal::object::task::Task::new(repo_id, actor, "History Test", None)
-            .unwrap();
+        git_internal::internal::object::task::Task::new(actor, "History Test", None).unwrap();
     storage.put_tracked(&task, &history_manager).await.unwrap();
 
     // Now should return a real hex hash
@@ -210,8 +210,7 @@ async fn test_list_context_snapshots_with_summary() {
     let actor = ActorRef::human("tester").unwrap();
     let base = "a".repeat(64);
 
-    let mut snap =
-        ContextSnapshot::new(repo_id, actor, &base, SelectionStrategy::Heuristic).unwrap();
+    let mut snap = ContextSnapshot::new(actor, SelectionStrategy::Heuristic).unwrap();
     snap.set_summary(Some("test summary".to_string()));
     storage.put_tracked(&snap, &history_manager).await.unwrap();
 
@@ -234,15 +233,10 @@ async fn test_list_plans_with_summary() {
     let actor = ActorRef::human("tester").unwrap();
     let run_id = Uuid::new_v4();
 
-    let mut plan = Plan::new(repo_id, actor, run_id).unwrap();
-    plan.add_step(PlanStep {
-        intent: "step 1".to_string(),
-        inputs: None,
-        outputs: None,
-        checks: None,
-        owner_role: None,
-        status: PlanStatus::Pending,
-    });
+    let mut plan = Plan::new(actor).unwrap();
+    let mut step = PlanStep::new("step 1");
+    step.set_status(StepStatus::Pending);
+    plan.add_step(step);
     storage.put_tracked(&plan, &history_manager).await.unwrap();
 
     use libra::internal::ai::mcp::resource::ListPlansParams;
@@ -253,7 +247,6 @@ async fn test_list_plans_with_summary() {
     let val = serde_json::to_value(&result.content[0]).unwrap();
     let text = val.get("text").unwrap().as_str().unwrap();
 
-    assert!(text.contains("Version:"));
     assert!(text.contains("Steps: 1"));
 }
 
@@ -264,9 +257,9 @@ async fn test_list_patchsets_with_summary() {
     let run_id = Uuid::new_v4();
     let base = "b".repeat(64);
 
-    let mut ps = PatchSet::new(repo_id, actor, run_id, &base, 1).unwrap();
+    let mut ps = PatchSet::new(actor, run_id, &base).unwrap();
     let tf = TouchedFile::new("src/main.rs".to_string(), ChangeType::Modify, 10, 5).unwrap();
-    ps.add_touched_file(tf);
+    ps.add_touched(tf);
     storage.put_tracked(&ps, &history_manager).await.unwrap();
 
     use libra::internal::ai::mcp::resource::ListPatchSetsParams;
@@ -277,7 +270,6 @@ async fn test_list_patchsets_with_summary() {
     let val = serde_json::to_value(&result.content[0]).unwrap();
     let text = val.get("text").unwrap().as_str().unwrap();
 
-    assert!(text.contains("Gen: 1"));
     assert!(text.contains("Files: 1"));
     assert!(text.contains("Status:"));
 }
@@ -288,7 +280,7 @@ async fn test_list_evidences_with_summary() {
     let actor = ActorRef::human("tester").unwrap();
     let run_id = Uuid::new_v4();
 
-    let mut ev = Evidence::new(repo_id, actor, run_id, EvidenceKind::Test, "cargo").unwrap();
+    let mut ev = Evidence::new(actor, run_id, EvidenceKind::Test, "cargo").unwrap();
     ev.set_exit_code(Some(0));
     ev.set_summary(Some("all tests passed".to_string()));
     storage.put_tracked(&ev, &history_manager).await.unwrap();
@@ -313,7 +305,7 @@ async fn test_list_tool_invocations_with_summary() {
     let actor = ActorRef::human("tester").unwrap();
     let run_id = Uuid::new_v4();
 
-    let mut inv = ToolInvocation::new(repo_id, actor, run_id, "read_file").unwrap();
+    let mut inv = ToolInvocation::new(actor, run_id, "read_file").unwrap();
     inv.set_status(ToolStatus::Ok);
     inv.set_result_summary(Some("read 100 lines".to_string()));
     storage.put_tracked(&inv, &history_manager).await.unwrap();
@@ -337,7 +329,7 @@ async fn test_list_provenances_with_summary() {
     let actor = ActorRef::human("tester").unwrap();
     let run_id = Uuid::new_v4();
 
-    let prov = Provenance::new(repo_id, actor, run_id, "openai", "gpt-4o").unwrap();
+    let prov = Provenance::new(actor, run_id, "openai", "gpt-4o").unwrap();
     storage.put_tracked(&prov, &history_manager).await.unwrap();
 
     use libra::internal::ai::mcp::resource::ListProvenancesParams;
@@ -358,7 +350,7 @@ async fn test_list_decisions_with_summary() {
     let actor = ActorRef::human("tester").unwrap();
     let run_id = Uuid::new_v4();
 
-    let mut dec = Decision::new(repo_id, actor, run_id, DecisionType::Commit).unwrap();
+    let mut dec = Decision::new(actor, run_id, DecisionType::Commit).unwrap();
     dec.set_rationale(Some("all tests pass".to_string()));
     storage.put_tracked(&dec, &history_manager).await.unwrap();
 
@@ -381,6 +373,7 @@ async fn test_create_task_with_explicit_human_actor() {
 
     let params = CreateTaskParams {
         title: "Human-authored task".to_string(),
+        intent_id: None,
         description: None,
         goal_type: None,
         constraints: None,
@@ -431,6 +424,7 @@ async fn test_create_task_with_agent_actor() {
 
     let params = CreateTaskParams {
         title: "Agent-created task".to_string(),
+        intent_id: None,
         description: None,
         goal_type: None,
         constraints: None,
@@ -459,6 +453,7 @@ async fn test_create_task_default_actor_is_mcp() {
 
     let params = CreateTaskParams {
         title: "Default actor task".to_string(),
+        intent_id: None,
         description: None,
         goal_type: None,
         constraints: None,

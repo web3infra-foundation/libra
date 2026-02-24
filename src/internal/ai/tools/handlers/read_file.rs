@@ -291,6 +291,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_file_path_validation() {
+        let temp_dir = TempDir::new().unwrap();
+        let working_dir = temp_dir.path().to_path_buf();
         let handler = ReadFileHandler;
         // Use relative path - should fail
         let invocation = ToolInvocation::new(
@@ -304,7 +306,7 @@ mod tests {
                 })
                 .to_string(),
             },
-            std::env::current_dir().unwrap(),
+            working_dir,
         );
 
         let result = handler.handle(invocation).await;

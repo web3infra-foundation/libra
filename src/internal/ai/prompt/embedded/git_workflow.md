@@ -16,7 +16,14 @@ Types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `perf`, `ci`
 
 ### Implementation Workflow
 
-1. **Plan** -- Understand the requirements. Identify affected files and potential risks.
+1. **Analyze & Plan (AI Object Workflow)**
+   - **Simple Task (Single File)**: You may directly create a Task (`create_task`) and execute it.
+   - **Complex Task (Multi-file / Multi-step)**: You **MUST** follow the `Intent -> Plan -> Task` workflow:
+     1. Create an **Intent** (`create_intent`) capturing the user's high-level goal.
+     2. Create a **Plan** (`create_plan`) that breaks the Intent into sequential Steps.
+     3. For each step in the Plan, create a **Task** (`create_task` with `intent_id`) and execute it.
+   - Do not skip the Planning phase for complex features. It ensures context is preserved and steps are logical.
+
 2. **Implement** -- Write the code. Follow existing patterns in the codebase.
 3. **Test** -- Verify the change compiles (`cargo build`) and passes tests (`cargo test`).
 4. **Lint** -- Run `cargo clippy` and `cargo fmt --check`. Fix all warnings.

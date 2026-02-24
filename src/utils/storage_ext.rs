@@ -234,7 +234,7 @@ mod tests {
         // 1. Test Task Storage
         let repo_id = Uuid::new_v4();
         let actor = ActorRef::human("tester").unwrap();
-        let task = Task::new(repo_id, actor, "Test Task", Some(GoalType::Feature)).unwrap();
+        let task = Task::new(actor, "Test Task", Some(GoalType::Feature)).unwrap();
 
         let hash = storage.put_json(&task).await.unwrap();
         let loaded_task: Task = storage.get_json(&hash).await.unwrap();

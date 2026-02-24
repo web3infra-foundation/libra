@@ -23,20 +23,18 @@
 //! `task`, `run`, `snapshot`, `plan`, `patchset`, `evidence`, `invocation`, `provenance`, `decision`, `intent`.
 use std::collections::HashMap;
 
-use git_internal::{
-    hash::ObjectHash,
-    internal::object::{
-        context::{ContextItem, ContextItemKind, ContextSnapshot, SelectionStrategy},
-        decision::{Decision, DecisionType},
-        evidence::{Evidence, EvidenceKind},
-        patchset::{ApplyStatus, ChangeType, PatchSet, TouchedFile},
-        plan::{Plan, PlanStatus, PlanStep},
-        provenance::Provenance,
-        run::{AgentInstance, Run, RunStatus},
-        task::{GoalType, Task, TaskStatus},
-        tool::{IoFootprint, ToolInvocation, ToolStatus},
-        types::{ActorKind, ActorRef, ArtifactRef},
-    },
+use git_internal::internal::object::{
+    context::{ContextItem, ContextItemKind, ContextSnapshot, SelectionStrategy},
+    decision::{Decision, DecisionType},
+    evidence::{Evidence, EvidenceKind},
+    intent::{Intent, IntentStatus},
+    patchset::{ApplyStatus, ChangeType, PatchSet, TouchedFile},
+    plan::{Plan, PlanStep, StepStatus},
+    provenance::Provenance,
+    run::{Run, RunStatus},
+    task::{GoalType, Task, TaskStatus},
+    tool::{IoFootprint, ToolInvocation, ToolStatus},
+    types::{ActorKind, ActorRef, ArtifactRef},
 };
 use rmcp::{
     RoleServer,
@@ -49,7 +47,7 @@ use rmcp::{
 use uuid::Uuid;
 
 use crate::{
-    internal::ai::{intent::Intent, mcp::server::LibraMcpServer},
+    internal::ai::mcp::server::LibraMcpServer,
     utils::storage_ext::{Identifiable, StorageExt},
 };
 
@@ -177,6 +175,8 @@ pub struct CreateTaskParams {
     pub requested_by_id: Option<String>,
     /// UUIDs of tasks this task depends on.
     pub dependencies: Option<Vec<String>>,
+    /// ID of the intent this task belongs to.
+    pub intent_id: Option<String>,
     /// Task status: "draft", "running", "done", "failed", "cancelled". Defaults to "draft".
     pub status: Option<String>,
     /// Search tags (key-value pairs)
@@ -259,8 +259,11 @@ pub struct ListContextSnapshotsParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct CreatePlanParams {
-    pub run_id: String,
     pub plan_version: Option<u32>,
+    /// ID of the ContextPipeline used as basis for this plan.
+    pub pipeline_id: Option<String>,
+    /// Visible frame window (start, end) into the pipeline.
+    pub fwindow: Option<(u32, u32)>,
     pub steps: Option<Vec<PlanStepParams>>,
     /// Search tags (key-value pairs)
     pub tags: Option<HashMap<String, String>>,
@@ -274,7 +277,7 @@ pub struct CreatePlanParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct PlanStepParams {
-    pub intent: String,
+    pub description: String,
     pub inputs: Option<serde_json::Value>,
     pub outputs: Option<serde_json::Value>,
     pub checks: Option<serde_json::Value>,
@@ -442,10 +445,6 @@ impl LibraMcpServer {
         params: CreateIntentParams,
         actor: ActorRef,
     ) -> Result<CallToolResult, ErrorData> {
-        use std::str::FromStr;
-
-        use crate::internal::ai::intent::IntentStatus;
-
         let storage = self
             .storage
             .as_ref()
@@ -460,38 +459,34 @@ impl LibraMcpServer {
             None
         };
 
-        let task_id = if let Some(tid) = params.task_id {
-            Some(
-                tid.parse::<Uuid>()
-                    .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?,
-            )
-        } else {
-            None
-        };
+        // Note: git-internal 0.6.0 Intent does not support direct task_id link (it uses Plan).
+        // We ignore params.task_id for the Intent object itself.
 
-        let mut intent = Intent::new(
-            self.repo_id,
-            params.content,
-            parent_id,
-            task_id,
-            Some(actor),
-        );
+        let mut intent =
+            Intent::new(actor, params.content).map_err(|e| ErrorData::internal_error(e, None))?;
+
+        if let Some(pid) = parent_id {
+            intent.set_parent(Some(pid));
+        }
 
         if let Some(status) = params.status {
             intent.set_status(match status.as_str() {
                 "draft" => IntentStatus::Draft,
                 "active" => IntentStatus::Active,
                 "completed" => IntentStatus::Completed,
-                "discarded" => IntentStatus::Discarded,
+                "cancelled" => IntentStatus::Cancelled,
                 _ => return Err(ErrorData::invalid_params("invalid intent status", None)),
             });
         }
         if let Some(sha) = params.commit_sha {
             let normalized = crate::internal::ai::util::normalize_commit_anchor(&sha)
                 .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
-            let hash_val = ObjectHash::from_str(&normalized)
+
+            use git_internal::internal::object::integrity::IntegrityHash;
+            let ih = normalized
+                .parse::<IntegrityHash>()
                 .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
-            intent.set_commit_sha(hash_val);
+            intent.set_commit(Some(ih));
         }
 
         let hash = storage
@@ -512,7 +507,7 @@ impl LibraMcpServer {
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Intent created with ID: {}",
-            intent.id
+            intent.header().object_id()
         ))]))
     }
 
@@ -550,7 +545,7 @@ impl LibraMcpServer {
         }
 
         // Sort by created_at descending
-        intents.sort_by_key(|b| std::cmp::Reverse(b.created_at));
+        intents.sort_by_key(|b| std::cmp::Reverse(b.header().created_at()));
 
         let limit = params.limit.unwrap_or(10);
         let out: Vec<String> = intents
@@ -559,9 +554,9 @@ impl LibraMcpServer {
             .map(|i| {
                 format!(
                     "ID: {} | Status: {} | Content: {:.50}",
-                    i.id,
-                    i.status,
-                    i.content.replace('\n', " ")
+                    i.header().object_id(),
+                    i.status().unwrap_or(&IntentStatus::Draft),
+                    i.content().unwrap_or("-").replace('\n', " ")
                 )
             })
             .collect();
@@ -587,10 +582,6 @@ impl LibraMcpServer {
         &self,
         params: UpdateIntentParams,
     ) -> Result<CallToolResult, ErrorData> {
-        use std::str::FromStr;
-
-        use crate::internal::ai::intent::IntentStatus;
-
         let history = self
             .intent_history_manager
             .as_ref()
@@ -623,16 +614,20 @@ impl LibraMcpServer {
                 "draft" => IntentStatus::Draft,
                 "active" => IntentStatus::Active,
                 "completed" => IntentStatus::Completed,
-                "discarded" => IntentStatus::Discarded,
+                "cancelled" => IntentStatus::Cancelled,
                 _ => return Err(ErrorData::invalid_params("invalid intent status", None)),
             });
             changed = true;
         }
 
         if let Some(sha) = params.commit_sha {
-            let hash_val = ObjectHash::from_str(&sha)
+            use git_internal::internal::object::integrity::IntegrityHash;
+            let normalized = crate::internal::ai::util::normalize_commit_anchor(&sha)
                 .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
-            intent.set_commit_sha(hash_val);
+            let ih = normalized
+                .parse::<IntegrityHash>()
+                .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+            intent.set_commit(Some(ih));
             changed = true;
         }
 
@@ -656,7 +651,7 @@ impl LibraMcpServer {
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Intent {} updated successfully",
-            intent.id
+            intent.header().object_id()
         ))]))
     }
 
@@ -685,8 +680,6 @@ impl LibraMcpServer {
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
-        let repo_id = self.repo_id;
-
         let goal_type = if let Some(gt) = params.goal_type {
             use std::str::FromStr;
             Some(GoalType::from_str(&gt).map_err(|e| ErrorData::invalid_params(e, None))?)
@@ -694,7 +687,7 @@ impl LibraMcpServer {
             None
         };
 
-        let mut task = Task::new(repo_id, actor, params.title, goal_type)
+        let mut task = Task::new(actor, params.title, goal_type)
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
         if let Some(desc) = params.description {
@@ -719,7 +712,7 @@ impl LibraMcpServer {
             let rb_actor_kind: ActorKind = rb_kind.as_str().into();
             let rb_actor = ActorRef::new(rb_actor_kind, rb_id)
                 .map_err(|e| ErrorData::invalid_params(e, None))?;
-            task.set_requested_by(Some(rb_actor));
+            task.set_requester(Some(rb_actor));
         }
 
         // Add task dependencies
@@ -730,6 +723,19 @@ impl LibraMcpServer {
                     .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
                 task.add_dependency(dep_id);
             }
+        }
+
+        // Set intent if provided
+        if let Some(intent_id_str) = params.intent_id {
+            // Normalize ID (handle uuid: prefix if any)
+            let intent_uuid = if let Some(stripped) = intent_id_str.trim().strip_prefix("uuid:") {
+                stripped.parse::<Uuid>()
+            } else {
+                intent_id_str.trim().parse::<Uuid>()
+            }
+            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+
+            task.set_intent(Some(intent_uuid));
         }
 
         // Set task status if explicitly provided
@@ -863,7 +869,6 @@ impl LibraMcpServer {
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
-        let repo_id = self.repo_id;
         // Handle both regular UUID and uuid:... format
         let task_id_str = params.task_id.trim();
         let task_id = if let Some(stripped) = task_id_str.strip_prefix("uuid:") {
@@ -877,7 +882,7 @@ impl LibraMcpServer {
             crate::internal::ai::util::normalize_commit_anchor(&params.base_commit_sha)
                 .map_err(|e| ErrorData::invalid_params(e, None))?;
 
-        let mut run = Run::new(repo_id, actor, task_id, &base_commit_sha)
+        let mut run = Run::new(actor, task_id, &base_commit_sha)
             .map_err(|e| ErrorData::invalid_params(e, None))?;
 
         if let Some(s) = params.status {
@@ -899,13 +904,15 @@ impl LibraMcpServer {
                 id_str.parse::<Uuid>()
             }
             .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
-            run.set_context_snapshot_id(Some(parsed));
+            run.set_snapshot(Some(parsed));
         }
         if let Some(err) = params.error {
             run.set_error(Some(err));
         }
 
-        // Add agent instances
+        // Add agent instances - Note: git-internal 0.6.0 Run does not support agent instances
+        // We ignore params.agent_instances for now
+        /*
         if let Some(instances) = params.agent_instances {
             for ai in instances {
                 run.add_agent_instance(AgentInstance {
@@ -914,6 +921,7 @@ impl LibraMcpServer {
                 });
             }
         }
+        */
 
         // Set metrics
         if let Some(metrics_json) = params.metrics_json {
@@ -997,7 +1005,7 @@ impl LibraMcpServer {
                 out.push(format!(
                     "ID: {} | Task: {} | Status: {}",
                     run.header().object_id(),
-                    run.task_id(),
+                    run.task(),
                     run.status()
                 ));
             }
@@ -1037,8 +1045,6 @@ impl LibraMcpServer {
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
-        let repo_id = self.repo_id;
-
         let strategy = match params.selection_strategy.as_str() {
             "explicit" => SelectionStrategy::Explicit,
             "heuristic" => SelectionStrategy::Heuristic,
@@ -1050,21 +1056,25 @@ impl LibraMcpServer {
             }
         };
 
-        let base_commit_sha =
-            crate::internal::ai::util::normalize_commit_anchor(&params.base_commit_sha)
-                .map_err(|e| ErrorData::invalid_params(e, None))?;
+        // base_commit_sha is unused in 0.6.0 ContextSnapshot::new
+        let _ = crate::internal::ai::util::normalize_commit_anchor(&params.base_commit_sha)
+            .map_err(|e| ErrorData::invalid_params(e, None))?;
 
-        let mut snapshot = ContextSnapshot::new(repo_id, actor, &base_commit_sha, strategy)
+        let mut snapshot = ContextSnapshot::new(actor, strategy)
             .map_err(|e| ErrorData::invalid_params(e, None))?;
 
         if let Some(items) = params.items {
             for item in items {
-                let content_id = item
+                use git_internal::hash::ObjectHash;
+                let mut ctx_item = ContextItem::new(ContextItemKind::File, item.path)
+                    .map_err(|e| ErrorData::invalid_params(e, None))?;
+
+                let blob_hash = item
                     .content_hash
-                    .parse()
-                    .map_err(|e| ErrorData::invalid_params(e, None))?;
-                let ctx_item = ContextItem::new(ContextItemKind::File, item.path, content_id)
-                    .map_err(|e| ErrorData::invalid_params(e, None))?;
+                    .parse::<ObjectHash>()
+                    .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+                ctx_item.set_blob(Some(blob_hash));
+
                 snapshot.add_item(ctx_item);
             }
         }
@@ -1180,41 +1190,36 @@ impl LibraMcpServer {
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
-        let repo_id = self.repo_id;
-        let run_id = params
-            .run_id
-            .parse::<Uuid>()
-            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+        let mut plan = Plan::new(actor).map_err(|e| ErrorData::internal_error(e, None))?;
 
-        let mut plan = if let Some(version) = params.plan_version {
-            if version <= 1 {
-                Plan::new(repo_id, actor, run_id)
-            } else {
-                Plan::new_next(repo_id, actor, run_id, version - 1)
-            }
-        } else {
-            Plan::new(repo_id, actor, run_id)
+        if let Some(pid) = params.pipeline_id {
+            let parsed = pid
+                .parse::<Uuid>()
+                .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+            plan.set_pipeline(Some(parsed));
         }
-        .map_err(|e| ErrorData::internal_error(e, None))?;
+        if let Some((start, end)) = params.fwindow {
+            plan.set_fwindow(Some((start, end)));
+        }
 
         if let Some(steps) = params.steps {
             for step in steps {
                 let status = match step.status.as_deref().unwrap_or("pending") {
-                    "pending" => PlanStatus::Pending,
-                    "in_progress" => PlanStatus::InProgress,
-                    "completed" => PlanStatus::Completed,
-                    "failed" => PlanStatus::Failed,
-                    "skipped" => PlanStatus::Skipped,
+                    "pending" => StepStatus::Pending,
+                    "in_progress" => StepStatus::Progressing,
+                    "completed" => StepStatus::Completed,
+                    "failed" => StepStatus::Failed,
+                    "skipped" => StepStatus::Skipped,
                     _ => return Err(ErrorData::invalid_params("invalid plan step status", None)),
                 };
-                plan.add_step(PlanStep {
-                    intent: step.intent,
-                    inputs: step.inputs,
-                    outputs: step.outputs,
-                    checks: step.checks,
-                    owner_role: step.owner_role,
-                    status,
-                });
+
+                let mut ps = PlanStep::new(step.description);
+                ps.set_inputs(step.inputs);
+                ps.set_outputs(step.outputs);
+                ps.set_checks(step.checks);
+                ps.set_status(status);
+
+                plan.add_step(ps);
             }
         }
 
@@ -1283,10 +1288,8 @@ impl LibraMcpServer {
             }
             if let Ok(plan) = storage.get_json::<Plan>(&hash).await {
                 out.push(format!(
-                    "ID: {} | Run: {} | Version: {} | Steps: {}",
+                    "ID: {} | Steps: {}",
                     plan.header().object_id(),
-                    plan.run_id(),
-                    plan.plan_version(),
                     plan.steps().len(),
                 ));
             }
@@ -1326,7 +1329,6 @@ impl LibraMcpServer {
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
-        let repo_id = self.repo_id;
         let run_id = params
             .run_id
             .parse::<Uuid>()
@@ -1336,9 +1338,8 @@ impl LibraMcpServer {
             crate::internal::ai::util::normalize_commit_anchor(&params.base_commit_sha)
                 .map_err(|e| ErrorData::invalid_params(e, None))?;
 
-        let mut patchset =
-            PatchSet::new(repo_id, actor, run_id, &base_commit_sha, params.generation)
-                .map_err(|e| ErrorData::invalid_params(e, None))?;
+        let mut patchset = PatchSet::new(actor, run_id, &base_commit_sha)
+            .map_err(|e| ErrorData::invalid_params(e, None))?;
 
         if let Some(files) = params.touched_files {
             for f in files {
@@ -1352,7 +1353,7 @@ impl LibraMcpServer {
                 };
                 let touched = TouchedFile::new(f.path, ct, f.lines_added, f.lines_deleted)
                     .map_err(|e| ErrorData::invalid_params(e, None))?;
-                patchset.add_touched_file(touched);
+                patchset.add_touched(touched);
             }
         }
         patchset.set_rationale(params.rationale);
@@ -1361,13 +1362,12 @@ impl LibraMcpServer {
                 "proposed" => ApplyStatus::Proposed,
                 "applied" => ApplyStatus::Applied,
                 "rejected" => ApplyStatus::Rejected,
-                "superseded" => ApplyStatus::Superseded,
                 _ => return Err(ErrorData::invalid_params("invalid apply_status", None)),
             });
         }
         if let Some(artifact_params) = params.diff_artifact {
             let artifact = convert_artifact(artifact_params)?;
-            patchset.set_diff_artifact(Some(artifact));
+            patchset.set_artifact(Some(artifact));
         }
 
         // TODO: Set diff_format when git-internal supports it
@@ -1437,11 +1437,10 @@ impl LibraMcpServer {
             }
             if let Ok(ps) = storage.get_json::<PatchSet>(&hash).await {
                 out.push(format!(
-                    "ID: {} | Run: {} | Gen: {} | Files: {} | Status: {:?}",
+                    "ID: {} | Run: {} | Files: {} | Status: {:?}",
                     ps.header().object_id(),
-                    ps.run_id(),
-                    ps.generation(),
-                    ps.touched_files().len(),
+                    ps.run(),
+                    ps.touched().len(),
                     ps.apply_status(),
                 ));
             }
@@ -1481,7 +1480,6 @@ impl LibraMcpServer {
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
-        let repo_id = self.repo_id;
         let run_id = params
             .run_id
             .parse::<Uuid>()
@@ -1494,7 +1492,7 @@ impl LibraMcpServer {
             other => EvidenceKind::Other(other.to_string()),
         };
 
-        let mut evidence = Evidence::new(repo_id, actor, run_id, kind, params.tool)
+        let mut evidence = Evidence::new(actor, run_id, kind, params.tool)
             .map_err(|e| ErrorData::internal_error(e, None))?;
 
         if let Some(id) = params.patchset_id {
@@ -1622,13 +1620,12 @@ impl LibraMcpServer {
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
-        let repo_id = self.repo_id;
         let run_id = params
             .run_id
             .parse::<Uuid>()
             .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
 
-        let mut inv = ToolInvocation::new(repo_id, actor, run_id, params.tool_name)
+        let mut inv = ToolInvocation::new(actor, run_id, params.tool_name)
             .map_err(|e| ErrorData::internal_error(e, None))?;
         if let Some(status) = params.status {
             inv.set_status(match status.as_str() {
@@ -1762,13 +1759,12 @@ impl LibraMcpServer {
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
-        let repo_id = self.repo_id;
         let run_id = params
             .run_id
             .parse::<Uuid>()
             .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
 
-        let mut prov = Provenance::new(repo_id, actor, run_id, params.provider, params.model)
+        let mut prov = Provenance::new(actor, run_id, params.provider, params.model)
             .map_err(|e| ErrorData::internal_error(e, None))?;
         if let Some(parameters_json) = params.parameters_json {
             let v = serde_json::from_str(&parameters_json)
@@ -1888,7 +1884,6 @@ impl LibraMcpServer {
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
-        let repo_id = self.repo_id;
         // Handle both regular UUID and uuid:... format
         let run_id_str = params.run_id.trim();
         let run_id = if let Some(stripped) = run_id_str.strip_prefix("uuid:") {
@@ -1907,7 +1902,7 @@ impl LibraMcpServer {
             other => DecisionType::Other(other.to_string()),
         };
 
-        let mut decision = Decision::new(repo_id, actor, run_id, decision_type)
+        let mut decision = Decision::new(actor, run_id, decision_type)
             .map_err(|e| ErrorData::internal_error(e, None))?;
 
         if let Some(id) = params.chosen_patchset_id {

@@ -1470,9 +1470,9 @@ dependencies = [
 
 [[package]]
 name = "git-internal"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a1e9f5f8b8c9ee15de5e2c7e367abfd5200dd612c296f36e8ba160a620bc66cc"
+checksum = "eb5609f95543a4b5afd2e5ed82f65c7a6d6556880300782e13b16a7b44538bbe"
 dependencies = [
  "ahash 0.8.12",
  "async-trait",
