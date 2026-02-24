@@ -54,11 +54,14 @@ impl TreeExt for Tree {
                 });
             }
         };
-        
+
         let tree_data = match storage.get(hash) {
             Ok(data) => data,
             Err(e) => {
-                eprintln!("Warning: Tree object {} not found in storage ({}). Defaulting to empty.", hash, e);
+                eprintln!(
+                    "Warning: Tree object {} not found in storage ({}). Defaulting to empty.",
+                    hash, e
+                );
                 return Tree::from_tree_items(Vec::new()).unwrap_or_else(|e| {
                     panic!("Critical: Failed to create empty fallback tree: {}", e);
                 });
