@@ -24,6 +24,7 @@ async fn test_create_task_tool() {
 
     let params = CreateTaskParams {
         title: "Test Task".to_string(),
+        intent_id: None,
         description: Some("Description".to_string()),
         goal_type: None,
         constraints: None,

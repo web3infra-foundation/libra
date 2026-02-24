@@ -182,14 +182,14 @@ impl LibraMcpServer {
             let run_obj = serde_json::json!({
                 "id": run.header().object_id().to_string(),
                 "status": run.status().as_str(),
-                "task_id": run.task_id().to_string(),
-                "base_commit_sha": run.base_commit_sha().to_string(),
+                "task_id": run.task().to_string(),
+                "base_commit_sha": run.commit().to_string(),
             });
             result.insert("run".to_string(), run_obj);
 
             // Load parent Task
             let task_hash = history
-                .get_object_hash("task", &run.task_id().to_string())
+                .get_object_hash("task", &run.task().to_string())
                 .await
                 .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
             if let Some(hash) = task_hash
@@ -199,7 +199,7 @@ impl LibraMcpServer {
                     "id": task.header().object_id().to_string(),
                     "title": task.title(),
                     "status": task.status().as_str(),
-                    "goal_type": task.goal_type().map(|g| g.to_string()),
+                    "goal_type": task.goal().map(|g| g.to_string()),
                     "constraints": task.constraints(),
                     "acceptance_criteria": task.acceptance_criteria(),
                 });
@@ -207,7 +207,7 @@ impl LibraMcpServer {
             }
 
             // Load linked ContextSnapshot if present
-            if let Some(snapshot_id) = run.context_snapshot_id() {
+            if let Some(snapshot_id) = run.snapshot() {
                 let snap_hash = history
                     .get_object_hash("snapshot", &snapshot_id.to_string())
                     .await
@@ -222,13 +222,12 @@ impl LibraMcpServer {
                             serde_json::json!({
                                 "kind": format!("{:?}", item.kind),
                                 "path": item.path,
-                                "content_id": item.content_id.to_string(),
+                                "content_id": item.blob.as_ref().map(|b| b.to_string()).unwrap_or_default(),
                             })
                         })
                         .collect();
                     let snap_obj = serde_json::json!({
                         "id": snapshot.header().object_id().to_string(),
-                        "base_commit_sha": snapshot.base_commit_sha().to_string(),
                         "selection_strategy": format!("{:?}", snapshot.selection_strategy()),
                         "items": items,
                         "summary": snapshot.summary(),
@@ -257,7 +256,7 @@ impl LibraMcpServer {
                         "id": task.header().object_id().to_string(),
                         "title": task.title(),
                         "status": task.status().as_str(),
-                        "goal_type": task.goal_type().map(|g| g.to_string()),
+                        "goal_type": task.goal().map(|g| g.to_string()),
                         "constraints": task.constraints(),
                         "acceptance_criteria": task.acceptance_criteria(),
                     });
