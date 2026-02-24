@@ -211,7 +211,7 @@ async fn execute_web_only(args: CodeArgs) {
     // Use repository working directory to ensure correct initialization of .libra resources.
     let working_dir = crate::utils::util::working_dir();
 
-    let mcp_server = init_mcp_server(&working_dir, false);
+    let mcp_server = init_mcp_server(&working_dir);
 
     // Start MCP Server
     let (mcp_handle, mcp_line) =
@@ -251,7 +251,7 @@ async fn execute_tui(args: CodeArgs) {
     let resume = args.resume;
 
     // Prepare MCP server instance shared between the HTTP transport and TUI bridge
-    let mcp_server = init_mcp_server(&working_dir, false);
+    let mcp_server = init_mcp_server(&working_dir);
 
     // Create the bridge channel for request_user_input tool <-> TUI communication.
     let (user_input_tx, user_input_rx) = tokio::sync::mpsc::unbounded_channel::<
@@ -636,9 +636,9 @@ fn system_preamble(working_dir: &std::path::Path, context: Option<&str>) -> Stri
     builder.build()
 }
 
-fn init_mcp_server(working_dir: &std::path::Path, _is_stdio: bool) -> Arc<LibraMcpServer> {
-    // TUI/Web mode: Use the resolved .libra storage directory for isolation,
-    // supporting linked worktrees via try_get_storage_path.
+fn init_mcp_server(working_dir: &std::path::Path) -> Arc<LibraMcpServer> {
+    // Use the resolved .libra storage directory for isolation, supporting
+    // linked worktrees via try_get_storage_path.
     let storage_dir = crate::utils::util::try_get_storage_path(Some(working_dir.to_path_buf()))
         .unwrap_or_else(|_| working_dir.join(".libra"));
     let (objects_dir, dot_libra) = (storage_dir.join("objects"), storage_dir);
@@ -665,7 +665,7 @@ async fn execute_stdio(_args: CodeArgs) {
     // Use repository working directory to ensure correct initialization of .libra resources
     let working_dir = crate::utils::util::working_dir();
 
-    let mcp_server = init_mcp_server(&working_dir, true);
+    let mcp_server = init_mcp_server(&working_dir);
 
     use rmcp::{
         service::serve_server,

@@ -167,7 +167,7 @@ pub fn objects_storage() -> ClientStorage {
 pub fn try_objects_storage() -> io::Result<ClientStorage> {
     // Check if we are in a valid repo first to avoid panic in path::objects() if possible,
     // though path::objects() currently panics if storage_path() fails.
-    // Ideally path::objects() should also be faillible.
+    // Ideally path::objects() should also be fallible.
     // For now, let's wrap the panic-prone call if we can, or just rely on try_get_storage_path check.
     if try_get_storage_path(None).is_err() {
         return Err(io::Error::new(
