@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use tempfile::tempdir;
-use uuid::Uuid;
 
+// use uuid::Uuid;
 use crate::{
     internal::ai::{
         history::HistoryManager,
@@ -19,8 +19,7 @@ async fn test_create_task_tool() {
         storage.clone(),
         temp_dir.path().to_path_buf(),
     ));
-    let repo_id = Uuid::new_v4();
-    let server = LibraMcpServer::new(Some(history_manager), Some(storage), repo_id);
+    let server = LibraMcpServer::new(Some(history_manager), Some(storage));
 
     let params = CreateTaskParams {
         title: "Test Task".to_string(),

@@ -98,18 +98,23 @@ libra code --stdio
 
 #### Claude Desktop Configuration
 
-To use Libra with Claude Desktop, add the following to your `claude_desktop_config.json`:
+To use Libra with Claude Desktop, you must configure the MCP server to run within a valid Libra repository.
+Update your `claude_desktop_config.json` as follows:
 
 ```json
 {
   "mcpServers": {
     "libra": {
       "command": "/path/to/libra",
-      "args": ["code", "--stdio"]
+      "args": ["code", "--stdio"],
+      "cwd": "/path/to/your/libra/repo"
     }
   }
 }
 ```
+
+> **Note**: The `cwd` (current working directory) must be set to the root of a valid Libra repository.
+> If `libra code` is launched outside of a repository, it will exit with an error.
 
 ---
 

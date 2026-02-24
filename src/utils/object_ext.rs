@@ -49,8 +49,11 @@ impl TreeExt for Tree {
             Err(e) => {
                 // If parsing fails (e.g., empty tree data), return an empty tree as fallback
                 // This prevents panic on "Invalid pack object type number: 0"
-                eprintln!("Warning: Failed to load tree {}, defaulting to empty: {}", hash, e);
-                Tree::new(Vec::new())
+                eprintln!(
+                    "Warning: Failed to load tree {}, defaulting to empty: {}",
+                    hash, e
+                );
+                Tree::from_tree_items(Vec::new()).unwrap()
             }
         }
     }

@@ -232,7 +232,7 @@ mod tests {
         let storage = Arc::new(LocalStorage::new(dir.path().to_path_buf()));
 
         // 1. Test Task Storage
-        let _repo_id = Uuid::new_v4();
+        // let _repo_id = Uuid::new_v4();
         let actor = ActorRef::human("tester").unwrap();
         let task = Task::new(actor, "Test Task", Some(GoalType::Feature)).unwrap();
 

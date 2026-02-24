@@ -270,19 +270,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_file_zero_offset() {
+        let temp_dir = TempDir::new().unwrap();
+        let working_dir = temp_dir.path().to_path_buf();
+        let file_path = working_dir.join("test.txt");
+        tokio::fs::write(&file_path, "content").await.unwrap();
+
         let handler = ReadFileHandler;
         let invocation = ToolInvocation::new(
             "call-1",
             "read_file",
             ToolPayload::Function {
                 arguments: serde_json::json!({
-                    "file_path": "/tmp/test.txt",
+                    "file_path": file_path,
                     "offset": 0,
                     "limit": 100
                 })
                 .to_string(),
             },
-            std::env::current_dir().unwrap(),
+            working_dir,
         );
 
         let result = handler.handle(invocation).await;
@@ -315,19 +320,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_file_zero_limit() {
+        let temp_dir = TempDir::new().unwrap();
+        let working_dir = temp_dir.path().to_path_buf();
+        let file_path = working_dir.join("test.txt");
+        tokio::fs::write(&file_path, "content").await.unwrap();
+
         let handler = ReadFileHandler;
         let invocation = ToolInvocation::new(
             "call-1",
             "read_file",
             ToolPayload::Function {
                 arguments: serde_json::json!({
-                    "file_path": "/tmp/test.txt",
+                    "file_path": file_path,
                     "offset": 1,
                     "limit": 0
                 })
                 .to_string(),
             },
-            std::env::current_dir().unwrap(),
+            working_dir,
         );
 
         let result = handler.handle(invocation).await;
