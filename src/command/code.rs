@@ -208,13 +208,8 @@ async fn execute_web_only(args: CodeArgs) {
     println!("Libra Code server running at http://{}", addr);
 
     // Prepare MCP server instance shared between the HTTP transport and TUI bridge
-    let cwd = match std::env::current_dir() {
-        Ok(path) => path,
-        Err(e) => {
-            eprintln!("Failed to get current directory: {}", e);
-            return;
-        }
-    };
+    // Use repository working directory to ensure correct initialization of .libra resources
+    let cwd = crate::utils::util::working_dir();
 
     let mcp_server = init_mcp_server(&cwd, false);
 
@@ -244,13 +239,8 @@ async fn execute_web_only(args: CodeArgs) {
 }
 
 async fn execute_tui(args: CodeArgs) {
-    let working_dir = match std::env::current_dir() {
-        Ok(path) => path,
-        Err(err) => {
-            eprintln!("error: failed to get current working directory: {}", err);
-            return;
-        }
-    };
+    // Use repository working directory to ensure correct initialization of .libra resources.
+    let working_dir = crate::utils::util::working_dir();
 
     let preamble = system_preamble(&working_dir, args.context.as_deref());
     let temperature = args.temperature;
@@ -696,13 +686,8 @@ fn init_mcp_server(working_dir: &std::path::Path, is_stdio: bool) -> Arc<LibraMc
 }
 
 async fn execute_stdio(_args: CodeArgs) {
-    let cwd = match std::env::current_dir() {
-        Ok(cwd) => cwd,
-        Err(e) => {
-            eprintln!("Failed to get current directory: {}", e);
-            return;
-        }
-    };
+    // Use repository working directory to ensure correct initialization of .libra resources
+    let cwd = crate::utils::util::working_dir();
 
     let mcp_server = init_mcp_server(&cwd, true);
 
