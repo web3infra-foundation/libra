@@ -265,7 +265,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> Result<(), GitError> {
         }
     };
     match &args.command {
-        Commands::Init(_) | Commands::Clone(_) | Commands::Code(_) => {}
+        Commands::Init(_) | Commands::Clone(_) => {}
         // Config global/system scopes don't require a repository
         Commands::Config(cfg) if cfg.global || cfg.system => {}
         _ => {
