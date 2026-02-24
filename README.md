@@ -6,9 +6,7 @@ The goal is **not** to build a perfect, 100% feature-complete reimplementation o
 
 The `libra code` command starts an interactive TUI (with a background web server) that is designed to be driven collaboratively by AI agents and humans.
 
-<video src="docs/video/demo-20260224.mp4" controls="controls" style="max-width: 100%;">
-  <a href="docs/video/demo-20260224.mp4">Watch Demo Video</a>
-</video>
+![Demo Video](docs/video/demo-20260224.gif)
 
 ---
 
