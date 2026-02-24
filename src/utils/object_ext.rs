@@ -21,6 +21,7 @@ use crate::utils::{lfs, util};
 
 pub trait TreeExt {
     fn load(hash: &ObjectHash) -> Tree;
+    fn try_load(hash: &ObjectHash) -> Option<Tree>;
     fn get_plain_items(&self) -> Vec<(PathBuf, ObjectHash)>;
     /// Get all the items in the tree recursively with mode information
     /// Returns (path, hash, mode) tuples
@@ -42,46 +43,17 @@ pub trait BlobExt {
 
 impl TreeExt for Tree {
     fn load(hash: &ObjectHash) -> Tree {
-        let storage = match util::try_objects_storage() {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!(
-                    "Warning: Failed to access objects storage ({}). Defaulting to empty tree.",
-                    e
-                );
-                return Tree::from_tree_items(Vec::new()).unwrap_or_else(|e| {
-                    panic!("Critical: Failed to create empty fallback tree: {}", e);
-                });
-            }
-        };
+        let storage = util::objects_storage();
+        let tree_data = storage.get(hash).unwrap();
+        Tree::from_bytes(&tree_data, *hash).unwrap()
+    }
 
-        let tree_data = match storage.get(hash) {
-            Ok(data) => data,
-            Err(e) => {
-                eprintln!(
-                    "Warning: Tree object {} not found in storage ({}). Defaulting to empty.",
-                    hash, e
-                );
-                return Tree::from_tree_items(Vec::new()).unwrap_or_else(|e| {
-                    panic!("Critical: Failed to create empty fallback tree: {}", e);
-                });
-            }
-        };
-
-        match Tree::from_bytes(&tree_data, *hash) {
-            Ok(tree) => tree,
-            Err(e) => {
-                // If parsing fails (e.g., empty tree data), return an empty tree as fallback
-                // This prevents panic on "Invalid pack object type number: 0"
-                eprintln!(
-                    "Warning: Failed to parse tree {}, defaulting to empty: {}",
-                    hash, e
-                );
-                Tree::from_tree_items(Vec::new()).unwrap_or_else(|e| {
-                    panic!("Critical: Failed to create empty fallback tree: {}", e);
-                })
-            }
-        }
+    fn try_load(hash: &ObjectHash) -> Option<Tree> {
+        let storage = util::objects_storage();
+        storage
+            .get(hash)
+            .ok()
+            .and_then(|tree_data| Tree::from_bytes(&tree_data, *hash).ok())
     }
 
     /// Get all the items in the tree recursively (to workdir path)
