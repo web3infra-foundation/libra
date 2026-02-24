@@ -44,7 +44,15 @@ impl TreeExt for Tree {
     fn load(hash: &ObjectHash) -> Tree {
         let storage = util::objects_storage();
         let tree_data = storage.get(hash).unwrap();
-        Tree::from_bytes(&tree_data, *hash).unwrap()
+        match Tree::from_bytes(&tree_data, *hash) {
+            Ok(tree) => tree,
+            Err(e) => {
+                // If parsing fails (e.g., empty tree data), return an empty tree as fallback
+                // This prevents panic on "Invalid pack object type number: 0"
+                eprintln!("Warning: Failed to load tree {}, defaulting to empty: {}", hash, e);
+                Tree::new(Vec::new())
+            }
+        }
     }
 
     /// Get all the items in the tree recursively (to workdir path)
