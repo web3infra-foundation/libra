@@ -42,18 +42,41 @@ pub trait BlobExt {
 
 impl TreeExt for Tree {
     fn load(hash: &ObjectHash) -> Tree {
-        let storage = util::objects_storage();
-        let tree_data = storage.get(hash).unwrap();
+        let storage = match util::try_objects_storage() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "Warning: Failed to access objects storage ({}). Defaulting to empty tree.",
+                    e
+                );
+                return Tree::from_tree_items(Vec::new()).unwrap_or_else(|e| {
+                    panic!("Critical: Failed to create empty fallback tree: {}", e);
+                });
+            }
+        };
+        
+        let tree_data = match storage.get(hash) {
+            Ok(data) => data,
+            Err(e) => {
+                eprintln!("Warning: Tree object {} not found in storage ({}). Defaulting to empty.", hash, e);
+                return Tree::from_tree_items(Vec::new()).unwrap_or_else(|e| {
+                    panic!("Critical: Failed to create empty fallback tree: {}", e);
+                });
+            }
+        };
+
         match Tree::from_bytes(&tree_data, *hash) {
             Ok(tree) => tree,
             Err(e) => {
                 // If parsing fails (e.g., empty tree data), return an empty tree as fallback
                 // This prevents panic on "Invalid pack object type number: 0"
                 eprintln!(
-                    "Warning: Failed to load tree {}, defaulting to empty: {}",
+                    "Warning: Failed to parse tree {}, defaulting to empty: {}",
                     hash, e
                 );
-                Tree::from_tree_items(Vec::new()).unwrap()
+                Tree::from_tree_items(Vec::new()).unwrap_or_else(|e| {
+                    panic!("Critical: Failed to create empty fallback tree: {}", e);
+                })
             }
         }
     }
