@@ -27,6 +27,7 @@ use git_internal::internal::object::{
     context::{ContextItem, ContextItemKind, ContextSnapshot, SelectionStrategy},
     decision::{Decision, DecisionType},
     evidence::{Evidence, EvidenceKind},
+    intent::{Intent, IntentStatus},
     patchset::{ApplyStatus, ChangeType, PatchSet, TouchedFile},
     plan::{Plan, PlanStep, StepStatus},
     provenance::Provenance,
@@ -49,7 +50,6 @@ use crate::{
     internal::ai::mcp::server::LibraMcpServer,
     utils::storage_ext::{Identifiable, StorageExt},
 };
-use git_internal::internal::object::intent::{Intent, IntentStatus};
 
 impl LibraMcpServer {
     /// Default actor for MCP tool calls. Extracted for testability.
