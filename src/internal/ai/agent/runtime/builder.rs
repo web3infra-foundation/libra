@@ -53,9 +53,10 @@ impl<M: CompletionModel> AgentBuilder<M> {
     }
 
     /// Add tools from a ToolRegistry.
+    #[deprecated(
+        note = "Not yet implemented: ToolRegistry is not yet converted into ToolSet. Use tools(...) or tool(...) instead."
+    )]
     pub fn with_registry(self, _registry: &ToolRegistry) -> Self {
-        // For now, we can't directly convert ToolHandler to Tool
-        // This is a placeholder for future integration
         self
     }
 

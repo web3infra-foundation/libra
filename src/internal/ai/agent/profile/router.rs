@@ -2,6 +2,9 @@
 
 use super::parser::AgentProfile;
 
+const MIN_MATCH_SCORE: usize = 2;
+const MAX_PROFILE_FILE_BYTES: u64 = 1024 * 1024;
+
 /// Routes user input to the most appropriate agent profile.
 pub struct AgentProfileRouter {
     profiles: Vec<AgentProfile>,
@@ -26,7 +29,7 @@ impl AgentProfileRouter {
             let score = Self::match_score(&input_lower, profile);
             // Require at least 2 keyword matches to avoid false positives
             // on short or generic inputs like "test", "build", etc.
-            if score >= 2
+            if score >= MIN_MATCH_SCORE
                 && best
                     .as_ref()
                     .is_none_or(|(_, best_score)| score > *best_score)
@@ -76,10 +79,6 @@ impl AgentProfileRouter {
     }
 }
 
-/// Backward compatible type name for legacy callers.
-#[deprecated(note = "Use AgentProfileRouter instead.")]
-pub type AgentRouter = AgentProfileRouter;
-
 /// Load all embedded default agent profiles.
 pub fn load_embedded_profiles() -> Vec<AgentProfile> {
     let sources = [
@@ -93,12 +92,6 @@ pub fn load_embedded_profiles() -> Vec<AgentProfile> {
         .iter()
         .filter_map(|src| super::parser::parse_agent_profile(src))
         .collect()
-}
-
-/// Backward compatible embedded loader name.
-#[deprecated(note = "Use load_embedded_profiles instead.")]
-pub fn load_embedded_agents() -> Vec<AgentProfile> {
-    load_embedded_profiles()
 }
 
 /// Load agent profiles from a directory, with embedded profiles as fallback.
@@ -131,12 +124,6 @@ pub fn load_profiles(working_dir: &std::path::Path) -> Vec<AgentProfile> {
     profiles
 }
 
-/// Backward compatible loader name.
-#[deprecated(note = "Use load_profiles instead.")]
-pub fn load_agents(working_dir: &std::path::Path) -> Vec<AgentProfile> {
-    load_profiles(working_dir)
-}
-
 fn load_profiles_from_dir(
     dir: &std::path::Path,
     profiles: &mut Vec<AgentProfile>,
@@ -145,8 +132,29 @@ fn load_profiles_from_dir(
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().is_some_and(|ext| ext == "md")
-                && let Some(profile) = super::parser::load_agent_profile_from_file(&path)
+            if path.extension().is_none_or(|ext| ext != "md") {
+                continue;
+            }
+
+            let metadata = match path.metadata() {
+                Ok(meta) => meta,
+                Err(error) => {
+                    tracing::warn!(path = %path.display(), error = %error, "failed to read agent file metadata");
+                    continue;
+                }
+            };
+
+            if metadata.len() > MAX_PROFILE_FILE_BYTES {
+                tracing::warn!(
+                    path = %path.display(),
+                    size = metadata.len(),
+                    max_bytes = MAX_PROFILE_FILE_BYTES,
+                    "skipped oversized agent profile",
+                );
+                continue;
+            }
+
+            if let Some(profile) = super::parser::load_agent_profile_from_file(&path)
                 && loaded_names.insert(profile.name.clone())
             {
                 profiles.push(profile);
@@ -158,6 +166,31 @@ fn load_profiles_from_dir(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_load_profiles_skips_oversized_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agents_dir = tmp.path().join(".libra").join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+
+        let valid_profile = agents_dir.join("valid.md");
+        std::fs::write(
+            &valid_profile,
+            "---\nname: valid\ndescription: Valid planner\ntools: []\nmodel: default\n---\nbody",
+        )
+        .unwrap();
+
+        let mut oversized = String::from(
+            "---\nname: oversized\ndescription: Oversized profile\ntools: []\nmodel: default\n---\n",
+        );
+        oversized.push_str(&"a".repeat((MAX_PROFILE_FILE_BYTES + 1) as usize));
+        std::fs::write(agents_dir.join("oversized.md"), oversized).unwrap();
+
+        let profiles = load_profiles(tmp.path());
+        let names: Vec<_> = profiles.iter().map(|p| p.name.as_str()).collect();
+        assert!(names.contains(&"valid"));
+        assert!(!names.contains(&"oversized"));
+    }
 
     #[test]
     fn test_load_embedded_profiles() {

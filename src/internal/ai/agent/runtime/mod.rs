@@ -1,8 +1,11 @@
 use std::sync::Arc;
 
 use crate::internal::ai::{
-    completion::{Chat, CompletionError, CompletionModel, CompletionRequest, Message, Prompt},
-    tools::ToolSet,
+    completion::{
+        Chat, CompletionError, CompletionModel, CompletionRequest, Message, Prompt,
+        message::{AssistantContent, OneOrMany, ToolResult, UserContent},
+    },
+    tools::{ToolDefinition, ToolSet},
 };
 
 pub mod builder;
@@ -40,7 +43,6 @@ pub struct Agent<M: CompletionModel> {
     /// Maximum number of steps for tool execution loops. `None` means unlimited.
     max_steps: Option<usize>,
     /// Set of tools available to the agent.
-    /// Tools available to the agent.
     tools: ToolSet,
 }
 
@@ -63,8 +65,7 @@ impl<M: CompletionModel> Agent<M> {
         &self,
         mut chat_history: Vec<Message>,
     ) -> Result<String, CompletionError> {
-        let tools: Vec<crate::internal::ai::tools::ToolDefinition> =
-            self.tools.tools.iter().map(|t| t.definition()).collect();
+        let tools: Vec<ToolDefinition> = self.tools.tools.iter().map(|t| t.definition()).collect();
 
         let mut steps = 0usize;
 
@@ -81,9 +82,7 @@ impl<M: CompletionModel> Agent<M> {
 
             let mut tool_calls = Vec::new();
             for item in &response.content {
-                if let crate::internal::ai::completion::message::AssistantContent::ToolCall(tc) =
-                    item
-                {
+                if let AssistantContent::ToolCall(tc) = item {
                     tool_calls.push(tc.clone());
                 }
             }
@@ -93,9 +92,7 @@ impl<M: CompletionModel> Agent<M> {
                     .content
                     .iter()
                     .filter_map(|c| match c {
-                        crate::internal::ai::completion::message::AssistantContent::Text(t) => {
-                            Some(t.text.clone())
-                        }
+                        AssistantContent::Text(t) => Some(t.text.clone()),
                         _ => None,
                     })
                     .collect::<Vec<_>>()
@@ -120,9 +117,7 @@ impl<M: CompletionModel> Agent<M> {
                 )));
             }
 
-            let assistant_content = match crate::internal::ai::completion::message::OneOrMany::many(
-                response.content.clone(),
-            ) {
+            let assistant_content = match OneOrMany::many(response.content.clone()) {
                 Some(content) => content,
                 None => {
                     return Err(CompletionError::ResponseError(
@@ -157,24 +152,19 @@ impl<M: CompletionModel> Agent<M> {
                     .call(tc.function.arguments.clone())
                     .map_err(CompletionError::RequestError)?;
 
-                results.push(
-                    crate::internal::ai::completion::message::UserContent::ToolResult(
-                        crate::internal::ai::completion::message::ToolResult {
-                            id: tc.id.clone(),
-                            name: tc.function.name.clone(),
-                            result,
-                        },
-                    ),
-                );
+                results.push(UserContent::ToolResult(ToolResult {
+                    id: tc.id.clone(),
+                    name: tc.function.name.clone(),
+                    result,
+                }));
             }
 
-            let tool_result_content =
-                match crate::internal::ai::completion::message::OneOrMany::many(results) {
-                    Some(content) => content,
-                    None => {
-                        return Err(CompletionError::ResponseError("Empty tool results".into()));
-                    }
-                };
+            let tool_result_content = match OneOrMany::many(results) {
+                Some(content) => content,
+                None => {
+                    return Err(CompletionError::ResponseError("Empty tool results".into()));
+                }
+            };
 
             chat_history.push(Message::User {
                 content: tool_result_content,

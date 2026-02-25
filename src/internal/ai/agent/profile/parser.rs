@@ -19,6 +19,10 @@ pub struct AgentProfile {
 
 /// Parse a markdown string with YAML frontmatter into an AgentDefinition.
 ///
+/// The parser is intentionally simple and supports only single-line `key: value` fields and
+/// array-style tool lists like `tools: ["read_file", "list_dir"]`. It does not currently
+/// support multiline values or quoted values containing `:`.
+///
 /// Expected format:
 /// ```text
 /// ---
