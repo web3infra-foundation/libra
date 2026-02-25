@@ -62,6 +62,13 @@ pub enum AppEvent {
         /// If set, restrict tools for this message (agent tool restriction).
         allowed_tools: Option<Vec<String>>,
     },
+    /// Complete result for a `/plan` workflow run.
+    PlanWorkflowComplete {
+        text: String,
+        new_history: Vec<Message>,
+        intent_id: Option<String>,
+        spec_json: String,
+    },
     /// Insert a history cell into the chat.
     InsertHistoryCell(Box<dyn HistoryCell>),
     /// Tool call is starting.
