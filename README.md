@@ -1,3 +1,5 @@
+![Libra](docs/image/banner.png)
+
 # Libra
 
 Libra is a partial implementation of a **Git** client, developed in **Rust**.
