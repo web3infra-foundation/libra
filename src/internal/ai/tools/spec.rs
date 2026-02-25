@@ -158,6 +158,94 @@ impl ToolSpec {
         }
     }
 
+    /// Create a ToolSpec for submit_intent_draft.
+    pub fn submit_intent_draft() -> Self {
+        Self {
+            spec_type: "function".to_string(),
+            function: FunctionDefinition {
+                name: "submit_intent_draft".to_string(),
+                description: "Submit a structured IntentDraft for the /plan pipeline. \
+                    Use this exactly once after gathering enough context."
+                    .to_string(),
+                parameters: FunctionParameters::Object {
+                    param_type: "object".to_string(),
+                    properties: {
+                        let mut props = Map::new();
+                        props.insert(
+                            "draft".to_string(),
+                            json!({
+                                "type": "object",
+                                "required": ["intent", "acceptance", "risk"],
+                                "properties": {
+                                    "intent": {
+                                        "type": "object",
+                                        "required": ["summary", "problemStatement", "changeType", "objectives", "inScope", "outOfScope"],
+                                        "properties": {
+                                            "summary": {"type": "string"},
+                                            "problemStatement": {"type": "string"},
+                                            "changeType": {
+                                                "type": "string",
+                                                "enum": ["bugfix","feature","refactor","performance","security","docs","chore","unknown"]
+                                            },
+                                            "objectives": {"type": "array", "items": {"type": "string"}},
+                                            "inScope": {"type": "array", "items": {"type": "string"}},
+                                            "outOfScope": {"type": "array", "items": {"type": "string"}},
+                                            "touchHints": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "files": {"type": "array", "items": {"type": "string"}},
+                                                    "symbols": {"type": "array", "items": {"type": "string"}},
+                                                    "apis": {"type": "array", "items": {"type": "string"}}
+                                                }
+                                            }
+                                        }
+                                    },
+                                    "acceptance": {
+                                        "type": "object",
+                                        "required": ["successCriteria"],
+                                        "properties": {
+                                            "successCriteria": {"type": "array", "items": {"type": "string"}},
+                                            "fastChecks": {"type": "array", "items": {"$ref": "#/$defs/check"}},
+                                            "integrationChecks": {"type": "array", "items": {"$ref": "#/$defs/check"}},
+                                            "securityChecks": {"type": "array", "items": {"$ref": "#/$defs/check"}},
+                                            "releaseChecks": {"type": "array", "items": {"$ref": "#/$defs/check"}}
+                                        },
+                                        "$defs": {
+                                            "check": {
+                                                "type": "object",
+                                                "required": ["id", "kind"],
+                                                "properties": {
+                                                    "id": {"type": "string"},
+                                                    "kind": {"type": "string", "enum": ["command", "testSuite", "policy"]},
+                                                    "command": {"type": "string"},
+                                                    "timeoutSeconds": {"type": "integer"},
+                                                    "expectedExitCode": {"type": "integer"},
+                                                    "required": {"type": "boolean"},
+                                                    "artifactsProduced": {"type": "array", "items": {"type": "string"}}
+                                                }
+                                            }
+                                        }
+                                    },
+                                    "risk": {
+                                        "type": "object",
+                                        "required": ["rationale"],
+                                        "properties": {
+                                            "rationale": {"type": "string"},
+                                            "factors": {"type": "array", "items": {"type": "string"}},
+                                            "level": {"type": "string", "enum": ["low", "medium", "high"]}
+                                        }
+                                    }
+                                }
+                            }),
+                        );
+                        props
+                    },
+                    required: vec!["draft".to_string()],
+                },
+            },
+        }
+    }
+
     /// Create a ToolSpec for request_user_input.
     pub fn request_user_input() -> Self {
         Self {

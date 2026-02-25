@@ -28,9 +28,13 @@ use crate::internal::ai::{
     agents::AgentRouter,
     commands::CommandDispatcher,
     completion::{CompletionModel, Message},
+    intentspec::{
+        IntentDraft, ResolveContext, RiskLevel, render_summary, repair_intentspec,
+        resolve_intentspec, validate_intentspec,
+    },
     mcp::{
         resource::{
-            CreateContextSnapshotParams, CreateDecisionParams, CreateRunParams,
+            CreateContextSnapshotParams, CreateDecisionParams, CreateIntentParams, CreateRunParams,
             CreateToolInvocationParams,
         },
         server::LibraMcpServer,
@@ -38,7 +42,10 @@ use crate::internal::ai::{
     session::{SessionState, SessionStore},
     tools::{
         ToolOutput, ToolRegistry,
-        context::{UpdatePlanArgs, UserInputAnswer, UserInputRequest, UserInputResponse},
+        context::{
+            RequestUserInputArgs, SubmitIntentDraftArgs, UpdatePlanArgs, UserInputAnswer,
+            UserInputRequest, UserInputResponse,
+        },
     },
 };
 
@@ -50,6 +57,10 @@ pub struct McpIds {
     pub run_id: Option<String>,
     pub _context_snapshot_id: Option<String>,
 }
+
+const LATEST_INTENTSPEC_INTENT_ID: &str = "latest_intentspec_intent_id";
+const LATEST_INTENTSPEC_JSON: &str = "latest_intentspec_json";
+const MAX_INTENTSPEC_REPAIR_ATTEMPTS: usize = 2;
 
 /// The reason for exiting the application.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,6 +122,8 @@ pub struct App<M: CompletionModel> {
     registry: Arc<ToolRegistry>,
     /// Tool loop runtime config.
     config: ToolLoopConfig,
+    /// Default tool allow-list for regular chat turns.
+    default_allowed_tools: Vec<String>,
     /// Conversation history (model-facing).
     history: Vec<Message>,
     /// Receiver for app events.
@@ -162,12 +175,19 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
     ) -> Self {
         let (app_event_tx, app_event_rx) = mpsc::unbounded_channel();
         let history = app_config.session.to_history();
+        let default_allowed_tools = registry
+            .tool_specs()
+            .into_iter()
+            .map(|s| s.function.name)
+            .filter(|name| name != "submit_intent_draft")
+            .collect();
         Self {
             tui,
             widget: ChatWidget::new(),
             model,
             registry,
             config,
+            default_allowed_tools,
             history,
             app_event_rx,
             app_event_tx,
@@ -390,7 +410,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 KeyCode::Enter => {
                     if !self.widget.bottom_pane.is_empty() {
                         let text = self.widget.bottom_pane.take_input();
-                        self.submit_message(text);
+                        self.submit_message(text).await;
                     }
                 }
                 // Clear screen (Ctrl+K) - must come before generic Char handler
@@ -843,7 +863,8 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 let model = self.model.clone();
                 let registry = self.registry.clone();
                 let mut config = self.config.clone();
-                config.allowed_tools = allowed_tools;
+                config.allowed_tools =
+                    Some(allowed_tools.unwrap_or_else(|| self.default_allowed_tools.clone()));
                 let history = self.history.clone();
                 let tx = self.app_event_tx.clone();
                 let user_text = text;
@@ -1024,6 +1045,41 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     }
                 }
             }
+            AppEvent::PlanWorkflowComplete {
+                text,
+                new_history,
+                intent_id,
+                spec_json,
+            } => {
+                self.agent_task = None;
+                self.history = new_history;
+                self.session.add_assistant_message(&text);
+                self.session.metadata.insert(
+                    LATEST_INTENTSPEC_JSON.to_string(),
+                    serde_json::Value::String(spec_json),
+                );
+                if let Some(id) = intent_id {
+                    self.session.metadata.insert(
+                        LATEST_INTENTSPEC_INTENT_ID.to_string(),
+                        serde_json::Value::String(id),
+                    );
+                } else {
+                    self.session.metadata.remove(LATEST_INTENTSPEC_INTENT_ID);
+                }
+
+                for cell in self.widget.cells.iter_mut().rev() {
+                    if let Some(assistant_cell) =
+                        cell.as_any_mut().downcast_mut::<AssistantHistoryCell>()
+                        && assistant_cell.is_streaming
+                    {
+                        assistant_cell.content = text.clone();
+                        assistant_cell.complete();
+                        break;
+                    }
+                }
+                self.widget.bottom_pane.set_status(AgentStatus::Idle);
+                self.schedule_draw();
+            }
             AppEvent::InsertHistoryCell(cell) => {
                 self.insert_before_streaming_assistant(cell);
                 self.schedule_draw();
@@ -1105,10 +1161,10 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
     }
 
     /// Submit a user message, expanding slash commands and applying agent context.
-    fn submit_message(&mut self, text: String) {
+    async fn submit_message(&mut self, text: String) {
         // 1. Check for built-in TUI commands first.
-        if let Some((cmd, _args)) = super::slash_command::parse_builtin(&text) {
-            self.handle_builtin_command(cmd);
+        if let Some((cmd, args)) = super::slash_command::parse_builtin(&text) {
+            self.handle_builtin_command(cmd, args).await;
             return;
         }
 
@@ -1142,7 +1198,11 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
     }
 
     /// Handle a built-in TUI command (does not send to model).
-    fn handle_builtin_command(&mut self, cmd: super::slash_command::BuiltinCommand) {
+    async fn handle_builtin_command(
+        &mut self,
+        cmd: super::slash_command::BuiltinCommand,
+        args: &str,
+    ) {
         use super::slash_command::BuiltinCommand;
         match cmd {
             BuiltinCommand::Help => {
@@ -1181,6 +1241,12 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 self.widget
                     .add_cell(Box::new(AssistantHistoryCell::new(status)));
             }
+            BuiltinCommand::Plan => {
+                self.start_plan_workflow(args).await;
+            }
+            BuiltinCommand::Intent => {
+                self.handle_intent_command(args).await;
+            }
             BuiltinCommand::Quit => {
                 self.should_exit = true;
                 self.exit_info = Some(AppExitInfo {
@@ -1188,6 +1254,324 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 });
             }
         }
+    }
+
+    async fn start_plan_workflow(&mut self, request: &str) {
+        let request = request.trim();
+        if request.is_empty() {
+            self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                "Usage: /plan <your requirement>".to_string(),
+            )));
+            self.schedule_draw();
+            return;
+        }
+
+        let user_text = format!("/plan {request}");
+        self.session.add_user_message(&user_text);
+        self.widget
+            .add_cell(Box::new(UserHistoryCell::new(user_text.clone())));
+        self.widget
+            .add_cell(Box::new(AssistantHistoryCell::streaming()));
+        self.widget.bottom_pane.set_status(AgentStatus::Thinking);
+        self.schedule_draw();
+
+        let prompt = if let Some(agent) = self.agent_router.get("planner") {
+            format!(
+                "{}\n\n---\n\n{}",
+                agent.system_prompt,
+                build_plan_prompt(request)
+            )
+        } else {
+            build_plan_prompt(request)
+        };
+        let model = self.model.clone();
+        let registry = self.registry.clone();
+        let mut config = self.config.clone();
+        config.allowed_tools = Some(vec![
+            "read_file".to_string(),
+            "list_dir".to_string(),
+            "grep_files".to_string(),
+            "request_user_input".to_string(),
+            "submit_intent_draft".to_string(),
+        ]);
+        let history = self.history.clone();
+        let tx = self.app_event_tx.clone();
+        let mcp_server = self.mcp_server.clone();
+        let working_dir = self.registry.working_dir().to_path_buf();
+
+        let handle = tokio::spawn(async move {
+            struct PlanObserver {
+                tx: UnboundedSender<AppEvent>,
+                draft: Option<IntentDraft>,
+                risk_prompted: bool,
+                selected_risk: Option<RiskLevel>,
+            }
+
+            impl PlanObserver {
+                fn new(tx: UnboundedSender<AppEvent>) -> Self {
+                    Self {
+                        tx,
+                        draft: None,
+                        risk_prompted: false,
+                        selected_risk: None,
+                    }
+                }
+            }
+
+            impl crate::internal::ai::agent::ToolLoopObserver for PlanObserver {
+                fn on_tool_call_begin(
+                    &mut self,
+                    call_id: &str,
+                    tool_name: &str,
+                    arguments: &serde_json::Value,
+                ) {
+                    let _ = self.tx.send(AppEvent::ToolCallBegin {
+                        call_id: call_id.to_string(),
+                        tool_name: tool_name.to_string(),
+                        arguments: arguments.clone(),
+                    });
+
+                    if tool_name == "request_user_input"
+                        && let Ok(req) =
+                            parse_value_or_json_string::<RequestUserInputArgs>(arguments)
+                        && req
+                            .questions
+                            .iter()
+                            .any(|q| q.id.trim().eq_ignore_ascii_case("risk_profile"))
+                    {
+                        self.risk_prompted = true;
+                    }
+
+                    if tool_name == "submit_intent_draft"
+                        && let Ok(args) =
+                            parse_value_or_json_string::<SubmitIntentDraftArgs>(arguments)
+                    {
+                        self.draft = Some(args.draft);
+                    }
+                }
+
+                fn on_tool_call_end(
+                    &mut self,
+                    call_id: &str,
+                    tool_name: &str,
+                    result: &Result<ToolOutput, String>,
+                ) {
+                    let _ = self.tx.send(AppEvent::ToolCallEnd {
+                        call_id: call_id.to_string(),
+                        tool_name: tool_name.to_string(),
+                        result: result.clone(),
+                    });
+
+                    if tool_name == "request_user_input"
+                        && let Ok(output) = result
+                        && let Some(content) = output.as_text()
+                        && let Ok(resp) = serde_json::from_str::<UserInputResponse>(content)
+                        && let Some(level) = extract_risk_level_from_response(&resp)
+                    {
+                        self.selected_risk = Some(level);
+                    }
+                }
+            }
+
+            let mut observer = PlanObserver::new(tx.clone());
+            let run_result = run_tool_loop_with_history_and_observer(
+                &model,
+                history,
+                prompt,
+                &registry,
+                config,
+                &mut observer,
+            )
+            .await;
+
+            let turn = match run_result {
+                Ok(turn) => turn,
+                Err(e) => {
+                    let _ = tx.send(AppEvent::AgentEvent(AgentEvent::Error {
+                        message: e.to_string(),
+                    }));
+                    return;
+                }
+            };
+
+            if !observer.risk_prompted {
+                let _ = tx.send(AppEvent::AgentEvent(AgentEvent::Error {
+                    message: "Plan failed: planner did not ask for risk profile.".to_string(),
+                }));
+                return;
+            }
+
+            let risk_level = match observer.selected_risk.clone() {
+                Some(level) => level,
+                None => {
+                    let _ = tx.send(AppEvent::AgentEvent(AgentEvent::Error {
+                        message: "Plan failed: risk profile was not selected.".to_string(),
+                    }));
+                    return;
+                }
+            };
+
+            let draft = match observer.draft.take() {
+                Some(d) => d,
+                None => {
+                    let _ = tx.send(AppEvent::AgentEvent(AgentEvent::Error {
+                        message: "Plan failed: no intent draft was submitted.".to_string(),
+                    }));
+                    return;
+                }
+            };
+
+            let mut spec = resolve_intentspec(
+                draft,
+                risk_level,
+                ResolveContext {
+                    working_dir: working_dir.display().to_string(),
+                    base_ref: current_head_sha(&working_dir),
+                    created_by_id: "tui-user".to_string(),
+                },
+            );
+
+            let mut issues = validate_intentspec(&spec);
+            for _ in 0..MAX_INTENTSPEC_REPAIR_ATTEMPTS {
+                if issues.is_empty() {
+                    break;
+                }
+                repair_intentspec(&mut spec, &issues);
+                issues = validate_intentspec(&spec);
+            }
+
+            if !issues.is_empty() {
+                let report = issues
+                    .iter()
+                    .map(|i| format!("- {}: {}", i.path, i.message))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let _ = tx.send(AppEvent::AgentEvent(AgentEvent::Error {
+                    message: format!(
+                        "Plan failed after automatic repair.\nValidation issues:\n{}",
+                        report
+                    ),
+                }));
+                return;
+            }
+
+            let canonical =
+                match crate::internal::ai::intentspec::canonical::to_canonical_json(&spec) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let _ = tx.send(AppEvent::AgentEvent(AgentEvent::Error {
+                            message: format!("Plan failed: cannot serialize IntentSpec: {e}"),
+                        }));
+                        return;
+                    }
+                };
+
+            let mut persistence_warning = None;
+            let intent_id = if let Some(mcp_server) = mcp_server {
+                let params = CreateIntentParams {
+                    content: canonical,
+                    parent_id: None,
+                    status: Some("active".to_string()),
+                    task_id: None,
+                    commit_sha: None,
+                    actor_kind: Some("system".to_string()),
+                    actor_id: Some("libra-plan".to_string()),
+                };
+                let actor_kind = params.actor_kind.clone();
+                let actor_id = params.actor_id.clone();
+                match mcp_server
+                    .resolve_actor_from_params(actor_kind.as_deref(), actor_id.as_deref())
+                {
+                    Ok(actor) => match mcp_server.create_intent_impl(params, actor).await {
+                        Ok(call_result) => parse_created_id(&call_result),
+                        Err(e) => {
+                            persistence_warning =
+                                Some(format!("failed to persist intent into MCP: {e:?}"));
+                            None
+                        }
+                    },
+                    Err(e) => {
+                        persistence_warning =
+                            Some(format!("failed to resolve MCP actor for intent: {e:?}"));
+                        None
+                    }
+                }
+            } else {
+                persistence_warning =
+                    Some("MCP server unavailable; intent not persisted.".to_string());
+                None
+            };
+
+            let mut summary = render_summary(&spec, intent_id.as_deref());
+            if let Some(warn) = persistence_warning {
+                summary.push_str(&format!("\nWarning: {warn}"));
+            }
+
+            let pretty_json =
+                serde_json::to_string_pretty(&spec).unwrap_or_else(|_| "{}".to_string());
+            let mut new_history = turn.history;
+            new_history.push(Message::assistant(summary.clone()));
+
+            let _ = tx.send(AppEvent::PlanWorkflowComplete {
+                text: summary,
+                new_history,
+                intent_id,
+                spec_json: pretty_json,
+            });
+        });
+
+        self.agent_task = Some(handle);
+    }
+
+    async fn handle_intent_command(&mut self, args: &str) {
+        match args.trim() {
+            "show" => {
+                let rendered = self.load_latest_intentspec_json().await.unwrap_or_else(|| {
+                    "No IntentSpec found. Run `/plan <requirement>` first.".to_string()
+                });
+                self.widget
+                    .add_cell(Box::new(AssistantHistoryCell::new(rendered)));
+                self.schedule_draw();
+            }
+            _ => {
+                self.widget.add_cell(Box::new(AssistantHistoryCell::new(
+                    "Usage: /intent show".to_string(),
+                )));
+                self.schedule_draw();
+            }
+        }
+    }
+
+    async fn load_latest_intentspec_json(&self) -> Option<String> {
+        if let (Some(id), Some(mcp)) = (
+            self.session
+                .metadata
+                .get(LATEST_INTENTSPEC_INTENT_ID)
+                .and_then(|v| v.as_str()),
+            self.mcp_server.clone(),
+        ) {
+            if let Some(spec) = fetch_intentspec_from_object_id(&mcp, id).await {
+                return serde_json::to_string_pretty(&spec).ok();
+            }
+        }
+
+        if let Some(json_text) = self
+            .session
+            .metadata
+            .get(LATEST_INTENTSPEC_JSON)
+            .and_then(|v| v.as_str())
+        {
+            return Some(json_text.to_string());
+        }
+
+        let mcp = self.mcp_server.clone()?;
+        let ids = list_intent_object_ids(&mcp).await;
+        for id in ids.into_iter().rev() {
+            if let Some(spec) = fetch_intentspec_from_object_id(&mcp, &id).await {
+                return serde_json::to_string_pretty(&spec).ok();
+            }
+        }
+        None
     }
 
     fn interrupt_agent_task(&mut self) {
@@ -1328,5 +1712,130 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             }
         })?;
         Ok(())
+    }
+}
+
+fn build_plan_prompt(request: &str) -> String {
+    format!(
+        "You are running /plan mode.\n\
+First, you MUST call request_user_input with exactly one question id=risk_profile, header=Risk, and options Low/Medium/High.\n\
+After receiving user choice, analyze the repository and then call submit_intent_draft exactly once.\n\
+If required information is missing, call request_user_input again for focused follow-up questions.\n\
+Do not output a plain-text plan; finalize by submitting the draft tool call.\n\n\
+User request:\n{request}"
+    )
+}
+
+fn parse_value_or_json_string<T: serde::de::DeserializeOwned>(
+    value: &serde_json::Value,
+) -> Result<T, serde_json::Error> {
+    match value {
+        serde_json::Value::String(raw) => serde_json::from_str(raw),
+        _ => serde_json::from_value(value.clone()),
+    }
+}
+
+fn extract_risk_level_from_response(resp: &UserInputResponse) -> Option<RiskLevel> {
+    for answer in resp.answers.values() {
+        for item in &answer.answers {
+            let normalized = item.to_lowercase();
+            if normalized.contains("low") {
+                return Some(RiskLevel::Low);
+            }
+            if normalized.contains("medium") {
+                return Some(RiskLevel::Medium);
+            }
+            if normalized.contains("high") {
+                return Some(RiskLevel::High);
+            }
+        }
+    }
+    None
+}
+
+fn current_head_sha(working_dir: &std::path::Path) -> String {
+    let output = std::process::Command::new("git")
+        .arg("rev-parse")
+        .arg("HEAD")
+        .current_dir(working_dir)
+        .output();
+    match output {
+        Ok(out) if out.status.success() => {
+            let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if text.is_empty() {
+                "HEAD".to_string()
+            } else {
+                text
+            }
+        }
+        _ => "HEAD".to_string(),
+    }
+}
+
+fn parse_created_id(result: &rmcp::model::CallToolResult) -> Option<String> {
+    for content in &result.content {
+        if let Some(text) = content.as_text().map(|t| t.text.as_str())
+            && let Some(id) = text.split("ID:").nth(1)
+        {
+            let id = id.trim();
+            if !id.is_empty() {
+                return Some(id.to_string());
+            }
+        }
+    }
+    None
+}
+
+async fn list_intent_object_ids(mcp: &Arc<LibraMcpServer>) -> Vec<String> {
+    let mut ids = Vec::new();
+    let resources = match mcp.read_resource_impl("libra://objects/intent").await {
+        Ok(v) => v,
+        Err(_) => return ids,
+    };
+    let Some(content) = resources.first() else {
+        return ids;
+    };
+    let Some(text) = resource_text(content) else {
+        return ids;
+    };
+    for line in text.lines() {
+        if let Some(id) = line.split_whitespace().next() {
+            ids.push(id.to_string());
+        }
+    }
+    ids
+}
+
+async fn fetch_intentspec_from_object_id(
+    mcp: &Arc<LibraMcpServer>,
+    object_id: &str,
+) -> Option<crate::internal::ai::intentspec::IntentSpec> {
+    let uri = format!("libra://object/{object_id}");
+    let resources = mcp.read_resource_impl(&uri).await.ok()?;
+    let content = resources.first()?;
+    let text = resource_text(content)?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let intent_content = extract_content_field(&value)?;
+    serde_json::from_str::<crate::internal::ai::intentspec::IntentSpec>(&intent_content).ok()
+}
+
+fn resource_text(content: &rmcp::model::ResourceContents) -> Option<String> {
+    let value = serde_json::to_value(content).ok()?;
+    value
+        .get("text")
+        .and_then(|v| v.as_str())
+        .map(|v| v.to_string())
+}
+
+fn extract_content_field(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(v) = map.get("content").and_then(|v| v.as_str()) {
+                return Some(v.to_string());
+            }
+            map.values().find_map(extract_content_field)
+        }
+        serde_json::Value::Array(items) => items.iter().find_map(extract_content_field),
+        _ => None,
     }
 }

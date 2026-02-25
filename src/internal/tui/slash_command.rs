@@ -11,6 +11,8 @@ pub enum BuiltinCommand {
     Clear,
     Model,
     Status,
+    Plan,
+    Intent,
     Quit,
 }
 
@@ -22,6 +24,8 @@ impl BuiltinCommand {
             Self::Clear => "clear",
             Self::Model => "model",
             Self::Status => "status",
+            Self::Plan => "plan",
+            Self::Intent => "intent",
             Self::Quit => "quit",
         }
     }
@@ -33,6 +37,8 @@ impl BuiltinCommand {
             Self::Clear => "Clear conversation history",
             Self::Model => "Show current model info",
             Self::Status => "Show current status",
+            Self::Plan => "Generate validated IntentSpec from a request",
+            Self::Intent => "IntentSpec utilities (e.g. /intent show)",
             Self::Quit => "Quit the application",
         }
     }
@@ -44,6 +50,8 @@ impl BuiltinCommand {
             Self::Clear,
             Self::Model,
             Self::Status,
+            Self::Plan,
+            Self::Intent,
             Self::Quit,
         ]
     }
@@ -83,6 +91,14 @@ mod tests {
         assert_eq!(parse_builtin("/clear"), Some((BuiltinCommand::Clear, "")));
         assert_eq!(parse_builtin("/quit"), Some((BuiltinCommand::Quit, "")));
         assert_eq!(
+            parse_builtin("/plan add auth"),
+            Some((BuiltinCommand::Plan, "add auth"))
+        );
+        assert_eq!(
+            parse_builtin("/intent show"),
+            Some((BuiltinCommand::Intent, "show"))
+        );
+        assert_eq!(
             parse_builtin("/model gemini"),
             Some((BuiltinCommand::Model, "gemini"))
         );
@@ -92,11 +108,11 @@ mod tests {
     fn parse_case_insensitive() {
         assert_eq!(parse_builtin("/HELP"), Some((BuiltinCommand::Help, "")));
         assert_eq!(parse_builtin("/Quit"), Some((BuiltinCommand::Quit, "")));
+        assert_eq!(parse_builtin("/PLAN x"), Some((BuiltinCommand::Plan, "x")));
     }
 
     #[test]
     fn parse_unknown_returns_none() {
-        assert!(parse_builtin("/plan do something").is_none());
         assert!(parse_builtin("/unknown").is_none());
         assert!(parse_builtin("not a command").is_none());
         assert!(parse_builtin("").is_none());
@@ -105,8 +121,10 @@ mod tests {
     #[test]
     fn all_hints_returns_all() {
         let hints = BuiltinCommand::all_hints();
-        assert_eq!(hints.len(), 5);
+        assert_eq!(hints.len(), 7);
         assert!(hints.iter().any(|(n, _)| n == "help"));
         assert!(hints.iter().any(|(n, _)| n == "quit"));
+        assert!(hints.iter().any(|(n, _)| n == "plan"));
+        assert!(hints.iter().any(|(n, _)| n == "intent"));
     }
 }
