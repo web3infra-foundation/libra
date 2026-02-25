@@ -110,7 +110,7 @@ impl<M: CompletionModel> Agent<M> {
 
             steps += 1;
             if let Some(limit) = self.max_steps
-                && steps > limit
+                && steps >= limit
             {
                 return Err(CompletionError::ResponseError(format!(
                     "Tool calling exceeded max steps ({limit})",
