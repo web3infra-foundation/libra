@@ -24,8 +24,7 @@ use super::{
     terminal::{TARGET_FRAME_INTERVAL, Tui, TuiEvent},
 };
 use crate::internal::ai::{
-    agent::{ToolLoopConfig, run_tool_loop_with_history_and_observer},
-    agent::profile::AgentProfileRouter,
+    agent::{ToolLoopConfig, profile::AgentProfileRouter, run_tool_loop_with_history_and_observer},
     commands::CommandDispatcher,
     completion::{CompletionModel, Message},
     mcp::{

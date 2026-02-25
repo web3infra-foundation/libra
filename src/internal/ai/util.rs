@@ -42,6 +42,8 @@
 /// # Examples
 ///
 /// ```
+/// use libra::internal::ai::util::normalize_commit_anchor;
+///
 /// // SHA-256 hash is returned directly (lowercased)
 /// let sha256 = "a".repeat(64);
 /// assert_eq!(normalize_commit_anchor(&sha256).unwrap(), sha256);
@@ -111,6 +113,8 @@ pub fn normalize_commit_anchor(commit: &str) -> Result<String, String> {
 /// # Examples
 ///
 /// ```
+/// use libra::internal::ai::util::extract_sha1_from_anchor;
+///
 /// let anchor = format!("{}{}", "c".repeat(40), "0".repeat(24));
 /// assert_eq!(extract_sha1_from_anchor(&anchor).unwrap(), "c".repeat(40));
 /// ```
