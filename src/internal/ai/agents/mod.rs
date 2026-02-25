@@ -1,16 +1,19 @@
-//! Agent definition system for specialized AI agents.
+//! Deprecated compatibility shim for the legacy `ai::agents` module.
 //!
-//! Agents are defined in markdown files with YAML frontmatter. Each agent has a
-//! name, description, tool list, model preference, and system prompt. The agent
-//! router auto-selects the appropriate agent based on user input.
-//!
-//! Agent definitions are loaded from a three-tier hierarchy:
-//! 1. `{working_dir}/.libra/agents/*.md` (project-local)
-//! 2. `~/.config/libra/agents/*.md` (user-global)
-//! 3. Embedded defaults compiled into the binary
-
+//! This module is kept to reduce breakage while migrating callers to
+//! `ai::agent::profile`.
+#[allow(deprecated)]
 pub mod parser;
+
+#[allow(deprecated)]
 pub mod router;
 
-pub use parser::AgentDefinition;
-pub use router::{AgentRouter, load_agents, load_embedded_agents};
+pub use crate::internal::ai::agent::profile::{
+    AgentProfile as AgentDefinition,
+    AgentProfileRouter as AgentRouter,
+    load_embedded_profiles as load_embedded_agents,
+    load_profiles as load_agents,
+    parse_agent_profile,
+    AgentProfile,
+};
+

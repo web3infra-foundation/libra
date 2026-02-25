@@ -508,9 +508,9 @@ where
     let commands = crate::internal::ai::commands::load_commands(registry.working_dir());
     let command_dispatcher = crate::internal::ai::commands::CommandDispatcher::new(commands);
 
-    // Load agent definitions
-    let agents = crate::internal::ai::agents::load_agents(registry.working_dir());
-    let agent_router = crate::internal::ai::agents::AgentRouter::new(agents);
+    // Load agent profiles
+    let profiles = crate::internal::ai::agent::profile::load_profiles(registry.working_dir());
+    let agent_router = crate::internal::ai::agent::profile::AgentProfileRouter::new(profiles);
 
     // Set up session persistence
     let working_dir_str = registry.working_dir().to_string_lossy().to_string();
