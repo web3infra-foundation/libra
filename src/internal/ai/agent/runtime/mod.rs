@@ -110,7 +110,7 @@ impl<M: CompletionModel> Agent<M> {
 
             steps += 1;
             if let Some(limit) = self.max_steps
-                && steps >= limit
+                && steps > limit
             {
                 return Err(CompletionError::ResponseError(format!(
                     "Tool calling exceeded max steps ({limit})",
@@ -287,5 +287,94 @@ mod tests {
         let response = Prompt::prompt(&agent, "hi").await.unwrap();
 
         assert_eq!(response, "done");
+    }
+
+    #[tokio::test]
+    async fn test_max_steps_allows_exact_tool_call_count() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        #[derive(Clone)]
+        struct AlwaysToolCallModel {
+            completions: Arc<AtomicUsize>,
+        }
+
+        impl CompletionModel for AlwaysToolCallModel {
+            type Response = ();
+
+            async fn completion(
+                &self,
+                _request: CompletionRequest,
+            ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+                self.completions.fetch_add(1, Ordering::SeqCst);
+
+                Ok(CompletionResponse {
+                    content: vec![AssistantContent::ToolCall(ToolCall {
+                        id: "call".to_string(),
+                        name: "always_tool".to_string(),
+                        function: Function {
+                            name: "always_tool".to_string(),
+                            arguments: json!({}),
+                        },
+                    })],
+                    raw_response: (),
+                })
+            }
+        }
+
+        #[derive(Clone)]
+        struct CountingTool {
+            calls: Arc<AtomicUsize>,
+        }
+
+        impl Tool for CountingTool {
+            fn name(&self) -> String {
+                "always_tool".to_string()
+            }
+
+            fn description(&self) -> String {
+                "Always returns the same mock value".to_string()
+            }
+
+            fn definition(&self) -> ToolDefinition {
+                ToolDefinition {
+                    name: self.name(),
+                    description: self.description(),
+                    parameters: json!({ "type": "object" }),
+                }
+            }
+
+            fn call(
+                &self,
+                _args: serde_json::Value,
+            ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(json!({"ok": true}))
+            }
+        }
+
+        let completion_calls = Arc::new(AtomicUsize::new(0));
+        let tool_calls = Arc::new(AtomicUsize::new(0));
+
+        let mut tool_set = ToolSet::default();
+        tool_set.tools.push(std::sync::Arc::new(CountingTool {
+            calls: tool_calls.clone(),
+        }));
+
+        let model = AlwaysToolCallModel {
+            completions: completion_calls.clone(),
+        };
+        let agent = AgentBuilder::new(model)
+            .tools(tool_set)
+            .max_steps(2)
+            .build();
+
+        let err = Prompt::prompt(&agent, "hi").await.unwrap_err().to_string();
+
+        assert_eq!(tool_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(completion_calls.load(Ordering::SeqCst), 3);
+        assert!(err.contains("max steps"));
     }
 }

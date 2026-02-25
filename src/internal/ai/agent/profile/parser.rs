@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-/// A parsed agent definition from a markdown file with YAML frontmatter.
+/// A parsed agent profile from a markdown file with YAML frontmatter.
 #[derive(Debug, Clone)]
 pub struct AgentProfile {
     /// Unique name for this agent.
@@ -17,7 +17,7 @@ pub struct AgentProfile {
     pub system_prompt: String,
 }
 
-/// Parse a markdown string with YAML frontmatter into an AgentDefinition.
+/// Parse a markdown string with YAML frontmatter into an AgentProfile.
 ///
 /// The parser is intentionally simple and supports only single-line `key: value` fields and
 /// array-style tool lists like `tools: ["read_file", "list_dir"]`. It does not currently
@@ -72,7 +72,7 @@ pub fn parse_agent_profile(content: &str) -> Option<AgentProfile> {
     })
 }
 
-/// Load an agent definition from a file path.
+/// Load an agent profile from a file path.
 pub fn load_agent_profile_from_file(path: &Path) -> Option<AgentProfile> {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
@@ -83,7 +83,7 @@ pub fn load_agent_profile_from_file(path: &Path) -> Option<AgentProfile> {
     };
     let result = parse_agent_profile(&content);
     if result.is_none() {
-        tracing::warn!(path = %path.display(), "failed to parse agent definition");
+        tracing::warn!(path = %path.display(), "failed to parse agent profile");
     }
     result
 }
