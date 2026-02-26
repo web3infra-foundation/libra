@@ -21,6 +21,7 @@ use crate::internal::{
             anthropic::{CLAUDE_3_5_SONNET, Client as AnthropicClient},
             deepseek::client::Client as DeepSeekClient,
             gemini::{Client as GeminiClient, GEMINI_2_5_FLASH},
+            ollama::{Client as OllamaClient, GPT_OSS_120B},
             openai::{Client as OpenAIClient, GPT_4O_MINI},
             zhipu::{Client as ZhipuClient, GLM_5},
         },
@@ -42,6 +43,7 @@ pub enum CodeProvider {
     Anthropic,
     Deepseek,
     Zhipu,
+    Ollama,
 }
 
 #[derive(Parser, Debug)]
@@ -85,6 +87,10 @@ pub struct CodeArgs {
     /// Run the MCP server over Stdio (for Claude Desktop integration)
     #[arg(long, alias = "mcp-stdio", conflicts_with = "web_only")]
     pub stdio: bool,
+
+    /// Provider API base URL (e.g. http://remote-host:11434/v1 for remote Ollama)
+    #[arg(long)]
+    pub api_base: Option<String>,
 }
 
 pub async fn execute(args: CodeArgs) {
@@ -403,6 +409,32 @@ async fn execute_tui(args: CodeArgs) {
                 }
             };
             let model_name = args.model.unwrap_or_else(|| GLM_5.to_string());
+            let model = client.completion_model(&model_name);
+            run_tui_with_model(
+                model,
+                TuiParams {
+                    host: args.host,
+                    port: args.port,
+                    mcp_port: args.mcp_port,
+                    registry: registry.clone(),
+                    preamble,
+                    temperature,
+                    resume,
+                    user_input_rx,
+                    mcp_server,
+                    model_name,
+                    provider_name,
+                },
+            )
+            .await;
+        }
+        CodeProvider::Ollama => {
+            let client = if let Some(base_url) = &args.api_base {
+                OllamaClient::with_base_url(base_url)
+            } else {
+                OllamaClient::from_env()
+            };
+            let model_name = args.model.unwrap_or_else(|| GPT_OSS_120B.to_string());
             let model = client.completion_model(&model_name);
             run_tui_with_model(
                 model,

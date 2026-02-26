@@ -1,3 +1,21 @@
+//! Google Gemini API provider for libra.
+//!
+//! This module integrates with the [Gemini REST API](https://ai.google.dev/api/generate-content)
+//! to provide chat completion with function-calling support.
+//!
+//! # Authentication
+//!
+//! Set the `GEMINI_API_KEY` environment variable. The provider sends the key
+//! via the `x-goog-api-key` HTTP header on every request.
+//!
+//! # Example
+//! ```no_run
+//! use libra::internal::ai::providers::gemini;
+//!
+//! let client = gemini::Client::from_env().unwrap();
+//! let model = client.completion_model(gemini::GEMINI_2_5_FLASH);
+//! ```
+
 pub mod client;
 pub mod completion;
 pub mod gemini_api_types;
@@ -5,13 +23,10 @@ pub mod gemini_api_types;
 #[cfg(test)]
 mod api_tests;
 
+/// Re-export the concrete Gemini HTTP client.
 pub use client::Client;
+/// Re-export the Gemini completion model used by the agent loop.
 pub use completion::CompletionModel;
-
-// ================================================================
-// Google Gemini Completion Integration
-// From [Gemini API Reference](https://ai.google.dev/api/generate-content)
-// ================================================================
 /// `gemini-2.5-pro-preview-06-05` completion model
 pub const GEMINI_2_5_PRO_PREVIEW_06_05: &str = "gemini-2.5-pro-preview-06-05";
 /// `gemini-2.5-pro-preview-05-06` completion model

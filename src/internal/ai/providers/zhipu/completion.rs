@@ -1,4 +1,11 @@
 //! Zhipu completion model implementation.
+//!
+//! Zhipu exposes an OpenAI-compatible Chat Completions API, so the request and
+//! response payloads (`ZhipuRequest`, `ZhipuResponse`, etc.) closely mirror the
+//! OpenAI format. Messages are serialized with a `role` tag (`system`, `user`,
+//! `assistant`, `tool`) and tool calling follows the same `function`-type
+//! convention. This module converts between the internal libra `CompletionRequest`
+//! / `CompletionResponse` types and the Zhipu-specific wire types.
 
 use serde::{Deserialize, Serialize};
 
@@ -38,7 +45,11 @@ impl Model {
 // Zhipu API Types
 // ================================================================
 
-/// Zhipu chat completion request.
+/// Zhipu chat completion request body sent to `POST /chat/completions`.
+///
+/// Fields mirror the OpenAI-compatible API. Optional fields are skipped during
+/// serialization when they are `None` or empty so that only relevant keys
+/// appear in the JSON payload.
 #[derive(Debug, Serialize)]
 struct ZhipuRequest {
     model: String,
@@ -51,7 +62,12 @@ struct ZhipuRequest {
     tool_choice: Option<ZhipuToolChoice>,
 }
 
-/// Zhipu message format.
+/// A single message in the Zhipu chat conversation.
+///
+/// Serialized with an internally-tagged `role` field (`system`, `user`,
+/// `assistant`, `tool`). The `Assistant` variant carries an optional text
+/// body and zero-or-more tool calls; the `Tool` variant represents the
+/// result returned for a specific tool invocation.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "lowercase")]
 enum ZhipuMessage {
@@ -73,14 +89,21 @@ enum ZhipuMessage {
     },
 }
 
-/// Zhipu tool choice.
+/// Controls how the model selects tools.
+///
+/// Uses `#[serde(untagged)]` so that `Mode` variants serialize as bare strings
+/// (e.g. `"auto"`) while `Function` serializes as an object with a `type` and
+/// `function` key, allowing the caller to force a specific function.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 enum ZhipuToolChoice {
+    /// One of the predefined selection strategies (`auto`, `none`, `required`).
     Mode(ZhipuToolChoiceMode),
+    /// Force the model to call a specific function by name.
     Function(ZhipuFunctionToolChoice),
 }
 
+/// Predefined tool-selection strategies understood by the Zhipu API.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum ZhipuToolChoiceMode {
@@ -89,6 +112,7 @@ enum ZhipuToolChoiceMode {
     Required,
 }
 
+/// Requests a specific function to be called by the model.
 #[derive(Debug, Serialize, Deserialize)]
 struct ZhipuFunctionToolChoice {
     #[serde(rename = "type")]
@@ -96,50 +120,60 @@ struct ZhipuFunctionToolChoice {
     function: ZhipuToolChoiceFunction,
 }
 
+/// Identifies the function to force-call by name.
 #[derive(Debug, Serialize, Deserialize)]
 struct ZhipuToolChoiceFunction {
     name: String,
 }
 
-/// Zhipu tool definition.
+/// A tool the model may invoke, currently always of type `"function"`.
 #[derive(Debug, Serialize, Deserialize)]
 struct ZhipuToolDefinition {
+    /// Always `"function"` for now.
     r#type: String,
     function: ZhipuFunctionDefinition,
 }
 
-/// Zhipu function definition.
+/// Describes a callable function: its name, human-readable description, and
+/// JSON Schema for the expected parameters.
 #[derive(Debug, Serialize, Deserialize)]
 struct ZhipuFunctionDefinition {
     name: String,
     description: String,
+    /// JSON Schema object describing the function's parameters.
     parameters: serde_json::Value,
 }
 
-/// Zhipu tool call.
+/// A tool invocation emitted by the assistant in a response.
 #[derive(Debug, Serialize, Deserialize)]
 struct ZhipuToolCall {
+    /// Provider-assigned identifier used to correlate tool results.
     id: String,
+    /// Always `"function"`.
     r#type: String,
     function: ZhipuFunctionCall,
 }
 
-/// Zhipu function call.
+/// The function name and its serialized JSON arguments string as returned by the model.
 #[derive(Debug, Serialize, Deserialize)]
 struct ZhipuFunctionCall {
     name: String,
+    /// Raw JSON string of the function arguments.
     arguments: String,
 }
 
-/// Zhipu choice.
+/// A single completion candidate returned by the API.
 #[derive(Debug, Serialize, Deserialize)]
 struct ZhipuChoice {
+    /// Zero-based index of this choice in the response array.
     index: usize,
+    /// The assistant message generated for this choice.
     message: ZhipuMessage,
+    /// Reason the model stopped generating (e.g. `"stop"`, `"tool_calls"`).
     finish_reason: Option<String>,
 }
 
-/// Zhipu usage.
+/// Token usage statistics returned alongside a completion response.
 #[derive(Debug, Serialize, Deserialize)]
 struct ZhipuUsage {
     prompt_tokens: usize,
@@ -147,7 +181,11 @@ struct ZhipuUsage {
     total_tokens: usize,
 }
 
-/// Zhipu chat completion response.
+/// Top-level chat completion response returned by the Zhipu API.
+///
+/// Mirrors the OpenAI-compatible response shape. The `choices` vector
+/// typically contains a single element; only the first choice is used
+/// when converting into libra's internal `CompletionResponse`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ZhipuResponse {
     pub id: String,
@@ -158,13 +196,13 @@ pub struct ZhipuResponse {
     usage: Option<ZhipuUsage>,
 }
 
-/// Zhipu API error response.
+/// Inner error body returned when the Zhipu API reports an error.
 #[derive(Debug, Deserialize)]
 struct ZhipuError {
     message: String,
 }
 
-/// Zhipu API error wrapper.
+/// Wrapper for a Zhipu API error response (`{ "error": { "message": "..." } }`).
 #[derive(Debug, Deserialize)]
 struct ZhipuErrorResponse {
     error: ZhipuError,
@@ -174,6 +212,16 @@ struct ZhipuErrorResponse {
 // Conversions
 // ================================================================
 
+/// Converts a libra [`Message`] into a [`ZhipuMessage`].
+///
+/// Because the Zhipu API accepts only a single text string per message (not an
+/// array of content parts), this implementation takes only the **first** content
+/// item from the message's content list. Non-text content items in the first
+/// position are mapped to an empty string.
+///
+/// Note: this `From` impl is a simplified path used by callers that only need
+/// a quick single-item conversion. The full [`build_messages`] function handles
+/// multi-item content, tool calls, and tool results more thoroughly.
 impl From<&Message> for ZhipuMessage {
     fn from(msg: &Message) -> Self {
         match msg {
@@ -292,6 +340,8 @@ impl crate::internal::ai::completion::CompletionModel for Model {
     }
 }
 
+/// Converts libra [`ToolDefinition`]s into the Zhipu-specific
+/// [`ZhipuToolDefinition`] format, setting the type to `"function"` for each.
 fn parse_tools(tools: &[ToolDefinition]) -> Vec<ZhipuToolDefinition> {
     tools
         .iter()
@@ -306,6 +356,19 @@ fn parse_tools(tools: &[ToolDefinition]) -> Vec<ZhipuToolDefinition> {
         .collect()
 }
 
+/// Builds the full message list for a Zhipu chat completion request.
+///
+/// The optional preamble is prepended as a `System` message, followed by the
+/// chat history. Each libra `Message` is expanded into one or more
+/// `ZhipuMessage` entries:
+///
+/// - `User` content items are split so that text becomes `User` messages and
+///   tool results become `Tool` messages (Zhipu requires them at the top level).
+/// - `Assistant` messages aggregate text parts into a single optional string
+///   and collect any tool calls.
+/// - `System` messages concatenate all text content items with newlines.
+///
+/// Returns an error if an unsupported content type (e.g. images) is encountered.
 fn build_messages(request: &CompletionRequest) -> Result<Vec<ZhipuMessage>, CompletionError> {
     let mut messages = Vec::new();
 
@@ -392,6 +455,14 @@ fn build_messages(request: &CompletionRequest) -> Result<Vec<ZhipuMessage>, Comp
     Ok(messages)
 }
 
+/// Extracts [`AssistantContent`] items from a single [`ZhipuChoice`].
+///
+/// The assistant message may contain a text body, zero or more tool calls, or
+/// both. Tool call arguments arrive as a JSON string from the API and are
+/// parsed back into a `serde_json::Value`; if parsing fails the raw string is
+/// preserved as a JSON string value.
+///
+/// Returns an error if the choice's message is not the `Assistant` variant.
 fn parse_choice_content(choice: &ZhipuChoice) -> Result<Vec<AssistantContent>, CompletionError> {
     match &choice.message {
         ZhipuMessage::Assistant {
@@ -428,6 +499,11 @@ fn parse_choice_content(choice: &ZhipuChoice) -> Result<Vec<AssistantContent>, C
     }
 }
 
+/// Serializes tool-call arguments into a JSON string suitable for the Zhipu API.
+///
+/// If the value is already a `String` that contains valid JSON, it is returned
+/// as-is (avoiding double-encoding). Otherwise the value is serialized with
+/// `serde_json::to_string` / `Value::to_string`.
 fn tool_arguments_json(arguments: &serde_json::Value) -> String {
     match arguments {
         serde_json::Value::String(raw) => {

@@ -1,3 +1,10 @@
+//! Wire types for the Gemini REST API.
+//!
+//! These structs map directly to the JSON request and response bodies of the
+//! Gemini `generateContent` endpoint. They handle serialization (via `serde`)
+//! and are intentionally kept close to the upstream API schema so that adding
+//! new fields requires minimal translation.
+
 use serde::{Deserialize, Serialize};
 
 /// Function call from the model.

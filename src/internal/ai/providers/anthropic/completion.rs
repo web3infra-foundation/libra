@@ -1,4 +1,20 @@
-//! Anthropic completion model implementation.
+//! Completion model implementation for the Anthropic Messages API.
+//!
+//! This module translates libra's generic [`CompletionRequest`] into the
+//! Anthropic-specific wire format (`POST /v1/messages`) and parses the
+//! response back into the provider-agnostic [`CompletionResponse`].
+//!
+//! Key design points:
+//!
+//! - **System messages** are extracted from the chat history and merged with
+//!   the optional preamble into a single top-level `system` field, because
+//!   the Messages API does not allow "system" role messages inside the
+//!   `messages` array.
+//! - **Tool use** follows Anthropic's content-block model: tool calls arrive
+//!   as `tool_use` blocks in the assistant response, and results are sent
+//!   back as `tool_result` blocks in the next user message.
+//! - **`max_tokens`** is required by the API and is inferred from the model
+//!   name via [`calculate_max_tokens`] when the caller does not set it.
 
 use serde::{Deserialize, Serialize};
 
@@ -13,10 +29,15 @@ use crate::internal::ai::{
     tools::ToolDefinition,
 };
 
-/// Anthropic completion model.
+/// A specific Anthropic model bound to a [`Client`].
+///
+/// Created via [`CompletionClient::completion_model`] and used to send
+/// completion requests to the Anthropic Messages API.
 #[derive(Clone, Debug)]
 pub struct Model {
+    /// The authenticated HTTP client used to send requests.
     client: Client,
+    /// The Anthropic model identifier (e.g. `"claude-sonnet-4-0"`).
     model: String,
 }
 
@@ -39,52 +60,83 @@ impl Model {
 // Anthropic API Types
 // ================================================================
 
-/// Anthropic messages API request.
+/// Request body for `POST /v1/messages`.
+///
+/// Maps directly to the Anthropic Messages API JSON schema. The `system`
+/// field is a top-level string (not part of `messages`) because the API
+/// treats it specially. Fields that are `None` or empty are omitted from
+/// the serialized JSON via `skip_serializing_if`.
 #[derive(Debug, Serialize)]
 struct AnthropicRequest {
+    /// The model identifier to use for this completion.
     model: String,
+    /// The conversation turns (user and assistant messages only).
     messages: Vec<AnthropicMessage>,
+    /// The maximum number of tokens the model may generate.
     max_tokens: u64,
+    /// Optional system prompt, placed outside the messages array.
     #[serde(skip_serializing_if = "Option::is_none")]
     system: Option<String>,
+    /// Sampling temperature (0.0 = deterministic, 1.0 = creative).
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f64>,
+    /// Tool definitions available for the model to call.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<AnthropicToolDefinition>,
+    /// How the model should choose which tool to call (if any).
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<AnthropicToolChoice>,
 }
 
-/// Anthropic message.
+/// A single message in the conversation, carrying a `role` ("user" or
+/// "assistant") and its associated content.
 #[derive(Debug, Serialize, Deserialize)]
 struct AnthropicMessage {
+    /// Either `"user"` or `"assistant"`. System content is handled
+    /// separately via the top-level `system` field on the request.
     role: String,
+    /// The message payload -- either a plain string or an array of
+    /// typed content blocks.
     content: AnthropicContent,
 }
 
-/// Anthropic content - can be a string or array of content blocks.
+/// Message content, which the API accepts in two forms.
+///
+/// `#[serde(untagged)]` lets serde choose the right variant automatically:
+/// - [`String`](AnthropicContent::String) is a shorthand for a single text block.
+/// - [`Array`](AnthropicContent::Array) is required when the message contains
+///   multiple blocks (e.g. text + tool_use, or text + tool_result).
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 enum AnthropicContent {
+    /// Shorthand: a single plain-text message.
     String(String),
+    /// An array of typed content blocks (text, image, tool_use, tool_result).
     Array(Vec<AnthropicContentBlock>),
 }
 
-/// Anthropic content block.
+/// A single content block within a message.
+///
+/// Discriminated by the `"type"` field in JSON thanks to `#[serde(tag = "type")]`.
+/// The four variants correspond to the block types supported by the Messages API.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AnthropicContentBlock {
-    Text {
-        text: String,
-    },
-    Image {
-        source: AnthropicImageSource,
-    },
+    /// A plain text block.
+    Text { text: String },
+    /// A base64-encoded image block.
+    Image { source: AnthropicImageSource },
+    /// A tool invocation emitted by the assistant. Contains the tool `name`,
+    /// a unique `id` (used to correlate with the corresponding `ToolResult`),
+    /// and the JSON `input` arguments.
     ToolUse {
         id: String,
         name: String,
         input: serde_json::Value,
     },
+    /// The result of a previously invoked tool, sent by the user in a
+    /// follow-up message. `tool_use_id` links back to the originating
+    /// `ToolUse` block.
     ToolResult {
         tool_use_id: String,
         content: String,
@@ -93,58 +145,92 @@ enum AnthropicContentBlock {
     },
 }
 
-/// Anthropic image source.
+/// Source data for an inline image, sent as a base64-encoded payload.
 #[derive(Debug, Serialize, Deserialize)]
 struct AnthropicImageSource {
+    /// Always `"base64"` for inline images.
     r#type: String,
+    /// MIME type of the image (e.g. `"image/png"`, `"image/jpeg"`).
     media_type: String,
+    /// The base64-encoded image bytes.
     data: String,
 }
 
-/// Anthropic tool definition.
+/// A tool definition describing a function the model may invoke.
+///
+/// Mirrors the generic [`ToolDefinition`] but uses the Anthropic-specific
+/// field name `input_schema` (instead of `parameters`).
 #[derive(Debug, Serialize, Deserialize)]
 struct AnthropicToolDefinition {
+    /// Unique tool name (e.g. `"read_file"`).
     name: String,
+    /// Human-readable description shown to the model.
     description: String,
+    /// JSON Schema describing the expected input arguments.
     input_schema: serde_json::Value,
 }
 
-/// Anthropic tool choice.
+/// Controls how the model selects tools.
+///
+/// - `Auto` -- the model decides whether to use a tool.
+/// - `Any` -- the model must call at least one tool (any of them).
+/// - `None` -- tool use is disabled even if tools are provided.
+/// - `Tool` -- the model must call the specific named tool.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AnthropicToolChoice {
+    /// Let the model decide whether to use a tool.
     Auto,
+    /// Force the model to call at least one tool.
     Any,
+    /// Disable tool use.
     None,
+    /// Force the model to call a specific tool by name.
     Tool { name: String },
 }
 
-/// Anthropic usage.
+/// Token usage statistics returned by the API, used for billing and
+/// observability.
 #[derive(Debug, Serialize, Deserialize)]
 struct AnthropicUsage {
+    /// Number of tokens in the input (prompt + system + tools).
     input_tokens: u64,
+    /// Number of tokens generated by the model.
     output_tokens: u64,
 }
 
-/// Anthropic messages API response.
+/// Deserialized response from `POST /v1/messages`.
+///
+/// Stored as the `raw_response` inside [`CompletionResponse`] so callers can
+/// access provider-specific fields (e.g. `stop_reason`, `usage`).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AnthropicResponse {
+    /// Unique message identifier (e.g. `"msg_01XF..."``).
     pub id: String,
+    /// Always `"message"` for non-streaming responses.
     pub r#type: String,
+    /// Always `"assistant"` in a response.
     pub role: String,
+    /// The content blocks produced by the model (text and/or tool_use).
     content: Vec<AnthropicContentBlock>,
+    /// The model that actually served the request (may differ from the
+    /// alias used in the request, e.g. `"claude-3-5-sonnet-20241022"`).
     pub model: String,
+    /// Why the model stopped generating: `"end_turn"`, `"max_tokens"`,
+    /// `"stop_sequence"`, or `"tool_use"`.
     pub stop_reason: Option<String>,
+    /// Token usage statistics for this request/response pair.
     usage: AnthropicUsage,
 }
 
-/// Anthropic API error response.
+/// Inner error payload returned by the API on failure.
 #[derive(Debug, Deserialize)]
 struct AnthropicError {
+    /// Human-readable error description.
     message: String,
 }
 
-/// Anthropic API error wrapper.
+/// Top-level error envelope: `{ "error": { "message": "..." } }`.
 #[derive(Debug, Deserialize)]
 struct AnthropicErrorResponse {
     error: AnthropicError,
@@ -157,6 +243,11 @@ struct AnthropicErrorResponse {
 impl CompletionModelTrait for Model {
     type Response = AnthropicResponse;
 
+    /// Sends a completion request to the Anthropic Messages API.
+    ///
+    /// Converts the generic request into Anthropic's wire format, sends it
+    /// via the authenticated client, and parses the response back into
+    /// provider-agnostic types.
     async fn completion(
         &self,
         request: CompletionRequest,
@@ -221,6 +312,9 @@ impl CompletionModelTrait for Model {
     }
 }
 
+/// Converts generic [`ToolDefinition`]s into Anthropic-specific tool
+/// definitions. The only material change is renaming the `parameters`
+/// field to `input_schema` as required by the Messages API.
 fn parse_tools(tools: &[ToolDefinition]) -> Vec<AnthropicToolDefinition> {
     tools
         .iter()
@@ -232,6 +326,25 @@ fn parse_tools(tools: &[ToolDefinition]) -> Vec<AnthropicToolDefinition> {
         .collect()
 }
 
+/// Converts a generic [`CompletionRequest`] into Anthropic's message format.
+///
+/// Returns `(system, messages)` where:
+/// - `system` is the merged system prompt (preamble + any `Message::System`
+///   entries from the chat history), or `None` if there is no system content.
+/// - `messages` is the ordered list of user/assistant turns.
+///
+/// # Notable behaviour
+///
+/// - **System messages are hoisted**: The Messages API does not support a
+///   "system" role inside the `messages` array, so all system content is
+///   collected and concatenated into the top-level `system` field.
+/// - **Single text blocks use the string shorthand**: When a user message
+///   contains exactly one text block, it is sent as a plain `String` instead
+///   of a one-element `Array` for a more compact payload.
+/// - **Empty assistant blocks get a whitespace placeholder**: Anthropic
+///   requires at least one content block per message. If all assistant text
+///   blocks were empty (e.g. a tool-only turn where the text was blank),
+///   a single space is inserted to satisfy the API constraint.
 fn build_messages(
     request: &CompletionRequest,
 ) -> Result<(Option<String>, Vec<AnthropicMessage>), CompletionError> {
@@ -250,6 +363,9 @@ fn build_messages(
                             });
                         }
                         UserContent::ToolResult(tool_result) => {
+                            // Serialize the tool result value to a JSON string so
+                            // it can be embedded in the `content` field of a
+                            // ToolResult block (which expects a string, not an object).
                             let content = serde_json::to_string(&tool_result.result)
                                 .unwrap_or_else(|_| tool_result.result.to_string());
                             content_blocks.push(AnthropicContentBlock::ToolResult {
@@ -265,8 +381,9 @@ fn build_messages(
                         }
                     }
                 }
+                // Optimisation: use the string shorthand when there is
+                // exactly one text block, producing a smaller payload.
                 let content = if content_blocks.len() == 1 {
-                    // Single content block can be a string
                     match &content_blocks[0] {
                         AnthropicContentBlock::Text { text } => {
                             AnthropicContent::String(text.clone())
@@ -286,6 +403,8 @@ fn build_messages(
                 for item in content.iter() {
                     match item {
                         AssistantContent::Text(t) => {
+                            // Skip blank text blocks -- they carry no useful
+                            // content and would add noise to the payload.
                             if !t.text.trim().is_empty() {
                                 content_blocks.push(AnthropicContentBlock::Text {
                                     text: t.text.clone(),
@@ -301,7 +420,9 @@ fn build_messages(
                         }
                     }
                 }
-                // Anthropic requires at least one content block
+                // Anthropic requires at least one content block per message.
+                // If everything was filtered out above, insert a whitespace
+                // placeholder to satisfy the API constraint.
                 if content_blocks.is_empty() {
                     content_blocks.push(AnthropicContentBlock::Text {
                         text: " ".to_string(),
@@ -313,6 +434,8 @@ fn build_messages(
                 });
             }
             Message::System { content } => {
+                // Collect system message text; it will be merged into the
+                // top-level `system` field after the loop.
                 let text = content
                     .iter()
                     .filter_map(|c| match c {
@@ -328,6 +451,8 @@ fn build_messages(
         }
     }
 
+    // Merge the preamble (if any) with collected system messages into a
+    // single system string, separated by blank lines.
     let mut system_parts = Vec::new();
     if let Some(preamble) = &request.preamble
         && !preamble.trim().is_empty()
@@ -345,6 +470,12 @@ fn build_messages(
     Ok((system, messages))
 }
 
+/// Converts the Anthropic response content blocks into generic
+/// [`AssistantContent`] items.
+///
+/// Only `Text` and `ToolUse` blocks are relevant for the assistant's
+/// output; other block types (e.g. `Image`, `ToolResult`) are ignored
+/// because they are request-only constructs.
 fn parse_response(response: &AnthropicResponse) -> Vec<AssistantContent> {
     let mut parts = Vec::new();
 
@@ -365,13 +496,27 @@ fn parse_response(response: &AnthropicResponse) -> Vec<AssistantContent> {
                     },
                 }));
             }
+            // Image and ToolResult blocks are only used in requests, so
+            // they should never appear in an assistant response.
             _ => {}
         }
     }
     parts
 }
 
-/// Calculate default max_tokens based on the model.
+/// Returns a sensible default `max_tokens` value for the given model.
+///
+/// Anthropic's Messages API **requires** `max_tokens` to be set explicitly
+/// (there is no server-side default). The values chosen here reflect each
+/// model family's maximum output capacity to avoid unnecessarily
+/// truncating long responses:
+///
+/// | Model family           | `max_tokens` |
+/// |------------------------|------------- |
+/// | Claude Opus 4          | 32 000       |
+/// | Claude Sonnet 4 / 3.7  | 64 000       |
+/// | Claude 3.5 Sonnet/Haiku| 8 192        |
+/// | Everything else        | 4 096        |
 fn calculate_max_tokens(model: &str) -> u64 {
     if model.starts_with("claude-opus-4") {
         32000
@@ -380,7 +525,7 @@ fn calculate_max_tokens(model: &str) -> u64 {
     } else if model.starts_with("claude-3-5-sonnet") || model.starts_with("claude-3-5-haiku") {
         8192
     } else {
-        4096 // Default fallback
+        4096 // Default fallback for unknown or older models
     }
 }
 
@@ -391,12 +536,15 @@ fn calculate_max_tokens(model: &str) -> u64 {
 impl CompletionClient for Client {
     type Model = Model;
 
+    /// Creates a new [`Model`] bound to this client for the given model
+    /// identifier (e.g. `"claude-sonnet-4-0"`).
     fn completion_model(&self, model: impl Into<String>) -> Self::Model {
         Model::new(self.clone(), model)
     }
 }
 
-// Type alias for backwards compatibility
+/// Type alias retained for backwards compatibility with earlier versions
+/// of this module that used the name `CompletionModel` instead of `Model`.
 pub type CompletionModel = Model;
 
 #[cfg(test)]

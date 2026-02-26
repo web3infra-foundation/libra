@@ -1,4 +1,15 @@
 //! DeepSeek completion model implementation.
+//!
+//! DeepSeek exposes an OpenAI-compatible Chat Completions endpoint
+//! (`/chat/completions`), so the request and response wire types in this
+//! module closely mirror those of the OpenAI provider. One notable
+//! difference is that requests always set `stream: false` explicitly,
+//! because the generic completion interface expects a single, complete
+//! response rather than a stream of server-sent events.
+//!
+//! The main entry point is [`Model`], which implements the
+//! [`CompletionModelTrait`] trait. A [`CompletionModel`] type alias is
+//! also exported for backwards compatibility.
 
 use serde::{Deserialize, Serialize};
 
@@ -39,7 +50,11 @@ impl Model {
 // DeepSeek API Types
 // ================================================================
 
-/// DeepSeek chat completion request.
+/// Request body for the DeepSeek `/chat/completions` endpoint.
+///
+/// Mirrors the OpenAI chat completion request format. The `stream` field
+/// is always set to `false` because this implementation uses synchronous
+/// (non-streaming) completions.
 #[derive(Debug, Serialize)]
 struct DeepSeekRequest {
     model: String,
@@ -50,24 +65,28 @@ struct DeepSeekRequest {
     tools: Vec<DeepSeekToolDefinition>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<DeepSeekToolChoice>,
+    /// Always `false` -- streaming is not used by this provider.
     stream: bool,
 }
 
-/// DeepSeek message format.
+/// A message in the DeepSeek chat completion conversation.
+///
+/// Serialized with a `role` tag (`system`, `user`, `assistant`, or `tool`)
+/// to match the OpenAI-compatible wire format.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "lowercase")]
 enum DeepSeekMessage {
-    System {
-        content: String,
-    },
-    User {
-        content: String,
-    },
+    /// A system-level instruction that sets the overall behaviour.
+    System { content: String },
+    /// A user turn containing plain text.
+    User { content: String },
+    /// An assistant turn that may contain text and/or tool calls.
     Assistant {
         content: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tool_calls: Vec<DeepSeekToolCall>,
     },
+    /// The result of a tool invocation, identified by `tool_call_id`.
     Tool {
         tool_call_id: String,
         name: String,
@@ -75,7 +94,10 @@ enum DeepSeekMessage {
     },
 }
 
-/// DeepSeek tool choice.
+/// Controls how the model selects which tool (if any) to call.
+///
+/// `Auto` lets the model decide, `None` disables tool use, `Required`
+/// forces a tool call, and `Function` targets a specific function.
 #[derive(Debug, Serialize, Deserialize)]
 enum DeepSeekToolChoice {
     #[serde(rename = "auto")]
@@ -84,9 +106,12 @@ enum DeepSeekToolChoice {
     None,
     #[serde(rename = "required")]
     Required,
+    /// Forces the model to call a specific named function.
     Function(DeepSeekFunctionToolChoice),
 }
 
+/// Wrapper used when `DeepSeekToolChoice::Function` is selected.
+/// Contains `type: "function"` and the target function name.
 #[derive(Debug, Serialize, Deserialize)]
 struct DeepSeekFunctionToolChoice {
     #[serde(rename = "type")]
@@ -94,50 +119,59 @@ struct DeepSeekFunctionToolChoice {
     function: DeepSeekToolChoiceFunction,
 }
 
+/// Identifies a specific function by name inside a forced tool-choice.
 #[derive(Debug, Serialize, Deserialize)]
 struct DeepSeekToolChoiceFunction {
     name: String,
 }
 
-/// DeepSeek tool definition.
+/// A tool the model may invoke, always typed as `"function"`.
 #[derive(Debug, Serialize, Deserialize)]
 struct DeepSeekToolDefinition {
+    /// Always `"function"`.
     r#type: String,
     function: DeepSeekFunctionDefinition,
 }
 
-/// DeepSeek function definition.
+/// Schema for a callable function exposed to the model.
 #[derive(Debug, Serialize, Deserialize)]
 struct DeepSeekFunctionDefinition {
     name: String,
     description: String,
+    /// JSON Schema describing the function's parameters.
     parameters: serde_json::Value,
 }
 
-/// DeepSeek tool call.
+/// A tool call emitted by the assistant, referencing a specific function.
 #[derive(Debug, Serialize, Deserialize)]
 struct DeepSeekToolCall {
+    /// Unique identifier for this tool call, used to correlate the result.
     id: String,
+    /// Always `"function"`.
     r#type: String,
     function: DeepSeekFunctionCall,
 }
 
-/// DeepSeek function call.
+/// The function name and its JSON-encoded arguments string.
 #[derive(Debug, Serialize, Deserialize)]
 struct DeepSeekFunctionCall {
     name: String,
+    /// Arguments serialized as a JSON string (not a parsed object).
     arguments: String,
 }
 
-/// DeepSeek choice.
+/// A single completion choice returned by the API.
+///
+/// Non-streaming responses typically contain exactly one choice at index 0.
 #[derive(Debug, Serialize, Deserialize)]
 struct DeepSeekChoice {
     index: usize,
     message: DeepSeekMessage,
+    /// Reason the model stopped generating, e.g. `"stop"` or `"tool_calls"`.
     finish_reason: Option<String>,
 }
 
-/// DeepSeek usage.
+/// Token usage statistics returned alongside the completion.
 #[derive(Debug, Serialize, Deserialize)]
 struct DeepSeekUsage {
     prompt_tokens: usize,
@@ -145,24 +179,32 @@ struct DeepSeekUsage {
     total_tokens: usize,
 }
 
-/// DeepSeek chat completion response.
+/// Top-level response from the DeepSeek `/chat/completions` endpoint.
+///
+/// Public because it is exposed as the `raw_response` field on
+/// [`CompletionResponse`] so callers can inspect provider-specific metadata
+/// (e.g. `id`, `model`, `usage`).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DeepSeekResponse {
+    /// Unique identifier for this completion.
     pub id: String,
+    /// Object type, typically `"chat.completion"`.
     pub object: String,
+    /// Unix timestamp (seconds) when the response was created.
     pub created: u64,
+    /// The model that generated this response.
     pub model: String,
     choices: Vec<DeepSeekChoice>,
     usage: Option<DeepSeekUsage>,
 }
 
-/// DeepSeek API error response.
+/// Inner error payload returned by the DeepSeek API on failure.
 #[derive(Debug, Deserialize)]
 struct DeepSeekError {
     message: String,
 }
 
-/// DeepSeek API error wrapper.
+/// Wrapper for the DeepSeek error response format: `{ "error": { "message": "..." } }`.
 #[derive(Debug, Deserialize)]
 struct DeepSeekErrorResponse {
     error: DeepSeekError,
@@ -172,10 +214,18 @@ struct DeepSeekErrorResponse {
 // Conversions
 // ================================================================
 
+/// Converts a generic [`Message`] to a [`DeepSeekMessage`].
+///
+/// Only the **first** content item is taken from the message; additional
+/// items are silently ignored. Non-text content variants (e.g. images)
+/// are converted to an empty string because the simple `From` conversion
+/// cannot return an error. For full multi-item support, see
+/// [`build_messages`], which is used by the `CompletionModel` implementation.
 impl From<&Message> for DeepSeekMessage {
     fn from(msg: &Message) -> Self {
         match msg {
             Message::User { content } => {
+                // Take only the first content item; non-text variants yield "".
                 let text = content
                     .iter()
                     .next()
@@ -189,6 +239,7 @@ impl From<&Message> for DeepSeekMessage {
                 DeepSeekMessage::User { content: text }
             }
             Message::Assistant { content, .. } => {
+                // Take only the first content item; tool calls are not carried over.
                 let text = content
                     .iter()
                     .next()
@@ -200,6 +251,7 @@ impl From<&Message> for DeepSeekMessage {
                     })
                     .unwrap_or_default();
                 DeepSeekMessage::Assistant {
+                    // DeepSeek expects `null` (None) when the assistant only made tool calls.
                     content: if text.is_empty() { None } else { Some(text) },
                     tool_calls: Vec::new(),
                 }
@@ -225,6 +277,9 @@ impl From<&Message> for DeepSeekMessage {
 // CompletionModel Implementation
 // ================================================================
 
+/// Sends a non-streaming (`stream: false`) POST to the DeepSeek
+/// `/chat/completions` endpoint and maps the response back to the
+/// generic [`CompletionResponse`] type.
 impl CompletionModelTrait for Model {
     type Response = DeepSeekResponse;
 
@@ -235,11 +290,13 @@ impl CompletionModelTrait for Model {
         let tools = parse_tools(&request.tools);
         let messages = build_messages(&request)?;
 
-        // Build request
+        // Build the request body. `stream` is always false; see module docs.
         let deepseek_request = DeepSeekRequest {
             model: self.model.clone(),
             messages,
             temperature: request.temperature,
+            // Only include `tool_choice` when tools are provided; otherwise
+            // omit it entirely so the API does not complain.
             tool_choice: if tools.is_empty() {
                 None
             } else {
@@ -293,6 +350,8 @@ impl CompletionModelTrait for Model {
     }
 }
 
+/// Converts the generic [`ToolDefinition`] slice into DeepSeek-specific
+/// tool definitions. Each tool is wrapped as `type: "function"`.
 fn parse_tools(tools: &[ToolDefinition]) -> Vec<DeepSeekToolDefinition> {
     tools
         .iter()
@@ -307,6 +366,17 @@ fn parse_tools(tools: &[ToolDefinition]) -> Vec<DeepSeekToolDefinition> {
         .collect()
 }
 
+/// Builds the full message array for the DeepSeek API from a [`CompletionRequest`].
+///
+/// This function handles multi-item content correctly (unlike the simpler
+/// `From<&Message>` conversion): user messages may contain interleaved text
+/// and tool results, and assistant messages may contain text alongside tool
+/// calls. The optional `preamble` is prepended as a system message.
+///
+/// # Errors
+///
+/// Returns [`CompletionError::NotImplemented`] if an image content item is
+/// encountered, since the DeepSeek text-only API does not support images.
 fn build_messages(request: &CompletionRequest) -> Result<Vec<DeepSeekMessage>, CompletionError> {
     let mut messages = Vec::new();
 
@@ -325,6 +395,8 @@ fn build_messages(request: &CompletionRequest) -> Result<Vec<DeepSeekMessage>, C
                             content: t.text.clone(),
                         }),
                         UserContent::ToolResult(tool_result) => {
+                            // Serialize the tool result value to a JSON string
+                            // so it can be placed inside the `content` field.
                             let content = serde_json::to_string(&tool_result.result)
                                 .unwrap_or_else(|_| tool_result.result.to_string());
                             messages.push(DeepSeekMessage::Tool {
@@ -393,6 +465,13 @@ fn build_messages(request: &CompletionRequest) -> Result<Vec<DeepSeekMessage>, C
     Ok(messages)
 }
 
+/// Extracts [`AssistantContent`] items from a single [`DeepSeekChoice`].
+///
+/// The choice must contain an `Assistant` message; any other role is treated
+/// as an error. Text and tool-call parts are both collected. Tool-call
+/// arguments arrive as a JSON string and are parsed back into a
+/// [`serde_json::Value`] so the rest of the system can work with structured
+/// data.
 fn parse_choice_content(choice: &DeepSeekChoice) -> Result<Vec<AssistantContent>, CompletionError> {
     match &choice.message {
         DeepSeekMessage::Assistant {
@@ -429,6 +508,12 @@ fn parse_choice_content(choice: &DeepSeekChoice) -> Result<Vec<AssistantContent>
     }
 }
 
+/// Converts tool-call arguments from a [`serde_json::Value`] into the JSON
+/// string format expected by the DeepSeek API.
+///
+/// If the value is already a `String` that contains valid JSON, it is
+/// returned as-is (avoiding double-encoding). Otherwise the value is
+/// serialized with `to_string()`.
 fn tool_arguments_json(arguments: &serde_json::Value) -> String {
     match arguments {
         serde_json::Value::String(raw) => {
@@ -446,6 +531,8 @@ fn tool_arguments_json(arguments: &serde_json::Value) -> String {
 // CompletionClient Implementation
 // ================================================================
 
+/// Allows a [`Client`] to produce [`Model`] instances for any model name
+/// string (e.g. `"deepseek-chat"`, `"deepseek-coder"`).
 impl CompletionClient for Client {
     type Model = Model;
 
@@ -454,7 +541,8 @@ impl CompletionClient for Client {
     }
 }
 
-// Type alias for backwards compatibility
+/// Backwards-compatible type alias so that existing code using
+/// `deepseek::CompletionModel` continues to compile.
 pub type CompletionModel = Model;
 
 #[cfg(test)]

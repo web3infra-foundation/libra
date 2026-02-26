@@ -1,4 +1,19 @@
 //! OpenAI API client for libra.
+//!
+//! This module provides [`OpenAIProvider`] and a [`Client`] type alias that together
+//! implement authenticated access to the OpenAI REST API. Authentication uses the
+//! standard **Bearer token** scheme: every outgoing HTTP request receives an
+//! `Authorization: Bearer <api_key>` header via the [`Provider`] trait implementation.
+//!
+//! # Client construction
+//!
+//! There are three ways to create a client:
+//!
+//! - [`Client::from_env`] -- reads `OPENAI_API_KEY` (and optionally `OPENAI_BASE_URL`)
+//!   from environment variables. This is the recommended path for CLI usage.
+//! - [`Client::with_api_key`] -- uses the default `https://api.openai.com/v1` base URL.
+//! - [`Client::with_base_url`] -- allows pointing at a custom or proxy endpoint while
+//!   still using OpenAI-compatible authentication.
 
 use std::fmt;
 
@@ -30,6 +45,10 @@ impl OpenAIProvider {
     }
 }
 
+/// Implements the [`Provider`] trait to inject OpenAI-specific authentication.
+///
+/// Each outgoing request is augmented with an `Authorization: Bearer <api_key>`
+/// header, which is the authentication scheme required by the OpenAI REST API.
 impl Provider for OpenAIProvider {
     fn on_request(&self, mut request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         // OpenAI uses Bearer token authentication
