@@ -40,7 +40,7 @@ pub struct Agent<M: CompletionModel> {
     preamble: Option<String>,
     /// Sampling temperature (0.0 to 2.0). Higher values mean more creativity.
     temperature: Option<f64>,
-    /// Maximum number of steps for tool execution loops. `None` means unlimited.
+    /// Maximum number of steps for tool execution loops. `None` means unlimited (though currently enforced to 4 by default).
     max_steps: Option<usize>,
     /// Set of tools available to the agent.
     tools: ToolSet,
