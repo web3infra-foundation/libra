@@ -24,8 +24,7 @@ use super::{
     terminal::{TARGET_FRAME_INTERVAL, Tui, TuiEvent},
 };
 use crate::internal::ai::{
-    agent::{ToolLoopConfig, run_tool_loop_with_history_and_observer},
-    agents::AgentRouter,
+    agent::{ToolLoopConfig, profile::AgentProfileRouter, run_tool_loop_with_history_and_observer},
     commands::CommandDispatcher,
     completion::{CompletionModel, Message},
     mcp::{
@@ -87,7 +86,7 @@ struct PendingUserInput {
 pub struct AppConfig {
     pub welcome_message: String,
     pub command_dispatcher: CommandDispatcher,
-    pub agent_router: AgentRouter,
+    pub agent_router: AgentProfileRouter,
     pub session: SessionState,
     pub session_store: SessionStore,
     pub user_input_rx: UnboundedReceiver<UserInputRequest>,
@@ -132,7 +131,7 @@ pub struct App<M: CompletionModel> {
     /// Slash command dispatcher.
     command_dispatcher: CommandDispatcher,
     /// Agent router for auto-selection.
-    agent_router: AgentRouter,
+    agent_router: AgentProfileRouter,
     /// Session state for persistence.
     session: SessionState,
     /// Session store for saving/loading.

@@ -12,5 +12,18 @@
 pub mod parser;
 pub mod router;
 
-pub use parser::AgentDefinition;
-pub use router::{AgentRouter, load_agents, load_embedded_agents};
+pub use parser::{AgentProfile, parse_agent_profile};
+pub use router::{AgentProfileRouter, load_embedded_profiles, load_profiles};
+
+#[deprecated(note = "Use AgentProfileRouter instead.")]
+pub type AgentRouter = AgentProfileRouter;
+
+#[deprecated(note = "Use load_profiles instead.")]
+pub fn load_agents(working_dir: &std::path::Path) -> Vec<AgentProfile> {
+    load_profiles(working_dir)
+}
+
+#[deprecated(note = "Use load_embedded_profiles instead.")]
+pub fn load_embedded_agents() -> Vec<AgentProfile> {
+    load_embedded_profiles()
+}

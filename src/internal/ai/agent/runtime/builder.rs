@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
+use super::Agent;
 use crate::internal::ai::{
-    agent::Agent,
     completion::CompletionModel,
     tools::{Tool, ToolRegistry, ToolSet},
 };
@@ -33,8 +33,11 @@ impl<M: CompletionModel> AgentBuilder<M> {
         self
     }
 
-    /// Sets the maximum number of steps for tool execution loops.
+    /// Sets the maximum number of tool-call steps for tool execution loops.
     /// Defaults to 4 if not set.
+    ///
+    /// A value of `0` prevents tool calls from being executed. If the agent
+    /// encounters a tool call when `max_steps` is already reached, it returns an error.
     pub fn max_steps(mut self, max_steps: usize) -> Self {
         self.max_steps = Some(max_steps);
         self
@@ -53,9 +56,10 @@ impl<M: CompletionModel> AgentBuilder<M> {
     }
 
     /// Add tools from a ToolRegistry.
+    #[deprecated(
+        note = "Not yet implemented: ToolRegistry is not yet converted into ToolSet. Use tools(...) or tool(...) instead."
+    )]
     pub fn with_registry(self, _registry: &ToolRegistry) -> Self {
-        // For now, we can't directly convert ToolHandler to Tool
-        // This is a placeholder for future integration
         self
     }
 
