@@ -330,7 +330,7 @@ impl ConfigArgs {
     ///
     /// # Examples
     ///
-    /// ```rust,ignore
+    /// ```rust
     /// use libra::command::config::{ConfigArgs, ConfigScope};
     ///
     /// let args = ConfigArgs {
