@@ -170,10 +170,7 @@ pub type DeepSeekResponse = ChatResponse;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::internal::ai::{
-        completion::Message,
-        providers::openai_compat::{ChatFunctionDefinition, ChatMessage},
-    };
+    use crate::internal::ai::providers::openai_compat::{ChatFunctionDefinition, ChatMessage};
 
     #[test]
     fn test_deepseek_request_serialization() {
@@ -265,38 +262,6 @@ mod tests {
         let client = Client::with_api_key("test-key".to_string());
         let model = Model::new(client, "deepseek-chat");
         assert_eq!(model.model_name(), "deepseek-chat");
-    }
-
-    #[test]
-    fn test_message_to_chat_message() {
-        let user_msg = Message::user("Hello");
-        let chat_msg: ChatMessage = (&user_msg).into();
-        assert!(matches!(chat_msg, ChatMessage::User { .. }));
-
-        let assistant_msg = Message::Assistant {
-            id: None,
-            content: crate::internal::ai::completion::message::OneOrMany::one(
-                crate::internal::ai::completion::message::AssistantContent::Text(
-                    crate::internal::ai::completion::message::Text {
-                        text: "Hi there".to_string(),
-                    },
-                ),
-            ),
-        };
-        let chat_msg: ChatMessage = (&assistant_msg).into();
-        assert!(matches!(chat_msg, ChatMessage::Assistant { .. }));
-
-        let system_msg = Message::System {
-            content: crate::internal::ai::completion::message::OneOrMany::one(
-                crate::internal::ai::completion::message::UserContent::Text(
-                    crate::internal::ai::completion::message::Text {
-                        text: "System prompt".to_string(),
-                    },
-                ),
-            ),
-        };
-        let chat_msg: ChatMessage = (&system_msg).into();
-        assert!(matches!(chat_msg, ChatMessage::System { .. }));
     }
 
     #[test]

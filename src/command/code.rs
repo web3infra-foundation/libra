@@ -252,13 +252,10 @@ async fn execute_tui(args: CodeArgs) {
     // Use repository working directory to ensure correct initialization of .libra resources.
     let working_dir = crate::utils::util::working_dir();
 
-    // Warn if --api-base is used with a non-Ollama provider.
+    // Validate --api-base: only supported for Ollama, must be a valid URL.
     if args.api_base.is_some() && args.provider != CodeProvider::Ollama {
         eprintln!("warning: --api-base is only supported for the ollama provider; ignoring");
-    }
-
-    // Validate --api-base URL if provided.
-    if let Some(ref base_url) = args.api_base
+    } else if let Some(ref base_url) = args.api_base
         && !base_url.starts_with("http://")
         && !base_url.starts_with("https://")
     {

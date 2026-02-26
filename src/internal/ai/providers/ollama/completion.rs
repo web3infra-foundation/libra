@@ -256,9 +256,11 @@ mod tests {
     }
 
     /// Integration test: actually calls the local Ollama instance.
-    /// Skipped if Ollama is not running. Uses `OLLAMA_TEST_MODEL` env var
-    /// or defaults to `llama3.2`.
+    /// Uses `OLLAMA_TEST_MODEL` env var or defaults to `llama3.2`.
+    ///
+    /// Run with: `OLLAMA_TEST_MODEL=llama3.2 cargo test -- --ignored`
     #[tokio::test]
+    #[ignore = "requires a local Ollama instance"]
     async fn test_ollama_live_completion() {
         // Quick check if Ollama is available
         let client = reqwest::Client::new();

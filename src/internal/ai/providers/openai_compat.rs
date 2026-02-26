@@ -115,63 +115,6 @@ pub struct ChatErrorResponse {
 }
 
 // ================================================================
-// Conversions
-// ================================================================
-
-/// Simple one-to-one conversion from a generic [`Message`] to [`ChatMessage`].
-///
-/// Only the first content item is extracted; use [`build_messages`] for the
-/// full conversion that handles tool results, tool calls, and images.
-impl From<&Message> for ChatMessage {
-    fn from(msg: &Message) -> Self {
-        match msg {
-            Message::User { content } => {
-                let text = content
-                    .iter()
-                    .next()
-                    .map(|c| match c {
-                        crate::internal::ai::completion::message::UserContent::Text(t) => {
-                            t.text.clone()
-                        }
-                        _ => String::new(),
-                    })
-                    .unwrap_or_default();
-                ChatMessage::User { content: text }
-            }
-            Message::Assistant { content, .. } => {
-                let text = content
-                    .iter()
-                    .next()
-                    .map(|c| match c {
-                        crate::internal::ai::completion::message::AssistantContent::Text(t) => {
-                            t.text.clone()
-                        }
-                        _ => String::new(),
-                    })
-                    .unwrap_or_default();
-                ChatMessage::Assistant {
-                    content: if text.is_empty() { None } else { Some(text) },
-                    tool_calls: Vec::new(),
-                }
-            }
-            Message::System { content } => {
-                let text = content
-                    .iter()
-                    .next()
-                    .map(|c| match c {
-                        crate::internal::ai::completion::message::UserContent::Text(t) => {
-                            t.text.clone()
-                        }
-                        _ => String::new(),
-                    })
-                    .unwrap_or_default();
-                ChatMessage::System { content: text }
-            }
-        }
-    }
-}
-
-// ================================================================
 // Shared Helper Functions
 // ================================================================
 
@@ -337,5 +280,92 @@ pub fn tool_arguments_json(arguments: &serde_json::Value) -> String {
             }
         }
         _ => arguments.to_string(),
+    }
+}
+
+// ================================================================
+// Test-only Helpers
+// ================================================================
+
+/// Simplified lossy conversion from [`Message`] to [`ChatMessage`].
+///
+/// Only extracts the first content item per message — **not** suitable for
+/// production use where messages may carry multiple content items, tool calls,
+/// or tool results. Use [`build_messages`] instead.
+#[cfg(test)]
+impl From<&Message> for ChatMessage {
+    fn from(msg: &Message) -> Self {
+        match msg {
+            Message::User { content } => {
+                let text = content
+                    .iter()
+                    .next()
+                    .map(|c| match c {
+                        UserContent::Text(t) => t.text.clone(),
+                        _ => String::new(),
+                    })
+                    .unwrap_or_default();
+                ChatMessage::User { content: text }
+            }
+            Message::Assistant { content, .. } => {
+                let text = content
+                    .iter()
+                    .next()
+                    .map(|c| match c {
+                        AssistantContent::Text(t) => t.text.clone(),
+                        _ => String::new(),
+                    })
+                    .unwrap_or_default();
+                ChatMessage::Assistant {
+                    content: if text.is_empty() { None } else { Some(text) },
+                    tool_calls: Vec::new(),
+                }
+            }
+            Message::System { content } => {
+                let text = content
+                    .iter()
+                    .next()
+                    .map(|c| match c {
+                        UserContent::Text(t) => t.text.clone(),
+                        _ => String::new(),
+                    })
+                    .unwrap_or_default();
+                ChatMessage::System { content: text }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::internal::ai::completion::Message;
+
+    #[test]
+    fn test_message_to_chat_message() {
+        let user_msg = Message::user("Hello");
+        let chat_msg: ChatMessage = (&user_msg).into();
+        assert!(matches!(chat_msg, ChatMessage::User { .. }));
+
+        let assistant_msg = Message::Assistant {
+            id: None,
+            content: crate::internal::ai::completion::message::OneOrMany::one(
+                AssistantContent::Text(Text {
+                    text: "Hi there".to_string(),
+                }),
+            ),
+        };
+        let chat_msg: ChatMessage = (&assistant_msg).into();
+        assert!(matches!(chat_msg, ChatMessage::Assistant { .. }));
+
+        let system_msg = Message::System {
+            content: crate::internal::ai::completion::message::OneOrMany::one(UserContent::Text(
+                Text {
+                    text: "System prompt".to_string(),
+                },
+            )),
+        };
+        let chat_msg: ChatMessage = (&system_msg).into();
+        assert!(matches!(chat_msg, ChatMessage::System { .. }));
     }
 }
