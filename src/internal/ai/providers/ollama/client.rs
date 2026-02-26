@@ -51,7 +51,13 @@ fn build_ollama_client(base_url: &str) -> Client {
     let http_client = HttpClient::builder()
         .timeout(std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECS))
         .build()
-        .expect("Failed to build HTTP client for Ollama");
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                "Failed to build HTTP client with {DEFAULT_TIMEOUT_SECS}s timeout: {e}. \
+                 Using default client (timeout may differ)."
+            );
+            HttpClient::new()
+        });
 
     Client {
         base_url: base_url.to_string(),
