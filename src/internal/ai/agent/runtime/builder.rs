@@ -34,10 +34,10 @@ impl<M: CompletionModel> AgentBuilder<M> {
     }
 
     /// Sets the maximum number of tool-call steps for tool execution loops.
-    ///
-    /// A value of `0` allows direct-text responses but prevents tool calls from
-    /// being executed. `None` means unlimited.
     /// Defaults to 4 if not set.
+    ///
+    /// A value of `0` prevents tool calls from being executed. If the agent
+    /// encounters a tool call when `max_steps` is already reached, it returns an error.
     pub fn max_steps(mut self, max_steps: usize) -> Self {
         self.max_steps = Some(max_steps);
         self
