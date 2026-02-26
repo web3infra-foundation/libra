@@ -143,7 +143,7 @@ libra code --provider ollama --model codellama
 libra code --provider ollama --model llama3.2 --api-base http://remote-host:11434/v1
 ```
 
-> **Note**: The `--api-base` flag is only supported for the `ollama` provider. It is ignored for other providers (a warning is displayed).
+> **Note**: The `--api-base` CLI flag is only honored for the `ollama` provider. Other providers accept custom base URLs through their respective environment variables (e.g. `OPENAI_BASE_URL`).
 
 | Provider | Default Model | API Key Env Variable | Base URL Override |
 |----------|--------------|---------------------|-------------------|
