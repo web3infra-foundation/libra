@@ -10,6 +10,7 @@ use std::{net::SocketAddr, sync::Arc};
 use axum::{Router, response::Html, routing::get};
 use clap::{Parser, ValueEnum};
 use tokio::sync::oneshot;
+use url::Url;
 
 // use uuid::Uuid;
 use crate::internal::{
@@ -256,7 +257,7 @@ async fn execute_tui(args: CodeArgs) {
     if args.api_base.is_some() && args.provider != CodeProvider::Ollama {
         eprintln!("warning: --api-base is only supported for the ollama provider; ignoring");
     } else if let Some(ref base_url) = args.api_base {
-        match url::Url::parse(base_url) {
+        match Url::parse(base_url) {
             Ok(u) if u.scheme() == "http" || u.scheme() == "https" => {}
             Ok(u) => {
                 eprintln!(
