@@ -35,4 +35,5 @@ pub mod deepseek;
 pub mod gemini;
 pub mod ollama;
 pub mod openai;
+pub(crate) mod openai_compat;
 pub mod zhipu;

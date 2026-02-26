@@ -21,7 +21,7 @@ use crate::internal::{
             anthropic::{CLAUDE_3_5_SONNET, Client as AnthropicClient},
             deepseek::client::Client as DeepSeekClient,
             gemini::{Client as GeminiClient, GEMINI_2_5_FLASH},
-            ollama::{Client as OllamaClient, GPT_OSS_120B},
+            ollama::Client as OllamaClient,
             openai::{Client as OpenAIClient, GPT_4O_MINI},
             zhipu::{Client as ZhipuClient, GLM_5},
         },
@@ -252,6 +252,20 @@ async fn execute_tui(args: CodeArgs) {
     // Use repository working directory to ensure correct initialization of .libra resources.
     let working_dir = crate::utils::util::working_dir();
 
+    // Warn if --api-base is used with a non-Ollama provider.
+    if args.api_base.is_some() && args.provider != CodeProvider::Ollama {
+        eprintln!("warning: --api-base is only supported for the ollama provider; ignoring");
+    }
+
+    // Validate --api-base URL if provided.
+    if let Some(ref base_url) = args.api_base
+        && !base_url.starts_with("http://")
+        && !base_url.starts_with("https://")
+    {
+        eprintln!("error: --api-base must be a valid URL starting with http:// or https://");
+        return;
+    }
+
     let preamble = system_preamble(&working_dir, args.context.as_deref());
     let temperature = args.temperature;
     let resume = args.resume;
@@ -434,7 +448,15 @@ async fn execute_tui(args: CodeArgs) {
             } else {
                 OllamaClient::from_env()
             };
-            let model_name = args.model.unwrap_or_else(|| GPT_OSS_120B.to_string());
+            let model_name = match args.model {
+                Some(m) => m,
+                None => {
+                    eprintln!(
+                        "error: --model is required when using --provider ollama (e.g. --model llama3.2)"
+                    );
+                    return;
+                }
+            };
             let model = client.completion_model(&model_name);
             run_tui_with_model(
                 model,

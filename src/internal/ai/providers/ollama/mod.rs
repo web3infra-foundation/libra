@@ -1,7 +1,7 @@
 //! Ollama API provider for libra.
 //!
 //! Ollama exposes an OpenAI-compatible API locally (default: `http://localhost:11434/v1`).
-//! No API key is required.
+//! No API key is required. Use `--model` to specify which local model to use.
 //!
 //! # Example
 //! ```no_run
@@ -9,16 +9,11 @@
 //! use libra::internal::ai::providers::ollama;
 //!
 //! let client = ollama::Client::from_env();
-//! let model = client.completion_model("gpt-oss:120b");
+//! let model = client.completion_model("llama3.2");
 //! ```
 
 pub mod client;
 pub mod completion;
 
 pub use client::{Client, OllamaProvider};
-pub use completion::{CompletionModel, Model};
-
-// Model constants
-
-/// Default model identifier for the GPT-OSS 120-billion-parameter model served by Ollama.
-pub const GPT_OSS_120B: &str = "gpt-oss:120b";
+pub use completion::Model;

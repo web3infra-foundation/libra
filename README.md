@@ -135,13 +135,15 @@ libra code --provider deepseek
 # Zhipu (GLM)
 libra code --provider zhipu --model glm-5
 
-# Ollama (local inference, no API key required)
-libra code --provider ollama
-libra code --provider ollama --model gpt-oss:120b
+# Ollama (local inference, no API key required, --model is required)
+libra code --provider ollama --model llama3.2
+libra code --provider ollama --model codellama
 
 # Ollama with a remote instance
-libra code --provider ollama --api-base http://remote-host:11434/v1
+libra code --provider ollama --model llama3.2 --api-base http://remote-host:11434/v1
 ```
+
+> **Note**: The `--api-base` flag is only supported for the `ollama` provider. It is silently ignored for other providers.
 
 | Provider | Default Model | API Key Env Variable | Base URL Override |
 |----------|--------------|---------------------|-------------------|
@@ -150,7 +152,7 @@ libra code --provider ollama --api-base http://remote-host:11434/v1
 | `anthropic` | `claude-3-5-sonnet-latest` | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
 | `deepseek` | `deepseek-chat` | `DEEPSEEK_API_KEY` | — |
 | `zhipu` | `glm-5` | `ZHIPU_API_KEY` | `ZHIPU_BASE_URL` |
-| `ollama` | `gpt-oss:120b` | — | `OLLAMA_BASE_URL` or `--api-base` |
+| `ollama` | *(requires `--model`)* | — | `OLLAMA_BASE_URL` or `--api-base` |
 
 ---
 
