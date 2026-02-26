@@ -255,12 +255,21 @@ async fn execute_tui(args: CodeArgs) {
     // Validate --api-base: only supported for Ollama, must be a valid URL.
     if args.api_base.is_some() && args.provider != CodeProvider::Ollama {
         eprintln!("warning: --api-base is only supported for the ollama provider; ignoring");
-    } else if let Some(ref base_url) = args.api_base
-        && !base_url.starts_with("http://")
-        && !base_url.starts_with("https://")
-    {
-        eprintln!("error: --api-base must be a valid URL starting with http:// or https://");
-        return;
+    } else if let Some(ref base_url) = args.api_base {
+        match url::Url::parse(base_url) {
+            Ok(u) if u.scheme() == "http" || u.scheme() == "https" => {}
+            Ok(u) => {
+                eprintln!(
+                    "error: --api-base must use http or https (got {})",
+                    u.scheme()
+                );
+                return;
+            }
+            Err(e) => {
+                eprintln!("error: --api-base is not a valid URL: {e}");
+                return;
+            }
+        }
     }
 
     let preamble = system_preamble(&working_dir, args.context.as_deref());
