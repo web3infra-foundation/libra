@@ -98,7 +98,9 @@ enum Commands {
     Reset(command::reset::ResetArgs),
     #[command(about = "Move or rename a file, a directory, or a symlink")]
     Mv(command::mv::MvArgs),
-    #[command(about = "Apply the changes introduced by some existing commits")]
+    #[command(about = "Give an object a human readable name based on an available ref")]
+    Describe(command::describe::DescribeArgs),
+    #[command(about = "Apply the changes introduced by some existing commits")] 
     CherryPick(command::cherry_pick::CherryPickArgs),
     #[command(about = "Update remote refs along with associated objects")]
     Push(command::push::PushArgs),
@@ -305,6 +307,11 @@ pub async fn parse_async(args: Option<&[&str]>) -> Result<(), GitError> {
             command::mv::execute(args)
                 .await
                 .map_err(GitError::CustomError)?;
+        }
+        Commands::Describe(args) => {
+            command::describe::execute(args)
+                .await
+                .map_err(GitError::CustomError)?
         }
         Commands::CherryPick(args) => command::cherry_pick::execute(args).await,
         Commands::Push(args) => command::push::execute(args).await,
