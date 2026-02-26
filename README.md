@@ -143,7 +143,7 @@ libra code --provider ollama --model codellama
 libra code --provider ollama --model llama3.2 --api-base http://remote-host:11434/v1
 ```
 
-> **Note**: The `--api-base` flag is only supported for the `ollama` provider. It is silently ignored for other providers.
+> **Note**: The `--api-base` flag is only supported for the `ollama` provider. It is ignored for other providers (a warning is displayed).
 
 | Provider | Default Model | API Key Env Variable | Base URL Override |
 |----------|--------------|---------------------|-------------------|

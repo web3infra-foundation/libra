@@ -205,7 +205,7 @@ struct AnthropicUsage {
 /// access provider-specific fields (e.g. `stop_reason`, `usage`).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AnthropicResponse {
-    /// Unique message identifier (e.g. `"msg_01XF..."``).
+    /// Unique message identifier (e.g. `"msg_01XF..."`).
     pub id: String,
     /// Always `"message"` for non-streaming responses.
     pub r#type: String,
