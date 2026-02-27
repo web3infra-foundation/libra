@@ -124,6 +124,8 @@ enum Commands {
     Reflog(command::reflog::ReflogArgs),
     #[command(about = "Manage multiple working trees attached to this repository")]
     Worktree(command::worktree::WorktreeArgs),
+    #[command(about = "Cloud backup and restore operations (D1/R2)")]
+    Cloud(command::cloud::CloudArgs),
 
     // other hidden commands
     #[command(
@@ -325,7 +327,13 @@ pub async fn parse_async(args: Option<&[&str]>) -> Result<(), GitError> {
         Commands::Checkout(args) => command::checkout::execute(args).await,
         Commands::Reflog(args) => command::reflog::execute(args).await,
         Commands::Worktree(args) => command::worktree::execute(args).await,
+        Commands::Cloud(args) => command::cloud::execute(args).await,
     }
+
+    // Wait for any background storage tasks (e.g. object indexing) to complete
+    // This prevents tasks from being killed when the process exits
+    utils::client_storage::ClientStorage::wait_for_background_tasks();
+
     Ok(())
 }
 

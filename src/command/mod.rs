@@ -7,6 +7,7 @@ pub mod checkout;
 pub mod cherry_pick;
 pub mod clean;
 pub mod clone;
+pub mod cloud;
 pub mod code;
 pub mod commit;
 pub mod config;

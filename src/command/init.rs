@@ -741,6 +741,17 @@ async fn init_config(
         ..Default::default()
     };
     init_ref_format_entry.insert(&txn).await?;
+
+    // Generate and insert unique repository ID for cloud backup identification
+    let repo_id = uuid::Uuid::new_v4().to_string();
+    let repo_id_entry = config::ActiveModel {
+        configuration: Set("libra".to_owned()),
+        key: Set("repoid".to_owned()),
+        value: Set(repo_id),
+        ..Default::default()
+    };
+    repo_id_entry.insert(&txn).await?;
+
     // Commit the transaction
     txn.commit().await?;
     Ok(())
