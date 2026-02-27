@@ -10,6 +10,7 @@ pub mod clone;
 pub mod code;
 pub mod commit;
 pub mod config;
+pub mod describe;
 pub mod diff;
 pub mod fetch;
 pub mod index_pack;
