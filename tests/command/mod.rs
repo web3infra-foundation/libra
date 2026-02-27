@@ -18,6 +18,7 @@ use libra::{
         mv::{self, MvArgs},
         remove::{self, RemoveArgs},
         save_object,
+        shortlog::{self, ShortlogArgs},
         status::{changes_to_be_committed, changes_to_be_staged},
         switch::{self, SwitchArgs},
     },
@@ -56,6 +57,7 @@ mod remove_test;
 mod reset_test;
 mod restore_test;
 mod revert_test;
+mod shortlog_test;
 mod show_test;
 mod status_test;
 mod switch_test;

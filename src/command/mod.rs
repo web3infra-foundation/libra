@@ -30,6 +30,7 @@ pub mod remove;
 pub mod reset;
 pub mod restore;
 pub mod revert;
+pub mod shortlog;
 pub mod show;
 pub mod tag;
 pub mod worktree;
