@@ -1,4 +1,13 @@
 //! Remote object storage backend for Git objects
+//!
+//! This module provides an interface to interact with remote object storage services (like S3, R2).
+//! It supports storing Git objects with a directory structure similar to the local object store,
+//! but with optional prefixing for multi-tenant isolation.
+//!
+//! # Path Structure
+//!
+//! - Without prefix: `aa/bbcc...` (Standard Git object layout)
+//! - With prefix: `prefix/objects/aa/bbcc...` (Isolated layout, e.g. `repo_id/objects/...`)
 use std::{str::FromStr, sync::Arc};
 
 use async_trait::async_trait;
@@ -13,18 +22,37 @@ use super::Storage;
 /// Adapts object_store crate to Libra's StorageTrait
 pub struct RemoteStorage {
     inner: Arc<dyn ObjectStore>,
+    key_prefix: Option<String>,
 }
 
 impl RemoteStorage {
     /// Create a new RemoteStorage instance from an existing ObjectStore
     pub fn new(inner: Arc<dyn ObjectStore>) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            key_prefix: None,
+        }
+    }
+
+    pub fn new_with_prefix(inner: Arc<dyn ObjectStore>, key_prefix: String) -> Self {
+        let key_prefix = key_prefix.trim_matches('/').to_string();
+        let key_prefix = if key_prefix.is_empty() {
+            None
+        } else {
+            Some(key_prefix)
+        };
+        Self { inner, key_prefix }
     }
 
     /// Convert ObjectHash to storage path (aa/bbcc...)
     fn hash_to_path(&self, hash: &ObjectHash) -> ObjectPath {
         let h = hash.to_string();
-        ObjectPath::from(format!("{}/{}", &h[0..2], &h[2..]))
+        match &self.key_prefix {
+            Some(prefix) => {
+                ObjectPath::from(format!("{}/objects/{}/{}", prefix, &h[0..2], &h[2..]))
+            }
+            None => ObjectPath::from(format!("{}/{}", &h[0..2], &h[2..])),
+        }
     }
 }
 
@@ -109,10 +137,16 @@ impl Storage for RemoteStorage {
             // We don't use the full prefix (e.g. "aabb") for the list_prefix because
             // object_store paths are segment-based, and "aa/bb" is not considered a parent of "aa/bbcc...".
             // So we list "aa" and filter client-side.
-            ObjectPath::from(&prefix[0..2])
+            match &self.key_prefix {
+                Some(p) => ObjectPath::from(format!("{}/objects/{}", p, &prefix[0..2])),
+                None => ObjectPath::from(&prefix[0..2]),
+            }
         } else {
             // If < 2 chars, we must list the root. This is expensive but necessary for correctness.
-            ObjectPath::from("")
+            match &self.key_prefix {
+                Some(p) => ObjectPath::from(format!("{}/objects", p)),
+                None => ObjectPath::from(""),
+            }
         };
 
         let mut results = Vec::new();
@@ -123,7 +157,14 @@ impl Storage for RemoteStorage {
         while let Some(item) = stream.next().await {
             if let Ok(meta) = item {
                 // path is like "aa/bbcc..."
-                let path_str = meta.location.to_string();
+                let mut path_str = meta.location.to_string();
+                if let Some(p) = &self.key_prefix {
+                    let expected = format!("{}/objects/", p);
+                    if !path_str.starts_with(&expected) {
+                        continue;
+                    }
+                    path_str = path_str[expected.len()..].to_string();
+                }
                 // Remove '/' to get hash "aabbcc..."
                 let hash_str = path_str.replace('/', "");
 
