@@ -174,7 +174,7 @@ mod tests {
     use sea_orm::{
         ActiveModelTrait, ActiveValue::NotSet, ColumnTrait, EntityTrait, QueryFilter, Set,
     };
-    use tests::reference::ConfigKind;
+    use tests::{object_index, reference::ConfigKind};
 
     use super::*;
 
@@ -386,5 +386,98 @@ mod tests {
         assert!(result.is_ok()); // not duplicated because remote is different
         let result = entry.save(&conn).await;
         assert!(result.is_err(), "reference check duplicated failed");
+    }
+
+    #[tokio::test]
+    async fn test_object_index_crud() {
+        // Test CRUD operations on object_index table
+        let test_db = TestDbPath::new("test_object_index_crud.db").await;
+        let db_path = test_db.0.as_str();
+
+        let conn = establish_connection(db_path).await.unwrap();
+
+        // Test insert
+        let repo_id = "test-repo-uuid-1234";
+        let obj_hash = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
+        let entry = object_index::ActiveModel {
+            o_id: Set(obj_hash.to_string()),
+            o_type: Set("blob".to_string()),
+            o_size: Set(0),
+            repo_id: Set(repo_id.to_string()),
+            created_at: Set(chrono::Utc::now().timestamp()),
+            is_synced: Set(0),
+            ..Default::default()
+        };
+        let result = entry.save(&conn).await;
+        assert!(result.is_ok(), "Failed to insert object_index");
+
+        // Test query by repo_id
+        let results = object_index::Entity::find()
+            .filter(object_index::Column::RepoId.eq(repo_id))
+            .all(&conn)
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].o_id, obj_hash);
+        assert_eq!(results[0].o_type, "blob");
+        assert_eq!(results[0].is_synced, 0);
+
+        // Test update is_synced
+        let mut active: object_index::ActiveModel = results[0].clone().into();
+        active.is_synced = Set(1);
+        let updated = active.update(&conn).await.unwrap();
+        assert_eq!(updated.is_synced, 1);
+
+        // Test query unsynced objects
+        let unsynced = object_index::Entity::find()
+            .filter(object_index::Column::RepoId.eq(repo_id))
+            .filter(object_index::Column::IsSynced.eq(0))
+            .all(&conn)
+            .await
+            .unwrap();
+        assert_eq!(
+            unsynced.len(),
+            0,
+            "Should have no unsynced objects after update"
+        );
+
+        // Test unique constraint on o_id
+        let duplicate_entry = object_index::ActiveModel {
+            o_id: Set(obj_hash.to_string()),
+            o_type: Set("tree".to_string()),
+            o_size: Set(100),
+            repo_id: Set(repo_id.to_string()),
+            created_at: Set(chrono::Utc::now().timestamp()),
+            is_synced: Set(0),
+            ..Default::default()
+        };
+        let result = duplicate_entry.insert(&conn).await;
+        assert!(
+            result.is_err(),
+            "Should fail due to unique constraint on o_id"
+        );
+
+        // Test insert different object types
+        let types = ["tree", "commit", "tag"];
+        for (i, obj_type) in types.iter().enumerate() {
+            let entry = object_index::ActiveModel {
+                o_id: Set(format!("hash_{i}_{obj_type}")),
+                o_type: Set(obj_type.to_string()),
+                o_size: Set((i * 100) as i64),
+                repo_id: Set(repo_id.to_string()),
+                created_at: Set(chrono::Utc::now().timestamp()),
+                is_synced: Set(0),
+                ..Default::default()
+            };
+            entry.insert(&conn).await.unwrap();
+        }
+
+        // Verify all objects in repo
+        let all_objects = object_index::Entity::find()
+            .filter(object_index::Column::RepoId.eq(repo_id))
+            .all(&conn)
+            .await
+            .unwrap();
+        assert_eq!(all_objects.len(), 4, "Should have 4 objects total");
     }
 }
