@@ -1,3 +1,5 @@
+//! Unit tests for Gemini API type serialization and deserialization.
+
 #[test]
 fn test_part_deserialization() {
     use crate::internal::ai::providers::gemini::gemini_api_types::Part;
