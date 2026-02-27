@@ -221,18 +221,19 @@ impl ClientStorage {
 
     /// Wait for all background tasks (e.g. indexing) to complete
     pub fn wait_for_background_tasks() {
-        // Wait up to 5 seconds for tasks to finish
-        let start = std::time::Instant::now();
+        // Wait until all tasks finish
+        let mut waited = 0;
         loop {
             let pending = PENDING_TASKS.load(Ordering::Relaxed);
             if pending == 0 {
                 break;
             }
-            if start.elapsed() > Duration::from_secs(5) {
-                tracing::warn!("Timed out waiting for {} background tasks", pending);
-                break;
+            std::thread::sleep(Duration::from_millis(100));
+            waited += 100;
+            if waited >= 5000 {
+                tracing::info!("Waiting for {} background tasks to complete...", pending);
+                waited = 0;
             }
-            std::thread::sleep(Duration::from_millis(10));
         }
     }
 

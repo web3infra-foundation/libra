@@ -6,7 +6,7 @@
 
 use std::env;
 
-use reqwest::Client;
+use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 
 /// D1 API response wrapper
@@ -93,8 +93,12 @@ impl D1Client {
 
     /// Create a new D1 client with explicit credentials
     pub fn new(account_id: String, api_token: String, database_id: String) -> Self {
+        let client = Client::builder()
+            .https_only(true)
+            .build()
+            .unwrap_or_else(|_| Client::new());
         Self {
-            client: Client::new(),
+            client,
             account_id,
             api_token,
             database_id,
@@ -102,11 +106,24 @@ impl D1Client {
     }
 
     /// Get the D1 API endpoint URL
-    fn api_url(&self) -> String {
-        format!(
+    fn api_url(&self) -> Result<Url, D1Error> {
+        let url_str = format!(
             "https://api.cloudflare.com/client/v4/accounts/{}/d1/database/{}/query",
             self.account_id, self.database_id
-        )
+        );
+        let url = Url::parse(&url_str).map_err(|e| D1Error {
+            code: 2005,
+            message: format!("Invalid API URL: {}", e),
+        })?;
+
+        if url.scheme() != "https" {
+            return Err(D1Error {
+                code: 2006,
+                message: "API URL must use HTTPS".to_string(),
+            });
+        }
+
+        Ok(url)
     }
 
     /// Execute a single SQL statement
@@ -122,7 +139,7 @@ impl D1Client {
 
         let response = self
             .client
-            .post(self.api_url())
+            .post(self.api_url()?)
             .header("Authorization", format!("Bearer {}", self.api_token))
             .header("Content-Type", "application/json")
             .json(&statement)
@@ -267,15 +284,14 @@ impl D1Client {
                 )
                 .await?;
 
-                let _ = self
-                    .execute(
-                        r#"
-                            INSERT INTO object_index_v2 (o_id, o_type, o_size, repo_id, created_at, is_synced)
-                            SELECT o_id, o_type, o_size, repo_id, created_at, is_synced FROM object_index
-                        "#,
-                        None,
-                    )
-                    .await;
+                self.execute(
+                    r#"
+                        INSERT INTO object_index_v2 (o_id, o_type, o_size, repo_id, created_at, is_synced)
+                        SELECT o_id, o_type, o_size, repo_id, created_at, is_synced FROM object_index
+                    "#,
+                    None,
+                )
+                .await?;
 
                 self.execute("DROP TABLE object_index", None).await?;
                 self.execute("ALTER TABLE object_index_v2 RENAME TO object_index", None)

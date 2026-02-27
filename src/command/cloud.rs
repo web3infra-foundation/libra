@@ -9,7 +9,10 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use git_internal::hash::ObjectHash;
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set, sea_query::Expr};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Schema, Set,
+    sea_query::Expr,
+};
 use uuid::Uuid;
 
 use crate::{
@@ -112,6 +115,16 @@ async fn execute_sync(args: SyncArgs) -> Result<(), String> {
 
     // Get database connection
     let db_conn = db::get_db_conn_instance().await;
+
+    // Check if object_index table exists locally, create if not
+    let builder = db_conn.get_database_backend();
+    let schema = Schema::new(builder);
+    let stmt = schema
+        .create_table_from_entity(object_index::Entity)
+        .if_not_exists()
+        .to_owned();
+
+    let _ = db_conn.execute(builder.build(&stmt)).await;
 
     let repo_id = ensure_repo_id().await?;
 
