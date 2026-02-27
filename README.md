@@ -114,6 +114,46 @@ Update your `claude_desktop_config.json` as follows:
 > **Note**: The `cwd` (current working directory) must be set to the root of a valid Libra repository.
 > If `libra code` is launched outside of a repository, it will exit with an error.
 
+### AI Provider Selection
+
+Libra Code supports multiple AI provider backends. Use the `--provider` and `--model` flags to choose which LLM to use:
+
+```bash
+# Gemini (default)
+libra code --provider gemini
+libra code --provider gemini --model gemini-2.5-flash
+
+# OpenAI
+libra code --provider openai --model gpt-4o
+
+# Anthropic
+libra code --provider anthropic --model claude-3-5-sonnet-latest
+
+# DeepSeek
+libra code --provider deepseek
+
+# Zhipu (GLM)
+libra code --provider zhipu --model glm-5
+
+# Ollama (local inference, no API key required, --model is required)
+libra code --provider ollama --model llama3.2
+libra code --provider ollama --model codellama
+
+# Ollama with a remote instance
+libra code --provider ollama --model llama3.2 --api-base http://remote-host:11434/v1
+```
+
+> **Note**: The `--api-base` CLI flag is only honored for the `ollama` provider. Other providers accept custom base URLs through their respective environment variables (e.g. `OPENAI_BASE_URL`).
+
+| Provider | Default Model | API Key Env Variable | Base URL Override |
+|----------|--------------|---------------------|-------------------|
+| `gemini` | `gemini-2.5-flash` | `GEMINI_API_KEY` | — |
+| `openai` | `gpt-4o-mini` | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
+| `anthropic` | `claude-3-5-sonnet-latest` | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
+| `deepseek` | `deepseek-chat` | `DEEPSEEK_API_KEY` | *(programmatic only)* |
+| `zhipu` | `glm-5` | `ZHIPU_API_KEY` | `ZHIPU_BASE_URL` |
+| `ollama` | *(requires `--model`)* | — | `OLLAMA_BASE_URL` or `--api-base` |
+
 ---
 
 ## Features

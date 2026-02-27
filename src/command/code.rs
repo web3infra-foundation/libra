@@ -10,6 +10,7 @@ use std::{net::SocketAddr, sync::Arc};
 use axum::{Router, response::Html, routing::get};
 use clap::{Parser, ValueEnum};
 use tokio::sync::oneshot;
+use url::Url;
 
 // use uuid::Uuid;
 use crate::internal::{
@@ -21,6 +22,7 @@ use crate::internal::{
             anthropic::{CLAUDE_3_5_SONNET, Client as AnthropicClient},
             deepseek::client::Client as DeepSeekClient,
             gemini::{Client as GeminiClient, GEMINI_2_5_FLASH},
+            ollama::Client as OllamaClient,
             openai::{Client as OpenAIClient, GPT_4O_MINI},
             zhipu::{Client as ZhipuClient, GLM_5},
         },
@@ -42,6 +44,7 @@ pub enum CodeProvider {
     Anthropic,
     Deepseek,
     Zhipu,
+    Ollama,
 }
 
 #[derive(Parser, Debug)]
@@ -85,6 +88,10 @@ pub struct CodeArgs {
     /// Run the MCP server over Stdio (for Claude Desktop integration)
     #[arg(long, alias = "mcp-stdio", conflicts_with = "web_only")]
     pub stdio: bool,
+
+    /// Provider API base URL (e.g. http://remote-host:11434/v1 for remote Ollama)
+    #[arg(long)]
+    pub api_base: Option<String>,
 }
 
 pub async fn execute(args: CodeArgs) {
@@ -246,6 +253,30 @@ async fn execute_tui(args: CodeArgs) {
     // Use repository working directory to ensure correct initialization of .libra resources.
     let working_dir = crate::utils::util::working_dir();
 
+    // Validate --api-base: only honored for Ollama via CLI flag. Other providers
+    // accept custom base URLs through their respective environment variables.
+    if args.api_base.is_some() && args.provider != CodeProvider::Ollama {
+        eprintln!(
+            "warning: --api-base is only honored for the ollama provider; \
+             use provider-specific env vars (e.g. OPENAI_BASE_URL) for others; ignoring"
+        );
+    } else if let Some(ref base_url) = args.api_base {
+        match Url::parse(base_url) {
+            Ok(u) if u.scheme() == "http" || u.scheme() == "https" => {}
+            Ok(u) => {
+                eprintln!(
+                    "error: --api-base must use http or https (got {})",
+                    u.scheme()
+                );
+                return;
+            }
+            Err(e) => {
+                eprintln!("error: --api-base is not a valid URL: {e}");
+                return;
+            }
+        }
+    }
+
     let preamble = system_preamble(&working_dir, args.context.as_deref());
     let temperature = args.temperature;
     let resume = args.resume;
@@ -403,6 +434,40 @@ async fn execute_tui(args: CodeArgs) {
                 }
             };
             let model_name = args.model.unwrap_or_else(|| GLM_5.to_string());
+            let model = client.completion_model(&model_name);
+            run_tui_with_model(
+                model,
+                TuiParams {
+                    host: args.host,
+                    port: args.port,
+                    mcp_port: args.mcp_port,
+                    registry: registry.clone(),
+                    preamble,
+                    temperature,
+                    resume,
+                    user_input_rx,
+                    mcp_server,
+                    model_name,
+                    provider_name,
+                },
+            )
+            .await;
+        }
+        CodeProvider::Ollama => {
+            let client = if let Some(base_url) = &args.api_base {
+                OllamaClient::with_base_url(base_url)
+            } else {
+                OllamaClient::from_env()
+            };
+            let model_name = match args.model {
+                Some(m) => m,
+                None => {
+                    eprintln!(
+                        "error: --model is required when using --provider ollama (e.g. --model llama3.2)"
+                    );
+                    return;
+                }
+            };
             let model = client.completion_model(&model_name);
             run_tui_with_model(
                 model,
