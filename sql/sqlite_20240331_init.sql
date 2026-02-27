@@ -46,4 +46,19 @@ WHERE `remote` IS NOT NULL;
 CREATE UNIQUE INDEX idx_name_kind ON `reference`(`name`, `kind`)
 WHERE `remote` IS NULL;
 
-CREATE INDEX idx_ref_name_timestamp ON `reflog`(`ref_name`, `timestamp`)
+CREATE INDEX idx_ref_name_timestamp ON `reflog`(`ref_name`, `timestamp`);
+
+-- Object index table for cloud backup (D1/R2)
+CREATE TABLE IF NOT EXISTS `object_index` (
+    `id`         INTEGER PRIMARY KEY AUTOINCREMENT,
+    `o_id`       TEXT NOT NULL,             -- Object Hash (SHA-1/SHA-256)
+    `o_type`     TEXT NOT NULL,             -- Type: blob, tree, commit, tag
+    `o_size`     INTEGER NOT NULL,          -- Original object size in bytes
+    `repo_id`    TEXT NOT NULL,             -- Repository UUID for multi-tenant isolation
+    `created_at` INTEGER NOT NULL,          -- Unix timestamp
+    `is_synced`  INTEGER DEFAULT 0,         -- 0=not synced to cloud, 1=synced
+    UNIQUE(`repo_id`, `o_id`)               -- Support same object in different repos
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_object_repo_oid ON `object_index`(`repo_id`, `o_id`);
+CREATE INDEX IF NOT EXISTS idx_object_sync ON `object_index`(`repo_id`, `is_synced`);
+

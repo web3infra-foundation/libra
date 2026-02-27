@@ -3,9 +3,8 @@
 //! The `LocalStorage` struct provides methods to read and write Git objects, as well as to search for objects by prefix. It handles the Git object storage format, including zlib compression for loose objects
 //! and the pack file format for packed objects. The implementation also includes caching mechanisms for pack objects to improve performance when accessing packed data.
 use std::{
-    collections::HashMap,
     fs, io,
-    io::{BufReader, Cursor, Read, Seek, Write},
+    io::{Read, Seek, Write},
     path::{Path, PathBuf},
     str::FromStr,
     sync::{Arc, Mutex},
@@ -31,9 +30,6 @@ use crate::{command, utils::storage::Storage};
 /// Cache for pack objects, keyed by "pack_file_name-offset"
 static PACK_OBJ_CACHE: Lazy<Mutex<LruCache<String, CacheObject>>> =
     Lazy::new(|| Mutex::new(LruCache::new(1024 * 1024 * 200)));
-/// Cache for entire pack files, keyed by "pack_file_name"
-static PACK_FILE_CACHE: Lazy<Mutex<HashMap<String, Vec<u8>>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
 
 const IDX_MAGIC: [u8; 4] = [0xFF, 0x74, 0x4F, 0x63];
 const FANOUT: u64 = 256 * 4;
@@ -295,22 +291,8 @@ impl LocalStorage {
         }
 
         let obj = {
-            let mut cache = PACK_FILE_CACHE.lock().unwrap();
-            let pack_file_buf = match cache.get(&file_name) {
-                None => {
-                    let file = fs::File::open(pack_file)?;
-                    let mut pack_reader = io::BufReader::new(&file);
-
-                    let mut buf: Vec<u8> = Vec::new();
-                    pack_reader.read_to_end(&mut buf)?;
-                    cache.insert(file_name.clone(), buf);
-                    cache.get(&file_name).unwrap()
-                }
-                Some(buf) => buf,
-            };
-
-            let pack_cursor = Cursor::new(pack_file_buf);
-            let mut pack_reader = BufReader::new(pack_cursor);
+            let file = fs::File::open(pack_file)?;
+            let mut pack_reader = io::BufReader::new(&file);
             pack_reader.seek(io::SeekFrom::Start(offset))?;
             {
                 let mut offset = offset as usize;

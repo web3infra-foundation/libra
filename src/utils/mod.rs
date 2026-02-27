@@ -1,7 +1,8 @@
-//! Utilities module aggregator exposing storage, path, object, LFS, and testing helpers.
+//! Utilities module aggregator exposing storage, path, object, LFS, D1 client, and testing helpers.
 
 pub mod client_storage;
 pub mod convert;
+pub mod d1_client;
 pub mod ignore;
 pub mod lfs;
 pub mod object;
