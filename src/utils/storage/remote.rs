@@ -7,7 +7,7 @@
 //! # Path Structure
 //!
 //! - Without prefix: `aa/bbcc...` (Standard Git object layout)
-//! - With prefix: `prefix/objects/aa/bbcc...` (Isolated layout)
+//! - With prefix: `prefix/objects/aa/bbcc...` (Isolated layout, e.g. `repo_id/objects/...`)
 use std::{str::FromStr, sync::Arc};
 
 use async_trait::async_trait;

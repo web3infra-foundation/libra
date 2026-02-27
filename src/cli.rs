@@ -332,7 +332,10 @@ pub async fn parse_async(args: Option<&[&str]>) -> Result<(), GitError> {
 
     // Wait for any background storage tasks (e.g. object indexing) to complete
     // This prevents tasks from being killed when the process exits
-    utils::client_storage::ClientStorage::wait_for_background_tasks();
+    let _ = tokio::task::spawn_blocking(|| {
+        utils::client_storage::ClientStorage::wait_for_background_tasks();
+    })
+    .await;
 
     Ok(())
 }

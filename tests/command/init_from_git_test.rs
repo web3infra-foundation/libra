@@ -255,6 +255,15 @@ async fn test_init_from_git_repository_multiple_branches() {
             .success()
     );
 
+    assert!(
+        Command::new("git")
+            .current_dir(&git_dir)
+            .args(["pack-refs", "--all"])
+            .status()
+            .unwrap()
+            .success()
+    );
+
     let libra_dir = temp_root.path().join("libra-repo");
     fs::create_dir_all(&libra_dir).unwrap();
 
@@ -266,22 +275,22 @@ async fn test_init_from_git_repository_multiple_branches() {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("no refs fetched from source git repository")
-            || stderr.contains("InvalidPackFile")
-            || stderr.contains("corrupt deflate stream")
-        {
-            return;
-        }
-        panic!("libra init failed for an unexpected reason: {stderr}");
+        panic!("libra init failed: {stderr}");
     }
 
-    let _guard = ChangeDirGuard::new(&libra_dir);
-
-    let remote_branches = Branch::list_branches(Some("origin")).await;
-    assert!(
-        remote_branches.len() >= 2,
-        "remote tracking branches for multiple source branches should be created"
-    );
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(&libra_dir)
+        .args(["branch", "-r"])
+        .output()
+        .expect("failed to execute libra branch");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let remote_branches: Vec<&str> = stdout
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+    assert!(remote_branches.len() >= 2);
 }
 
 #[tokio::test]

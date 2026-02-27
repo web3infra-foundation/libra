@@ -21,7 +21,7 @@ use regex::Regex;
 use sea_orm::{ActiveModelTrait, Set};
 use tokio::{
     runtime::Runtime,
-    sync::mpsc::{UnboundedSender, unbounded_channel},
+    sync::mpsc::{Sender, channel, error::TrySendError},
 };
 use uuid::Uuid;
 
@@ -40,6 +40,7 @@ static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
 });
 
 // Index update message
+#[derive(Clone)]
 struct IndexUpdateMsg {
     hash: String,
     obj_type: String,
@@ -55,10 +56,10 @@ impl Drop for TaskGuard {
 }
 
 // Global channel for index updates
-// Using Unbounded channel to avoid blocking the sender (ClientStorage::put)
+// Using Bounded channel to apply backpressure
 // The consumer will process updates sequentially to avoid DB lock contention.
-static INDEX_UPDATE_CHANNEL: Lazy<UnboundedSender<IndexUpdateMsg>> = Lazy::new(|| {
-    let (tx, mut rx) = unbounded_channel::<IndexUpdateMsg>();
+static INDEX_UPDATE_CHANNEL: Lazy<Sender<IndexUpdateMsg>> = Lazy::new(|| {
+    let (tx, mut rx) = channel::<IndexUpdateMsg>(1000);
 
     RUNTIME.spawn(async move {
         while let Some(msg) = rx.recv().await {
@@ -106,7 +107,7 @@ impl ClientStorage {
     /// with local cache and remote persistence.
     ///
     /// ## Repo ID Isolation
-    /// When remote storage is enabled, it attempts to read `libra.repid` from the configuration.
+    /// When remote storage is enabled, it attempts to read `libra.repoid` from the configuration.
     /// If found, it uses `repo_id` as a key prefix (`<repo_id>/objects/...`) for isolation.
     /// If not found (e.g., during init before config exists), it defaults to no prefix (root of bucket),
     /// which might be risky for multi-tenant buckets but acceptable for single-repo buckets.
@@ -280,10 +281,19 @@ impl ClientStorage {
                     size: data_len as i64,
                 };
 
-                if INDEX_UPDATE_CHANNEL.send(msg).is_err() {
-                    // If send fails, decrement counter immediately
-                    PENDING_TASKS.fetch_sub(1, Ordering::Relaxed);
-                    tracing::warn!("Failed to queue object index update: channel closed");
+                loop {
+                    match INDEX_UPDATE_CHANNEL.try_send(msg.clone()) {
+                        Ok(_) => break,
+                        Err(TrySendError::Full(_)) => {
+                            // Channel full, wait a bit and retry (backpressure)
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(TrySendError::Closed(_)) => {
+                            PENDING_TASKS.fetch_sub(1, Ordering::Relaxed);
+                            tracing::warn!("Failed to queue object index update: channel closed");
+                            break;
+                        }
+                    }
                 }
             }
         }

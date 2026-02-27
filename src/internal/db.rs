@@ -441,7 +441,7 @@ mod tests {
             "Should have no unsynced objects after update"
         );
 
-        // Test unique constraint on o_id
+        // Test unique constraint on (repo_id, o_id)
         let duplicate_entry = object_index::ActiveModel {
             o_id: Set(obj_hash.to_string()),
             o_type: Set("tree".to_string()),

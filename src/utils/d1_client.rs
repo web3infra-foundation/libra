@@ -182,10 +182,15 @@ impl D1Client {
         let result = self.execute(sql, params).await?;
 
         let results = result.results.unwrap_or_default();
-        let typed_results: Vec<T> = results
-            .into_iter()
-            .filter_map(|v| serde_json::from_value(v).ok())
-            .collect();
+        let mut typed_results = Vec::with_capacity(results.len());
+
+        for v in results {
+            let t: T = serde_json::from_value(v).map_err(|e| D1Error {
+                code: 2004,
+                message: format!("Failed to deserialize result row: {}", e),
+            })?;
+            typed_results.push(t);
+        }
 
         Ok(typed_results)
     }

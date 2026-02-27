@@ -93,14 +93,18 @@ pub async fn execute(args: CloudArgs) {
 
 /// Execute sync command - uploads objects to R2 and indexes to D1
 async fn execute_sync(args: SyncArgs) -> Result<(), String> {
+    if args.batch_size < 1 {
+        return Err("Batch size must be at least 1".to_string());
+    }
+
     println!("Starting cloud sync...");
 
-    validate_cloud_backup_env()?;
+    validate_cloud_backup_env(false)?;
 
     // Initialize D1 client
     let d1_client = D1Client::from_env().map_err(|e| format!("D1 client error: {}", e.message))?;
 
-    // Ensure D1 table exists
+    // Ensure D1 table exists before any operations
     d1_client
         .ensure_object_index_table()
         .await
@@ -230,7 +234,7 @@ async fn sync_single_object(
 async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
     println!("Starting restore for repo: {}", args.repo_id);
 
-    validate_cloud_backup_env()?;
+    validate_cloud_backup_env(args.metadata_only)?;
 
     // Initialize D1 client
     let d1_client = D1Client::from_env().map_err(|e| format!("D1 client error: {}", e.message))?;
@@ -252,20 +256,34 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
     let db_conn = db::get_db_conn_instance().await;
 
     for idx in &indexes {
-        let entry = object_index::ActiveModel {
-            o_id: Set(idx.o_id.clone()),
-            o_type: Set(idx.o_type.clone()),
-            o_size: Set(idx.o_size),
-            repo_id: Set(idx.repo_id.clone()),
-            created_at: Set(idx.created_at),
-            is_synced: Set(1), // Already synced since we're restoring from cloud
-            ..Default::default()
-        };
+        // Check if exists
+        let existing = object_index::Entity::find()
+            .filter(object_index::Column::OId.eq(&idx.o_id))
+            .filter(object_index::Column::RepoId.eq(&idx.repo_id))
+            .one(db_conn)
+            .await
+            .map_err(|e| format!("DB error: {}", e))?;
 
-        // Use insert or update logic
-        if let Err(e) = entry.insert(db_conn).await {
-            // Might already exist, which is ok
-            tracing::debug!("Insert skipped (may already exist): {}", e);
+        if let Some(existing_model) = existing {
+            let mut active: object_index::ActiveModel = existing_model.into();
+            active.is_synced = Set(1);
+            if let Err(e) = active.update(db_conn).await {
+                eprintln!("Failed to update index for {}: {}", idx.o_id, e);
+            }
+        } else {
+            let entry = object_index::ActiveModel {
+                o_id: Set(idx.o_id.clone()),
+                o_type: Set(idx.o_type.clone()),
+                o_size: Set(idx.o_size),
+                repo_id: Set(idx.repo_id.clone()),
+                created_at: Set(idx.created_at),
+                is_synced: Set(1), // Already synced since we're restoring from cloud
+                ..Default::default()
+            };
+
+            if let Err(e) = entry.insert(db_conn).await {
+                eprintln!("Failed to insert index for {}: {}", idx.o_id, e);
+            }
         }
     }
 
@@ -273,6 +291,9 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
         "Restored {} object indexes to local database.",
         indexes.len()
     );
+
+    // Update local config with restored repo_id
+    Config::insert("libra", None, "repoid", &args.repo_id).await;
 
     if args.metadata_only {
         println!("Metadata-only restore complete.");
@@ -437,16 +458,21 @@ fn create_r2_storage(repo_id: &str) -> Result<RemoteStorage, String> {
     ))
 }
 
-fn validate_cloud_backup_env() -> Result<(), String> {
-    let required = [
+fn validate_cloud_backup_env(skip_r2: bool) -> Result<(), String> {
+    let mut required = vec![
         "LIBRA_D1_ACCOUNT_ID",
         "LIBRA_D1_API_TOKEN",
         "LIBRA_D1_DATABASE_ID",
-        "LIBRA_STORAGE_ENDPOINT",
-        "LIBRA_STORAGE_BUCKET",
-        "LIBRA_STORAGE_ACCESS_KEY",
-        "LIBRA_STORAGE_SECRET_KEY",
     ];
+
+    if !skip_r2 {
+        required.extend_from_slice(&[
+            "LIBRA_STORAGE_ENDPOINT",
+            "LIBRA_STORAGE_BUCKET",
+            "LIBRA_STORAGE_ACCESS_KEY",
+            "LIBRA_STORAGE_SECRET_KEY",
+        ]);
+    }
 
     let missing: Vec<&str> = required
         .into_iter()
@@ -457,7 +483,8 @@ fn validate_cloud_backup_env() -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "Cloud backup requires D1 + R2 configuration. Missing: {}",
+            "Cloud backup requires D1{} configuration. Missing: {}",
+            if skip_r2 { "" } else { " + R2" },
             missing.join(", ")
         ))
     }
