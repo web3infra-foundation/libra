@@ -150,7 +150,7 @@ libra code --provider ollama --model llama3.2 --api-base http://remote-host:1143
 | `gemini` | `gemini-2.5-flash` | `GEMINI_API_KEY` | — |
 | `openai` | `gpt-4o-mini` | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
 | `anthropic` | `claude-3-5-sonnet-latest` | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
-| `deepseek` | `deepseek-chat` | `DEEPSEEK_API_KEY` | — |
+| `deepseek` | `deepseek-chat` | `DEEPSEEK_API_KEY` | *(programmatic only)* |
 | `zhipu` | `glm-5` | `ZHIPU_API_KEY` | `ZHIPU_BASE_URL` |
 | `ollama` | *(requires `--model`)* | — | `OLLAMA_BASE_URL` or `--api-base` |
 

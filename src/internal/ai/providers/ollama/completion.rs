@@ -144,7 +144,7 @@ mod tests {
     use super::*;
     use crate::internal::ai::{
         completion::AssistantContent,
-        providers::openai_compat::{ChatMessage, ChatResponse, parse_choice_content},
+        providers::openai_compat::{ChatMessage, ChatResponse},
     };
 
     #[test]
@@ -303,7 +303,7 @@ mod tests {
             }
         }
 
-        assert!(response.is_ok(), "Completion failed: {:?}", response.err());
+        assert!(response.is_ok(), "Completion failed: {:?}", response);
 
         let response = response.unwrap();
         assert!(!response.content.is_empty(), "No content in response");
