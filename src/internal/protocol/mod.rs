@@ -190,7 +190,7 @@ pub fn generate_upload_pack_content(
     let mut buf = BytesMut::new();
     let mut write_first_line = false;
 
-    let mut capability = vec!["side-band-64k", "ofs-delta", "multi_ack_detailed"];
+    let mut capability = vec!["side-band-64k", "multi_ack_detailed"];
     if get_wire_hash_kind() == HashKind::Sha256 {
         capability.push("object-format=sha256");
     }
