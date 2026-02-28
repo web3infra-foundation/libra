@@ -33,6 +33,7 @@ pub mod intent;
 pub mod intentspec;
 pub mod mcp;
 pub mod node_adapter;
+pub mod orchestrator;
 pub mod prompt;
 pub mod providers;
 pub mod session;
