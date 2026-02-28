@@ -47,6 +47,7 @@ Commands:
   config       Manage repository configurations
   reflog       Manage the log of reference changes (e.g., HEAD, branches)
   worktree     Manage multiple working trees attached to this repository
+  cloud        Cloud backup and restore operations (D1/R2)
   help         Print this message or the help of the given subcommand(s)
 
 Options:
@@ -256,7 +257,6 @@ In addition to the Object Storage variables, you need to configure D1 credential
 - `libra cloud restore --repo-id <ID>` - Restore repository from cloud
 - `libra cloud status` - Show synchronization status
 
-For detailed usage, see [docs/cloud_backup_zh.md](docs/cloud_backup_zh.md) (Chinese).
 
 ---
 
