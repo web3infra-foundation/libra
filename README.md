@@ -47,6 +47,7 @@ Commands:
   config       Manage repository configurations
   reflog       Manage the log of reference changes (e.g., HEAD, branches)
   worktree     Manage multiple working trees attached to this repository
+  cloud        Cloud backup and restore operations (D1/R2)
   help         Print this message or the help of the given subcommand(s)
 
 Options:
@@ -233,6 +234,29 @@ Configure object storage by setting these environment variables:
 | `LIBRA_STORAGE_ALLOW_HTTP`  | Allow HTTP (non-TLS) endpoints for testing (not for prod)     | No                   | `false`              |
 
 > Note: If any mandatory variable is invalid or empty (for example, empty bucket or credentials), Libra automatically falls back to local storage and logs an error message.
+
+---
+
+## Cloud Backup & Restore
+
+Libra supports backing up your repository to Cloudflare D1 (metadata) and R2 (objects).
+
+### Environment Variables for Backup
+
+In addition to the Object Storage variables, you need to configure D1 credentials:
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `LIBRA_D1_ACCOUNT_ID` | Cloudflare Account ID | Yes |
+| `LIBRA_D1_API_TOKEN` | Cloudflare API Token | Yes |
+| `LIBRA_D1_DATABASE_ID` | Cloudflare D1 Database ID | Yes |
+
+### Commands
+
+- `libra cloud sync` - Sync local repository to cloud
+- `libra cloud restore --repo-id <ID>` - Restore repository from cloud
+- `libra cloud status` - Show synchronization status
+
 
 ---
 
