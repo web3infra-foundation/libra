@@ -236,6 +236,30 @@ Configure object storage by setting these environment variables:
 
 ---
 
+## Cloud Backup & Restore
+
+Libra supports backing up your repository to Cloudflare D1 (metadata) and R2 (objects).
+
+### Environment Variables for Backup
+
+In addition to the Object Storage variables, you need to configure D1 credentials:
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `LIBRA_D1_ACCOUNT_ID` | Cloudflare Account ID | Yes |
+| `LIBRA_D1_API_TOKEN` | Cloudflare API Token | Yes |
+| `LIBRA_D1_DATABASE_ID` | Cloudflare D1 Database ID | Yes |
+
+### Commands
+
+- `libra cloud sync` - Sync local repository to cloud
+- `libra cloud restore --repo-id <ID>` - Restore repository from cloud
+- `libra cloud status` - Show synchronization status
+
+For detailed usage, see [docs/cloud_backup_zh.md](docs/cloud_backup_zh.md) (Chinese).
+
+---
+
 ## 🚧 Pending Git commands (not yet supported)
 
 The following Git top-level commands are currently **not implemented** in Libra (excluding `submodule` and `subtree`, which are intentionally omitted):
