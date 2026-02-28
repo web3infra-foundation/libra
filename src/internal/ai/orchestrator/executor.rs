@@ -96,40 +96,84 @@ pub async fn execute_task<M: CompletionModel>(
 
 /// Execute all tasks in the DAG in topological order.
 ///
-/// Respects `max_parallel` for concurrent execution.
-pub async fn execute_dag<M: CompletionModel>(
+/// Respects `max_parallel` for concurrent execution. When `max_parallel > 1`,
+/// ready tasks (whose dependencies are all completed) run concurrently up to
+/// the parallelism limit.
+pub async fn execute_dag<M: CompletionModel + 'static>(
     dag: &mut TaskDAG,
     model: &M,
     registry: &ToolRegistry,
     config: &ExecutorConfig,
 ) -> Vec<TaskResult> {
-    let order = dag.topological_order();
-    let mut results = Vec::with_capacity(order.len());
+    let max_parallel = dag.max_parallel.max(1) as usize;
+    let mut results = Vec::with_capacity(dag.nodes.len());
+    let mut failed = false;
 
-    // Execute sequentially in topological order
-    // Future: implement concurrent execution with max_parallel
-    for task_id in order {
-        let task = match dag.get(task_id) {
-            Some(t) => t.clone(),
-            None => continue,
-        };
-
-        if let Some(node) = dag.get_mut(task_id) {
-            node.status = TaskNodeStatus::Running;
-        }
-
-        let result = execute_task(&task, model, registry, config).await;
-
-        if let Some(node) = dag.get_mut(task_id) {
-            node.status = result.status.clone();
-        }
-
-        let failed = result.status == TaskNodeStatus::Failed;
-        results.push(result);
-
+    loop {
         if failed {
-            // Skip remaining tasks
             break;
+        }
+
+        let ready = dag.ready_tasks();
+        if ready.is_empty() {
+            break;
+        }
+
+        // Take up to max_parallel ready tasks
+        let batch: Vec<_> = ready.into_iter().take(max_parallel).collect();
+
+        // Collect task snapshots for this batch
+        let tasks: Vec<_> = batch
+            .iter()
+            .filter_map(|&id| dag.get(id).cloned())
+            .collect();
+
+        for &id in &batch {
+            if let Some(node) = dag.get_mut(id) {
+                node.status = TaskNodeStatus::Running;
+            }
+        }
+
+        if tasks.len() == 1 {
+            // Single task — no need for join
+            let result = execute_task(&tasks[0], model, registry, config).await;
+            if let Some(node) = dag.get_mut(result.task_id) {
+                node.status = result.status.clone();
+            }
+            if result.status == TaskNodeStatus::Failed {
+                failed = true;
+            }
+            results.push(result);
+        } else {
+            // Multiple tasks — run concurrently
+            let mut handles = Vec::with_capacity(tasks.len());
+            for task in tasks {
+                let model = model.clone();
+                let registry_dir = registry.working_dir().to_path_buf();
+                let config = config.clone();
+                handles.push(tokio::spawn(async move {
+                    let local_registry = ToolRegistry::with_working_dir(registry_dir);
+                    execute_task(&task, &model, &local_registry, &config).await
+                }));
+            }
+
+            for handle in handles {
+                match handle.await {
+                    Ok(result) => {
+                        if let Some(node) = dag.get_mut(result.task_id) {
+                            node.status = result.status.clone();
+                        }
+                        if result.status == TaskNodeStatus::Failed {
+                            failed = true;
+                        }
+                        results.push(result);
+                    }
+                    Err(e) => {
+                        tracing::warn!("task join error: {}", e);
+                        failed = true;
+                    }
+                }
+            }
         }
     }
 
@@ -350,5 +394,67 @@ mod tests {
         assert!(prompt.contains("src/"));
         assert!(prompt.contains("vendor/"));
         assert!(prompt.contains("network:deny"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_dag_parallel_independent() {
+        let model = MockModel {
+            final_text: "done".into(),
+        };
+        let registry = ToolRegistry::new();
+        let dir = tempfile::tempdir().unwrap();
+        let config = make_config(dir.path());
+
+        let a = make_task("a");
+        let b = make_task("b");
+        let c = make_task("c");
+
+        let mut dag = TaskDAG {
+            nodes: vec![a.clone(), b.clone(), c.clone()],
+            intent_spec_id: "test".into(),
+            max_parallel: 4,
+        };
+
+        let results = execute_dag(&mut dag, &model, &registry, &config).await;
+        assert_eq!(results.len(), 3);
+        // All should complete
+        for r in &results {
+            assert_eq!(r.status, TaskNodeStatus::Completed);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_execute_dag_stops_on_failure() {
+        // Model that always produces a response, but the fast check will fail
+        let model = MockModel {
+            final_text: "done".into(),
+        };
+        let registry = ToolRegistry::new();
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = make_config(dir.path());
+        config.max_retries = 0;
+        config.fast_checks = vec![Check {
+            id: "fail".into(),
+            kind: crate::internal::ai::intentspec::types::CheckKind::Command,
+            command: Some("false".into()),
+            timeout_seconds: Some(10),
+            expected_exit_code: None,
+            required: true,
+            artifacts_produced: vec![],
+        }];
+
+        let a = make_task("a");
+        let b = make_task("b");
+
+        let mut dag = TaskDAG {
+            nodes: vec![a.clone(), b.clone()],
+            intent_spec_id: "test".into(),
+            max_parallel: 1,
+        };
+
+        let results = execute_dag(&mut dag, &model, &registry, &config).await;
+        // First task fails, second should be skipped
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, TaskNodeStatus::Failed);
     }
 }
