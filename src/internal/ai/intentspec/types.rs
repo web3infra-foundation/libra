@@ -846,3 +846,119 @@ impl Default for DecisionPolicyConfig {
 fn default_true() -> bool {
     true
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_libra_binding_serde_roundtrip_full() {
+        let binding = LibraBinding {
+            object_store: Some(ObjectStoreConfig {
+                backend: ObjectStoreBackend::ExternalS3,
+                blob_retention_strategy: BlobRetentionStrategy::OrphanCommit,
+                ai_ref_prefix: "refs/custom/".into(),
+            }),
+            context_pipeline: Some(ContextPipelineConfig {
+                max_frames: 64,
+                seed_frame_kind: SeedFrameKind::Checkpoint,
+                checkpoint_on_replan: false,
+            }),
+            plan_generation: Some(PlanGenerationConfig {
+                decomposition_mode: DecompositionMode::PerFileCluster,
+                conflict_resolution: ConflictResolution::MergeTasks,
+                gate_task_per_stage: false,
+            }),
+            run_policy: Some(RunPolicyConfig {
+                patchset_format: PatchsetFormat::Unified,
+                snapshot_on_run_start: false,
+                metrics_schema: Some(serde_json::json!({"type": "object"})),
+            }),
+            actor_mapping: Some(ActorMappingConfig {
+                orchestrator_actor_id: "custom-orch".into(),
+                coder_actor_id: "custom-coder".into(),
+                reviewer_actor_id: "custom-reviewer".into(),
+            }),
+            decision_policy: Some(DecisionPolicyConfig {
+                abandon_on_security_gate_fail: false,
+                checkpoint_before_replan: false,
+                rollback_on_provenance_fail: false,
+            }),
+        };
+        let json = serde_json::to_string(&binding).unwrap();
+        let back: LibraBinding = serde_json::from_str(&json).unwrap();
+        assert_eq!(binding, back);
+    }
+
+    #[test]
+    fn test_libra_binding_serde_roundtrip_empty() {
+        let binding = LibraBinding {
+            object_store: None,
+            context_pipeline: None,
+            plan_generation: None,
+            run_policy: None,
+            actor_mapping: None,
+            decision_policy: None,
+        };
+        let json = serde_json::to_string(&binding).unwrap();
+        let back: LibraBinding = serde_json::from_str(&json).unwrap();
+        assert_eq!(binding, back);
+    }
+
+    #[test]
+    fn test_libra_binding_deserialize_defaults() {
+        // Deserialize from empty JSON object — all fields should get defaults
+        let json = r#"{"objectStore": {}, "contextPipeline": {}, "planGeneration": {}, "runPolicy": {}, "actorMapping": {}, "decisionPolicy": {}}"#;
+        let binding: LibraBinding = serde_json::from_str(json).unwrap();
+
+        let os = binding.object_store.unwrap();
+        assert_eq!(os.backend, ObjectStoreBackend::GitNative);
+        assert_eq!(os.blob_retention_strategy, BlobRetentionStrategy::RefAnchoring);
+        assert_eq!(os.ai_ref_prefix, "refs/ai/");
+
+        let cp = binding.context_pipeline.unwrap();
+        assert_eq!(cp.max_frames, 128);
+        assert_eq!(cp.seed_frame_kind, SeedFrameKind::IntentAnalysis);
+        assert!(cp.checkpoint_on_replan);
+
+        let pg = binding.plan_generation.unwrap();
+        assert_eq!(pg.decomposition_mode, DecompositionMode::PerObjective);
+        assert_eq!(pg.conflict_resolution, ConflictResolution::ForceSerial);
+        assert!(pg.gate_task_per_stage);
+
+        let rp = binding.run_policy.unwrap();
+        assert_eq!(rp.patchset_format, PatchsetFormat::GitDiff);
+        assert!(rp.snapshot_on_run_start);
+        assert!(rp.metrics_schema.is_none());
+
+        let am = binding.actor_mapping.unwrap();
+        assert_eq!(am.orchestrator_actor_id, "libra-orchestrator");
+        assert_eq!(am.coder_actor_id, "libra-coder");
+        assert_eq!(am.reviewer_actor_id, "libra-reviewer");
+
+        let dp = binding.decision_policy.unwrap();
+        assert!(dp.abandon_on_security_gate_fail);
+        assert!(dp.checkpoint_before_replan);
+        assert!(dp.rollback_on_provenance_fail);
+    }
+
+    #[test]
+    fn test_object_store_config_serde_roundtrip() {
+        let config = ObjectStoreConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let back: ObjectStoreConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, back);
+    }
+
+    #[test]
+    fn test_decision_policy_config_serde_roundtrip() {
+        let config = DecisionPolicyConfig {
+            abandon_on_security_gate_fail: false,
+            checkpoint_before_replan: true,
+            rollback_on_provenance_fail: false,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let back: DecisionPolicyConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, back);
+    }
+}
