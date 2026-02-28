@@ -569,31 +569,280 @@ pub struct LibraBinding {
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub object_store: Option<Value>,
+    pub object_store: Option<ObjectStoreConfig>,
     #[serde(
         rename = "contextPipeline",
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub context_pipeline: Option<Value>,
+    pub context_pipeline: Option<ContextPipelineConfig>,
     #[serde(
         rename = "planGeneration",
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub plan_generation: Option<Value>,
+    pub plan_generation: Option<PlanGenerationConfig>,
     #[serde(rename = "runPolicy", default, skip_serializing_if = "Option::is_none")]
-    pub run_policy: Option<Value>,
+    pub run_policy: Option<RunPolicyConfig>,
     #[serde(
         rename = "actorMapping",
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub actor_mapping: Option<Value>,
+    pub actor_mapping: Option<ActorMappingConfig>,
     #[serde(
         rename = "decisionPolicy",
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub decision_policy: Option<Value>,
+    pub decision_policy: Option<DecisionPolicyConfig>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ObjectStoreConfig {
+    #[serde(default = "ObjectStoreConfig::default_backend")]
+    pub backend: ObjectStoreBackend,
+    #[serde(
+        rename = "blobRetentionStrategy",
+        default = "ObjectStoreConfig::default_blob_retention"
+    )]
+    pub blob_retention_strategy: BlobRetentionStrategy,
+    #[serde(
+        rename = "aiRefPrefix",
+        default = "ObjectStoreConfig::default_ai_ref_prefix"
+    )]
+    pub ai_ref_prefix: String,
+}
+
+impl ObjectStoreConfig {
+    fn default_backend() -> ObjectStoreBackend {
+        ObjectStoreBackend::GitNative
+    }
+    fn default_blob_retention() -> BlobRetentionStrategy {
+        BlobRetentionStrategy::RefAnchoring
+    }
+    fn default_ai_ref_prefix() -> String {
+        "refs/ai/".to_string()
+    }
+}
+
+impl Default for ObjectStoreConfig {
+    fn default() -> Self {
+        Self {
+            backend: Self::default_backend(),
+            blob_retention_strategy: Self::default_blob_retention(),
+            ai_ref_prefix: Self::default_ai_ref_prefix(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ObjectStoreBackend {
+    GitNative,
+    ExternalS3,
+    ExternalLocal,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum BlobRetentionStrategy {
+    RefAnchoring,
+    OrphanCommit,
+    KeepPack,
+    CustomGc,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ContextPipelineConfig {
+    #[serde(rename = "maxFrames", default = "ContextPipelineConfig::default_max_frames")]
+    pub max_frames: u32,
+    #[serde(
+        rename = "seedFrameKind",
+        default = "ContextPipelineConfig::default_seed_frame_kind"
+    )]
+    pub seed_frame_kind: SeedFrameKind,
+    #[serde(rename = "checkpointOnReplan", default = "default_true")]
+    pub checkpoint_on_replan: bool,
+}
+
+impl ContextPipelineConfig {
+    fn default_max_frames() -> u32 {
+        128
+    }
+    fn default_seed_frame_kind() -> SeedFrameKind {
+        SeedFrameKind::IntentAnalysis
+    }
+}
+
+impl Default for ContextPipelineConfig {
+    fn default() -> Self {
+        Self {
+            max_frames: Self::default_max_frames(),
+            seed_frame_kind: Self::default_seed_frame_kind(),
+            checkpoint_on_replan: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum SeedFrameKind {
+    IntentAnalysis,
+    Checkpoint,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct PlanGenerationConfig {
+    #[serde(
+        rename = "decompositionMode",
+        default = "PlanGenerationConfig::default_decomposition"
+    )]
+    pub decomposition_mode: DecompositionMode,
+    #[serde(
+        rename = "conflictResolution",
+        default = "PlanGenerationConfig::default_conflict_resolution"
+    )]
+    pub conflict_resolution: ConflictResolution,
+    #[serde(rename = "gateTaskPerStage", default = "default_true")]
+    pub gate_task_per_stage: bool,
+}
+
+impl PlanGenerationConfig {
+    fn default_decomposition() -> DecompositionMode {
+        DecompositionMode::PerObjective
+    }
+    fn default_conflict_resolution() -> ConflictResolution {
+        ConflictResolution::ForceSerial
+    }
+}
+
+impl Default for PlanGenerationConfig {
+    fn default() -> Self {
+        Self {
+            decomposition_mode: Self::default_decomposition(),
+            conflict_resolution: Self::default_conflict_resolution(),
+            gate_task_per_stage: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum DecompositionMode {
+    PerObjective,
+    PerFileCluster,
+    SingleTask,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConflictResolution {
+    MergeTasks,
+    ForceSerial,
+    FailFast,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct RunPolicyConfig {
+    #[serde(
+        rename = "patchsetFormat",
+        default = "RunPolicyConfig::default_patchset_format"
+    )]
+    pub patchset_format: PatchsetFormat,
+    #[serde(rename = "snapshotOnRunStart", default = "default_true")]
+    pub snapshot_on_run_start: bool,
+    #[serde(
+        rename = "metricsSchema",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub metrics_schema: Option<Value>,
+}
+
+impl RunPolicyConfig {
+    fn default_patchset_format() -> PatchsetFormat {
+        PatchsetFormat::GitDiff
+    }
+}
+
+impl Default for RunPolicyConfig {
+    fn default() -> Self {
+        Self {
+            patchset_format: Self::default_patchset_format(),
+            snapshot_on_run_start: true,
+            metrics_schema: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum PatchsetFormat {
+    Unified,
+    GitDiff,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ActorMappingConfig {
+    #[serde(
+        rename = "orchestratorActorId",
+        default = "ActorMappingConfig::default_orchestrator"
+    )]
+    pub orchestrator_actor_id: String,
+    #[serde(
+        rename = "coderActorId",
+        default = "ActorMappingConfig::default_coder"
+    )]
+    pub coder_actor_id: String,
+    #[serde(
+        rename = "reviewerActorId",
+        default = "ActorMappingConfig::default_reviewer"
+    )]
+    pub reviewer_actor_id: String,
+}
+
+impl ActorMappingConfig {
+    fn default_orchestrator() -> String {
+        "libra-orchestrator".to_string()
+    }
+    fn default_coder() -> String {
+        "libra-coder".to_string()
+    }
+    fn default_reviewer() -> String {
+        "libra-reviewer".to_string()
+    }
+}
+
+impl Default for ActorMappingConfig {
+    fn default() -> Self {
+        Self {
+            orchestrator_actor_id: Self::default_orchestrator(),
+            coder_actor_id: Self::default_coder(),
+            reviewer_actor_id: Self::default_reviewer(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct DecisionPolicyConfig {
+    #[serde(rename = "abandonOnSecurityGateFail", default = "default_true")]
+    pub abandon_on_security_gate_fail: bool,
+    #[serde(rename = "checkpointBeforeReplan", default = "default_true")]
+    pub checkpoint_before_replan: bool,
+    #[serde(rename = "rollbackOnProvenanceFail", default = "default_true")]
+    pub rollback_on_provenance_fail: bool,
+}
+
+impl Default for DecisionPolicyConfig {
+    fn default() -> Self {
+        Self {
+            abandon_on_security_gate_fail: true,
+            checkpoint_before_replan: true,
+            rollback_on_provenance_fail: true,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
