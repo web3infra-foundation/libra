@@ -303,4 +303,22 @@ mod tests {
         let result = orchestrator.run(spec).await.unwrap();
         assert_eq!(result.decision, types::DecisionOutcome::HumanReviewRequired);
     }
+
+    #[tokio::test]
+    async fn test_orchestrator_validation_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = MockOrchestratorModel;
+        let registry = ToolRegistry::new();
+        let config = OrchestratorConfig {
+            working_dir: dir.path().to_path_buf(),
+            base_commit: None,
+        };
+        let orchestrator = Orchestrator::new(model, registry, config);
+        let mut spec = test_spec();
+        // Empty required fields that repair cannot fix
+        spec.metadata.id = String::new();
+        spec.intent.summary = String::new();
+        let err = orchestrator.run(spec).await.unwrap_err();
+        assert!(matches!(err, OrchestratorError::ValidationFailed(_)));
+    }
 }
