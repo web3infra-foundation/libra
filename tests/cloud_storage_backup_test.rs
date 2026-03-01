@@ -399,34 +399,33 @@ async fn cloud_full_workflow_end_to_end() {
 
     // Verify Object Isolation in R2
     // We expect the blob (same hash) to exist in BOTH prefixes
-    let mut blob_id_from_d1 = String::new();
-    let mut bin_blob_id = String::new();
+    use git_internal::internal::object::types::ObjectType;
+    let blob_hash = git_internal::hash::ObjectHash::from_type_and_data(
+        ObjectType::Blob,
+        "Content from Repo A".as_bytes(),
+    );
+    let bin_hash = git_internal::hash::ObjectHash::from_type_and_data(
+        ObjectType::Blob,
+        &[0u8, 15, 255, 10, 42],
+    );
 
-    // Find the text blob ID and binary blob ID
-    for idx in &idx_a {
-        if idx.o_size == 19 {
-            blob_id_from_d1 = idx.o_id.clone();
-        } else if idx.o_size == 5 {
-            bin_blob_id = idx.o_id.clone();
-        }
-    }
+    let blob_id_from_d1 = blob_hash.to_string();
+    let bin_blob_id = bin_hash.to_string();
 
+    // Verify D1 has these objects
     assert!(
-        !blob_id_from_d1.is_empty(),
+        idx_a.iter().any(|idx| idx.o_id == blob_id_from_d1),
         "Repo A should have the text blob in D1"
     );
     assert!(
-        !bin_blob_id.is_empty(),
+        idx_a.iter().any(|idx| idx.o_id == bin_blob_id),
         "Repo A should have the binary blob in D1"
     );
 
-    let check_hash = git_internal::hash::ObjectHash::from_str(&blob_id_from_d1).unwrap();
-    let bin_hash = git_internal::hash::ObjectHash::from_str(&bin_blob_id).unwrap();
-
     assert!(
-        r2_a.exist(&check_hash).await,
+        r2_a.exist(&blob_hash).await,
         "Text Blob {} should be in Repo A storage",
-        check_hash
+        blob_hash
     );
     assert!(
         r2_a.exist(&bin_hash).await,
@@ -434,9 +433,9 @@ async fn cloud_full_workflow_end_to_end() {
         bin_hash
     );
     assert!(
-        r2_b.exist(&check_hash).await,
+        r2_b.exist(&blob_hash).await,
         "Text Blob {} should be in Repo B storage",
-        check_hash
+        blob_hash
     );
 
     // Restore Scenarios
@@ -469,9 +468,9 @@ async fn cloud_full_workflow_end_to_end() {
     let objects_path_a = restore_path_a.join(".libra/objects");
     let local_store_a = LocalStorage::new(objects_path_a);
     assert!(
-        local_store_a.exist(&check_hash).await,
+        local_store_a.exist(&blob_hash).await,
         "Restored repo A should have the text blob {}",
-        check_hash
+        blob_hash
     );
     assert!(
         local_store_a.exist(&bin_hash).await,
@@ -518,9 +517,26 @@ async fn cloud_full_workflow_end_to_end() {
     let objects_path_b = restore_path_b.join(".libra/objects");
     let local_store_b = LocalStorage::new(objects_path_b);
     assert!(
-        local_store_b.exist(&check_hash).await,
+        local_store_b.exist(&blob_hash).await,
         "Restored repo B should have the blob {}",
-        check_hash
+        blob_hash
+    );
+
+    // Verify binary blob (Repo A only) is NOT present
+    assert!(
+        !local_store_b.exist(&bin_hash).await,
+        "Restored repo B should NOT have the binary blob {}",
+        bin_hash
+    );
+
+    // Verify config (repoid)
+    let config_out_b = run_libra(restore_path_b, &["config", "--get", "libra.repoid"]);
+    let config_val_b = String::from_utf8_lossy(&config_out_b.stdout)
+        .trim()
+        .to_string();
+    assert_eq!(
+        config_val_b, repo_id_b,
+        "Restored repo B should have correct repo_id"
     );
 }
 
@@ -586,9 +602,9 @@ fn run_libra_cmd(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
     ];
 
     for var in env_vars {
-        if let Ok(val) = std::env::var(var) {
-            cmd.env(var, val);
-        }
+        let val =
+            std::env::var(var).unwrap_or_else(|_| panic!("Missing required env var: {}", var));
+        cmd.env(var, val);
     }
 
     if std::env::var("LIBRA_STORAGE_REGION").is_err() {

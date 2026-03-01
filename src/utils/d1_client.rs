@@ -369,12 +369,15 @@ impl D1Client {
 
     /// Upsert a repository
     ///
-    /// This function handles two cases:
+    /// This function handles three cases:
     /// 1. New repository: Inserts a new record.
     /// 2. Existing repository (same repo_id): Updates the name and timestamp.
+    /// 3. Name conflict (different repo_id): Returns the existing repository row
+    ///    that already owns this `name`.
     ///
-    /// If the name is already taken by *another* repository (different repo_id),
-    /// it returns a constraint error, which the caller should handle.
+    /// Callers that need to enforce unique names per logical repository must
+    /// compare the returned `repo_id` with the one they attempted to upsert; if
+    /// they differ, a logical name conflict has occurred.
     pub async fn upsert_repository(
         &self,
         repo_id: &str,

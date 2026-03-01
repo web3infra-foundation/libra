@@ -5,7 +5,7 @@
 //! - `libra cloud restore` - Restore from D1/R2
 //! - `libra cloud status` - Show sync status
 
-use std::{env, sync::Arc};
+use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use git_internal::hash::ObjectHash;
@@ -21,6 +21,7 @@ use crate::{
         d1_client::D1Client,
         path,
         storage::{Storage, local::LocalStorage, remote::RemoteStorage},
+        util,
     },
 };
 
@@ -55,11 +56,11 @@ pub struct SyncArgs {
 #[derive(Parser, Debug)]
 pub struct RestoreArgs {
     /// Repository ID to restore
-    #[arg(long, required_unless_present = "name")]
+    #[arg(long, required_unless_present = "name", conflicts_with = "name")]
     pub repo_id: Option<String>,
 
     /// Repository name to restore
-    #[arg(long, required_unless_present = "repo_id")]
+    #[arg(long, required_unless_present = "repo_id", conflicts_with = "repo_id")]
     pub name: Option<String>,
 
     /// Only restore metadata (object index), not objects
@@ -134,9 +135,9 @@ async fn execute_sync(args: SyncArgs) -> Result<(), String> {
 
     // Determine project name from config 'cloud.name' or current directory name
     let project_name = Config::get("cloud", None, "name").await.unwrap_or_else(|| {
-        env::current_dir()
-            .ok()
-            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+        util::working_dir()
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown-project".to_string())
     });
 
@@ -283,6 +284,13 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
     let d1_client = D1Client::from_env().map_err(|e| format!("D1 client error: {}", e.message))?;
 
     let repo_id = if let Some(name) = &args.name {
+        // Ensure repositories table exists before resolving name
+        // This handles cases where the D1 database is old/uninitialized and missing the table
+        d1_client
+            .ensure_repositories_table()
+            .await
+            .map_err(|e| format!("Failed to ensure repositories table: {}", e.message))?;
+
         let id = d1_client
             .get_repo_id_by_name(name)
             .await
