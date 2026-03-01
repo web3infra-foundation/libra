@@ -109,7 +109,7 @@ Do not dismiss an issue only because:
 ## Commit & Pull Request Guidelines
 - History uses short, typed summaries with optional scope and PR reference, e.g., `feat(status): support porcelain v2 (#82)` or `fix(push): record tracking reflog (#81)`.
 - Commits must include DCO and PGP signing: `git commit -S -s -m "feat(...): ..."`; ensure the `Signed-off-by` trailer is present.
-- PRs should state intent, linked issues, and tests run (`cargo +nightly fmt --all`, `cargo clippy --all-targets --all-features`, `cargo test --all --all-features ...`); include repro steps or sample CLI output when touching user-visible behavior.
+- PRs should state intent, linked issues, and tests run (`cargo +nightly fmt --all`, `cargo clippy --all-targets --all-features`, `cargo test --all --all-features`); include repro steps or sample CLI output when touching user-visible behavior.
 - Keep changes small and cohesive; update README/CLI docs when adding flags or altering compatibility tables.
 
 ## Aggressive review bias
