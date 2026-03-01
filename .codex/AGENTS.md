@@ -1,50 +1,12 @@
-# AGENTS.md
+# AGENTS guidelines for `.codex`
 
-## Review guidelines
+This file intentionally does **not** duplicate the full review guidelines.
+The single source of truth for agent/review guidance is the repo-root
+[`AGENTS.md`](../AGENTS.md).
 
-Review pull requests with a high-recall, production-risk mindset.
-
-Prioritize finding issues that could plausibly cause:
-- security exposure
-- incorrect behavior
-- silent failure
-- data corruption or data loss
-- backward incompatibility
-- production instability
-- missing validation or missing tests around changed behavior
-- incomplete documentation for externally visible changes
-
-Do not optimize for fewer comments.
-If an issue is plausible, user-impacting, and actionable, raise it.
-
-Focus areas:
-
-- Code quality: readability, maintainability, error handling, edge cases, control flow clarity, and failure modes.
-- Security: vulnerabilities, unsafe defaults, input validation/sanitization, secrets exposure, auth/authz regressions, injection risks, SSRF/path traversal/deserialization/crypto misuse where relevant.
-- Performance: hot-path regressions, N+1 queries, unbounded work, excessive allocations, blocking I/O, memory/resource leaks, missing pagination/batching/caching where impact is likely.
-- Testing: missing coverage for changed behavior, weak assertions, missing regression tests, missing edge-case coverage, flaky test risk.
-- Documentation: missing or stale code comments, README updates, migration notes, config/env var docs, API/SDK/schema docs, changelog or release notes for externally visible behavior.
-
-## Review output
-
-- Use inline comments for specific issues tied to changed files.
-- Use a top-level summary for cross-cutting risks, overall assessment, and praise.
-- Order findings by severity, then user impact, then ease of verification.
-- For each finding, explain:
-  - what is wrong
-  - why it matters
-  - the realistic impact
-  - the minimal fix or direction
-- Prefer one clear finding per issue. Avoid combining unrelated concerns.
-- Avoid style-only nitpicks unless they create maintainability or correctness risk.
-- If no material issues are found, say so briefly and note any residual risk or untested area.
-
-## Severity policy
-
-Treat the following as P0/P1 when applicable:
-
-### P0
-- vulnerabilities enabling unauthorized access, data exfiltration, remote code execution, privilege escalation, or destructive data loss
+If you need to update or extend the guidelines, edit `AGENTS.md` in the
+repository root. Keep this file as a thin pointer to avoid the two copies
+drifting out of sync over time.
 - changes likely to cause major outage, irreversible corruption, or widespread security exposure
 
 ### P1
@@ -109,7 +71,7 @@ Do not dismiss an issue only because:
 ## Commit & Pull Request Guidelines
 - History uses short, typed summaries with optional scope and PR reference, e.g., `feat(status): support porcelain v2 (#82)` or `fix(push): record tracking reflog (#81)`.
 - Commits must include DCO and PGP signing: `git commit -S -s -m "feat(...): ..."`; ensure the `Signed-off-by` trailer is present.
-- PRs should state intent, linked issues, and tests run (`cargo +nightly fmt --all`, `cargo clippy --all-targets --all-features`, `cargo test --all --all-features`); include repro steps or sample CLI output when touching user-visible behavior.
+- PRs should state intent, linked issues, and tests run (`cargo +nightly fmt --all`, `cargo clippy --all-targets --all-features`, `cargo test --all --all-features ...`); include repro steps or sample CLI output when touching user-visible behavior.
 - Keep changes small and cohesive; update README/CLI docs when adding flags or altering compatibility tables.
 
 ## Aggressive review bias
