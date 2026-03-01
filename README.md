@@ -253,9 +253,18 @@ In addition to the Object Storage variables, you need to configure D1 credential
 
 ### Commands
 
-- `libra cloud sync` - Sync local repository to cloud
-- `libra cloud restore --repo-id <ID>` - Restore repository from cloud
+- `libra cloud sync` - Sync local repository to cloud (automatically registers project name)
+- `libra cloud restore --name <NAME>` - Restore repository by project name
+- `libra cloud restore --repo-id <ID>` - Restore repository by ID
 - `libra cloud status` - Show synchronization status
+
+### Configuration
+
+You can customize the project name used for cloud backup (defaults to the directory name):
+
+```bash
+libra config cloud.name <my-unique-project-name>
+```
 
 
 ---
