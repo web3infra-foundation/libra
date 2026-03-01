@@ -137,9 +137,11 @@ impl D1Client {
             params,
         };
 
+        let url = self.api_url()?;
+
         let response = self
             .client
-            .post(self.api_url()?)
+            .post(url)
             .header("Authorization", format!("Bearer {}", self.api_token))
             .header("Content-Type", "application/json")
             .json(&statement)
@@ -147,7 +149,7 @@ impl D1Client {
             .await
             .map_err(|e| D1Error {
                 code: 2001,
-                message: format!("HTTP request failed: {}", e),
+                message: format!("HTTP request failed: {:?}", e),
             })?;
 
         let status = response.status();
@@ -350,6 +352,85 @@ impl D1Client {
         self.query(sql, Some(vec![serde_json::json!(repo_id)]))
             .await
     }
+
+    /// Create repositories table in D1 if not exists
+    pub async fn ensure_repositories_table(&self) -> Result<(), D1Error> {
+        let sql = r#"
+            CREATE TABLE IF NOT EXISTS repositories (
+                repo_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+        "#;
+        self.execute(sql, None).await?;
+        Ok(())
+    }
+
+    /// Upsert a repository
+    ///
+    /// This function handles two cases:
+    /// 1. New repository: Inserts a new record.
+    /// 2. Existing repository (same repo_id): Updates the name and timestamp.
+    ///
+    /// If the name is already taken by *another* repository (different repo_id),
+    /// it returns a constraint error, which the caller should handle.
+    pub async fn upsert_repository(
+        &self,
+        repo_id: &str,
+        name: &str,
+    ) -> Result<RepositoryRow, D1Error> {
+        let now = chrono::Utc::now().timestamp();
+        // Try to insert or update existing repo_id (renaming project)
+        let sql = r#"
+            INSERT INTO repositories (repo_id, name, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(repo_id) DO UPDATE SET
+                name = excluded.name,
+                updated_at = excluded.updated_at
+            RETURNING repo_id, name, created_at, updated_at
+        "#;
+        let params = vec![
+            serde_json::json!(repo_id),
+            serde_json::json!(name),
+            serde_json::json!(now),
+            serde_json::json!(now),
+        ];
+
+        match self.query(sql, Some(params)).await {
+            Ok(rows) => rows.into_iter().next().ok_or_else(|| D1Error {
+                code: 3002,
+                message: "Failed to upsert repository".to_string(),
+            }),
+            Err(e) => {
+                // Check if error is due to name conflict (UNIQUE constraint on name)
+                if e.message
+                    .contains("UNIQUE constraint failed: repositories.name")
+                    || e.message.contains("SQLITE_CONSTRAINT")
+                {
+                    // Fetch the existing repository that owns this name
+                    let existing_sql = "SELECT repo_id, name, created_at, updated_at FROM repositories WHERE name = ?1";
+                    let existing_rows: Vec<RepositoryRow> = self
+                        .query(existing_sql, Some(vec![serde_json::json!(name)]))
+                        .await?;
+                    existing_rows.into_iter().next().ok_or(e)
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
+
+    /// Get repository ID by name
+    pub async fn get_repo_id_by_name(&self, name: &str) -> Result<Option<String>, D1Error> {
+        #[derive(Deserialize)]
+        struct IdRow {
+            repo_id: String,
+        }
+        let sql = "SELECT repo_id FROM repositories WHERE name = ?1";
+        let result: Vec<IdRow> = self.query(sql, Some(vec![serde_json::json!(name)])).await?;
+        Ok(result.into_iter().next().map(|r| r.repo_id))
+    }
 }
 
 /// Object index row from D1
@@ -361,6 +442,15 @@ pub struct ObjectIndexRow {
     pub repo_id: String,
     pub created_at: i64,
     pub is_synced: i32,
+}
+
+/// Repository row from D1
+#[derive(Debug, Deserialize, Serialize)]
+pub struct RepositoryRow {
+    pub repo_id: String,
+    pub name: String,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
 #[cfg(test)]
