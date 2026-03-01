@@ -5,8 +5,7 @@
 //! - `libra cloud restore` - Restore from D1/R2
 //! - `libra cloud status` - Show sync status
 
-use std::env;
-use std::sync::Arc;
+use std::{env, sync::Arc};
 
 use clap::{Parser, Subcommand};
 use git_internal::hash::ObjectHash;
