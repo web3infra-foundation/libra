@@ -299,42 +299,8 @@ async fn r2_connection_basic() {
 #[tokio::test]
 #[serial]
 #[ignore]
-async fn cloud_sync_workflow_r2_then_d1() {
-    let d1_client = d1_client_from_env();
-    let repo_id = "cloud-sync-test-repo";
-    let r2_storage = r2_storage_from_env(repo_id);
-
-    d1_client.ensure_object_index_table().await.unwrap();
-
-    let content = format!("Sync test content {}", chrono::Utc::now().timestamp());
-    let blob = Blob::from_content(&content);
-
-    r2_storage
-        .put(&blob.id, &blob.data, blob.get_type())
-        .await
-        .unwrap();
-    d1_client
-        .upsert_object_index(
-            &blob.id.to_string(),
-            "blob",
-            blob.data.len() as i64,
-            repo_id,
-            chrono::Utc::now().timestamp(),
-        )
-        .await
-        .unwrap();
-
-    assert!(r2_storage.exist(&blob.id).await);
-
-    let indexes = d1_client.get_object_indexes(repo_id).await.unwrap();
-    assert!(indexes.iter().any(|idx| idx.o_id == blob.id.to_string()));
-}
-
-#[tokio::test]
-#[serial]
-#[ignore]
 async fn cloud_full_workflow_end_to_end() {
-    // Phase 1: Setup - Initialize two separate local repos
+    // Setup - Initialize two separate local repos
     let repo_a_dir = init_repo();
     let repo_b_dir = init_repo();
     let repo_a_path = repo_a_dir.path();
@@ -343,11 +309,6 @@ async fn cloud_full_workflow_end_to_end() {
     // Generate unique repo IDs for isolation test
     let repo_id_a = format!("test-repo-a-{}", Uuid::new_v4());
     let repo_id_b = format!("test-repo-b-{}", Uuid::new_v4());
-
-    // Configure repos with their IDs (simulate `libra init` behavior or config edit)
-    // Here we manually inject them into the config via CLI or just pass them to commands
-    // But `cloud sync` reads from config.
-    // Let's use `libra config` to set them.
 
     let envs = [
         ("LIBRA_D1_ACCOUNT_ID", required_env("LIBRA_D1_ACCOUNT_ID")),
@@ -387,8 +348,6 @@ async fn cloud_full_workflow_end_to_end() {
 
     // Set repo IDs using local scope
     // libra config expects: libra config --local libra.repoid <value>
-    // Format: configuration.name.key = value
-    // libra -> configuration, repoid -> key (no name component)
     run_libra(
         repo_a_path,
         &["config", "--local", "libra.repoid", &repo_id_a],
@@ -398,23 +357,35 @@ async fn cloud_full_workflow_end_to_end() {
         &["config", "--local", "libra.repoid", &repo_id_b],
     );
 
-    // Phase 2: Create content in Repo A
+    // Set cloud names for testing name-based restore
+    let name_a = format!("end-to-end-test-a-{}", Uuid::new_v4());
+    let name_b = format!("end-to-end-test-b-{}", Uuid::new_v4());
+    run_libra(repo_a_path, &["config", "--local", "cloud.name", &name_a]);
+    run_libra(repo_b_path, &["config", "--local", "cloud.name", &name_b]);
+
+    // Create content in Repo A
     let file_a = repo_a_path.join("file_a.txt");
     std::fs::write(&file_a, "Content from Repo A").unwrap();
+
+    // Add a binary file to test non-text content
+    let bin_file_a = repo_a_path.join("logo.bin");
+    let bin_content = vec![0u8, 15, 255, 10, 42]; // Simple binary signature
+    std::fs::write(&bin_file_a, &bin_content).unwrap();
+
     run_libra(repo_a_path, &["add", "."]);
     run_libra(repo_a_path, &["commit", "-m", "Commit A"]);
 
-    // Phase 3: Create content in Repo B (Same content -> Same Hash, Different Repo)
+    // Create content in Repo B (Same content -> Same Hash, Different Repo)
     let file_b = repo_b_path.join("file_b.txt");
     std::fs::write(&file_b, "Content from Repo A").unwrap(); // Intentionally same content
     run_libra(repo_b_path, &["add", "."]);
     run_libra(repo_b_path, &["commit", "-m", "Commit B (Same Content)"]);
 
-    // Phase 4: Cloud Sync both repos
+    // Cloud Sync both repos
     run_libra(repo_a_path, &["cloud", "sync"]);
     run_libra(repo_b_path, &["cloud", "sync"]);
 
-    // Phase 5: Verification (Direct D1/R2 check)
+    // Verification (Direct D1/R2 check)
     let d1 = d1_client_from_env();
     let r2_a = r2_storage_from_env(&repo_id_a);
     let r2_b = r2_storage_from_env(&repo_id_b);
@@ -428,46 +399,60 @@ async fn cloud_full_workflow_end_to_end() {
 
     // Verify Object Isolation in R2
     // We expect the blob (same hash) to exist in BOTH prefixes
-    let mut blob_id_from_d1 = String::new();
-    for idx in &idx_a {
-        if idx.o_type == "blob" {
-            blob_id_from_d1 = idx.o_id.clone();
-            break;
-        }
-    }
-
-    assert!(
-        !blob_id_from_d1.is_empty(),
-        "Repo A should have a blob in D1 index after sync"
+    use git_internal::internal::object::types::ObjectType;
+    let blob_hash = git_internal::hash::ObjectHash::from_type_and_data(
+        ObjectType::Blob,
+        "Content from Repo A".as_bytes(),
     );
-    // If D1 has a blob, use that hash for R2 check
-    let check_hash = git_internal::hash::ObjectHash::from_str(&blob_id_from_d1).unwrap();
-
-    assert!(
-        r2_a.exist(&check_hash).await,
-        "Blob {} should be in Repo A storage",
-        check_hash
-    );
-    assert!(
-        r2_b.exist(&check_hash).await,
-        "Blob {} should be in Repo B storage",
-        check_hash
+    let bin_hash = git_internal::hash::ObjectHash::from_type_and_data(
+        ObjectType::Blob,
+        &[0u8, 15, 255, 10, 42],
     );
 
-    // Phase 6: Restore Scenario
-    // Simulate a fresh clone for Repo A
-    let restore_dir = tempdir().unwrap();
-    let restore_path = restore_dir.path();
+    let blob_id_from_d1 = blob_hash.to_string();
+    let bin_blob_id = bin_hash.to_string();
+
+    // Verify D1 has these objects
+    assert!(
+        idx_a.iter().any(|idx| idx.o_id == blob_id_from_d1),
+        "Repo A should have the text blob in D1"
+    );
+    assert!(
+        idx_a.iter().any(|idx| idx.o_id == bin_blob_id),
+        "Repo A should have the binary blob in D1"
+    );
+
+    assert!(
+        r2_a.exist(&blob_hash).await,
+        "Text Blob {} should be in Repo A storage",
+        blob_hash
+    );
+    assert!(
+        r2_a.exist(&bin_hash).await,
+        "Binary Blob {} should be in Repo A storage",
+        bin_hash
+    );
+    assert!(
+        r2_b.exist(&blob_hash).await,
+        "Text Blob {} should be in Repo B storage",
+        blob_hash
+    );
+
+    // Restore Scenarios
+
+    // Restore Repo A using ID (Legacy/Explicit ID method)
+    let restore_dir_a = tempdir().unwrap();
+    let restore_path_a = restore_dir_a.path();
 
     // Init empty
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_libra"));
-    cmd.current_dir(restore_path).arg("init");
+    cmd.current_dir(restore_path_a).arg("init");
     cmd.output().unwrap();
 
     // Restore from Cloud using Repo A's ID
     let mut restore_cmd = Command::new(env!("CARGO_BIN_EXE_libra"));
     restore_cmd
-        .current_dir(restore_path)
+        .current_dir(restore_path_a)
         .args(["cloud", "restore", "--repo-id", &repo_id_a]);
     for (k, v) in &envs {
         restore_cmd.env(k, v);
@@ -475,99 +460,161 @@ async fn cloud_full_workflow_end_to_end() {
     let out = restore_cmd.output().unwrap();
     assert!(
         out.status.success(),
-        "Restore failed: {}",
+        "Restore A (by ID) failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
 
     // Check if objects are in `.libra/objects`
-    let objects_path = restore_path.join(".libra/objects");
-    let local_store = LocalStorage::new(objects_path.clone());
+    let objects_path_a = restore_path_a.join(".libra/objects");
+    let local_store_a = LocalStorage::new(objects_path_a);
+    assert!(
+        local_store_a.exist(&blob_hash).await,
+        "Restored repo A should have the text blob {}",
+        blob_hash
+    );
+    assert!(
+        local_store_a.exist(&bin_hash).await,
+        "Restored repo A should have the binary blob {}",
+        bin_hash
+    );
 
-    let exists = local_store.exist(&check_hash).await;
+    // Verify config was restored (repoid)
+    // We can check by running `libra config --get libra.repoid`
+    let config_out = run_libra(restore_path_a, &["config", "--get", "libra.repoid"]);
+    let config_val = String::from_utf8_lossy(&config_out.stdout)
+        .trim()
+        .to_string();
+    assert_eq!(
+        config_val, repo_id_a,
+        "Restored repo should have correct repo_id in config"
+    );
 
-    assert!(exists, "Restored repo should have the blob {}", check_hash);
+    // Restore Repo B using Name (New method)
+    let restore_dir_b = tempdir().unwrap();
+    let restore_path_b = restore_dir_b.path();
+
+    // Init empty
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_libra"));
+    cmd.current_dir(restore_path_b).arg("init");
+    cmd.output().unwrap();
+
+    // Restore from Cloud using Repo B's Name
+    let mut restore_cmd_b = Command::new(env!("CARGO_BIN_EXE_libra"));
+    restore_cmd_b
+        .current_dir(restore_path_b)
+        .args(["cloud", "restore", "--name", &name_b]);
+    for (k, v) in &envs {
+        restore_cmd_b.env(k, v);
+    }
+    let out_b = restore_cmd_b.output().unwrap();
+    assert!(
+        out_b.status.success(),
+        "Restore B (by Name) failed: {}",
+        String::from_utf8_lossy(&out_b.stderr)
+    );
+
+    // Check if objects are in `.libra/objects`
+    let objects_path_b = restore_path_b.join(".libra/objects");
+    let local_store_b = LocalStorage::new(objects_path_b);
+    assert!(
+        local_store_b.exist(&blob_hash).await,
+        "Restored repo B should have the blob {}",
+        blob_hash
+    );
+
+    // Verify binary blob (Repo A only) is NOT present
+    assert!(
+        !local_store_b.exist(&bin_hash).await,
+        "Restored repo B should NOT have the binary blob {}",
+        bin_hash
+    );
+
+    // Verify config (repoid)
+    let config_out_b = run_libra(restore_path_b, &["config", "--get", "libra.repoid"]);
+    let config_val_b = String::from_utf8_lossy(&config_out_b.stdout)
+        .trim()
+        .to_string();
+    assert_eq!(
+        config_val_b, repo_id_b,
+        "Restored repo B should have correct repo_id"
+    );
 }
 
 #[tokio::test]
 #[serial]
 #[ignore]
-async fn cloud_restore_workflow_d1_then_r2() {
-    let d1_client = d1_client_from_env();
-    let repo_id = "cloud-sync-test-repo";
-    let r2_storage = r2_storage_from_env(repo_id);
+async fn cloud_sync_name_conflict() {
+    let repo_a = init_repo();
+    let repo_b = init_repo();
+    let cloud_name = format!("conflict-test-{}", Uuid::new_v4());
 
-    let indexes = d1_client.get_object_indexes(repo_id).await.unwrap();
-    if indexes.is_empty() {
-        return;
-    }
+    // Repo A
+    run_libra_cmd(
+        repo_a.path(),
+        &["config", "--local", "cloud.name", &cloud_name],
+    );
+    let file_a = repo_a.path().join("a.txt");
+    std::fs::write(&file_a, "A").unwrap();
+    run_libra_cmd(repo_a.path(), &["add", "."]);
+    run_libra_cmd(repo_a.path(), &["commit", "-m", "A"]);
+    let out_a = run_libra_cmd(repo_a.path(), &["cloud", "sync"]);
+    assert!(
+        out_a.status.success(),
+        "Repo A sync failed: {}",
+        String::from_utf8_lossy(&out_a.stderr)
+    );
 
-    for idx in indexes.iter().take(5) {
-        let hash = match git_internal::hash::ObjectHash::from_bytes(
-            &hex::decode(&idx.o_id).unwrap_or_default(),
-        ) {
-            Ok(h) => h,
-            Err(_) => continue,
-        };
+    // Repo B
+    run_libra_cmd(
+        repo_b.path(),
+        &["config", "--local", "cloud.name", &cloud_name],
+    );
+    let file_b = repo_b.path().join("b.txt");
+    std::fs::write(&file_b, "B").unwrap();
+    run_libra_cmd(repo_b.path(), &["add", "."]);
+    run_libra_cmd(repo_b.path(), &["commit", "-m", "B"]);
+    let out_b = run_libra_cmd(repo_b.path(), &["cloud", "sync"]);
 
-        if let Ok((data, _)) = r2_storage.get(&hash).await {
-            let computed = git_internal::hash::ObjectHash::from_type_and_data(
-                git_internal::internal::object::types::ObjectType::Blob,
-                &data,
-            );
-            assert_eq!(computed, hash);
-        }
-    }
+    assert!(
+        !out_b.status.success(),
+        "Repo B sync should fail due to name conflict"
+    );
+    let stderr = String::from_utf8_lossy(&out_b.stderr);
+    assert!(
+        stderr.contains("already taken by another repository"),
+        "Error message mismatch: {}",
+        stderr
+    );
 }
 
-#[tokio::test]
-#[serial]
-#[ignore]
-async fn multi_repo_isolation_same_object_id() {
-    let client = d1_client_from_env();
-    client.ensure_object_index_table().await.unwrap();
+fn run_libra_cmd(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_libra"));
+    cmd.current_dir(dir).args(args);
 
-    let repo_a = "multi-repo-a";
-    let repo_b = "multi-repo-b";
+    let env_vars = [
+        "LIBRA_D1_ACCOUNT_ID",
+        "LIBRA_D1_API_TOKEN",
+        "LIBRA_D1_DATABASE_ID",
+        "LIBRA_STORAGE_ENDPOINT",
+        "LIBRA_STORAGE_BUCKET",
+        "LIBRA_STORAGE_ACCESS_KEY",
+        "LIBRA_STORAGE_SECRET_KEY",
+    ];
 
-    let r2_a = r2_storage_from_env(repo_a);
-    let r2_b = r2_storage_from_env(repo_b);
+    for var in env_vars {
+        let val =
+            std::env::var(var).unwrap_or_else(|_| panic!("Missing required env var: {}", var));
+        cmd.env(var, val);
+    }
 
-    let blob = Blob::from_content("same object across repos");
-    let ts = chrono::Utc::now().timestamp();
+    if std::env::var("LIBRA_STORAGE_REGION").is_err() {
+        cmd.env("LIBRA_STORAGE_REGION", "auto");
+    } else {
+        cmd.env(
+            "LIBRA_STORAGE_REGION",
+            std::env::var("LIBRA_STORAGE_REGION").unwrap(),
+        );
+    }
 
-    r2_a.put(&blob.id, &blob.data, blob.get_type())
-        .await
-        .unwrap();
-    r2_b.put(&blob.id, &blob.data, blob.get_type())
-        .await
-        .unwrap();
-
-    client
-        .upsert_object_index(
-            &blob.id.to_string(),
-            "blob",
-            blob.data.len() as i64,
-            repo_a,
-            ts,
-        )
-        .await
-        .unwrap();
-    client
-        .upsert_object_index(
-            &blob.id.to_string(),
-            "blob",
-            blob.data.len() as i64,
-            repo_b,
-            ts,
-        )
-        .await
-        .unwrap();
-
-    assert!(r2_a.exist(&blob.id).await);
-    assert!(r2_b.exist(&blob.id).await);
-
-    let a = client.get_object_indexes(repo_a).await.unwrap();
-    let b = client.get_object_indexes(repo_b).await.unwrap();
-    assert!(a.iter().any(|idx| idx.o_id == blob.id.to_string()));
-    assert!(b.iter().any(|idx| idx.o_id == blob.id.to_string()));
+    cmd.output().expect("Failed to execute libra")
 }

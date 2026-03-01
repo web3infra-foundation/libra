@@ -21,6 +21,7 @@ use crate::{
         d1_client::D1Client,
         path,
         storage::{Storage, local::LocalStorage, remote::RemoteStorage},
+        util,
     },
 };
 
@@ -55,8 +56,12 @@ pub struct SyncArgs {
 #[derive(Parser, Debug)]
 pub struct RestoreArgs {
     /// Repository ID to restore
-    #[arg(long)]
-    pub repo_id: String,
+    #[arg(long, required_unless_present = "name", conflicts_with = "name")]
+    pub repo_id: Option<String>,
+
+    /// Repository name to restore
+    #[arg(long, required_unless_present = "repo_id", conflicts_with = "repo_id")]
+    pub name: Option<String>,
 
     /// Only restore metadata (object index), not objects
     #[arg(long)]
@@ -94,7 +99,7 @@ pub async fn execute(args: CloudArgs) {
     }
 }
 
-/// Execute sync command - uploads objects to R2 and indexes to D1
+/// Execute sync command - uploads objects to R2, indexes to D1, and registers project name
 async fn execute_sync(args: SyncArgs) -> Result<(), String> {
     if args.batch_size < 1 {
         return Err("Batch size must be at least 1".to_string());
@@ -127,6 +132,34 @@ async fn execute_sync(args: SyncArgs) -> Result<(), String> {
     let _ = db_conn.execute(builder.build(&stmt)).await;
 
     let repo_id = ensure_repo_id().await?;
+
+    // Determine project name from config 'cloud.name' or current directory name
+    let project_name = Config::get("cloud", None, "name").await.unwrap_or_else(|| {
+        util::working_dir()
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown-project".to_string())
+    });
+
+    // Ensure repositories table exists
+    d1_client
+        .ensure_repositories_table()
+        .await
+        .map_err(|e| format!("Failed to create repositories table: {}", e.message))?;
+
+    // Upsert repository info
+    let repo_row = d1_client
+        .upsert_repository(&repo_id, &project_name)
+        .await
+        .map_err(|e| format!("Failed to upsert repository: {}", e.message))?;
+
+    // Verify repo_id matches (to detect name conflict)
+    if repo_row.repo_id != repo_id {
+        return Err(format!(
+            "Project name '{}' is already taken by another repository (ID: {}). Please choose a different name in cloud.name config.",
+            project_name, repo_row.repo_id
+        ));
+    }
 
     // Query unsynced objects
     let query = if args.force {
@@ -243,18 +276,37 @@ async fn sync_single_object(
     Ok(())
 }
 
-/// Execute restore command - downloads from D1/R2
+/// Execute restore command - resolves project name (if provided) and restores from D1/R2
 async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
-    println!("Starting restore for repo: {}", args.repo_id);
-
     validate_cloud_backup_env(args.metadata_only)?;
 
     // Initialize D1 client
     let d1_client = D1Client::from_env().map_err(|e| format!("D1 client error: {}", e.message))?;
 
+    let repo_id = if let Some(name) = &args.name {
+        // Ensure repositories table exists before resolving name
+        // This handles cases where the D1 database is old/uninitialized and missing the table
+        d1_client
+            .ensure_repositories_table()
+            .await
+            .map_err(|e| format!("Failed to ensure repositories table: {}", e.message))?;
+
+        let id = d1_client
+            .get_repo_id_by_name(name)
+            .await
+            .map_err(|e| format!("Failed to resolve repo name: {}", e.message))?;
+        id.ok_or_else(|| format!("Repository with name '{}' not found", name))?
+    } else {
+        args.repo_id
+            .clone()
+            .ok_or_else(|| "repo_id is required".to_string())?
+    };
+
+    println!("Starting restore for repo: {}", repo_id);
+
     // Get object indexes from D1
     let indexes = d1_client
-        .get_object_indexes(&args.repo_id)
+        .get_object_indexes(&repo_id)
         .await
         .map_err(|e| format!("Failed to query D1: {}", e.message))?;
 
@@ -306,7 +358,11 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
     );
 
     // Update local config with restored repo_id
-    Config::insert("libra", None, "repoid", &args.repo_id).await;
+    if Config::get("libra", None, "repoid").await.is_some() {
+        Config::update("libra", None, "repoid", &repo_id).await;
+    } else {
+        Config::insert("libra", None, "repoid", &repo_id).await;
+    }
 
     if args.metadata_only {
         println!("Metadata-only restore complete.");
@@ -314,7 +370,7 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
     }
 
     // Download objects from R2
-    let r2_storage = create_r2_storage(&args.repo_id)?;
+    let r2_storage = create_r2_storage(&repo_id)?;
     let objects_path = path::objects();
     let local_storage = LocalStorage::new(objects_path);
 
@@ -522,4 +578,29 @@ async fn ensure_repo_id() -> Result<String, String> {
         .await;
 
     Ok(repo_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_restore_args_repo_id() {
+        let args = RestoreArgs::try_parse_from(["restore", "--repo-id", "123"]).unwrap();
+        assert_eq!(args.repo_id, Some("123".to_string()));
+        assert_eq!(args.name, None);
+    }
+
+    #[test]
+    fn test_restore_args_name() {
+        let args = RestoreArgs::try_parse_from(["restore", "--name", "test-repo"]).unwrap();
+        assert_eq!(args.name, Some("test-repo".to_string()));
+        assert_eq!(args.repo_id, None);
+    }
+
+    #[test]
+    fn test_restore_args_missing() {
+        let result = RestoreArgs::try_parse_from(["restore"]);
+        assert!(result.is_err());
+    }
 }
