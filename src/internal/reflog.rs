@@ -40,8 +40,8 @@ pub enum ReflogError {
 impl Display for ReflogError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::DatabaseError(e) => write!(f, "Database error: {e}"),
-            Self::TransactionError(e) => write!(f, "Transaction error: {e}"),
+            Self::DatabaseError(_) => write!(f, "failed to access reflog storage"),
+            Self::TransactionError(_) => write!(f, "failed to update reflog"),
         }
     }
 }
