@@ -15,6 +15,7 @@ src/
 ├── cli.rs                       # Clap CLI definition, subcommand dispatch
 ├── common_utils.rs              # Shared utility functions
 ├── git_protocol.rs              # Git protocol helpers
+├── lfs_structs.rs               # LFS data types (used by command/lfs.rs and protocol/lfs_client.rs)
 ├── command/                     # All subcommand implementations (38 modules)
 │   ├── mod.rs                   # Re-exports, shared helpers (load/save objects, auth)
 │   ├── init.rs, clone.rs, add.rs, commit.rs, push.rs, pull.rs, fetch.rs
@@ -50,13 +51,19 @@ src/
 tests/
 ├── command/                     # Integration tests (one file per command)
 │   ├── mod.rs                   # Shared test helpers
-│   ├── init_test.rs, add_test.rs, commit_test.rs, ...
-│   └── ...
+│   └── init_test.rs, add_test.rs, commit_test.rs, ...
+├── objects/                     # Object-level tests
 ├── data/                        # Test fixtures (pack files, objects, indices)
+├── command_test.rs              # Top-level command integration test
 ├── e2e_mcp_flow.rs              # MCP end-to-end tests
 ├── mcp_integration_test.rs      # MCP integration tests
+├── ai_agent_test.rs             # AI agent tests
 ├── ai_chat_agent_test.rs        # AI chat agent tests
-└── ...
+├── ai_dag_tool_loop_test.rs     # AI DAG tool loop tests
+├── ai_storage_flow_test.rs      # AI storage flow tests
+├── intent_flow_test.rs          # Intent flow tests
+├── cloud_storage_backup_test.rs # Cloud storage backup tests
+└── storage_r2_test.rs           # R2 storage tests
 
 docs/                            # Community docs, contributing guide, agent specs
 sql/sqlite_20240331_init.sql     # SQLite schema bootstrap
@@ -203,7 +210,7 @@ SQLite database at `.libra/db` with tables: `config`, `reference`, `reflog`, `re
 | `ollama` | — | `OLLAMA_BASE_URL` or `--api-base` |
 
 ### Cloud Storage (S3/R2)
-`LIBRA_STORAGE_TYPE`, `LIBRA_STORAGE_BUCKET`, `LIBRA_STORAGE_ENDPOINT`, `LIBRA_STORAGE_REGION`, `LIBRA_STORAGE_ACCESS_KEY`, `LIBRA_STORAGE_SECRET_KEY`, `LIBRA_STORAGE_THRESHOLD`, `LIBRA_STORAGE_CACHE_SIZE`
+`LIBRA_STORAGE_TYPE`, `LIBRA_STORAGE_BUCKET`, `LIBRA_STORAGE_ENDPOINT`, `LIBRA_STORAGE_REGION`, `LIBRA_STORAGE_ACCESS_KEY`, `LIBRA_STORAGE_SECRET_KEY`, `LIBRA_STORAGE_THRESHOLD`, `LIBRA_STORAGE_CACHE_SIZE`, `LIBRA_STORAGE_ALLOW_HTTP` (set to `"true"` to permit non-TLS HTTP endpoints, useful for local/dev S3-compatible stores)
 
 ### Cloud Backup (D1/R2)
 `LIBRA_D1_ACCOUNT_ID`, `LIBRA_D1_API_TOKEN`, `LIBRA_D1_DATABASE_ID`
