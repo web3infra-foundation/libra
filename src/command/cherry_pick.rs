@@ -20,6 +20,7 @@ use git_internal::{
 use sea_orm::ConnectionTrait;
 
 use crate::{
+    cli_error,
     command::{load_object, save_object},
     common_utils::format_commit_msg,
     internal::{
@@ -101,7 +102,7 @@ pub async fn execute(args: CherryPickArgs) {
                 }
             }
             Err(e) => {
-                eprintln!("error: failed to cherry-pick {}: {}", &args.commits[i], e);
+                cli_error!(e, "error: failed to cherry-pick {}", &args.commits[i]);
                 // This simplified implementation does not handle conflicts or offer options to abort or skip.
                 return;
             }

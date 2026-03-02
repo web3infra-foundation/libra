@@ -17,6 +17,7 @@ use git_internal::{
 use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait, Value};
 
 use crate::{
+    cli_error,
     command::{load_object, save_object, status},
     internal::{
         branch::Branch,
@@ -540,14 +541,14 @@ async fn start_rebase(upstream: &str) {
         let upstream_commit: Commit = match load_object(&upstream_id) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("fatal: failed to load upstream commit: {:?}", e);
+                cli_error!(e, "fatal: failed to load upstream commit");
                 return;
             }
         };
         let upstream_tree: Tree = match load_object(&upstream_commit.tree_id) {
             Ok(t) => t,
             Err(e) => {
-                eprintln!("fatal: failed to load upstream tree: {:?}", e);
+                cli_error!(e, "fatal: failed to load upstream tree");
                 return;
             }
         };
@@ -605,7 +606,7 @@ async fn start_rebase(upstream: &str) {
         }
 
         if let Err(e) = index.save(&index_file) {
-            eprintln!("fatal: failed to save index: {:?}", e);
+            cli_error!(e, "fatal: failed to save index");
             return;
         }
         if let Err(e) = reset_workdir_tracked_only(&current_index, &index) {
@@ -718,10 +719,10 @@ async fn continue_replay(state: &mut RebaseState, branch_name: &str, upstream_di
         match load_object::<Commit>(commit_id) {
             Ok(commit) => commit.message.lines().next().unwrap_or("").to_string(),
             Err(e) => {
-                eprintln!(
-                    "warning: failed to load commit {}: {:?}",
-                    &commit_id.to_string()[..7],
-                    e
+                cli_error!(
+                    e,
+                    "warning: failed to load commit {}",
+                    &commit_id.to_string()[..7]
                 );
                 "unknown".to_string()
             }
@@ -928,7 +929,7 @@ async fn rebase_continue() {
     let index = match git_internal::internal::index::Index::load(&index_file) {
         Ok(idx) => idx,
         Err(e) => {
-            eprintln!("fatal: failed to load index: {:?}", e);
+            cli_error!(e, "fatal: failed to load index");
             return;
         }
     };
@@ -953,7 +954,7 @@ async fn rebase_continue() {
     let original_commit: Commit = match load_object(&stopped_sha) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("fatal: failed to load original commit: {:?}", e);
+            cli_error!(e, "fatal: failed to load original commit");
             return;
         }
     };
@@ -965,7 +966,7 @@ async fn rebase_continue() {
         &original_commit.message,
     );
     if let Err(e) = save_object(&new_commit, &new_commit.id) {
-        eprintln!("fatal: failed to save commit: {:?}", e);
+        cli_error!(e, "fatal: failed to save commit");
         return;
     }
 
@@ -1072,14 +1073,14 @@ async fn rebase_abort() {
     let orig_commit: Commit = match load_object(&orig_head) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("fatal: failed to load original commit: {:?}", e);
+            cli_error!(e, "fatal: failed to load original commit");
             return;
         }
     };
     let orig_tree: Tree = match load_object(&orig_commit.tree_id) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("fatal: failed to load original tree: {:?}", e);
+            cli_error!(e, "fatal: failed to load original tree");
             return;
         }
     };
@@ -1088,7 +1089,7 @@ async fn rebase_abort() {
     let current_index = match git_internal::internal::index::Index::load(&index_file) {
         Ok(idx) => idx,
         Err(e) => {
-            eprintln!("fatal: failed to load current index: {:?}", e);
+            cli_error!(e, "fatal: failed to load current index");
             return;
         }
     };
@@ -1156,7 +1157,7 @@ async fn rebase_skip() {
     let skipped_message = match load_object::<Commit>(&skipped_sha) {
         Ok(c) => Some(c.message),
         Err(e) => {
-            eprintln!("warning: could not load skipped commit: {:?}", e);
+            cli_error!(e, "warning: could not load skipped commit");
             None
         }
     };
@@ -1182,14 +1183,14 @@ async fn rebase_skip() {
     let current_commit: Commit = match load_object(&state.current_head) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("fatal: failed to load current commit: {:?}", e);
+            cli_error!(e, "fatal: failed to load current commit");
             return;
         }
     };
     let current_tree: Tree = match load_object(&current_commit.tree_id) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("fatal: failed to load current tree: {:?}", e);
+            cli_error!(e, "fatal: failed to load current tree");
             return;
         }
     };
@@ -1198,7 +1199,7 @@ async fn rebase_skip() {
     let current_index = match git_internal::internal::index::Index::load(&index_file) {
         Ok(idx) => idx,
         Err(e) => {
-            eprintln!("fatal: failed to load current index: {:?}", e);
+            cli_error!(e, "fatal: failed to load current index");
             return;
         }
     };

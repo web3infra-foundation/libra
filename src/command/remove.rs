@@ -8,6 +8,7 @@ use git_internal::{errors::GitError, internal::index::Index};
 use tokio::fs;
 
 use crate::{
+    cli_error,
     command::status::{changes_to_be_committed, changes_to_be_staged},
     utils::{path, path_ext::PathExt, util},
 };
@@ -280,23 +281,23 @@ pub async fn execute(args: RemoveArgs) {
         for path_str in remove_list {
             let path = PathBuf::from(&path_str);
             if let Err(e) = fs::remove_file(&path).await {
-                eprintln!("Failed to remove file {}: {}", &path.display(), e);
+                cli_error!(e, "error: failed to remove file '{}'", &path.display());
             }
         }
         for path_str in remove_dir_list {
             let path = PathBuf::from(&path_str);
             if args.recursive {
                 if let Err(e) = fs::remove_dir_all(&path).await {
-                    eprintln!("Failed to remove directory {}: {}", &path.display(), e);
+                    cli_error!(e, "error: failed to remove directory '{}'", &path.display());
                 }
             } else if let Err(e) = fs::remove_dir(&path).await {
-                eprintln!("Failed to remove directory {}: {}", &path.display(), e);
+                cli_error!(e, "error: failed to remove directory '{}'", &path.display());
             }
         }
     }
 
     if index.save(&idx_file).is_err() {
-        eprintln!("Failed to save index.");
+        eprintln!("fatal: failed to save index");
     }
 }
 
