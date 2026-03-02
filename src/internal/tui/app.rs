@@ -310,7 +310,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         if !result.is_error.unwrap_or(false) {
                             println!("Decision created successfully");
                         } else {
-                            eprintln!("error: failed to create decision");
+                            cli_error!(result.content, "error: failed to create decision");
                         }
                     }
                     Err(e) => {
@@ -791,7 +791,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         match mcp_server_clone.create_run_impl(run_params, actor).await {
                             Ok(result) => {
                                 if result.is_error.unwrap_or(false) {
-                                    eprintln!("error: failed to create run");
+                                    cli_error!(result.content, "error: failed to create run");
                                 }
                             }
                             Err(e) => {
@@ -830,7 +830,10 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         {
                             Ok(result) => {
                                 if result.is_error.unwrap_or(false) {
-                                    eprintln!("error: failed to create context snapshot");
+                                    cli_error!(
+                                        result.content,
+                                        "error: failed to create context snapshot"
+                                    );
                                 }
                             }
                             Err(e) => {
@@ -905,9 +908,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                                     ) {
                                         Ok(actor) => actor,
                                         Err(e) => {
-                                            eprintln!(
-                                                "Failed to resolve actor for tool invocation: {:?}",
-                                                e
+                                            cli_error!(
+                                                e,
+                                                "error: failed to resolve actor for tool invocation"
                                             );
                                             return;
                                         }
@@ -921,7 +924,8 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                                         Ok(result) => {
                                             if !result.is_error.unwrap_or(false) {
                                             } else {
-                                                eprintln!(
+                                                cli_error!(
+                                                    result.content,
                                                     "error: failed to record tool invocation"
                                                 );
                                             }

@@ -32,6 +32,11 @@ macro_rules! cli_error {
     // The error's own message IS the user-facing text.
     //   Release  →  eprintln!("{prefix}: {e}")       (Display)
     //   Debug    →  eprintln!("{prefix}: {e:?}")      (Debug)
+    //
+    // NOTE: In debug builds the output uses `{:?}` (Debug), not `{}`
+    // (Display), so you will see the Rust struct representation rather
+    // than the human-readable message. This is intentional — it surfaces
+    // the full cause chain for developers.
     ($prefix:expr => $err:expr) => {{
         #[cfg(debug_assertions)]
         eprintln!("{}: {:?}", $prefix, $err);
@@ -56,4 +61,38 @@ macro_rules! cli_error {
             eprintln!($($arg)+);
         }
     }};
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    /// Verify Pattern A compiles with a std::io::Error (Display + Debug).
+    #[test]
+    fn pattern_a_compiles_with_io_error() {
+        let err = io::Error::new(io::ErrorKind::NotFound, "gone");
+        cli_error!("fatal" => err);
+    }
+
+    /// Verify Pattern B compiles with a plain message.
+    #[test]
+    fn pattern_b_compiles_with_message() {
+        let err = io::Error::new(io::ErrorKind::PermissionDenied, "no access");
+        cli_error!(err, "fatal: failed to open file");
+    }
+
+    /// Verify Pattern B compiles with format arguments.
+    #[test]
+    fn pattern_b_compiles_with_format_args() {
+        let err = io::Error::new(io::ErrorKind::InvalidInput, "bad path");
+        let path = "/tmp/test";
+        cli_error!(err, "fatal: cannot read '{}'", path);
+    }
+
+    /// Verify Pattern B compiles with non-error types (e.g. String).
+    #[test]
+    fn pattern_b_compiles_with_string() {
+        let detail = String::from("ng refs/heads/main non-fast-forward");
+        cli_error!(detail, "fatal: ref update failed");
+    }
 }

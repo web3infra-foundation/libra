@@ -291,7 +291,7 @@ pub async fn execute(args: PushArgs) {
     }
     let (_, pkt_line) = read_pkt_line(&mut data);
     if !pkt_line.starts_with("ok".as_ref()) {
-        eprintln!("fatal: ref update failed");
+        cli_error!(pkt_line, "fatal: ref update failed");
         return;
     }
     let (len, _) = read_pkt_line(&mut data);

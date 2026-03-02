@@ -76,7 +76,7 @@ impl BasicAuth {
                 eprintln!("fatal: failed to authenticate after {MAX_TRY} attempts");
                 break;
             }
-            eprintln!("Authentication required, retrying...");
+            eprintln!("warning: authentication required, retrying...");
             AUTH.lock().unwrap().replace(ask_basic_auth());
             try_cnt += 1;
         }

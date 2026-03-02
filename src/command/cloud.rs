@@ -81,19 +81,19 @@ pub async fn execute(args: CloudArgs) {
     match args.command {
         CloudCommand::Sync(sync_args) => {
             if let Err(e) = execute_sync(sync_args).await {
-                eprintln!("fatal: sync failed: {}", e);
+                cli_error!(e, "fatal: sync failed");
                 std::process::exit(1);
             }
         }
         CloudCommand::Restore(restore_args) => {
             if let Err(e) = execute_restore(restore_args).await {
-                eprintln!("fatal: restore failed: {}", e);
+                cli_error!(e, "fatal: restore failed");
                 std::process::exit(1);
             }
         }
         CloudCommand::Status(status_args) => {
             if let Err(e) = execute_status(status_args).await {
-                eprintln!("fatal: status check failed: {}", e);
+                cli_error!(e, "fatal: status check failed");
                 std::process::exit(1);
             }
         }
@@ -408,7 +408,7 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
                 let computed = ObjectHash::from_type_and_data(obj_type, &data);
                 if computed != hash {
                     eprintln!(
-                        "Hash mismatch for {}: expected {}, got {}",
+                        "warning: hash mismatch for {}: expected {}, got {}",
                         idx.o_id, hash, computed
                     );
                     failed += 1;
