@@ -81,7 +81,7 @@ platforms/, toolchains/          # Buck2 platform & toolchain configs
 cargo +nightly fmt --all
 
 # Lint — all warnings must be resolved before committing
-cargo clippy -- -D warnings
+cargo clippy --all-targets --all-features -- -D warnings
 
 # Quick compile check
 cargo build
@@ -110,7 +110,7 @@ cargo buckal migrate             # Regenerate Buck metadata after Cargo.toml cha
 
 All PRs must pass these checks:
 1. `cargo +nightly fmt --all --check` — formatting
-2. `cargo clippy -- -D warnings` — linting (zero warnings)
+2. `cargo clippy --all-targets --all-features -- -D warnings` — linting (zero warnings)
 3. Redundancy check on `third-party/rust/crates`
 4. `buck2 build //:libra` — Buck2 build
 5. `cargo test --all` — full test suite
@@ -195,7 +195,7 @@ docs(readme): update provider table
 
 ## Database Schema
 
-SQLite database at `.libra/db` with tables: `config`, `reference`, `reflog`, `rebase_state`, `object_index`. Schema bootstrap in `sql/sqlite_20240331_init.sql`.
+SQLite database at `.libra/libra.db` with tables: `config`, `reference`, `reflog`, `rebase_state`, `object_index`. Schema bootstrap in `sql/sqlite_20240331_init.sql`.
 
 ## Environment Variables
 
