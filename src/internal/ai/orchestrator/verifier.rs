@@ -1,17 +1,16 @@
 use std::path::Path;
 
-use super::gate;
-use super::types::{GateReport, SystemReport};
+use super::{
+    gate,
+    types::{GateReport, SystemReport},
+};
 use crate::internal::ai::intentspec::types::IntentSpec;
 
 /// Execute Phase 3 system-level verification checks.
 ///
 /// Runs integration, security, and release checks sequentially.
 /// Each stage blocks the next on failure of required checks.
-pub async fn run_system_verification(
-    spec: &IntentSpec,
-    working_dir: &Path,
-) -> SystemReport {
+pub async fn run_system_verification(spec: &IntentSpec, working_dir: &Path) -> SystemReport {
     let plan = &spec.acceptance.verification_plan;
 
     let integration = gate::run_gates(&plan.integration_checks, working_dir).await;
@@ -40,9 +39,10 @@ pub async fn run_system_verification(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::internal::ai::intentspec::types::*;
-    use std::collections::BTreeMap;
 
     fn spec_with_checks(
         integration: Vec<Check>,

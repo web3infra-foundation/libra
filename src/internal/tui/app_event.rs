@@ -37,6 +37,8 @@ pub enum AgentStatus {
     ExecutingTool,
     /// Agent is waiting for user input (via `request_user_input` tool).
     AwaitingUserInput,
+    /// Waiting for user to choose post-plan action (Execute / Modify / Cancel).
+    AwaitingPostPlanChoice,
 }
 
 /// The exit strategy requested by the UI layer.
@@ -87,4 +89,9 @@ pub enum AppEvent {
     AgentStatusUpdate { status: AgentStatus },
     /// The agent is requesting user input via the `request_user_input` tool.
     RequestUserInput { request: UserInputRequest },
+    /// Orchestrator workflow completed.
+    ExecuteWorkflowComplete {
+        text: String,
+        new_history: Vec<Message>,
+    },
 }

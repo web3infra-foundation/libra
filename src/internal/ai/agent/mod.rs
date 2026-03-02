@@ -37,8 +37,6 @@ pub struct Agent<M: CompletionModel> {
     preamble: Option<String>,
     /// Sampling temperature (0.0 to 2.0). Higher values mean more creativity.
     temperature: Option<f64>,
-    /// Maximum number of steps for tool execution loops. `None` means unlimited.
-    max_steps: Option<usize>,
     /// Set of tools available to the agent.
     /// Tools available to the agent.
     tools: ToolSet,
@@ -54,7 +52,6 @@ impl<M: CompletionModel> Agent<M> {
             model: Arc::new(model),
             preamble: None,
             temperature: None,
-            max_steps: Some(4),
             tools: ToolSet::default(),
         }
     }
@@ -65,9 +62,6 @@ impl<M: CompletionModel> Agent<M> {
     ) -> Result<String, CompletionError> {
         let tools: Vec<crate::internal::ai::tools::ToolDefinition> =
             self.tools.tools.iter().map(|t| t.definition()).collect();
-
-        let mut steps = 0usize;
-
         loop {
             let request = CompletionRequest {
                 preamble: self.preamble.clone(),
@@ -110,16 +104,6 @@ impl<M: CompletionModel> Agent<M> {
 
                 return Ok(text_response);
             }
-
-            steps += 1;
-            if let Some(limit) = self.max_steps
-                && steps >= limit
-            {
-                return Err(CompletionError::ResponseError(format!(
-                    "Tool calling exceeded max steps ({limit})",
-                )));
-            }
-
             let assistant_content = match crate::internal::ai::completion::message::OneOrMany::many(
                 response.content.clone(),
             ) {

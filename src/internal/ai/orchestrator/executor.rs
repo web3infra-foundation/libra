@@ -1,11 +1,15 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
-use super::gate;
-use super::types::{GateReport, TaskNode, TaskNodeStatus, TaskResult, TaskDAG};
-use crate::internal::ai::agent::tool_loop::{run_tool_loop, ToolLoopConfig};
-use crate::internal::ai::completion::{CompletionModel, CompletionError};
-use crate::internal::ai::intentspec::types::Check;
-use crate::internal::ai::tools::registry::ToolRegistry;
+use super::{
+    gate,
+    types::{GateReport, TaskDAG, TaskNode, TaskNodeStatus, TaskResult},
+};
+use crate::internal::ai::{
+    agent::tool_loop::{ToolLoopConfig, run_tool_loop},
+    completion::{CompletionError, CompletionModel},
+    intentspec::types::Check,
+    tools::registry::ToolRegistry,
+};
 
 /// Configuration for task execution.
 #[derive(Clone)]
@@ -30,18 +34,13 @@ pub async fn execute_task<M: CompletionModel>(
     let mut retry_count: u8 = 0;
 
     loop {
-        let agent_result = run_tool_loop(
-            model,
-            &prompt,
-            registry,
-            config.tool_loop_config.clone(),
-        )
-        .await;
+        let agent_result =
+            run_tool_loop(model, &prompt, registry, config.tool_loop_config.clone()).await;
 
         let agent_output = match agent_result {
             Ok(output) => output,
             Err(CompletionError::ResponseError(msg)) => {
-                // Agent hit max_steps or similar — treat as failure but allow retry
+                // Treat model/tool-loop response errors as retryable task failures.
                 tracing::warn!(task_id = %task.id, "agent response error: {}", msg);
                 msg
             }
@@ -102,7 +101,7 @@ pub async fn execute_task<M: CompletionModel>(
 pub async fn execute_dag<M: CompletionModel + 'static>(
     dag: &mut TaskDAG,
     model: &M,
-    registry: &ToolRegistry,
+    registry: &Arc<ToolRegistry>,
     config: &ExecutorConfig,
 ) -> Vec<TaskResult> {
     let max_parallel = dag.max_parallel.max(1) as usize;
@@ -149,11 +148,10 @@ pub async fn execute_dag<M: CompletionModel + 'static>(
             let mut handles = Vec::with_capacity(tasks.len());
             for task in tasks {
                 let model = model.clone();
-                let registry_dir = registry.working_dir().to_path_buf();
+                let task_registry = Arc::clone(registry);
                 let config = config.clone();
                 handles.push(tokio::spawn(async move {
-                    let local_registry = ToolRegistry::with_working_dir(registry_dir);
-                    execute_task(&task, &model, &local_registry, &config).await
+                    execute_task(&task, &model, &task_registry, &config).await
                 }));
             }
 
@@ -200,17 +198,11 @@ fn build_task_prompt(task: &TaskNode) -> String {
     }
 
     if !task.scope_in.is_empty() {
-        parts.push(format!(
-            "## In Scope\n{}",
-            task.scope_in.join(", ")
-        ));
+        parts.push(format!("## In Scope\n{}", task.scope_in.join(", ")));
     }
 
     if !task.scope_out.is_empty() {
-        parts.push(format!(
-            "## Out of Scope\n{}",
-            task.scope_out.join(", ")
-        ));
+        parts.push(format!("## Out of Scope\n{}", task.scope_out.join(", ")));
     }
 
     if !task.constraints.is_empty() {
@@ -229,14 +221,18 @@ fn build_task_prompt(task: &TaskNode) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::internal::ai::completion::{
-        CompletionRequest, CompletionResponse, CompletionError,
-        message::{AssistantContent, Text},
-    };
-    use crate::internal::ai::tools::registry::ToolRegistry;
-    use std::path::Path;
+    use std::{path::Path, sync::Arc};
+
     use uuid::Uuid;
+
+    use super::*;
+    use crate::internal::ai::{
+        completion::{
+            CompletionError, CompletionRequest, CompletionResponse,
+            message::{AssistantContent, Text},
+        },
+        tools::registry::ToolRegistry,
+    };
 
     #[derive(Clone)]
     struct MockModel {
@@ -354,7 +350,7 @@ mod tests {
         let model = MockModel {
             final_text: "done".into(),
         };
-        let registry = ToolRegistry::new();
+        let registry = Arc::new(ToolRegistry::new());
         let dir = tempfile::tempdir().unwrap();
         let config = make_config(dir.path());
 
@@ -401,7 +397,7 @@ mod tests {
         let model = MockModel {
             final_text: "done".into(),
         };
-        let registry = ToolRegistry::new();
+        let registry = Arc::new(ToolRegistry::new());
         let dir = tempfile::tempdir().unwrap();
         let config = make_config(dir.path());
 
@@ -429,7 +425,7 @@ mod tests {
         let model = MockModel {
             final_text: "done".into(),
         };
-        let registry = ToolRegistry::new();
+        let registry = Arc::new(ToolRegistry::new());
         let dir = tempfile::tempdir().unwrap();
         let mut config = make_config(dir.path());
         config.max_retries = 0;

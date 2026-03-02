@@ -1,5 +1,4 @@
-use std::path::Path;
-use std::time::Instant;
+use std::{path::Path, time::Instant};
 
 use tokio::process::Command;
 
@@ -54,8 +53,7 @@ pub async fn run_check(check: &Check, working_dir: &Path) -> GateResult {
 
             let result = match cmd.spawn() {
                 Ok(child) => {
-                    let timeout_dur =
-                        std::time::Duration::from_secs(timeout_secs);
+                    let timeout_dur = std::time::Duration::from_secs(timeout_secs);
                     tokio::select! {
                         output = child.wait_with_output() => {
                             match output {

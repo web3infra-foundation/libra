@@ -94,6 +94,12 @@ struct PendingUserInput {
     notes_text: String,
 }
 
+/// Post-plan dialog state: stores the spec and user selection.
+struct PendingPostPlan {
+    spec_json: String,
+    selected: usize, // 0=Execute, 1=Modify, 2=Cancel
+}
+
 /// Configuration for creating an App.
 pub struct AppConfig {
     pub welcome_message: String,
@@ -154,6 +160,8 @@ pub struct App<M: CompletionModel> {
     user_input_rx: UnboundedReceiver<UserInputRequest>,
     /// Currently pending user-input interaction, if any.
     pending_user_input: Option<PendingUserInput>,
+    /// Post-plan dialog state (present when user is choosing Execute/Modify/Cancel).
+    pending_post_plan: Option<PendingPostPlan>,
     /// Display name of the active model.
     model_name: String,
     /// Provider identifier.
@@ -203,6 +211,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             session_store: app_config.session_store,
             user_input_rx: app_config.user_input_rx,
             pending_user_input: None,
+            pending_post_plan: None,
             model_name: app_config.model_name,
             provider_name: app_config.provider_name,
             mcp_server: app_config.mcp_server,
@@ -377,6 +386,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         // Check for Ctrl+C first (always handled)
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.cancel_pending_user_input();
+            self.dismiss_post_plan_dialog();
             self.interrupt_agent_task();
             self.exit_info = Some(AppExitInfo {
                 reason: ExitReason::UserRequested,
@@ -485,6 +495,29 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             AgentStatus::AwaitingUserInput => {
                 self.handle_user_input_key(key);
             }
+            AgentStatus::AwaitingPostPlanChoice => match key.code {
+                KeyCode::Up => {
+                    if let Some(ref mut p) = self.pending_post_plan {
+                        p.selected = p.selected.saturating_sub(1);
+                        self.widget.bottom_pane.post_plan_selected = p.selected;
+                    }
+                    self.schedule_draw();
+                }
+                KeyCode::Down => {
+                    if let Some(ref mut p) = self.pending_post_plan {
+                        p.selected = (p.selected + 1).min(2);
+                        self.widget.bottom_pane.post_plan_selected = p.selected;
+                    }
+                    self.schedule_draw();
+                }
+                KeyCode::Enter => {
+                    self.handle_post_plan_choice().await;
+                }
+                KeyCode::Esc => {
+                    self.dismiss_post_plan_dialog();
+                }
+                _ => {}
+            },
             AgentStatus::Thinking | AgentStatus::ExecutingTool => {
                 // During processing, only handle Escape for interrupt
                 if key.code == KeyCode::Esc {
@@ -1056,7 +1089,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 self.session.add_assistant_message(&text);
                 self.session.metadata.insert(
                     LATEST_INTENTSPEC_JSON.to_string(),
-                    serde_json::Value::String(spec_json),
+                    serde_json::Value::String(spec_json.clone()),
                 );
                 if let Some(id) = intent_id {
                     self.session.metadata.insert(
@@ -1067,17 +1100,17 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     self.session.metadata.remove(LATEST_INTENTSPEC_INTENT_ID);
                 }
 
-                for cell in self.widget.cells.iter_mut().rev() {
-                    if let Some(assistant_cell) =
-                        cell.as_any_mut().downcast_mut::<AssistantHistoryCell>()
-                        && assistant_cell.is_streaming
-                    {
-                        assistant_cell.content = text.clone();
-                        assistant_cell.complete();
-                        break;
-                    }
-                }
-                self.widget.bottom_pane.set_status(AgentStatus::Idle);
+                self.complete_streaming_assistant_cell(text);
+
+                // Show post-plan dialog instead of returning to Idle
+                self.pending_post_plan = Some(PendingPostPlan {
+                    spec_json,
+                    selected: 0,
+                });
+                self.widget.bottom_pane.reset_post_plan_selection();
+                self.widget
+                    .bottom_pane
+                    .set_status(AgentStatus::AwaitingPostPlanChoice);
                 self.schedule_draw();
             }
             AppEvent::InsertHistoryCell(cell) => {
@@ -1154,6 +1187,14 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             }
             AppEvent::RequestUserInput { request } => {
                 self.handle_user_input_request(request);
+            }
+            AppEvent::ExecuteWorkflowComplete { text, new_history } => {
+                self.agent_task = None;
+                self.history = new_history;
+                self.session.add_assistant_message(&text);
+                self.complete_streaming_assistant_cell(text);
+                self.widget.bottom_pane.set_status(AgentStatus::Idle);
+                self.schedule_draw();
             }
         }
 
@@ -1254,6 +1295,102 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 });
             }
         }
+    }
+
+    // ── Post-plan dialog ────────────────────────────────────────────
+
+    async fn handle_post_plan_choice(&mut self) {
+        let pending = match self.pending_post_plan.take() {
+            Some(p) => p,
+            None => return,
+        };
+
+        match pending.selected {
+            0 => {
+                // Execute: parse spec and launch orchestrator
+                self.start_execute_workflow(&pending.spec_json).await;
+            }
+            _ => {
+                // Modify (1) or Cancel (2+)
+                if pending.selected == 1 {
+                    let msg = format!(
+                        "Here is the current IntentSpec. Please tell me what you'd like to change:\n\n```json\n{}\n```",
+                        pending.spec_json
+                    );
+                    self.widget
+                        .add_cell(Box::new(AssistantHistoryCell::new(msg)));
+                }
+                self.widget.bottom_pane.set_status(AgentStatus::Idle);
+            }
+        }
+        self.schedule_draw();
+    }
+
+    fn dismiss_post_plan_dialog(&mut self) {
+        self.pending_post_plan = None;
+        self.widget.bottom_pane.set_status(AgentStatus::Idle);
+        self.schedule_draw();
+    }
+
+    async fn start_execute_workflow(&mut self, spec_json: &str) {
+        use crate::internal::ai::{
+            intentspec::types::IntentSpec,
+            orchestrator::{Orchestrator, types::OrchestratorConfig},
+        };
+
+        let spec: IntentSpec = match serde_json::from_str(spec_json) {
+            Ok(s) => s,
+            Err(e) => {
+                self.widget
+                    .add_cell(Box::new(AssistantHistoryCell::new(format!(
+                        "Failed to parse IntentSpec: {e}"
+                    ))));
+                self.widget.bottom_pane.set_status(AgentStatus::Idle);
+                self.schedule_draw();
+                return;
+            }
+        };
+
+        self.widget
+            .add_cell(Box::new(AssistantHistoryCell::streaming()));
+        self.widget.bottom_pane.set_status(AgentStatus::Thinking);
+        self.schedule_draw();
+
+        let model = self.model.clone();
+        let registry = self.registry.clone();
+        let working_dir = self.registry.working_dir().to_path_buf();
+        let coder_preamble = self
+            .agent_router
+            .get("coder")
+            .map(|a| a.system_prompt.clone());
+        let tx = self.app_event_tx.clone();
+        let history = self.history.clone();
+
+        let handle = tokio::spawn(async move {
+            let config = OrchestratorConfig {
+                working_dir,
+                base_commit: None,
+                coder_preamble,
+            };
+            let orchestrator = Orchestrator::new(model, registry, config);
+
+            let result = orchestrator.run(spec).await;
+
+            let summary = match &result {
+                Ok(r) => format_orchestrator_result(r),
+                Err(e) => format!("Orchestrator failed: {e}"),
+            };
+
+            let mut new_history = history;
+            new_history.push(Message::assistant(summary.clone()));
+
+            let _ = tx.send(AppEvent::ExecuteWorkflowComplete {
+                text: summary,
+                new_history,
+            });
+        });
+
+        self.agent_task = Some(handle);
     }
 
     async fn start_plan_workflow(&mut self, request: &str) {
@@ -1549,10 +1686,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 .get(LATEST_INTENTSPEC_INTENT_ID)
                 .and_then(|v| v.as_str()),
             self.mcp_server.clone(),
-        ) {
-            if let Some(spec) = fetch_intentspec_from_object_id(&mcp, id).await {
-                return serde_json::to_string_pretty(&spec).ok();
-            }
+        ) && let Some(spec) = fetch_intentspec_from_object_id(&mcp, id).await
+        {
+            return serde_json::to_string_pretty(&spec).ok();
         }
 
         if let Some(json_text) = self
@@ -1713,6 +1849,40 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         })?;
         Ok(())
     }
+}
+
+fn format_orchestrator_result(
+    result: &crate::internal::ai::orchestrator::types::OrchestratorResult,
+) -> String {
+    use crate::internal::ai::orchestrator::types::{DecisionOutcome, TaskNodeStatus};
+
+    let mut lines = Vec::new();
+    let decision_label = match result.decision {
+        DecisionOutcome::Commit => "Commit",
+        DecisionOutcome::HumanReviewRequired => "Human Review Required",
+        DecisionOutcome::Abandon => "Abandon",
+    };
+    lines.push(format!("## Orchestrator Result: {decision_label}"));
+    lines.push(String::new());
+
+    for tr in &result.task_results {
+        let status_icon = match tr.status {
+            TaskNodeStatus::Completed => "✓",
+            TaskNodeStatus::Failed => "✗",
+            _ => "○",
+        };
+        lines.push(format!(
+            "{} Task {} — {:?} (retries: {})",
+            status_icon, tr.task_id, tr.status, tr.retry_count
+        ));
+    }
+
+    if !result.system_report.overall_passed {
+        lines.push(String::new());
+        lines.push("System verification: FAILED".to_string());
+    }
+
+    lines.join("\n")
 }
 
 fn build_plan_prompt(request: &str) -> String {

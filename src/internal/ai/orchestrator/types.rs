@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -69,7 +68,8 @@ impl TaskDAG {
             .collect();
 
         let mut in_degree: HashMap<Uuid, usize> = self.nodes.iter().map(|n| (n.id, 0)).collect();
-        let mut adj: HashMap<Uuid, Vec<Uuid>> = self.nodes.iter().map(|n| (n.id, Vec::new())).collect();
+        let mut adj: HashMap<Uuid, Vec<Uuid>> =
+            self.nodes.iter().map(|n| (n.id, Vec::new())).collect();
 
         for node in &self.nodes {
             for dep in &node.dependencies {
@@ -114,9 +114,9 @@ impl TaskDAG {
             .iter()
             .filter(|n| {
                 n.status == TaskNodeStatus::Pending
-                    && n.dependencies.iter().all(|dep| {
-                        matches!(status_map.get(dep), Some(TaskNodeStatus::Completed))
-                    })
+                    && n.dependencies
+                        .iter()
+                        .all(|dep| matches!(status_map.get(dep), Some(TaskNodeStatus::Completed)))
             })
             .map(|n| n.id)
             .collect()
@@ -208,6 +208,8 @@ pub struct OrchestratorResult {
 pub struct OrchestratorConfig {
     pub working_dir: PathBuf,
     pub base_commit: Option<String>,
+    /// System prompt injected into each task's tool loop (e.g. coder agent prompt).
+    pub coder_preamble: Option<String>,
 }
 
 #[cfg(test)]

@@ -83,6 +83,8 @@ pub fn load_embedded_agents() -> Vec<AgentDefinition> {
         include_str!("embedded/code_reviewer.md"),
         include_str!("embedded/architect.md"),
         include_str!("embedded/build_error_resolver.md"),
+        include_str!("embedded/orchestrator.md"),
+        include_str!("embedded/coder.md"),
     ];
 
     sources
@@ -146,12 +148,14 @@ mod tests {
     #[test]
     fn test_load_embedded_agents() {
         let agents = load_embedded_agents();
-        assert_eq!(agents.len(), 4);
+        assert_eq!(agents.len(), 6);
         let names: Vec<&str> = agents.iter().map(|a| a.name.as_str()).collect();
         assert!(names.contains(&"planner"));
         assert!(names.contains(&"code_reviewer"));
         assert!(names.contains(&"architect"));
         assert!(names.contains(&"build_error_resolver"));
+        assert!(names.contains(&"orchestrator"));
+        assert!(names.contains(&"coder"));
     }
 
     #[test]
@@ -159,8 +163,7 @@ mod tests {
         let agents = load_embedded_agents();
         let router = AgentRouter::new(agents);
 
-        let selected =
-            router.select("plan the implementation and identify dependencies for the new feature");
+        let selected = router.select("plan the intentspec pipeline for the new feature");
         assert!(selected.is_some());
         assert_eq!(selected.unwrap().name, "planner");
     }

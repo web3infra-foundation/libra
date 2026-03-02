@@ -19,8 +19,7 @@ pub fn check_tool_acl(
     // Check deny rules first
     for rule in &acl.deny {
         if matches_rule(&rule.tool, tool_name)
-            && (rule.actions.contains(&"*".to_string())
-                || rule.actions.iter().any(|a| a == action))
+            && (rule.actions.contains(&"*".to_string()) || rule.actions.iter().any(|a| a == action))
         {
             if let Some(reason) = check_deny_constraints(&rule.constraints, tool_name, action) {
                 return AclVerdict::Deny(reason);
@@ -35,8 +34,7 @@ pub fn check_tool_acl(
     // Check allow rules
     for rule in &acl.allow {
         if matches_rule(&rule.tool, tool_name)
-            && (rule.actions.contains(&"*".to_string())
-                || rule.actions.iter().any(|a| a == action))
+            && (rule.actions.contains(&"*".to_string()) || rule.actions.iter().any(|a| a == action))
         {
             return AclVerdict::Allow;
         }
@@ -129,7 +127,9 @@ fn glob_matches(pattern: &str, path: &str) -> bool {
     // "src/**" matches anything under src/
     if let Some(prefix) = pattern.strip_suffix("/**") {
         return path.starts_with(prefix)
-            && path.get(prefix.len()..).is_some_and(|r| r.starts_with('/') || r.is_empty());
+            && path
+                .get(prefix.len()..)
+                .is_some_and(|r| r.starts_with('/') || r.is_empty());
     }
 
     // "*.rs" matches "foo.rs"
@@ -143,9 +143,10 @@ fn glob_matches(pattern: &str, path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::internal::ai::intentspec::types::{ToolAcl, ToolRule};
-    use std::collections::BTreeMap;
 
     fn make_rule(tool: &str, actions: &[&str]) -> ToolRule {
         ToolRule {
@@ -209,10 +210,7 @@ mod tests {
             allow: vec![make_rule("shell", &["*"])],
             deny: vec![],
         };
-        assert_eq!(
-            check_tool_acl(&acl, "shell", "execute"),
-            AclVerdict::Allow
-        );
+        assert_eq!(check_tool_acl(&acl, "shell", "execute"), AclVerdict::Allow);
     }
 
     #[test]
@@ -231,38 +229,28 @@ mod tests {
             }],
         };
         let verdict = check_tool_acl(&acl, "shell", "execute");
-        assert!(matches!(verdict, AclVerdict::Deny(reason) if reason.contains("denied substrings")));
+        assert!(
+            matches!(verdict, AclVerdict::Deny(reason) if reason.contains("denied substrings"))
+        );
     }
 
     // Scope tests
 
     #[test]
     fn test_scope_in_scope() {
-        let verdict = check_scope(
-            &["src/".into()],
-            &["vendor/".into()],
-            "src/main.rs",
-        );
+        let verdict = check_scope(&["src/".into()], &["vendor/".into()], "src/main.rs");
         assert_eq!(verdict, ScopeVerdict::InScope);
     }
 
     #[test]
     fn test_scope_out_of_scope_pattern() {
-        let verdict = check_scope(
-            &["src/".into()],
-            &["vendor/".into()],
-            "vendor/lib.rs",
-        );
+        let verdict = check_scope(&["src/".into()], &["vendor/".into()], "vendor/lib.rs");
         assert!(matches!(verdict, ScopeVerdict::OutOfScope(_)));
     }
 
     #[test]
     fn test_scope_not_in_any_pattern() {
-        let verdict = check_scope(
-            &["src/".into()],
-            &[],
-            "docs/readme.md",
-        );
+        let verdict = check_scope(&["src/".into()], &[], "docs/readme.md");
         assert!(matches!(verdict, ScopeVerdict::OutOfScope(_)));
     }
 

@@ -221,7 +221,24 @@ impl ToolSpec {
                                                     "timeoutSeconds": {"type": "integer"},
                                                     "expectedExitCode": {"type": "integer"},
                                                     "required": {"type": "boolean"},
-                                                    "artifactsProduced": {"type": "array", "items": {"type": "string"}}
+                                                    "artifactsProduced": {
+                                                        "type": "array",
+                                                        "description": "Names of produced evidence artifacts. Must be one of the supported artifact names (not file paths).",
+                                                        "items": {
+                                                            "type": "string",
+                                                            "enum": [
+                                                                "patchset",
+                                                                "test-log",
+                                                                "build-log",
+                                                                "sast-report",
+                                                                "sca-report",
+                                                                "sbom",
+                                                                "provenance-attestation",
+                                                                "transparency-proof",
+                                                                "release-notes"
+                                                            ]
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }

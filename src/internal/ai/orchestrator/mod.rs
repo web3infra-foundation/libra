@@ -6,15 +6,15 @@ pub mod planner;
 pub mod types;
 pub mod verifier;
 
-use types::{
-    OrchestratorConfig, OrchestratorError, OrchestratorResult,
+use std::sync::Arc;
+
+use types::{OrchestratorConfig, OrchestratorError, OrchestratorResult};
+
+use crate::internal::ai::{
+    completion::CompletionModel,
+    intentspec::{repair_intentspec, types::IntentSpec, validate_intentspec},
+    tools::registry::ToolRegistry,
 };
-use crate::internal::ai::completion::CompletionModel;
-use crate::internal::ai::intentspec::{
-    repair_intentspec, validate_intentspec,
-    types::IntentSpec,
-};
-use crate::internal::ai::tools::registry::ToolRegistry;
 
 /// The main orchestrator that drives IntentSpec execution through all phases.
 ///
@@ -26,12 +26,12 @@ use crate::internal::ai::tools::registry::ToolRegistry;
 /// 4. Make decision
 pub struct Orchestrator<M: CompletionModel> {
     model: M,
-    registry: ToolRegistry,
+    registry: Arc<ToolRegistry>,
     config: OrchestratorConfig,
 }
 
 impl<M: CompletionModel + 'static> Orchestrator<M> {
-    pub fn new(model: M, registry: ToolRegistry, config: OrchestratorConfig) -> Self {
+    pub fn new(model: M, registry: Arc<ToolRegistry>, config: OrchestratorConfig) -> Self {
         Self {
             model,
             registry,
@@ -40,10 +40,7 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
     }
 
     /// Run the full orchestration pipeline.
-    pub async fn run(
-        &self,
-        mut spec: IntentSpec,
-    ) -> Result<OrchestratorResult, OrchestratorError> {
+    pub async fn run(&self, mut spec: IntentSpec) -> Result<OrchestratorResult, OrchestratorError> {
         // Phase 0: Validate and repair
         let issues = validate_intentspec(&spec);
         if !issues.is_empty() {
@@ -64,8 +61,13 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
         let mut dag = planner::generate_task_dag(&spec);
 
         // Phase 2: Execute tasks
+        let tool_loop_config = crate::internal::ai::agent::tool_loop::ToolLoopConfig {
+            preamble: self.config.coder_preamble.clone(),
+            ..Default::default()
+        };
+
         let executor_config = executor::ExecutorConfig {
-            tool_loop_config: crate::internal::ai::agent::tool_loop::ToolLoopConfig::default(),
+            tool_loop_config,
             max_retries: spec.execution.retry.max_retries,
             backoff_seconds: spec.execution.retry.backoff_seconds,
             fast_checks: spec.acceptance.verification_plan.fast_checks.clone(),
@@ -98,13 +100,16 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
 
 #[cfg(test)]
 mod tests {
+    use std::{collections::BTreeMap, sync::Arc};
+
     use super::*;
-    use crate::internal::ai::completion::{
-        CompletionError, CompletionRequest, CompletionResponse,
-        message::{AssistantContent, Text},
+    use crate::internal::ai::{
+        completion::{
+            CompletionError, CompletionRequest, CompletionResponse,
+            message::{AssistantContent, Text},
+        },
+        intentspec::types::*,
     };
-    use crate::internal::ai::intentspec::types::*;
-    use std::collections::BTreeMap;
 
     #[derive(Clone)]
     struct MockOrchestratorModel;
@@ -112,6 +117,7 @@ mod tests {
     impl CompletionModel for MockOrchestratorModel {
         type Response = ();
 
+        #[allow(clippy::manual_async_fn)]
         fn completion(
             &self,
             _request: CompletionRequest,
@@ -273,10 +279,11 @@ mod tests {
     async fn test_orchestrator_full_pipeline() {
         let dir = tempfile::tempdir().unwrap();
         let model = MockOrchestratorModel;
-        let registry = ToolRegistry::new();
+        let registry = Arc::new(ToolRegistry::new());
         let config = OrchestratorConfig {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
+            coder_preamble: None,
         };
         let orchestrator = Orchestrator::new(model, registry, config);
         let spec = test_spec();
@@ -290,10 +297,11 @@ mod tests {
     async fn test_orchestrator_high_risk_human_review() {
         let dir = tempfile::tempdir().unwrap();
         let model = MockOrchestratorModel;
-        let registry = ToolRegistry::new();
+        let registry = Arc::new(ToolRegistry::new());
         let config = OrchestratorConfig {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
+            coder_preamble: None,
         };
         let orchestrator = Orchestrator::new(model, registry, config);
         let mut spec = test_spec();
@@ -308,10 +316,11 @@ mod tests {
     async fn test_orchestrator_validation_failure() {
         let dir = tempfile::tempdir().unwrap();
         let model = MockOrchestratorModel;
-        let registry = ToolRegistry::new();
+        let registry = Arc::new(ToolRegistry::new());
         let config = OrchestratorConfig {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
+            coder_preamble: None,
         };
         let orchestrator = Orchestrator::new(model, registry, config);
         let mut spec = test_spec();

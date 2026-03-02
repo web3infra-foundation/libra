@@ -655,7 +655,10 @@ pub enum BlobRetentionStrategy {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ContextPipelineConfig {
-    #[serde(rename = "maxFrames", default = "ContextPipelineConfig::default_max_frames")]
+    #[serde(
+        rename = "maxFrames",
+        default = "ContextPipelineConfig::default_max_frames"
+    )]
     pub max_frames: u32,
     #[serde(
         rename = "seedFrameKind",
@@ -789,10 +792,7 @@ pub struct ActorMappingConfig {
         default = "ActorMappingConfig::default_orchestrator"
     )]
     pub orchestrator_actor_id: String,
-    #[serde(
-        rename = "coderActorId",
-        default = "ActorMappingConfig::default_coder"
-    )]
+    #[serde(rename = "coderActorId", default = "ActorMappingConfig::default_coder")]
     pub coder_actor_id: String,
     #[serde(
         rename = "reviewerActorId",
@@ -913,7 +913,10 @@ mod tests {
 
         let os = binding.object_store.unwrap();
         assert_eq!(os.backend, ObjectStoreBackend::GitNative);
-        assert_eq!(os.blob_retention_strategy, BlobRetentionStrategy::RefAnchoring);
+        assert_eq!(
+            os.blob_retention_strategy,
+            BlobRetentionStrategy::RefAnchoring
+        );
         assert_eq!(os.ai_ref_prefix, "refs/ai/");
 
         let cp = binding.context_pipeline.unwrap();

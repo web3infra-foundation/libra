@@ -62,9 +62,10 @@ pub fn generate_task_dag(spec: &IntentSpec) -> TaskDAG {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::internal::ai::intentspec::types::*;
-    use std::collections::BTreeMap;
 
     fn minimal_spec(objectives: Vec<String>, max_parallel: u8) -> IntentSpec {
         IntentSpec {
@@ -172,9 +173,7 @@ mod tests {
                     max_retries: 3,
                     backoff_seconds: 5,
                 },
-                replan: ReplanPolicy {
-                    triggers: vec![],
-                },
+                replan: ReplanPolicy { triggers: vec![] },
                 concurrency: ConcurrencyPolicy {
                     max_parallel_tasks: max_parallel,
                 },
@@ -238,7 +237,11 @@ mod tests {
     fn test_constraint_propagation() {
         let spec = minimal_spec(vec!["do thing".into()], 1);
         let dag = generate_task_dag(&spec);
-        assert!(dag.nodes[0].constraints.contains(&"network:deny".to_string()));
+        assert!(
+            dag.nodes[0]
+                .constraints
+                .contains(&"network:deny".to_string())
+        );
     }
 
     #[test]

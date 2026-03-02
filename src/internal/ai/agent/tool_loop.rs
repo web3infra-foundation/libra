@@ -46,8 +46,6 @@ impl ToolLoopObserver for NoopObserver {}
 pub struct ToolLoopConfig {
     pub preamble: Option<String>,
     pub temperature: Option<f64>,
-    /// Maximum number of model/tool round-trips. `None` means unlimited.
-    pub max_steps: Option<usize>,
     /// Optional hook runner for pre/post tool-use hooks.
     pub hook_runner: Option<Arc<HookRunner>>,
     /// If set, only expose these tools to the model (agent tool restriction).
@@ -59,7 +57,6 @@ impl Default for ToolLoopConfig {
         Self {
             preamble: None,
             temperature: Some(0.0),
-            max_steps: Some(8),
             hook_runner: None,
             allowed_tools: None,
         }
@@ -96,12 +93,6 @@ pub async fn run_tool_loop_with_history_and_observer<M: CompletionModel, O: Tool
     config: ToolLoopConfig,
     observer: &mut O,
 ) -> Result<ToolLoopTurn, CompletionError> {
-    if config.max_steps == Some(0) {
-        return Err(CompletionError::RequestError(
-            "max_steps must be greater than 0".into(),
-        ));
-    }
-
     existing_history.push(Message::user(prompt.into()));
     let mut history = existing_history;
 
@@ -111,18 +102,7 @@ pub async fn run_tool_loop_with_history_and_observer<M: CompletionModel, O: Tool
     if let Some(ref allowed) = config.allowed_tools {
         tools.retain(|t| allowed.iter().any(|a| a == &t.name));
     }
-
-    let mut step = 0usize;
     loop {
-        if let Some(limit) = config.max_steps
-            && step >= limit
-        {
-            return Err(CompletionError::ResponseError(format!(
-                "Agent reached max_steps={limit} without producing a final text response",
-            )));
-        }
-        step += 1;
-
         let request = CompletionRequest {
             preamble: config.preamble.clone(),
             chat_history: history.clone(),
@@ -445,7 +425,6 @@ mod tests {
             ToolLoopConfig {
                 preamble: None,
                 temperature: Some(0.0),
-                max_steps: Some(4),
                 hook_runner: None,
                 allowed_tools: None,
             },
@@ -509,7 +488,6 @@ mod tests {
             ToolLoopConfig {
                 preamble: None,
                 temperature: Some(0.0),
-                max_steps: Some(4),
                 hook_runner: Some(Arc::new(hook_runner)),
                 allowed_tools: None,
             },
@@ -533,64 +511,6 @@ mod tests {
 
         // History: User(prompt) + Assistant(toolcall) + User(blocked result) + Assistant(text)
         assert_eq!(turn.history.len(), 4);
-    }
-
-    #[tokio::test]
-    async fn tool_loop_max_steps_reached_returns_error() {
-        /// A model that always issues a tool call, never returning text.
-        #[derive(Clone)]
-        struct AlwaysToolCallModel;
-
-        impl CompletionModel for AlwaysToolCallModel {
-            type Response = ();
-
-            async fn completion(
-                &self,
-                _request: CompletionRequest,
-            ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
-                Ok(CompletionResponse {
-                    content: vec![AssistantContent::ToolCall(ToolCall {
-                        id: "call_loop".to_string(),
-                        name: "mock_tool".to_string(),
-                        function: Function {
-                            name: "mock_tool".to_string(),
-                            arguments: json!({}),
-                        },
-                    })],
-                    raw_response: (),
-                })
-            }
-        }
-
-        let temp_dir = TempDir::new().unwrap();
-        let mut registry = ToolRegistry::with_working_dir(temp_dir.path().to_path_buf());
-        registry.register("mock_tool", Arc::new(MockHandler));
-
-        let result = run_tool_loop(
-            &AlwaysToolCallModel,
-            "hello",
-            &registry,
-            ToolLoopConfig {
-                preamble: None,
-                temperature: Some(0.0),
-                max_steps: Some(2),
-                hook_runner: None,
-                allowed_tools: None,
-            },
-        )
-        .await;
-
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        match err {
-            CompletionError::ResponseError(msg) => {
-                assert!(
-                    msg.contains("max_steps=2"),
-                    "error should mention max_steps"
-                );
-            }
-            other => panic!("expected ResponseError, got {:?}", other),
-        }
     }
 
     #[tokio::test]
@@ -672,7 +592,6 @@ mod tests {
             ToolLoopConfig {
                 preamble: None,
                 temperature: Some(0.0),
-                max_steps: Some(4),
                 hook_runner: None,
                 allowed_tools: None,
             },
@@ -691,34 +610,6 @@ mod tests {
 
         // Model should still get the error and produce final text
         assert_eq!(turn.final_text, "handled error");
-    }
-
-    #[tokio::test]
-    async fn tool_loop_zero_max_steps_returns_error() {
-        let temp_dir = TempDir::new().unwrap();
-        let registry = ToolRegistry::with_working_dir(temp_dir.path().to_path_buf());
-
-        let result = run_tool_loop(
-            &MockModel,
-            "hello",
-            &registry,
-            ToolLoopConfig {
-                preamble: None,
-                temperature: Some(0.0),
-                max_steps: Some(0),
-                hook_runner: None,
-                allowed_tools: None,
-            },
-        )
-        .await;
-
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            CompletionError::RequestError(err) => {
-                assert!(err.to_string().contains("max_steps"));
-            }
-            other => panic!("expected RequestError, got {:?}", other),
-        }
     }
 
     #[tokio::test]
@@ -768,7 +659,6 @@ mod tests {
             ToolLoopConfig {
                 preamble: None,
                 temperature: Some(0.0),
-                max_steps: Some(4),
                 hook_runner: None,
                 allowed_tools: Some(vec!["other_tool".to_string()]),
             },

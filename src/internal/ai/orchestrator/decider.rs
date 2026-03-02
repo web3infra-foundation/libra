@@ -43,9 +43,10 @@ pub fn make_decision(
 
 #[cfg(test)]
 mod tests {
+    use uuid::Uuid;
+
     use super::*;
     use crate::internal::ai::orchestrator::types::{GateReport, TaskNodeStatus};
-    use uuid::Uuid;
 
     fn passing_system_report() -> SystemReport {
         SystemReport {
