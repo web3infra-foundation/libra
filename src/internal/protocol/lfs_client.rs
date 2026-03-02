@@ -166,7 +166,7 @@ impl LFSClient {
                     })
                     .collect::<Vec<_>>();
                 if !theirs.is_empty() {
-                    eprintln!("Locking failed: The following files are locked by another user:");
+                    eprintln!("error: the following files are locked by another user:");
                     for lock in theirs {
                         eprintln!("  - {}", lock.path);
                     }

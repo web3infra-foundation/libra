@@ -15,6 +15,7 @@ use git_internal::{
 };
 
 use crate::{
+    cli_error,
     command::{get_target_commit, load_object},
     utils::{object_ext::TreeExt, util},
 };
@@ -51,7 +52,7 @@ pub async fn execute(args: BlameArgs) {
     let commit_id = match get_target_commit(&args.commit).await {
         Ok(id) => id,
         Err(e) => {
-            eprintln!("Error: {}", e);
+            eprintln!("fatal: {}", e);
             return;
         }
     };
@@ -59,7 +60,7 @@ pub async fn execute(args: BlameArgs) {
     let commit_obj = match load_object::<Commit>(&commit_id) {
         Ok(obj) => obj,
         Err(e) => {
-            eprintln!("Failed to load commit: {}", e);
+            cli_error!(e, "fatal: failed to load commit");
             return;
         }
     };
@@ -154,7 +155,7 @@ pub async fn execute(args: BlameArgs) {
                 .filter(|b| b.line_number >= start && b.line_number <= end)
                 .collect(),
             Err(e) => {
-                eprintln!("Error parsing line range: {}", e);
+                eprintln!("error: invalid line range: {}", e);
                 return;
             }
         }

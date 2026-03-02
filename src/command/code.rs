@@ -12,6 +12,7 @@ use clap::{Parser, ValueEnum};
 use tokio::sync::oneshot;
 use url::Url;
 
+use crate::cli_error;
 // use uuid::Uuid;
 use crate::internal::{
     ai::{
@@ -174,7 +175,7 @@ async fn create_initial_intent(mcp_server: &Arc<LibraMcpServer>) {
     {
         Ok(actor) => actor,
         Err(e) => {
-            eprintln!("Failed to resolve actor: {:?}", e);
+            cli_error!(e, "error: failed to resolve actor");
             return;
         }
     };
@@ -185,11 +186,11 @@ async fn create_initial_intent(mcp_server: &Arc<LibraMcpServer>) {
             if !result.is_error.unwrap_or(false) {
                 // Initial intent created successfully
             } else {
-                eprintln!("Failed to create initial intent: {:?}", result.content);
+                eprintln!("error: failed to create initial intent");
             }
         }
         Err(e) => {
-            eprintln!("Error creating initial intent: {:?}", e);
+            cli_error!(e, "error: failed to create initial intent");
         }
     }
 }
@@ -198,7 +199,7 @@ async fn execute_web_only(args: CodeArgs) {
     let addr: SocketAddr = match format!("{}:{}", args.host, args.port).parse() {
         Ok(addr) => addr,
         Err(e) => {
-            eprintln!("Invalid address: {}", e);
+            cli_error!(e, "error: invalid address '{}:{}'", args.host, args.port);
             return;
         }
     };
@@ -206,7 +207,7 @@ async fn execute_web_only(args: CodeArgs) {
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("Failed to bind to {}: {}", addr, e);
+            cli_error!(e, "fatal: failed to bind to {}", addr);
             return;
         }
     };
@@ -531,7 +532,7 @@ where
     let terminal = match tui_init() {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("Failed to initialize terminal: {}", e);
+            cli_error!(e, "fatal: failed to initialize terminal");
             return;
         }
     };
@@ -611,11 +612,11 @@ where
     match app.run().await {
         Ok(exit_info) => {
             if let crate::internal::tui::ExitReason::Fatal(msg) = exit_info.reason {
-                eprintln!("Fatal error: {}", msg);
+                eprintln!("fatal: {}", msg);
             }
         }
         Err(e) => {
-            eprintln!("Error running TUI: {}", e);
+            cli_error!(e, "fatal: TUI exited unexpectedly");
         }
     }
 
@@ -668,12 +669,12 @@ async fn start_mcp_server(
                                     .serve_connection(io, service)
                                     .await
                                 {
-                                    eprintln!("MCP connection error: {:?}", e);
+                                    cli_error!(e, "warning: MCP connection error");
                                 }
                             });
                         }
                         Err(e) => {
-                            eprintln!("MCP accept error: {:?}", e);
+                            cli_error!(e, "warning: MCP accept error");
                         }
                     }
                 }
@@ -748,7 +749,7 @@ async fn execute_stdio(_args: CodeArgs) {
             }
         }
         Err(e) => {
-            eprintln!("Failed to start MCP Stdio server: {}", e);
+            cli_error!(e, "fatal: failed to start MCP Stdio server");
         }
     }
 }

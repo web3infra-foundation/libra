@@ -27,6 +27,7 @@ use tokio::sync::mpsc;
 use url::Url;
 
 use crate::{
+    cli_error,
     command::branch,
     git_protocol::{ServiceType::ReceivePack, add_pkt_line_string, read_pkt_line},
     internal::{
@@ -116,7 +117,7 @@ pub async fn execute(args: PushArgs) {
     }) {
         Ok(u) => u,
         Err(e) => {
-            eprintln!("fatal: invalid remote url '{}': {}", repo_url, e);
+            cli_error!(e, "fatal: invalid remote url '{}'", repo_url);
             return;
         }
     };
@@ -290,7 +291,7 @@ pub async fn execute(args: PushArgs) {
     }
     let (_, pkt_line) = read_pkt_line(&mut data);
     if !pkt_line.starts_with("ok".as_ref()) {
-        eprintln!("fatal: ref update failed [{pkt_line:?}]");
+        eprintln!("fatal: ref update failed");
         return;
     }
     let (len, _) = read_pkt_line(&mut data);
@@ -362,7 +363,7 @@ async fn update_remote_tracking(
         .await;
 
     if let Err(e) = transaction_result {
-        eprintln!("fatal: failed to update remote tracking branch: {}", e);
+        cli_error!(e, "fatal: failed to update remote tracking branch");
     }
 }
 

@@ -16,6 +16,7 @@ use sea_orm::{
 use uuid::Uuid;
 
 use crate::{
+    cli_error,
     internal::{config::Config, db, model::object_index},
     utils::{
         d1_client::D1Client,
@@ -80,19 +81,19 @@ pub async fn execute(args: CloudArgs) {
     match args.command {
         CloudCommand::Sync(sync_args) => {
             if let Err(e) = execute_sync(sync_args).await {
-                eprintln!("Sync failed: {}", e);
+                eprintln!("fatal: sync failed: {}", e);
                 std::process::exit(1);
             }
         }
         CloudCommand::Restore(restore_args) => {
             if let Err(e) = execute_restore(restore_args).await {
-                eprintln!("Restore failed: {}", e);
+                eprintln!("fatal: restore failed: {}", e);
                 std::process::exit(1);
             }
         }
         CloudCommand::Status(status_args) => {
             if let Err(e) = execute_status(status_args).await {
-                eprintln!("Status check failed: {}", e);
+                eprintln!("fatal: status check failed: {}", e);
                 std::process::exit(1);
             }
         }
@@ -203,12 +204,16 @@ async fn execute_sync(args: SyncArgs) -> Result<(), String> {
                     let mut active: object_index::ActiveModel = obj.clone().into();
                     active.is_synced = Set(1);
                     if let Err(e) = active.update(db_conn).await {
-                        eprintln!("Failed to update local sync status for {}: {}", obj.o_id, e);
+                        cli_error!(
+                            e,
+                            "warning: failed to update local sync status for {}",
+                            obj.o_id
+                        );
                     }
                     synced_count += 1;
                 }
                 Err(e) => {
-                    eprintln!("Failed to sync {}: {}", obj.o_id, e);
+                    cli_error!(e, "error: failed to sync {}", obj.o_id);
                     failed_count += 1;
                 }
             }
@@ -333,7 +338,7 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
             let mut active: object_index::ActiveModel = existing_model.into();
             active.is_synced = Set(1);
             if let Err(e) = active.update(db_conn).await {
-                eprintln!("Failed to update index for {}: {}", idx.o_id, e);
+                cli_error!(e, "warning: failed to update index for {}", idx.o_id);
             }
         } else {
             let entry = object_index::ActiveModel {
@@ -347,7 +352,7 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
             };
 
             if let Err(e) = entry.insert(db_conn).await {
-                eprintln!("Failed to insert index for {}: {}", idx.o_id, e);
+                cli_error!(e, "warning: failed to insert index for {}", idx.o_id);
             }
         }
     }
@@ -384,7 +389,7 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
         ) {
             Ok(h) => h,
             Err(e) => {
-                eprintln!("Invalid object hash {}: {}", idx.o_id, e);
+                cli_error!(e, "error: invalid object hash '{}'", idx.o_id);
                 failed += 1;
                 continue;
             }
@@ -412,14 +417,14 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
 
                 // Save to local storage
                 if let Err(e) = local_storage.put(&hash, &data, obj_type).await {
-                    eprintln!("Failed to save object {}: {}", idx.o_id, e);
+                    cli_error!(e, "error: failed to save object {}", idx.o_id);
                     failed += 1;
                     continue;
                 }
                 downloaded += 1;
             }
             Err(e) => {
-                eprintln!("Failed to download {}: {}", idx.o_id, e);
+                cli_error!(e, "error: failed to download {}", idx.o_id);
                 failed += 1;
             }
         }

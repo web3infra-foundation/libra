@@ -23,21 +23,26 @@ use super::{
     },
     terminal::{TARGET_FRAME_INTERVAL, Tui, TuiEvent},
 };
-use crate::internal::ai::{
-    agent::{ToolLoopConfig, profile::AgentProfileRouter, run_tool_loop_with_history_and_observer},
-    commands::CommandDispatcher,
-    completion::{CompletionModel, Message},
-    mcp::{
-        resource::{
-            CreateContextSnapshotParams, CreateDecisionParams, CreateRunParams,
-            CreateToolInvocationParams,
+use crate::{
+    cli_error,
+    internal::ai::{
+        agent::{
+            ToolLoopConfig, profile::AgentProfileRouter, run_tool_loop_with_history_and_observer,
         },
-        server::LibraMcpServer,
-    },
-    session::{SessionState, SessionStore},
-    tools::{
-        ToolOutput, ToolRegistry,
-        context::{UpdatePlanArgs, UserInputAnswer, UserInputRequest, UserInputResponse},
+        commands::CommandDispatcher,
+        completion::{CompletionModel, Message},
+        mcp::{
+            resource::{
+                CreateContextSnapshotParams, CreateDecisionParams, CreateRunParams,
+                CreateToolInvocationParams,
+            },
+            server::LibraMcpServer,
+        },
+        session::{SessionState, SessionStore},
+        tools::{
+            ToolOutput, ToolRegistry,
+            context::{UpdatePlanArgs, UserInputAnswer, UserInputRequest, UserInputResponse},
+        },
     },
 };
 
@@ -291,7 +296,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 ) {
                     Ok(actor) => actor,
                     Err(e) => {
-                        eprintln!("Failed to resolve actor for decision: {:?}", e);
+                        cli_error!(e, "error: failed to resolve actor for decision");
                         return;
                     }
                 };
@@ -305,11 +310,11 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         if !result.is_error.unwrap_or(false) {
                             println!("Decision created successfully");
                         } else {
-                            eprintln!("Failed to create decision: {:?}", result.content);
+                            eprintln!("error: failed to create decision");
                         }
                     }
                     Err(e) => {
-                        eprintln!("Error creating decision: {:?}", e);
+                        cli_error!(e, "error: failed to create decision");
                     }
                 }
             });
@@ -777,7 +782,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         ) {
                             Ok(actor) => actor,
                             Err(e) => {
-                                eprintln!("Failed to resolve actor for run: {:?}", e);
+                                cli_error!(e, "error: failed to resolve actor for run");
                                 return;
                             }
                         };
@@ -786,11 +791,11 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         match mcp_server_clone.create_run_impl(run_params, actor).await {
                             Ok(result) => {
                                 if result.is_error.unwrap_or(false) {
-                                    eprintln!("Failed to create run: {:?}", result.content);
+                                    eprintln!("error: failed to create run");
                                 }
                             }
                             Err(e) => {
-                                eprintln!("Error creating run: {:?}", e);
+                                cli_error!(e, "error: failed to create run");
                             }
                         }
 
@@ -813,7 +818,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         ) {
                             Ok(actor) => actor,
                             Err(e) => {
-                                eprintln!("Failed to resolve actor for snapshot: {:?}", e);
+                                cli_error!(e, "error: failed to resolve actor for snapshot");
                                 return;
                             }
                         };
@@ -825,14 +830,11 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         {
                             Ok(result) => {
                                 if result.is_error.unwrap_or(false) {
-                                    eprintln!(
-                                        "Failed to create context snapshot: {:?}",
-                                        result.content
-                                    );
+                                    eprintln!("error: failed to create context snapshot");
                                 }
                             }
                             Err(e) => {
-                                eprintln!("Error creating context snapshot: {:?}", e);
+                                cli_error!(e, "error: failed to create context snapshot");
                             }
                         }
                     });
@@ -920,13 +922,15 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                                             if !result.is_error.unwrap_or(false) {
                                             } else {
                                                 eprintln!(
-                                                    "Failed to record tool invocation: {:?}",
-                                                    result.content
+                                                    "error: failed to record tool invocation"
                                                 );
                                             }
                                         }
                                         Err(e) => {
-                                            eprintln!("Error recording tool invocation: {:?}", e);
+                                            cli_error!(
+                                                e,
+                                                "error: failed to record tool invocation"
+                                            );
                                         }
                                     }
                                 });
