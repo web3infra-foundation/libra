@@ -509,17 +509,11 @@ pub async fn init(args: InitArgs) -> Result<(), InitError> {
 
     // Check if the root directory already exists
     if is_reinit(&cur_dir) {
-        if !args.quiet {
-            eprintln!(
-                "the repository is already initialized at '{}'\n\
-                 If you wish to reinitialize, please remove the existing directory or file.",
-                root_dir.display()
-            );
-        }
         return Err(InitError::Io(io::Error::new(
             io::ErrorKind::AlreadyExists,
             format!(
-                "the repository is already initialized at '{}'",
+                "the repository is already initialized at '{}'\n\
+                 hint: if you wish to reinitialize, please remove the existing directory or file.",
                 root_dir.display()
             ),
         )));
