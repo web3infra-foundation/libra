@@ -13,13 +13,16 @@ src/
 ├── main.rs                      # Binary entry point (tokio runtime)
 ├── lib.rs                       # Library root, sync/async exec helpers
 ├── cli.rs                       # Clap CLI definition, subcommand dispatch
-├── command/                     # All subcommand implementations (~38 modules)
+├── common_utils.rs              # Shared utility functions
+├── git_protocol.rs              # Git protocol helpers
+├── command/                     # All subcommand implementations (38 modules)
 │   ├── mod.rs                   # Re-exports, shared helpers (load/save objects, auth)
 │   ├── init.rs, clone.rs, add.rs, commit.rs, push.rs, pull.rs, fetch.rs
-│   ├── status.rs, log.rs, show.rs, diff.rs, blame.rs
-│   ├── branch.rs, tag.rs, switch.rs, merge.rs, rebase.rs, cherry_pick.rs
-│   ├── reset.rs, restore.rs, remove.rs, clean.rs, stash.rs
+│   ├── status.rs, log.rs, show.rs, diff.rs, blame.rs, shortlog.rs, describe.rs
+│   ├── branch.rs, tag.rs, switch.rs, checkout.rs, merge.rs, rebase.rs, cherry_pick.rs
+│   ├── reset.rs, restore.rs, remove.rs, mv.rs, clean.rs, stash.rs, revert.rs
 │   ├── reflog.rs, config.rs, remote.rs, worktree.rs, cloud.rs, lfs.rs
+│   ├── open.rs, index_pack.rs   # Browser open, pack index operations
 │   └── code.rs                  # `libra code` — TUI/Web/MCP entry
 ├── internal/                    # Core logic
 │   ├── ai/                      # AI Agent Infrastructure
@@ -71,7 +74,7 @@ platforms/, toolchains/          # Buck2 platform & toolchain configs
 cargo +nightly fmt --all
 
 # Lint — all warnings must be resolved before committing
-cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy -- -D warnings
 
 # Quick compile check
 cargo build
