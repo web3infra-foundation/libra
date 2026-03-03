@@ -1,8 +1,6 @@
 use std::collections::HashSet;
 
-use super::types::{
-    ArtifactName, ChangeType, Check, IntentSpec, LifecycleStatus, RiskLevel, VerificationPlan,
-};
+use super::types::{ArtifactName, ChangeType, Check, IntentSpec, LifecycleStatus, RiskLevel};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValidationIssue {
@@ -138,6 +136,19 @@ fn validate_check_artifacts(
 ) {
     for check in checks {
         for produced in &check.artifacts_produced {
+            if !is_known_artifact_name(produced) {
+                issues.push(ValidationIssue::new(
+                    format!(
+                        "acceptance.verificationPlan.{stage}.{}.artifactsProduced",
+                        check.id
+                    ),
+                    format!(
+                        "unknown artifact name '{produced}'; must be one of {} (do not use file paths here)",
+                        KNOWN_ARTIFACT_NAMES.join(", ")
+                    ),
+                ));
+                continue;
+            }
             if !required.contains(produced) {
                 issues.push(ValidationIssue::new(
                     format!(
@@ -149,6 +160,33 @@ fn validate_check_artifacts(
             }
         }
     }
+}
+
+const KNOWN_ARTIFACT_NAMES: [&str; 9] = [
+    "patchset",
+    "test-log",
+    "build-log",
+    "sast-report",
+    "sca-report",
+    "sbom",
+    "provenance-attestation",
+    "transparency-proof",
+    "release-notes",
+];
+
+fn is_known_artifact_name(name: &str) -> bool {
+    matches!(
+        name,
+        "patchset"
+            | "test-log"
+            | "build-log"
+            | "sast-report"
+            | "sca-report"
+            | "sbom"
+            | "provenance-attestation"
+            | "transparency-proof"
+            | "release-notes"
+    )
 }
 
 fn validate_retention(spec: &IntentSpec, issues: &mut Vec<ValidationIssue>) {
@@ -235,7 +273,7 @@ mod tests {
         ResolveContext,
         draft::{DraftAcceptance, DraftIntent, DraftRisk, IntentDraft},
         resolve_intentspec,
-        types::{ChangeType, RiskLevel},
+        types::{ChangeType, CheckKind, RiskLevel},
     };
 
     fn sample_spec() -> IntentSpec {
@@ -288,6 +326,28 @@ mod tests {
             issues
                 .iter()
                 .any(|i| i.path == "risk.humanInLoop.minApprovers")
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_unknown_artifacts_produced() {
+        let mut spec = sample_spec();
+        spec.acceptance.verification_plan.fast_checks.push(Check {
+            id: "hello-world-compiles".into(),
+            kind: CheckKind::Command,
+            command: Some("cargo build -p hello-world --release".into()),
+            timeout_seconds: Some(120),
+            expected_exit_code: Some(0),
+            required: true,
+            artifacts_produced: vec!["hello-world/target/release/hello-world".into()],
+        });
+
+        let issues = validate_intentspec(&spec);
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.message.contains("unknown artifact name")),
+            "{issues:?}"
         );
     }
 }

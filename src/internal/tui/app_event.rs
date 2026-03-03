@@ -8,7 +8,7 @@ use serde_json::Value;
 use super::history_cell::HistoryCell;
 use crate::internal::ai::{
     completion::Message,
-    tools::{ToolOutput, context::UserInputRequest},
+    tools::{context::UserInputRequest, ToolOutput},
 };
 
 /// Events emitted by agent execution to notify the UI.
@@ -37,6 +37,8 @@ pub enum AgentStatus {
     ExecutingTool,
     /// Agent is waiting for user input (via `request_user_input` tool).
     AwaitingUserInput,
+    /// Waiting for user to choose post-plan action (Execute / Modify / Cancel).
+    AwaitingPostPlanChoice,
 }
 
 /// The exit strategy requested by the UI layer.
