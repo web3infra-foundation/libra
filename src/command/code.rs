@@ -161,6 +161,7 @@ async fn start_web_server(host: &str, port: u16) -> anyhow::Result<WebHandle> {
 async fn create_initial_intent(mcp_server: &Arc<LibraMcpServer>) {
     let params = CreateIntentParams {
         content: "Libra Code session started".to_string(),
+        structured_content: None,
         parent_id: None,
         status: Some("active".to_string()),
         task_id: None,

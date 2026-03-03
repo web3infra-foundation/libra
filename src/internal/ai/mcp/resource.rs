@@ -131,8 +131,13 @@ pub struct ArtifactParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct CreateIntentParams {
-    /// The prompt or goal content.
+    /// The prompt or goal content (raw user input / natural language description).
     pub content: String,
+    /// AI-analyzed structured content (e.g. canonical IntentSpec JSON).
+    /// Stored in the Intent object's `content` field. When `None`, the Intent
+    /// is created without structured content (Draft state).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_content: Option<String>,
     /// ID of the parent intent, forming the history chain.
     pub parent_id: Option<String>,
     /// Status: "draft", "active", "completed", "discarded".
@@ -464,6 +469,11 @@ impl LibraMcpServer {
 
         let mut intent =
             Intent::new(actor, params.content).map_err(|e| ErrorData::internal_error(e, None))?;
+
+        // Store the AI-analyzed structured content (e.g. canonical IntentSpec JSON)
+        if params.structured_content.is_some() {
+            intent.set_content(params.structured_content);
+        }
 
         if let Some(pid) = parent_id {
             intent.set_parent(Some(pid));

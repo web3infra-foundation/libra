@@ -23,6 +23,10 @@ pub struct ResolveContext {
     pub created_by_id: String,
 }
 
+/// Resolves an IntentDraft into a full IntentSpec by applying risk-based defaults and metadata.
+///
+/// This is the final stage of "Plan" generation before the IntentSpec is presented to the user
+/// and persisted via MCP (see [`crate::internal::ai::intentspec::persist_intentspec`]).
 pub fn resolve_intentspec(
     draft: IntentDraft,
     risk_level: RiskLevel,
