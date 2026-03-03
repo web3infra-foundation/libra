@@ -200,7 +200,7 @@ async fn switch_to_commit(commit_hash: ObjectHash) {
 async fn switch_to_branch(branch_name: String) {
     if branch_name == "intent" {
         eprintln!("fatal: switching to 'intent' branch is not allowed");
-        return;
+        std::process::exit(1);
     }
     let db = get_db_conn_instance().await;
 

@@ -137,7 +137,7 @@ async fn test_switch_function() {
             _ => panic!("head not in branch,unreachable"),
             // Head::Detached(name) => name.to_string(),
         };
-        assert_eq!(ref_name, "main", "switch bach to the master failed!");
+        assert_eq!(ref_name, "main", "switch back to the master failed!");
     }
 }
 #[tokio::test]

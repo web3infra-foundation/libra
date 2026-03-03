@@ -176,21 +176,26 @@ pub async fn create_branch(new_branch: String, branch_or_commit: Option<String>)
 
 async fn delete_branch(branch_name: String) {
     if branch_name == "main" || branch_name == "intent" {
-        panic!(
+        eprintln!(
             "fatal: The '{}' branch is locked and cannot be deleted.",
             branch_name
         );
+        std::process::exit(1);
     }
 
     let _ = Branch::find_branch(&branch_name, None)
         .await
-        .unwrap_or_else(|| panic!("fatal: branch '{branch_name}' not found"));
+        .unwrap_or_else(|| {
+            eprintln!("fatal: branch '{branch_name}' not found");
+            std::process::exit(1);
+        });
     let head = Head::current().await;
 
     if let Head::Branch(name) = head
         && name == branch_name
     {
-        panic!("fatal: Cannot delete the branch '{branch_name}' which you are currently on");
+        eprintln!("fatal: Cannot delete the branch '{branch_name}' which you are currently on");
+        std::process::exit(1);
     }
 
     Branch::delete_branch(&branch_name, None).await;
@@ -203,31 +208,37 @@ async fn delete_branch(branch_name: String) {
 /// suggests using `branch -D` for force deletion.
 async fn delete_branch_safe(branch_name: String) {
     if branch_name == "main" || branch_name == "intent" {
-        panic!(
+        eprintln!(
             "fatal: The '{}' branch is locked and cannot be deleted.",
             branch_name
         );
+        std::process::exit(1);
     }
 
     // 1. Check if branch exists
     let branch = Branch::find_branch(&branch_name, None)
         .await
-        .unwrap_or_else(|| panic!("fatal: branch '{branch_name}' not found"));
+        .unwrap_or_else(|| {
+            eprintln!("fatal: branch '{branch_name}' not found");
+            std::process::exit(1);
+        });
 
     // 2. Check if trying to delete current branch
     let head = Head::current().await;
     if let Head::Branch(name) = &head
         && name == &branch_name
     {
-        panic!("fatal: Cannot delete the branch '{branch_name}' which you are currently on");
+        eprintln!("fatal: Cannot delete the branch '{branch_name}' which you are currently on");
+        std::process::exit(1);
     }
 
     // 3. Check if the branch is fully merged into HEAD
     // Get current HEAD commit
     let head_commit = match head {
-        Head::Branch(_) => Head::current_commit()
-            .await
-            .unwrap_or_else(|| panic!("fatal: cannot get HEAD commit")),
+        Head::Branch(_) => Head::current_commit().await.unwrap_or_else(|| {
+            eprintln!("fatal: cannot get HEAD commit");
+            std::process::exit(1);
+        }),
         Head::Detached(commit_hash) => commit_hash,
     };
 
@@ -281,11 +292,20 @@ async fn rename_branch(args: Vec<String>) {
         return;
     }
 
+    if new_name == "main" || new_name == "intent" {
+        eprintln!(
+            "fatal: The '{}' branch is locked and cannot be overwritten.",
+            new_name
+        );
+        std::process::exit(1);
+    }
+
     if old_name == "main" || old_name == "intent" {
-        panic!(
+        eprintln!(
             "fatal: The '{}' branch is locked and cannot be renamed.",
             old_name
         );
+        std::process::exit(1);
     }
 
     // check if old branch exists

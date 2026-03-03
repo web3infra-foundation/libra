@@ -356,17 +356,30 @@ async fn ai_list_objects(type_name: &str) {
     println!("\nTotal: {} {} object(s)", objects.len(), type_name);
 }
 
+/// Redact UUID for safe logging (keep first 8 chars)
+fn redact_uuid(uuid: &str) -> String {
+    if uuid.len() > 8 {
+        format!("{}***", &uuid[..8])
+    } else {
+        "***".to_string()
+    }
+}
+
 /// Pretty-print an AI object by UUID (auto-detects type).
 async fn ai_pretty_print(uuid: &str) {
     let hm = build_history_manager().await;
     let (hash, type_name) = match hm.find_object_hash(uuid).await {
         Ok(Some(pair)) => pair,
         Ok(None) => {
-            eprintln!("fatal: AI object not found: {}", uuid);
+            eprintln!("fatal: AI object not found: {}", redact_uuid(uuid));
             std::process::exit(128);
         }
         Err(e) => {
-            eprintln!("fatal: failed to look up AI object {}: {}", uuid, e);
+            eprintln!(
+                "fatal: failed to look up AI object {}: {}",
+                redact_uuid(uuid),
+                e
+            );
             std::process::exit(128);
         }
     };
@@ -409,11 +422,15 @@ async fn ai_show_type(uuid: &str) {
     match hm.find_object_hash(uuid).await {
         Ok(Some((_hash, type_name))) => println!("{}", type_name),
         Ok(None) => {
-            eprintln!("fatal: AI object not found: {}", uuid);
+            eprintln!("fatal: AI object not found: {}", redact_uuid(uuid));
             std::process::exit(128);
         }
         Err(e) => {
-            eprintln!("fatal: failed to look up AI object {}: {}", uuid, e);
+            eprintln!(
+                "fatal: failed to look up AI object {}: {}",
+                redact_uuid(uuid),
+                e
+            );
             std::process::exit(128);
         }
     }

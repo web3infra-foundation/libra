@@ -490,7 +490,7 @@ pub async fn init(args: InitArgs) -> Result<(), InitError> {
     } else {
         cur_dir.join(ROOT_DIR)
     };
-    // check if format is supported,Now SHA-1 and SHA-256 are supported.
+    // Check if format is supported. Currently, SHA-1 and SHA-256 are supported.
     let object_format_value = args
         .object_format
         .as_ref()
@@ -634,7 +634,8 @@ pub async fn init(args: InitArgs) -> Result<(), InitError> {
     // Validate branch name according to the selected ref format
     validate_branch_name(&initial_branch_name, ref_format_mode)?;
 
-    // Create HEAD (store the branch name as before; ref format stored in config)
+    // Initialize HEAD reference pointing to the initial branch.
+    // The branch name is stored in the 'name' field.
     reference::ActiveModel {
         name: Set(Some(initial_branch_name.clone())),
         kind: Set(reference::ConfigKind::Head),

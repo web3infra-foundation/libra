@@ -725,6 +725,11 @@ async fn init_mcp_server(working_dir: &std::path::Path) -> Arc<LibraMcpServer> {
     let db_path = dot_libra.join("libra.db");
     let db_path_str = db_path.to_str().unwrap_or_default();
 
+    #[cfg(target_os = "windows")]
+    let db_path_string = db_path_str.replace("\\", "/");
+    #[cfg(target_os = "windows")]
+    let db_path_str = &db_path_string;
+
     let db_conn = match crate::internal::db::establish_connection(db_path_str).await {
         Ok(conn) => Arc::new(conn),
         Err(e) => {

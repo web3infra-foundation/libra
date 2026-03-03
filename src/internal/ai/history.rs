@@ -295,7 +295,20 @@ impl HistoryManager {
                     .map_err(|e| GitError::InvalidObjectInfo(e.to_string())),
                 None => Ok(None),
             },
-            None => Ok(None),
+            None => {
+                // Fallback: check file system for legacy reference
+                let ref_path = self.repo_path.join(&self.ref_name);
+                if ref_path.exists() {
+                    let content = std::fs::read_to_string(&ref_path).map_err(GitError::IOError)?;
+                    let hash_str = content.trim();
+                    if let Ok(hash) = ObjectHash::from_str(hash_str) {
+                        // Found legacy ref, migrate to DB
+                        self.update_ref(&self.ref_name, hash).await?;
+                        return Ok(Some(hash));
+                    }
+                }
+                Ok(None)
+            }
         }
     }
 
@@ -463,5 +476,37 @@ mod tests {
         let content = String::from_utf8_lossy(&data);
         assert!(content.contains("tree "));
         assert!(content.contains("Update run/run-1"));
+    }
+
+    #[tokio::test]
+    async fn test_history_legacy_fallback() {
+        let dir = tempdir().unwrap();
+        let repo_path = dir.path().join(".libra");
+        std::fs::create_dir(&repo_path).unwrap();
+        // Create the legacy ref file
+        let legacy_ref_path = repo_path.join("libra").join("intent");
+        std::fs::create_dir_all(legacy_ref_path.parent().unwrap()).unwrap();
+        let commit_hash = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
+        std::fs::write(&legacy_ref_path, format!("{}\n", commit_hash)).unwrap();
+
+        let objects_dir = repo_path.join("objects");
+        let storage = Arc::new(LocalStorage::new(objects_dir));
+        let db_conn = Arc::new(setup_test_db().await);
+        let manager = HistoryManager::new(storage.clone(), repo_path.clone(), db_conn.clone());
+
+        // Should resolve from file system
+        let head = manager.resolve_history_head().await.unwrap();
+        assert_eq!(head, Some(ObjectHash::from_str(commit_hash).unwrap()));
+
+        // Should have migrated to DB
+        let ref_model = reference::Entity::find()
+            .filter(reference::Column::Name.eq(AI_REF))
+            .filter(reference::Column::Kind.eq(ConfigKind::Intent))
+            .one(&*db_conn)
+            .await
+            .unwrap();
+
+        assert!(ref_model.is_some());
+        assert_eq!(ref_model.unwrap().commit, Some(commit_hash.to_string()));
     }
 }

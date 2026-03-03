@@ -28,13 +28,13 @@ pub async fn execute(args: CheckoutArgs) {
         && branch_name == "intent"
     {
         eprintln!("fatal: checking out 'intent' branch is not allowed");
-        return;
+        std::process::exit(1);
     }
     if let Some(ref new_branch_name) = args.new_branch
         && new_branch_name == "intent"
     {
         eprintln!("fatal: creating/switching to 'intent' branch is not allowed");
-        return;
+        std::process::exit(1);
     }
 
     if switch::check_status().await {
@@ -68,7 +68,7 @@ async fn show_current_branch() {
 pub async fn switch_branch(branch_name: &str) {
     if branch_name == "intent" {
         eprintln!("fatal: switching to 'intent' branch is not allowed");
-        return;
+        std::process::exit(1);
     }
     let target_branch: Option<Branch> = Branch::find_branch(branch_name, None).await;
     let commit_id = target_branch.unwrap().commit;

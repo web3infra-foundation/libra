@@ -54,6 +54,41 @@ impl RemoteStorage {
             None => ObjectPath::from(format!("{}/{}", &h[0..2], &h[2..])),
         }
     }
+
+    pub async fn put_metadata(&self, data: &[u8]) -> Result<(), GitError> {
+        let path = match &self.key_prefix {
+            Some(prefix) => ObjectPath::from(format!("{}/metadata.json", prefix)),
+            None => ObjectPath::from("metadata.json"),
+        };
+
+        self.inner
+            .put(&path, Bytes::from(data.to_vec()).into())
+            .await
+            .map_err(|e| GitError::IOError(std::io::Error::other(e)))?;
+
+        Ok(())
+    }
+
+    pub async fn get_metadata(&self) -> Result<Vec<u8>, GitError> {
+        let path = match &self.key_prefix {
+            Some(prefix) => ObjectPath::from(format!("{}/metadata.json", prefix)),
+            None => ObjectPath::from("metadata.json"),
+        };
+
+        let result = self.inner.get(&path).await.map_err(|e| match e {
+            object_store::Error::NotFound { .. } => {
+                GitError::ObjectNotFound(format!("Metadata not found: {}", e))
+            }
+            _ => GitError::IOError(std::io::Error::other(e)),
+        })?;
+
+        let bytes = result
+            .bytes()
+            .await
+            .map_err(|e| GitError::IOError(std::io::Error::other(e)))?;
+
+        Ok(bytes.to_vec())
+    }
 }
 
 #[async_trait]

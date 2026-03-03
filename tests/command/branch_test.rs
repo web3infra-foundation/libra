@@ -541,10 +541,7 @@ async fn test_list_all_branches() {
     execute(args).await; // This will print to stdout, which is fine for tests
 
     // Verify branches exist
-    assert!(
-        Branch::find_branch("main", None).await.is_some()
-            || Branch::find_branch("main", None).await.is_some()
-    );
+    assert!(Branch::find_branch("main", None).await.is_some());
     assert!(Branch::find_branch("feature_branch", None).await.is_some());
     assert!(
         Branch::find_branch("remote_branch", Some("origin"))

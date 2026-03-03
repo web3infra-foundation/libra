@@ -17,7 +17,11 @@ use uuid::Uuid;
 
 use crate::{
     cli_error,
-    internal::{config::Config, db, model::object_index},
+    internal::{
+        config::Config,
+        db,
+        model::{object_index, reference},
+    },
     utils::{
         d1_client::D1Client,
         path,
@@ -234,6 +238,9 @@ async fn execute_sync(args: SyncArgs) -> Result<(), String> {
     if failed_count > 0 {
         Err(format!("{} objects failed to sync", failed_count))
     } else {
+        if let Err(e) = sync_metadata(db_conn, &r2_storage).await {
+            eprintln!("warning: failed to sync metadata: {}", e);
+        }
         Ok(())
     }
 }
@@ -438,14 +445,34 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
     if failed > 0 {
         Err(format!("{} objects failed to restore", failed))
     } else {
+        // Restore metadata
+        if let Err(e) = restore_metadata(db_conn, &r2_storage).await {
+            eprintln!("warning: failed to restore metadata: {}", e);
+        }
+
         // Post-restore: update HEAD and restore worktree if we're in a fresh repo state
         // This handles the case where we restored a repo into an empty directory
         // We try to find the latest commit and checkout to it
 
-        // Check if HEAD is currently unborn (no commit)
+        // Check if HEAD has a commit (either restored or existing)
         let head_commit = crate::internal::head::Head::current_commit().await;
-        if head_commit.is_none() {
-            println!("Restoring working directory...");
+
+        if let Some(commit) = head_commit {
+            println!("Restoring working directory to HEAD ({})", commit);
+            let restore_args = crate::command::restore::RestoreArgs {
+                pathspec: vec![".".to_string()], // restore everything
+                source: Some("HEAD".to_string()),
+                worktree: true,
+                staged: true,
+            };
+
+            if let Err(e) = crate::command::restore::execute_checked(restore_args).await {
+                eprintln!("warning: failed to restore worktree files: {}", e);
+            } else {
+                println!("Successfully restored working directory files.");
+            }
+        } else {
+            println!("Restoring working directory (fallback)...");
 
             // Find the latest commit from the restored objects
             // We look for commit objects in the object_index table
@@ -466,6 +493,13 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
                 // We assume 'main' is the default branch for now
                 crate::internal::branch::Branch::update_branch("main", &commit_model.o_id, None)
                     .await;
+
+                // Update HEAD to point to main
+                crate::internal::head::Head::update(
+                    crate::internal::head::Head::Branch("main".to_string()),
+                    None,
+                )
+                .await;
 
                 // Restore files to worktree
                 // We use the restore command logic programmatically
@@ -629,6 +663,92 @@ async fn ensure_repo_id() -> Result<String, String> {
         .await;
 
     Ok(repo_id)
+}
+
+async fn sync_metadata(
+    db_conn: &sea_orm::DatabaseConnection,
+    r2_storage: &RemoteStorage,
+) -> Result<(), String> {
+    println!("Syncing metadata...");
+    let references = reference::Entity::find()
+        .all(db_conn)
+        .await
+        .map_err(|e| format!("Failed to fetch references: {}", e))?;
+
+    let json = serde_json::to_vec(&references)
+        .map_err(|e| format!("Failed to serialize metadata: {}", e))?;
+
+    r2_storage
+        .put_metadata(&json)
+        .await
+        .map_err(|e| format!("Failed to upload metadata: {}", e))?;
+
+    println!("Metadata synced ({} references).", references.len());
+    Ok(())
+}
+
+async fn restore_metadata(
+    db_conn: &sea_orm::DatabaseConnection,
+    r2_storage: &RemoteStorage,
+) -> Result<(), String> {
+    println!("Restoring metadata...");
+
+    let data = match r2_storage.get_metadata().await {
+        Ok(data) => data,
+        Err(e) => {
+            println!("warning: failed to download metadata: {}", e);
+            return Ok(());
+        }
+    };
+
+    let references: Vec<reference::Model> = serde_json::from_slice(&data)
+        .map_err(|e| format!("Failed to deserialize metadata: {}", e))?;
+
+    for ref_model in references {
+        // Find existing reference by name and kind
+        let mut query =
+            reference::Entity::find().filter(reference::Column::Kind.eq(ref_model.kind.clone()));
+
+        if let Some(name) = &ref_model.name {
+            query = query.filter(reference::Column::Name.eq(name));
+        } else {
+            query = query.filter(reference::Column::Name.is_null());
+        }
+
+        let existing = query
+            .one(db_conn)
+            .await
+            .map_err(|e| format!("DB error: {}", e))?;
+
+        if let Some(existing_model) = existing {
+            let mut active: reference::ActiveModel = existing_model.into();
+            active.commit = Set(ref_model.commit.clone());
+            active.remote = Set(ref_model.remote.clone());
+            if let Err(e) = active.update(db_conn).await {
+                eprintln!(
+                    "warning: failed to update reference {:?}: {}",
+                    ref_model.name, e
+                );
+            }
+        } else {
+            let active = reference::ActiveModel {
+                name: Set(ref_model.name.clone()),
+                kind: Set(ref_model.kind.clone()),
+                commit: Set(ref_model.commit.clone()),
+                remote: Set(ref_model.remote.clone()),
+                ..Default::default()
+            };
+            if let Err(e) = active.insert(db_conn).await {
+                eprintln!(
+                    "warning: failed to insert reference {:?}: {}",
+                    ref_model.name, e
+                );
+            }
+        }
+    }
+
+    println!("Metadata restored.");
+    Ok(())
 }
 
 #[cfg(test)]
