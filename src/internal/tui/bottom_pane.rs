@@ -385,7 +385,7 @@ impl BottomPane {
         // Question text
         lines.push(Line::styled(
             format!("  {}", question.question),
-            Style::default().fg(Color::White),
+            Style::default(),
         ));
 
         let selected = self.user_input_selected_option;
@@ -401,7 +401,7 @@ impl BottomPane {
                 let style = if i == selected {
                     Style::default().fg(Color::Cyan).bold()
                 } else {
-                    Style::default().fg(Color::White)
+                    Style::default()
                 };
                 lines.push(Line::styled(
                     format!("  {} {}. {}  {}", marker, i + 1, label, description),
@@ -420,7 +420,7 @@ impl BottomPane {
                 let style = if selected == other_idx {
                     Style::default().fg(Color::Cyan).bold()
                 } else {
-                    Style::default().fg(Color::DarkGray)
+                    Style::default().add_modifier(Modifier::DIM)
                 };
                 lines.push(Line::styled(
                     format!(
@@ -454,7 +454,7 @@ impl BottomPane {
         } else {
             "[↑/↓: Select] [1-9: Quick select] [Tab: Notes] [Enter: Submit] [Esc: Cancel]"
         };
-        let help_line = Line::styled(help, Style::default().fg(Color::DarkGray));
+        let help_line = Line::styled(help, Style::default().add_modifier(Modifier::DIM));
         Paragraph::new(help_line).render(chunks[4], buf);
 
         // Show cursor: for freeform always, for options only when notes focused
@@ -485,7 +485,10 @@ impl BottomPane {
         let inner = block.inner(area);
 
         let display = if self.user_input_notes_text.is_empty() {
-            Text::styled("Tab to add notes...", Style::default().fg(Color::DarkGray))
+            Text::styled(
+                "Tab to add notes...",
+                Style::default().add_modifier(Modifier::DIM),
+            )
         } else {
             Text::raw(&self.user_input_notes_text)
         };
@@ -550,7 +553,7 @@ impl BottomPane {
             };
             let text = format!("{}{}", prefix, truncated_desc);
             let style = if is_selected {
-                Style::default().fg(Color::White).bg(Color::DarkGray)
+                Style::default().add_modifier(Modifier::REVERSED)
             } else {
                 Style::default().fg(Color::White)
             };
@@ -559,7 +562,7 @@ impl BottomPane {
 
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray))
+            .border_style(Style::default().add_modifier(Modifier::DIM))
             .title(" Commands ");
 
         let paragraph = Paragraph::new(Text::from(lines)).block(block);
@@ -605,7 +608,7 @@ impl BottomPane {
                 "Type your message..."
             };
             (
-                Text::styled(placeholder, Style::default().fg(Color::DarkGray)),
+                Text::styled(placeholder, Style::default().add_modifier(Modifier::DIM)),
                 0u16,
             )
         } else {
@@ -642,7 +645,7 @@ impl BottomPane {
             }
         };
 
-        let help_line = Line::styled(help, Style::default().fg(Color::DarkGray));
+        let help_line = Line::styled(help, Style::default().add_modifier(Modifier::DIM));
         Paragraph::new(help_line).render(area, buf);
     }
 
