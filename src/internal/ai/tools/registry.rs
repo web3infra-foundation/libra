@@ -260,7 +260,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_registry_registration() {
-        let mut registry = ToolRegistry::new();
+        let mut registry = ToolRegistry::with_working_dir(std::path::PathBuf::from("/tmp"));
         registry.register("mock", Arc::new(MockHandler));
 
         assert!(registry.contains_tool("mock"));
@@ -270,7 +270,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_registry_dispatch() {
-        let mut registry = ToolRegistry::new();
+        let mut registry = ToolRegistry::with_working_dir(std::path::PathBuf::from("/tmp"));
         registry.register("mock", Arc::new(MockHandler));
 
         let invocation = ToolInvocation::new(
@@ -289,7 +289,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_registry_tool_not_found() {
-        let registry = ToolRegistry::new();
+        let registry = ToolRegistry::with_working_dir(std::path::PathBuf::from("/tmp"));
 
         let invocation = ToolInvocation::new(
             "call-1",
@@ -306,7 +306,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_registry_incompatible_payload() {
-        let mut registry = ToolRegistry::new();
+        let mut registry = ToolRegistry::with_working_dir(std::path::PathBuf::from("/tmp"));
         registry.register("mock", Arc::new(MockHandler));
 
         // MockHandler is Function kind, but we send Custom payload
@@ -325,7 +325,7 @@ mod tests {
 
     #[test]
     fn test_tool_specs() {
-        let mut registry = ToolRegistry::new();
+        let mut registry = ToolRegistry::with_working_dir(std::path::PathBuf::from("/tmp"));
         registry.register("mock", Arc::new(MockHandler));
 
         let specs = registry.tool_specs();
@@ -339,7 +339,7 @@ mod tests {
 
     #[test]
     fn test_registry_builder() {
-        let registry = ToolRegistryBuilder::new()
+        let registry = ToolRegistryBuilder::with_working_dir(std::path::PathBuf::from("/tmp"))
             .register("mock", Arc::new(MockHandler))
             .working_dir("/tmp".into())
             .build();
