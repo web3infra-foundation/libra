@@ -1316,7 +1316,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         pending.spec_json
                     );
                     self.widget
-                        .add_cell(Box::new(AssistantHistoryCell::new(msg)));
+                        .add_cell(Box::new(AssistantHistoryCell::new(msg.clone())));
+                    self.history.push(Message::assistant(msg.clone()));
+                    self.session.add_assistant_message(&msg);
                 }
                 self.widget.bottom_pane.set_status(AgentStatus::Idle);
             }
