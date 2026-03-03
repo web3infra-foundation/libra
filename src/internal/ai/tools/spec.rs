@@ -1,7 +1,7 @@
 //! Tool specification types for OpenAI-compatible function calling.
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 
 /// A tool specification compatible with OpenAI's function calling format.
 ///
@@ -153,6 +153,7 @@ impl ToolSpec {
                         props
                     },
                     required: vec!["plan".to_string()],
+                    definitions: None,
                 },
             },
         }
@@ -209,38 +210,6 @@ impl ToolSpec {
                                             "integrationChecks": {"type": "array", "items": {"$ref": "#/$defs/check"}},
                                             "securityChecks": {"type": "array", "items": {"$ref": "#/$defs/check"}},
                                             "releaseChecks": {"type": "array", "items": {"$ref": "#/$defs/check"}}
-                                        },
-                                        "$defs": {
-                                            "check": {
-                                                "type": "object",
-                                                "required": ["id", "kind"],
-                                                "properties": {
-                                                    "id": {"type": "string"},
-                                                    "kind": {"type": "string", "enum": ["command", "testSuite", "policy"]},
-                                                    "command": {"type": "string"},
-                                                    "timeoutSeconds": {"type": "integer"},
-                                                    "expectedExitCode": {"type": "integer"},
-                                                    "required": {"type": "boolean"},
-                                                    "artifactsProduced": {
-                                                        "type": "array",
-                                                        "description": "Names of produced evidence artifacts. Must be one of the supported artifact names (not file paths).",
-                                                        "items": {
-                                                            "type": "string",
-                                                            "enum": [
-                                                                "patchset",
-                                                                "test-log",
-                                                                "build-log",
-                                                                "sast-report",
-                                                                "sca-report",
-                                                                "sbom",
-                                                                "provenance-attestation",
-                                                                "transparency-proof",
-                                                                "release-notes"
-                                                            ]
-                                                        }
-                                                    }
-                                                }
-                                            }
                                         }
                                     },
                                     "risk": {
@@ -258,6 +227,43 @@ impl ToolSpec {
                         props
                     },
                     required: vec!["draft".to_string()],
+                    definitions: Some({
+                        let mut defs = Map::new();
+                        defs.insert(
+                            "check".to_string(),
+                            json!({
+                                "type": "object",
+                                "required": ["id", "kind"],
+                                "properties": {
+                                    "id": {"type": "string"},
+                                    "kind": {"type": "string", "enum": ["command", "testSuite", "policy"]},
+                                    "command": {"type": "string"},
+                                    "timeoutSeconds": {"type": "integer"},
+                                    "expectedExitCode": {"type": "integer"},
+                                    "required": {"type": "boolean"},
+                                    "artifactsProduced": {
+                                        "type": "array",
+                                        "description": "Names of produced evidence artifacts. Must be one of the supported artifact names (not file paths).",
+                                        "items": {
+                                            "type": "string",
+                                            "enum": [
+                                                "patchset",
+                                                "test-log",
+                                                "build-log",
+                                                "sast-report",
+                                                "sca-report",
+                                                "sbom",
+                                                "provenance-attestation",
+                                                "transparency-proof",
+                                                "release-notes"
+                                            ]
+                                        }
+                                    }
+                                }
+                            }),
+                        );
+                        defs
+                    }),
                 },
             },
         }
@@ -337,6 +343,7 @@ impl ToolSpec {
                         props
                     },
                     required: vec!["questions".to_string()],
+                    definitions: None,
                 },
             },
         }
@@ -466,6 +473,9 @@ pub enum FunctionParameters {
         properties: Map<String, Value>,
         /// Required properties.
         required: Vec<String>,
+        /// JSON Schema definitions for $ref resolution.
+        #[serde(rename = "$defs", skip_serializing_if = "Option::is_none")]
+        definitions: Option<Map<String, Value>>,
     },
 }
 
@@ -507,6 +517,7 @@ impl FunctionParameters {
             param_type: "object".to_string(),
             properties: props,
             required: req,
+            definitions: None,
         }
     }
 
@@ -592,6 +603,7 @@ impl ToolSpecBuilder {
                         param_type: "object".to_string(),
                         properties: self.parameters,
                         required: self.required,
+                        definitions: None,
                     }
                 },
             },
@@ -642,6 +654,7 @@ mod tests {
                 param_type,
                 properties,
                 required,
+                definitions: _,
             } => {
                 assert_eq!(param_type, "object");
                 assert!(properties.contains_key("test"));
@@ -680,5 +693,30 @@ mod tests {
 
         assert_eq!(parsed["type"], "function");
         assert_eq!(parsed["function"]["name"], "read_file");
+    }
+
+    #[test]
+    fn test_submit_intent_draft_definitions_at_root() {
+        let spec = ToolSpec::submit_intent_draft();
+        let json_str = serde_json::to_string(&spec).unwrap();
+        let parsed: Value = serde_json::from_str(&json_str).unwrap();
+
+        // $defs should be at root level of parameters, not nested inside acceptance
+        let params = &parsed["function"]["parameters"];
+        assert!(
+            params.get("$defs").is_some(),
+            "$defs should be at root level"
+        );
+        assert!(
+            params["$defs"]["check"].is_object(),
+            "check definition should exist"
+        );
+
+        // acceptance should NOT have nested $defs
+        let acceptance = &params["properties"]["draft"]["properties"]["acceptance"];
+        assert!(
+            acceptance.get("$defs").is_none(),
+            "$defs should not be nested in acceptance"
+        );
     }
 }

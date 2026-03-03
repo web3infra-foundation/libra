@@ -111,6 +111,7 @@ fn schema_to_params<T: rmcp::schemars::JsonSchema>() -> FunctionParameters {
         param_type: "object".to_string(),
         properties,
         required,
+        definitions: None,
     }
 }
 
