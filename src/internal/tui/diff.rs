@@ -155,7 +155,7 @@ fn render_changes_block(rows: Vec<Row>, wrap_cols: usize, cwd: &Path) -> Vec<Lin
         if !summary.is_empty() {
             out.push(Line::from(vec![
                 Span::raw(format!("{indent}\u{2514} ")),
-                Span::styled(summary, Style::default().fg(Color::DarkGray)),
+                Span::styled(summary, Style::default().add_modifier(Modifier::DIM)),
             ]));
         }
 

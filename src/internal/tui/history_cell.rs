@@ -120,12 +120,7 @@ impl HistoryCell for UserHistoryCell {
         )];
 
         for line in self.message.lines() {
-            lines.extend(wrap_text(
-                line,
-                "  ",
-                width,
-                Style::default().fg(Color::White),
-            ));
+            lines.extend(wrap_text(line, "  ", width, Style::default()));
         }
 
         lines.push(Line::raw("")); // Empty line for spacing
@@ -191,7 +186,7 @@ impl HistoryCell for AssistantHistoryCell {
             if self.is_streaming {
                 lines.push(Line::styled(
                     "  Thinking...",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().add_modifier(Modifier::DIM),
                 ));
             }
         } else {
@@ -213,12 +208,7 @@ impl HistoryCell for AssistantHistoryCell {
                         Style::default().fg(Color::Yellow),
                     ));
                 } else {
-                    lines.extend(wrap_text(
-                        line,
-                        "  ",
-                        width,
-                        Style::default().fg(Color::White),
-                    ));
+                    lines.extend(wrap_text(line, "  ", width, Style::default()));
                 }
             }
         }
@@ -316,7 +306,7 @@ impl HistoryCell for ToolCallHistoryCell {
         };
         lines.push(Line::styled(
             format!("  Args: {}", truncated),
-            Style::default().fg(Color::DarkGray),
+            Style::default().add_modifier(Modifier::DIM),
         ));
 
         // Result
@@ -453,7 +443,7 @@ impl HistoryCell for PlanUpdateHistoryCell {
                 explanation,
                 "  ",
                 width,
-                Style::default().fg(Color::DarkGray).italic(),
+                Style::default().add_modifier(Modifier::DIM).italic(),
             ));
         }
 
@@ -463,11 +453,11 @@ impl HistoryCell for PlanUpdateHistoryCell {
                 StepStatus::Completed => (
                     "✔",
                     Style::default()
-                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::DIM)
                         .add_modifier(Modifier::CROSSED_OUT),
                 ),
                 StepStatus::InProgress => ("◐", Style::default().fg(Color::Cyan).bold()),
-                StepStatus::Pending => ("□", Style::default().fg(Color::DarkGray)),
+                StepStatus::Pending => ("□", Style::default().add_modifier(Modifier::DIM)),
             };
 
             lines.extend(wrap_text(
