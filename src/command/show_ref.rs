@@ -1,4 +1,4 @@
-//! Implements `show-ref` to list all refs (branches, tags) with their commit hashes.
+//! Implements `show-ref` to list all refs (branches, tags) with their object IDs.
 
 use clap::Parser;
 
@@ -18,18 +18,16 @@ pub struct ShowRefArgs {
     #[clap(long = "head")]
     pub head: bool,
 
-    /// Only show the SHA-1 hash, not the reference name
-    #[clap(short = 'q', long = "hash")]
+    /// Only show the object hash, not the reference name
+    #[clap(short = 's', long = "hash")]
     pub hash: bool,
 
     /// Filter refs by pattern (substring match on the ref name)
     pub pattern: Vec<String>,
 }
 
-pub async fn execute(args: ShowRefArgs) {
-    if let Err(e) = run_show_ref(args).await {
-        eprintln!("fatal: {}", e);
-    }
+pub async fn execute(args: ShowRefArgs) -> Result<(), String> {
+    run_show_ref(args).await
 }
 
 async fn run_show_ref(args: ShowRefArgs) -> Result<(), String> {

@@ -303,7 +303,9 @@ pub async fn parse_async(args: Option<&[&str]>) -> Result<(), GitError> {
         Commands::Log(args) => command::log::execute(args).await,
         Commands::Shortlog(args) => command::shortlog::execute(args).await,
         Commands::Show(args) => command::show::execute(args).await,
-        Commands::ShowRef(args) => command::show_ref::execute(args).await,
+        Commands::ShowRef(args) => command::show_ref::execute(args)
+            .await
+            .map_err(GitError::CustomError)?,
         Commands::Branch(args) => command::branch::execute(args).await,
         Commands::Tag(args) => command::tag::execute(args).await,
         Commands::Commit(args) => command::commit::execute(args).await,
