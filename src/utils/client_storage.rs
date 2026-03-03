@@ -1,10 +1,16 @@
 use std::{
     io::{self, Read, Write},
     path::PathBuf,
-    sync::{Arc, mpsc},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    },
+    time::Duration,
 };
 
 use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
+use futures::FutureExt; // Import for catch_unwind
 use git_internal::{
     errors::GitError,
     hash::ObjectHash,
@@ -12,11 +18,16 @@ use git_internal::{
 };
 use once_cell::sync::Lazy;
 use regex::Regex;
-use tokio::runtime::Runtime;
+use sea_orm::{ActiveModelTrait, Set};
+use tokio::{
+    runtime::Runtime,
+    sync::mpsc::{Sender, channel, error::TrySendError},
+};
+use uuid::Uuid;
 
 use crate::{
     command::load_object,
-    internal::{branch::Branch, head::Head},
+    internal::{branch::Branch, config::Config, db, head::Head, model::object_index},
     utils::storage::{Storage, local::LocalStorage, remote::RemoteStorage, tiered::TieredStorage},
 };
 
@@ -27,6 +38,54 @@ static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
         .build()
         .unwrap()
 });
+
+// Index update message
+#[derive(Clone)]
+struct IndexUpdateMsg {
+    hash: String,
+    obj_type: String,
+    size: i64,
+}
+
+// Helper guard to ensure PENDING_TASKS is decremented even if task panics
+struct TaskGuard;
+impl Drop for TaskGuard {
+    fn drop(&mut self) {
+        PENDING_TASKS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+// Global channel for index updates
+// Using Bounded channel to apply backpressure
+// The consumer will process updates sequentially to avoid DB lock contention.
+static INDEX_UPDATE_CHANNEL: Lazy<Sender<IndexUpdateMsg>> = Lazy::new(|| {
+    let (tx, mut rx) = channel::<IndexUpdateMsg>(1000);
+
+    RUNTIME.spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            // Guard ensures decrement happens on drop (scope exit or panic)
+            let _guard = TaskGuard;
+
+            // Wrap in AssertUnwindSafe to catch panics from DB operations
+            // This prevents the consumer loop from dying if one update fails hard
+            let future = async {
+                if let Err(e) = update_object_index(&msg.hash, &msg.obj_type, msg.size).await {
+                    tracing::warn!("Failed to update object index for {}: {}", msg.hash, e);
+                }
+            };
+            let result = std::panic::AssertUnwindSafe(future).catch_unwind().await;
+
+            if let Err(payload) = result {
+                tracing::error!("Panic in background index update task: {:?}", payload);
+            }
+        }
+    });
+
+    tx
+});
+
+// Counter for active background tasks
+static PENDING_TASKS: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone)]
 pub struct ClientStorage {
@@ -41,6 +100,17 @@ impl ClientStorage {
         ClientStorage { storage, base_path }
     }
 
+    /// Create a storage backend.
+    ///
+    /// # Remote Storage
+    /// If `LIBRA_STORAGE_TYPE` is set to "s3" or "r2", it configures a tiered storage
+    /// with local cache and remote persistence.
+    ///
+    /// ## Repo ID Isolation
+    /// When remote storage is enabled, it attempts to read `libra.repoid` from the configuration.
+    /// If found, it uses `repo_id` as a key prefix (`<repo_id>/objects/...`) for isolation.
+    /// If not found (e.g., during init before config exists), it defaults to no prefix (root of bucket),
+    /// which might be risky for multi-tenant buckets but acceptable for single-repo buckets.
     fn create_storage_backend(base_path: PathBuf) -> Arc<dyn Storage> {
         // Check for object storage configuration
         if let Ok(storage_type) = std::env::var("LIBRA_STORAGE_TYPE") {
@@ -106,7 +176,10 @@ impl ClientStorage {
                 }
             };
 
-            let remote = RemoteStorage::new(object_store);
+            let remote = match get_or_create_repo_id_for_prefix() {
+                Some(repo_id) => RemoteStorage::new_with_prefix(object_store, repo_id),
+                None => RemoteStorage::new(object_store),
+            };
             let local = LocalStorage::new(base_path.clone());
 
             let threshold = std::env::var("LIBRA_STORAGE_THRESHOLD")
@@ -146,6 +219,24 @@ impl ClientStorage {
         rx.recv().unwrap()
     }
 
+    /// Wait for all background tasks (e.g. indexing) to complete
+    pub fn wait_for_background_tasks() {
+        // Wait until all tasks finish
+        let mut waited = 0;
+        loop {
+            let pending = PENDING_TASKS.load(Ordering::Relaxed);
+            if pending == 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            waited += 100;
+            if waited >= 5000 {
+                tracing::info!("Waiting for {} background tasks to complete...", pending);
+                waited = 0;
+            }
+        }
+    }
+
     pub fn get(&self, object_id: &ObjectHash) -> Result<Vec<u8>, GitError> {
         let storage = self.storage.clone();
         let hash = *object_id;
@@ -161,13 +252,54 @@ impl ClientStorage {
         let storage = self.storage.clone();
         let hash = *obj_id;
         let data = content.to_vec();
+        let data_len = data.len();
+        let hash_str = hash.to_string();
+        let type_str = obj_type.to_string();
 
-        self.block_on_storage(async move {
+        // First, store the object
+        let result = self.block_on_storage(async move {
             storage
                 .put(&hash, &data, obj_type)
                 .await
                 .map_err(|e| io::Error::other(e.to_string()))
-        })
+        })?;
+
+        // Update object index asynchronously (via sequential queue)
+        // This ensures CLI commands don't block on indexing, and avoids DB lock contention.
+        if let Ok(storage_path) = crate::utils::util::try_get_storage_path(None) {
+            let db_path = storage_path.join(crate::utils::util::DATABASE);
+            if db_path.exists() {
+                let hash_str = hash_str.clone();
+                let type_str = type_str.clone();
+
+                PENDING_TASKS.fetch_add(1, Ordering::Relaxed);
+
+                // Send to global channel
+                // If channel is closed (runtime shutting down), we can't do much, but that's unlikely in normal CLI flow.
+                let msg = IndexUpdateMsg {
+                    hash: hash_str,
+                    obj_type: type_str,
+                    size: data_len as i64,
+                };
+
+                loop {
+                    match INDEX_UPDATE_CHANNEL.try_send(msg.clone()) {
+                        Ok(_) => break,
+                        Err(TrySendError::Full(_)) => {
+                            // Channel full, wait a bit and retry (backpressure)
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(TrySendError::Closed(_)) => {
+                            PENDING_TASKS.fetch_sub(1, Ordering::Relaxed);
+                            tracing::warn!("Failed to queue object index update: channel closed");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(result)
     }
 
     pub fn exist(&self, obj_id: &ObjectHash) -> bool {
@@ -340,6 +472,80 @@ impl ClientStorage {
         decoder.read_to_end(&mut decompressed_data)?;
         Ok(decompressed_data)
     }
+}
+
+fn get_or_create_repo_id_for_prefix() -> Option<String> {
+    let storage_path = crate::utils::util::try_get_storage_path(None).ok()?;
+    let db_path = storage_path.join(crate::utils::util::DATABASE);
+    if !db_path.exists() {
+        return None;
+    }
+
+    let (tx, rx) = mpsc::channel();
+    RUNTIME.spawn(async move {
+        let mut repo_id = Config::get("libra", None, "repoid").await;
+        let needs_init = repo_id
+            .as_deref()
+            .map(|s| s.is_empty() || s == "unknown-repo")
+            .unwrap_or(true);
+        if needs_init {
+            let new_id = Uuid::new_v4().to_string();
+            Config::insert("libra", None, "repoid", &new_id).await;
+            repo_id = Some(new_id);
+        }
+        let _ = tx.send(repo_id);
+    });
+
+    rx.recv().ok().flatten()
+}
+
+/// Get the repository ID from config, or return a default if not found
+async fn get_repo_id() -> String {
+    crate::internal::config::Config::get("libra", None, "repoid")
+        .await
+        .unwrap_or_else(|| "unknown-repo".to_string())
+}
+
+/// Update object_index table for cloud backup tracking
+async fn update_object_index(o_id: &str, o_type: &str, o_size: i64) -> Result<(), String> {
+    // Note: Caller should ensure we're in a valid repo context before calling this
+    let repo_id = get_repo_id().await;
+    let created_at = chrono::Utc::now().timestamp();
+
+    // Get database connection
+    let db_conn = db::get_db_conn_instance().await;
+
+    // Check if object already exists
+    // With multi-repo support, we must check (o_id, repo_id)
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let existing = object_index::Entity::find()
+        .filter(object_index::Column::OId.eq(o_id))
+        .filter(object_index::Column::RepoId.eq(&repo_id))
+        .one(db_conn)
+        .await
+        .map_err(|e| format!("Database query failed: {}", e))?;
+
+    if existing.is_some() {
+        return Ok(());
+    }
+
+    // Insert new object index entry
+    let entry = object_index::ActiveModel {
+        o_id: Set(o_id.to_string()),
+        o_type: Set(o_type.to_string()),
+        o_size: Set(o_size),
+        repo_id: Set(repo_id),
+        created_at: Set(created_at),
+        is_synced: Set(0), // Not synced to cloud yet
+        ..Default::default()
+    };
+
+    entry
+        .insert(db_conn)
+        .await
+        .map_err(|e| format!("Failed to insert object index: {}", e))?;
+
+    Ok(())
 }
 
 #[cfg(test)]

@@ -47,6 +47,7 @@ Commands:
   config       Manage repository configurations
   reflog       Manage the log of reference changes (e.g., HEAD, branches)
   worktree     Manage multiple working trees attached to this repository
+  cloud        Cloud backup and restore operations (D1/R2)
   help         Print this message or the help of the given subcommand(s)
 
 Options:
@@ -113,6 +114,46 @@ Update your `claude_desktop_config.json` as follows:
 
 > **Note**: The `cwd` (current working directory) must be set to the root of a valid Libra repository.
 > If `libra code` is launched outside of a repository, it will exit with an error.
+
+### AI Provider Selection
+
+Libra Code supports multiple AI provider backends. Use the `--provider` and `--model` flags to choose which LLM to use:
+
+```bash
+# Gemini (default)
+libra code --provider gemini
+libra code --provider gemini --model gemini-2.5-flash
+
+# OpenAI
+libra code --provider openai --model gpt-4o
+
+# Anthropic
+libra code --provider anthropic --model claude-3-5-sonnet-latest
+
+# DeepSeek
+libra code --provider deepseek
+
+# Zhipu (GLM)
+libra code --provider zhipu --model glm-5
+
+# Ollama (local inference, no API key required, --model is required)
+libra code --provider ollama --model llama3.2
+libra code --provider ollama --model codellama
+
+# Ollama with a remote instance
+libra code --provider ollama --model llama3.2 --api-base http://remote-host:11434/v1
+```
+
+> **Note**: The `--api-base` CLI flag is only honored for the `ollama` provider. Other providers accept custom base URLs through their respective environment variables (e.g. `OPENAI_BASE_URL`).
+
+| Provider | Default Model | API Key Env Variable | Base URL Override |
+|----------|--------------|---------------------|-------------------|
+| `gemini` | `gemini-2.5-flash` | `GEMINI_API_KEY` | — |
+| `openai` | `gpt-4o-mini` | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
+| `anthropic` | `claude-3-5-sonnet-latest` | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
+| `deepseek` | `deepseek-chat` | `DEEPSEEK_API_KEY` | *(programmatic only)* |
+| `zhipu` | `glm-5` | `ZHIPU_API_KEY` | `ZHIPU_BASE_URL` |
+| `ollama` | *(requires `--model`)* | — | `OLLAMA_BASE_URL` or `--api-base` |
 
 ---
 
@@ -193,6 +234,38 @@ Configure object storage by setting these environment variables:
 | `LIBRA_STORAGE_ALLOW_HTTP`  | Allow HTTP (non-TLS) endpoints for testing (not for prod)     | No                   | `false`              |
 
 > Note: If any mandatory variable is invalid or empty (for example, empty bucket or credentials), Libra automatically falls back to local storage and logs an error message.
+
+---
+
+## Cloud Backup & Restore
+
+Libra supports backing up your repository to Cloudflare D1 (metadata) and R2 (objects).
+
+### Environment Variables for Backup
+
+In addition to the Object Storage variables, you need to configure D1 credentials:
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `LIBRA_D1_ACCOUNT_ID` | Cloudflare Account ID | Yes |
+| `LIBRA_D1_API_TOKEN` | Cloudflare API Token | Yes |
+| `LIBRA_D1_DATABASE_ID` | Cloudflare D1 Database ID | Yes |
+
+### Commands
+
+- `libra cloud sync` - Sync local repository to cloud (automatically registers project name)
+- `libra cloud restore --name <NAME>` - Restore repository by project name
+- `libra cloud restore --repo-id <ID>` - Restore repository by ID
+- `libra cloud status` - Show synchronization status
+
+### Configuration
+
+You can customize the project name used for cloud backup (defaults to the directory name):
+
+```bash
+libra config cloud.name <my-unique-project-name>
+```
+
 
 ---
 

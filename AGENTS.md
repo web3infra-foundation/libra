@@ -1,4 +1,86 @@
-# Repository Guidelines
+# AGENTS.md
+
+## Review guidelines
+
+Review pull requests with a high-recall, production-risk mindset.
+
+Prioritize finding issues that could plausibly cause:
+- security exposure
+- incorrect behavior
+- silent failure
+- data corruption or data loss
+- backward incompatibility
+- production instability
+- missing validation or missing tests around changed behavior
+- incomplete documentation for externally visible changes
+
+Do not optimize for fewer comments.
+If an issue is plausible, user-impacting, and actionable, raise it.
+
+Focus areas:
+
+- Code quality: readability, maintainability, error handling, edge cases, control flow clarity, and failure modes.
+- Security: vulnerabilities, unsafe defaults, input validation/sanitization, secrets exposure, auth/authz regressions, injection risks, SSRF/path traversal/deserialization/crypto misuse where relevant.
+- Performance: hot-path regressions, N+1 queries, unbounded work, excessive allocations, blocking I/O, memory/resource leaks, missing pagination/batching/caching where impact is likely.
+- Testing: missing coverage for changed behavior, weak assertions, missing regression tests, missing edge-case coverage, flaky test risk.
+- Documentation: missing or stale code comments, README updates, migration notes, config/env var docs, API/SDK/schema docs, changelog or release notes for externally visible behavior.
+
+## Review output
+
+- Use inline comments for specific issues tied to changed files.
+- Use a top-level summary for cross-cutting risks, overall assessment, and praise.
+- Order findings by severity, then user impact, then ease of verification.
+- For each finding, explain:
+  - what is wrong
+  - why it matters
+  - the realistic impact
+  - the minimal fix or direction
+- Prefer one clear finding per issue. Avoid combining unrelated concerns.
+- Avoid style-only nitpicks unless they create maintainability or correctness risk.
+- If no material issues are found, say so briefly and note any residual risk or untested area.
+
+## Severity policy
+
+Treat the following as P0/P1 when applicable:
+
+### P0
+- vulnerabilities enabling unauthorized access, data exfiltration, remote code execution, privilege escalation, or destructive data loss
+- changes likely to cause major outage, irreversible corruption, or widespread security exposure
+
+### P1
+- missing or weakened authentication, authorization, tenancy, or permission checks
+- untrusted input reaching dangerous sinks without adequate validation or sanitization
+- silent exception swallowing, hidden failure paths, or incorrect fallback behavior
+- correctness bugs in business logic, state transitions, retries, idempotency, concurrency, or transaction handling
+- backward-incompatible API, schema, contract, or migration changes without explicit handling
+- performance regressions likely to affect latency, throughput, reliability, or infrastructure cost in production
+- missing tests for changed behavior, bug fixes, edge cases, or critical failure paths
+- missing README, migration, configuration, or API documentation for externally visible changes
+- unsafe logging of secrets, tokens, PII, or sensitive internal details
+- resource lifecycle issues: leaked handles, unreleased locks, missing timeouts, unbounded retries, or unbounded memory growth
+
+## Trigger rules
+
+When deciding whether to raise a finding, err toward reporting if:
+- the change affects auth, permissions, payments, data writes, migrations, caching, concurrency, retries, or external APIs
+- the PR changes public behavior but tests or docs were not updated
+- error handling changed and failure behavior is not explicitly tested
+- a query, loop, or network call is added in a potentially hot path
+- defaults changed in a way that could affect security or production behavior
+- a fix depends on assumptions not enforced in code
+
+Do not dismiss an issue only because:
+- the diff is small
+- the code “probably works”
+- the risk depends on a realistic edge case
+- the fix would be easy to add later
+
+## Commenting style
+
+- Inline comments: concrete file-specific defects or risks.
+- Top-level summary: overall risk, recurring themes, and praise.
+- Be direct and specific.
+- Prefer actionable recommendations over generic advice.
 
 ## Project Structure & Module Organization
 - `src/` holds the Rust crate: CLI entry in `src/main.rs`, crate root in `src/lib.rs`, subcommands under `src/command/`, shared primitives in `src/internal/`, utilities in `src/utils/`.
@@ -27,5 +109,21 @@
 ## Commit & Pull Request Guidelines
 - History uses short, typed summaries with optional scope and PR reference, e.g., `feat(status): support porcelain v2 (#82)` or `fix(push): record tracking reflog (#81)`.
 - Commits must include DCO and PGP signing: `git commit -S -s -m "feat(...): ..."`; ensure the `Signed-off-by` trailer is present.
-- PRs should state intent, linked issues, and tests run (`cargo +nightly fmt`, `cargo clippy`, `cargo test ...`); include repro steps or sample CLI output when touching user-visible behavior.
+- PRs should state intent, linked issues, and tests run (`cargo +nightly fmt --all`, `cargo clippy --all-targets --all-features`, `cargo test --all --all-features`); include repro steps or sample CLI output when touching user-visible behavior.
 - Keep changes small and cohesive; update README/CLI docs when adding flags or altering compatibility tables.
+
+## Aggressive review bias
+
+Prefer false-positive-tolerant review over false-negative-tolerant review for:
+- security-sensitive code
+- data mutations
+- migrations
+- public API changes
+- reliability-critical paths
+
+If uncertain between “mention in summary” and “raise as finding”,
+raise as a finding when the issue could plausibly reach production.
+
+Treat undocumented assumptions as risk.
+Treat untested fixes as incomplete.
+Treat externally visible behavior changes without docs as P1 by default.

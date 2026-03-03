@@ -10,6 +10,7 @@ use git_internal::{
 };
 
 use crate::{
+    cli_error,
     command::{
         load_object,
         log::{ChangeType, generate_diff, get_changed_files_for_commit},
@@ -105,7 +106,7 @@ fn show_object_by_hash<'a>(
         let obj_type = match storage.get_object_type(hash) {
             Ok(t) => t,
             Err(e) => {
-                eprintln!("fatal: could not read object {}: {}", hash, e);
+                cli_error!(e, "fatal: could not read object {}", hash);
                 std::process::exit(1);
             }
         };
@@ -129,7 +130,7 @@ async fn show_commit(commit_hash: &ObjectHash, args: &ShowArgs) {
     let commit = match load_object::<Commit>(commit_hash) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("fatal: could not load commit {}: {}", commit_hash, e);
+            cli_error!(e, "fatal: could not load commit {}", commit_hash);
             std::process::exit(1);
         }
     };
@@ -206,7 +207,7 @@ async fn show_tree(hash: &ObjectHash) {
     let tree = match load_object::<Tree>(hash) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("fatal: could not load tree {}: {}", hash, e);
+            cli_error!(e, "fatal: could not load tree {}", hash);
             std::process::exit(1);
         }
     };
@@ -226,7 +227,7 @@ async fn show_blob(hash: &ObjectHash) {
     let blob = match load_object::<Blob>(hash) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("fatal: could not load blob {}: {}", hash, e);
+            cli_error!(e, "fatal: could not load blob {}", hash);
             std::process::exit(1);
         }
     };
@@ -254,7 +255,7 @@ async fn show_commit_file(rev: &str, file_path: &str, _args: &ShowArgs) {
     let commit = match load_object::<Commit>(&commit_hash) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("fatal: could not load commit: {}", e);
+            cli_error!(e, "fatal: could not load commit");
             std::process::exit(1);
         }
     };
@@ -263,7 +264,7 @@ async fn show_commit_file(rev: &str, file_path: &str, _args: &ShowArgs) {
     let tree = match load_object::<Tree>(&commit.tree_id) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("fatal: could not load tree: {}", e);
+            cli_error!(e, "fatal: could not load tree");
             std::process::exit(1);
         }
     };

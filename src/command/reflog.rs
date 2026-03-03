@@ -16,6 +16,7 @@ use git_internal::{hash::ObjectHash, internal::object::commit::Commit};
 use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait, sqlx::types::chrono};
 
 use crate::{
+    cli_error,
     command::load_object,
     internal::{
         config,
@@ -150,7 +151,7 @@ async fn handle_show(ref_name: &str, options: ReflogShowOptions) {
     let logs = match Reflog::find_all(db, &ref_name).await {
         Ok(logs) => logs,
         Err(e) => {
-            eprintln!("fatal: failed to get reflog entries: {e}");
+            cli_error!(e, "fatal: failed to get reflog entries");
             return;
         }
     };
@@ -189,7 +190,7 @@ async fn handle_show(ref_name: &str, options: ReflogShowOptions) {
     if let Some(ref mut stdin) = less.stdin {
         writeln!(stdin, "{}", formatter).expect("fatal: failed to write to stdin");
     } else {
-        eprintln!("Failed to capture stdin");
+        eprintln!("fatal: failed to capture stdin");
     }
 
     #[cfg(unix)]

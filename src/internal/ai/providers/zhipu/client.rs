@@ -1,4 +1,9 @@
 //! Zhipu API client for libra.
+//!
+//! Zhipu AI (also known as GLM / ChatGLM) is a Chinese AI research lab that provides
+//! large language models through a cloud API. Authentication is performed via a Bearer
+//! token included in the `Authorization` header of each HTTP request. The default base
+//! URL points to `https://open.bigmodel.cn/api/paas/v4`.
 
 use std::fmt;
 
@@ -30,6 +35,9 @@ impl ZhipuProvider {
     }
 }
 
+/// Implements the [`Provider`] trait so that every outgoing HTTP request is
+/// annotated with a `Bearer <api_key>` authorization header, which is the
+/// authentication scheme required by the Zhipu API.
 impl Provider for ZhipuProvider {
     fn on_request(&self, mut request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         // Zhipu uses Bearer token authentication

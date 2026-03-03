@@ -205,8 +205,8 @@ mod tests {
         let commands = load_embedded_commands();
         let dispatcher = CommandDispatcher::new(commands);
 
-        let agents = crate::internal::ai::agents::load_embedded_agents();
-        let router = crate::internal::ai::agents::AgentRouter::new(agents);
+        let profiles = crate::internal::ai::agent::profile::load_embedded_profiles();
+        let router = crate::internal::ai::agent::profile::AgentProfileRouter::new(profiles);
 
         // Dispatch /architect command
         let result = dispatcher

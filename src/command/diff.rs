@@ -22,6 +22,7 @@ use git_internal::{
 use similar;
 
 use crate::{
+    cli_error,
     command::{get_target_commit, load_object},
     internal::head::Head,
     utils::{
@@ -73,7 +74,7 @@ pub async fn execute(args: DiffArgs) {
         Some(ref path) => {
             let file = std::fs::File::create(path)
                 .map_err(|e| {
-                    eprintln!("fatal: could not open to file '{path}' for writing: {e}");
+                    cli_error!(e, "fatal: could not open file '{path}' for writing");
                 })
                 .unwrap();
             Some(file)
@@ -142,7 +143,7 @@ pub async fn execute(args: DiffArgs) {
                 let file = to_workdir_path(file);
                 std::fs::read(&file)
                     .map_err(|e| {
-                        eprintln!("fatal: could not read file '{}': {}", file.display(), e);
+                        cli_error!(e, "fatal: could not read file '{}'", file.display());
                     })
                     .unwrap()
             }

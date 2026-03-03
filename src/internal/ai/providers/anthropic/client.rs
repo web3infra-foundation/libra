@@ -1,10 +1,25 @@
-//! Anthropic API client for libra.
+//! Anthropic API client construction and authentication.
+//!
+//! This module provides [`AnthropicProvider`], which implements the generic
+//! [`Provider`] trait by attaching Anthropic-specific authentication headers
+//! to every outgoing HTTP request:
+//!
+//! - `x-api-key` -- the secret API key (Anthropic does **not** use Bearer
+//!   token authentication).
+//! - `anthropic-version` -- a required version header that pins the wire
+//!   format of the Messages API.
+//!
+//! The [`Client`] type alias combines the generic HTTP client with
+//! `AnthropicProvider` and exposes convenience constructors that read
+//! credentials from environment variables (`ANTHROPIC_API_KEY`) or accept
+//! them directly.
 
 use std::fmt;
 
 use crate::internal::ai::client::{Client as GenericClient, Provider};
 
-/// Anthropic API provider.
+/// Anthropic API provider that carries the API key and injects
+/// authentication headers into every request.
 #[derive(Clone)]
 pub struct AnthropicProvider {
     api_key: String,
@@ -31,6 +46,12 @@ impl AnthropicProvider {
 }
 
 impl Provider for AnthropicProvider {
+    /// Injects Anthropic-specific headers into the outgoing request.
+    ///
+    /// Unlike most LLM providers that use `Authorization: Bearer <token>`,
+    /// Anthropic authenticates via a dedicated `x-api-key` header. The
+    /// `anthropic-version` header is also required by the API and controls
+    /// which version of the Messages API wire format the server uses.
     fn on_request(&self, mut request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         // Anthropic uses x-api-key header (not Bearer token)
         request = request.header("x-api-key", &self.api_key);
@@ -40,7 +61,8 @@ impl Provider for AnthropicProvider {
     }
 }
 
-/// Anthropic client type.
+/// Concrete Anthropic client type, combining the generic HTTP client with
+/// [`AnthropicProvider`] for authentication.
 pub type Client = GenericClient<AnthropicProvider>;
 
 impl Client {

@@ -1,3 +1,19 @@
+//! Gemini completion model implementation.
+//!
+//! Implements the [`CompletionModelTrait`] by calling the Gemini
+//! `generateContent` endpoint:
+//!
+//! ```text
+//! POST /v1beta/models/{model}:generateContent
+//! ```
+//!
+//! # Role mapping
+//!
+//! Gemini uses `"model"` as the assistant role (not `"assistant"` as in
+//! OpenAI-style APIs). System instructions are sent via the dedicated
+//! `system_instruction` field rather than as a message in the conversation
+//! history.
+
 use bytes::Buf;
 
 use super::{
@@ -56,15 +72,13 @@ impl CompletionModelTrait for CompletionModel {
         &self,
         request: CompletionRequest,
     ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
-        // Use generic Provider to customize request if needed, though Gemini usually uses query param or header.
-        // Our new Client structure puts auth in header via on_request.
-
         let url = format!(
             "{}/v1beta/models/{}:generateContent",
             self.client.base_url, self.model
         );
 
-        // Convert messages
+        // Convert generic messages into Gemini `Content` entries.
+        // Gemini uses "user" and "model" roles (not "assistant").
         let mut contents = Vec::new();
         for msg in request.chat_history {
             match msg {
@@ -94,12 +108,12 @@ impl CompletionModelTrait for CompletionModel {
                     });
                 }
                 Message::Assistant { content, .. } => {
+                    // Gemini expects "model" as the role for assistant turns.
                     let mut parts = Vec::new();
                     for item in content.into_iter() {
                         match item {
                             AssistantContent::Text(t) => parts.push(Part::text(t.text)),
                             AssistantContent::ToolCall(tool_call) => {
-                                // Convert tool call to function call
                                 parts.push(Part::function_call(
                                     tool_call.function.name,
                                     tool_call.function.arguments,
@@ -113,9 +127,10 @@ impl CompletionModelTrait for CompletionModel {
                     });
                 }
                 Message::System { content } => {
-                    // System messages in chat history might need to be merged or handled as 'user' role for Gemini
-                    // or ignored if preamble is preferred.
-                    // For now, treat as user text.
+                    // Gemini does not have a dedicated system role in the
+                    // contents array (system instructions go via the separate
+                    // `system_instruction` field). Inline system messages
+                    // are mapped to the "user" role as a fallback.
                     let mut parts = Vec::new();
                     for item in content.into_iter() {
                         if let UserContent::Text(t) = item {
@@ -130,7 +145,8 @@ impl CompletionModelTrait for CompletionModel {
             }
         }
 
-        // Handle Preamble (System Prompt)
+        // The preamble maps to Gemini's `system_instruction` field, which is
+        // sent outside the regular conversation contents.
         let system_instruction = request.preamble.map(Content::text);
 
         // Convert tools to Gemini format
@@ -149,10 +165,9 @@ impl CompletionModelTrait for CompletionModel {
             tools,
         };
 
-        // Build request using generic client logic
         let mut req_builder = self.client.http_client.post(&url).json(&body);
 
-        // Apply Provider customizations (Auth headers)
+        // Apply provider-level customisations (adds the x-goog-api-key header).
         req_builder = self.client.provider.on_request(req_builder);
 
         tracing::debug!("Sending request to Gemini API: {}", url);
@@ -196,6 +211,17 @@ impl CompletionModelTrait for CompletionModel {
     }
 }
 
+/// Extracts text segments and function calls from the first candidate in a
+/// Gemini `GenerateContentResponse`.
+///
+/// Each [`Part`] in the candidate content is inspected: text parts become
+/// [`AssistantContent::Text`] and function-call parts become
+/// [`AssistantContent::ToolCall`]. Because the Gemini API does not return
+/// tool-call IDs, a synthetic ID is generated from the function name and
+/// the part index (e.g., `call-get_weather-1`).
+///
+/// Returns an error if the response contains no candidates or if no
+/// actionable content (text or tool calls) is found.
 fn parse_assistant_output(
     api_resp: &GenerateContentResponse,
 ) -> Result<Vec<AssistantContent>, CompletionError> {
@@ -237,7 +263,14 @@ fn parse_assistant_output(
     Ok(assistant_parts)
 }
 
-/// Convert generic tool specs to Gemini's tool declaration format.
+/// Converts generic [`ToolDefinition`] values into Gemini's
+/// [`ToolDeclaration`] / [`FunctionDeclaration`] wire format.
+///
+/// Each tool's JSON Schema `parameters` object is destructured into
+/// Gemini's [`FunctionParameters`] (type, properties, required). All
+/// function declarations are grouped into a single [`ToolDeclaration`],
+/// which matches the Gemini API expectation of a top-level `tools` array
+/// containing objects with `function_declarations`.
 fn convert_tools_to_gemini(tools: &[ToolDefinition]) -> Vec<ToolDeclaration> {
     let mut function_declarations = Vec::new();
 

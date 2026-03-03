@@ -5,6 +5,8 @@
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Instant};
 
+use crate::cli_error;
+
 use crossterm::event::{KeyCode, KeyModifiers};
 use tokio::{
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
@@ -24,8 +26,9 @@ use super::{
     terminal::{TARGET_FRAME_INTERVAL, Tui, TuiEvent},
 };
 use crate::internal::ai::{
-    agent::{ToolLoopConfig, run_tool_loop_with_history_and_observer},
-    agents::AgentRouter,
+    agent::{
+        ToolLoopConfig, profile::AgentProfileRouter, run_tool_loop_with_history_and_observer,
+    },
     commands::CommandDispatcher,
     completion::{CompletionModel, Message},
     intentspec::{
@@ -104,7 +107,7 @@ struct PendingPostPlan {
 pub struct AppConfig {
     pub welcome_message: String,
     pub command_dispatcher: CommandDispatcher,
-    pub agent_router: AgentRouter,
+    pub agent_router: AgentProfileRouter,
     pub session: SessionState,
     pub session_store: SessionStore,
     pub user_input_rx: UnboundedReceiver<UserInputRequest>,
@@ -151,7 +154,7 @@ pub struct App<M: CompletionModel> {
     /// Slash command dispatcher.
     command_dispatcher: CommandDispatcher,
     /// Agent router for auto-selection.
-    agent_router: AgentRouter,
+    agent_router: AgentProfileRouter,
     /// Session state for persistence.
     session: SessionState,
     /// Session store for saving/loading.
@@ -321,7 +324,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 ) {
                     Ok(actor) => actor,
                     Err(e) => {
-                        eprintln!("Failed to resolve actor for decision: {:?}", e);
+                        cli_error!(e, "error: failed to resolve actor for decision");
                         return;
                     }
                 };
@@ -335,11 +338,11 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         if !result.is_error.unwrap_or(false) {
                             println!("Decision created successfully");
                         } else {
-                            eprintln!("Failed to create decision: {:?}", result.content);
+                            cli_error!(result.content, "error: failed to create decision");
                         }
                     }
                     Err(e) => {
-                        eprintln!("Error creating decision: {:?}", e);
+                        cli_error!(e, "error: failed to create decision");
                     }
                 }
             });
@@ -831,7 +834,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         ) {
                             Ok(actor) => actor,
                             Err(e) => {
-                                eprintln!("Failed to resolve actor for run: {:?}", e);
+                                cli_error!(e, "error: failed to resolve actor for run");
                                 return;
                             }
                         };
@@ -840,11 +843,11 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         match mcp_server_clone.create_run_impl(run_params, actor).await {
                             Ok(result) => {
                                 if result.is_error.unwrap_or(false) {
-                                    eprintln!("Failed to create run: {:?}", result.content);
+                                    cli_error!(result.content, "error: failed to create run");
                                 }
                             }
                             Err(e) => {
-                                eprintln!("Error creating run: {:?}", e);
+                                cli_error!(e, "error: failed to create run");
                             }
                         }
 
@@ -867,7 +870,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         ) {
                             Ok(actor) => actor,
                             Err(e) => {
-                                eprintln!("Failed to resolve actor for snapshot: {:?}", e);
+                                cli_error!(e, "error: failed to resolve actor for snapshot");
                                 return;
                             }
                         };
@@ -879,14 +882,14 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         {
                             Ok(result) => {
                                 if result.is_error.unwrap_or(false) {
-                                    eprintln!(
-                                        "Failed to create context snapshot: {:?}",
-                                        result.content
+                                    cli_error!(
+                                        result.content,
+                                        "error: failed to create context snapshot"
                                     );
                                 }
                             }
                             Err(e) => {
-                                eprintln!("Error creating context snapshot: {:?}", e);
+                                cli_error!(e, "error: failed to create context snapshot");
                             }
                         }
                     });
@@ -958,9 +961,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                                     ) {
                                         Ok(actor) => actor,
                                         Err(e) => {
-                                            eprintln!(
-                                                "Failed to resolve actor for tool invocation: {:?}",
-                                                e
+                                            cli_error!(
+                                                e,
+                                                "error: failed to resolve actor for tool invocation"
                                             );
                                             return;
                                         }
@@ -974,14 +977,17 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                                         Ok(result) => {
                                             if !result.is_error.unwrap_or(false) {
                                             } else {
-                                                eprintln!(
-                                                    "Failed to record tool invocation: {:?}",
-                                                    result.content
+                                                cli_error!(
+                                                    result.content,
+                                                    "error: failed to record tool invocation"
                                                 );
                                             }
                                         }
                                         Err(e) => {
-                                            eprintln!("Error recording tool invocation: {:?}", e);
+                                            cli_error!(
+                                                e,
+                                                "error: failed to record tool invocation"
+                                            );
                                         }
                                     }
                                 });

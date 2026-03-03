@@ -16,6 +16,7 @@ use git_internal::{
 };
 
 use crate::{
+    cli_error,
     command::{get_target_commit, load_object},
     internal::{
         branch::Branch,
@@ -123,7 +124,7 @@ async fn reset_pathspecs(pathspecs: &[String], target: &str) {
     let commit: Commit = match load_object(&target_commit_id) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("fatal: failed to load commit: {e}");
+            cli_error!(e, "fatal: failed to load commit");
             return;
         }
     };
@@ -131,7 +132,7 @@ async fn reset_pathspecs(pathspecs: &[String], target: &str) {
     let tree: Tree = match load_object(&commit.tree_id) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("fatal: failed to load tree: {e}");
+            cli_error!(e, "fatal: failed to load tree");
             return;
         }
     };
@@ -140,7 +141,7 @@ async fn reset_pathspecs(pathspecs: &[String], target: &str) {
     let mut index = match Index::load(&index_file) {
         Ok(idx) => idx,
         Err(e) => {
-            eprintln!("fatal: failed to load index: {e}");
+            cli_error!(e, "fatal: failed to load index");
             return;
         }
     };
@@ -178,7 +179,7 @@ async fn reset_pathspecs(pathspecs: &[String], target: &str) {
     }
 
     if changed && let Err(e) = index.save(&index_file) {
-        eprintln!("fatal: failed to save index: {e}");
+        cli_error!(e, "fatal: failed to save index");
     }
 }
 
@@ -319,7 +320,7 @@ pub(crate) async fn reset_working_directory_to_commit(
                     if full_path.exists()
                         && let Err(e) = fs::remove_file(&full_path)
                     {
-                        eprintln!("warning: failed to remove {}: {}", full_path.display(), e);
+                        cli_error!(e, "warning: failed to remove '{}'", full_path.display());
                     }
                 }
             }

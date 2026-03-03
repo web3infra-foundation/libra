@@ -21,6 +21,7 @@ use tokio_util::io::StreamReader;
 use url::Url;
 
 use crate::{
+    cli_error,
     command::{
         index_pack::{self, IndexPackArgs},
         load_object,
@@ -243,7 +244,7 @@ pub async fn fetch_repository(
     let mut result_stream = match remote_client.fetch_objects(&have, &want, depth).await {
         Ok(stream) => stream,
         Err(e) => {
-            eprintln!("fatal: failed to fetch objects: {e}");
+            cli_error!(e, "fatal: failed to fetch objects");
             return;
         }
     };
@@ -420,7 +421,7 @@ pub async fn fetch_repository(
         .await;
 
     if let Err(e) = transaction_result {
-        eprintln!("fatal: failed to update references after fetch: {}", e);
+        cli_error!(e, "fatal: failed to update references after fetch");
     }
 }
 

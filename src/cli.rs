@@ -80,6 +80,8 @@ enum Commands {
     Lfs(command::lfs::LfsCmds),
     #[command(about = "Show commit logs")]
     Log(command::log::LogArgs),
+    #[command(about = "Summarize 'git log' output")]
+    Shortlog(command::shortlog::ShortlogArgs),
     #[command(about = "Show various types of objects")]
     Show(command::show::ShowArgs),
     #[command(about = "List, create, or delete branches")]
@@ -98,6 +100,8 @@ enum Commands {
     Reset(command::reset::ResetArgs),
     #[command(about = "Move or rename a file, a directory, or a symlink")]
     Mv(command::mv::MvArgs),
+    #[command(about = "Give an object a human readable name based on an available ref")]
+    Describe(command::describe::DescribeArgs),
     #[command(about = "Apply the changes introduced by some existing commits")]
     CherryPick(command::cherry_pick::CherryPickArgs),
     #[command(about = "Update remote refs along with associated objects")]
@@ -122,6 +126,8 @@ enum Commands {
     Reflog(command::reflog::ReflogArgs),
     #[command(about = "Manage multiple working trees attached to this repository")]
     Worktree(command::worktree::WorktreeArgs),
+    #[command(about = "Cloud backup and restore operations (D1/R2)")]
+    Cloud(command::cloud::CloudArgs),
 
     // other hidden commands
     #[command(
@@ -293,6 +299,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> Result<(), GitError> {
         Commands::Stash(cmd) => command::stash::execute(cmd).await,
         Commands::Lfs(cmd) => command::lfs::execute(cmd).await,
         Commands::Log(args) => command::log::execute(args).await,
+        Commands::Shortlog(args) => command::shortlog::execute(args).await,
         Commands::Show(args) => command::show::execute(args).await,
         Commands::Branch(args) => command::branch::execute(args).await,
         Commands::Tag(args) => command::tag::execute(args).await,
@@ -306,6 +313,9 @@ pub async fn parse_async(args: Option<&[&str]>) -> Result<(), GitError> {
                 .await
                 .map_err(GitError::CustomError)?;
         }
+        Commands::Describe(args) => command::describe::execute(args)
+            .await
+            .map_err(GitError::CustomError)?,
         Commands::CherryPick(args) => command::cherry_pick::execute(args).await,
         Commands::Push(args) => command::push::execute(args).await,
         Commands::IndexPack(args) => command::index_pack::execute(args),
@@ -320,7 +330,16 @@ pub async fn parse_async(args: Option<&[&str]>) -> Result<(), GitError> {
         Commands::Checkout(args) => command::checkout::execute(args).await,
         Commands::Reflog(args) => command::reflog::execute(args).await,
         Commands::Worktree(args) => command::worktree::execute(args).await,
+        Commands::Cloud(args) => command::cloud::execute(args).await,
     }
+
+    // Wait for any background storage tasks (e.g. object indexing) to complete
+    // This prevents tasks from being killed when the process exits
+    let _ = tokio::task::spawn_blocking(|| {
+        utils::client_storage::ClientStorage::wait_for_background_tasks();
+    })
+    .await;
+
     Ok(())
 }
 

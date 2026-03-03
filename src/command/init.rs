@@ -11,6 +11,7 @@ use git_internal::hash::{HashKind, set_hash_kind};
 use sea_orm::{ActiveModelTrait, DbConn, DbErr, Set, TransactionTrait};
 
 use crate::{
+    cli_error,
     internal::{
         db,
         model::{config, reference},
@@ -101,10 +102,10 @@ pub enum InitError {
     #[error("branch name is too long (max {MAX_BRANCH_NAME_LENGTH} characters)")]
     BranchNameTooLong,
 
-    #[error("I/O error: {0}")]
+    #[error("{0}")]
     Io(#[from] io::Error),
 
-    #[error("Database error: {0}")]
+    #[error("initialization failed due to a storage error")]
     Database(#[from] DbErr),
 
     #[error("conversion from git repository failed: {0}")]
@@ -214,7 +215,11 @@ pub async fn execute(args: InitArgs) {
         match joined.canonicalize() {
             Ok(canonical) => Some(canonical),
             Err(e) => {
-                eprintln!("Error: failed to resolve from-git-repository path: {e}");
+                cli_error!(
+                    e,
+                    "fatal: failed to resolve from-git-repository path '{}'",
+                    p
+                );
                 std::process::exit(1);
             }
         }
@@ -226,14 +231,14 @@ pub async fn execute(args: InitArgs) {
         .await
         .and_then(|_| Ok(env::set_current_dir(&target_path)?))
     {
-        eprintln!("Error: {e}");
+        cli_error!("fatal" => e);
         return;
     }
 
     if let Some(source_git) = from_git_abs
         && let Err(e) = convert::convert_from_git_repository(&source_git, is_bare).await
     {
-        eprintln!("Error: {e}");
+        cli_error!("fatal" => e);
         std::process::exit(1);
     }
 }
@@ -504,13 +509,13 @@ pub async fn init(args: InitArgs) -> Result<(), InitError> {
 
     // Check if the root directory already exists
     if is_reinit(&cur_dir) {
-        if !args.quiet {
-            eprintln!("Already initialized - [{}]", root_dir.display());
-        }
         return Err(InitError::Io(io::Error::new(
             io::ErrorKind::AlreadyExists,
-            "Initialization failed: The repository is already initialized at the specified location.
-            If you wish to reinitialize, please remove the existing directory or file.",
+            format!(
+                "the repository is already initialized at '{}'\n\
+                 hint: if you wish to reinitialize, please remove the existing directory or file.",
+                root_dir.display()
+            ),
         )));
     }
 
@@ -652,7 +657,7 @@ pub async fn init(args: InitArgs) -> Result<(), InitError> {
         let storage = std::sync::Arc::new(LocalStorage::new(objects_dir));
         let ai_history = HistoryManager::new(storage, root_dir.clone());
         if let Err(e) = ai_history.init_branch().await {
-            eprintln!("Warning: failed to initialize AI history branch: {}", e);
+            cli_error!(e, "warning: failed to initialize AI history branch");
         }
     }
 
@@ -741,6 +746,17 @@ async fn init_config(
         ..Default::default()
     };
     init_ref_format_entry.insert(&txn).await?;
+
+    // Generate and insert unique repository ID for cloud backup identification
+    let repo_id = uuid::Uuid::new_v4().to_string();
+    let repo_id_entry = config::ActiveModel {
+        configuration: Set("libra".to_owned()),
+        key: Set("repoid".to_owned()),
+        value: Set(repo_id),
+        ..Default::default()
+    };
+    repo_id_entry.insert(&txn).await?;
+
     // Commit the transaction
     txn.commit().await?;
     Ok(())

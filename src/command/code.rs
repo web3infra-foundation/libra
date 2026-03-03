@@ -10,7 +10,9 @@ use std::{net::SocketAddr, sync::Arc};
 use axum::{Router, response::Html, routing::get};
 use clap::{Parser, ValueEnum};
 use tokio::sync::oneshot;
+use url::Url;
 
+use crate::cli_error;
 // use uuid::Uuid;
 use crate::internal::{
     ai::{
@@ -21,6 +23,7 @@ use crate::internal::{
             anthropic::{CLAUDE_3_5_SONNET, Client as AnthropicClient},
             deepseek::client::Client as DeepSeekClient,
             gemini::{Client as GeminiClient, GEMINI_2_5_FLASH},
+            ollama::Client as OllamaClient,
             openai::{Client as OpenAIClient, GPT_4O_MINI},
             zhipu::{Client as ZhipuClient, GLM_5},
         },
@@ -42,6 +45,7 @@ pub enum CodeProvider {
     Anthropic,
     Deepseek,
     Zhipu,
+    Ollama,
 }
 
 #[derive(Parser, Debug)]
@@ -85,6 +89,10 @@ pub struct CodeArgs {
     /// Run the MCP server over Stdio (for Claude Desktop integration)
     #[arg(long, alias = "mcp-stdio", conflicts_with = "web_only")]
     pub stdio: bool,
+
+    /// Provider API base URL (e.g. http://remote-host:11434/v1 for remote Ollama)
+    #[arg(long)]
+    pub api_base: Option<String>,
 }
 
 pub async fn execute(args: CodeArgs) {
@@ -167,7 +175,7 @@ async fn create_initial_intent(mcp_server: &Arc<LibraMcpServer>) {
     {
         Ok(actor) => actor,
         Err(e) => {
-            eprintln!("Failed to resolve actor: {:?}", e);
+            cli_error!(e, "error: failed to resolve actor");
             return;
         }
     };
@@ -178,11 +186,11 @@ async fn create_initial_intent(mcp_server: &Arc<LibraMcpServer>) {
             if !result.is_error.unwrap_or(false) {
                 // Initial intent created successfully
             } else {
-                eprintln!("Failed to create initial intent: {:?}", result.content);
+                eprintln!("error: failed to create initial intent");
             }
         }
         Err(e) => {
-            eprintln!("Error creating initial intent: {:?}", e);
+            cli_error!(e, "error: failed to create initial intent");
         }
     }
 }
@@ -191,7 +199,7 @@ async fn execute_web_only(args: CodeArgs) {
     let addr: SocketAddr = match format!("{}:{}", args.host, args.port).parse() {
         Ok(addr) => addr,
         Err(e) => {
-            eprintln!("Invalid address: {}", e);
+            cli_error!(e, "error: invalid address '{}:{}'", args.host, args.port);
             return;
         }
     };
@@ -199,7 +207,7 @@ async fn execute_web_only(args: CodeArgs) {
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("Failed to bind to {}: {}", addr, e);
+            cli_error!(e, "fatal: failed to bind to {}", addr);
             return;
         }
     };
@@ -245,6 +253,30 @@ async fn execute_web_only(args: CodeArgs) {
 async fn execute_tui(args: CodeArgs) {
     // Use repository working directory to ensure correct initialization of .libra resources.
     let working_dir = crate::utils::util::working_dir();
+
+    // Validate --api-base: only honored for Ollama via CLI flag. Other providers
+    // accept custom base URLs through their respective environment variables.
+    if args.api_base.is_some() && args.provider != CodeProvider::Ollama {
+        eprintln!(
+            "warning: --api-base is only honored for the ollama provider; \
+             use provider-specific env vars (e.g. OPENAI_BASE_URL) for others; ignoring"
+        );
+    } else if let Some(ref base_url) = args.api_base {
+        match Url::parse(base_url) {
+            Ok(u) if u.scheme() == "http" || u.scheme() == "https" => {}
+            Ok(u) => {
+                eprintln!(
+                    "error: --api-base must use http or https (got {})",
+                    u.scheme()
+                );
+                return;
+            }
+            Err(e) => {
+                eprintln!("error: --api-base is not a valid URL: {e}");
+                return;
+            }
+        }
+    }
 
     let preamble = system_preamble(&working_dir, args.context.as_deref());
     let temperature = args.temperature;
@@ -423,6 +455,40 @@ async fn execute_tui(args: CodeArgs) {
             )
             .await;
         }
+        CodeProvider::Ollama => {
+            let client = if let Some(base_url) = &args.api_base {
+                OllamaClient::with_base_url(base_url)
+            } else {
+                OllamaClient::from_env()
+            };
+            let model_name = match args.model {
+                Some(m) => m,
+                None => {
+                    eprintln!(
+                        "error: --model is required when using --provider ollama (e.g. --model llama3.2)"
+                    );
+                    return;
+                }
+            };
+            let model = client.completion_model(&model_name);
+            run_tui_with_model(
+                model,
+                TuiParams {
+                    host: args.host,
+                    port: args.port,
+                    mcp_port: args.mcp_port,
+                    registry: registry.clone(),
+                    preamble,
+                    temperature,
+                    resume,
+                    user_input_rx,
+                    mcp_server,
+                    model_name,
+                    provider_name,
+                },
+            )
+            .await;
+        }
     }
 }
 
@@ -467,7 +533,7 @@ where
     let terminal = match tui_init() {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("Failed to initialize terminal: {}", e);
+            cli_error!(e, "fatal: failed to initialize terminal");
             return;
         }
     };
@@ -509,9 +575,9 @@ where
     let commands = crate::internal::ai::commands::load_commands(registry.working_dir());
     let command_dispatcher = crate::internal::ai::commands::CommandDispatcher::new(commands);
 
-    // Load agent definitions
-    let agents = crate::internal::ai::agents::load_agents(registry.working_dir());
-    let agent_router = crate::internal::ai::agents::AgentRouter::new(agents);
+    // Load agent profiles
+    let profiles = crate::internal::ai::agent::profile::load_profiles(registry.working_dir());
+    let agent_router = crate::internal::ai::agent::profile::AgentProfileRouter::new(profiles);
 
     // Set up session persistence
     let working_dir_str = registry.working_dir().to_string_lossy().to_string();
@@ -547,11 +613,11 @@ where
     match app.run().await {
         Ok(exit_info) => {
             if let crate::internal::tui::ExitReason::Fatal(msg) = exit_info.reason {
-                eprintln!("Fatal error: {}", msg);
+                eprintln!("fatal: {}", msg);
             }
         }
         Err(e) => {
-            eprintln!("Error running TUI: {}", e);
+            cli_error!(e, "fatal: TUI exited unexpectedly");
         }
     }
 
@@ -604,12 +670,12 @@ async fn start_mcp_server(
                                     .serve_connection(io, service)
                                     .await
                                 {
-                                    eprintln!("MCP connection error: {:?}", e);
+                                    cli_error!(e, "warning: MCP connection error");
                                 }
                             });
                         }
                         Err(e) => {
-                            eprintln!("MCP accept error: {:?}", e);
+                            cli_error!(e, "warning: MCP accept error");
                         }
                     }
                 }
@@ -684,7 +750,7 @@ async fn execute_stdio(_args: CodeArgs) {
             }
         }
         Err(e) => {
-            eprintln!("Failed to start MCP Stdio server: {}", e);
+            cli_error!(e, "fatal: failed to start MCP Stdio server");
         }
     }
 }

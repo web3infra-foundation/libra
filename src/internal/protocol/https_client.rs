@@ -66,17 +66,17 @@ impl BasicAuth {
             res = request.send().await?;
             if res.status() == StatusCode::FORBIDDEN {
                 // 403: no access, no need to retry
-                eprintln!("Authentication failed, forbidden");
+                eprintln!("fatal: authentication failed, forbidden");
                 break;
             } else if res.status() != StatusCode::UNAUTHORIZED {
                 break;
             }
             // 401 (Unauthorized): username or password is incorrect
             if try_cnt >= MAX_TRY {
-                eprintln!("Failed to authenticate after {MAX_TRY} attempts");
+                eprintln!("fatal: failed to authenticate after {MAX_TRY} attempts");
                 break;
             }
-            eprintln!("Authentication required, retrying...");
+            eprintln!("warning: authentication required, retrying...");
             AUTH.lock().unwrap().replace(ask_basic_auth());
             try_cnt += 1;
         }

@@ -27,6 +27,7 @@ use tokio::sync::mpsc;
 use url::Url;
 
 use crate::{
+    cli_error,
     command::branch,
     git_protocol::{ServiceType::ReceivePack, add_pkt_line_string, read_pkt_line},
     internal::{
@@ -116,7 +117,7 @@ pub async fn execute(args: PushArgs) {
     }) {
         Ok(u) => u,
         Err(e) => {
-            eprintln!("fatal: invalid remote url '{}': {}", repo_url, e);
+            cli_error!(e, "fatal: invalid remote url '{}'", repo_url);
             return;
         }
     };
@@ -131,7 +132,7 @@ pub async fn execute(args: PushArgs) {
     let discovery = match client.discovery_reference(ReceivePack).await {
         Ok(result) => result,
         Err(e) => {
-            eprintln!("fatal: {e}");
+            cli_error!("fatal" => e);
             return;
         }
     };
@@ -280,7 +281,11 @@ pub async fn execute(args: PushArgs) {
     let res = client.send_pack(data.freeze()).await.unwrap(); // TODO: send stream
 
     if res.status() != 200 {
-        eprintln!("status code: {}", res.status());
+        eprintln!(
+            "fatal: unexpected server response (status {})",
+            res.status()
+        );
+        return;
     }
     let mut data = res.bytes().await.unwrap();
     let (_, pkt_line) = read_pkt_line(&mut data);
@@ -290,7 +295,7 @@ pub async fn execute(args: PushArgs) {
     }
     let (_, pkt_line) = read_pkt_line(&mut data);
     if !pkt_line.starts_with("ok".as_ref()) {
-        eprintln!("fatal: ref update failed [{pkt_line:?}]");
+        cli_error!(pkt_line, "fatal: ref update failed");
         return;
     }
     let (len, _) = read_pkt_line(&mut data);
@@ -362,7 +367,7 @@ async fn update_remote_tracking(
         .await;
 
     if let Err(e) = transaction_result {
-        eprintln!("fatal: failed to update remote tracking branch: {}", e);
+        cli_error!(e, "fatal: failed to update remote tracking branch");
     }
 }
 
@@ -480,7 +485,7 @@ fn incremental_objs(local_ref: ObjectHash, remote_ref: ObjectHash) -> HashSet<En
             if root_commit.is_none() {
                 root_commit = Some(commit.id);
             } else if root_commit != Some(commit.id) {
-                eprintln!("{}", "fatal: multiple root commits".red());
+                eprintln!("fatal: multiple root commits");
             }
         }
         for parent in parents.iter() {
@@ -593,7 +598,7 @@ fn diff_tree_objs(old_tree: Option<&ObjectHash>, new_tree: &ObjectHash) -> HashS
                     // TODO: submodule (TreeItemMode: Commit)
                     if item.mode == TreeItemMode::Commit {
                         // (160000)| Gitlink (Submodule)
-                        eprintln!("{}", "Warning: Submodule is not supported yet".red());
+                        eprintln!("warning: submodule is not supported yet");
                     }
                     let blob = Blob::load(&item.id);
                     objs.insert(blob.into());

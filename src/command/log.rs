@@ -523,7 +523,7 @@ pub async fn execute(args: LogArgs) {
             if let Some(ref mut stdin) = process.stdin {
                 writeln!(stdin, "{message}").unwrap();
             } else {
-                eprintln!("Failed to capture stdin");
+                eprintln!("fatal: failed to capture stdin");
             }
         }
         #[cfg(not(unix))]
