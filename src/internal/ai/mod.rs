@@ -29,6 +29,7 @@ pub mod completion;
 pub mod history;
 pub mod hooks;
 pub mod intent;
+pub mod intentspec;
 pub mod mcp;
 pub mod node_adapter;
 pub mod prompt;

@@ -31,7 +31,7 @@ use crate::internal::{
             ToolRegistry, ToolRegistryBuilder,
             handlers::{
                 ApplyPatchHandler, GrepFilesHandler, ListDirHandler, McpBridgeHandler, PlanHandler,
-                ReadFileHandler, RequestUserInputHandler, ShellHandler,
+                ReadFileHandler, RequestUserInputHandler, ShellHandler, SubmitIntentDraftHandler,
             },
         },
     },
@@ -298,6 +298,7 @@ async fn execute_tui(args: CodeArgs) {
         .register("apply_patch", Arc::new(ApplyPatchHandler))
         .register("shell", Arc::new(ShellHandler))
         .register("update_plan", Arc::new(PlanHandler))
+        .register("submit_intent_draft", Arc::new(SubmitIntentDraftHandler))
         .register(
             "request_user_input",
             Arc::new(RequestUserInputHandler::new(user_input_tx)),

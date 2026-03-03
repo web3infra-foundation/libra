@@ -56,6 +56,8 @@ pub struct BottomPane {
     pub user_input_notes_text: String,
     /// Slash-command autocomplete popup state.
     command_popup: CommandPopupState,
+    /// Currently selected option in the post-plan dialog (0=Execute, 1=Modify, 2=Cancel).
+    pub post_plan_selected: usize,
 }
 
 impl BottomPane {
@@ -76,6 +78,7 @@ impl BottomPane {
                 visible: false,
                 selected: 0,
             },
+            post_plan_selected: 0,
         }
     }
 
@@ -103,6 +106,11 @@ impl BottomPane {
         self.user_input_selected_option = 0;
         self.user_input_notes_focused = false;
         self.user_input_notes_text.clear();
+    }
+
+    /// Reset the post-plan dialog selection.
+    pub fn reset_post_plan_selection(&mut self) {
+        self.post_plan_selected = 0;
     }
 
     /// Handle a character input.
@@ -263,6 +271,10 @@ impl BottomPane {
 
     /// Return the height (in lines) the bottom pane needs for the current state.
     pub fn desired_height(&self) -> u16 {
+        if self.status == AgentStatus::AwaitingPostPlanChoice {
+            // status(1) + 3 options + 1 blank + help(1) = 6
+            return 6;
+        }
         if self.status != AgentStatus::AwaitingUserInput {
             // Normal mode: status(1) + input(3) + help(1) = 5
             return 5;
@@ -300,6 +312,9 @@ impl BottomPane {
     pub fn render(&self, area: Rect, buf: &mut Buffer) -> Option<Position> {
         if self.status == AgentStatus::AwaitingUserInput {
             return self.render_user_input_mode(area, buf);
+        }
+        if self.status == AgentStatus::AwaitingPostPlanChoice {
+            return self.render_post_plan_dialog(area, buf);
         }
 
         // Split area into status bar and input area
@@ -465,6 +480,52 @@ impl BottomPane {
         }
     }
 
+    /// Render the post-plan dialog (Execute / Modify / Cancel).
+    fn render_post_plan_dialog(&self, area: Rect, buf: &mut Buffer) -> Option<Position> {
+        let chunks = Layout::vertical([
+            Constraint::Length(1), // Status bar
+            Constraint::Length(4), // 3 options + 1 blank line
+            Constraint::Length(1), // Help text
+        ])
+        .split(area);
+
+        // Status bar
+        self.render_status_bar(chunks[0], buf);
+
+        // Options
+        let options = [
+            ("Execute Spec", "Run the orchestrator"),
+            ("Modify Spec", "Edit the plan"),
+            ("Cancel", "Return to chat"),
+        ];
+
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        for (i, (label, desc)) in options.iter().enumerate() {
+            let marker = if i == self.post_plan_selected {
+                "▸"
+            } else {
+                " "
+            };
+            let style = if i == self.post_plan_selected {
+                Style::default().fg(Color::Cyan).bold()
+            } else {
+                Style::default().fg(Color::White)
+            };
+            lines.push(Line::styled(
+                format!("  {} {:<16} {}", marker, label, desc),
+                style,
+            ));
+        }
+        lines.push(Line::raw(""));
+
+        Paragraph::new(Text::from(lines)).render(chunks[1], buf);
+
+        // Help text
+        self.render_help_text(chunks[2], buf);
+
+        None // no cursor in this mode
+    }
+
     /// Render the notes input area for option questions.
     fn render_notes_area(&self, area: Rect, buf: &mut Buffer) -> Option<Position> {
         if area.height == 0 {
@@ -575,12 +636,13 @@ impl BottomPane {
             AgentStatus::Thinking => "● Thinking...",
             AgentStatus::ExecutingTool => "● Executing tool...",
             AgentStatus::AwaitingUserInput => "● Awaiting input...",
+            AgentStatus::AwaitingPostPlanChoice => "● Plan complete — choose next step",
         };
 
         let status_color = match self.status {
             AgentStatus::Idle => Color::Green,
             AgentStatus::Thinking | AgentStatus::ExecutingTool => Color::Yellow,
-            AgentStatus::AwaitingUserInput => Color::Magenta,
+            AgentStatus::AwaitingUserInput | AgentStatus::AwaitingPostPlanChoice => Color::Magenta,
         };
 
         let status_line = Line::styled(status_text, Style::default().fg(status_color).bold());
@@ -634,14 +696,17 @@ impl BottomPane {
                 if self.command_popup.visible {
                     "[Tab: Complete] [Up/Down: Select] [Esc: Dismiss] [Enter: Send]"
                 } else {
-                    "[Enter: Send] [PgUp/PgDn/Up/Down: Scroll] [Ctrl+K: Clear] [Ctrl+C: Exit]"
+                    "[Enter: Send] [PgUp/PgDn: Scroll] [Shift+Drag: Select] [Ctrl+C: Exit]"
                 }
             }
             AgentStatus::Thinking | AgentStatus::ExecutingTool => {
-                "[Esc: Interrupt] [PgUp/PgDn/Up/Down: Scroll] [Ctrl+C: Exit]"
+                "[Esc: Interrupt] [PgUp/PgDn: Scroll] [Shift+Drag: Select] [Ctrl+C: Exit]"
             }
             AgentStatus::AwaitingUserInput => {
                 "[Up/Down: Select] [1-9: Quick select] [Enter: Submit] [Esc: Cancel]"
+            }
+            AgentStatus::AwaitingPostPlanChoice => {
+                "[Up/Down: Select] [Enter: Confirm] [Esc: Cancel]"
             }
         };
 

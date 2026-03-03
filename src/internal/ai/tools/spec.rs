@@ -153,6 +153,117 @@ impl ToolSpec {
                         props
                     },
                     required: vec!["plan".to_string()],
+                    definitions: None,
+                },
+            },
+        }
+    }
+
+    /// Create a ToolSpec for submit_intent_draft.
+    pub fn submit_intent_draft() -> Self {
+        Self {
+            spec_type: "function".to_string(),
+            function: FunctionDefinition {
+                name: "submit_intent_draft".to_string(),
+                description: "Submit a structured IntentDraft for the /plan pipeline. \
+                    Use this exactly once after gathering enough context."
+                    .to_string(),
+                parameters: FunctionParameters::Object {
+                    param_type: "object".to_string(),
+                    properties: {
+                        let mut props = Map::new();
+                        props.insert(
+                            "draft".to_string(),
+                            json!({
+                                "type": "object",
+                                "required": ["intent", "acceptance", "risk"],
+                                "properties": {
+                                    "intent": {
+                                        "type": "object",
+                                        "required": ["summary", "problemStatement", "changeType", "objectives", "inScope", "outOfScope"],
+                                        "properties": {
+                                            "summary": {"type": "string"},
+                                            "problemStatement": {"type": "string"},
+                                            "changeType": {
+                                                "type": "string",
+                                                "enum": ["bugfix","feature","refactor","performance","security","docs","chore","unknown"]
+                                            },
+                                            "objectives": {"type": "array", "items": {"type": "string"}},
+                                            "inScope": {"type": "array", "items": {"type": "string"}},
+                                            "outOfScope": {"type": "array", "items": {"type": "string"}},
+                                            "touchHints": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "files": {"type": "array", "items": {"type": "string"}},
+                                                    "symbols": {"type": "array", "items": {"type": "string"}},
+                                                    "apis": {"type": "array", "items": {"type": "string"}}
+                                                }
+                                            }
+                                        }
+                                    },
+                                    "acceptance": {
+                                        "type": "object",
+                                        "required": ["successCriteria"],
+                                        "properties": {
+                                            "successCriteria": {"type": "array", "items": {"type": "string"}},
+                                            "fastChecks": {"type": "array", "items": {"$ref": "#/$defs/check"}},
+                                            "integrationChecks": {"type": "array", "items": {"$ref": "#/$defs/check"}},
+                                            "securityChecks": {"type": "array", "items": {"$ref": "#/$defs/check"}},
+                                            "releaseChecks": {"type": "array", "items": {"$ref": "#/$defs/check"}}
+                                        }
+                                    },
+                                    "risk": {
+                                        "type": "object",
+                                        "required": ["rationale"],
+                                        "properties": {
+                                            "rationale": {"type": "string"},
+                                            "factors": {"type": "array", "items": {"type": "string"}},
+                                            "level": {"type": "string", "enum": ["low", "medium", "high"]}
+                                        }
+                                    }
+                                }
+                            }),
+                        );
+                        props
+                    },
+                    required: vec!["draft".to_string()],
+                    definitions: Some({
+                        let mut defs = Map::new();
+                        defs.insert(
+                            "check".to_string(),
+                            json!({
+                                "type": "object",
+                                "required": ["id", "kind"],
+                                "properties": {
+                                    "id": {"type": "string"},
+                                    "kind": {"type": "string", "enum": ["command", "testSuite", "policy"]},
+                                    "command": {"type": "string"},
+                                    "timeoutSeconds": {"type": "integer"},
+                                    "expectedExitCode": {"type": "integer"},
+                                    "required": {"type": "boolean"},
+                                    "artifactsProduced": {
+                                        "type": "array",
+                                        "description": "Names of produced evidence artifacts. Must be one of the supported artifact names (not file paths).",
+                                        "items": {
+                                            "type": "string",
+                                            "enum": [
+                                                "patchset",
+                                                "test-log",
+                                                "build-log",
+                                                "sast-report",
+                                                "sca-report",
+                                                "sbom",
+                                                "provenance-attestation",
+                                                "transparency-proof",
+                                                "release-notes"
+                                            ]
+                                        }
+                                    }
+                                }
+                            }),
+                        );
+                        defs
+                    }),
                 },
             },
         }
@@ -232,6 +343,7 @@ impl ToolSpec {
                         props
                     },
                     required: vec!["questions".to_string()],
+                    definitions: None,
                 },
             },
         }
@@ -361,6 +473,9 @@ pub enum FunctionParameters {
         properties: Map<String, Value>,
         /// Required properties.
         required: Vec<String>,
+        /// JSON Schema definitions for $ref resolution.
+        #[serde(rename = "$defs", skip_serializing_if = "Option::is_none")]
+        definitions: Option<Map<String, Value>>,
     },
 }
 
@@ -402,6 +517,7 @@ impl FunctionParameters {
             param_type: "object".to_string(),
             properties: props,
             required: req,
+            definitions: None,
         }
     }
 
@@ -487,6 +603,7 @@ impl ToolSpecBuilder {
                         param_type: "object".to_string(),
                         properties: self.parameters,
                         required: self.required,
+                        definitions: None,
                     }
                 },
             },
@@ -537,6 +654,7 @@ mod tests {
                 param_type,
                 properties,
                 required,
+                definitions: _,
             } => {
                 assert_eq!(param_type, "object");
                 assert!(properties.contains_key("test"));
@@ -575,5 +693,30 @@ mod tests {
 
         assert_eq!(parsed["type"], "function");
         assert_eq!(parsed["function"]["name"], "read_file");
+    }
+
+    #[test]
+    fn test_submit_intent_draft_definitions_at_root() {
+        let spec = ToolSpec::submit_intent_draft();
+        let json_str = serde_json::to_string(&spec).unwrap();
+        let parsed: Value = serde_json::from_str(&json_str).unwrap();
+
+        // $defs should be at root level of parameters, not nested inside acceptance
+        let params = &parsed["function"]["parameters"];
+        assert!(
+            params.get("$defs").is_some(),
+            "$defs should be at root level"
+        );
+        assert!(
+            params["$defs"]["check"].is_object(),
+            "check definition should exist"
+        );
+
+        // acceptance should NOT have nested $defs
+        let acceptance = &params["properties"]["draft"]["properties"]["acceptance"];
+        assert!(
+            acceptance.get("$defs").is_none(),
+            "$defs should not be nested in acceptance"
+        );
     }
 }

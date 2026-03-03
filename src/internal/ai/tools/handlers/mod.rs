@@ -8,6 +8,7 @@ pub mod plan;
 pub mod read_file;
 pub mod request_user_input;
 pub mod shell;
+pub mod submit_intent_draft;
 
 pub use apply_patch::ApplyPatchHandler;
 pub use grep_files::GrepFilesHandler;
@@ -17,6 +18,7 @@ pub use plan::PlanHandler;
 pub use read_file::ReadFileHandler;
 pub use request_user_input::RequestUserInputHandler;
 pub use shell::ShellHandler;
+pub use submit_intent_draft::SubmitIntentDraftHandler;
 
 /// Helper function to parse JSON arguments for tool handlers.
 pub fn parse_arguments<T: serde::de::DeserializeOwned>(

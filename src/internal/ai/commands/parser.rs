@@ -136,11 +136,6 @@ Create a plan for: $ARGUMENTS
 
     #[test]
     fn test_parse_embedded_commands() {
-        let plan = include_str!("embedded/plan.md");
-        let cmd = parse_command_definition(plan).unwrap();
-        assert_eq!(cmd.name, "plan");
-        assert_eq!(cmd.agent.as_deref(), Some("planner"));
-
         let review = include_str!("embedded/code_review.md");
         let cmd = parse_command_definition(review).unwrap();
         assert_eq!(cmd.name, "code-review");
