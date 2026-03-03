@@ -77,7 +77,7 @@ impl StatusIndicator {
             AgentStatus::Thinking => "Thinking",
             AgentStatus::ExecutingTool => "Executing tool",
             AgentStatus::AwaitingUserInput => "Awaiting input",
-            AgentStatus::Idle => return,
+            AgentStatus::Idle | AgentStatus::AwaitingPostPlanChoice => return,
         };
 
         let spinner = self.spinner_frame();

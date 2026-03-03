@@ -5,6 +5,8 @@ use std::{collections::HashMap, fmt, path::PathBuf};
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
+use crate::internal::ai::intentspec::IntentDraft;
+
 /// The kind of tool payload.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ToolKind {
@@ -315,6 +317,15 @@ pub struct UpdatePlanArgs {
     pub explanation: Option<String>,
     /// The full plan, expressed as an ordered list of steps.
     pub plan: Vec<PlanStep>,
+}
+
+// ── submit_intent_draft types ─────────────────────────────────────────
+
+/// Arguments for the `submit_intent_draft` tool.
+#[derive(Clone, Debug, Deserialize)]
+pub struct SubmitIntentDraftArgs {
+    /// Structured draft used by the program to resolve a complete IntentSpec.
+    pub draft: IntentDraft,
 }
 
 // ── request_user_input types ───────────────────────────────────────────

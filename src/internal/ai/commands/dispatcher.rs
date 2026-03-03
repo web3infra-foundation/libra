@@ -60,7 +60,6 @@ impl CommandDispatcher {
 /// Load all embedded default command definitions.
 pub fn load_embedded_commands() -> Vec<CommandDefinition> {
     let sources = [
-        include_str!("embedded/plan.md"),
         include_str!("embedded/code_review.md"),
         include_str!("embedded/verify.md"),
         include_str!("embedded/tdd.md"),
@@ -128,9 +127,8 @@ mod tests {
     #[test]
     fn test_load_embedded_commands() {
         let commands = load_embedded_commands();
-        assert_eq!(commands.len(), 6);
+        assert_eq!(commands.len(), 5);
         let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
-        assert!(names.contains(&"plan"));
         assert!(names.contains(&"code-review"));
         assert!(names.contains(&"verify"));
         assert!(names.contains(&"tdd"));
@@ -139,15 +137,15 @@ mod tests {
     }
 
     #[test]
-    fn test_dispatch_plan() {
+    fn test_dispatch_architect() {
         let commands = load_embedded_commands();
         let dispatcher = CommandDispatcher::new(commands);
 
-        let result = dispatcher.dispatch("/plan add user authentication");
+        let result = dispatcher.dispatch("/architect add user authentication");
         assert!(result.is_some());
         let result = result.unwrap();
         assert!(result.prompt.contains("add user authentication"));
-        assert_eq!(result.agent.as_deref(), Some("planner"));
+        assert_eq!(result.agent.as_deref(), Some("architect"));
     }
 
     #[test]
@@ -196,7 +194,7 @@ mod tests {
         let commands = load_embedded_commands();
         let dispatcher = CommandDispatcher::new(commands);
 
-        assert!(dispatcher.get("plan").is_some());
+        assert!(dispatcher.get("architect").is_some());
         assert!(dispatcher.get("nonexistent").is_none());
     }
 
@@ -210,13 +208,15 @@ mod tests {
         let profiles = crate::internal::ai::agent::profile::load_embedded_profiles();
         let router = crate::internal::ai::agent::profile::AgentProfileRouter::new(profiles);
 
-        // Dispatch /plan command
-        let result = dispatcher.dispatch("/plan implement user auth").unwrap();
-        assert_eq!(result.agent.as_deref(), Some("planner"));
+        // Dispatch /architect command
+        let result = dispatcher
+            .dispatch("/architect implement user auth")
+            .unwrap();
+        assert_eq!(result.agent.as_deref(), Some("architect"));
 
         // The agent referenced by the command should exist in the router
         let agent = router.get(result.agent.as_deref().unwrap()).unwrap();
-        assert_eq!(agent.name, "planner");
+        assert_eq!(agent.name, "architect");
         assert!(!agent.system_prompt.is_empty());
         assert!(!agent.tools.is_empty());
 
@@ -245,13 +245,13 @@ mod tests {
         let cmd_dir = tmp.path().join(".libra").join("commands");
         std::fs::create_dir_all(&cmd_dir).unwrap();
         std::fs::write(
-            cmd_dir.join("plan.md"),
-            "---\nname: plan\ndescription: Custom plan\nagent: custom_planner\n---\nCustom template $ARGUMENTS",
+            cmd_dir.join("verify.md"),
+            "---\nname: verify\ndescription: Custom verify\nagent: custom_verifier\n---\nCustom template $ARGUMENTS",
         ).unwrap();
 
         let commands = load_commands(tmp.path());
-        let plan = commands.iter().find(|c| c.name == "plan").unwrap();
-        assert_eq!(plan.description, "Custom plan");
-        assert_eq!(plan.agent.as_deref(), Some("custom_planner"));
+        let verify = commands.iter().find(|c| c.name == "verify").unwrap();
+        assert_eq!(verify.description, "Custom verify");
+        assert_eq!(verify.agent.as_deref(), Some("custom_verifier"));
     }
 }

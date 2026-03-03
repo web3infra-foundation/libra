@@ -37,6 +37,8 @@ pub enum AgentStatus {
     ExecutingTool,
     /// Agent is waiting for user input (via `request_user_input` tool).
     AwaitingUserInput,
+    /// Waiting for user to choose post-plan action (Execute / Modify / Cancel).
+    AwaitingPostPlanChoice,
 }
 
 /// The exit strategy requested by the UI layer.
@@ -61,6 +63,13 @@ pub enum AppEvent {
         text: String,
         /// If set, restrict tools for this message (agent tool restriction).
         allowed_tools: Option<Vec<String>>,
+    },
+    /// Complete result for a `/plan` workflow run.
+    PlanWorkflowComplete {
+        text: String,
+        new_history: Vec<Message>,
+        intent_id: Option<String>,
+        spec_json: String,
     },
     /// Insert a history cell into the chat.
     InsertHistoryCell(Box<dyn HistoryCell>),

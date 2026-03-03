@@ -67,5 +67,8 @@ mod tests {
 
         let shell_spec = ToolSpec::shell();
         assert_eq!(shell_spec.function.name, "shell");
+
+        let intent_spec = ToolSpec::submit_intent_draft();
+        assert_eq!(intent_spec.function.name, "submit_intent_draft");
     }
 }
