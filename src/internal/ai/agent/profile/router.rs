@@ -208,8 +208,7 @@ mod tests {
         let profiles = load_embedded_profiles();
         let router = AgentProfileRouter::new(profiles);
 
-        let selected =
-            router.select("plan the implementation and identify dependencies for the new feature");
+        let selected = router.select("create an intentspec planning for the new feature pipeline");
         assert!(selected.is_some());
         assert_eq!(selected.unwrap().name, "planner");
     }
