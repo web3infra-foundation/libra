@@ -8,7 +8,7 @@ use serde_json::Value;
 use super::history_cell::HistoryCell;
 use crate::internal::ai::{
     completion::Message,
-    tools::{context::UserInputRequest, ToolOutput},
+    tools::{ToolOutput, context::UserInputRequest},
 };
 
 /// Events emitted by agent execution to notify the UI.
