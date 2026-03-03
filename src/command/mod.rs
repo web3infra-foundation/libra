@@ -32,6 +32,7 @@ pub mod restore;
 pub mod revert;
 pub mod shortlog;
 pub mod show;
+pub mod show_ref;
 pub mod tag;
 pub mod worktree;
 
