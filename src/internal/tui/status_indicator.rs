@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Style},
+    style::{Modifier, Style},
     text::Line,
     widgets::{Paragraph, Widget},
 };
@@ -85,7 +85,7 @@ impl StatusIndicator {
 
         let content = format!("{} {}  {}  [Esc: Interrupt]", spinner, status_text, elapsed);
 
-        let style = Style::default().fg(Color::DarkGray);
+        let style = Style::default().add_modifier(Modifier::DIM);
 
         let line = Line::styled(content, style);
         Paragraph::new(line).render(area, buf);
