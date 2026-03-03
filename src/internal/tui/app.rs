@@ -32,13 +32,13 @@ use crate::{
         commands::CommandDispatcher,
         completion::{CompletionModel, Message},
         intentspec::{
-            IntentDraft, ResolveContext, RiskLevel, render_summary, repair_intentspec,
-            resolve_intentspec, validate_intentspec,
+            IntentDraft, ResolveContext, RiskLevel, persist_intentspec, render_summary,
+            repair_intentspec, resolve_intentspec, validate_intentspec,
         },
         mcp::{
             resource::{
-                CreateContextSnapshotParams, CreateDecisionParams, CreateIntentParams,
-                CreateRunParams, CreateToolInvocationParams,
+                CreateContextSnapshotParams, CreateDecisionParams, CreateRunParams,
+                CreateToolInvocationParams,
             },
             server::LibraMcpServer,
         },
@@ -1556,44 +1556,13 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 return;
             }
 
-            let canonical =
-                match crate::internal::ai::intentspec::canonical::to_canonical_json(&spec) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        let _ = tx.send(AppEvent::AgentEvent(AgentEvent::Error {
-                            message: format!("Plan failed: cannot serialize IntentSpec: {e}"),
-                        }));
-                        return;
-                    }
-                };
-
             let mut persistence_warning = None;
             let intent_id = if let Some(mcp_server) = mcp_server {
-                let params = CreateIntentParams {
-                    content: canonical,
-                    parent_id: None,
-                    status: Some("active".to_string()),
-                    task_id: None,
-                    commit_sha: None,
-                    actor_kind: Some("system".to_string()),
-                    actor_id: Some("libra-plan".to_string()),
-                };
-                let actor_kind = params.actor_kind.clone();
-                let actor_id = params.actor_id.clone();
-                match mcp_server
-                    .resolve_actor_from_params(actor_kind.as_deref(), actor_id.as_deref())
-                {
-                    Ok(actor) => match mcp_server.create_intent_impl(params, actor).await {
-                        Ok(call_result) => parse_created_id(&call_result),
-                        Err(e) => {
-                            persistence_warning =
-                                Some(format!("failed to persist intent into MCP: {e:?}"));
-                            None
-                        }
-                    },
+                match persist_intentspec(&spec, &mcp_server).await {
+                    Ok(id) => Some(id),
                     Err(e) => {
                         persistence_warning =
-                            Some(format!("failed to resolve MCP actor for intent: {e:?}"));
+                            Some(format!("failed to persist intent into MCP: {e:?}"));
                         None
                     }
                 }
@@ -1870,20 +1839,6 @@ fn current_head_sha(working_dir: &std::path::Path) -> String {
         }
         _ => "HEAD".to_string(),
     }
-}
-
-fn parse_created_id(result: &rmcp::model::CallToolResult) -> Option<String> {
-    for content in &result.content {
-        if let Some(text) = content.as_text().map(|t| t.text.as_str())
-            && let Some(id) = text.split("ID:").nth(1)
-        {
-            let id = id.trim();
-            if !id.is_empty() {
-                return Some(id.to_string());
-            }
-        }
-    }
-    None
 }
 
 async fn list_intent_object_ids(mcp: &Arc<LibraMcpServer>) -> Vec<String> {
