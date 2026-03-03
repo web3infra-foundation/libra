@@ -1,7 +1,7 @@
 //! Tool specification types for OpenAI-compatible function calling.
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 /// A tool specification compatible with OpenAI's function calling format.
 ///

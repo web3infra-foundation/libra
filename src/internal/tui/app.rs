@@ -5,8 +5,6 @@
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Instant};
 
-use crate::cli_error;
-
 use crossterm::event::{KeyCode, KeyModifiers};
 use tokio::{
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
@@ -25,29 +23,32 @@ use super::{
     },
     terminal::{TARGET_FRAME_INTERVAL, Tui, TuiEvent},
 };
-use crate::internal::ai::{
-    agent::{
-        ToolLoopConfig, profile::AgentProfileRouter, run_tool_loop_with_history_and_observer,
-    },
-    commands::CommandDispatcher,
-    completion::{CompletionModel, Message},
-    intentspec::{
-        IntentDraft, ResolveContext, RiskLevel, render_summary, repair_intentspec,
-        resolve_intentspec, validate_intentspec,
-    },
-    mcp::{
-        resource::{
-            CreateContextSnapshotParams, CreateDecisionParams, CreateIntentParams, CreateRunParams,
-            CreateToolInvocationParams,
+use crate::{
+    cli_error,
+    internal::ai::{
+        agent::{
+            ToolLoopConfig, profile::AgentProfileRouter, run_tool_loop_with_history_and_observer,
         },
-        server::LibraMcpServer,
-    },
-    session::{SessionState, SessionStore},
-    tools::{
-        ToolOutput, ToolRegistry,
-        context::{
-            RequestUserInputArgs, SubmitIntentDraftArgs, UpdatePlanArgs, UserInputAnswer,
-            UserInputRequest, UserInputResponse,
+        commands::CommandDispatcher,
+        completion::{CompletionModel, Message},
+        intentspec::{
+            IntentDraft, ResolveContext, RiskLevel, render_summary, repair_intentspec,
+            resolve_intentspec, validate_intentspec,
+        },
+        mcp::{
+            resource::{
+                CreateContextSnapshotParams, CreateDecisionParams, CreateIntentParams,
+                CreateRunParams, CreateToolInvocationParams,
+            },
+            server::LibraMcpServer,
+        },
+        session::{SessionState, SessionStore},
+        tools::{
+            ToolOutput, ToolRegistry,
+            context::{
+                RequestUserInputArgs, SubmitIntentDraftArgs, UpdatePlanArgs, UserInputAnswer,
+                UserInputRequest, UserInputResponse,
+            },
         },
     },
 };
