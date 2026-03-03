@@ -84,6 +84,8 @@ enum Commands {
     Shortlog(command::shortlog::ShortlogArgs),
     #[command(about = "Show various types of objects")]
     Show(command::show::ShowArgs),
+    #[command(about = "List references in a local repository")]
+    ShowRef(command::show_ref::ShowRefArgs),
     #[command(about = "List, create, or delete branches")]
     Branch(command::branch::BranchArgs),
     #[command(about = "Create a new tag")]
@@ -301,6 +303,9 @@ pub async fn parse_async(args: Option<&[&str]>) -> Result<(), GitError> {
         Commands::Log(args) => command::log::execute(args).await,
         Commands::Shortlog(args) => command::shortlog::execute(args).await,
         Commands::Show(args) => command::show::execute(args).await,
+        Commands::ShowRef(args) => command::show_ref::execute(args)
+            .await
+            .map_err(GitError::CustomError)?,
         Commands::Branch(args) => command::branch::execute(args).await,
         Commands::Tag(args) => command::tag::execute(args).await,
         Commands::Commit(args) => command::commit::execute(args).await,

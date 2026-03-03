@@ -58,6 +58,7 @@ mod reset_test;
 mod restore_test;
 mod revert_test;
 mod shortlog_test;
+mod show_ref_test;
 mod show_test;
 mod status_test;
 mod switch_test;
