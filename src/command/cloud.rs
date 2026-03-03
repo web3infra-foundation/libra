@@ -438,9 +438,55 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
     if failed > 0 {
         Err(format!("{} objects failed to restore", failed))
     } else {
+        // Post-restore: update HEAD and restore worktree if we're in a fresh repo state
+        // This handles the case where we restored a repo into an empty directory
+        // We try to find the latest commit and checkout to it
+        
+        // Check if HEAD is currently unborn (no commit)
+        let head_commit = crate::internal::head::Head::current_commit().await;
+        if head_commit.is_none() {
+            println!("Restoring working directory...");
+            
+            // Find the latest commit from the restored objects
+            // We look for commit objects in the object_index table
+            use sea_orm::{QueryOrder, QuerySelect};
+            
+            let latest_commit = object_index::Entity::find()
+                .filter(object_index::Column::RepoId.eq(&repo_id))
+                .filter(object_index::Column::OType.eq("commit"))
+                .order_by_desc(object_index::Column::CreatedAt)
+                .one(db_conn)
+                .await
+                .map_err(|e| format!("Failed to query latest commit: {}", e))?;
+                
+            if let Some(commit_model) = latest_commit {
+                println!("Found latest commit: {}", commit_model.o_id);
+                
+                // Update 'main' branch to point to this commit
+                // We assume 'main' is the default branch for now
+                crate::internal::branch::Branch::update_branch("main", &commit_model.o_id, None).await;
+                
+                // Restore files to worktree
+                // We use the restore command logic programmatically
+                let restore_args = crate::command::restore::RestoreArgs {
+                    pathspec: vec![".".to_string()], // restore everything
+                    source: Some("HEAD".to_string()),
+                    worktree: true,
+                    staged: true,
+                };
+                
+                if let Err(e) = crate::command::restore::execute_checked(restore_args).await {
+                    eprintln!("warning: failed to restore worktree files: {}", e);
+                } else {
+                    println!("Successfully restored working directory files.");
+                }
+            }
+        }
+        
         Ok(())
     }
 }
+
 
 /// Execute status command - shows sync status
 async fn execute_status(args: StatusArgs) -> Result<(), String> {
