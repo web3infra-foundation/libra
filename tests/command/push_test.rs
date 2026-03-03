@@ -116,7 +116,7 @@ async fn test_push_file_remote_fails_without_reflog() {
     // push should fail with clear fatal message
     let out = Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(local_path)
-        .args(["push", "origin", "master"])
+        .args(["push", "origin", "main"])
         .output()
         .expect("push");
     let stderr = String::from_utf8_lossy(&out.stderr);

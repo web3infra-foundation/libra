@@ -125,7 +125,7 @@ async fn test_switch_function() {
     //switch branch back to the master
     {
         let args = SwitchArgs {
-            branch: Some("master".to_string()),
+            branch: Some("main".to_string()),
             create: None,
             detach: false,
             track: false,
@@ -137,7 +137,7 @@ async fn test_switch_function() {
             _ => panic!("head not in branch,unreachable"),
             // Head::Detached(name) => name.to_string(),
         };
-        assert_eq!(ref_name, "master", "switch bach to the master failed!");
+        assert_eq!(ref_name, "main", "switch bach to the master failed!");
     }
 }
 #[tokio::test]
@@ -240,7 +240,7 @@ async fn test_detach_head_basic() {
     }
     //detach to head
     {
-        switch_to_branch("master".to_string()).await;
+        switch_to_branch("main".to_string()).await;
 
         let commit_message = switch_to_detach("HEAD".to_string()).await;
         assert_eq!(&commit_message, "commit_5");
@@ -265,7 +265,7 @@ async fn test_detach_head_basic() {
         let commit_message = switch_to_detach("HEAD~1".to_string()).await;
         assert_eq!(&commit_message, "commit_1");
     }
-    switch_to_branch("master".to_string()).await;
+    switch_to_branch("main".to_string()).await;
 
     for i in 6..12 {
         let args = CommitArgs {
@@ -286,73 +286,73 @@ async fn test_detach_head_basic() {
 
     //detach use head's ref
     {
-        switch_to_branch("master".to_string()).await;
+        switch_to_branch("main".to_string()).await;
         let commit_message = switch_to_detach("HEAD~11".to_string()).await;
         assert_eq!(&commit_message, "commit_0");
     }
     {
-        switch_to_branch("master".to_string()).await;
+        switch_to_branch("main".to_string()).await;
         let commit_message = switch_to_detach("HEAD~~~~~~~~~~~".to_string()).await;
         assert_eq!(&commit_message, "commit_0");
     }
     {
-        switch_to_branch("master".to_string()).await;
+        switch_to_branch("main".to_string()).await;
         let commit_message = switch_to_detach("HEAD^^^^^^^^^^^".to_string()).await;
         assert_eq!(&commit_message, "commit_0");
     }
 
     {
-        switch_to_branch("master".to_string()).await;
+        switch_to_branch("main".to_string()).await;
         let commit_message = switch_to_detach("HEAD^~^~^~^~^~^".to_string()).await;
         assert_eq!(&commit_message, "commit_0");
     }
     //detach use branch's ref
     {
-        switch_to_branch("master".to_string()).await;
-        let commit_message = switch_to_detach("master~11".to_string()).await;
+        switch_to_branch("main".to_string()).await;
+        let commit_message = switch_to_detach("main~11".to_string()).await;
         assert_eq!(&commit_message, "commit_0");
     }
     {
-        switch_to_branch("master".to_string()).await;
-        let commit_message = switch_to_detach("master~~~~~~~~~~~".to_string()).await;
+        switch_to_branch("main".to_string()).await;
+        let commit_message = switch_to_detach("main~~~~~~~~~~~".to_string()).await;
         assert_eq!(&commit_message, "commit_0");
     }
     {
-        switch_to_branch("master".to_string()).await;
-        let commit_message = switch_to_detach("master^^^^^^^^^^^".to_string()).await;
+        switch_to_branch("main".to_string()).await;
+        let commit_message = switch_to_detach("main^^^^^^^^^^^".to_string()).await;
         assert_eq!(&commit_message, "commit_0");
     }
 
     {
-        switch_to_branch("master".to_string()).await;
-        let commit_message = switch_to_detach("master^~^~^~^~^~^".to_string()).await;
+        switch_to_branch("main".to_string()).await;
+        let commit_message = switch_to_detach("main^~^~^~^~^~^".to_string()).await;
         assert_eq!(&commit_message, "commit_0");
     }
-    let master_commit_id = Branch::find_branch("master", None).await.unwrap().commit;
+    let master_commit_id = Branch::find_branch("main", None).await.unwrap().commit;
     //detach use commit's ref
     {
-        switch_to_branch("master".to_string()).await;
+        switch_to_branch("main".to_string()).await;
         let commit_message = switch_to_detach(format!("{master_commit_id}~11")).await;
         assert_eq!(&commit_message, "commit_0");
     }
     {
-        switch_to_branch("master".to_string()).await;
+        switch_to_branch("main".to_string()).await;
         let commit_message = switch_to_detach(format!("{master_commit_id}~11")).await;
         assert_eq!(&commit_message, "commit_0");
     }
     {
-        switch_to_branch("master".to_string()).await;
+        switch_to_branch("main".to_string()).await;
         let commit_message = switch_to_detach(format!("{master_commit_id}~~~~~~~~~~~")).await;
         assert_eq!(&commit_message, "commit_0");
     }
     {
-        switch_to_branch("master".to_string()).await;
+        switch_to_branch("main".to_string()).await;
         let commit_message = switch_to_detach(format!("{master_commit_id}^^^^^^^^^^^")).await;
         assert_eq!(&commit_message, "commit_0");
     }
 
     {
-        switch_to_branch("master".to_string()).await;
+        switch_to_branch("main".to_string()).await;
         let commit_message = switch_to_detach(format!("{master_commit_id}^~^~^~^~^~^")).await;
         assert_eq!(&commit_message, "commit_0");
     }
@@ -392,7 +392,7 @@ async fn create_commit_tree() {
         );
         commit_last.committer.timestamp = 100;
         save_object(&commit_last, &commit_last.id).unwrap();
-        Branch::update_branch("master", &commit_last.id.to_string(), None).await;
+        Branch::update_branch("main", &commit_last.id.to_string(), None).await;
     }
 }
 
@@ -419,34 +419,34 @@ async fn test_detach_head_extra() {
         assert_eq!(commit_message, format!("commit_{i}"));
 
         //back to the last commit
-        switch_to_branch("master".to_string()).await;
+        switch_to_branch("main".to_string()).await;
     }
     //detach use the branch's ref
     for i in 1..12 {
-        let commit_message = switch_to_detach(format!("master^{i}")).await;
+        let commit_message = switch_to_detach(format!("main^{i}")).await;
         assert_eq!(commit_message, format!("commit_{i}"));
 
         //back to the last commit
-        switch_to_branch("master".to_string()).await;
+        switch_to_branch("main".to_string()).await;
     }
     //detach use head's ref
     {
         let commit_message = switch_to_detach("HEAD^11~".to_string()).await;
         assert_eq!(commit_message, "commit_0".to_string());
-        switch_to_branch("master".to_string()).await;
+        switch_to_branch("main".to_string()).await;
     }
     //detach use branch's ref
     {
-        let commit_message = switch_to_detach("master^11~".to_string()).await;
+        let commit_message = switch_to_detach("main^11~".to_string()).await;
         assert_eq!(commit_message, "commit_0".to_string());
-        switch_to_branch("master".to_string()).await;
+        switch_to_branch("main".to_string()).await;
     }
-    let master_commit_id = Branch::find_branch("master", None).await.unwrap().commit;
+    let master_commit_id = Branch::find_branch("main", None).await.unwrap().commit;
     //detach use commit's ref
     {
         let commit_message = switch_to_detach(format!("{master_commit_id}^11~")).await;
         assert_eq!(commit_message, "commit_0".to_string());
-        switch_to_branch("master".to_string()).await;
+        switch_to_branch("main".to_string()).await;
     }
 }
 

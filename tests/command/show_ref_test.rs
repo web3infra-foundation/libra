@@ -75,8 +75,8 @@ async fn test_show_ref_lists_branch() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("refs/heads/master"),
-        "expected refs/heads/master in output, got: {stdout}"
+        stdout.contains("refs/heads/main"),
+        "expected refs/heads/main in output, got: {stdout}"
     );
     assert!(
         stdout.contains(&head_commit.to_string()),
@@ -204,14 +204,14 @@ async fn test_show_ref_pattern_match() {
         .current_dir(temp.path())
         .arg("show-ref")
         .arg("--heads")
-        .arg("master")
+        .arg("main")
         .output()
         .unwrap();
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("refs/heads/master"),
-        "pattern should match master"
+        stdout.contains("refs/heads/main"),
+        "pattern should match main"
     );
     assert!(
         !stdout.contains("refs/heads/feature"),
@@ -255,7 +255,7 @@ async fn test_show_ref_head_exempt_from_pattern_filter() {
         .current_dir(temp.path())
         .arg("show-ref")
         .arg("--head")
-        .arg("master")
+        .arg("main")
         .output()
         .unwrap();
 
@@ -265,7 +265,7 @@ async fn test_show_ref_head_exempt_from_pattern_filter() {
         "HEAD should appear even when pattern is 'master': {stdout}"
     );
     assert!(
-        stdout.contains("refs/heads/master"),
-        "master should also match: {stdout}"
+        stdout.contains("refs/heads/main"),
+        "main should also match: {stdout}"
     );
 }

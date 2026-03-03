@@ -13,7 +13,7 @@ use libra::{
     utils::util::{DATABASE, ROOT_DIR},
 };
 use sea_orm::{ActiveModelTrait, Database, DbConn, DbErr, Set, TransactionTrait};
-const DEFAULT_BRANCH: &str = "master";
+const DEFAULT_BRANCH: &str = "main";
 
 /// Reference format validation modes
 #[derive(ValueEnum, Debug, Clone, PartialEq)]
