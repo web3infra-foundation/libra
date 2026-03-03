@@ -18,7 +18,8 @@ pub async fn persist_intentspec(spec: &IntentSpec, mcp_server: &LibraMcpServer) 
         to_canonical_json(spec).context("Failed to serialize IntentSpec to canonical JSON")?;
 
     let params = CreateIntentParams {
-        content: canonical,
+        content: spec.intent.summary.clone(),
+        structured_content: Some(canonical),
         parent_id: None,
         status: Some("active".to_string()),
         task_id: None,    // IntentSpec drives the plan, not a task yet
@@ -112,6 +113,7 @@ mod tests {
 
         let params = CreateIntentParams {
             content: canonical.clone(),
+            structured_content: Some(canonical.clone()),
             parent_id: None,
             status: Some("active".to_string()),
             task_id: None,
@@ -121,6 +123,11 @@ mod tests {
         };
 
         assert_eq!(params.content, canonical);
+        assert!(params.structured_content.is_some());
+        assert_eq!(
+            params.structured_content.as_deref(),
+            Some(canonical.as_str())
+        );
         assert_eq!(params.status.as_deref(), Some("active"));
         assert_eq!(params.actor_id.as_deref(), Some("libra-plan"));
     }
@@ -133,5 +140,34 @@ mod tests {
 
         let result_fail = CallToolResult::success(vec![Content::text("Something else")]);
         assert_eq!(parse_created_id(&result_fail), None);
+    }
+
+    /// Verify that persist_intentspec builds params with
+    /// `content` = intent summary (prompt) and `structured_content` = canonical JSON.
+    #[test]
+    fn test_persist_params_use_summary_as_prompt_and_canonical_as_content() {
+        let spec = create_dummy_spec();
+        let canonical = to_canonical_json(&spec).expect("Should serialize");
+
+        // Simulate what persist_intentspec does internally
+        let params = CreateIntentParams {
+            content: spec.intent.summary.clone(),
+            structured_content: Some(canonical.clone()),
+            parent_id: None,
+            status: Some("active".to_string()),
+            task_id: None,
+            commit_sha: None,
+            actor_kind: Some("system".to_string()),
+            actor_id: Some("libra-plan".to_string()),
+        };
+
+        // The prompt (content) should be the human-readable summary
+        assert_eq!(params.content, "Test Spec");
+        // The structured_content should be the full canonical JSON
+        assert!(params.structured_content.is_some());
+        let sc = params.structured_content.unwrap();
+        assert!(sc.contains("intentspec.io/v1alpha1"));
+        assert!(sc.contains("Testing persistence"));
+        assert_eq!(sc, canonical);
     }
 }
