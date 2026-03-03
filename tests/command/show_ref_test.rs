@@ -243,3 +243,29 @@ async fn test_show_ref_default_shows_both() {
     );
     assert!(stdout.contains("refs/tags/"), "default should show tags");
 }
+
+/// show-ref --head with a non-HEAD pattern should still include HEAD.
+#[tokio::test]
+#[serial]
+async fn test_show_ref_head_exempt_from_pattern_filter() {
+    let temp = tempdir().unwrap();
+    let _guard = setup_repo_with_commit(&temp).await;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp.path())
+        .arg("show-ref")
+        .arg("--head")
+        .arg("master")
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("HEAD"),
+        "HEAD should appear even when pattern is 'master': {stdout}"
+    );
+    assert!(
+        stdout.contains("refs/heads/master"),
+        "master should also match: {stdout}"
+    );
+}

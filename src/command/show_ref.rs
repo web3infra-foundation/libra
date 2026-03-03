@@ -74,7 +74,9 @@ async fn run_show_ref(args: ShowRefArgs) -> Result<(), String> {
 
     // Apply pattern filter if any patterns were given
     if !args.pattern.is_empty() {
-        entries.retain(|(_, refname)| args.pattern.iter().any(|p| refname.contains(p.as_str())));
+        entries.retain(|(_, refname)| {
+            refname == "HEAD" || args.pattern.iter().any(|p| refname.contains(p.as_str()))
+        });
     }
 
     if entries.is_empty() {
