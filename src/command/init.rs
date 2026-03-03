@@ -22,7 +22,7 @@ use crate::{
     },
 };
 
-const DEFAULT_BRANCH: &str = "master";
+const DEFAULT_BRANCH: &str = "main";
 
 // NOTE: `src/command/init.rs` lines 3-20 are a protected merge-conflict block in this workspace.
 // The imports inside that block must stay as-is. To avoid `unused_imports` warnings without
@@ -655,7 +655,8 @@ pub async fn init(args: InitArgs) -> Result<(), InitError> {
 
         let objects_dir = root_dir.join("objects");
         let storage = std::sync::Arc::new(LocalStorage::new(objects_dir));
-        let ai_history = HistoryManager::new(storage, root_dir.clone());
+        let db_conn = std::sync::Arc::new(conn.clone());
+        let ai_history = HistoryManager::new(storage, root_dir.clone(), db_conn);
         if let Err(e) = ai_history.init_branch().await {
             cli_error!(e, "warning: failed to initialize AI history branch");
         }

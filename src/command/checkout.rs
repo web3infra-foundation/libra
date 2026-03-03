@@ -24,6 +24,19 @@ pub struct CheckoutArgs {
 }
 
 pub async fn execute(args: CheckoutArgs) {
+    if let Some(ref branch_name) = args.branch
+        && branch_name == "intent"
+    {
+        eprintln!("fatal: checking out 'intent' branch is not allowed");
+        return;
+    }
+    if let Some(ref new_branch_name) = args.new_branch
+        && new_branch_name == "intent"
+    {
+        eprintln!("fatal: creating/switching to 'intent' branch is not allowed");
+        return;
+    }
+
     if switch::check_status().await {
         return;
     }
@@ -53,6 +66,10 @@ async fn show_current_branch() {
 }
 
 pub async fn switch_branch(branch_name: &str) {
+    if branch_name == "intent" {
+        eprintln!("fatal: switching to 'intent' branch is not allowed");
+        return;
+    }
     let target_branch: Option<Branch> = Branch::find_branch(branch_name, None).await;
     let commit_id = target_branch.unwrap().commit;
     restore_to_commit(commit_id).await;

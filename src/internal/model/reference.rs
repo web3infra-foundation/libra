@@ -25,4 +25,6 @@ pub enum ConfigKind {
     Tag, // .git/refs/tags
     #[sea_orm(string_value = "Head")]
     Head, // .git/HEAD
+    #[sea_orm(string_value = "Intent")]
+    Intent, // refs/libra/intent
 }

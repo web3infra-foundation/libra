@@ -175,6 +175,13 @@ pub async fn create_branch(new_branch: String, branch_or_commit: Option<String>)
 }
 
 async fn delete_branch(branch_name: String) {
+    if branch_name == "main" || branch_name == "intent" {
+        panic!(
+            "fatal: The '{}' branch is locked and cannot be deleted.",
+            branch_name
+        );
+    }
+
     let _ = Branch::find_branch(&branch_name, None)
         .await
         .unwrap_or_else(|| panic!("fatal: branch '{branch_name}' not found"));
@@ -195,6 +202,13 @@ async fn delete_branch(branch_name: String) {
 /// before deletion. If the branch is not fully merged, prints an error and
 /// suggests using `branch -D` for force deletion.
 async fn delete_branch_safe(branch_name: String) {
+    if branch_name == "main" || branch_name == "intent" {
+        panic!(
+            "fatal: The '{}' branch is locked and cannot be deleted.",
+            branch_name
+        );
+    }
+
     // 1. Check if branch exists
     let branch = Branch::find_branch(&branch_name, None)
         .await
@@ -265,6 +279,13 @@ async fn rename_branch(args: Vec<String>) {
     if !is_valid_git_branch_name(&new_name) {
         eprintln!("fatal: invalid branch name: {new_name}");
         return;
+    }
+
+    if old_name == "main" || old_name == "intent" {
+        panic!(
+            "fatal: The '{}' branch is locked and cannot be renamed.",
+            old_name
+        );
     }
 
     // check if old branch exists
@@ -404,6 +425,12 @@ pub async fn list_branches(
     // display `local_branches` and `remote_branches` if not empty
     if !local_branches.is_empty() {
         display_branches(local_branches, &head_name, false);
+    } else if matches!(list_mode, BranchListMode::Local | BranchListMode::All) {
+        // Fix: If there are no branches but we are on a valid HEAD (unborn branch), show it.
+        // This happens on fresh init where HEAD points to 'main' but 'main' record doesn't exist yet.
+        if !head_name.is_empty() {
+            println!("* {}", head_name.green());
+        }
     }
     if !remote_branches.is_empty() {
         display_branches(remote_branches, &head_name, true);

@@ -198,6 +198,10 @@ async fn switch_to_commit(commit_hash: ObjectHash) {
 }
 
 async fn switch_to_branch(branch_name: String) {
+    if branch_name == "intent" {
+        eprintln!("fatal: switching to 'intent' branch is not allowed");
+        return;
+    }
     let db = get_db_conn_instance().await;
 
     let target_branch = match Branch::find_branch_with_conn(db, &branch_name, None).await {

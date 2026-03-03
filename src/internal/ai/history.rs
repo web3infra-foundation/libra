@@ -9,10 +9,17 @@ use git_internal::{
         tree::{Tree, TreeItem, TreeItemMode},
     },
 };
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
+    QueryFilter, Set, TransactionTrait,
+};
 
-use crate::utils::{
-    object::{read_git_object, write_git_object},
-    storage::Storage,
+use crate::{
+    internal::model::reference::{self, ConfigKind},
+    utils::{
+        object::{read_git_object, write_git_object},
+        storage::Storage,
+    },
 };
 
 /// Default Git reference for the AI history orphan branch.
@@ -23,11 +30,13 @@ use crate::utils::{
 ///
 /// By keeping AI objects reachable from this ref, they are protected
 /// from `git gc` — the branch acts as a GC root.
-pub const AI_REF: &str = "refs/libra/intent";
+///
+/// In the database, this is stored with kind='Intent' and name='libra/intent'.
+pub const AI_REF: &str = "libra/intent";
 
 /// Manages object history using an orphan branch and Git Tree structure.
 ///
-/// The default branch (`refs/libra/intent`) stores **all** AI workflow objects,
+/// The default branch (`libra/intent`) stores **all** AI workflow objects,
 /// running in parallel with the normal code history (`refs/heads/*`).
 /// This is initialised during `libra init` so both branches exist from the start.
 ///
@@ -45,23 +54,30 @@ pub struct HistoryManager {
     #[allow(dead_code)]
     storage: Arc<dyn Storage + Send + Sync>,
     repo_path: PathBuf,
-    /// The Git reference name this manager writes to (e.g. "refs/libra/history").
+    db_conn: Arc<DatabaseConnection>,
+    /// The reference name this manager writes to (e.g. "libra/intent").
     ref_name: String,
 }
 
 impl HistoryManager {
-    pub fn new(storage: Arc<dyn Storage + Send + Sync>, repo_path: PathBuf) -> Self {
-        Self::new_with_ref(storage, repo_path, AI_REF)
+    pub fn new(
+        storage: Arc<dyn Storage + Send + Sync>,
+        repo_path: PathBuf,
+        db_conn: Arc<DatabaseConnection>,
+    ) -> Self {
+        Self::new_with_ref(storage, repo_path, db_conn, AI_REF)
     }
 
     pub fn new_with_ref(
         storage: Arc<dyn Storage + Send + Sync>,
         repo_path: PathBuf,
+        db_conn: Arc<DatabaseConnection>,
         ref_name: impl Into<String>,
     ) -> Self {
         Self {
             storage,
             repo_path,
+            db_conn,
             ref_name: ref_name.into(),
         }
     }
@@ -99,7 +115,7 @@ impl HistoryManager {
         commit_content.push_str("Initialize AI history branch");
 
         let commit_hash = write_git_object(&self.repo_path, "commit", commit_content.as_bytes())?;
-        self.update_ref(&self.ref_name, commit_hash)?;
+        self.update_ref(&self.ref_name, commit_hash).await?;
 
         Ok(())
     }
@@ -201,7 +217,7 @@ impl HistoryManager {
         let commit_hash = write_git_object(&self.repo_path, "commit", commit_content.as_bytes())?;
 
         // 4. Update Ref
-        self.update_ref(&self.ref_name, commit_hash)?;
+        self.update_ref(&self.ref_name, commit_hash).await?;
 
         Ok(())
     }
@@ -265,20 +281,22 @@ impl HistoryManager {
     }
 
     pub async fn resolve_history_head(&self) -> Result<Option<ObjectHash>, GitError> {
-        let ref_path = self.repo_path.join(&self.ref_name);
-        if !ref_path.exists() {
-            return Ok(None);
-        }
+        let ref_model = reference::Entity::find()
+            .filter(reference::Column::Name.eq(&self.ref_name))
+            .filter(reference::Column::Kind.eq(ConfigKind::Intent))
+            .one(&*self.db_conn)
+            .await
+            .map_err(|e| GitError::IOError(std::io::Error::other(e.to_string())))?;
 
-        let content = std::fs::read_to_string(&ref_path).map_err(GitError::IOError)?;
-        let hash_str = content.trim();
-        if hash_str.is_empty() {
-            return Ok(None);
+        match ref_model {
+            Some(model) => match model.commit {
+                Some(commit_hash) => ObjectHash::from_str(&commit_hash)
+                    .map(Some)
+                    .map_err(|e| GitError::InvalidObjectInfo(e.to_string())),
+                None => Ok(None),
+            },
+            None => Ok(None),
         }
-
-        ObjectHash::from_str(hash_str)
-            .map(Some)
-            .map_err(|e| GitError::InvalidObjectInfo(e.to_string()))
     }
 
     fn load_commit_tree(&self, commit_id: &ObjectHash) -> Result<Vec<TreeItem>, GitError> {
@@ -331,12 +349,46 @@ impl HistoryManager {
         write_git_object(&self.repo_path, "tree", &data)
     }
 
-    fn update_ref(&self, ref_name: &str, hash: ObjectHash) -> Result<(), GitError> {
-        let path = self.repo_path.join(ref_name);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(GitError::IOError)?;
+    async fn update_ref(&self, ref_name: &str, hash: ObjectHash) -> Result<(), GitError> {
+        let txn: DatabaseTransaction = self
+            .db_conn
+            .begin()
+            .await
+            .map_err(|e| GitError::IOError(std::io::Error::other(e.to_string())))?;
+
+        // Try to find existing reference
+        let existing = reference::Entity::find()
+            .filter(reference::Column::Name.eq(ref_name))
+            .filter(reference::Column::Kind.eq(ConfigKind::Intent))
+            .one(&txn)
+            .await
+            .map_err(|e| GitError::IOError(std::io::Error::other(e.to_string())))?;
+
+        if let Some(model) = existing {
+            let mut active: reference::ActiveModel = model.into();
+            active.commit = Set(Some(hash.to_string()));
+            active
+                .update(&txn)
+                .await
+                .map_err(|e| GitError::IOError(std::io::Error::other(e.to_string())))?;
+        } else {
+            let new_ref = reference::ActiveModel {
+                name: Set(Some(ref_name.to_string())),
+                kind: Set(ConfigKind::Intent),
+                commit: Set(Some(hash.to_string())),
+                remote: Set(None),
+                ..Default::default()
+            };
+            new_ref
+                .insert(&txn)
+                .await
+                .map_err(|e| GitError::IOError(std::io::Error::other(e.to_string())))?;
         }
-        std::fs::write(path, hash.to_string()).map_err(GitError::IOError)?;
+
+        txn.commit()
+            .await
+            .map_err(|e| GitError::IOError(std::io::Error::other(e.to_string())))?;
+
         Ok(())
     }
 
@@ -348,10 +400,20 @@ impl HistoryManager {
 
 #[cfg(test)]
 mod tests {
+    use sea_orm::{ConnectionTrait, Database, Schema};
     use tempfile::tempdir;
 
     use super::*;
     use crate::utils::storage::local::LocalStorage;
+
+    async fn setup_test_db() -> DatabaseConnection {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let builder = db.get_database_backend();
+        let schema = Schema::new(builder);
+        let stmt = schema.create_table_from_entity(reference::Entity);
+        db.execute(builder.build(&stmt)).await.unwrap();
+        db
+    }
 
     #[tokio::test]
     async fn test_history_append_simple() {
@@ -361,15 +423,30 @@ mod tests {
         let objects_dir = repo_path.join("objects");
 
         let storage = Arc::new(LocalStorage::new(objects_dir));
-        let manager = HistoryManager::new(storage.clone(), repo_path.clone());
+        let db_conn = Arc::new(setup_test_db().await);
+        let manager = HistoryManager::new(storage.clone(), repo_path.clone(), db_conn.clone());
 
         // 1. Append first object
         let blob_hash = ObjectHash::from_str("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391").unwrap();
         manager.append("task", "task-1", blob_hash).await.unwrap();
 
-        // Verify ref exists
-        let history_ref = repo_path.join("refs/libra/intent");
-        assert!(history_ref.exists());
+        // Verify ref exists in DB
+        let ref_model = reference::Entity::find()
+            .filter(reference::Column::Name.eq(AI_REF))
+            .filter(reference::Column::Kind.eq(ConfigKind::Intent))
+            .one(&*db_conn)
+            .await
+            .unwrap()
+            .expect("Reference should exist");
+
+        let commit_hash_str = ref_model.commit.expect("Commit hash should exist");
+        let commit_hash = ObjectHash::from_str(&commit_hash_str).unwrap();
+
+        // Verify we can load commit
+        let data = read_git_object(&repo_path, &commit_hash).unwrap();
+        let content = String::from_utf8_lossy(&data);
+        assert!(content.contains("tree "));
+        assert!(content.contains("Update task/task-1"));
 
         // 2. Append second object (same type)
         let blob_hash_2 = ObjectHash::from_str("f4e6d0434b8b29ae775ad8c2e48c5391e69de29b").unwrap();
@@ -378,12 +455,11 @@ mod tests {
         // 3. Append third object (different type)
         manager.append("run", "run-1", blob_hash).await.unwrap();
 
-        // Load Head Commit
-        let commit_hash_str = std::fs::read_to_string(history_ref).unwrap();
-        let commit_hash = ObjectHash::from_str(commit_hash_str.trim()).unwrap();
+        // Load Head Commit from DB
+        let head = manager.resolve_history_head().await.unwrap().unwrap();
 
         // Verify we can load commit
-        let data = read_git_object(&repo_path, &commit_hash).unwrap();
+        let data = read_git_object(&repo_path, &head).unwrap();
         let content = String::from_utf8_lossy(&data);
         assert!(content.contains("tree "));
         assert!(content.contains("Update run/run-1"));

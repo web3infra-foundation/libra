@@ -220,7 +220,7 @@ async fn execute_web_only(args: CodeArgs) {
     // Use repository working directory to ensure correct initialization of .libra resources.
     let working_dir = crate::utils::util::working_dir();
 
-    let mcp_server = init_mcp_server(&working_dir);
+    let mcp_server = init_mcp_server(&working_dir).await;
 
     // Start MCP Server
     let (mcp_handle, mcp_line) =
@@ -284,7 +284,7 @@ async fn execute_tui(args: CodeArgs) {
     let resume = args.resume;
 
     // Prepare MCP server instance shared between the HTTP transport and TUI bridge
-    let mcp_server = init_mcp_server(&working_dir);
+    let mcp_server = init_mcp_server(&working_dir).await;
 
     // Create the bridge channel for request_user_input tool <-> TUI communication.
     let (user_input_tx, user_input_rx) = tokio::sync::mpsc::unbounded_channel::<
@@ -704,7 +704,7 @@ fn system_preamble(working_dir: &std::path::Path, context: Option<&str>) -> Stri
     builder.build()
 }
 
-fn init_mcp_server(working_dir: &std::path::Path) -> Arc<LibraMcpServer> {
+async fn init_mcp_server(working_dir: &std::path::Path) -> Arc<LibraMcpServer> {
     // Use the resolved .libra storage directory for isolation, supporting
     // linked worktrees via try_get_storage_path.
     let storage_dir = crate::utils::util::try_get_storage_path(Some(working_dir.to_path_buf()))
@@ -721,8 +721,23 @@ fn init_mcp_server(working_dir: &std::path::Path) -> Arc<LibraMcpServer> {
         return Arc::new(LibraMcpServer::new(None, None));
     }
 
+    // Connect to DB
+    let db_path = dot_libra.join("libra.db");
+    let db_path_str = db_path.to_str().unwrap_or_default();
+
+    let db_conn = match crate::internal::db::establish_connection(db_path_str).await {
+        Ok(conn) => Arc::new(conn),
+        Err(e) => {
+            eprintln!(
+                "Warning: Failed to connect to database: {}. History disabled.",
+                e
+            );
+            return Arc::new(LibraMcpServer::new(None, None));
+        }
+    };
+
     let storage = Arc::new(crate::utils::storage::local::LocalStorage::new(objects_dir));
-    let intent_history_manager = Arc::new(HistoryManager::new(storage.clone(), dot_libra));
+    let intent_history_manager = Arc::new(HistoryManager::new(storage.clone(), dot_libra, db_conn));
     Arc::new(LibraMcpServer::new(
         Some(intent_history_manager),
         Some(storage),
@@ -730,10 +745,10 @@ fn init_mcp_server(working_dir: &std::path::Path) -> Arc<LibraMcpServer> {
 }
 
 async fn execute_stdio(_args: CodeArgs) {
-    // Use repository working directory to ensure correct initialization of .libra resources
+    // Use repository working directory to ensure correct initialization of .libra resources.
     let working_dir = crate::utils::util::working_dir();
 
-    let mcp_server = init_mcp_server(&working_dir);
+    let mcp_server = init_mcp_server(&working_dir).await;
 
     use rmcp::{
         service::serve_server,
