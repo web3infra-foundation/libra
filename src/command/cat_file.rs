@@ -320,7 +320,11 @@ async fn ai_list_types() {
             Ok(objects) if !objects.is_empty() => {
                 println!("{}\t({} objects)", type_name, objects.len());
             }
-            _ => {}
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("fatal: failed to list {} objects: {}", type_name, e);
+                std::process::exit(128);
+            }
         }
     }
 }

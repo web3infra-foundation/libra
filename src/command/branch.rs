@@ -144,6 +144,10 @@ pub async fn create_branch(new_branch: String, branch_or_commit: Option<String>)
         eprintln!("fatal: invalid branch name: {new_branch}");
         return;
     }
+    if new_branch == "intent" {
+        eprintln!("fatal: The '{}' branch is locked and cannot be created.", new_branch);
+        return;
+    }
 
     // check if branch exists
     let branch = Branch::find_branch(&new_branch, None).await;
@@ -414,6 +418,7 @@ pub async fn list_branches(
     commits_no_contains: &[String],
 ) {
     let head_name = display_head_state().await;
+    let has_commit_filters = !commits_contains.is_empty() || !commits_no_contains.is_empty();
 
     // filter branches by `list_mode`
     let mut local_branches = match &list_mode {
@@ -445,7 +450,9 @@ pub async fn list_branches(
     // display `local_branches` and `remote_branches` if not empty
     if !local_branches.is_empty() {
         display_branches(local_branches, &head_name, false);
-    } else if matches!(list_mode, BranchListMode::Local | BranchListMode::All) {
+    } else if matches!(list_mode, BranchListMode::Local | BranchListMode::All)
+        && !has_commit_filters
+    {
         // Fix: If there are no branches but we are on a valid HEAD (unborn branch), show it.
         // This happens on fresh init where HEAD points to 'main' but 'main' record doesn't exist yet.
         if !head_name.is_empty() {
