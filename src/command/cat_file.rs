@@ -358,8 +358,8 @@ async fn ai_list_objects(type_name: &str) {
 
 /// Redact UUID for safe logging (keep first 8 chars)
 fn redact_uuid(uuid: &str) -> String {
-    if uuid.len() > 8 {
-        format!("{}***", &uuid[..8])
+    if uuid.chars().count() > 8 {
+        format!("{}***", uuid.chars().take(8).collect::<String>())
     } else {
         "***".to_string()
     }

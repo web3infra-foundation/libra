@@ -180,15 +180,18 @@ async fn execute_sync(args: SyncArgs) -> Result<(), String> {
         .await
         .map_err(|e| format!("Database query failed: {}", e))?;
 
+    // Initialize R2 storage
+    let r2_storage = create_r2_storage(&repo_id)?;
+
     if unsynced_objects.is_empty() {
         println!("No objects to sync.");
+        if let Err(e) = sync_metadata(db_conn, &r2_storage).await {
+            eprintln!("warning: failed to sync metadata: {}", e);
+        }
         return Ok(());
     }
 
     println!("Found {} objects to sync.", unsynced_objects.len());
-
-    // Initialize R2 storage
-    let r2_storage = create_r2_storage(&repo_id)?;
 
     // Initialize local storage for reading objects
     let objects_path = path::objects();
@@ -705,17 +708,11 @@ async fn restore_metadata(
         .map_err(|e| format!("Failed to deserialize metadata: {}", e))?;
 
     for ref_model in references {
-        // Find existing reference by name and kind
-        let mut query =
-            reference::Entity::find().filter(reference::Column::Kind.eq(ref_model.kind.clone()));
-
-        if let Some(name) = &ref_model.name {
-            query = query.filter(reference::Column::Name.eq(name));
-        } else {
-            query = query.filter(reference::Column::Name.is_null());
-        }
-
-        let existing = query
+        // Find existing reference by name, kind, and remote
+        let existing = reference::Entity::find()
+            .filter(reference::Column::Kind.eq(ref_model.kind.clone()))
+            .filter(reference::Column::Name.eq(ref_model.name.clone()))
+            .filter(reference::Column::Remote.eq(ref_model.remote.clone()))
             .one(db_conn)
             .await
             .map_err(|e| format!("DB error: {}", e))?;
