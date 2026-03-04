@@ -185,9 +185,9 @@ async fn execute_sync(args: SyncArgs) -> Result<(), String> {
 
     if unsynced_objects.is_empty() {
         println!("No objects to sync.");
-        if let Err(e) = sync_metadata(db_conn, &r2_storage).await {
-            eprintln!("warning: failed to sync metadata: {}", e);
-        }
+        sync_metadata(db_conn, &r2_storage)
+            .await
+            .map_err(|e| format!("Metadata sync failed: {}", e))?;
         return Ok(());
     }
 
@@ -241,9 +241,9 @@ async fn execute_sync(args: SyncArgs) -> Result<(), String> {
     if failed_count > 0 {
         Err(format!("{} objects failed to sync", failed_count))
     } else {
-        if let Err(e) = sync_metadata(db_conn, &r2_storage).await {
-            eprintln!("warning: failed to sync metadata: {}", e);
-        }
+        sync_metadata(db_conn, &r2_storage)
+            .await
+            .map_err(|e| format!("Metadata sync failed: {}", e))?;
         Ok(())
     }
 }
