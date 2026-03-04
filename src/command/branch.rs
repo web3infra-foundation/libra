@@ -8,7 +8,11 @@ use git_internal::{hash::ObjectHash, internal::object::commit::Commit};
 
 use crate::{
     command::{get_target_commit, load_object},
-    internal::{branch::Branch, config::Config, head::Head},
+    internal::{
+        branch::{self, Branch},
+        config::Config,
+        head::Head,
+    },
 };
 
 pub enum BranchListMode {
@@ -142,20 +146,21 @@ pub async fn create_branch(new_branch: String, branch_or_commit: Option<String>)
 
     if !is_valid_git_branch_name(&new_branch) {
         eprintln!("fatal: invalid branch name: {new_branch}");
-        return;
+        std::process::exit(1);
     }
-    if new_branch == "intent" {
+    if branch::is_locked_branch(&new_branch) {
         eprintln!(
             "fatal: The '{}' branch is locked and cannot be created.",
             new_branch
         );
-        return;
+        std::process::exit(1);
     }
 
     // check if branch exists
     let branch = Branch::find_branch(&new_branch, None).await;
     if branch.is_some() {
-        panic!("fatal: A branch named '{new_branch}' already exists.");
+        eprintln!("fatal: A branch named '{new_branch}' already exists.");
+        std::process::exit(1);
     }
 
     let commit_id = match branch_or_commit {
@@ -165,7 +170,7 @@ pub async fn create_branch(new_branch: String, branch_or_commit: Option<String>)
                 Ok(commit) => commit,
                 Err(e) => {
                     eprintln!("fatal: {e}");
-                    return;
+                    std::process::exit(1);
                 }
             }
         }
@@ -182,7 +187,7 @@ pub async fn create_branch(new_branch: String, branch_or_commit: Option<String>)
 }
 
 async fn delete_branch(branch_name: String) {
-    if branch_name == "main" || branch_name == "intent" {
+    if branch::is_locked_branch(&branch_name) {
         eprintln!(
             "fatal: The '{}' branch is locked and cannot be deleted.",
             branch_name
@@ -214,7 +219,7 @@ async fn delete_branch(branch_name: String) {
 /// before deletion. If the branch is not fully merged, prints an error and
 /// suggests using `branch -D` for force deletion.
 async fn delete_branch_safe(branch_name: String) {
-    if branch_name == "main" || branch_name == "intent" {
+    if branch::is_locked_branch(&branch_name) {
         eprintln!(
             "fatal: The '{}' branch is locked and cannot be deleted.",
             branch_name
@@ -299,7 +304,7 @@ async fn rename_branch(args: Vec<String>) {
         return;
     }
 
-    if new_name == "main" || new_name == "intent" {
+    if branch::is_locked_branch(&new_name) {
         eprintln!(
             "fatal: The '{}' branch is locked and cannot be overwritten.",
             new_name
@@ -307,7 +312,7 @@ async fn rename_branch(args: Vec<String>) {
         std::process::exit(1);
     }
 
-    if old_name == "main" || old_name == "intent" {
+    if branch::is_locked_branch(&old_name) {
         eprintln!(
             "fatal: The '{}' branch is locked and cannot be renamed.",
             old_name

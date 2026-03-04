@@ -10,7 +10,7 @@ use super::{
 use crate::{
     command::{branch, status::StatusArgs},
     internal::{
-        branch::Branch,
+        branch::{Branch, INTENT_BRANCH},
         db::get_db_conn_instance,
         head::Head,
         reflog::{ReflogAction, ReflogContext, with_reflog},
@@ -66,8 +66,11 @@ pub async fn execute(args: SwitchArgs) {
 
     match create {
         Some(new_branch_name) => {
-            if new_branch_name == "intent" {
-                eprintln!("fatal: creating/switching to 'intent' branch is not allowed");
+            if new_branch_name == INTENT_BRANCH {
+                eprintln!(
+                    "fatal: creating/switching to '{}' branch is not allowed",
+                    INTENT_BRANCH
+                );
                 std::process::exit(1);
             }
             branch::create_branch(new_branch_name.clone(), branch).await;

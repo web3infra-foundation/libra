@@ -1,6 +1,6 @@
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use git_internal::{
-    errors::GitError,
     hash::ObjectHash,
     internal::object::{
         context::ContextSnapshot,
@@ -112,10 +112,7 @@ impl Identifiable for Decision {
 pub trait StorageExt: Storage + Send + Sync {
     /// Store a serializable object (Task, Run, etc.) as a Git Blob.
     /// Returns the Git Object Hash.
-    async fn put_json<T: Serialize + Send + Sync>(
-        &self,
-        object: &T,
-    ) -> Result<ObjectHash, GitError>;
+    async fn put_json<T: Serialize + Send + Sync>(&self, object: &T) -> Result<ObjectHash>;
 
     /// Store an object and automatically add it to the history log (Orphan Branch).
     /// This prevents GC and organizes objects in a time-series tree.
@@ -124,35 +121,30 @@ pub trait StorageExt: Storage + Send + Sync {
         &self,
         object: &T,
         history_manager: &HistoryManager,
-    ) -> Result<ObjectHash, GitError>;
+    ) -> Result<ObjectHash>;
 
     /// Retrieve and deserialize an object from a Git Blob hash.
-    async fn get_json<T: DeserializeOwned + Send + Sync>(
-        &self,
-        hash: &ObjectHash,
-    ) -> Result<T, GitError>;
+    async fn get_json<T: DeserializeOwned + Send + Sync>(&self, hash: &ObjectHash) -> Result<T>;
 
     /// Store raw content as an Artifact.
     /// Returns an ArtifactRef pointing to the stored content.
-    async fn put_artifact(&self, data: &[u8]) -> Result<ArtifactRef, GitError>;
+    async fn put_artifact(&self, data: &[u8]) -> Result<ArtifactRef>;
 }
 
 #[async_trait]
 impl<S: Storage + Send + Sync + ?Sized> StorageExt for S {
-    async fn put_json<T: Serialize + Send + Sync>(
-        &self,
-        object: &T,
-    ) -> Result<ObjectHash, GitError> {
+    async fn put_json<T: Serialize + Send + Sync>(&self, object: &T) -> Result<ObjectHash> {
         // Serialize to JSON
-        let data = serde_json::to_vec(object).map_err(|e| {
-            GitError::InvalidObjectInfo(format!("Failed to serialize object: {}", e))
-        })?;
+        let data =
+            serde_json::to_vec(object).map_err(|e| anyhow!("Failed to serialize object: {}", e))?;
 
         // Compute hash for Blob type
         let hash = ObjectHash::from_type_and_data(ObjectType::Blob, &data);
 
         // Store in backend
-        self.put(&hash, &data, ObjectType::Blob).await?;
+        self.put(&hash, &data, ObjectType::Blob)
+            .await
+            .map_err(|e| anyhow!(e))?;
 
         Ok(hash)
     }
@@ -161,7 +153,7 @@ impl<S: Storage + Send + Sync + ?Sized> StorageExt for S {
         &self,
         object: &T,
         history_manager: &HistoryManager,
-    ) -> Result<ObjectHash, GitError> {
+    ) -> Result<ObjectHash> {
         let hash = self.put_json(object).await?;
 
         history_manager
@@ -171,32 +163,27 @@ impl<S: Storage + Send + Sync + ?Sized> StorageExt for S {
         Ok(hash)
     }
 
-    async fn get_json<T: DeserializeOwned + Send + Sync>(
-        &self,
-        hash: &ObjectHash,
-    ) -> Result<T, GitError> {
-        let (data, obj_type) = self.get(hash).await?;
+    async fn get_json<T: DeserializeOwned + Send + Sync>(&self, hash: &ObjectHash) -> Result<T> {
+        let (data, obj_type) = self.get(hash).await.map_err(|e| anyhow!(e))?;
 
         if obj_type != ObjectType::Blob {
-            return Err(GitError::InvalidObjectType(format!(
-                "Expected Blob for object, found {}",
-                obj_type
-            )));
+            return Err(anyhow!("Expected Blob for object, found {}", obj_type));
         }
 
-        let object = serde_json::from_slice(&data).map_err(|e| {
-            GitError::InvalidObjectInfo(format!("Failed to deserialize object: {}", e))
-        })?;
+        let object = serde_json::from_slice(&data)
+            .map_err(|e| anyhow!("Failed to deserialize object: {}", e))?;
 
         Ok(object)
     }
 
-    async fn put_artifact(&self, data: &[u8]) -> Result<ArtifactRef, GitError> {
+    async fn put_artifact(&self, data: &[u8]) -> Result<ArtifactRef> {
         // Compute Git Object Hash (SHA1/SHA256) for storage addressing
         let object_hash = ObjectHash::from_type_and_data(ObjectType::Blob, data);
 
         // Store as Blob
-        self.put(&object_hash, data, ObjectType::Blob).await?;
+        self.put(&object_hash, data, ObjectType::Blob)
+            .await
+            .map_err(|e| anyhow!(e))?;
 
         // Compute Integrity Hash (SHA256) for ArtifactRef
         let integrity_hash = IntegrityHash::compute(data);
@@ -205,7 +192,7 @@ impl<S: Storage + Send + Sync + ?Sized> StorageExt for S {
         // Key is the Git Object Hash string
         // Store is unified as "libra"
         let artifact = ArtifactRef::new("libra", object_hash.to_string())
-            .map_err(GitError::InvalidObjectInfo)?
+            .map_err(|e| anyhow!(e))?
             .with_hash(integrity_hash);
 
         Ok(artifact)

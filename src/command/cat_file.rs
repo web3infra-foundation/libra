@@ -23,10 +23,11 @@ use git_internal::{
     hash::ObjectHash,
     internal::object::{blob::Blob, commit::Commit, tree::Tree, types::ObjectType},
 };
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
 use crate::{
     command::load_object,
-    internal::{ai::history::HistoryManager, db},
+    internal::{ai::history::HistoryManager, db, model::reference},
     utils::{client_storage::ClientStorage, path, storage::local::LocalStorage, util},
 };
 
@@ -85,6 +86,7 @@ const AI_OBJECT_TYPES: &[&str] = &[
     "decision",
     "snapshot",
 ];
+const TAG_REF_PREFIX: &str = "refs/tags/";
 
 pub async fn execute(args: CatFileArgs) {
     // ── AI modes (no positional object arg required) ────────────────────
@@ -114,14 +116,14 @@ pub async fn execute(args: CatFileArgs) {
         }
     };
 
-    let hash = resolve_object(object_ref).await;
+    let storage = ClientStorage::init(path::objects());
+    let hash = resolve_object(object_ref, &storage).await;
 
     if args.check_exist {
-        check_object_exists(&hash);
+        check_object_exists(&hash, &storage);
         return;
     }
 
-    let storage = ClientStorage::init(path::objects());
     let obj_type = match storage.get_object_type(&hash) {
         Ok(t) => t,
         Err(_) => {
@@ -145,7 +147,12 @@ pub async fn execute(args: CatFileArgs) {
 /// Resolve a user-supplied object reference to an `ObjectHash`.
 ///
 /// Supports branch names, tags, HEAD, and raw hex hashes.
-async fn resolve_object(object_ref: &str) -> ObjectHash {
+async fn resolve_object(object_ref: &str, storage: &ClientStorage) -> ObjectHash {
+    // Resolve tags without dereferencing annotated tag objects to commits.
+    if let Some(hash) = resolve_tag_object_ref(object_ref).await {
+        return hash;
+    }
+
     // Try as a ref (branch/tag/HEAD) first
     if let Ok(hash) = util::get_commit_base(object_ref).await {
         return hash;
@@ -157,7 +164,6 @@ async fn resolve_object(object_ref: &str) -> ObjectHash {
     }
 
     // Try abbreviated hash via storage search
-    let storage = ClientStorage::init(path::objects());
     let results = storage.search(object_ref).await;
     if results.len() == 1 {
         return results[0];
@@ -174,9 +180,31 @@ async fn resolve_object(object_ref: &str) -> ObjectHash {
     std::process::exit(128);
 }
 
+fn normalize_tag_ref_name(object_ref: &str) -> String {
+    if object_ref.starts_with(TAG_REF_PREFIX) {
+        object_ref.to_string()
+    } else {
+        format!("{TAG_REF_PREFIX}{object_ref}")
+    }
+}
+
+async fn resolve_tag_object_ref(object_ref: &str) -> Option<ObjectHash> {
+    let full_ref_name = normalize_tag_ref_name(object_ref);
+    let db_conn = db::get_db_conn_instance().await;
+    let tag_ref = reference::Entity::find()
+        .filter(reference::Column::Kind.eq(reference::ConfigKind::Tag))
+        .filter(reference::Column::Name.eq(full_ref_name))
+        .one(db_conn)
+        .await
+        .ok()
+        .flatten()?;
+
+    let target_hash = tag_ref.commit?;
+    ObjectHash::from_str(&target_hash).ok()
+}
+
 /// Exit with 0 if the object exists, 1 otherwise.
-fn check_object_exists(hash: &ObjectHash) {
-    let storage = ClientStorage::init(path::objects());
+fn check_object_exists(hash: &ObjectHash, storage: &ClientStorage) {
     if !storage.exist(hash) {
         std::process::exit(1);
     }
@@ -266,16 +294,18 @@ fn print_commit(hash: &ObjectHash) {
         println!("parent {}", parent);
     }
     println!(
-        "author {} <{}> {} +0000",
+        "author {} <{}> {} {}",
         commit.author.name.trim(),
         commit.author.email.trim(),
         commit.author.timestamp,
+        commit.author.timezone,
     );
     println!(
-        "committer {} <{}> {} +0000",
+        "committer {} <{}> {} {}",
         commit.committer.name.trim(),
         commit.committer.email.trim(),
         commit.committer.timestamp,
+        commit.committer.timezone,
     );
     println!();
     let (msg, _) = crate::common_utils::parse_commit_msg(&commit.message);
@@ -524,5 +554,18 @@ mod tests {
         // --ai and -t should be mutually exclusive
         let result = CatFileArgs::try_parse_from(["cat-file", "--ai", "some-uuid", "-t", "abc123"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_normalize_tag_ref_name_short() {
+        assert_eq!(normalize_tag_ref_name("v1.0.0"), "refs/tags/v1.0.0");
+    }
+
+    #[test]
+    fn test_normalize_tag_ref_name_full() {
+        assert_eq!(
+            normalize_tag_ref_name("refs/tags/v1.0.0"),
+            "refs/tags/v1.0.0"
+        );
     }
 }

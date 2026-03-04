@@ -5,7 +5,11 @@
 //! - `libra cloud restore` - Restore from D1/R2
 //! - `libra cloud status` - Show sync status
 
-use std::sync::Arc;
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+    sync::Arc,
+};
 
 use clap::{Parser, Subcommand};
 use git_internal::hash::ObjectHash;
@@ -462,40 +466,16 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
 
         if let Some(commit) = head_commit {
             println!("Restoring working directory to HEAD ({})", commit);
-            let restore_args = crate::command::restore::RestoreArgs {
-                pathspec: vec![".".to_string()], // restore everything
-                source: Some("HEAD".to_string()),
-                worktree: true,
-                staged: true,
-            };
-
-            if let Err(e) = crate::command::restore::execute_checked(restore_args).await {
-                eprintln!("warning: failed to restore worktree files: {}", e);
-            } else {
-                println!("Successfully restored working directory files.");
-            }
+            let _ = restore_worktree_to_head().await;
         } else {
             println!("Restoring working directory (fallback)...");
 
-            // Find the latest commit from the restored objects
-            // We look for commit objects in the object_index table
-            use sea_orm::QueryOrder;
+            // Try to find 'main' branch in references
+            // We look for 'main' branch in the reference table as a fallback
+            let main_branch = crate::internal::branch::Branch::find_branch("main", None).await;
 
-            let latest_commit = object_index::Entity::find()
-                .filter(object_index::Column::RepoId.eq(&repo_id))
-                .filter(object_index::Column::OType.eq("commit"))
-                .order_by_desc(object_index::Column::CreatedAt)
-                .one(db_conn)
-                .await
-                .map_err(|e| format!("Failed to query latest commit: {}", e))?;
-
-            if let Some(commit_model) = latest_commit {
-                println!("Found latest commit: {}", commit_model.o_id);
-
-                // Update 'main' branch to point to this commit
-                // We assume 'main' is the default branch for now
-                crate::internal::branch::Branch::update_branch("main", &commit_model.o_id, None)
-                    .await;
+            if let Some(branch) = main_branch {
+                println!("Found main branch: {}", branch.commit);
 
                 // Update HEAD to point to main
                 crate::internal::head::Head::update(
@@ -504,23 +484,29 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
                 )
                 .await;
 
-                // Restore files to worktree
-                // We use the restore command logic programmatically
-                let restore_args = crate::command::restore::RestoreArgs {
-                    pathspec: vec![".".to_string()], // restore everything
-                    source: Some("HEAD".to_string()),
-                    worktree: true,
-                    staged: true,
-                };
-
-                if let Err(e) = crate::command::restore::execute_checked(restore_args).await {
-                    eprintln!("warning: failed to restore worktree files: {}", e);
-                } else {
-                    println!("Successfully restored working directory files.");
-                }
+                let _ = restore_worktree_to_head().await;
+            } else {
+                println!("No HEAD commit or main branch found. Skipping worktree restore.");
             }
         }
 
+        Ok(())
+    }
+}
+
+async fn restore_worktree_to_head() -> Result<(), String> {
+    let restore_args = crate::command::restore::RestoreArgs {
+        pathspec: vec![".".to_string()], // restore everything
+        source: Some("HEAD".to_string()),
+        worktree: true,
+        staged: true,
+    };
+
+    if let Err(e) = crate::command::restore::execute_checked(restore_args).await {
+        eprintln!("warning: failed to restore worktree files: {}", e);
+        Err(e.to_string())
+    } else {
+        println!("Successfully restored working directory files.");
         Ok(())
     }
 }
@@ -668,6 +654,12 @@ async fn ensure_repo_id() -> Result<String, String> {
     Ok(repo_id)
 }
 
+fn calculate_metadata_hash(json: &[u8]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    json.hash(&mut hasher);
+    hasher.finish()
+}
+
 async fn sync_metadata(
     db_conn: &sea_orm::DatabaseConnection,
     r2_storage: &RemoteStorage,
@@ -678,15 +670,39 @@ async fn sync_metadata(
         .await
         .map_err(|e| format!("Failed to fetch references: {}", e))?;
 
-    let json = serde_json::to_vec(&references)
+    // Sort to ensure deterministic output for hashing
+    let mut sorted_refs = references;
+    sorted_refs.sort_by(|a, b| {
+        let a_kind = format!("{:?}", a.kind);
+        let b_kind = format!("{:?}", b.kind);
+        let a_key = (&a.name, &a.remote, a_kind);
+        let b_key = (&b.name, &b.remote, b_kind);
+        a_key.cmp(&b_key)
+    });
+
+    let json = serde_json::to_vec(&sorted_refs)
         .map_err(|e| format!("Failed to serialize metadata: {}", e))?;
+
+    let current_hash = calculate_metadata_hash(&json);
+
+    // Check if hash matches last sync
+    if let Some(stored) = Config::get("cloud", None, "metadata_hash").await
+        && let Ok(stored_hash) = stored.parse::<u64>()
+        && stored_hash == current_hash
+    {
+        println!("Metadata unchanged, skipping upload.");
+        return Ok(());
+    }
 
     r2_storage
         .put_metadata(&json)
         .await
         .map_err(|e| format!("Failed to upload metadata: {}", e))?;
 
-    println!("Metadata synced ({} references).", references.len());
+    // Update stored hash
+    Config::insert("cloud", None, "metadata_hash", &current_hash.to_string()).await;
+
+    println!("Metadata synced ({} references).", sorted_refs.len());
     Ok(())
 }
 
@@ -708,17 +724,26 @@ async fn restore_metadata(
         .map_err(|e| format!("Failed to deserialize metadata: {}", e))?;
 
     for ref_model in references {
-        // Find existing reference by name, kind, and remote
-        let existing = reference::Entity::find()
+        // Build query to find matching reference
+        let mut query = reference::Entity::find()
             .filter(reference::Column::Kind.eq(ref_model.kind.clone()))
-            .filter(reference::Column::Name.eq(ref_model.name.clone()))
-            .filter(reference::Column::Remote.eq(ref_model.remote.clone()))
+            .filter(reference::Column::Remote.eq(ref_model.remote.clone()));
+
+        // Head references are unique by kind and remote, name is the mutable current branch.
+        // For other types, match by name as well.
+        if ref_model.kind != reference::ConfigKind::Head {
+            query = query.filter(reference::Column::Name.eq(ref_model.name.clone()));
+        }
+
+        let existing = query
             .one(db_conn)
             .await
             .map_err(|e| format!("DB error: {}", e))?;
 
         if let Some(existing_model) = existing {
             let mut active: reference::ActiveModel = existing_model.into();
+            // Keep mutable HEAD name (attached branch) consistent during restore.
+            active.name = Set(ref_model.name.clone());
             active.commit = Set(ref_model.commit.clone());
             active.remote = Set(ref_model.remote.clone());
             if let Err(e) = active.update(db_conn).await {

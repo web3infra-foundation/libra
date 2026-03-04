@@ -9,7 +9,10 @@ use crate::{
         restore::{self, RestoreArgs},
         switch,
     },
-    internal::{branch::Branch, head::Head},
+    internal::{
+        branch::{Branch, INTENT_BRANCH},
+        head::Head,
+    },
     utils::util,
 };
 
@@ -25,15 +28,21 @@ pub struct CheckoutArgs {
 
 pub async fn execute(args: CheckoutArgs) {
     if let Some(ref branch_name) = args.branch
-        && branch_name == "intent"
+        && branch_name == INTENT_BRANCH
     {
-        eprintln!("fatal: checking out 'intent' branch is not allowed");
+        eprintln!(
+            "fatal: checking out '{}' branch is not allowed",
+            INTENT_BRANCH
+        );
         std::process::exit(1);
     }
     if let Some(ref new_branch_name) = args.new_branch
-        && new_branch_name == "intent"
+        && new_branch_name == INTENT_BRANCH
     {
-        eprintln!("fatal: creating/switching to 'intent' branch is not allowed");
+        eprintln!(
+            "fatal: creating/switching to '{}' branch is not allowed",
+            INTENT_BRANCH
+        );
         std::process::exit(1);
     }
 
@@ -66,8 +75,11 @@ async fn show_current_branch() {
 }
 
 pub async fn switch_branch(branch_name: &str) {
-    if branch_name == "intent" {
-        eprintln!("fatal: switching to 'intent' branch is not allowed");
+    if branch_name == INTENT_BRANCH {
+        eprintln!(
+            "fatal: switching to '{}' branch is not allowed",
+            INTENT_BRANCH
+        );
         std::process::exit(1);
     }
     let target_branch: Option<Branch> = Branch::find_branch(branch_name, None).await;

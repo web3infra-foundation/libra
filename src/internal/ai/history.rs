@@ -1,7 +1,7 @@
 use std::{path::PathBuf, str::FromStr, sync::Arc};
 
+use anyhow::{Context, Result, anyhow};
 use git_internal::{
-    errors::GitError,
     hash::ObjectHash,
     internal::object::{
         ObjectTrait,
@@ -87,7 +87,7 @@ impl HistoryManager {
     /// This should be called once during `libra init` so that the AI ref
     /// exists from the start (parallel to `refs/heads/<branch>`).
     /// If the ref already exists this is a no-op.
-    pub async fn init_branch(&self) -> Result<(), GitError> {
+    pub async fn init_branch(&self) -> Result<()> {
         // Already initialised — nothing to do.
         if self.resolve_history_head().await?.is_some() {
             return Ok(());
@@ -132,7 +132,7 @@ impl HistoryManager {
         object_type: &str,
         object_id: &str,
         blob_hash: ObjectHash,
-    ) -> Result<(), GitError> {
+    ) -> Result<()> {
         // 1. Resolve current history head
         let parent_commit_id = self.resolve_history_head().await?;
 
@@ -227,7 +227,7 @@ impl HistoryManager {
         &self,
         object_type: &str,
         object_id: &str,
-    ) -> Result<Option<ObjectHash>, GitError> {
+    ) -> Result<Option<ObjectHash>> {
         let parent_commit_id = self.resolve_history_head().await?;
         if let Some(parent_id) = parent_commit_id {
             let root_items = self.load_commit_tree(&parent_id)?;
@@ -243,10 +243,7 @@ impl HistoryManager {
 
     /// Find an object by ID across all types in the history.
     /// Returns (hash, type).
-    pub async fn find_object_hash(
-        &self,
-        object_id: &str,
-    ) -> Result<Option<(ObjectHash, String)>, GitError> {
+    pub async fn find_object_hash(&self, object_id: &str) -> Result<Option<(ObjectHash, String)>> {
         let parent_commit_id = self.resolve_history_head().await?;
         if let Some(parent_id) = parent_commit_id {
             let root_items = self.load_commit_tree(&parent_id)?;
@@ -262,10 +259,7 @@ impl HistoryManager {
 
     /// List all objects of a specific type from the current history.
     /// Returns a list of (object_id, object_hash).
-    pub async fn list_objects(
-        &self,
-        object_type: &str,
-    ) -> Result<Vec<(String, ObjectHash)>, GitError> {
+    pub async fn list_objects(&self, object_type: &str) -> Result<Vec<(String, ObjectHash)>> {
         let parent_commit_id = self.resolve_history_head().await?;
         if let Some(parent_id) = parent_commit_id {
             let root_items = self.load_commit_tree(&parent_id)?;
@@ -280,47 +274,47 @@ impl HistoryManager {
         Ok(Vec::new())
     }
 
-    pub async fn resolve_history_head(&self) -> Result<Option<ObjectHash>, GitError> {
+    pub async fn resolve_history_head(&self) -> Result<Option<ObjectHash>> {
         let ref_model = reference::Entity::find()
             .filter(reference::Column::Name.eq(&self.ref_name))
             .filter(reference::Column::Kind.eq(ConfigKind::Intent))
             .one(&*self.db_conn)
             .await
-            .map_err(|e| GitError::IOError(std::io::Error::other(e.to_string())))?;
+            .context("Failed to query history head")?;
 
         match ref_model {
             Some(model) => match model.commit {
                 Some(commit_hash) => ObjectHash::from_str(&commit_hash)
                     .map(Some)
-                    .map_err(|e| GitError::InvalidObjectInfo(e.to_string())),
+                    .map_err(|e| anyhow!("Invalid commit hash in DB: {}", e)),
                 None => Ok(None),
             },
             None => Ok(None),
         }
     }
 
-    fn load_commit_tree(&self, commit_id: &ObjectHash) -> Result<Vec<TreeItem>, GitError> {
+    fn load_commit_tree(&self, commit_id: &ObjectHash) -> Result<Vec<TreeItem>> {
         let data = read_git_object(&self.repo_path, commit_id)?;
         // Commit format: tree <hash>\nparent...
         let content = String::from_utf8_lossy(&data);
         for line in content.lines() {
             if let Some(hash_str) = line.strip_prefix("tree ") {
                 let tree_hash = ObjectHash::from_str(hash_str)
-                    .map_err(|e| GitError::InvalidObjectInfo(e.to_string()))?;
+                    .map_err(|e| anyhow!("Invalid tree hash in commit: {}", e))?;
                 return self.load_tree(&tree_hash);
             }
         }
-        Err(GitError::InvalidObjectInfo("Commit has no tree".into()))
+        Err(anyhow!("Commit has no tree"))
     }
 
-    fn load_tree(&self, tree_id: &ObjectHash) -> Result<Vec<TreeItem>, GitError> {
+    fn load_tree(&self, tree_id: &ObjectHash) -> Result<Vec<TreeItem>> {
         let data = read_git_object(&self.repo_path, tree_id)?;
 
         let tree = Tree::from_bytes(&data, *tree_id)?;
         Ok(tree.tree_items)
     }
 
-    fn write_tree(&self, tree_items: &[TreeItem]) -> Result<ObjectHash, GitError> {
+    fn write_tree(&self, tree_items: &[TreeItem]) -> Result<ObjectHash> {
         let mut data = Vec::new();
         for item in tree_items {
             let mode_str = match item.mode {
@@ -336,25 +330,22 @@ impl HistoryManager {
             data.push(0);
             let hash_hex = item.id.to_string();
             let hash_bytes =
-                hex::decode(&hash_hex).map_err(|e| GitError::InvalidObjectInfo(e.to_string()))?;
+                hex::decode(&hash_hex).map_err(|e| anyhow!("Invalid hash hex: {}", e))?;
             if hash_bytes.len() != 20 && hash_bytes.len() != 32 {
-                return Err(GitError::InvalidObjectInfo(format!(
-                    "Invalid object hash length: {}",
-                    hash_bytes.len()
-                )));
+                return Err(anyhow!("Invalid object hash length: {}", hash_bytes.len()));
             }
             data.extend_from_slice(&hash_bytes);
         }
 
-        write_git_object(&self.repo_path, "tree", &data)
+        Ok(write_git_object(&self.repo_path, "tree", &data)?)
     }
 
-    async fn update_ref(&self, ref_name: &str, hash: ObjectHash) -> Result<(), GitError> {
+    async fn update_ref(&self, ref_name: &str, hash: ObjectHash) -> Result<()> {
         let txn: DatabaseTransaction = self
             .db_conn
             .begin()
             .await
-            .map_err(|e| GitError::IOError(std::io::Error::other(e.to_string())))?;
+            .context("Failed to begin transaction")?;
 
         // Try to find existing reference
         let existing = reference::Entity::find()
@@ -362,7 +353,7 @@ impl HistoryManager {
             .filter(reference::Column::Kind.eq(ConfigKind::Intent))
             .one(&txn)
             .await
-            .map_err(|e| GitError::IOError(std::io::Error::other(e.to_string())))?;
+            .context("Failed to query reference")?;
 
         if let Some(model) = existing {
             let mut active: reference::ActiveModel = model.into();
@@ -370,7 +361,7 @@ impl HistoryManager {
             active
                 .update(&txn)
                 .await
-                .map_err(|e| GitError::IOError(std::io::Error::other(e.to_string())))?;
+                .context("Failed to update reference")?;
         } else {
             let new_ref = reference::ActiveModel {
                 name: Set(Some(ref_name.to_string())),
@@ -382,12 +373,10 @@ impl HistoryManager {
             new_ref
                 .insert(&txn)
                 .await
-                .map_err(|e| GitError::IOError(std::io::Error::other(e.to_string())))?;
+                .context("Failed to insert reference")?;
         }
 
-        txn.commit()
-            .await
-            .map_err(|e| GitError::IOError(std::io::Error::other(e.to_string())))?;
+        txn.commit().await.context("Failed to commit transaction")?;
 
         Ok(())
     }
