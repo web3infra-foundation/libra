@@ -644,6 +644,17 @@ pub async fn init(args: InitArgs) -> Result<(), InitError> {
     .insert(&conn)
     .await?;
 
+    // Initialize 'intent' branch as an unborn branch (placeholder)
+    reference::ActiveModel {
+        name: Set(Some("intent".to_owned())),
+        kind: Set(reference::ConfigKind::Branch),
+        commit: Set(None), // Unborn
+        remote: Set(None),
+        ..Default::default()
+    }
+    .insert(&conn)
+    .await?;
+
     // Set .libra as hidden
     set_dir_hidden(root_dir.to_str().unwrap())?;
 

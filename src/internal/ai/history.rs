@@ -5,6 +5,7 @@ use git_internal::{
     hash::ObjectHash,
     internal::object::{
         ObjectTrait,
+        commit::Commit,
         signature::{Signature, SignatureType},
         tree::{Tree, TreeItem, TreeItemMode},
     },
@@ -107,14 +108,15 @@ impl HistoryManager {
             "ai@libra".to_string(),
         );
 
-        let mut commit_content = String::new();
-        commit_content.push_str(&format!("tree {}\n", empty_tree_hash));
-        commit_content.push_str(&format!("author {}\n", author));
-        commit_content.push_str(&format!("committer {}\n", committer));
-        commit_content.push('\n');
-        commit_content.push_str("Initialize AI history branch");
+        let commit = Commit::new(
+            author,
+            committer,
+            empty_tree_hash,
+            vec![],
+            "Initialize AI history branch",
+        );
 
-        let commit_hash = write_git_object(&self.repo_path, "commit", commit_content.as_bytes())?;
+        let commit_hash = write_git_object(&self.repo_path, "commit", &commit.to_data().unwrap())?;
         self.update_ref(&self.ref_name, commit_hash).await?;
 
         Ok(())
@@ -195,26 +197,10 @@ impl HistoryManager {
             vec![]
         };
 
-        // Manual Commit Serialization to ensure correct Git object format
-        // Format:
-        // tree <tree_hash>
-        // parent <parent_hash>
-        // author <author_sig>
-        // committer <committer_sig>
-        //
-        // <message>
-        let mut commit_content = String::new();
-        commit_content.push_str(&format!("tree {}\n", root_tree_hash));
-        for parent in &parents {
-            commit_content.push_str(&format!("parent {}\n", parent));
-        }
-        commit_content.push_str(&format!("author {}\n", author));
-        commit_content.push_str(&format!("committer {}\n", signature));
-        commit_content.push('\n');
-        commit_content.push_str(&message);
+        let commit = Commit::new(author, signature, root_tree_hash, parents, &message);
 
         // Serialize and write commit
-        let commit_hash = write_git_object(&self.repo_path, "commit", commit_content.as_bytes())?;
+        let commit_hash = write_git_object(&self.repo_path, "commit", &commit.to_data().unwrap())?;
 
         // 4. Update Ref
         self.update_ref(&self.ref_name, commit_hash).await?;
