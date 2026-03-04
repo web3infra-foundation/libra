@@ -464,5 +464,4 @@ mod tests {
         assert!(content.contains("tree "));
         assert!(content.contains("Update run/run-1"));
     }
-
 }
