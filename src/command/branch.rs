@@ -145,7 +145,10 @@ pub async fn create_branch(new_branch: String, branch_or_commit: Option<String>)
         return;
     }
     if new_branch == "intent" {
-        eprintln!("fatal: The '{}' branch is locked and cannot be created.", new_branch);
+        eprintln!(
+            "fatal: The '{}' branch is locked and cannot be created.",
+            new_branch
+        );
         return;
     }
 
