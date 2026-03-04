@@ -132,6 +132,9 @@ enum Commands {
     Cloud(command::cloud::CloudArgs),
 
     // other hidden commands
+    #[command(about = "Provide content, type or size info for repository objects")]
+    CatFile(command::cat_file::CatFileArgs),
+
     #[command(
         about = "Build pack index file for an existing packed archive",
         hide = true
@@ -323,6 +326,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> Result<(), GitError> {
             .map_err(GitError::CustomError)?,
         Commands::CherryPick(args) => command::cherry_pick::execute(args).await,
         Commands::Push(args) => command::push::execute(args).await,
+        Commands::CatFile(args) => command::cat_file::execute(args).await,
         Commands::IndexPack(args) => command::index_pack::execute(args),
         Commands::Fetch(args) => command::fetch::execute(args).await,
         Commands::Diff(args) => command::diff::execute(args).await,

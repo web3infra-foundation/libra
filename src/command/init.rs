@@ -22,7 +22,7 @@ use crate::{
     },
 };
 
-const DEFAULT_BRANCH: &str = "master";
+const DEFAULT_BRANCH: &str = "main";
 
 // NOTE: `src/command/init.rs` lines 3-20 are a protected merge-conflict block in this workspace.
 // The imports inside that block must stay as-is. To avoid `unused_imports` warnings without
@@ -490,7 +490,7 @@ pub async fn init(args: InitArgs) -> Result<(), InitError> {
     } else {
         cur_dir.join(ROOT_DIR)
     };
-    // check if format is supported,Now SHA-1 and SHA-256 are supported.
+    // Check if format is supported. Currently, SHA-1 and SHA-256 are supported.
     let object_format_value = args
         .object_format
         .as_ref()
@@ -634,7 +634,8 @@ pub async fn init(args: InitArgs) -> Result<(), InitError> {
     // Validate branch name according to the selected ref format
     validate_branch_name(&initial_branch_name, ref_format_mode)?;
 
-    // Create HEAD (store the branch name as before; ref format stored in config)
+    // Initialize HEAD reference pointing to the initial branch.
+    // The branch name is stored in the 'name' field.
     reference::ActiveModel {
         name: Set(Some(initial_branch_name.clone())),
         kind: Set(reference::ConfigKind::Head),
@@ -655,7 +656,8 @@ pub async fn init(args: InitArgs) -> Result<(), InitError> {
 
         let objects_dir = root_dir.join("objects");
         let storage = std::sync::Arc::new(LocalStorage::new(objects_dir));
-        let ai_history = HistoryManager::new(storage, root_dir.clone());
+        let db_conn = std::sync::Arc::new(conn.clone());
+        let ai_history = HistoryManager::new(storage, root_dir.clone(), db_conn);
         if let Err(e) = ai_history.init_branch().await {
             cli_error!(e, "warning: failed to initialize AI history branch");
         }

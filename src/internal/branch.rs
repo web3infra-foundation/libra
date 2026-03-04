@@ -9,6 +9,13 @@ use sea_orm::{
 
 use crate::internal::{db::get_db_conn_instance, model::reference};
 
+pub const DEFAULT_BRANCH: &str = "main";
+pub const INTENT_BRANCH: &str = "intent";
+
+pub fn is_locked_branch(name: &str) -> bool {
+    name == DEFAULT_BRANCH || name == INTENT_BRANCH
+}
+
 #[derive(Debug)]
 pub struct Branch {
     pub name: String,

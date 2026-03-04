@@ -8,7 +8,11 @@ use git_internal::{hash::ObjectHash, internal::object::commit::Commit};
 
 use crate::{
     command::{get_target_commit, load_object},
-    internal::{branch::Branch, config::Config, head::Head},
+    internal::{
+        branch::{self, Branch},
+        config::Config,
+        head::Head,
+    },
 };
 
 pub enum BranchListMode {
@@ -142,13 +146,21 @@ pub async fn create_branch(new_branch: String, branch_or_commit: Option<String>)
 
     if !is_valid_git_branch_name(&new_branch) {
         eprintln!("fatal: invalid branch name: {new_branch}");
-        return;
+        std::process::exit(1);
+    }
+    if branch::is_locked_branch(&new_branch) {
+        eprintln!(
+            "fatal: The '{}' branch is locked and cannot be created.",
+            new_branch
+        );
+        std::process::exit(1);
     }
 
     // check if branch exists
     let branch = Branch::find_branch(&new_branch, None).await;
     if branch.is_some() {
-        panic!("fatal: A branch named '{new_branch}' already exists.");
+        eprintln!("fatal: A branch named '{new_branch}' already exists.");
+        std::process::exit(1);
     }
 
     let commit_id = match branch_or_commit {
@@ -158,7 +170,7 @@ pub async fn create_branch(new_branch: String, branch_or_commit: Option<String>)
                 Ok(commit) => commit,
                 Err(e) => {
                     eprintln!("fatal: {e}");
-                    return;
+                    std::process::exit(1);
                 }
             }
         }
@@ -175,15 +187,27 @@ pub async fn create_branch(new_branch: String, branch_or_commit: Option<String>)
 }
 
 async fn delete_branch(branch_name: String) {
+    if branch::is_locked_branch(&branch_name) {
+        eprintln!(
+            "fatal: The '{}' branch is locked and cannot be deleted.",
+            branch_name
+        );
+        std::process::exit(1);
+    }
+
     let _ = Branch::find_branch(&branch_name, None)
         .await
-        .unwrap_or_else(|| panic!("fatal: branch '{branch_name}' not found"));
+        .unwrap_or_else(|| {
+            eprintln!("fatal: branch '{branch_name}' not found");
+            std::process::exit(1);
+        });
     let head = Head::current().await;
 
     if let Head::Branch(name) = head
         && name == branch_name
     {
-        panic!("fatal: Cannot delete the branch '{branch_name}' which you are currently on");
+        eprintln!("fatal: Cannot delete the branch '{branch_name}' which you are currently on");
+        std::process::exit(1);
     }
 
     Branch::delete_branch(&branch_name, None).await;
@@ -195,25 +219,38 @@ async fn delete_branch(branch_name: String) {
 /// before deletion. If the branch is not fully merged, prints an error and
 /// suggests using `branch -D` for force deletion.
 async fn delete_branch_safe(branch_name: String) {
+    if branch::is_locked_branch(&branch_name) {
+        eprintln!(
+            "fatal: The '{}' branch is locked and cannot be deleted.",
+            branch_name
+        );
+        std::process::exit(1);
+    }
+
     // 1. Check if branch exists
     let branch = Branch::find_branch(&branch_name, None)
         .await
-        .unwrap_or_else(|| panic!("fatal: branch '{branch_name}' not found"));
+        .unwrap_or_else(|| {
+            eprintln!("fatal: branch '{branch_name}' not found");
+            std::process::exit(1);
+        });
 
     // 2. Check if trying to delete current branch
     let head = Head::current().await;
     if let Head::Branch(name) = &head
         && name == &branch_name
     {
-        panic!("fatal: Cannot delete the branch '{branch_name}' which you are currently on");
+        eprintln!("fatal: Cannot delete the branch '{branch_name}' which you are currently on");
+        std::process::exit(1);
     }
 
     // 3. Check if the branch is fully merged into HEAD
     // Get current HEAD commit
     let head_commit = match head {
-        Head::Branch(_) => Head::current_commit()
-            .await
-            .unwrap_or_else(|| panic!("fatal: cannot get HEAD commit")),
+        Head::Branch(_) => Head::current_commit().await.unwrap_or_else(|| {
+            eprintln!("fatal: cannot get HEAD commit");
+            std::process::exit(1);
+        }),
         Head::Detached(commit_hash) => commit_hash,
     };
 
@@ -265,6 +302,22 @@ async fn rename_branch(args: Vec<String>) {
     if !is_valid_git_branch_name(&new_name) {
         eprintln!("fatal: invalid branch name: {new_name}");
         return;
+    }
+
+    if branch::is_locked_branch(&new_name) {
+        eprintln!(
+            "fatal: The '{}' branch is locked and cannot be overwritten.",
+            new_name
+        );
+        std::process::exit(1);
+    }
+
+    if branch::is_locked_branch(&old_name) {
+        eprintln!(
+            "fatal: The '{}' branch is locked and cannot be renamed.",
+            old_name
+        );
+        std::process::exit(1);
     }
 
     // check if old branch exists
@@ -373,6 +426,7 @@ pub async fn list_branches(
     commits_no_contains: &[String],
 ) {
     let head_name = display_head_state().await;
+    let has_commit_filters = !commits_contains.is_empty() || !commits_no_contains.is_empty();
 
     // filter branches by `list_mode`
     let mut local_branches = match &list_mode {
@@ -404,6 +458,14 @@ pub async fn list_branches(
     // display `local_branches` and `remote_branches` if not empty
     if !local_branches.is_empty() {
         display_branches(local_branches, &head_name, false);
+    } else if matches!(list_mode, BranchListMode::Local | BranchListMode::All)
+        && !has_commit_filters
+    {
+        // Fix: If there are no branches but we are on a valid HEAD (unborn branch), show it.
+        // This happens on fresh init where HEAD points to 'main' but 'main' record doesn't exist yet.
+        if !head_name.is_empty() {
+            println!("* {}", head_name.green());
+        }
     }
     if !remote_branches.is_empty() {
         display_branches(remote_branches, &head_name, true);

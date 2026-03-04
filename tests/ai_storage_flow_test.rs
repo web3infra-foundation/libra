@@ -35,7 +35,13 @@ async fn test_ai_flow_local() {
     let objects_dir = libra_dir.join("objects");
 
     let storage = Arc::new(LocalStorage::new(objects_dir));
-    let history_manager = HistoryManager::new(storage.clone(), libra_dir.clone());
+    let db_path = libra_dir.join("libra.db");
+    let db_conn = Arc::new(
+        libra::internal::db::establish_connection(db_path.to_str().unwrap())
+            .await
+            .unwrap(),
+    );
+    let history_manager = HistoryManager::new(storage.clone(), libra_dir.clone(), db_conn);
 
     // 2. User creates a Task
     // let _repo_id = Uuid::new_v4();
@@ -51,9 +57,17 @@ async fn test_ai_flow_local() {
     // The AI ref should exist and point to a commit
     let history_ref_path = libra_dir.join("refs/libra/intent");
     assert!(
-        history_ref_path.exists(),
-        "AI history ref file should be created at {:?}",
+        !history_ref_path.exists(),
+        "AI history ref file should NOT be created at {:?}, it should be in DB",
         history_ref_path
+    );
+    assert!(
+        history_manager
+            .resolve_history_head()
+            .await
+            .unwrap()
+            .is_some(),
+        "AI ref should exist in DB"
     );
 
     libra::command::commit::execute(CommitArgs {
