@@ -62,7 +62,7 @@ impl RemoteStorage {
         };
 
         self.inner
-            .put(&path, Bytes::from(data.to_vec()).into())
+            .put(&path, Bytes::copy_from_slice(data).into())
             .await
             .map_err(|e| GitError::IOError(std::io::Error::other(e)))?;
 
