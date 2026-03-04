@@ -490,7 +490,7 @@ mod tests {
                 hooks: vec![HookDefinition {
                     event: HookEvent::PreToolUse,
                     matcher: "mock_tool".to_string(),
-                    command: r#"echo '{"message":"tool blocked by test hook"}' && exit 2"#
+                    command: r#"echo "{\"message\":\"tool blocked by test hook\"}" && exit 2"#
                         .to_string(),
                     description: "test blocker".to_string(),
                     timeout_ms: 5000,
@@ -507,11 +507,9 @@ mod tests {
             "hello",
             &registry,
             ToolLoopConfig {
-                preamble: None,
-                temperature: Some(0.0),
                 max_steps: Some(4),
                 hook_runner: Some(Arc::new(hook_runner)),
-                allowed_tools: None,
+                ..Default::default()
             },
             &mut observer,
         )

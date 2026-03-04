@@ -1197,7 +1197,7 @@ async fn test_status_short_format_with_branch() {
 
     // Should show branch info in the first line with ## prefix
     assert!(
-        output_str.contains("## master"),
+        output_str.contains("## main"),
         "Short format with --branch should start with branch info (##). Got: {}",
         output_str
     );
@@ -1258,7 +1258,7 @@ async fn test_status_porcelain_format_with_branch() {
 
     // Should show branch info in the first line with ## prefix
     assert!(
-        output_str.contains("## master"),
+        output_str.contains("## main"),
         "Porcelain format with --branch should start with branch info (##). Got: {}",
         output_str
     );

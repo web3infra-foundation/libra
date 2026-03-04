@@ -32,14 +32,24 @@ async fn test_intent_flow() {
     let storage = Arc::new(LocalStorage::new(objects_dir));
 
     // Single AI History Manager — all AI objects go here
-    let ai_history = HistoryManager::new(storage.clone(), libra_dir.clone());
+    let db_path = libra_dir.join("libra.db");
+    let db_conn = Arc::new(
+        libra::internal::db::establish_connection(db_path.to_str().unwrap())
+            .await
+            .unwrap(),
+    );
+    let ai_history = HistoryManager::new(storage.clone(), libra_dir.clone(), db_conn);
 
     // 2. Verify init creates the AI ref (called during `libra init`)
     let ai_ref_path = libra_dir.join("refs/libra/intent");
     assert!(
-        ai_ref_path.exists(),
-        "AI ref file should be created during init at {:?}",
+        !ai_ref_path.exists(),
+        "AI ref file should NOT be created during init at {:?}, it should be in DB",
         ai_ref_path
+    );
+    assert!(
+        ai_history.resolve_history_head().await.unwrap().is_some(),
+        "AI ref should exist in DB"
     );
 
     // The old history ref should NOT exist

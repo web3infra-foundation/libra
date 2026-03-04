@@ -145,7 +145,7 @@ async fn test_clone_default_branch() {
     // Verify the Head reference
     match Head::current().await {
         Head::Branch(current_branch) => {
-            assert_eq!(current_branch, "master");
+            assert_eq!(current_branch, "main");
         }
         _ => panic!("should be branch"),
     };
@@ -178,7 +178,7 @@ async fn test_clone_default_branch_single_branch() {
     // Verify the Head reference
     match Head::current().await {
         Head::Branch(current_branch) => {
-            assert_eq!(current_branch, "master");
+            assert_eq!(current_branch, "main");
         }
         _ => panic!("should be branch"),
     };
@@ -213,7 +213,7 @@ async fn test_clone_empty_repo() {
     // Verify the Head reference
     match Head::current().await {
         Head::Branch(current_branch) => {
-            assert_eq!(current_branch, "master");
+            assert_eq!(current_branch, "main");
         }
         _ => panic!("should be branch"),
     };
@@ -360,7 +360,7 @@ async fn test_clone_with_depth() {
     // Verify the Head reference
     match Head::current().await {
         Head::Branch(current_branch) => {
-            assert_eq!(current_branch, "master");
+            assert_eq!(current_branch, "main");
         }
         _ => panic!("should be branch"),
     };

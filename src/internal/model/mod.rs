@@ -4,3 +4,6 @@ pub mod config;
 pub mod object_index;
 pub mod reference;
 pub mod reflog;
+
+#[cfg(test)]
+mod reference_test;

@@ -420,7 +420,7 @@ async fn test_reset_on_branch() {
     let head_before = Head::current().await;
     match head_before {
         Head::Branch(branch_name) => {
-            assert_eq!(branch_name, "master"); // Default branch name
+            assert_eq!(branch_name, "main"); // Default branch name
 
             // Perform reset
             reset::execute(ResetArgs {
