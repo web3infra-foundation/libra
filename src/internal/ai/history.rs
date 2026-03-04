@@ -31,7 +31,7 @@ use crate::{
 /// By keeping AI objects reachable from this ref, they are protected
 /// from `git gc` — the branch acts as a GC root.
 ///
-/// In the database, this is stored with kind='Intent' and name='libra/intent'.
+/// In the database, this is stored with kind='Branch' and name='libra/intent'.
 pub const AI_REF: &str = "libra/intent";
 
 /// Manages object history using an orphan branch and Git Tree structure.
@@ -277,7 +277,7 @@ impl HistoryManager {
     pub async fn resolve_history_head(&self) -> Result<Option<ObjectHash>> {
         let ref_model = reference::Entity::find()
             .filter(reference::Column::Name.eq(&self.ref_name))
-            .filter(reference::Column::Kind.eq(ConfigKind::Intent))
+            .filter(reference::Column::Kind.eq(ConfigKind::Branch))
             .one(&*self.db_conn)
             .await
             .context("Failed to query history head")?;
@@ -350,7 +350,7 @@ impl HistoryManager {
         // Try to find existing reference
         let existing = reference::Entity::find()
             .filter(reference::Column::Name.eq(ref_name))
-            .filter(reference::Column::Kind.eq(ConfigKind::Intent))
+            .filter(reference::Column::Kind.eq(ConfigKind::Branch))
             .one(&txn)
             .await
             .context("Failed to query reference")?;
@@ -365,7 +365,7 @@ impl HistoryManager {
         } else {
             let new_ref = reference::ActiveModel {
                 name: Set(Some(ref_name.to_string())),
-                kind: Set(ConfigKind::Intent),
+                kind: Set(ConfigKind::Branch),
                 commit: Set(Some(hash.to_string())),
                 remote: Set(None),
                 ..Default::default()
@@ -422,7 +422,7 @@ mod tests {
         // Verify ref exists in DB
         let ref_model = reference::Entity::find()
             .filter(reference::Column::Name.eq(AI_REF))
-            .filter(reference::Column::Kind.eq(ConfigKind::Intent))
+            .filter(reference::Column::Kind.eq(ConfigKind::Branch))
             .one(&*db_conn)
             .await
             .unwrap()

@@ -40,7 +40,4 @@ pub enum ConfigKind {
     /// Represents the HEAD reference (current checkout)
     #[sea_orm(string_value = "Head")]
     Head,
-    /// Represents an AI intent history reference (libra/intent)
-    #[sea_orm(string_value = "Intent")]
-    Intent,
 }
