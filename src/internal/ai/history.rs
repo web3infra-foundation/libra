@@ -5,6 +5,7 @@ use git_internal::{
     hash::ObjectHash,
     internal::object::{
         ObjectTrait,
+        commit::Commit,
         signature::{Signature, SignatureType},
         tree::{Tree, TreeItem, TreeItemMode},
     },
@@ -31,7 +32,7 @@ use crate::{
 /// By keeping AI objects reachable from this ref, they are protected
 /// from `git gc` — the branch acts as a GC root.
 ///
-/// In the database, this is stored with kind='Intent' and name='libra/intent'.
+/// In the database, this is stored with kind='Branch' and name='libra/intent'.
 pub const AI_REF: &str = "libra/intent";
 
 /// Manages object history using an orphan branch and Git Tree structure.
@@ -107,14 +108,15 @@ impl HistoryManager {
             "ai@libra".to_string(),
         );
 
-        let mut commit_content = String::new();
-        commit_content.push_str(&format!("tree {}\n", empty_tree_hash));
-        commit_content.push_str(&format!("author {}\n", author));
-        commit_content.push_str(&format!("committer {}\n", committer));
-        commit_content.push('\n');
-        commit_content.push_str("Initialize AI history branch");
+        let commit = Commit::new(
+            author,
+            committer,
+            empty_tree_hash,
+            vec![],
+            "Initialize AI history branch",
+        );
 
-        let commit_hash = write_git_object(&self.repo_path, "commit", commit_content.as_bytes())?;
+        let commit_hash = write_git_object(&self.repo_path, "commit", &commit.to_data().unwrap())?;
         self.update_ref(&self.ref_name, commit_hash).await?;
 
         Ok(())
@@ -195,26 +197,10 @@ impl HistoryManager {
             vec![]
         };
 
-        // Manual Commit Serialization to ensure correct Git object format
-        // Format:
-        // tree <tree_hash>
-        // parent <parent_hash>
-        // author <author_sig>
-        // committer <committer_sig>
-        //
-        // <message>
-        let mut commit_content = String::new();
-        commit_content.push_str(&format!("tree {}\n", root_tree_hash));
-        for parent in &parents {
-            commit_content.push_str(&format!("parent {}\n", parent));
-        }
-        commit_content.push_str(&format!("author {}\n", author));
-        commit_content.push_str(&format!("committer {}\n", signature));
-        commit_content.push('\n');
-        commit_content.push_str(&message);
+        let commit = Commit::new(author, signature, root_tree_hash, parents, &message);
 
         // Serialize and write commit
-        let commit_hash = write_git_object(&self.repo_path, "commit", commit_content.as_bytes())?;
+        let commit_hash = write_git_object(&self.repo_path, "commit", &commit.to_data().unwrap())?;
 
         // 4. Update Ref
         self.update_ref(&self.ref_name, commit_hash).await?;
@@ -277,7 +263,7 @@ impl HistoryManager {
     pub async fn resolve_history_head(&self) -> Result<Option<ObjectHash>> {
         let ref_model = reference::Entity::find()
             .filter(reference::Column::Name.eq(&self.ref_name))
-            .filter(reference::Column::Kind.eq(ConfigKind::Intent))
+            .filter(reference::Column::Kind.eq(ConfigKind::Branch))
             .one(&*self.db_conn)
             .await
             .context("Failed to query history head")?;
@@ -350,7 +336,7 @@ impl HistoryManager {
         // Try to find existing reference
         let existing = reference::Entity::find()
             .filter(reference::Column::Name.eq(ref_name))
-            .filter(reference::Column::Kind.eq(ConfigKind::Intent))
+            .filter(reference::Column::Kind.eq(ConfigKind::Branch))
             .one(&txn)
             .await
             .context("Failed to query reference")?;
@@ -365,7 +351,7 @@ impl HistoryManager {
         } else {
             let new_ref = reference::ActiveModel {
                 name: Set(Some(ref_name.to_string())),
-                kind: Set(ConfigKind::Intent),
+                kind: Set(ConfigKind::Branch),
                 commit: Set(Some(hash.to_string())),
                 remote: Set(None),
                 ..Default::default()
@@ -422,7 +408,7 @@ mod tests {
         // Verify ref exists in DB
         let ref_model = reference::Entity::find()
             .filter(reference::Column::Name.eq(AI_REF))
-            .filter(reference::Column::Kind.eq(ConfigKind::Intent))
+            .filter(reference::Column::Kind.eq(ConfigKind::Branch))
             .one(&*db_conn)
             .await
             .unwrap()

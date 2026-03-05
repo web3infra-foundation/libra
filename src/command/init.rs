@@ -644,24 +644,19 @@ pub async fn init(args: InitArgs) -> Result<(), InitError> {
     .insert(&conn)
     .await?;
 
+    // Initialize 'intent' branch as an unborn branch (placeholder)
+    reference::ActiveModel {
+        name: Set(Some("intent".to_owned())),
+        kind: Set(reference::ConfigKind::Branch),
+        commit: Set(None), // Unborn
+        remote: Set(None),
+        ..Default::default()
+    }
+    .insert(&conn)
+    .await?;
+
     // Set .libra as hidden
     set_dir_hidden(root_dir.to_str().unwrap())?;
-
-    // Initialize the AI history orphan branch (refs/libra/intent) so it exists
-    // in parallel with the code branch from the very start.
-    // This also acts as a GC root — objects reachable from this ref will
-    // not be garbage-collected.
-    {
-        use crate::{internal::ai::history::HistoryManager, utils::storage::local::LocalStorage};
-
-        let objects_dir = root_dir.join("objects");
-        let storage = std::sync::Arc::new(LocalStorage::new(objects_dir));
-        let db_conn = std::sync::Arc::new(conn.clone());
-        let ai_history = HistoryManager::new(storage, root_dir.clone(), db_conn);
-        if let Err(e) = ai_history.init_branch().await {
-            cli_error!(e, "warning: failed to initialize AI history branch");
-        }
-    }
 
     // Apply shared permissions if requested
     if let Some(shared_mode) = &args.shared {

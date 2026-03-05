@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS `reference` (
     `id` INTEGER PRIMARY KEY AUTOINCREMENT,
     -- name can't be ''
     `name` TEXT CHECK (name <> '' OR name IS NULL),
-    `kind` TEXT NOT NULL CHECK (kind IN ('Branch', 'Tag', 'Head', 'Intent')),
+    `kind` TEXT NOT NULL CHECK (kind IN ('Branch', 'Tag', 'Head')),
     `commit` TEXT,
     -- remote can't be ''. If kind is Tag, remote must be NULL.
     `remote` TEXT CHECK (remote <> '' OR remote IS NULL),
