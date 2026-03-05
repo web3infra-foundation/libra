@@ -336,7 +336,7 @@ pub(crate) async fn setup_repository(
         .await;
 
         // Set up a default branch config matching the init default
-        let default_branch = "main";
+        let default_branch = "master";
         let merge_ref = format!("refs/heads/{}", default_branch);
         Config::insert("branch", Some(default_branch), "merge", &merge_ref).await;
         Config::insert(
