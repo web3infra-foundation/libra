@@ -113,6 +113,12 @@ pub async fn setup_with_new_libra_in(temp_path: impl AsRef<Path>) {
         from_git_repository: None,
     };
     command::init::init(args).await.unwrap();
+
+    // Most tests don't exercise identity flows. Seed a deterministic identity so
+    // commit-related tests don't depend on host-level config.
+    let _guard = ChangeDirGuard::new(temp_path.as_ref());
+    crate::internal::config::Config::insert("user", None, "name", "Libra Test User").await;
+    crate::internal::config::Config::insert("user", None, "email", "libra-test@example.com").await;
 }
 /// change the log level to reduce verbose output.
 pub fn init_debug_logger() {

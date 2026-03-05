@@ -363,7 +363,9 @@ async fn create_commit_tree() {
     let index = Index::load(path::index()).unwrap();
     let storage = ClientStorage::init(path::objects());
 
-    let tree = commit::create_tree(&index, &storage, "".into()).await;
+    let tree = commit::create_tree(&index, &storage, "".into())
+        .await
+        .unwrap();
 
     let mut commit_1 = Commit::from_tree_id(tree.id, vec![], &format_commit_msg("commit_0", None));
     commit_1.committer.timestamp = 1;
@@ -371,7 +373,9 @@ async fn create_commit_tree() {
 
     let mut parents_ids = vec![];
     for i in 1..12 {
-        let tree = commit::create_tree(&index, &storage, "".into()).await;
+        let tree = commit::create_tree(&index, &storage, "".into())
+            .await
+            .unwrap();
 
         let mut commit = Commit::from_tree_id(
             tree.id,
@@ -383,7 +387,9 @@ async fn create_commit_tree() {
         parents_ids.push(commit.id);
     }
     {
-        let tree = commit::create_tree(&index, &storage, "".into()).await;
+        let tree = commit::create_tree(&index, &storage, "".into())
+            .await
+            .unwrap();
 
         let mut commit_last = Commit::from_tree_id(
             tree.id,

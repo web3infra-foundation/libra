@@ -1,5 +1,7 @@
 //! Tests config command read/write behaviors, scope handling, and edge cases.
 //
+use std::process::Command;
+
 use git_internal::errors::GitError;
 use libra::{command::config, exec_async};
 use serial_test::serial;
@@ -101,6 +103,106 @@ async fn test_cli_config_local_requires_repo() {
     assert!(matches!(result, Err(GitError::RepoNotFound)));
 }
 
+#[tokio::test]
+#[serial]
+async fn test_config_import_global_from_git() {
+    let temp_dir = tempdir().unwrap();
+    let _guard = test::ChangeDirGuard::new(temp_dir.path());
+
+    let global_db_dir = tempdir().unwrap();
+    let system_db_dir = tempdir().unwrap();
+    let _scoped = ScopedConfigPathGuard::new(
+        &global_db_dir.path().join("global_config_import.db"),
+        &system_db_dir.path().join("system_config_import.db"),
+    );
+
+    let fake_home = tempdir().unwrap();
+    let _home_guard = EnvVarGuard::set("HOME", fake_home.path().as_os_str());
+    let _xdg_guard = EnvVarGuard::set(
+        "XDG_CONFIG_HOME",
+        fake_home.path().join(".config").as_os_str(),
+    );
+
+    let set_name = Command::new("git")
+        .args(["config", "--global", "user.name", "Git Global Import User"])
+        .output()
+        .unwrap();
+    assert!(set_name.status.success());
+
+    let set_email = Command::new("git")
+        .args([
+            "config",
+            "--global",
+            "user.email",
+            "git-global-import@example.com",
+        ])
+        .output()
+        .unwrap();
+    assert!(set_email.status.success());
+
+    let result = exec_async(vec!["config", "--global", "import"]).await;
+    assert!(result.is_ok());
+
+    let imported_name =
+        config::ScopedConfig::get(config::ConfigScope::Global, "user", None, "name")
+            .await
+            .unwrap();
+    let imported_email =
+        config::ScopedConfig::get(config::ConfigScope::Global, "user", None, "email")
+            .await
+            .unwrap();
+    assert_eq!(imported_name.as_deref(), Some("Git Global Import User"));
+    assert_eq!(
+        imported_email.as_deref(),
+        Some("git-global-import@example.com")
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_import_local_from_git_repository() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    use libra::internal::config::Config;
+    Config::remove_config("user", None, "name", None, true).await;
+    Config::remove_config("user", None, "email", None, true).await;
+
+    let git_init = Command::new("git").args(["init"]).output().unwrap();
+    assert!(git_init.status.success());
+
+    let set_name = Command::new("git")
+        .args(["config", "user.name", "Git Local Import User"])
+        .output()
+        .unwrap();
+    assert!(set_name.status.success());
+
+    let set_email = Command::new("git")
+        .args(["config", "user.email", "git-local-import@example.com"])
+        .output()
+        .unwrap();
+    assert!(set_email.status.success());
+
+    let result = exec_async(vec!["config", "import"]).await;
+    assert!(result.is_ok());
+
+    let imported_names =
+        config::ScopedConfig::get_all(config::ConfigScope::Local, "user", None, "name")
+            .await
+            .unwrap();
+    let imported_emails =
+        config::ScopedConfig::get_all(config::ConfigScope::Local, "user", None, "email")
+            .await
+            .unwrap();
+    assert!(imported_names.iter().any(|v| v == "Git Local Import User"));
+    assert!(
+        imported_emails
+            .iter()
+            .any(|v| v == "git-local-import@example.com")
+    );
+}
+
 impl EnvVarGuard {
     fn set(key: &'static str, value: &std::ffi::OsStr) -> Self {
         let original = std::env::var_os(key);
@@ -153,6 +255,7 @@ async fn test_config_get_failed() {
         local: false,
         global: false,
         system: false,
+        import: false,
         key: Some("user.name".to_string()),
         valuepattern: Some("value".to_string()),
         default: Some("erasernoob".to_string()),
@@ -188,6 +291,7 @@ async fn test_config_get_all() {
         local: false,
         global: false,
         system: false,
+        import: false,
         key: Some("user.name".to_string()),
         valuepattern: Some("erasernoob".to_string()),
         default: None,
@@ -205,6 +309,7 @@ async fn test_config_get_all() {
         local: false,
         global: false,
         system: false,
+        import: false,
         key: Some("user.name".to_string()),
         valuepattern: None,
         default: None,
@@ -233,6 +338,7 @@ async fn test_config_get_all_with_default() {
         local: false,
         global: false,
         system: false,
+        import: false,
         key: Some("user.name".to_string()),
         valuepattern: Some("value".to_string()),
         default: Some("erasernoob".to_string()),
@@ -262,6 +368,7 @@ async fn test_config_get() {
         local: false,
         global: false,
         system: false,
+        import: false,
         key: Some("user.name".to_string()),
         valuepattern: Some("erasernoob".to_string()),
         default: None,
@@ -279,6 +386,7 @@ async fn test_config_get() {
         local: false,
         global: false,
         system: false,
+        import: false,
         key: Some("user.name".to_string()),
         valuepattern: None,
         default: None,
@@ -306,6 +414,7 @@ async fn test_config_get_with_default() {
         local: false,
         global: false,
         system: false,
+        import: false,
         key: Some("user.name".to_string()),
         valuepattern: None,
         default: Some("erasernoob".to_string()),
@@ -335,6 +444,7 @@ async fn test_config_list() {
         local: false,
         global: false,
         system: false,
+        import: false,
         key: Some("user.name".to_string()),
         valuepattern: Some("erasernoob".to_string()),
         default: None,
@@ -352,6 +462,7 @@ async fn test_config_list() {
         local: false,
         global: false,
         system: false,
+        import: false,
         key: Some("user.email".to_string()),
         valuepattern: Some("erasernoob@example.com".to_string()),
         default: None,
@@ -370,6 +481,7 @@ async fn test_config_list() {
         local: false,
         global: false,
         system: false,
+        import: false,
         key: None,
         valuepattern: None,
         default: None,
@@ -400,6 +512,7 @@ async fn test_config_list_name_only() {
         local: false,
         global: false,
         system: false,
+        import: false,
         key: Some("user.name".to_string()),
         valuepattern: Some("erasernoob".to_string()),
         default: None,
@@ -417,6 +530,7 @@ async fn test_config_list_name_only() {
         local: false,
         global: false,
         system: false,
+        import: false,
         key: Some("user.email".to_string()),
         valuepattern: Some("erasernoob@example.com".to_string()),
         default: None,
@@ -435,6 +549,7 @@ async fn test_config_list_name_only() {
         local: false,
         global: false,
         system: false,
+        import: false,
         key: None,
         valuepattern: None,
         default: None,
@@ -464,6 +579,7 @@ async fn test_config_list_name_only_without_list() {
         local: false,
         global: false,
         system: false,
+        import: false,
         key: None,
         valuepattern: None,
         default: None,
@@ -491,6 +607,7 @@ async fn test_config_scope_local_default() {
         local: false, // No scope specified, should default to local
         global: false,
         system: false,
+        import: false,
         key: Some("user.name".to_string()),
         valuepattern: Some("test_user_local_default".to_string()),
         default: None,
@@ -511,6 +628,7 @@ async fn test_config_scope_local_default() {
         local: false, // Default to local
         global: false,
         system: false,
+        import: false,
         key: Some("user.name".to_string()),
         valuepattern: None,
         default: None,
@@ -547,6 +665,7 @@ async fn test_config_scope_global() {
         local: false,
         global: true,
         system: false,
+        import: false,
         key: Some("user.email".to_string()),
         valuepattern: Some("global_user@example.com".to_string()),
         default: None,
@@ -567,6 +686,7 @@ async fn test_config_scope_global() {
         local: false,
         global: true,
         system: false,
+        import: false,
         key: Some("user.email".to_string()),
         valuepattern: None,
         default: None,
@@ -586,6 +706,7 @@ async fn test_config_scope_global() {
         local: true, // Explicitly local
         global: false,
         system: false,
+        import: false,
         key: Some("user.email".to_string()),
         valuepattern: None,
         default: Some("not_found".to_string()), // Should return this default
@@ -621,6 +742,7 @@ async fn test_config_scope_system() {
         local: false,
         global: false,
         system: true,
+        import: false,
         key: Some("user.name".to_string()),
         valuepattern: Some("system_user".to_string()),
         default: None,
@@ -649,6 +771,7 @@ async fn test_config_scope_explicit_local() {
         local: true,
         global: false,
         system: false,
+        import: false,
         key: Some("user.name".to_string()),
         valuepattern: Some("explicit_local_user".to_string()),
         default: None,
@@ -669,6 +792,7 @@ async fn test_config_scope_explicit_local() {
         local: true,
         global: false,
         system: false,
+        import: false,
         key: Some("user.name".to_string()),
         valuepattern: None,
         default: None,
@@ -704,6 +828,7 @@ async fn test_config_scope_isolation() {
         local: true,
         global: false,
         system: false,
+        import: false,
         key: Some("test.isolation".to_string()),
         valuepattern: Some("local_value".to_string()),
         default: None,
@@ -721,6 +846,7 @@ async fn test_config_scope_isolation() {
         local: false,
         global: true,
         system: false,
+        import: false,
         key: Some("test.isolation".to_string()),
         valuepattern: Some("global_value".to_string()),
         default: None,
@@ -740,6 +866,7 @@ async fn test_config_scope_isolation() {
         local: true,
         global: false,
         system: false,
+        import: false,
         key: Some("test.isolation".to_string()),
         valuepattern: None,
         default: None,
@@ -758,6 +885,7 @@ async fn test_config_scope_isolation() {
         local: false,
         global: true,
         system: false,
+        import: false,
         key: Some("test.isolation".to_string()),
         valuepattern: None,
         default: None,
