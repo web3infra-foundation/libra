@@ -16,7 +16,20 @@ use crate::{command, utils};
 
 /// Reads the repository's configuration and sets the global hash kind.
 /// This must be called for any command that operates within an existing repository.
+/// Returns an error if the repository database is missing or corrupted.
 async fn set_local_hash_kind() -> Result<(), GitError> {
+    // Verify the database file actually exists before accessing it, to avoid
+    // panicking inside `get_db_conn_instance()` when `.libra` exists but
+    // `libra.db` is missing (e.g. corrupted or partially-removed repo).
+    let storage = utils::util::try_get_storage_path(None)?;
+    let db_path = storage.join(utils::util::DATABASE);
+    if !db_path.exists() {
+        return Err(GitError::CustomError(format!(
+            "repository database not found at '{}'",
+            db_path.display()
+        )));
+    }
+
     // Use the public API from the `config` module to get the configuration value.
     let object_format = crate::internal::config::Config::get("core", None, "objectformat")
         .await
@@ -438,62 +451,80 @@ pub async fn parse_async(args: Option<&[&str]>) -> Result<(), GitError> {
     Ok(())
 }
 
-/// this test is to verify that the CLI can be built without panicking
-/// according [clap dock](https://docs.rs/clap/latest/clap/_derive/_tutorial/chapter_4/index.html)
-#[test]
-fn verify_cli() {
-    use clap::CommandFactory;
+#[cfg(test)]
+mod tests {
+    use serial_test::serial;
 
-    Cli::command().debug_assert()
-}
+    use super::*;
+    use crate::utils::test::ChangeDirGuard;
 
-#[tokio::test]
-async fn parse_error_shows_import_hint() {
-    let err = parse_async(Some(&["libra", "import"])).await.unwrap_err();
-    let msg = match err {
-        GitError::InvalidArgument(msg) => msg,
-        other => panic!("unexpected error: {other:?}"),
-    };
-    assert!(
-        msg.contains("You probably want `libra config --import`."),
-        "got: {msg}"
-    );
-}
+    /// this test is to verify that the CLI can be built without panicking
+    /// according [clap dock](https://docs.rs/clap/latest/clap/_derive/_tutorial/chapter_4/index.html)
+    #[test]
+    fn verify_cli() {
+        use clap::CommandFactory;
 
-#[tokio::test]
-async fn clap_alias_br_resolves_to_branch() {
-    // `br` is a clap alias for `branch`, so it should NOT produce an error
-    // but instead be dispatched like `libra branch` (which fails without a repo).
-    let err = parse_async(Some(&["libra", "br"])).await.unwrap_err();
-    // Should fail because no repo exists, not because the subcommand is unknown.
-    assert!(
-        !matches!(err, GitError::InvalidArgument(_)),
-        "expected non-parse error (alias should resolve), got: {err:?}"
-    );
-}
+        Cli::command().debug_assert()
+    }
 
-#[tokio::test]
-async fn clap_alias_cfg_resolves_to_config() {
-    // `cfg` is a clap alias for `config`, dispatched normally.
-    // Without arguments it should fail with a config validation error, not a parse error.
-    let err = parse_async(Some(&["libra", "cfg"])).await.unwrap_err();
-    assert!(
-        !matches!(err, GitError::InvalidArgument(_)),
-        "expected non-parse error (alias should resolve), got: {err:?}"
-    );
-}
+    #[tokio::test]
+    async fn parse_error_shows_import_hint() {
+        let err = parse_async(Some(&["libra", "import"])).await.unwrap_err();
+        let msg = match err {
+            GitError::InvalidArgument(msg) => msg,
+            other => panic!("unexpected error: {other:?}"),
+        };
+        assert!(
+            msg.contains("You probably want `libra config --import`."),
+            "got: {msg}"
+        );
+    }
 
-#[tokio::test]
-async fn clap_fuzzy_suggests_similar_command() {
-    // "initt" is close enough to "init" for clap's built-in fuzzy match.
-    let err = parse_async(Some(&["libra", "initt"])).await.unwrap_err();
-    let msg = match err {
-        GitError::InvalidArgument(msg) => msg,
-        other => panic!("unexpected error: {other:?}"),
-    };
-    // Clap should include its own "tip: a similar subcommand exists: 'init'".
-    assert!(
-        msg.contains("tip:") || msg.contains("similar"),
-        "expected clap fuzzy-match suggestion, got: {msg}"
-    );
+    #[tokio::test]
+    #[serial]
+    async fn clap_alias_br_resolves_to_branch() {
+        // Run from a temp dir that has no `.libra` to guarantee RepoNotFound.
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = ChangeDirGuard::new(temp.path());
+
+        // `br` is a clap alias for `branch`, so it should NOT produce an error
+        // but instead be dispatched like `libra branch` (which fails without a repo).
+        let err = parse_async(Some(&["libra", "br"])).await.unwrap_err();
+        // Should fail because no repo exists, not because the subcommand is unknown.
+        assert!(
+            !matches!(err, GitError::InvalidArgument(_)),
+            "expected non-parse error (alias should resolve), got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn clap_alias_cfg_resolves_to_config() {
+        // Run from a temp dir that has no `.libra` to guarantee RepoNotFound.
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = ChangeDirGuard::new(temp.path());
+
+        // `cfg` is a clap alias for `config`, dispatched normally.
+        // Without arguments it should fail with a config validation error, not a parse error.
+        let err = parse_async(Some(&["libra", "cfg"])).await.unwrap_err();
+        assert!(
+            !matches!(err, GitError::InvalidArgument(_)),
+            "expected non-parse error (alias should resolve), got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn clap_fuzzy_suggests_similar_command() {
+        // "initt" is close enough to "init" for clap's built-in fuzzy match.
+        let err = parse_async(Some(&["libra", "initt"])).await.unwrap_err();
+        let msg = match err {
+            GitError::InvalidArgument(msg) => msg,
+            other => panic!("unexpected error: {other:?}"),
+        };
+        // Clap should include its own "tip: a similar subcommand exists: 'init'".
+        assert!(
+            msg.contains("tip:") || msg.contains("similar"),
+            "expected clap fuzzy-match suggestion, got: {msg}"
+        );
+    }
 }

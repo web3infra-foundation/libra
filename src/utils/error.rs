@@ -1,19 +1,19 @@
 //! User-facing error output utilities.
 //!
-//! Provides the [`cli_error!`] macro that conditionally includes internal
-//! error details based on the build profile:
+//! Provides the [`cli_error!`] macro for printing user-facing error messages
+//! to stderr.
 //!
-//! - **Debug** builds (`cargo build`): includes the `Debug` representation
-//!   of the error so developers can see the full cause chain.
-//! - **Release** builds (`cargo build --release`): shows only the
-//!   user-friendly message, with no internal implementation details.
+//! - **Pattern A** always uses the `Display` representation so that users
+//!   see the human-readable message from `thiserror` / `std::fmt::Display`.
+//! - **Pattern B** appends the `Debug` representation of the underlying
+//!   error cause in debug builds only, while always printing the
+//!   human-readable message.
 //!
 //! # Usage
 //!
 //! ```ignore
-//! // Pattern A – error *is* the message (Display vs Debug):
-//! //   Release → "fatal: the repository is already initialized at '...'"
-//! //   Debug   → "fatal: Io(Custom { kind: AlreadyExists, … })"
+//! // Pattern A – error's Display message IS the user-facing text:
+//! //   "fatal: the repository is already initialized at '...'"
 //! cli_error!("fatal" => e);
 //!
 //! // Pattern B – fixed message with hidden error cause (error first):
@@ -29,18 +29,11 @@
 #[macro_export]
 macro_rules! cli_error {
     // ── Pattern A ──────────────────────────────────────────────────
-    // The error's own message IS the user-facing text.
-    //   Release  →  eprintln!("{prefix}: {e}")       (Display)
-    //   Debug    →  eprintln!("{prefix}: {e:?}")      (Debug)
-    //
-    // NOTE: In debug builds the output uses `{:?}` (Debug), not `{}`
-    // (Display), so you will see the Rust struct representation rather
-    // than the human-readable message. This is intentional — it surfaces
-    // the full cause chain for developers.
+    // The error's own Display message IS the user-facing text.
+    // Always uses `{}` (Display) so the output is human-readable.
+    // Developers who need the full cause chain should use tracing or
+    // RUST_LOG.
     ($prefix:expr => $err:expr) => {{
-        #[cfg(debug_assertions)]
-        eprintln!("{}: {:?}", $prefix, $err);
-        #[cfg(not(debug_assertions))]
         eprintln!("{}: {}", $prefix, $err);
     }};
 

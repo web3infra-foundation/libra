@@ -440,7 +440,18 @@ impl ScopedConfig {
     async fn get_connection(scope: ConfigScope) -> Result<DatabaseConnection, String> {
         match scope {
             ConfigScope::Local => {
-                // Use the existing repository database connection
+                // Use try_get_storage_path to avoid panics when no repo exists.
+                let storage = crate::utils::util::try_get_storage_path(None).map_err(|_| {
+                    "fatal: not a libra repository (or any of the parent directories): .libra"
+                        .to_string()
+                })?;
+                let db_path = storage.join(crate::utils::util::DATABASE);
+                if !db_path.exists() {
+                    return Err(format!(
+                        "fatal: libra database not found at '{}'",
+                        db_path.display()
+                    ));
+                }
                 Ok(crate::internal::db::get_db_conn_instance().await.clone())
             }
             ConfigScope::Global => {
