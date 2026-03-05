@@ -58,6 +58,7 @@ Treat the following as P0/P1 when applicable:
 - missing README, migration, configuration, or API documentation for externally visible changes
 - unsafe logging of secrets, tokens, PII, or sensitive internal details
 - resource lifecycle issues: leaked handles, unreleased locks, missing timeouts, unbounded retries, or unbounded memory growth
+- use of `unwrap()` or `expect()` in non-test library/command code — these must be replaced with proper error handling (`?`, `anyhow::Context`, `thiserror`) that produces user-friendly error messages; panics from unwrap/expect are unacceptable in production paths
 
 ## Trigger rules
 
@@ -68,6 +69,7 @@ When deciding whether to raise a finding, err toward reporting if:
 - a query, loop, or network call is added in a potentially hot path
 - defaults changed in a way that could affect security or production behavior
 - a fix depends on assumptions not enforced in code
+- any new or modified code introduces `unwrap()`, `expect()`, or `panic!()` in non-test code — flag every instance and suggest a `Result`-based alternative with contextual error message
 
 Do not dismiss an issue only because:
 - the diff is small
@@ -127,3 +129,4 @@ raise as a finding when the issue could plausibly reach production.
 Treat undocumented assumptions as risk.
 Treat untested fixes as incomplete.
 Treat externally visible behavior changes without docs as P1 by default.
+Treat every `unwrap()` / `expect()` in non-test code as a P1 finding — suggest replacing with `?` + contextual error message via `anyhow::Context` or a domain-specific `thiserror` variant. The only acceptable exception is when the invariant is **provably guaranteed** by immediately preceding code and documented with a `// SAFETY:` or `// INVARIANT:` comment explaining why the value can never be `None`/`Err`.

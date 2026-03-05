@@ -129,6 +129,7 @@ All PRs must pass these checks:
 - **Library code**: Use `thiserror` with domain-specific error enums (e.g., `InitError`, `GitError`)
 - **Command handlers**: `execute(args)` is the public async entry; may return early without Result for simple CLI feedback
 - **Database operations**: `_with_conn` suffix for transaction-safe variants accepting `ConnectionTrait`
+- **No `unwrap()` / `expect()` in non-test code**: Always anticipate possible errors and propagate them with `?`. Attach human-readable context via `.context("failed to ...")` or `.with_context(|| format!(...))` so end-users see actionable messages instead of panics. The only exception is when the invariant is provably guaranteed by immediately preceding code and documented with a `// INVARIANT:` comment. In test code, `unwrap()` is acceptable.
 
 ### Patterns
 
