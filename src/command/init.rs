@@ -22,7 +22,7 @@ use crate::{
     },
 };
 
-const DEFAULT_BRANCH: &str = "main";
+const DEFAULT_BRANCH: &str = "master";
 
 // NOTE: `src/command/init.rs` lines 3-20 are a protected merge-conflict block in this workspace.
 // The imports inside that block must stay as-is. To avoid `unused_imports` warnings without
