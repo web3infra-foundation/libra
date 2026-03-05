@@ -1,0 +1,63 @@
+   Compiling ring v0.17.14
+   Compiling rustls-webpki v0.103.9
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.83s
+     Running unittests src/lib.rs (target/debug/deps/libra-9903a922706bf3ae)
+To /var/folders/b4/vyw1_gq52xl1mg2kp06r2wr40000gn/T/.tmpG4N4be/remote.git
+ * [new branch]      HEAD -> main
+     Running unittests src/main.rs (target/debug/deps/libra-2abec5c93f262998)
+     Running tests/ai_agent_test.rs (target/debug/deps/ai_agent_test-688b5b5279795714)
+     Running tests/ai_chat_agent_test.rs (target/debug/deps/ai_chat_agent_test-e277b615e4c211a4)
+     Running tests/ai_dag_tool_loop_test.rs (target/debug/deps/ai_dag_tool_loop_test-220f733cb6f7e371)
+     Running tests/ai_storage_flow_test.rs (target/debug/deps/ai_storage_flow_test-51d7c8ce12308358)
+     Running tests/cloud_storage_backup_test.rs (target/debug/deps/cloud_storage_backup_test-00e73b3a0a618c84)
+     Running tests/command_test.rs (target/debug/deps/command_test-1661deafd9c7a702)
+To /var/folders/b4/vyw1_gq52xl1mg2kp06r2wr40000gn/T/.tmpmTGQ4p/remote.git
+ * [new branch]      HEAD -> main
+Cloning into bare repository '/var/folders/b4/vyw1_gq52xl1mg2kp06r2wr40000gn/T/.tmpQDNBM3/git-src-bare'...
+done.
+Converting from Git repository...
+Converting from Git repository...
+fatal: '/private/var/folders/b4/vyw1_gq52xl1mg2kp06r2wr40000gn/T/.tmpcNZCaS/not-a-git' is not a valid git repository
+Converting from Git repository...
+Converting from Git repository...
+fatal: conversion from git repository failed: no refs fetched from source git repository
+fatal: failed to resolve from-git-repository path '/var/folders/b4/vyw1_gq52xl1mg2kp06r2wr40000gn/T/.tmp7qcSMX/missing-git': Os { code: 2, kind: NotFound, message: "No such file or directory" }
+Switched to a new branch 'feature'
+Switched to branch 'main'
+To /var/folders/b4/vyw1_gq52xl1mg2kp06r2wr40000gn/T/.tmptHzYHC/remote.git
+ * [new branch]      HEAD -> main
+Switched to a new branch 'stale_branch'
+To /var/folders/b4/vyw1_gq52xl1mg2kp06r2wr40000gn/T/.tmptHzYHC/remote.git
+ * [new branch]      stale_branch -> stale_branch
+To /var/folders/b4/vyw1_gq52xl1mg2kp06r2wr40000gn/T/.tmpq9YVjs/remote.git
+ * [new branch]      HEAD -> main
+Switched to a new branch 'feature1'
+To /var/folders/b4/vyw1_gq52xl1mg2kp06r2wr40000gn/T/.tmpq9YVjs/remote.git
+ * [new branch]      feature1 -> feature1
+Switched to a new branch 'feature2'
+To /var/folders/b4/vyw1_gq52xl1mg2kp06r2wr40000gn/T/.tmpq9YVjs/remote.git
+ * [new branch]      feature2 -> feature2
+Switched to a new branch 'feature3'
+To /var/folders/b4/vyw1_gq52xl1mg2kp06r2wr40000gn/T/.tmpq9YVjs/remote.git
+ * [new branch]      feature3 -> feature3
+     Running tests/e2e_mcp_flow.rs (target/debug/deps/e2e_mcp_flow-916c700e7b7361aa)
+   Compiling ring v0.17.14
+   Compiling rustls v0.23.36
+   Compiling rustls-webpki v0.103.9
+   Compiling sqlx-core v0.8.6
+   Compiling tokio-rustls v0.26.4
+   Compiling hyper-rustls v0.27.7
+   Compiling reqwest v0.12.28
+   Compiling rig-core v0.30.0
+   Compiling object_store v0.12.5
+   Compiling sqlx-sqlite v0.8.6
+   Compiling sqlx v0.8.6
+   Compiling sea-query-binder v0.7.0
+   Compiling sea-orm v1.1.19
+   Compiling git-internal v0.6.0
+   Compiling libra v0.1.0 (/Users/jackie/rustprogram/libra)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 16.19s
+     Running tests/intent_flow_test.rs (target/debug/deps/intent_flow_test-f9c9d9cadb7725ac)
+     Running tests/mcp_integration_test.rs (target/debug/deps/mcp_integration_test-e0d5bbfbe44f5c9e)
+     Running tests/storage_r2_test.rs (target/debug/deps/storage_r2_test-2b8309f65b588444)
+   Doc-tests libra

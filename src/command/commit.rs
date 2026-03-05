@@ -180,14 +180,39 @@ fn env_first_non_empty(keys: &[&str]) -> Option<String> {
 }
 
 async fn resolve_committer_identity() -> Result<UserIdentity, String> {
-    let name = get_user_config_value("name").await.or_else(|| {
+    // Step 1: check libra config (highest precedence after explicit --author)
+    let config_name = get_user_config_value("name").await;
+    let config_email = get_user_config_value("email").await;
+
+    // Step 2: check user.useConfigOnly BEFORE falling back to env vars / auto-detect.
+    // When useConfigOnly is true, only config values are acceptable — env vars and
+    // auto-detection are both skipped so the user is forced to configure identity
+    // explicitly.  This is stricter than Git (which still honours GIT_AUTHOR_*
+    // env vars) and prevents silent identity leakage from server environments.
+    let use_config_only = get_user_config_value("useConfigOnly")
+        .await
+        .map(|v| v.to_lowercase() == "true")
+        .unwrap_or(false);
+
+    if use_config_only {
+        if let (Some(name), Some(email)) = (config_name, config_email) {
+            return Ok(UserIdentity { name, email });
+        }
+        // Report which field(s) are missing — using *config-only* perspective.
+        let name_missing = get_user_config_value("name").await.is_none();
+        let email_missing = get_user_config_value("email").await.is_none();
+        return Err(missing_identity_message(name_missing, email_missing));
+    }
+
+    // Step 3: env-var fallback (GIT_COMMITTER_*, GIT_AUTHOR_*, EMAIL, LIBRA_COMMITTER_*)
+    let name = config_name.or_else(|| {
         env_first_non_empty(&[
             "GIT_COMMITTER_NAME",
             "GIT_AUTHOR_NAME",
             "LIBRA_COMMITTER_NAME",
         ])
     });
-    let email = get_user_config_value("email").await.or_else(|| {
+    let email = config_email.or_else(|| {
         env_first_non_empty(&[
             "GIT_COMMITTER_EMAIL",
             "GIT_AUTHOR_EMAIL",
@@ -198,16 +223,6 @@ async fn resolve_committer_identity() -> Result<UserIdentity, String> {
 
     if let (Some(name), Some(email)) = (name.clone(), email.clone()) {
         return Ok(UserIdentity { name, email });
-    }
-
-    // Check user.useConfigOnly
-    let use_config_only = get_user_config_value("useConfigOnly")
-        .await
-        .map(|v| v.to_lowercase() == "true")
-        .unwrap_or(false);
-
-    if use_config_only {
-        return Err(missing_identity_message(name.is_none(), email.is_none()));
     }
 
     // Auto-detection
