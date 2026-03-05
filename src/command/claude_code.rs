@@ -88,6 +88,7 @@ pub async fn execute(cmd: ClaudeCodeCommand) -> Result<(), String> {
         ));
     }
 
+    // Use process cwd as the trust boundary for local writes.
     let working_dir =
         std::env::current_dir().map_err(|e| format!("failed to read current directory: {e}"))?;
     let working_dir_str = working_dir.to_string_lossy().to_string();
@@ -123,6 +124,8 @@ pub async fn execute(cmd: ClaudeCodeCommand) -> Result<(), String> {
         if !is_session_end(&cmd) {
             return Ok(());
         }
+        // For SessionEnd, only skip when persistence is already confirmed.
+        // This allows retried end events to recover after a previous failure.
         if session_persisted(&session) {
             return Ok(());
         }
@@ -154,6 +157,8 @@ pub async fn execute(cmd: ClaudeCodeCommand) -> Result<(), String> {
                 session.metadata.remove("cleanup_failed");
                 session.metadata.remove("last_error");
 
+                // Delete local session after successful persistence.
+                // Keep metadata on cleanup failure so the operator can inspect/retry.
                 match session_store.delete(&session.id) {
                     Ok(_) => return Ok(()),
                     Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -248,6 +253,7 @@ fn apply_event(
         .entry("raw_hook_events".to_string())
         .or_insert_with(|| Value::Array(Vec::new()));
     if let Value::Array(events) = raw_events {
+        // Keep normalized raw fragments for audit/debug and deterministic hashing.
         events.push(json!({
             "hook_event_name": envelope.hook_event_name,
             "payload": normalize_value(Value::Object(envelope.extra.clone())),
@@ -344,6 +350,7 @@ fn make_event_key(envelope: &HookEnvelope) -> String {
     let mut hasher = DefaultHasher::new();
     envelope.hook_event_name.hash(&mut hasher);
     envelope.session_id.hash(&mut hasher);
+    // Hash canonicalized payload to keep dedup stable across key order differences.
     let normalized = normalize_value(Value::Object(envelope.extra.clone()));
     if let Ok(canonical_extra) = serde_json::to_string(&normalized) {
         canonical_extra.hash(&mut hasher);
@@ -405,6 +412,7 @@ async fn persist_session_history(session: &SessionState) -> anyhow::Result<Persi
     let storage = Arc::new(LocalStorage::new(objects_dir));
     let db_conn = Arc::new(db::get_db_conn_instance().await.clone());
     let history_manager = HistoryManager::new(storage, storage_path.clone(), db_conn);
+    // Idempotency fast path: skip append when object already exists.
     if let Some(existing) = history_manager
         .get_object_hash(CLAUDE_SESSION_TYPE, &session.id)
         .await?
@@ -425,6 +433,7 @@ async fn persist_session_history(session: &SessionState) -> anyhow::Result<Persi
         }
     });
 
+    // Canonical JSON keeps blob content deterministic for the same semantic payload.
     let blob_data = to_canonical_json_bytes(&payload)?;
     let blob_hash = write_git_object(&storage_path, "blob", &blob_data)?;
     history_manager
