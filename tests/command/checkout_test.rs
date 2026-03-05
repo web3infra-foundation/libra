@@ -9,11 +9,16 @@ use libra::{
         commit, init,
         restore::{self, RestoreArgs},
     },
-    internal::head::Head,
+    internal::{config::Config, head::Head},
     utils::{test, util},
 };
 use serial_test::serial;
 use tempfile::tempdir;
+
+async fn configure_identity_for_test() {
+    Config::insert("user", None, "name", "Checkout Test User").await;
+    Config::insert("user", None, "email", "checkout-test@example.com").await;
+}
 async fn test_check_branch() {
     println!("\n\x1b[1mTest check_branch function.\x1b[0m");
 
@@ -80,6 +85,7 @@ async fn test_checkout_module_functions() {
     init::init(init_args)
         .await
         .expect("Error initializing repository");
+    configure_identity_for_test().await;
 
     // Initialize the main branch by creating an empty commit
     let commit_args = commit::CommitArgs {
@@ -130,6 +136,7 @@ async fn test_checkout_module_functions_sha256() {
     init::init(init_args)
         .await
         .expect("Error initializing repository");
+    configure_identity_for_test().await;
 
     let commit_args = commit::CommitArgs {
         message: Some("An empty initial commit".to_string()),
@@ -180,6 +187,7 @@ async fn checkout_restore_rejects_sha1_hash_in_sha256_repo() {
     })
     .await
     .unwrap();
+    configure_identity_for_test().await;
 
     // create and commit a file
     test::ensure_file("foo.txt", Some("v1"));

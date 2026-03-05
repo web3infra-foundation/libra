@@ -33,6 +33,7 @@ async fn setup_user_identity() {
         local: false,
         global: false,
         system: false,
+        import: false,
         name_only: false,
         default: None,
     })
@@ -49,6 +50,7 @@ async fn setup_user_identity() {
         local: false,
         global: false,
         system: false,
+        import: false,
         name_only: false,
         default: None,
     })

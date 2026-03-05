@@ -534,6 +534,8 @@ async fn test_cherry_pick_sha256_hash_handling() {
     })
     .await
     .unwrap();
+    libra::internal::config::Config::insert("user", None, "name", "Cherry Test User").await;
+    libra::internal::config::Config::insert("user", None, "email", "cherry-test@example.com").await;
 
     // base commit on main
     fs::write("base.txt", "base").unwrap();

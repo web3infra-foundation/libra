@@ -6,19 +6,37 @@ use std::{
 use serde_json::json;
 use tokio::time::sleep;
 
-/// Pick a random 4-digit port in [7100, 9800], avoiding well-known ports.
-///
-/// Uses both PID and nanosecond timestamp as seed for uniqueness across
-/// parallel test runs.
-fn random_test_port() -> u16 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
+/// Allocate a free MCP/Web port pair `(p, p+1)` on localhost.
+fn pick_test_ports() -> (u16, u16) {
+    use std::{
+        net::TcpListener,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    // Keep ports 4-digit to match existing local assumptions and avoid common services.
+    const START: u16 = 7100;
+    const END: u16 = 9799; // web port uses +1
+    let range_len = (END - START + 1) as u128;
+    let seed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("Time went backwards")
         .as_nanos();
-    let pid = std::process::id() as u128;
-    // Range: 7100..=9800  (all 4-digit, avoids 3000/3306/5432/6379/8080/8443/9090 etc.)
-    7100 + ((nanos ^ pid) % 2701) as u16
+    let start_offset = (seed % range_len) as u16;
+
+    for i in 0..=END - START {
+        let mcp_port = START + ((start_offset + i) % (END - START + 1));
+        let Ok(mcp_listener) = TcpListener::bind(("127.0.0.1", mcp_port)) else {
+            continue;
+        };
+        let web_port = mcp_port + 1;
+        if let Ok(web_listener) = TcpListener::bind(("127.0.0.1", web_port)) {
+            drop(web_listener);
+            drop(mcp_listener);
+            return (mcp_port, web_port);
+        }
+    }
+
+    panic!("Failed to allocate free MCP/Web test ports");
 }
 
 /// Extract all `data:` values from an SSE event stream body.
@@ -93,12 +111,7 @@ async fn test_e2e_mcp_flow() {
     // ── 2. Start Server ────────────────────────────────────────────────────────
     // Use --web-only so the test can run without a terminal (no TUI).
     // The MCP server is started identically in both TUI and web-only modes.
-    let mcp_port = random_test_port();
-    let web_port = mcp_port + 1;
-    assert!(
-        mcp_port >= 1000 && web_port <= 9999,
-        "Ports must be 4 digits: mcp={mcp_port}, web={web_port}"
-    );
+    let (mcp_port, web_port) = pick_test_ports();
 
     println!("Starting server on MCP port {mcp_port}, Web port {web_port}");
 
@@ -117,27 +130,27 @@ async fn test_e2e_mcp_flow() {
         .spawn()
         .expect("Failed to start libra code");
 
-    // Poll until the MCP server is accepting connections (max ~15 s)
+    // Poll until the MCP server TCP listener is accepting connections (max ~30 s)
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
+        .no_proxy()
         .build()
         .unwrap();
     let mcp_url = format!("http://127.0.0.1:{mcp_port}");
 
     let mut server_ready = false;
-    for _ in 0..30 {
-        sleep(Duration::from_millis(500)).await;
-        if client
-            .post(&mcp_url)
-            .header("Content-Type", "application/json")
-            .header("Accept", "text/event-stream, application/json")
-            .body("{}")
-            .send()
-            .await
-            .is_ok()
-        {
-            server_ready = true;
-            break;
+    let mut last_probe_error = None;
+    for _ in 0..120 {
+        sleep(Duration::from_millis(250)).await;
+        match tokio::net::TcpStream::connect(("127.0.0.1", mcp_port)).await {
+            Ok(stream) => {
+                drop(stream);
+                server_ready = true;
+                break;
+            }
+            Err(e) => {
+                last_probe_error = Some(e.to_string());
+            }
         }
     }
 
@@ -152,7 +165,10 @@ async fn test_e2e_mcp_flow() {
             "Server stdout:\n{}",
             String::from_utf8_lossy(&output.stdout)
         );
-        panic!("MCP server did not start in time on port {mcp_port}");
+        panic!(
+            "MCP server did not start in time on port {mcp_port}; last TCP probe error: {}",
+            last_probe_error.unwrap_or_else(|| "<none>".to_string())
+        );
     }
     println!("MCP server is ready");
 
@@ -178,20 +194,39 @@ async fn test_e2e_mcp_flow() {
     });
 
     println!("Sending Initialize...");
-    let response = client
-        .post(&mcp_url)
-        .header("Content-Type", "application/json")
-        .header("Accept", "text/event-stream, application/json")
-        .json(&init_msg)
-        .send()
-        .await
-        .expect("Failed to send initialize");
+    let mut response_opt = None;
+    let mut last_init_error = None;
+    for _ in 0..60 {
+        match client
+            .post(&mcp_url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream, application/json")
+            .json(&init_msg)
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => {
+                response_opt = Some(response);
+                break;
+            }
+            Ok(response) => {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                last_init_error = Some(format!("status {status}, body: {body}"));
+            }
+            Err(e) => {
+                last_init_error = Some(e.to_string());
+            }
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
 
-    assert!(
-        response.status().is_success(),
-        "Initialize failed with status {}",
-        response.status()
-    );
+    let response = response_opt.unwrap_or_else(|| {
+        panic!(
+            "Initialize failed after retries: {}",
+            last_init_error.unwrap_or_else(|| "unknown".to_string())
+        )
+    });
 
     // Extract Mcp-Session-Id from response headers
     let session_id = response
