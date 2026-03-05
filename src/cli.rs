@@ -75,6 +75,8 @@ enum Commands {
     Clone(command::clone::CloneArgs),
     #[command(about = "Start Libra Code interactive TUI (with background web server)")]
     Code(command::code::CodeArgs),
+    #[command(subcommand, about = "Handle Claude Code hook events")]
+    ClaudeCode(command::claude_code::ClaudeCodeCommand),
 
     // The rest of the commands require a repository to be present
     #[command(about = "Add file contents to the index")]
@@ -443,7 +445,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         },
     };
     match &args.command {
-        Commands::Init(_) | Commands::Clone(_) => {}
+        Commands::Init(_) | Commands::Clone(_) | Commands::ClaudeCode(_) => {}
         // Config global/system scopes don't require a repository
         Commands::Config(cfg) if cfg.global || cfg.system => {}
         _ => {
@@ -467,6 +469,9 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         }
         Commands::Clone(args) => command::clone::execute_safe(args).await?, //clone will use init internally,so we don't need to set hash kind here again
         Commands::Code(args) => command::code::execute(args).await,
+        Commands::ClaudeCode(cmd) => command::claude_code::execute(cmd)
+            .await
+            .map_err(|e| CliError::fatal(e.to_string()))?,
         Commands::Add(args) => command::add::execute_safe(args).await?,
         Commands::Rm(args) => command::remove::execute(args).await,
         Commands::Restore(args) => command::restore::execute(args).await,
