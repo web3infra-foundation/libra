@@ -331,6 +331,11 @@ impl ConfigArgs {
             return Err("--name-only is only valid when --list is set".to_string());
         }
         if self.is_import_mode() {
+            // Explicit flag form: `libra config --import` must not accept <key>.
+            if self.import && self.key.is_some() {
+                return Err("`libra config --import` does not accept <key>".to_string());
+            }
+            // Reject value_pattern for both explicit and implicit import forms.
             if self.valuepattern.is_some() {
                 return Err("`libra config import` does not accept <value_pattern>".to_string());
             }
@@ -589,17 +594,20 @@ pub struct Key {
     key: String,
 }
 
-/// Execute the `config` command using parsed CLI arguments, printing any error
-/// to stderr instead of bubbling it up to the caller.
+/// Execute the `config` command, printing any error to stderr.
+///
+/// **Note:** Prefer [`execute_safe`] for programmatic / embedded callers so
+/// errors can be handled without terminating the process.
 pub async fn execute(args: ConfigArgs) {
-    if let Err(e) = execute_impl(args).await {
+    if let Err(e) = execute_safe(args).await {
         eprintln!("{e}");
-        std::process::exit(1);
     }
 }
 
-/// Internal implementation that returns Result for better error handling
-async fn execute_impl(args: ConfigArgs) -> Result<(), String> {
+/// Execute the `config` command and return errors to the caller instead of
+/// printing them.  This is the preferred entry point for library consumers,
+/// tests, and the top-level CLI dispatch.
+pub async fn execute_safe(args: ConfigArgs) -> Result<(), String> {
     args.validate().map_err(|e| format!("error: {e}"))?;
 
     let scope = args.get_scope();
@@ -1078,5 +1086,19 @@ mod args_tests {
         let args = ConfigArgs::try_parse_from(["config", "user.name"]).unwrap();
         let err = args.validate().unwrap_err();
         assert_eq!(err, "missing required argument: <value_pattern>");
+    }
+
+    #[test]
+    fn import_flag_rejects_positional_key() {
+        let args = ConfigArgs::try_parse_from(["config", "--import", "user.name"]).unwrap();
+        let err = args.validate().unwrap_err();
+        assert_eq!(err, "`libra config --import` does not accept <key>");
+    }
+
+    #[test]
+    fn import_implicit_rejects_value_pattern() {
+        let args = ConfigArgs::try_parse_from(["config", "import", "extra"]).unwrap();
+        let err = args.validate().unwrap_err();
+        assert_eq!(err, "`libra config import` does not accept <value_pattern>");
     }
 }

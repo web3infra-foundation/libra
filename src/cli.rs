@@ -434,7 +434,15 @@ pub async fn parse_async(args: Option<&[&str]>) -> Result<(), GitError> {
         Commands::Remote(cmd) => command::remote::execute(cmd).await,
         Commands::Open(args) => command::open::execute(args).await,
         Commands::Pull(args) => command::pull::execute(args).await,
-        Commands::Config(args) => command::config::execute(args).await,
+        Commands::Config(args) => {
+            if let Err(msg) = command::config::execute_safe(args).await {
+                if from_process_args {
+                    eprintln!("{msg}");
+                    std::process::exit(1);
+                }
+                return Err(GitError::CustomError(msg));
+            }
+        }
         Commands::Checkout(args) => command::checkout::execute(args).await,
         Commands::Reflog(args) => command::reflog::execute(args).await,
         Commands::Worktree(args) => command::worktree::execute(args).await,
