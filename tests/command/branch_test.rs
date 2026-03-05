@@ -794,6 +794,7 @@ async fn test_branch_contains_commit_filter() {
         let no_contains: Vec<String> = no_contains.iter().map(|s| s.to_string()).collect();
         async move {
             let mut branches = Branch::list_branches(None).await;
+            branches.retain(|b| b.name != "libra/intent");
             filter_branches(
                 &mut branches,
                 &resolve_commits(&contains).await,

@@ -310,6 +310,27 @@ async fn test_cat_file_pretty_blob() {
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "14");
 }
 
+/// Test `cat-file` panic handling for corrupted/invalid objects.
+#[tokio::test]
+#[serial]
+async fn test_cat_file_panic_handling() {
+    let temp_dir = init_temp_repo();
+    let temp_path = temp_dir.path();
+
+    // Test that the command reports an error (exit 128) rather than panicking
+    // when accessing a non-existent object in a valid repository.
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["cat-file", "-p", "0000000000000000000000000000000000000000"])
+        .output()
+        .expect("Failed to execute cat-file");
+
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(128));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("fatal:"));
+}
+
 /// Test `cat-file -e` exits 0 for existing objects and non-zero for missing objects.
 #[tokio::test]
 #[serial]

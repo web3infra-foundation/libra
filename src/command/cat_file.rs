@@ -237,10 +237,17 @@ fn pretty_print_object(hash: &ObjectHash, obj_type: ObjectType) {
 
 /// Print a blob object's raw content.
 fn print_blob(hash: &ObjectHash) {
-    let blob: Blob = match load_object(hash) {
-        Ok(b) => b,
-        Err(e) => {
+    let blob: Blob = match std::panic::catch_unwind(|| load_object(hash)) {
+        Ok(Ok(b)) => b,
+        Ok(Err(e)) => {
             eprintln!("fatal: could not read blob {}: {}", hash, e);
+            std::process::exit(128);
+        }
+        Err(_) => {
+            eprintln!(
+                "fatal: failed to load blob object {}: internal error (panic)",
+                hash
+            );
             std::process::exit(128);
         }
     };
@@ -261,10 +268,17 @@ fn print_blob(hash: &ObjectHash) {
 
 /// Print a tree object in a human-readable format.
 fn print_tree(hash: &ObjectHash) {
-    let tree: Tree = match load_object(hash) {
-        Ok(t) => t,
-        Err(e) => {
+    let tree: Tree = match std::panic::catch_unwind(|| load_object(hash)) {
+        Ok(Ok(t)) => t,
+        Ok(Err(e)) => {
             eprintln!("fatal: could not read tree {}: {}", hash, e);
+            std::process::exit(128);
+        }
+        Err(_) => {
+            eprintln!(
+                "fatal: failed to load tree object {}: internal error (panic)",
+                hash
+            );
             std::process::exit(128);
         }
     };
@@ -282,10 +296,17 @@ fn print_tree(hash: &ObjectHash) {
 
 /// Print a commit object in human-readable format.
 fn print_commit(hash: &ObjectHash) {
-    let commit: Commit = match load_object(hash) {
-        Ok(c) => c,
-        Err(e) => {
+    let commit: Commit = match std::panic::catch_unwind(|| load_object(hash)) {
+        Ok(Ok(c)) => c,
+        Ok(Err(e)) => {
             eprintln!("fatal: could not read commit {}: {}", hash, e);
+            std::process::exit(128);
+        }
+        Err(_) => {
+            eprintln!(
+                "fatal: failed to load commit object {}: internal error (panic)",
+                hash
+            );
             std::process::exit(128);
         }
     };
