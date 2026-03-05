@@ -10,7 +10,7 @@ use libra::{
         branch::{BranchArgs, execute, filter_branches},
         calc_file_blob_hash,
         clean::{self, CleanArgs},
-        commit::{self, CommitArgs},
+        commit::{self, CommitArgs, execute_safe},
         get_target_commit,
         init::{InitArgs, init},
         load_object,
