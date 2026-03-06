@@ -66,6 +66,35 @@ const LATEST_INTENTSPEC_INTENT_ID: &str = "latest_intentspec_intent_id";
 const LATEST_INTENTSPEC_JSON: &str = "latest_intentspec_json";
 const MAX_INTENTSPEC_REPAIR_ATTEMPTS: usize = 2;
 
+fn summarize_mcp_content(content: &[rmcp::model::Content]) -> Option<String> {
+    let mut parts = Vec::new();
+    for item in content {
+        if let Some(text) = item
+            .as_text()
+            .map(|text| text.text.trim())
+            .filter(|text| !text.is_empty())
+        {
+            parts.push(text.to_string());
+        }
+    }
+
+    if !parts.is_empty() {
+        return Some(parts.join(" | "));
+    }
+
+    serde_json::to_string(content)
+        .ok()
+        .filter(|text| !text.trim().is_empty())
+}
+
+fn render_mcp_error(context: &str, content: Vec<rmcp::model::Content>) {
+    if let Some(content) = summarize_mcp_content(&content) {
+        cli_error!("error" => format!("{context}: {content}"));
+    } else {
+        cli_error!("error" => context);
+    }
+}
+
 /// The reason for exiting the application.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExitReason {
@@ -339,7 +368,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         if !result.is_error.unwrap_or(false) {
                             println!("Decision created successfully");
                         } else {
-                            cli_error!(result.content, "error: failed to create decision");
+                            render_mcp_error("failed to create decision", result.content);
                         }
                     }
                     Err(e) => {
@@ -844,7 +873,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         match mcp_server_clone.create_run_impl(run_params, actor).await {
                             Ok(result) => {
                                 if result.is_error.unwrap_or(false) {
-                                    cli_error!(result.content, "error: failed to create run");
+                                    render_mcp_error("failed to create run", result.content);
                                 }
                             }
                             Err(e) => {
@@ -883,9 +912,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         {
                             Ok(result) => {
                                 if result.is_error.unwrap_or(false) {
-                                    cli_error!(
+                                    render_mcp_error(
+                                        "failed to create context snapshot",
                                         result.content,
-                                        "error: failed to create context snapshot"
                                     );
                                 }
                             }
@@ -976,11 +1005,10 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                                         .await
                                     {
                                         Ok(result) => {
-                                            if !result.is_error.unwrap_or(false) {
-                                            } else {
-                                                cli_error!(
+                                            if result.is_error.unwrap_or(false) {
+                                                render_mcp_error(
+                                                    "failed to record tool invocation",
                                                     result.content,
-                                                    "error: failed to record tool invocation"
                                                 );
                                             }
                                         }

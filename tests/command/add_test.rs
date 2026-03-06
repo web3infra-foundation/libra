@@ -204,7 +204,7 @@ async fn test_add_update_flag() {
     .await;
 
     // Verify only tracked file was updated
-    let changes = changes_to_be_staged();
+    let changes = changes_to_be_staged().unwrap();
     // Tracked file should not appear in changes (because it was updated in index)
     assert!(
         !changes
@@ -267,7 +267,7 @@ async fn test_add_with_ignore_patterns() {
     .await;
 
     // Verify only non-ignored files were added
-    let changes_staged = changes_to_be_staged();
+    let changes_staged = changes_to_be_staged().unwrap();
     let changes_committed = changes_to_be_committed().await;
 
     // Ignored files should not appear in any status (they are ignored)
@@ -325,7 +325,7 @@ async fn test_add_force_tracks_ignored_file() {
     let ignored_path = "ignored.txt";
 
     // Without --force the ignored file should stay hidden from staging
-    let unstaged_initial = changes_to_be_staged();
+    let unstaged_initial = changes_to_be_staged().unwrap();
     assert!(
         !unstaged_initial
             .new
@@ -377,7 +377,7 @@ async fn test_add_force_tracks_ignored_file() {
     // After being tracked, further updates should appear without --force
     fs::write("ignored.txt", "second").unwrap();
 
-    let unstaged_after_edit = changes_to_be_staged();
+    let unstaged_after_edit = changes_to_be_staged().unwrap();
     assert!(
         unstaged_after_edit
             .modified
@@ -405,7 +405,7 @@ async fn test_add_force_tracks_ignored_file() {
             .any(|p| p.to_str().unwrap() == ignored_path)
     );
 
-    let unstaged_final = changes_to_be_staged();
+    let unstaged_final = changes_to_be_staged().unwrap();
     assert!(
         !unstaged_final
             .modified
@@ -506,7 +506,7 @@ async fn test_add_dry_run() {
     .await;
 
     // Verify the file was not actually added to index
-    let changes = changes_to_be_staged();
+    let changes = changes_to_be_staged().unwrap();
     assert!(changes.new.iter().any(|x| x.to_str().unwrap() == file_path));
 }
 
