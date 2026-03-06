@@ -94,7 +94,13 @@ pub async fn execute(args: SwitchArgs) {
 
 // Check status before change the branch
 pub async fn check_status() -> bool {
-    let unstaged: status::Changes = status::changes_to_be_staged();
+    let unstaged = match status::changes_to_be_staged() {
+        Ok(c) => c,
+        Err(err) => {
+            eprintln!("fatal: failed to determine working tree status: {err}");
+            return true;
+        }
+    };
     if !unstaged.deleted.is_empty() || !unstaged.modified.is_empty() {
         status::execute(StatusArgs::default()).await;
         eprintln!("fatal: unstaged changes, can't switch branch");

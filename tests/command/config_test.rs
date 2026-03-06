@@ -2,8 +2,7 @@
 //
 use std::process::Command;
 
-use git_internal::errors::GitError;
-use libra::{command::config, exec_async};
+use libra::{CliErrorKind, command::config, exec_async};
 use serial_test::serial;
 use tempfile::tempdir;
 
@@ -100,7 +99,9 @@ async fn test_cli_config_local_requires_repo() {
     let _guard = test::ChangeDirGuard::new(temp_dir.path());
 
     let result = exec_async(vec!["config", "--local", "--list"]).await;
-    assert!(matches!(result, Err(GitError::RepoNotFound)));
+    let err = result.unwrap_err();
+    assert_eq!(err.kind(), CliErrorKind::Fatal);
+    assert!(err.message().contains("not a libra repository"));
 }
 
 #[tokio::test]

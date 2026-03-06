@@ -296,7 +296,7 @@ async fn test_reset_mixed() {
     assert!(staged.is_empty(), "Index should be reset in mixed reset");
 
     // Verify unstaged changes exist (2.txt, 3.txt, 4.txt should be untracked/modified)
-    let unstaged = changes_to_be_staged();
+    let unstaged = changes_to_be_staged().unwrap();
     assert!(
         !unstaged.new.is_empty() || !unstaged.modified.is_empty(),
         "Should have unstaged changes after mixed reset"
@@ -357,7 +357,7 @@ async fn test_reset_hard() {
     assert!(staged.is_empty(), "Index should be reset in hard reset");
 
     // Verify only untracked files remain
-    let unstaged = changes_to_be_staged();
+    let unstaged = changes_to_be_staged().unwrap();
     assert!(
         !unstaged.new.is_empty(),
         "Should have untracked files (5.txt)"
@@ -398,7 +398,7 @@ async fn test_reset_with_head_reference() {
     assert!(fs::metadata("4.txt").is_ok());
 
     // Verify index was reset (4.txt should be untracked)
-    let unstaged = changes_to_be_staged();
+    let unstaged = changes_to_be_staged().unwrap();
     assert!(
         unstaged
             .new

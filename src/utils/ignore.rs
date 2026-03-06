@@ -161,7 +161,8 @@ mod tests {
         );
 
         let unstaged =
-            crate::command::status::changes_to_be_staged_with_policy(IgnorePolicy::IncludeIgnored);
+            crate::command::status::changes_to_be_staged_with_policy(IgnorePolicy::IncludeIgnored)
+                .unwrap();
         assert!(
             unstaged.new.iter().any(|p| p == Path::new("ignored.txt")),
             "IncludeIgnored policy should surface ignored entries for staging workflows"
@@ -200,7 +201,7 @@ mod tests {
         let staged = changes_to_be_committed().await;
         assert!(staged.new.iter().any(|p| p == Path::new("tracked.txt")));
 
-        let unstaged = changes_to_be_staged();
+        let unstaged = changes_to_be_staged().unwrap();
         assert!(!unstaged.new.iter().any(|p| p == Path::new("ignored.txt")));
     }
 
@@ -243,7 +244,8 @@ mod tests {
         );
 
         let only_ignored =
-            crate::command::status::changes_to_be_staged_with_policy(IgnorePolicy::OnlyIgnored);
+            crate::command::status::changes_to_be_staged_with_policy(IgnorePolicy::OnlyIgnored)
+                .unwrap();
         assert!(
             !only_ignored
                 .new

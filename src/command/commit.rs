@@ -621,7 +621,8 @@ pub async fn create_tree(
 }
 
 fn auto_stage_tracked_changes() -> Result<bool, String> {
-    let pending = status::changes_to_be_staged();
+    let pending = status::changes_to_be_staged()
+        .map_err(|e| format!("failed to determine working tree status: {e}"))?;
     if pending.modified.is_empty() && pending.deleted.is_empty() {
         return Ok(false);
     }
