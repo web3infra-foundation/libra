@@ -4,11 +4,14 @@ use std::{
     collections::{BTreeMap, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
     io::Read,
+    path::Path,
     sync::Arc,
 };
 
+use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
 use clap::{Parser, Subcommand};
+use git_internal::hash::{HashKind, set_hash_kind};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
@@ -21,9 +24,26 @@ use crate::{
 };
 
 const PROCESSED_EVENT_KEYS: &str = "processed_event_keys";
-const PROCESSED_EVENT_KEYS_MAX: usize = 200;
+const MAX_STDIN_BYTES: usize = 1_048_576;
+const MAX_PROCESSED_EVENT_KEYS: usize = 200;
+const MAX_RAW_HOOK_EVENTS: usize = 200;
+const MAX_TOOL_EVENTS: usize = 200;
+const MAX_TRANSCRIPT_PATH_BYTES: usize = 4096;
+const DEDUP_IDENTITY_KEYS: &[&str] = &[
+    "event_id",
+    "request_id",
+    "turn_id",
+    "message_id",
+    "tool_use_id",
+    "sequence",
+    "timestamp",
+];
 const CLAUDE_SESSION_TYPE: &str = "claude_session";
+/// Persisted blob schema identifier for Claude hook-ingested session payloads.
+const CLAUDE_SESSION_SCHEMA: &str = "libra.claude_session.v1";
+const LIFECYCLE_EVENTS: &[&str] = &["SessionStart", "Stop", "SessionStop", "SessionEnd"];
 
+/// Subcommands that map to Claude Code hook events.
 #[derive(Subcommand, Debug)]
 pub enum ClaudeCodeCommand {
     #[command(about = "Handle SessionStart hook event")]
@@ -38,6 +58,7 @@ pub enum ClaudeCodeCommand {
     SessionEnd(ClaudeCodeArgs),
 }
 
+/// Placeholder args reserved for future `claude-code` command options.
 #[derive(Parser, Debug, Clone)]
 pub struct ClaudeCodeArgs {}
 
@@ -65,50 +86,67 @@ struct PersistOutcome {
     already_exists: bool,
 }
 
-pub async fn execute(cmd: ClaudeCodeCommand) -> Result<(), String> {
-    let mut stdin = String::new();
+/// Ingest one Claude hook event from stdin JSON and update/persist session state.
+///
+/// Stdin must be UTF-8 JSON with at least:
+/// - `hook_event_name`
+/// - `session_id`
+/// - `cwd`
+pub async fn execute(cmd: ClaudeCodeCommand) -> Result<()> {
+    let mut stdin_bytes = Vec::new();
     std::io::stdin()
-        .read_to_string(&mut stdin)
-        .map_err(|e| format!("failed to read stdin: {e}"))?;
+        .take((MAX_STDIN_BYTES + 1) as u64)
+        .read_to_end(&mut stdin_bytes)
+        .context("failed to read stdin")?;
+    if stdin_bytes.len() > MAX_STDIN_BYTES {
+        bail!("hook input exceeds {MAX_STDIN_BYTES} bytes");
+    }
+    let stdin = String::from_utf8(stdin_bytes).context("hook input is not valid UTF-8")?;
 
     if stdin.trim().is_empty() {
-        return Err("hook input is empty".to_string());
+        bail!("hook input is empty");
     }
 
     let envelope: HookEnvelope =
-        serde_json::from_str(&stdin).map_err(|e| format!("invalid hook JSON payload: {e}"))?;
+        serde_json::from_str(&stdin).map_err(|e| anyhow!("invalid hook JSON payload: {e}"))?;
 
     validate_core_fields(&envelope)?;
 
     let expected = expected_event_names(&cmd);
     if !expected.contains(&envelope.hook_event_name.as_str()) {
-        return Err(format!(
+        bail!(
             "hook_event_name mismatch: expected one of {:?}, got '{}'",
-            expected, envelope.hook_event_name
-        ));
+            expected,
+            envelope.hook_event_name
+        );
     }
 
-    // Use process cwd as the trust boundary for local writes.
-    let working_dir =
-        std::env::current_dir().map_err(|e| format!("failed to read current directory: {e}"))?;
-    let working_dir_str = working_dir.to_string_lossy().to_string();
-    let session_store = crate::internal::ai::session::SessionStore::new(&working_dir);
+    // Use process cwd as the trust boundary and resolve a canonical repo storage root from it.
+    let process_cwd = std::env::current_dir().context("failed to read current directory")?;
+    let storage_path = util::try_get_storage_path(Some(process_cwd.clone()))
+        .context("failed to resolve libra storage path from current directory")?;
+    set_hash_kind_from_repo()
+        .await
+        .context("failed to configure hash kind from repo config")?;
+    let process_cwd_str = process_cwd.to_string_lossy().to_string();
+    let session_store =
+        crate::internal::ai::session::SessionStore::from_storage_path(&storage_path);
 
     let mut session = match session_store.load(&envelope.session_id) {
         Ok(s) => s,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            let mut recovered = SessionState::new(&working_dir_str);
+            let mut recovered = SessionState::new(&process_cwd_str);
             recovered.id = envelope.session_id.clone();
-            recovered.working_dir = working_dir_str.clone();
+            recovered.working_dir = process_cwd_str.clone();
             recovered
                 .metadata
                 .insert("recovered_from_out_of_order".to_string(), json!(true));
             recovered
         }
-        Err(err) => return Err(format!("failed to load session: {err}")),
+        Err(err) => return Err(anyhow!("failed to load session: {err}")),
     };
-    session.working_dir = working_dir_str.clone();
-    if envelope.cwd != working_dir_str {
+    session.working_dir = process_cwd_str.clone();
+    if envelope.cwd != process_cwd_str {
         session
             .metadata
             .insert("hook_reported_cwd".to_string(), json!(envelope.cwd.clone()));
@@ -120,7 +158,8 @@ pub async fn execute(cmd: ClaudeCodeCommand) -> Result<(), String> {
         session.metadata.remove("hook_reported_cwd");
     }
 
-    if dedup_hit(&session, &envelope) {
+    let dedup_key = dedup_key(&envelope);
+    if dedup_hit(&session, dedup_key.as_deref()) {
         if !is_session_end(&cmd) {
             return Ok(());
         }
@@ -132,10 +171,12 @@ pub async fn execute(cmd: ClaudeCodeCommand) -> Result<(), String> {
     }
 
     apply_event(&mut session, &envelope, &cmd)?;
-    append_processed_event_key(&mut session, make_event_key(&envelope));
+    if let Some(event_key) = dedup_key {
+        append_processed_event_key(&mut session, event_key);
+    }
 
     if is_session_end(&cmd) {
-        match persist_session_history(&session).await {
+        match persist_session_history(&storage_path, &session).await {
             Ok(outcome) => {
                 session
                     .metadata
@@ -182,34 +223,42 @@ pub async fn execute(cmd: ClaudeCodeCommand) -> Result<(), String> {
                 session
                     .metadata
                     .insert("persisted".to_string(), json!(false));
+                eprintln!("warning: failed to persist session history: {err}");
+                session_store.save(&session).map_err(|e| {
+                    anyhow!("failed to save session after persistence failure: {e}")
+                })?;
+                return Err(err.context("session history persistence failed"));
             }
         }
     }
 
     session_store
         .save(&session)
-        .map_err(|e| format!("failed to save session: {e}"))?;
+        .map_err(|e| anyhow!("failed to save session: {e}"))?;
 
     Ok(())
 }
 
-fn validate_core_fields(envelope: &HookEnvelope) -> Result<(), String> {
+fn validate_core_fields(envelope: &HookEnvelope) -> Result<()> {
     if envelope.hook_event_name.trim().is_empty() {
-        return Err("missing required field: hook_event_name".to_string());
+        bail!("missing required field: hook_event_name");
     }
     if envelope.session_id.trim().is_empty() {
-        return Err("missing required field: session_id".to_string());
+        bail!("missing required field: session_id");
     }
     validate_session_id(&envelope.session_id)?;
     if envelope.cwd.trim().is_empty() {
-        return Err("missing required field: cwd".to_string());
+        bail!("missing required field: cwd");
+    }
+    if let Some(transcript_path) = envelope.transcript_path.as_deref() {
+        validate_transcript_path(transcript_path)?;
     }
     Ok(())
 }
 
-fn validate_session_id(session_id: &str) -> Result<(), String> {
+fn validate_session_id(session_id: &str) -> Result<()> {
     if session_id.len() > 128 {
-        return Err("invalid session_id: length exceeds 128 characters".to_string());
+        bail!("invalid session_id: length exceeds 128 characters");
     }
     if session_id
         .chars()
@@ -217,7 +266,34 @@ fn validate_session_id(session_id: &str) -> Result<(), String> {
     {
         return Ok(());
     }
-    Err("invalid session_id: only [A-Za-z0-9._-] are allowed".to_string())
+    bail!("invalid session_id: only [A-Za-z0-9._-] are allowed")
+}
+
+async fn set_hash_kind_from_repo() -> Result<()> {
+    let object_format = crate::internal::config::Config::get("core", None, "objectformat")
+        .await
+        .unwrap_or_else(|| "sha1".to_string());
+
+    let hash_kind = match object_format.as_str() {
+        "sha1" => HashKind::Sha1,
+        "sha256" => HashKind::Sha256,
+        _ => bail!("unsupported object format: '{object_format}'"),
+    };
+    set_hash_kind(hash_kind);
+    Ok(())
+}
+
+fn validate_transcript_path(path: &str) -> Result<()> {
+    if path.trim().is_empty() {
+        bail!("invalid transcript_path: empty value");
+    }
+    if path.len() > MAX_TRANSCRIPT_PATH_BYTES {
+        bail!("invalid transcript_path: length exceeds {MAX_TRANSCRIPT_PATH_BYTES} characters");
+    }
+    if path.contains('\0') {
+        bail!("invalid transcript_path: contains NUL byte");
+    }
+    Ok(())
 }
 
 fn expected_event_names(cmd: &ClaudeCodeCommand) -> &'static [&'static str] {
@@ -238,10 +314,11 @@ fn apply_event(
     session: &mut SessionState,
     envelope: &HookEnvelope,
     cmd: &ClaudeCodeCommand,
-) -> Result<(), String> {
+) -> Result<()> {
     session.updated_at = Utc::now();
 
     if let Some(transcript_path) = &envelope.transcript_path {
+        // Keep this as opaque metadata only; do not use it for file I/O without validation.
         session.metadata.insert(
             "transcript_path".to_string(),
             Value::String(transcript_path.clone()),
@@ -258,8 +335,8 @@ fn apply_event(
             "hook_event_name": envelope.hook_event_name,
             "payload": normalize_value(Value::Object(envelope.extra.clone())),
         }));
-        if events.len() > PROCESSED_EVENT_KEYS_MAX {
-            let drop_n = events.len() - PROCESSED_EVENT_KEYS_MAX;
+        if events.len() > MAX_RAW_HOOK_EVENTS {
+            let drop_n = events.len() - MAX_RAW_HOOK_EVENTS;
             events.drain(0..drop_n);
         }
     }
@@ -293,8 +370,8 @@ fn apply_event(
                     "response": envelope.extra.get("tool_response").cloned().unwrap_or(Value::Null),
                     "timestamp": Utc::now().to_rfc3339(),
                 }));
-                if items.len() > PROCESSED_EVENT_KEYS_MAX {
-                    let drop_n = items.len() - PROCESSED_EVENT_KEYS_MAX;
+                if items.len() > MAX_TOOL_EVENTS {
+                    let drop_n = items.len() - MAX_TOOL_EVENTS;
                     items.drain(0..drop_n);
                 }
             }
@@ -307,7 +384,7 @@ fn apply_event(
             ) {
                 session
                     .metadata
-                    .insert("last_assistant_message".to_string(), json!(msg.clone()));
+                    .insert("last_assistant_message".to_string(), json!(msg));
                 let should_append = session
                     .messages
                     .last()
@@ -346,31 +423,82 @@ fn find_string(envelope: &HookEnvelope, keys: &[&str]) -> Option<String> {
     None
 }
 
-fn make_event_key(envelope: &HookEnvelope) -> String {
+fn dedup_identity_value(value: &Value) -> Option<String> {
+    match value {
+        Value::String(v) => Some(v.clone()),
+        Value::Number(v) => Some(v.to_string()),
+        Value::Bool(v) => Some(v.to_string()),
+        _ => None,
+    }
+}
+
+fn dedup_identity(envelope: &HookEnvelope) -> Option<String> {
+    for key in DEDUP_IDENTITY_KEYS {
+        if let Some(value) = envelope.extra.get(*key)
+            && let Some(identity) = dedup_identity_value(value)
+        {
+            return Some(format!("{key}:{identity}"));
+        }
+    }
+    None
+}
+
+fn make_event_key(envelope: &HookEnvelope) -> Option<String> {
+    let identity = dedup_identity(envelope)?;
+
+    // DefaultHasher output is only used for short-lived in-session dedup keys.
     let mut hasher = DefaultHasher::new();
     envelope.hook_event_name.hash(&mut hasher);
     envelope.session_id.hash(&mut hasher);
+    identity.hash(&mut hasher);
     // Hash canonicalized payload to keep dedup stable across key order differences.
     let normalized = normalize_value(Value::Object(envelope.extra.clone()));
     if let Ok(canonical_extra) = serde_json::to_string(&normalized) {
         canonical_extra.hash(&mut hasher);
     }
 
-    format!(
+    Some(format!(
         "{}:{}:{:x}",
         envelope.hook_event_name,
         envelope.session_id,
         hasher.finish()
-    )
+    ))
 }
 
-fn dedup_hit(session: &SessionState, envelope: &HookEnvelope) -> bool {
-    let key = make_event_key(envelope);
+fn make_lifecycle_fallback_key(envelope: &HookEnvelope) -> Option<String> {
+    if !LIFECYCLE_EVENTS.contains(&envelope.hook_event_name.as_str()) {
+        return None;
+    }
+
+    let mut hasher = DefaultHasher::new();
+    envelope.hook_event_name.hash(&mut hasher);
+    envelope.session_id.hash(&mut hasher);
+    let normalized = normalize_value(Value::Object(envelope.extra.clone()));
+    if let Ok(canonical_extra) = serde_json::to_string(&normalized) {
+        canonical_extra.hash(&mut hasher);
+    }
+
+    Some(format!(
+        "lifecycle:{}:{}:{:x}",
+        envelope.hook_event_name,
+        envelope.session_id,
+        hasher.finish()
+    ))
+}
+
+fn dedup_key(envelope: &HookEnvelope) -> Option<String> {
+    make_event_key(envelope).or_else(|| make_lifecycle_fallback_key(envelope))
+}
+
+fn dedup_hit(session: &SessionState, key: Option<&str>) -> bool {
+    let Some(key) = key else {
+        return false;
+    };
     session
         .metadata
         .get(PROCESSED_EVENT_KEYS)
         .and_then(Value::as_array)
-        .map(|items| items.iter().any(|v| v.as_str() == Some(key.as_str())))
+        .map(|items| items.iter().any(|v| v.as_str() == Some(key)))
         .unwrap_or(false)
 }
 
@@ -389,8 +517,8 @@ fn append_processed_event_key(session: &mut SessionState, key: String) {
     };
 
     items.push(Value::String(key));
-    if items.len() > PROCESSED_EVENT_KEYS_MAX {
-        let drop_n = items.len() - PROCESSED_EVENT_KEYS_MAX;
+    if items.len() > MAX_PROCESSED_EVENT_KEYS {
+        let drop_n = items.len() - MAX_PROCESSED_EVENT_KEYS;
         items.drain(0..drop_n);
     }
 }
@@ -403,15 +531,16 @@ fn session_persisted(session: &SessionState) -> bool {
         .unwrap_or(false)
 }
 
-async fn persist_session_history(session: &SessionState) -> anyhow::Result<PersistOutcome> {
-    let storage_path =
-        util::try_get_storage_path(Some(std::path::PathBuf::from(&session.working_dir)))?;
+async fn persist_session_history(
+    storage_path: &Path,
+    session: &SessionState,
+) -> anyhow::Result<PersistOutcome> {
     let objects_dir = storage_path.join("objects");
     std::fs::create_dir_all(&objects_dir)?;
 
     let storage = Arc::new(LocalStorage::new(objects_dir));
     let db_conn = Arc::new(db::get_db_conn_instance().await.clone());
-    let history_manager = HistoryManager::new(storage, storage_path.clone(), db_conn);
+    let history_manager = HistoryManager::new(storage, storage_path.to_path_buf(), db_conn);
     // Idempotency fast path: skip append when object already exists.
     if let Some(existing) = history_manager
         .get_object_hash(CLAUDE_SESSION_TYPE, &session.id)
@@ -424,7 +553,7 @@ async fn persist_session_history(session: &SessionState) -> anyhow::Result<Persi
     }
 
     let payload = json!({
-        "schema": "libra.claude_session.v1",
+        "schema": CLAUDE_SESSION_SCHEMA,
         "session": session,
         "raw_hook_events": session.metadata.get("raw_hook_events").cloned().unwrap_or(Value::Array(vec![])),
         "ingest_meta": {
@@ -435,7 +564,7 @@ async fn persist_session_history(session: &SessionState) -> anyhow::Result<Persi
 
     // Canonical JSON keeps blob content deterministic for the same semantic payload.
     let blob_data = to_canonical_json_bytes(&payload)?;
-    let blob_hash = write_git_object(&storage_path, "blob", &blob_data)?;
+    let blob_hash = write_git_object(storage_path, "blob", &blob_data)?;
     history_manager
         .append(CLAUDE_SESSION_TYPE, &session.id, blob_hash)
         .await?;
@@ -479,6 +608,7 @@ mod tests {
             extra: {
                 let mut m = Map::new();
                 m.insert("prompt".to_string(), Value::String("hello".to_string()));
+                m.insert("event_id".to_string(), Value::String("evt-1".to_string()));
                 m
             },
         };
@@ -486,12 +616,13 @@ mod tests {
         let k1 = make_event_key(&env);
         let k2 = make_event_key(&env);
         assert_eq!(k1, k2);
+        assert!(k1.is_some());
     }
 
     #[test]
     fn processed_event_keys_capped() {
         let mut s = SessionState::new("/tmp");
-        for i in 0..(PROCESSED_EVENT_KEYS_MAX + 50) {
+        for i in 0..(MAX_PROCESSED_EVENT_KEYS + 50) {
             append_processed_event_key(&mut s, format!("k{i}"));
         }
 
@@ -501,7 +632,7 @@ mod tests {
             .and_then(Value::as_array)
             .map(std::vec::Vec::len)
             .unwrap_or(0);
-        assert_eq!(len, PROCESSED_EVENT_KEYS_MAX);
+        assert_eq!(len, MAX_PROCESSED_EVENT_KEYS);
     }
 
     #[test]
@@ -540,5 +671,47 @@ mod tests {
 
         let canonical = serde_json::to_string(&normalize_value(value)).unwrap();
         assert_eq!(canonical, r#"{"a":{"k1":1,"k2":2},"z":1}"#);
+    }
+
+    #[test]
+    fn validate_core_fields_rejects_invalid_transcript_path() {
+        let env = HookEnvelope {
+            hook_event_name: "SessionStart".to_string(),
+            session_id: "s1".to_string(),
+            cwd: "/tmp".to_string(),
+            transcript_path: Some("\0bad".to_string()),
+            extra: Map::new(),
+        };
+        assert!(validate_core_fields(&env).is_err());
+    }
+
+    #[test]
+    fn event_key_absent_without_identity() {
+        let env = HookEnvelope {
+            hook_event_name: "UserPromptSubmit".to_string(),
+            session_id: "s1".to_string(),
+            cwd: "/tmp".to_string(),
+            transcript_path: None,
+            extra: {
+                let mut m = Map::new();
+                m.insert("prompt".to_string(), Value::String("hello".to_string()));
+                m
+            },
+        };
+        assert!(make_event_key(&env).is_none());
+        assert!(dedup_key(&env).is_none());
+    }
+
+    #[test]
+    fn lifecycle_event_uses_fallback_key_without_identity() {
+        let env = HookEnvelope {
+            hook_event_name: "SessionStart".to_string(),
+            session_id: "s1".to_string(),
+            cwd: "/tmp".to_string(),
+            transcript_path: None,
+            extra: Map::new(),
+        };
+        assert!(make_event_key(&env).is_none());
+        assert!(dedup_key(&env).is_some());
     }
 }
