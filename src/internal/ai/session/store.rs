@@ -19,6 +19,13 @@ impl SessionStore {
         }
     }
 
+    /// Create a store rooted at `{storage_path}/sessions/`.
+    pub fn from_storage_path(storage_path: &Path) -> Self {
+        Self {
+            sessions_dir: storage_path.join("sessions"),
+        }
+    }
+
     /// Create the sessions directory if it doesn't exist.
     fn ensure_dir(&self) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.sessions_dir)
@@ -188,6 +195,21 @@ mod tests {
 
         store.delete(&session.id).unwrap();
         assert!(store.load(&session.id).is_err());
+    }
+
+    #[test]
+    fn test_from_storage_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = SessionStore::from_storage_path(tmp.path());
+
+        let session = SessionState::new("/tmp/test");
+        store.save(&session).unwrap();
+        assert!(
+            tmp.path()
+                .join("sessions")
+                .join(format!("{}.json", session.id))
+                .exists()
+        );
     }
 
     #[test]
