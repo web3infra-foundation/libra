@@ -2,102 +2,71 @@ name: Release
 
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - "v*"
-  
+
   release:
-    types: [created, edited]
+    types:
+      - created
+      - edited
 
 permissions:
   contents: write
 
 jobs:
-  upload-assets:
+  build:
+    if: github.event.release.draft == true
+
     strategy:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            arch: amd64
             os: ubuntu-latest
+            ext: ""
           - target: aarch64-apple-darwin
-            arch: aarch64
             os: macos-latest
+            ext: ""
           - target: x86_64-pc-windows-msvc
-            arch: x64
             os: windows-latest
+            ext: ".exe"
 
     runs-on: ${{ matrix.os }}
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Check Release Status
-        id: release_status
-        uses: actions/github-script@v7
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Prepare artifact
+        run: |
+          mkdir dist
+          mv target/release/libra${{ matrix.ext }} \
+          dist/libra_${{ github.event.release.tag_name }}_${{ matrix.target }}${{ matrix.ext }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
-          script: |
-            const tag = context.ref.replace("refs/tags/", "");
-            try {
-              const { data: release } = await github.rest.repos.getReleaseByTag({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                tag: tag,
-              });
+          name: ${{ matrix.target }}
+          path: dist/*
 
-              core.setOutput("draft", release.draft ? "true" : "false");
-              core.info(`Release draft status: ${release.draft}`);
-            } catch (e) {
-              core.info("Release not found. Skipping upload.");
-              core.setOutput("draft", "false");
-            }
+  release:
+    needs: build
+    if: github.event.release.draft == true
+    runs-on: ubuntu-latest
 
-      - name: Building
-        run: |
-          cargo install --locked cargo-packager
-          cargo build --release --manifest-path Cargo.toml
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
 
-      - name: Prepare Linux
-        if: contains(matrix.os, 'ubuntu')
-        run: |
-          mv target/release/libra ${{ github.workspace }}/libra_${{ github.ref_name }}_${{ matrix.target }}
-
-      - name: Prepare Windows
-        if: contains(matrix.os, 'windows')
-        run: |
-          mv target/release/libra.exe ${{ github.workspace }}/libra_${{ github.ref_name }}_${{ matrix.target }}.exe
-
-      - name: Prepare MacOS
-        if: contains(matrix.os, 'macos')
-        run: |
-          mv target/release/libra ${{ github.workspace }}/libra_${{ github.ref_name }}_${{ matrix.target }}
-
-      - name: Release Linux
-        if: contains(matrix.os, 'ubuntu') && steps.release_status.outputs.draft == 'true'
+      - name: Upload assets to Draft Release
         uses: softprops/action-gh-release@v2
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          overwrite: true
-          files: |
-            libra_${{ github.ref_name }}_${{ matrix.target }}
-
-      - name: Release Windows
-        if: contains(matrix.os, 'windows') && steps.release_status.outputs.draft == 'true'
-        uses: softprops/action-gh-release@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          overwrite: true
-          files: |
-            libra_${{ github.ref_name }}_${{ matrix.target }}.exe
-
-      - name: Release MacOS
-        if: contains(matrix.os, 'macos') && steps.release_status.outputs.draft == 'true'
-        uses: softprops/action-gh-release@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          overwrite: true
-          files: |
-            libra_${{ github.ref_name }}_${{ matrix.target }}
+          tag_name: ${{ github.event.release.tag_name }}
+          files: artifacts/**/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
