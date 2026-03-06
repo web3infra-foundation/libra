@@ -28,6 +28,7 @@ use libra::{
 };
 use serial_test::serial;
 use tempfile::tempdir;
+mod add_cli_test;
 mod add_test;
 mod blame_test;
 mod branch_test;
@@ -35,6 +36,8 @@ mod cat_file_test;
 mod checkout_test;
 mod cherry_pick_test;
 mod clean_test;
+mod cli_error_test;
+mod clone_cli_test;
 mod clone_test;
 mod commit_test;
 mod config_test;

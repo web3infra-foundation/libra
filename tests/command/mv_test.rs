@@ -247,7 +247,7 @@ async fn test_mv_dry_run_output_matches_command_text() {
         .output()
         .expect("failed to execute libra mv -n");
 
-    assert!(output.status.success());
+    assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Checking rename of 'dry_cli.txt' to 'dry_cli_new.txt'"));
     assert!(stdout.contains("Renaming dry_cli.txt to dry_cli_new.txt"));
@@ -268,7 +268,7 @@ async fn test_mv_usage_output_matches_command_text() {
         .output()
         .expect("failed to execute libra mv");
 
-    assert!(output.status.success());
+    assert_eq!(output.status.code(), Some(129));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("usage: libra mv [<options>] <source>... <destination>"));
     assert!(stderr.contains("-v, --verbose    be verbose"));
@@ -289,7 +289,7 @@ async fn test_mv_bad_source_output_matches_command_text() {
         .output()
         .expect("failed to execute libra mv bad source case");
 
-    assert!(output.status.success());
+    assert_eq!(output.status.code(), Some(128));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("fatal: bad source, source=11, destination=22"),
@@ -317,7 +317,7 @@ async fn test_mv_rejects_source_path_outside_workdir() {
         .output()
         .expect("failed to execute libra mv outside-source case");
 
-    assert!(output.status.success());
+    assert_eq!(output.status.code(), Some(128));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("is outside of the repository at"),
@@ -350,7 +350,7 @@ async fn test_mv_rejects_destination_path_outside_workdir() {
         .output()
         .expect("failed to execute libra mv outside-destination case");
 
-    assert!(output.status.success());
+    assert_eq!(output.status.code(), Some(128));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("is outside of the repository at"),
@@ -375,7 +375,7 @@ async fn test_mv_rejects_untracked_source() {
         .output()
         .expect("failed to execute libra mv untracked case");
 
-    assert!(output.status.success());
+    assert_eq!(output.status.code(), Some(128));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains(
@@ -425,7 +425,7 @@ async fn test_mv_rejects_conflicted_source_file() {
         .output()
         .expect("failed to execute libra mv conflict case");
 
-    assert!(output.status.success());
+    assert_eq!(output.status.code(), Some(128));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("fatal: conflicted, source=conflict.txt, destination=renamed.txt"),
@@ -452,7 +452,7 @@ async fn test_mv_rejects_multiple_sources_with_same_target_name() {
         .output()
         .expect("failed to execute libra mv duplicate target case");
 
-    assert!(output.status.success());
+    assert_eq!(output.status.code(), Some(128));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains(
@@ -483,7 +483,7 @@ async fn test_mv_moves_directory_without_tracked_files() {
         .output()
         .expect("failed to execute libra mv untracked-only directory case");
 
-    assert!(output.status.success());
+    assert_eq!(output.status.code(), Some(0));
     assert!(
         String::from_utf8_lossy(&output.stderr).is_empty(),
         "unexpected stderr: {}",
@@ -540,7 +540,7 @@ async fn test_mv_rejects_directory_to_non_directory_destination() {
         .output()
         .expect("failed to execute libra mv directory->file case");
 
-    assert!(output.status.success());
+    assert_eq!(output.status.code(), Some(128));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("fatal: destination 'dest_file.txt' is not a directory"),
@@ -566,7 +566,7 @@ async fn test_mv_rejects_same_source_and_destination_path() {
         .output()
         .expect("failed to execute libra mv same-path case");
 
-    assert!(output.status.success());
+    assert_eq!(output.status.code(), Some(128));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains(
@@ -592,7 +592,7 @@ async fn test_mv_rejects_moving_directory_into_subdirectory() {
         .output()
         .expect("failed to execute libra mv directory-into-subdirectory case");
 
-    assert!(output.status.success());
+    assert_eq!(output.status.code(), Some(128));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr
