@@ -534,22 +534,38 @@ async fn update_references(
                 Reflog::insert_single_entry(txn, &context, &full_ref_name).await?;
             }
 
-            if let Some(remote_head) = remote_head {
-                if let Some(remote_head_ref) = ref_heads
+            // Determine the remote default branch.
+            // When the remote HEAD is advertised, match it by hash against fetched
+            // branches.  When it is absent (e.g. the remote HEAD symref points to
+            // an unborn branch), fall back to the first available branch, preferring
+            // "main" then "master" – mirroring the heuristic used by git itself.
+            let resolved_remote_head: Option<&str> = if let Some(ref remote_head) = remote_head {
+                ref_heads
                     .iter()
                     .find(|reference| reference._hash == remote_head._hash)
-                    && let Some(remote_head_branch) =
-                        remote_head_ref._ref.strip_prefix("refs/heads/")
-                {
-                    Head::update_with_conn(
-                        txn,
-                        Head::Branch(remote_head_branch.to_owned()),
-                        Some(&remote_config.name),
-                    )
-                    .await;
-                } else if branch.is_none() {
-                    tracing::debug!("remote HEAD does not point to a branch ref");
+                    .and_then(|r| r._ref.strip_prefix("refs/heads/"))
+            } else {
+                None
+            };
+
+            let remote_default_branch = resolved_remote_head.map(str::to_owned).or_else(|| {
+                if ref_heads.is_empty() {
+                    return None;
                 }
+                ref_heads
+                    .iter()
+                    .find(|r| r._ref == "refs/heads/main")
+                    .or_else(|| ref_heads.iter().find(|r| r._ref == "refs/heads/master"))
+                    .or(ref_heads.first())
+                    .and_then(|r| r._ref.strip_prefix("refs/heads/"))
+                    .map(str::to_owned)
+            });
+
+            if let Some(branch_name) = remote_default_branch {
+                Head::update_with_conn(txn, Head::Branch(branch_name), Some(&remote_config.name))
+                    .await;
+            } else if branch.is_none() && remote_head.is_some() {
+                tracing::debug!("remote HEAD does not point to a branch ref");
             }
 
             Ok::<_, ReflogError>(())

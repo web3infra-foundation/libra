@@ -258,9 +258,21 @@ pub async fn execute_to(args: StatusArgs, writer: &mut impl Write) {
 
     // to cur_dir relative path
     let staged = changes_to_be_committed().await.to_relative();
-    let mut unstaged = changes_to_be_staged().to_relative();
+    let mut unstaged = match changes_to_be_staged() {
+        Ok(c) => c.to_relative(),
+        Err(err) => {
+            eprintln!("fatal: {err}");
+            return;
+        }
+    };
     let mut ignored_files = if args.ignored && !matches!(args.untracked_files, UntrackedFiles::No) {
-        list_ignored_files().to_relative().new
+        match list_ignored_files() {
+            Ok(c) => c.to_relative().new,
+            Err(err) => {
+                eprintln!("fatal: {err}");
+                return;
+            }
+        }
     } else {
         vec![]
     };
@@ -748,10 +760,18 @@ pub async fn execute(args: StatusArgs) {
     execute_to(args, &mut std::io::stdout()).await
 }
 
-/// Check if the working tree is clean
+/// Check if the working tree is clean.
+///
+/// Returns `false` when the status cannot be determined (e.g. corrupt index).
 pub async fn is_clean() -> bool {
     let staged = changes_to_be_committed().await;
-    let unstaged = changes_to_be_staged();
+    let unstaged = match changes_to_be_staged() {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::error!("failed to calculate staged changes: {err}");
+            return false;
+        }
+    };
     staged.is_empty() && unstaged.is_empty()
 }
 
@@ -797,23 +817,13 @@ pub async fn changes_to_be_committed() -> Changes {
 }
 
 /// Compare the difference between `index` and the `workdir` using the default ignore rules.
-pub fn changes_to_be_staged() -> Changes {
+pub fn changes_to_be_staged() -> Result<Changes, StatusError> {
     changes_to_be_staged_with_policy(IgnorePolicy::Respect)
 }
 
 /// Variant of [`changes_to_be_staged`] that lets callers pick the ignore strategy explicitly.
 /// Commands such as `add --force` or `status --ignored` can switch policies as needed.
-pub fn changes_to_be_staged_with_policy(policy: IgnorePolicy) -> Changes {
-    match changes_to_be_staged_with_policy_safe(policy) {
-        Ok(changes) => changes,
-        Err(err) => {
-            tracing::error!("failed to calculate staged changes: {err}");
-            Changes::default()
-        }
-    }
-}
-
-pub fn changes_to_be_staged_with_policy_safe(policy: IgnorePolicy) -> Result<Changes, StatusError> {
+pub fn changes_to_be_staged_with_policy(policy: IgnorePolicy) -> Result<Changes, StatusError> {
     let workdir = util::try_working_dir().map_err(|source| StatusError::Workdir { source })?;
     let index_path = path::try_index().map_err(|source| StatusError::Workdir { source })?;
     let index = Index::load(&index_path).map_err(|source| StatusError::IndexLoad {
@@ -916,7 +926,7 @@ fn list_workdir_files_safe(workdir: &Path) -> io::Result<Vec<PathBuf>> {
 }
 
 /// List ignored files (not tracked by index, but ignored by .libraignore) under workdir
-pub fn list_ignored_files() -> Changes {
+pub fn list_ignored_files() -> Result<Changes, StatusError> {
     changes_to_be_staged_with_policy(IgnorePolicy::OnlyIgnored)
 }
 

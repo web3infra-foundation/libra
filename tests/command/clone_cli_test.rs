@@ -60,6 +60,12 @@ fn create_remote_with_main(base: &Path) -> std::path::PathBuf {
         .success()
     );
     assert!(run_git(&["push", "origin", "main"], &work).status.success());
+    // Ensure bare repo HEAD points to main regardless of init.defaultBranch config.
+    assert!(
+        run_git(&["symbolic-ref", "HEAD", "refs/heads/main"], &remote)
+            .status
+            .success()
+    );
     remote
 }
 

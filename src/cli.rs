@@ -513,7 +513,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Config(args) => {
             command::config::execute_safe(args)
                 .await
-                .map_err(CliError::failure)?;
+                .map_err(legacy_string_error_to_cli_error)?;
         }
         Commands::Checkout(args) => command::checkout::execute(args).await,
         Commands::Reflog(args) => command::reflog::execute(args).await,
