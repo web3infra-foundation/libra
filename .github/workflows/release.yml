@@ -2,7 +2,6 @@ name: Release
 
 on:
   workflow_dispatch:
-
   release:
     types:
       - created
@@ -11,62 +10,141 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.event.release.tag_name || github.ref_name }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  BIN_NAME: libra
+
 jobs:
   build:
-    if: github.event.release.draft == true
-
+    name: Build ${{ matrix.target }}
+    if: github.event_name == 'workflow_dispatch' || github.event.release.draft == true
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            ext: ""
-          - target: aarch64-apple-darwin
-            os: macos-latest
-            ext: ""
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            ext: ".exe"
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive_ext: tar.gz
+            bin_ext: ""
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive_ext: tar.gz
+            bin_ext: ""
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive_ext: zip
+            bin_ext: .exe
 
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Install Rust
+      - name: Resolve tag
+        id: meta
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
       - name: Build
-        run: cargo build --release
+        shell: bash
+        run: cargo build --locked --release --target ${{ matrix.target }}
 
-      - name: Prepare artifact
+      - name: Prepare package (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
         run: |
-          mkdir dist
-          mv target/release/libra${{ matrix.ext }} \
-          dist/libra_${{ github.event.release.tag_name }}_${{ matrix.target }}${{ matrix.ext }}
+          set -euxo pipefail
 
-      - name: Upload artifact
+          TAG="${{ steps.meta.outputs.tag }}"
+          PKG="${BIN_NAME}_${TAG}_${{ matrix.target }}"
+          mkdir -p dist/$PKG
+
+          cp "target/${{ matrix.target }}/release/${BIN_NAME}" "dist/$PKG/${BIN_NAME}"
+          cp README.md "dist/$PKG/" || true
+          cp LICENSE* "dist/$PKG/" 2>/dev/null || true
+
+          tar -C dist -czf "dist/${PKG}.tar.gz" "$PKG"
+          shasum -a 256 "dist/${PKG}.tar.gz" > "dist/${PKG}.tar.gz.sha256"
+
+      - name: Prepare package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $tag = "${{ steps.meta.outputs.tag }}"
+          $pkg = "${env:BIN_NAME}_${tag}_${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path "dist\$pkg" | Out-Null
+
+          Copy-Item "target\${{ matrix.target }}\release\${env:BIN_NAME}${{ matrix.bin_ext }}" "dist\$pkg\${env:BIN_NAME}${{ matrix.bin_ext }}"
+          if (Test-Path "README.md") { Copy-Item "README.md" "dist\$pkg\" }
+          Get-ChildItem "LICENSE*" -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-Item $_.FullName "dist\$pkg\"
+          }
+
+          Compress-Archive -Path "dist\$pkg\*" -DestinationPath "dist\$pkg.zip" -Force
+
+          $hash = (Get-FileHash "dist\$pkg.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $pkg.zip" | Out-File -Encoding ascii "dist\$pkg.zip.sha256"
+
+      - name: Upload packaged artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.target }}
+          name: package-${{ matrix.target }}
           path: dist/*
+          if-no-files-found: error
+          retention-days: 7
 
-  release:
+  publish-draft-assets:
+    name: Upload assets to draft release
     needs: build
-    if: github.event.release.draft == true
     runs-on: ubuntu-latest
+    if: github.event_name == 'release' && github.event.release.draft == true
 
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
         with:
           path: artifacts
 
-      - name: Upload assets to Draft Release
+      - name: Merge checksums
+        shell: bash
+        run: |
+          set -euxo pipefail
+          find artifacts -type f -name '*.sha256' -print0 | sort -z | xargs -0 cat > checksums.txt
+          ls -R artifacts
+          cat checksums.txt
+
+      - name: Upload assets to GitHub Draft Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.release.tag_name }}
-          files: artifacts/**/*
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          files: |
+            artifacts/**/*
+            checksums.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
