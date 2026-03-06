@@ -152,14 +152,14 @@ impl CodexWebSocket {
                                 }
                                 // Handle turn completion
                                 if method_str.contains("turn/completed") || method_str.contains("turnCompleted") {
-                                    eprintln!("[Codex] Turn completed notification received");
+                                    // eprintln!("[Codex] Turn completed notification received");
                                     if let Some(tx) = completion_tx_clone.lock().await.take() {
                                         let _ = tx.send(());
                                     }
                                 }
                                 // Handle request approval
                                 if method_str.contains("requestApproval") {
-                                    eprintln!("[Codex] Request approval received: {}", method_str);
+                                    // eprintln!("[Codex] Request approval received: {}", method_str);
                                     if let Some(params) = json.get("params") {
                                         let request_id = params.get("requestId").cloned();
                                         // Send approval immediately
@@ -172,7 +172,7 @@ impl CodexWebSocket {
                                             })
                                         );
                                         if let Some(ref sender) = *sender_for_approval.lock().await {
-                                            eprintln!("[Codex] Sending auto-approval");
+                                            // eprintln!("[Codex] Sending auto-approval");
                                             let _ = sender.send(Message::Text(msg.to_json())).await;
                                         }
                                     }
@@ -293,18 +293,18 @@ impl CodexWebSocket {
         let result = self.send_request(method, params_with_thread).await?;
 
         // Wait for completion signal with timeout (120 seconds)
-        let timeout = tokio::time::timeout(tokio::time::Duration::from_secs(120), rx);
-        match timeout.await {
-            Ok(Ok(())) => {
-                eprintln!("[Codex] Received completion signal, waiting for turn to complete...");
-            }
-            Ok(Err(_)) => {
-                eprintln!("[Codex] Completion channel closed without signal");
-            }
-            Err(_) => {
-                eprintln!("[Codex] Timeout waiting for completion");
-            }
-        }
+        // let timeout = tokio::time::timeout(tokio::time::Duration::from_secs(120), rx);
+        // match timeout.await {
+        //     Ok(Ok(())) => {
+        //         // eprintln!("[Codex] Received completion signal, waiting for turn to complete...");
+        //     }
+        //     Ok(Err(_)) => {
+        //         // eprintln!("[Codex] Completion channel closed without signal");
+        //     }
+        //     Err(_) => {
+        //         // eprintln!("[Codex] Timeout waiting for completion");
+        //     }
+        // }
 
         // Poll thread/read until turn is completed
         for i in 0..60 {
@@ -325,7 +325,7 @@ impl CodexWebSocket {
                     .and_then(|last_turn| last_turn.get("status"))
                     .and_then(|s| s.as_str());
 
-                eprintln!("[Codex] Turn status ({}): {:?}", i, status);
+                // eprintln!("[Codex] Turn status ({}): {:?}", i, status);
 
                 if status == Some("completed") {
                     return Ok(turn_result);

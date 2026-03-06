@@ -95,25 +95,25 @@ impl CompletionModelTrait for Model {
 
         // Apply file changes to working directory
         if !file_changes.is_empty() {
-            eprintln!("[Codex] Applying {} file changes...", file_changes.len());
+            // eprintln!("[Codex] Applying {} file changes...", file_changes.len());
             for change in &file_changes {
-                eprintln!("[Codex] - {}: {}", change.operation, change.path);
+                // eprintln!("[Codex] - {}: {}", change.operation, change.path);
                 if let Err(e) = apply_file_change(change) {
-                    eprintln!("[Codex] Failed to apply change to {}: {}", change.path, e);
+                    // eprintln!("[Codex] Failed to apply change to {}: {}", change.path, e);
                 }
             }
 
             // Auto-add and commit changes to Libra
-            eprintln!("[Codex] Committing changes to Libra...");
+            // eprintln!("[Codex] Committing changes to Libra...");
             if let Err(e) = commit_to_libra(&file_changes).await {
-                eprintln!("[Codex] Failed to commit: {}", e);
+                // eprintln!("[Codex] Failed to commit: {}", e);
             }
         }
 
         if content.is_empty() {
             // Fallback to streaming message if response extraction failed
             let message = self.client.get_agent_messages().await;
-            eprintln!("[Codex] Using fallback message, len: {}", message.len());
+            // eprintln!("[Codex] Using fallback message, len: {}", message.len());
             if !message.is_empty() {
                 return Ok(CompletionResponse {
                     content: vec![AssistantContent::Text(Text { text: message.join("
@@ -122,9 +122,9 @@ impl CompletionModelTrait for Model {
                 });
             }
         } else {
-            eprintln!("[Codex] Extracted content from response, {} items", content.len());
+            // eprintln!("[Codex] Extracted content from response, {} items", content.len());
             for (i, c) in content.iter().enumerate() {
-                eprintln!("[Codex] Content {}: {:?}", i, c);
+                // eprintln!("[Codex] Content {}: {:?}", i, c);
             }
         };
 
@@ -152,14 +152,14 @@ fn extract_content_and_changes(response: &serde_json::Value) -> (Vec<AssistantCo
 
     // Debug: print the full response
     let resp_str = serde_json::to_string(&response).unwrap_or_default();
-    eprintln!("[Codex] extract_content_and_changes, response len: {}", resp_str.len());
-    eprintln!("[Codex] response preview: {}", resp_str.chars().take(200).collect::<String>());
+    // eprintln!("[Codex] extract_content_and_changes, response len: {}", resp_str.len());
+    // eprintln!("[Codex] response preview: {}", resp_str.chars().take(200).collect::<String>());
     // Also check for error in status
     if let Some(status) = response.get("result").and_then(|r| r.get("thread")).and_then(|t| t.get("status")) {
-        eprintln!("[Codex] thread status: {:?}", status);
+        // eprintln!("[Codex] thread status: {:?}", status);
     // Check for error details
     if let Some(error) = response.get("result").and_then(|r| r.get("error")) {
-        eprintln!("[Codex] error in response: {:?}", error);
+        // eprintln!("[Codex] error in response: {:?}", error);
     }
     }
 
@@ -244,7 +244,7 @@ fn apply_file_change(change: &FileChange) -> Result<(), Box<dyn std::error::Erro
         "delete" => {
             if file_path.exists() {
                 std::fs::remove_file(&file_path)?;
-                eprintln!("[Codex] Deleted file: {}", change.path);
+                // eprintln!("[Codex] Deleted file: {}", change.path);
             }
         }
         "add" | "update" => {
@@ -255,7 +255,7 @@ fn apply_file_change(change: &FileChange) -> Result<(), Box<dyn std::error::Erro
                         std::fs::create_dir_all(parent)?;
                     }
                     std::fs::write(&file_path, file_content)?;
-                    eprintln!("[Codex] Wrote new file from content: {}", change.path);
+                    // eprintln!("[Codex] Wrote new file from content: {}", change.path);
                     return Ok(());
                 }
             }
@@ -278,7 +278,7 @@ fn apply_file_change(change: &FileChange) -> Result<(), Box<dyn std::error::Erro
                                 std::fs::create_dir_all(parent)?;
                             }
                             std::fs::write(&file_path, &new_content)?;
-                            eprintln!("[Codex] Applied diff to: {}", change.path);
+                            // eprintln!("[Codex] Applied diff to: {}", change.path);
                         }
                         Err(e) => {
                             // If diff application fails, write the entire content if it's a new file
@@ -288,9 +288,9 @@ fn apply_file_change(change: &FileChange) -> Result<(), Box<dyn std::error::Erro
                                 }
                                 // For add operation, the diff might contain the full content
                                 std::fs::write(&file_path, &change.diff)?;
-                                eprintln!("[Codex] Wrote new file: {}", change.path);
+                                // eprintln!("[Codex] Wrote new file: {}", change.path);
                             } else {
-                                eprintln!("[Codex] Failed to apply diff to {}: {}", change.path, e);
+                                // eprintln!("[Codex] Failed to apply diff to {}: {}", change.path, e);
                             }
                         }
                     }
@@ -301,7 +301,7 @@ fn apply_file_change(change: &FileChange) -> Result<(), Box<dyn std::error::Erro
                             std::fs::create_dir_all(parent)?;
                         }
                         std::fs::write(&file_path, &change.diff)?;
-                        eprintln!("[Codex] Wrote new file: {}", change.path);
+                        // eprintln!("[Codex] Wrote new file: {}", change.path);
                     }
                 }
             }
@@ -339,14 +339,14 @@ async fn commit_to_libra(file_changes: &[FileChange]) -> Result<(), Box<dyn std:
     match add_result {
         Ok(output) => {
             if output.status.success() {
-                eprintln!("[Codex] Added files to Libra");
+                // eprintln!("[Codex] Added files to Libra");
             } else {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                eprintln!("[Codex] Add failed: {}", stderr);
+                // eprintln!("[Codex] Add failed: {}", stderr);
             }
         }
         Err(e) => {
-            eprintln!("[Codex] Failed to run add: {}", e);
+            // eprintln!("[Codex] Failed to run add: {}", e);
         }
     }
 
@@ -360,14 +360,14 @@ async fn commit_to_libra(file_changes: &[FileChange]) -> Result<(), Box<dyn std:
         Ok(output) => {
             if output.status.success() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                eprintln!("[Codex] Committed to Libra: {}", stdout.trim());
+                // eprintln!("[Codex] Committed to Libra: {}", stdout.trim());
             } else {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                eprintln!("[Codex] Commit failed: {}", stderr);
+                // eprintln!("[Codex] Commit failed: {}", stderr);
             }
         }
         Err(e) => {
-            eprintln!("[Codex] Failed to run commit: {}", e);
+            // eprintln!("[Codex] Failed to run commit: {}", e);
         }
     }
 
