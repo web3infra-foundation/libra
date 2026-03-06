@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, oneshot};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::internal::ai::client::Provider;
@@ -75,10 +75,12 @@ pub struct CodexWebSocket {
     responses: Arc<Mutex<std::collections::HashMap<u64, serde_json::Value>>>,
     thread_id: Arc<Mutex<Option<String>>>,
     agent_messages: Arc<Mutex<Vec<String>>>,
+    completion_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    approval_tx: Arc<Mutex<Option<mpsc::Sender<serde_json::Value>>>>,
 }
 
 impl std::fmt::Debug for CodexWebSocket {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CodexWebSocket")
             .field("provider", &self.provider)
             .finish()
@@ -93,6 +95,8 @@ impl CodexWebSocket {
             responses: Arc::new(Mutex::new(std::collections::HashMap::new())),
             thread_id: Arc::new(Mutex::new(None)),
             agent_messages: Arc::new(Mutex::new(Vec::new())),
+            completion_tx: Arc::new(Mutex::new(None)),
+            approval_tx: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -102,6 +106,9 @@ impl CodexWebSocket {
 
         let responses = self.responses.clone();
         let agent_messages = self.agent_messages.clone();
+        let completion_tx = self.completion_tx.clone();
+        let approval_tx = self.approval_tx.clone();
+        let sender_clone = self.sender.clone();
 
         let (tx, mut rx) = mpsc::channel::<Message>(100);
 
@@ -110,7 +117,6 @@ impl CodexWebSocket {
             *sender = Some(tx.clone());
         }
 
-        let mut write = write;
         tokio::spawn(async move {
             while let Some(message) = rx.recv().await {
                 if write.send(message).await.is_err() {
@@ -121,6 +127,9 @@ impl CodexWebSocket {
 
         let responses_clone = responses;
         let agent_messages_clone = agent_messages;
+        let completion_tx_clone = completion_tx;
+        let _approval_tx_clone = approval_tx;
+        let sender_for_approval = sender_clone.clone();
         tokio::spawn(async move {
             while let Some(msg) = read.next().await {
                 match msg {
@@ -133,14 +142,38 @@ impl CodexWebSocket {
                                 }
                             } else if let Some(method) = json.get("method") {
                                 let method_str = method.as_str().unwrap_or("");
-                                if method_str.contains("agent_message") {
+                                if method_str.contains("agent_message")
+                                    && let Some(params) = json.get("params")
+                                    && let Some(msg_obj) = params.get("msg")
+                                    && let Some(delta) = msg_obj.get("delta").and_then(|d| d.as_str())
+                                {
+                                    let mut msgs = agent_messages_clone.lock().await;
+                                    msgs.push(delta.to_string());
+                                }
+                                // Handle turn completion
+                                if method_str.contains("turn/completed") || method_str.contains("turnCompleted") {
+                                    eprintln!("[Codex] Turn completed notification received");
+                                    if let Some(tx) = completion_tx_clone.lock().await.take() {
+                                        let _ = tx.send(());
+                                    }
+                                }
+                                // Handle request approval
+                                if method_str.contains("requestApproval") {
+                                    eprintln!("[Codex] Request approval received: {}", method_str);
                                     if let Some(params) = json.get("params") {
-                                        if let Some(msg_obj) = params.get("msg") {
-                                            if let Some(delta) = msg_obj.get("delta").and_then(|d| d.as_str()) {
-                                                eprintln!("[Codex] Got agent message: {}", delta);
-                                                let mut msgs = agent_messages_clone.lock().await;
-                                                msgs.push(delta.to_string());
-                                            }
+                                        let request_id = params.get("requestId").cloned();
+                                        // Send approval immediately
+                                        let msg = CodexMessage::new_request(
+                                            0,
+                                            "requestApproval/resolve",
+                                            serde_json::json!({
+                                                "requestId": request_id,
+                                                "approved": true
+                                            })
+                                        );
+                                        if let Some(ref sender) = *sender_for_approval.lock().await {
+                                            eprintln!("[Codex] Sending auto-approval");
+                                            let _ = sender.send(Message::Text(msg.to_json())).await;
                                         }
                                     }
                                 }
@@ -173,6 +206,8 @@ impl CodexWebSocket {
 
         let thread_id_clone = self.thread_id.clone();
         let thread_result = self.send_request("thread/start", serde_json::json!({})).await;
+
+        #[allow(clippy::collapsible_if, clippy::collapsible_else_if)]
 
         if let Ok(result) = thread_result {
             if let Some(result_obj) = result.get("result") {
@@ -242,9 +277,61 @@ impl CodexWebSocket {
             return Err("No thread ID available".into());
         }
 
+        // Create oneshot channel for completion signal
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut completion = self.completion_tx.lock().await;
+            *completion = Some(tx);
+        }
+
+        // Clear previous messages
+        {
+            let mut msgs = self.agent_messages.lock().await;
+            msgs.clear();
+        }
+
         let result = self.send_request(method, params_with_thread).await?;
 
-        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+        // Wait for completion signal with timeout (120 seconds)
+        let timeout = tokio::time::timeout(tokio::time::Duration::from_secs(120), rx);
+        match timeout.await {
+            Ok(Ok(())) => {
+                eprintln!("[Codex] Received completion signal, waiting for turn to complete...");
+            }
+            Ok(Err(_)) => {
+                eprintln!("[Codex] Completion channel closed without signal");
+            }
+            Err(_) => {
+                eprintln!("[Codex] Timeout waiting for completion");
+            }
+        }
+
+        // Poll thread/read until turn is completed
+        for i in 0..60 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+            let turn_result = self.send_request("thread/read", serde_json::json!({
+                "includeTurns": true,
+                "threadId": thread_id
+            })).await;
+
+            if let Ok(turn_result) = turn_result {
+                // Check result.thread.turns[-1].status (from thread/read API)
+                let status = turn_result.get("result")
+                    .and_then(|r| r.get("thread"))
+                    .and_then(|t| t.get("turns"))
+                    .and_then(|arr| arr.as_array())
+                    .and_then(|arr| arr.last())
+                    .and_then(|last_turn| last_turn.get("status"))
+                    .and_then(|s| s.as_str());
+
+                eprintln!("[Codex] Turn status ({}): {:?}", i, status);
+
+                if status == Some("completed") {
+                    return Ok(turn_result);
+                }
+            }
+        }
 
         Ok(result)
     }
@@ -281,6 +368,8 @@ impl Clone for CodexWebSocket {
             responses: self.responses.clone(),
             thread_id: self.thread_id.clone(),
             agent_messages: self.agent_messages.clone(),
+            completion_tx: self.completion_tx.clone(),
+            approval_tx: self.approval_tx.clone(),
         }
     }
 }
