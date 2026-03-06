@@ -72,24 +72,18 @@ pub enum CloneError {
     InitializeRepository { message: String },
     #[error("remote branch {branch} not found in upstream origin")]
     RemoteBranchNotFound { branch: String },
+    #[error("fetch failed: {source}")]
+    FetchFailed { source: fetch::FetchError },
     #[error("failed to complete clone setup: {message}")]
     SetupFailed { message: String },
 }
 
 impl From<CloneError> for CliError {
     fn from(error: CloneError) -> Self {
-        match error {
+        match &error {
             CloneError::CannotInferDestination => CliError::fatal(error.to_string())
                 .with_hint("please specify the destination path explicitly."),
-            CloneError::DestinationExistsNonEmpty { .. }
-            | CloneError::DestinationAlreadyRepo { .. }
-            | CloneError::InvalidRemote { .. }
-            | CloneError::ChangeDirectory { .. }
-            | CloneError::RestoreDirectory { .. }
-            | CloneError::InitializeRepository { .. }
-            | CloneError::RemoteBranchNotFound { .. }
-            | CloneError::SetupFailed { .. } => CliError::fatal(error.to_string()),
-            CloneError::CreateDestinationFailed { .. } => CliError::fatal(error.to_string()),
+            _ => CliError::fatal(error.to_string()),
         }
     }
 }
@@ -202,7 +196,6 @@ async fn execute_clone(args: CloneArgs, original_dir: &Path) -> Result<(), Clone
         &remote_client,
         &discovery,
         &local_path,
-        created_by_clone,
         original_dir,
     )
     .await
@@ -222,7 +215,6 @@ async fn clone_into_destination(
     remote_client: &fetch::RemoteClient,
     discovery: &crate::internal::protocol::DiscoveryResult,
     local_path: &Path,
-    _created_by_clone: bool,
     original_dir: &Path,
 ) -> Result<(), CloneError> {
     env::set_current_dir(local_path).map_err(|source| CloneError::ChangeDirectory {
@@ -263,9 +255,7 @@ async fn clone_into_destination(
         args.depth,
     )
     .await
-    .map_err(|error| CloneError::InvalidRemote {
-        message: error.to_string(),
-    })?;
+    .map_err(|source| CloneError::FetchFailed { source })?;
 
     setup_repository(remote_config, args.branch.clone(), !args.bare).await?;
 

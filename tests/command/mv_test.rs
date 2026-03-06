@@ -258,6 +258,9 @@ async fn test_mv_dry_run_output_matches_command_text() {
 #[tokio::test]
 #[serial]
 /// Prints usage text when `mv` is called without enough arguments.
+/// TODO: `mv` still uses the legacy string-error path, so these exit-code
+/// assertions are coupled to the current CLI compatibility shim until `mv`
+/// migrates to `CliError`.
 async fn test_mv_usage_output_matches_command_text() {
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;

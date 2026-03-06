@@ -4,7 +4,7 @@ use std::{
     collections::{HashMap, HashSet},
     io,
     io::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use clap::{Parser, ValueEnum};
@@ -26,7 +26,7 @@ use crate::{
     command::calc_file_blob_hash,
     internal::{config::Config, head::Head},
     utils::{
-        ignore::{self, IgnorePolicy},
+        ignore::IgnorePolicy,
         object_ext::{CommitExt, TreeExt},
         path, util,
     },
@@ -198,6 +198,12 @@ impl Changes {
         poly.extend(self.modified.clone());
         poly.extend(self.deleted.clone());
         poly
+    }
+
+    pub fn extend(&mut self, other: Changes) {
+        self.new.extend(other.new);
+        self.modified.extend(other.modified);
+        self.deleted.extend(other.deleted);
     }
 }
 
@@ -798,30 +804,58 @@ pub fn changes_to_be_staged() -> Changes {
 /// Variant of [`changes_to_be_staged`] that lets callers pick the ignore strategy explicitly.
 /// Commands such as `add --force` or `status --ignored` can switch policies as needed.
 pub fn changes_to_be_staged_with_policy(policy: IgnorePolicy) -> Changes {
-    changes_to_be_staged_with_policy_safe(policy)
-        .unwrap_or_else(|e| panic!("failed to calculate staged changes: {e}"))
+    match changes_to_be_staged_with_policy_safe(policy) {
+        Ok(changes) => changes,
+        Err(err) => {
+            tracing::error!("failed to calculate staged changes: {err}");
+            Changes::default()
+        }
+    }
 }
 
 pub fn changes_to_be_staged_with_policy_safe(policy: IgnorePolicy) -> Result<Changes, StatusError> {
-    let mut changes = Changes::default();
     let workdir = util::try_working_dir().map_err(|source| StatusError::Workdir { source })?;
     let index_path = path::try_index().map_err(|source| StatusError::Workdir { source })?;
     let index = Index::load(&index_path).map_err(|source| StatusError::IndexLoad {
         path: index_path.clone(),
         source,
     })?;
+    let (mut visible, ignored) = changes_to_be_staged_split_with_index(&workdir, &index)?;
+    match policy {
+        IgnorePolicy::Respect => Ok(visible),
+        IgnorePolicy::OnlyIgnored => Ok(ignored),
+        IgnorePolicy::IncludeIgnored => {
+            visible.extend(ignored);
+            Ok(visible)
+        }
+    }
+}
+
+pub fn changes_to_be_staged_split_safe() -> Result<(Changes, Changes), StatusError> {
+    let workdir = util::try_working_dir().map_err(|source| StatusError::Workdir { source })?;
+    let index_path = path::try_index().map_err(|source| StatusError::Workdir { source })?;
+    let index = Index::load(&index_path).map_err(|source| StatusError::IndexLoad {
+        path: index_path.clone(),
+        source,
+    })?;
+    changes_to_be_staged_split_with_index(&workdir, &index)
+}
+
+fn changes_to_be_staged_split_with_index(
+    workdir: &PathBuf,
+    index: &Index,
+) -> Result<(Changes, Changes), StatusError> {
+    let mut visible = Changes::default();
+    let mut ignored = Changes::default();
     let tracked_files = index.tracked_files();
     for file in tracked_files.iter() {
-        if ignore::should_ignore(file, policy, &index) {
-            continue;
-        }
         let file_str = file
             .to_str()
             .ok_or_else(|| StatusError::InvalidPathEncoding { path: file.clone() })?;
-        let file_abs = util::workdir_to_absolute(file);
+        let file_abs = workdir.join(file);
         if !file_abs.exists() {
-            changes.deleted.push(file.clone());
-        } else if index.is_modified(file_str, 0, &workdir) {
+            visible.deleted.push(file.clone());
+        } else if index.is_modified(file_str, 0, workdir) {
             // only calc the hash if the file is modified (metadata), for optimization
             let file_hash =
                 calc_file_blob_hash(&file_abs).map_err(|source| StatusError::FileHash {
@@ -829,24 +863,56 @@ pub fn changes_to_be_staged_with_policy_safe(policy: IgnorePolicy) -> Result<Cha
                     source,
                 })?;
             if !index.verify_hash(file_str, 0, &file_hash) {
-                changes.modified.push(file.clone());
+                visible.modified.push(file.clone());
             }
         }
     }
-    let files = util::list_workdir_files().map_err(|source| StatusError::ListWorkdirFiles {
-        path: workdir.clone(),
-        source,
-    })?; // to workdir
-    for file in ignore::filter_workdir_paths(files.into_iter(), policy, &index) {
+    let files =
+        list_workdir_files_safe(workdir).map_err(|source| StatusError::ListWorkdirFiles {
+            path: workdir.clone(),
+            source,
+        })?; // to workdir
+    for file in files {
         let file_str = file
             .to_str()
             .ok_or_else(|| StatusError::InvalidPathEncoding { path: file.clone() })?;
         if !index.tracked(file_str, 0) {
-            // file not tracked in `index`
-            changes.new.push(file);
+            let file_abs = workdir.join(&file);
+            if util::check_gitignore(workdir, &file_abs) {
+                ignored.new.push(file);
+            } else {
+                visible.new.push(file);
+            }
         }
     }
-    Ok(changes)
+    Ok((visible, ignored))
+}
+
+fn list_workdir_files_safe(workdir: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+
+    for entry in walkdir::WalkDir::new(workdir)
+        .into_iter()
+        .filter_entry(|entry| {
+            entry.path() == workdir || entry.file_name() != std::ffi::OsStr::new(util::ROOT_DIR)
+        })
+    {
+        let entry = entry.map_err(|err| {
+            let err_text = err.to_string();
+            err.into_io_error()
+                .unwrap_or_else(|| io::Error::other(err_text))
+        })?;
+        let path = entry.path();
+
+        if entry.file_type().is_file() {
+            let relative = path
+                .strip_prefix(workdir)
+                .map_err(|err| io::Error::other(err.to_string()))?;
+            files.push(relative.to_path_buf());
+        }
+    }
+
+    Ok(files)
 }
 
 /// List ignored files (not tracked by index, but ignored by .libraignore) under workdir

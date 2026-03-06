@@ -132,8 +132,8 @@ pub struct FetchArgs {
 
 #[derive(thiserror::Error, Debug)]
 pub enum FetchError {
-    #[error("{0}")]
-    Message(String),
+    #[error("{reason}")]
+    InvalidRemoteSpec { spec: String, reason: String },
     #[error("failed to discover references from '{remote}': {source}")]
     Discovery { remote: String, source: GitError },
     #[error("remote object format '{remote}' does not match local '{local}'")]
@@ -150,6 +150,8 @@ pub enum FetchError {
     RemoteSideband { message: String },
     #[error("pack checksum mismatch")]
     ChecksumMismatch,
+    #[error("failed to locate objects directory: {source}")]
+    ObjectsDirNotFound { source: io::Error },
     #[error("failed to create pack directory '{path}': {source}")]
     PackDirCreate { path: PathBuf, source: io::Error },
     #[error("failed to write pack file '{path}': {source}")]
@@ -164,22 +166,7 @@ pub enum FetchError {
 
 impl From<FetchError> for CliError {
     fn from(error: FetchError) -> Self {
-        match error {
-            FetchError::RemoteBranchNotFound { .. } => CliError::fatal(error.to_string()),
-            FetchError::Message(_)
-            | FetchError::Discovery { .. }
-            | FetchError::ObjectFormatMismatch { .. }
-            | FetchError::FetchObjects { .. }
-            | FetchError::PacketRead { .. }
-            | FetchError::InvalidPktHeader { .. }
-            | FetchError::RemoteSideband { .. }
-            | FetchError::ChecksumMismatch
-            | FetchError::PackDirCreate { .. }
-            | FetchError::PackWrite { .. }
-            | FetchError::IndexPack { .. }
-            | FetchError::UpdateRefs { .. }
-            | FetchError::LocalState { .. } => CliError::fatal(error.to_string()),
-        }
+        CliError::fatal(error.to_string())
     }
 }
 
@@ -229,8 +216,11 @@ pub async fn execute_safe(args: FetchArgs) -> CliResult<()> {
 pub(crate) async fn discover_remote(
     remote_spec: &str,
 ) -> Result<(RemoteClient, DiscoveryResult), FetchError> {
-    let remote_client = RemoteClient::from_spec(remote_spec)
-        .map_err(|message| FetchError::Message(format_remote_spec_error(remote_spec, &message)))?;
+    let remote_client =
+        RemoteClient::from_spec(remote_spec).map_err(|message| FetchError::InvalidRemoteSpec {
+            spec: remote_spec.to_string(),
+            reason: format_remote_spec_error(remote_spec, &message),
+        })?;
     let discovery = remote_client
         .discovery_reference(UploadPack)
         .await
@@ -248,7 +238,14 @@ fn format_remote_spec_error(remote_spec: &str, message: &str) -> String {
         } else {
             remote_spec.trim_end_matches('/').to_string()
         };
-        return format!("repository '{}' does not exist", display);
+        let lower = message.to_ascii_lowercase();
+        if lower.contains("no such file or directory")
+            || lower.contains("does not exist")
+            || lower.contains("not found")
+        {
+            return format!("repository '{}' does not exist", display);
+        }
+        return format!("'{}' does not appear to be a libra repository", display);
     }
     message.to_string()
 }
@@ -465,7 +462,7 @@ fn write_pack_and_index(pack_data: &[u8]) -> Result<Option<String>, FetchError> 
     }
 
     let pack_dir = path::try_objects()
-        .map_err(|e| FetchError::Message(format!("failed to locate objects directory: {e}")))?
+        .map_err(|source| FetchError::ObjectsDirNotFound { source })?
         .join("pack");
     fs::create_dir_all(&pack_dir).map_err(|source| FetchError::PackDirCreate {
         path: pack_dir.clone(),

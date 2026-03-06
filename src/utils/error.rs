@@ -183,14 +183,7 @@ impl CliError {
 }
 
 fn render_hint(text: &str) -> Vec<String> {
-    let mut lines = text.lines();
-    let Some(first) = lines.next() else {
-        return Vec::new();
-    };
-
-    let mut rendered = vec![format!("hint: {}", first)];
-    rendered.extend(lines.map(std::string::ToString::to_string));
-    rendered
+    text.lines().map(|line| format!("hint: {}", line)).collect()
 }
 
 impl fmt::Display for CliError {
@@ -239,7 +232,7 @@ mod tests {
     }
 
     #[test]
-    fn multiline_hint_keeps_indented_follow_up_lines() {
+    fn multiline_hint_prefixes_every_line() {
         let rendered = CliError::failure("name and email are not configured")
             .with_hint(
                 "to configure, run:\n  libra config --global user.name \"Some One\"\n  libra config --global user.email \"someone@example.com\"",
@@ -247,7 +240,7 @@ mod tests {
             .render();
         assert_eq!(
             rendered,
-            "error: name and email are not configured\nhint: to configure, run:\n  libra config --global user.name \"Some One\"\n  libra config --global user.email \"someone@example.com\""
+            "error: name and email are not configured\nhint: to configure, run:\nhint:   libra config --global user.name \"Some One\"\nhint:   libra config --global user.email \"someone@example.com\""
         );
     }
 

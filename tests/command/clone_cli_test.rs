@@ -70,7 +70,10 @@ fn invalid_source_does_not_panic() {
     assert_eq!(output.status.code(), Some(128));
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(stderr, "fatal: repository '/' does not exist\n");
+    assert_eq!(
+        stderr,
+        "fatal: '/' does not appear to be a libra repository\n"
+    );
     assert!(!stderr.contains("thread 'main' panicked"));
 }
 

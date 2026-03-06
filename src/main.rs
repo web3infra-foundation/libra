@@ -1,19 +1,21 @@
 //! Binary entry point that boots the async runtime, parses CLI arguments, and dispatches execution.
 
 use libra::cli;
+use tracing_subscriber::EnvFilter;
 
 fn main() {
-    if let Some(level) = std::env::var_os("LIBRA_LOG").or_else(|| std::env::var_os("RUST_LOG")) {
-        let max_level = match level.to_string_lossy().to_ascii_lowercase().as_str() {
-            "trace" => tracing::Level::TRACE,
-            "debug" => tracing::Level::DEBUG,
-            "info" => tracing::Level::INFO,
-            "warn" | "warning" => tracing::Level::WARN,
-            "error" => tracing::Level::ERROR,
-            _ => tracing::Level::INFO,
-        };
+    if std::env::var_os("LIBRA_LOG").is_some() || std::env::var_os("RUST_LOG").is_some() {
+        if std::env::var_os("RUST_LOG").is_none()
+            && let Some(value) = std::env::var_os("LIBRA_LOG")
+        {
+            // SAFETY: CLI startup happens before any threads are spawned.
+            unsafe {
+                std::env::set_var("RUST_LOG", value);
+            }
+        }
+
         let _ = tracing_subscriber::fmt()
-            .with_max_level(max_level)
+            .with_env_filter(EnvFilter::from_default_env())
             .try_init();
     }
 

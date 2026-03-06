@@ -2,7 +2,7 @@
 //! policy, refreshing index entries, and writing blob objects.
 
 use std::{
-    io,
+    env, io,
     path::{Path, PathBuf},
 };
 
@@ -19,7 +19,6 @@ use crate::{
     command::status::{self, Changes},
     utils::{
         error::{CliError, CliResult},
-        ignore::IgnorePolicy,
         lfs,
         object_ext::BlobExt,
         path, util,
@@ -94,19 +93,11 @@ pub enum AddError {
 
 impl From<AddError> for CliError {
     fn from(error: AddError) -> Self {
-        match error {
-            AddError::NotInRepo => CliError::fatal(error.to_string()),
+        match &error {
             AddError::PathspecNotMatched { .. } => CliError::fatal(error.to_string())
                 .with_hint("check the path and try again.")
                 .with_hint("use 'libra status' to inspect tracked and untracked files."),
-            AddError::PathOutsideRepo { .. } => CliError::fatal(error.to_string()),
-            AddError::IndexLoad { .. }
-            | AddError::IndexSave { .. }
-            | AddError::RefreshFailed { .. }
-            | AddError::CreateIndexEntry { .. }
-            | AddError::InvalidPathEncoding { .. }
-            | AddError::Workdir { .. }
-            | AddError::Status { .. } => CliError::fatal(error.to_string()),
+            _ => CliError::fatal(error.to_string()),
         }
     }
 }
@@ -162,33 +153,36 @@ pub async fn execute_safe(args: AddArgs) -> CliResult<()> {
         path: index_path.clone(),
         source,
     })?;
+    let current_dir = env::current_dir().map_err(|source| AddError::Workdir { source })?;
 
-    let policy = if args.force {
-        IgnorePolicy::IncludeIgnored
-    } else {
-        IgnorePolicy::Respect
-    };
-    let visible_changes = status::changes_to_be_staged_with_policy_safe(policy)
-        .map_err(|source| AddError::Status { source })?;
+    let (mut visible_changes, ignored_changes) =
+        status::changes_to_be_staged_split_safe().map_err(|source| AddError::Status { source })?;
+    if args.force {
+        visible_changes.extend(ignored_changes.clone());
+    }
     let ignored_changes = if args.force {
         Changes::default()
     } else {
-        status::changes_to_be_staged_with_policy_safe(IgnorePolicy::OnlyIgnored)
-            .map_err(|source| AddError::Status { source })?
+        ignored_changes
     };
 
     let validated = validate_pathspecs(
         &args.pathspec,
         &requested_paths,
         &workdir,
+        &current_dir,
         &visible_changes,
         &ignored_changes,
         &index,
     )?;
 
     if args.refresh {
-        let tracked_modified =
-            filter_refresh_candidates(&visible_changes.modified, &validated.files);
+        let tracked_modified = filter_refresh_candidates(
+            &visible_changes.modified,
+            &validated.files,
+            &workdir,
+            &current_dir,
+        );
         if args.dry_run {
             for file in &tracked_modified {
                 println!("refresh: {}", file.display());
@@ -211,7 +205,7 @@ pub async fn execute_safe(args: AddArgs) -> CliResult<()> {
     if !args.update {
         files.extend(visible_changes.new);
     }
-    files = filter_candidates(&files, &validated.files);
+    files = filter_candidates(&files, &validated.files, &workdir, &current_dir);
     filter_out_current_executable(&mut files);
     files.sort();
     files.dedup();
@@ -270,6 +264,7 @@ fn validate_pathspecs(
     raw_pathspecs: &[String],
     requested_paths: &[PathBuf],
     workdir: &Path,
+    current_dir: &Path,
     visible_changes: &Changes,
     ignored_changes: &Changes,
     index: &Index,
@@ -284,11 +279,11 @@ fn validate_pathspecs(
     let tracked_files = index.tracked_files();
     let change_candidates = collect_change_candidates(visible_changes);
     let ignored_candidates = collect_change_candidates(ignored_changes);
-    let current_dir = util::cur_dir();
 
     let mut ignored = Vec::new();
+    let mut files = Vec::new();
     for (raw, requested_path) in raw_pathspecs.iter().zip(requested_paths.iter()) {
-        let requested_abs = resolve_pathspec(requested_path, &current_dir);
+        let requested_abs = resolve_pathspec(requested_path, current_dir);
         if !util::is_sub_path(&requested_abs, workdir) {
             return Err(AddError::PathOutsideRepo {
                 path: raw.clone(),
@@ -296,11 +291,12 @@ fn validate_pathspecs(
             });
         }
 
-        let matches_changes = pathspec_matches_any(requested_path, &change_candidates, workdir);
-        let matches_tracked = pathspec_matches_any(requested_path, &tracked_files, workdir);
-        let matches_ignored = pathspec_matches_any(requested_path, &ignored_candidates, workdir);
+        let matches_changes = pathspec_matches_any(&requested_abs, &change_candidates, workdir);
+        let matches_tracked = pathspec_matches_any(&requested_abs, &tracked_files, workdir);
+        let matches_ignored = pathspec_matches_any(&requested_abs, &ignored_candidates, workdir);
 
         if matches_changes || matches_tracked {
+            files.push(requested_path.clone());
             continue;
         }
         if matches_ignored {
@@ -313,10 +309,7 @@ fn validate_pathspecs(
         });
     }
 
-    Ok(ValidatedPathspecs {
-        files: requested_paths.to_vec(),
-        ignored,
-    })
+    Ok(ValidatedPathspecs { files, ignored })
 }
 
 fn collect_change_candidates(changes: &Changes) -> Vec<PathBuf> {
@@ -335,28 +328,25 @@ fn resolve_pathspec(pathspec: &Path, current_dir: &Path) -> PathBuf {
     }
 }
 
-fn pathspec_matches_any(pathspec: &Path, candidates: &[PathBuf], workdir: &Path) -> bool {
-    let current_dir = util::cur_dir();
-    let requested_abs = resolve_pathspec(pathspec, &current_dir);
+fn pathspec_matches_any(requested_abs: &Path, candidates: &[PathBuf], workdir: &Path) -> bool {
     candidates.iter().any(|candidate| {
         let candidate_abs = workdir.join(candidate);
-        util::is_sub_path(&candidate_abs, &requested_abs)
+        util::is_sub_path(&candidate_abs, requested_abs)
     })
 }
 
-fn filter_candidates(files: &[PathBuf], requested_paths: &[PathBuf]) -> Vec<PathBuf> {
-    if requested_paths.is_empty() {
-        return files.to_vec();
-    }
-
-    let workdir = util::working_dir();
-    let current_dir = util::cur_dir();
+fn filter_candidates(
+    files: &[PathBuf],
+    requested_paths: &[PathBuf],
+    workdir: &Path,
+    current_dir: &Path,
+) -> Vec<PathBuf> {
     files
         .iter()
         .filter(|file| {
             let file_abs = workdir.join(file.as_path());
             requested_paths.iter().any(|pathspec| {
-                let requested_abs = resolve_pathspec(pathspec, &current_dir);
+                let requested_abs = resolve_pathspec(pathspec, current_dir);
                 util::is_sub_path(&file_abs, &requested_abs)
             })
         })
@@ -364,8 +354,13 @@ fn filter_candidates(files: &[PathBuf], requested_paths: &[PathBuf]) -> Vec<Path
         .collect()
 }
 
-fn filter_refresh_candidates(files: &[PathBuf], requested_paths: &[PathBuf]) -> Vec<PathBuf> {
-    filter_candidates(files, requested_paths)
+fn filter_refresh_candidates(
+    files: &[PathBuf],
+    requested_paths: &[PathBuf],
+    workdir: &Path,
+    current_dir: &Path,
+) -> Vec<PathBuf> {
+    filter_candidates(files, requested_paths, workdir, current_dir)
 }
 
 fn filter_out_current_executable(files: &mut Vec<PathBuf>) {

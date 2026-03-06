@@ -60,6 +60,33 @@ fn ignored_path_returns_1_and_valid_paths_still_stage() {
 }
 
 #[test]
+fn ignored_only_path_does_not_stage_unrelated_changes() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo(&repo);
+    fs::write(repo.join(".libraignore"), "ignored.txt\n").unwrap();
+    fs::write(repo.join("visible.txt"), "visible").unwrap();
+    fs::write(repo.join("ignored.txt"), "ignored").unwrap();
+
+    let output = run_libra(&["add", "ignored.txt"], &repo);
+    assert_eq!(output.status.code(), Some(1));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("ignored.txt"));
+
+    let status = run_libra(&["status", "--short"], &repo);
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        !stdout.contains("A  visible.txt"),
+        "ignored-only add should not stage unrelated files: {stdout}"
+    );
+    assert!(
+        !stdout.contains("A  ignored.txt"),
+        "ignored-only add should not stage the ignored file: {stdout}"
+    );
+}
+
+#[test]
 fn corrupt_index_reports_fatal_without_panic() {
     let temp = tempdir().unwrap();
     let repo = temp.path().join("repo");
