@@ -23,12 +23,34 @@ jobs:
           - target: x86_64-pc-windows-msvc
             arch: x64
             os: windows-latest
+
     runs-on: ${{ matrix.os }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - name: Check Release Status
+        id: release_status
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = context.ref.replace("refs/tags/", "");
+            try {
+              const { data: release } = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag: tag,
+              });
+
+              core.setOutput("draft", release.draft ? "true" : "false");
+              core.info(`Release draft status: ${release.draft}`);
+            } catch (e) {
+              core.info("Release not found. Skipping upload.");
+              core.setOutput("draft", "false");
+            }
 
       - name: Building
         run: |
@@ -51,31 +73,28 @@ jobs:
           mv target/release/libra ${{ github.workspace }}/libra_${{ github.ref_name }}_${{ matrix.target }}
 
       - name: Release Linux
-        if: contains(matrix.os, 'ubuntu')
+        if: contains(matrix.os, 'ubuntu') && steps.release_status.outputs.draft == 'true'
         uses: softprops/action-gh-release@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          draft: true
           overwrite: true
           files: |
             libra_${{ github.ref_name }}_${{ matrix.target }}
 
       - name: Release Windows
-        if: contains(matrix.os, 'windows')
+        if: contains(matrix.os, 'windows') && steps.release_status.outputs.draft == 'true'
         uses: softprops/action-gh-release@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          draft: true
           overwrite: true
           files: |
             libra_${{ github.ref_name }}_${{ matrix.target }}.exe
 
       - name: Release MacOS
-        if: contains(matrix.os, 'macos')
+        if: contains(matrix.os, 'macos') && steps.release_status.outputs.draft == 'true'
         uses: softprops/action-gh-release@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          draft: true
           overwrite: true
           files: |
             libra_${{ github.ref_name }}_${{ matrix.target }}
