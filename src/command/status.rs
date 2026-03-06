@@ -2,6 +2,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    io,
     io::Write,
     path::PathBuf,
 };
@@ -9,6 +10,7 @@ use std::{
 use clap::{Parser, ValueEnum};
 use colored::Colorize;
 use git_internal::{
+    errors::GitError,
     hash::{ObjectHash, get_hash_kind},
     internal::{
         index::Index,
@@ -92,6 +94,20 @@ pub struct Changes {
     pub new: Vec<PathBuf>,
     pub modified: Vec<PathBuf>,
     pub deleted: Vec<PathBuf>,
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum StatusError {
+    #[error("failed to open index '{path}': {source}")]
+    IndexLoad { path: PathBuf, source: GitError },
+    #[error("path '{path}' is not valid UTF-8")]
+    InvalidPathEncoding { path: PathBuf },
+    #[error("failed to hash '{path}': {source}")]
+    FileHash { path: PathBuf, source: io::Error },
+    #[error("failed to list files in '{path}': {source}")]
+    ListWorkdirFiles { path: PathBuf, source: io::Error },
+    #[error("failed to determine working directory: {source}")]
+    Workdir { source: io::Error },
 }
 
 /// Collapse untracked files into their parent directories when possible.
@@ -782,35 +798,55 @@ pub fn changes_to_be_staged() -> Changes {
 /// Variant of [`changes_to_be_staged`] that lets callers pick the ignore strategy explicitly.
 /// Commands such as `add --force` or `status --ignored` can switch policies as needed.
 pub fn changes_to_be_staged_with_policy(policy: IgnorePolicy) -> Changes {
+    changes_to_be_staged_with_policy_safe(policy)
+        .unwrap_or_else(|e| panic!("failed to calculate staged changes: {e}"))
+}
+
+pub fn changes_to_be_staged_with_policy_safe(policy: IgnorePolicy) -> Result<Changes, StatusError> {
     let mut changes = Changes::default();
-    let workdir = util::working_dir();
-    let index = Index::load(path::index()).unwrap();
+    let workdir = util::try_working_dir().map_err(|source| StatusError::Workdir { source })?;
+    let index_path = path::try_index().map_err(|source| StatusError::Workdir { source })?;
+    let index = Index::load(&index_path).map_err(|source| StatusError::IndexLoad {
+        path: index_path.clone(),
+        source,
+    })?;
     let tracked_files = index.tracked_files();
     for file in tracked_files.iter() {
         if ignore::should_ignore(file, policy, &index) {
             continue;
         }
-        let file_str = file.to_str().unwrap();
+        let file_str = file
+            .to_str()
+            .ok_or_else(|| StatusError::InvalidPathEncoding { path: file.clone() })?;
         let file_abs = util::workdir_to_absolute(file);
         if !file_abs.exists() {
             changes.deleted.push(file.clone());
         } else if index.is_modified(file_str, 0, &workdir) {
             // only calc the hash if the file is modified (metadata), for optimization
-            let file_hash = calc_file_blob_hash(&file_abs).unwrap();
+            let file_hash =
+                calc_file_blob_hash(&file_abs).map_err(|source| StatusError::FileHash {
+                    path: file_abs.clone(),
+                    source,
+                })?;
             if !index.verify_hash(file_str, 0, &file_hash) {
                 changes.modified.push(file.clone());
             }
         }
     }
-    let files = util::list_workdir_files().unwrap(); // to workdir
+    let files = util::list_workdir_files().map_err(|source| StatusError::ListWorkdirFiles {
+        path: workdir.clone(),
+        source,
+    })?; // to workdir
     for file in ignore::filter_workdir_paths(files.into_iter(), policy, &index) {
-        let file_str = file.to_str().unwrap();
+        let file_str = file
+            .to_str()
+            .ok_or_else(|| StatusError::InvalidPathEncoding { path: file.clone() })?;
         if !index.tracked(file_str, 0) {
             // file not tracked in `index`
             changes.new.push(file);
         }
     }
-    changes
+    Ok(changes)
 }
 
 /// List ignored files (not tracked by index, but ignored by .libraignore) under workdir

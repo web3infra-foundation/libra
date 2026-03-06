@@ -1,26 +1,24 @@
 //! Binary entry point that boots the async runtime, parses CLI arguments, and dispatches execution.
 
-use git_internal::errors::GitError;
 use libra::cli;
 
 fn main() {
-    #[cfg(debug_assertions)]
-    {
-        tracing::subscriber::set_global_default(
-            tracing_subscriber::fmt()
-                .with_max_level(tracing::Level::INFO)
-                .finish(),
-        )
-        .unwrap();
+    if let Some(level) = std::env::var_os("LIBRA_LOG").or_else(|| std::env::var_os("RUST_LOG")) {
+        let max_level = match level.to_string_lossy().to_ascii_lowercase().as_str() {
+            "trace" => tracing::Level::TRACE,
+            "debug" => tracing::Level::DEBUG,
+            "info" => tracing::Level::INFO,
+            "warn" | "warning" => tracing::Level::WARN,
+            "error" => tracing::Level::ERROR,
+            _ => tracing::Level::INFO,
+        };
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(max_level)
+            .try_init();
     }
 
-    let res = cli::parse(None);
-    match res {
-        Ok(_) => {}
-        Err(e) => {
-            if !matches!(e, GitError::RepoNotFound) {
-                libra::cli_error!("error" => e);
-            }
-        }
+    if let Err(err) = cli::parse(None) {
+        eprintln!("{}", err.render());
+        std::process::exit(err.exit_code());
     }
 }

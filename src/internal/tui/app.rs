@@ -339,7 +339,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         if !result.is_error.unwrap_or(false) {
                             println!("Decision created successfully");
                         } else {
-                            cli_error!(result.content, "error: failed to create decision");
+                            cli_error!("error" => "failed to create decision");
                         }
                     }
                     Err(e) => {
@@ -844,7 +844,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         match mcp_server_clone.create_run_impl(run_params, actor).await {
                             Ok(result) => {
                                 if result.is_error.unwrap_or(false) {
-                                    cli_error!(result.content, "error: failed to create run");
+                                    cli_error!("error" => "failed to create run");
                                 }
                             }
                             Err(e) => {
@@ -883,10 +883,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         {
                             Ok(result) => {
                                 if result.is_error.unwrap_or(false) {
-                                    cli_error!(
-                                        result.content,
-                                        "error: failed to create context snapshot"
-                                    );
+                                    cli_error!("error" => "failed to create context snapshot");
                                 }
                             }
                             Err(e) => {
@@ -978,10 +975,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                                         Ok(result) => {
                                             if !result.is_error.unwrap_or(false) {
                                             } else {
-                                                cli_error!(
-                                                    result.content,
-                                                    "error: failed to record tool invocation"
-                                                );
+                                                cli_error!("error" => "failed to record tool invocation");
                                             }
                                         }
                                         Err(e) => {

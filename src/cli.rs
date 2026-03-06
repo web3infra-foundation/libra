@@ -5,26 +5,26 @@ use std::env;
 
 use clap::{
     Parser, Subcommand,
-    error::{ContextKind, ContextValue},
+    error::{ContextKind, ContextValue, ErrorKind},
 };
-use git_internal::{
-    errors::GitError,
-    hash::{HashKind, set_hash_kind},
-};
+use git_internal::hash::{HashKind, set_hash_kind};
 
-use crate::{command, utils};
+use crate::{
+    command, utils,
+    utils::error::{CliError, CliResult},
+};
 
 /// Reads the repository's configuration and sets the global hash kind.
 /// This must be called for any command that operates within an existing repository.
 /// Returns an error if the repository database is missing or corrupted.
-async fn set_local_hash_kind() -> Result<(), GitError> {
+async fn set_local_hash_kind() -> CliResult<()> {
     // Verify the database file actually exists before accessing it, to avoid
     // panicking inside `get_db_conn_instance()` when `.libra` exists but
     // `libra.db` is missing (e.g. corrupted or partially-removed repo).
-    let storage = utils::util::try_get_storage_path(None)?;
+    let storage = utils::util::try_get_storage_path(None).map_err(|_| repo_not_found_error())?;
     let db_path = storage.join(utils::util::DATABASE);
     if !db_path.exists() {
-        return Err(GitError::CustomError(format!(
+        return Err(CliError::fatal(format!(
             "repository database not found at '{}'",
             db_path.display()
         )));
@@ -39,7 +39,7 @@ async fn set_local_hash_kind() -> Result<(), GitError> {
         "sha1" => HashKind::Sha1,
         "sha256" => HashKind::Sha256,
         _ => {
-            return Err(GitError::InvalidHashValue(format!(
+            return Err(CliError::fatal(format!(
                 "unsupported object format: '{}'",
                 object_format
             )));
@@ -208,7 +208,7 @@ pub enum Stash {
 /// - Caution: This is a `synchronous` function, it's declared as `async` to be able to use `[tokio::main]`
 /// - `args`: parse from command line if it's `None`, otherwise parse from the given args
 #[tokio::main]
-pub async fn parse(args: Option<&[&str]>) -> Result<(), GitError> {
+pub async fn parse(args: Option<&[&str]>) -> CliResult<()> {
     parse_async(args).await
 }
 
@@ -318,62 +318,136 @@ fn parse_error_hints(err: &clap::Error) -> Vec<String> {
     hints
 }
 
-fn format_parse_error(err: &clap::Error) -> String {
-    let mut rendered = err.to_string();
-    let custom_hints = parse_error_hints(err);
+fn parse_error_components(err: &clap::Error) -> (String, Option<String>, Vec<String>) {
+    let rendered = err.to_string();
+    let mut message = None;
+    let mut usage_lines = Vec::new();
+    let mut hints = Vec::new();
 
-    // Only strip clap's built-in "tip:" lines when we have our own hints to
-    // replace them; otherwise keep clap's original suggestion intact.
-    if !custom_hints.is_empty() && rendered.contains("tip: ") {
-        rendered = rendered
-            .lines()
-            .filter(|line| !line.trim().starts_with("tip:"))
-            .collect::<Vec<_>>()
-            .join("\n");
+    for line in rendered.lines() {
+        let trimmed = line.trim_start();
+        if let Some(tip) = trimmed.strip_prefix("tip:") {
+            hints.push(tip.trim().to_string());
+            continue;
+        }
+        if message.is_none() {
+            if let Some(msg) = trimmed.strip_prefix("error:") {
+                message = Some(msg.trim().to_string());
+                continue;
+            }
+            if !trimmed.is_empty() {
+                message = Some(trimmed.to_string());
+                continue;
+            }
+        }
+        usage_lines.push(line.to_string());
     }
 
-    if !rendered.ends_with('\n') {
-        rendered.push('\n');
+    hints.extend(parse_error_hints(err));
+
+    let usage = if usage_lines.is_empty() {
+        None
+    } else {
+        Some(usage_lines.join("\n").trim().to_string())
+    };
+
+    (
+        message.unwrap_or_else(|| rendered.trim().to_string()),
+        usage,
+        hints,
+    )
+}
+
+fn repo_not_found_error() -> CliError {
+    CliError::fatal("not a libra repository (or any of the parent directories): .libra")
+}
+
+fn legacy_string_error_to_cli_error(message: String) -> CliError {
+    let trimmed = message.trim().to_string();
+    if let Some(fatal) = trimmed.strip_prefix("fatal: ") {
+        return CliError::fatal(fatal.to_string());
     }
-    for hint in custom_hints {
-        rendered.push_str("Hint: ");
-        rendered.push_str(&hint);
-        rendered.push('\n');
+    if let Some(error) = trimmed.strip_prefix("error: ") {
+        return CliError::failure(error.to_string());
     }
-    rendered
+    if trimmed.starts_with("usage: ") {
+        return CliError::command_usage("invalid arguments").with_usage(trimmed);
+    }
+    CliError::failure(trimmed)
+}
+
+fn is_top_level_unknown_command(argv: &[String], err: &clap::Error) -> Option<String> {
+    let invalid = match err.get(ContextKind::InvalidSubcommand) {
+        Some(ContextValue::String(cmd)) => cmd,
+        _ => return None,
+    };
+
+    let (index, _) = find_subcommand_index(argv)?;
+    if argv.get(index).is_some_and(|arg| arg == invalid) {
+        return Some(invalid.to_string());
+    }
+
+    None
+}
+
+fn classify_parse_error(argv: &[String], err: &clap::Error) -> CliError {
+    if let Some(cmd) = is_top_level_unknown_command(argv, err) {
+        let (_, _, hints) = parse_error_components(err);
+        let mut cli_error = CliError::unknown_command(format!(
+            "libra: '{}' is not a libra command. See 'libra --help'.",
+            cmd
+        ));
+        for hint in hints {
+            cli_error = cli_error.with_hint(hint);
+        }
+        return cli_error;
+    }
+
+    let (message, usage, hints) = parse_error_components(err);
+    let mut cli_error = if find_subcommand_index(argv).is_some() {
+        match err.kind() {
+            ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => CliError::parse_usage(message),
+            _ => CliError::command_usage(message),
+        }
+    } else {
+        CliError::parse_usage(message)
+    };
+
+    if let Some(usage) = usage {
+        cli_error = cli_error.with_usage(usage);
+    }
+    for hint in hints {
+        cli_error = cli_error.with_hint(hint);
+    }
+
+    cli_error
 }
 
 /// `async` version of the [parse] function
-pub async fn parse_async(args: Option<&[&str]>) -> Result<(), GitError> {
-    let from_process_args = args.is_none();
+pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
     let argv = match args {
         Some(args) => args.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
         None => env::args().collect::<Vec<_>>(),
     };
     let argv = rewrite_log_short_number_args(argv);
-    let args = match Cli::try_parse_from(argv) {
+    let args = match Cli::try_parse_from(argv.clone()) {
         Ok(args) => args,
-        Err(err) => {
-            let rendered = format_parse_error(&err);
-            if from_process_args {
-                if err.use_stderr() {
-                    eprint!("{rendered}");
-                } else {
-                    print!("{rendered}");
-                }
-                std::process::exit(err.exit_code());
+        Err(err) => match err.kind() {
+            ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => {
+                err.print().map_err(|print_err| {
+                    CliError::fatal(format!("failed to write clap output: {print_err}"))
+                })?;
+                return Ok(());
             }
-            return Err(GitError::InvalidArgument(rendered));
-        }
+            _ => return Err(classify_parse_error(&argv, &err)),
+        },
     };
     match &args.command {
         Commands::Init(_) | Commands::Clone(_) => {}
         // Config global/system scopes don't require a repository
         Commands::Config(cfg) if cfg.global || cfg.system => {}
         _ => {
-            if !utils::util::check_repo_exist() {
-                return Err(GitError::RepoNotFound);
-            }
+            utils::util::try_get_storage_path(None).map_err(|_| repo_not_found_error())?;
             set_local_hash_kind().await?;
         }
     }
@@ -383,11 +457,17 @@ pub async fn parse_async(args: Option<&[&str]>) -> Result<(), GitError> {
             let original_dir = utils::util::cur_dir();
             command::init::execute(args).await; // set working directory as args.repo_directory
             set_local_hash_kind().await?; // set hash kind after init
-            env::set_current_dir(&original_dir)?; // restore working directory as original_dir
+            env::set_current_dir(&original_dir).map_err(|e| {
+                CliError::fatal(format!(
+                    "failed to restore working directory '{}': {}",
+                    original_dir.display(),
+                    e
+                ))
+            })?; // restore working directory as original_dir
         }
-        Commands::Clone(args) => command::clone::execute(args).await, //clone will use init internally,so we don't need to set hash kind here again
+        Commands::Clone(args) => command::clone::execute_safe(args).await?, //clone will use init internally,so we don't need to set hash kind here again
         Commands::Code(args) => command::code::execute(args).await,
-        Commands::Add(args) => command::add::execute(args).await,
+        Commands::Add(args) => command::add::execute_safe(args).await?,
         Commands::Rm(args) => command::remove::execute(args).await,
         Commands::Restore(args) => command::restore::execute(args).await,
         Commands::Status(args) => command::status::execute(args).await,
@@ -399,17 +479,13 @@ pub async fn parse_async(args: Option<&[&str]>) -> Result<(), GitError> {
         Commands::Show(args) => command::show::execute(args).await,
         Commands::ShowRef(args) => command::show_ref::execute(args)
             .await
-            .map_err(GitError::CustomError)?,
+            .map_err(legacy_string_error_to_cli_error)?,
         Commands::Branch(args) => command::branch::execute(args).await,
         Commands::Tag(args) => command::tag::execute(args).await,
         Commands::Commit(args) => {
-            if let Err(msg) = command::commit::execute_safe(args).await {
-                if from_process_args {
-                    eprintln!("{msg}");
-                    std::process::exit(128);
-                }
-                return Err(GitError::CustomError(msg));
-            }
+            command::commit::execute_safe(args)
+                .await
+                .map_err(CliError::fatal)?;
         }
         Commands::Switch(args) => command::switch::execute(args).await,
         Commands::Rebase(args) => command::rebase::execute(args).await,
@@ -418,16 +494,16 @@ pub async fn parse_async(args: Option<&[&str]>) -> Result<(), GitError> {
         Commands::Mv(args) => {
             command::mv::execute(args)
                 .await
-                .map_err(GitError::CustomError)?;
+                .map_err(legacy_string_error_to_cli_error)?;
         }
         Commands::Describe(args) => command::describe::execute(args)
             .await
-            .map_err(GitError::CustomError)?,
+            .map_err(legacy_string_error_to_cli_error)?,
         Commands::CherryPick(args) => command::cherry_pick::execute(args).await,
         Commands::Push(args) => command::push::execute(args).await,
         Commands::CatFile(args) => command::cat_file::execute(args).await,
         Commands::IndexPack(args) => command::index_pack::execute(args),
-        Commands::Fetch(args) => command::fetch::execute(args).await,
+        Commands::Fetch(args) => command::fetch::execute_safe(args).await?,
         Commands::Diff(args) => command::diff::execute(args).await,
         Commands::Blame(args) => command::blame::execute(args).await,
         Commands::Revert(args) => command::revert::execute(args).await,
@@ -435,13 +511,9 @@ pub async fn parse_async(args: Option<&[&str]>) -> Result<(), GitError> {
         Commands::Open(args) => command::open::execute(args).await,
         Commands::Pull(args) => command::pull::execute(args).await,
         Commands::Config(args) => {
-            if let Err(msg) = command::config::execute_safe(args).await {
-                if from_process_args {
-                    eprintln!("{msg}");
-                    std::process::exit(1);
-                }
-                return Err(GitError::CustomError(msg));
-            }
+            command::config::execute_safe(args)
+                .await
+                .map_err(CliError::failure)?;
         }
         Commands::Checkout(args) => command::checkout::execute(args).await,
         Commands::Reflog(args) => command::reflog::execute(args).await,
@@ -464,7 +536,7 @@ mod tests {
     use serial_test::serial;
 
     use super::*;
-    use crate::utils::test::ChangeDirGuard;
+    use crate::utils::{error::CliErrorKind, test::ChangeDirGuard};
 
     /// this test is to verify that the CLI can be built without panicking
     /// according [clap dock](https://docs.rs/clap/latest/clap/_derive/_tutorial/chapter_4/index.html)
@@ -478,10 +550,7 @@ mod tests {
     #[tokio::test]
     async fn parse_error_shows_import_hint() {
         let err = parse_async(Some(&["libra", "import"])).await.unwrap_err();
-        let msg = match err {
-            GitError::InvalidArgument(msg) => msg,
-            other => panic!("unexpected error: {other:?}"),
-        };
+        let msg = err.render();
         assert!(
             msg.contains("You probably want `libra config --import`."),
             "got: {msg}"
@@ -500,7 +569,10 @@ mod tests {
         let err = parse_async(Some(&["libra", "br"])).await.unwrap_err();
         // Should fail because no repo exists, not because the subcommand is unknown.
         assert!(
-            !matches!(err, GitError::InvalidArgument(_)),
+            !matches!(
+                err.kind(),
+                CliErrorKind::ParseUsage | CliErrorKind::CommandUsage
+            ),
             "expected non-parse error (alias should resolve), got: {err:?}"
         );
     }
@@ -516,7 +588,10 @@ mod tests {
         // Without arguments it should fail with a config validation error, not a parse error.
         let err = parse_async(Some(&["libra", "cfg"])).await.unwrap_err();
         assert!(
-            !matches!(err, GitError::InvalidArgument(_)),
+            !matches!(
+                err.kind(),
+                CliErrorKind::ParseUsage | CliErrorKind::CommandUsage
+            ),
             "expected non-parse error (alias should resolve), got: {err:?}"
         );
     }
@@ -525,13 +600,10 @@ mod tests {
     async fn clap_fuzzy_suggests_similar_command() {
         // "initt" is close enough to "init" for clap's built-in fuzzy match.
         let err = parse_async(Some(&["libra", "initt"])).await.unwrap_err();
-        let msg = match err {
-            GitError::InvalidArgument(msg) => msg,
-            other => panic!("unexpected error: {other:?}"),
-        };
+        let msg = err.render();
         // Clap should include its own "tip: a similar subcommand exists: 'init'".
         assert!(
-            msg.contains("tip:") || msg.contains("similar"),
+            msg.contains("hint:") || msg.contains("similar"),
             "expected clap fuzzy-match suggestion, got: {msg}"
         );
     }
