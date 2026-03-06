@@ -5,6 +5,9 @@ on:
   push:
     tags:
       - "v*"
+  
+  release:
+    types: [created, edited]
 
 permissions:
   contents: write
