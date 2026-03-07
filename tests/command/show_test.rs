@@ -1,10 +1,11 @@
 //! Tests for the show command, verifying correct display of commits and tags.
 //! Tests use CLI commands via the libra binary.
 
-use super::{create_committed_repo_via_cli, run_libra_command};
 use std::process::Command;
 
 use serial_test::serial;
+
+use super::{create_committed_repo_via_cli, run_libra_command};
 
 /// Initialize a temporary repository using CLI.
 fn init_temp_repo() -> tempfile::TempDir {

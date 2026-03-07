@@ -7,6 +7,19 @@ use libra::utils::path;
 
 use super::*;
 
+#[test]
+#[serial]
+fn test_mv_cli_outside_repository_returns_fatal_128() {
+    let temp = tempdir().unwrap();
+    let output = run_libra_command(&["mv", "a.txt", "b.txt"], temp.path());
+    assert_eq!(output.status.code(), Some(128));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("fatal: not a libra repository"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
 async fn stage_file(path: &str, content: &str) {
     test::ensure_file(path, Some(content));
     add::execute(AddArgs {

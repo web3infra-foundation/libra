@@ -105,9 +105,8 @@ pub async fn execute(args: DiffArgs) {
                     }
                 }
             } else {
-                // default git diff => old = INDEX
-                let files = index.tracked_files();
-                get_files_blobs(&files, &index, IgnorePolicy::Respect)
+                // default git diff => old = INDEX (use stored hashes, not disk content)
+                get_index_blobs(&index, IgnorePolicy::Respect)
             }
         }
     };
@@ -173,20 +172,24 @@ pub async fn execute(args: DiffArgs) {
             } else {
                 results.join("")
             };
-            #[cfg(unix)]
-            {
-                let mut child = Command::new("less")
-                    .arg("-R")
-                    .arg("-F")
-                    .stdin(Stdio::piped())
-                    .spawn()
-                    .expect("failed to execute process");
-                let stdin = child.stdin.as_mut().unwrap();
-                stdin.write_all(output.as_bytes()).unwrap();
-                child.wait().unwrap();
-            }
-            #[cfg(not(unix))]
-            {
+            if io::stdout().is_terminal() {
+                #[cfg(unix)]
+                {
+                    let mut child = Command::new("less")
+                        .arg("-R")
+                        .arg("-F")
+                        .stdin(Stdio::piped())
+                        .spawn()
+                        .expect("failed to execute process");
+                    let stdin = child.stdin.as_mut().unwrap();
+                    stdin.write_all(output.as_bytes()).unwrap();
+                    child.wait().unwrap();
+                }
+                #[cfg(not(unix))]
+                {
+                    io::stdout().write_all(output.as_bytes()).unwrap();
+                }
+            } else {
                 io::stdout().write_all(output.as_bytes()).unwrap();
             }
         }
@@ -221,6 +224,19 @@ fn get_files_blobs(
             let data = std::fs::read(&path).unwrap();
             (p.to_owned(), calculate_object_hash(ObjectType::Blob, &data))
         })
+        .collect()
+}
+
+/// Returns (path, hash) pairs from the index's stored entries (stage 0).
+/// Unlike `get_files_blobs`, this uses the hash already recorded in the index
+/// rather than reading the current file on disk, which is essential for
+/// producing a correct working-directory diff (index vs working tree).
+fn get_index_blobs(index: &Index, policy: IgnorePolicy) -> Vec<(PathBuf, ObjectHash)> {
+    index
+        .tracked_entries(0)
+        .iter()
+        .filter(|entry| !ignore::should_ignore(&PathBuf::from(&entry.name), policy, index))
+        .map(|entry| (PathBuf::from(&entry.name), entry.hash))
         .collect()
 }
 

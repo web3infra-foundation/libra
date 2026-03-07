@@ -2,7 +2,6 @@
 
 use std::{env, process::Command, time::Duration};
 
-use super::{create_committed_repo_via_cli, run_libra_command};
 use clap::Parser;
 use libra::{
     command::push,
@@ -12,6 +11,8 @@ use libra::{
 use serial_test::serial;
 use tempfile::TempDir;
 use tokio::{process::Command as TokioCommand, time::timeout};
+
+use super::{create_committed_repo_via_cli, run_libra_command};
 
 /// Helper function: Initialize a temporary Libra repository
 fn init_temp_repo() -> TempDir {

@@ -4,8 +4,10 @@ use clap::Parser;
 use lazy_static::lazy_static;
 use regex::Regex;
 
-use crate::internal::config::Config;
-use crate::utils::error::{CliError, CliResult};
+use crate::{
+    internal::config::Config,
+    utils::error::{CliError, CliResult},
+};
 
 #[derive(Parser, Debug)]
 pub struct OpenArgs {

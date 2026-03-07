@@ -2,8 +2,10 @@
 
 use clap::Parser;
 
-use crate::internal::{branch::Branch, head::Head, tag};
-use crate::utils::error::{CliError, CliResult};
+use crate::{
+    internal::{branch::Branch, head::Head, tag},
+    utils::error::{CliError, CliResult},
+};
 
 #[derive(Parser, Debug)]
 pub struct ShowRefArgs {

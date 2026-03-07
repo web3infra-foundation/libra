@@ -7,8 +7,10 @@ use once_cell::sync::Lazy;
 use sea_orm::DatabaseConnection;
 use tokio::sync::Mutex;
 
-use crate::internal::config;
-use crate::utils::error::{CliError, CliResult};
+use crate::{
+    internal::config,
+    utils::error::{CliError, CliResult},
+};
 
 /// Cached database connection for Global scope, paired with the resolved DB path.
 ///

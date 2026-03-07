@@ -1,6 +1,5 @@
 //! Tests pack index generation validating offsets, CRC32, fanout tables, and trailer hashes.
 
-use super::{init_repo_via_cli, run_libra_command};
 use std::{
     collections::HashMap,
     fs,
@@ -24,6 +23,8 @@ use serial_test::serial;
 use sha1::{Digest, Sha1};
 use tempfile::tempdir;
 use tokio::sync::mpsc;
+
+use super::{init_repo_via_cli, run_libra_command};
 
 /// Expected pack contents for validation
 #[derive(Debug)]

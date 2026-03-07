@@ -1,7 +1,8 @@
 //! Tests pull command integration that combines fetch with merge or rebase behaviors.
 
-use super::{create_committed_repo_via_cli, run_libra_command};
 use serial_test::serial;
+
+use super::{create_committed_repo_via_cli, run_libra_command};
 
 #[test]
 #[serial]

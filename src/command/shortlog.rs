@@ -54,9 +54,10 @@ use std::{collections::HashMap, io::Write};
 use clap::Parser;
 use git_internal::internal::object::commit::Commit;
 
-use crate::utils::error::{CliError, CliResult};
-
-use crate::internal::{head::Head, log::date_parser::parse_date};
+use crate::{
+    internal::{head::Head, log::date_parser::parse_date},
+    utils::error::{CliError, CliResult},
+};
 
 #[derive(Parser, Debug)]
 pub struct ShortlogArgs {

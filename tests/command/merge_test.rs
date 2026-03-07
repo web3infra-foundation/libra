@@ -2,8 +2,10 @@
 
 use std::process::Command;
 
-use libra::internal::{branch::Branch, head::Head};
-use libra::utils::test::ChangeDirGuard;
+use libra::{
+    internal::{branch::Branch, head::Head},
+    utils::test::ChangeDirGuard,
+};
 use serial_test::serial;
 
 use super::{create_committed_repo_via_cli, run_libra_command};
