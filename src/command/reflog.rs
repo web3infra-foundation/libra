@@ -78,7 +78,6 @@ enum Subcommands {
 pub async fn execute(args: ReflogArgs) {
     if let Err(e) = execute_safe(args).await {
         eprintln!("{}", e.render());
-        std::process::exit(e.exit_code());
     }
 }
 

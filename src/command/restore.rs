@@ -60,6 +60,14 @@ pub async fn execute_safe(args: RestoreArgs) -> CliResult<()> {
         .map_err(|e| CliError::fatal(e.to_string()))
 }
 
+/// Low-level restore that skips the repository-existence check.
+///
+/// # Preconditions
+///
+/// The caller **must** ensure a valid libra repository is reachable from the
+/// current working directory (e.g. by calling `util::require_repo()` or
+/// `execute_safe()` first).  This function is `pub` because it is used by
+/// `worktree.rs`, which performs its own repository validation.
 pub async fn execute_checked(args: RestoreArgs) -> io::Result<()> {
     let staged = args.staged;
     let mut worktree = args.worktree;

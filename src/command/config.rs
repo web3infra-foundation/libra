@@ -602,8 +602,8 @@ pub struct Key {
 /// **Note:** Prefer [`execute_safe`] for programmatic / embedded callers so
 /// errors can be handled without terminating the process.
 pub async fn execute(args: ConfigArgs) {
-    if let Err(e) = execute_inner(args).await {
-        eprintln!("{e}");
+    if let Err(e) = execute_safe(args).await {
+        eprintln!("{}", e.render());
     }
 }
 

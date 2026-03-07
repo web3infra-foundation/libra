@@ -235,6 +235,8 @@ fn strip_hint_prefix(line: &str) -> String {
     line.to_string()
 }
 
+// NOTE: We use "Hint:" (capital H) rather than Git's lowercase "hint:". This is
+// a deliberate stylistic choice for Libra — not a bug.
 fn render_hint(text: &str) -> Vec<String> {
     text.lines().map(|line| format!("Hint: {}", line)).collect()
 }

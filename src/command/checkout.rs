@@ -32,7 +32,6 @@ pub struct CheckoutArgs {
 pub async fn execute(args: CheckoutArgs) {
     if let Err(e) = execute_safe(args).await {
         eprintln!("{}", e.render());
-        std::process::exit(e.exit_code());
     }
 }
 
@@ -57,12 +56,9 @@ pub async fn execute_safe(args: CheckoutArgs) -> CliResult<()> {
         )));
     }
 
-    if switch::check_status().await {
-        // Status details already printed by check_status.
-        return Err(CliError::failure(
-            "local changes would be overwritten by checkout",
-        ));
-    }
+    switch::ensure_clean_status().await.map_err(|_| {
+        CliError::failure("local changes would be overwritten by checkout")
+    })?;
 
     match (args.branch, args.new_branch) {
         (Some(target_branch), _) => check_and_switch_branch(&target_branch).await?,

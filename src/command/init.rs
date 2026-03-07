@@ -193,7 +193,6 @@ pub struct InitArgs {
 pub async fn execute(args: InitArgs) {
     if let Err(e) = execute_safe(args).await {
         eprintln!("{}", e.render());
-        std::process::exit(e.exit_code());
     }
 }
 /// Safe entry point that returns structured [`CliResult`] instead of printing
@@ -237,10 +236,14 @@ pub async fn execute_safe(args: InitArgs) -> CliResult<()> {
         .and_then(|_| Ok(env::set_current_dir(&target_path)?))
         .map_err(|e| CliError::fatal(e.to_string()))?;
 
-    if let Some(source_git) = from_git_abs {
-        convert::convert_from_git_repository(&source_git, is_bare)
-            .await
-            .map_err(|e| CliError::fatal(e.to_string()))?;
+    if let Some(source_git) = from_git_abs
+        && let Err(e) = convert::convert_from_git_repository(&source_git, is_bare).await
+    {
+        // Best-effort cwd restore before surfacing the error so in-process
+        // callers (tests, MCP, multi-command sessions) don't continue in the
+        // wrong directory.
+        let _ = env::set_current_dir(&current_dir);
+        return Err(CliError::fatal(e.to_string()));
     }
 
     Ok(())

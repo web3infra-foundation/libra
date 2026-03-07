@@ -48,11 +48,10 @@ impl MovePlan {
     }
 }
 
-pub async fn execute(args: MvArgs) -> Result<(), String> {
-    if !util::check_repo_exist() {
-        return Err("fatal: not a libra repository".to_string());
+pub async fn execute(args: MvArgs) {
+    if let Err(e) = execute_safe(args).await {
+        eprintln!("{}", e.render());
     }
-    execute_inner(args).await
 }
 
 /// Safe entry point that returns structured [`CliResult`] instead of printing

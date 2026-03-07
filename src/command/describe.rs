@@ -43,12 +43,10 @@ struct TagInfo {
     is_annotated: bool,
 }
 
-pub async fn execute(args: DescribeArgs) -> Result<(), String> {
-    // Check if it is in the libra repository.
-    if !util::check_repo_exist() {
-        return Err("fatal: not a libra repository".to_string());
+pub async fn execute(args: DescribeArgs) {
+    if let Err(e) = execute_safe(args).await {
+        eprintln!("{}", e.render());
     }
-    execute_inner(args).await
 }
 
 /// Safe entry point that returns structured [`CliResult`] instead of printing

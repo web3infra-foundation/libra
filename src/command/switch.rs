@@ -101,8 +101,12 @@ pub async fn execute_safe(args: SwitchArgs) -> CliResult<()> {
     }
 }
 
-// Check status before changing branches and return a user-facing error on failure.
-async fn ensure_clean_status() -> CliResult<()> {
+/// Check status before changing branches and return a user-facing error on failure.
+///
+/// When uncommitted or unstaged changes are detected, this prints the current
+/// status summary (via `status::execute`) and returns a descriptive
+/// [`CliError`] so callers can decide how to surface the problem.
+pub async fn ensure_clean_status() -> CliResult<()> {
     let unstaged = match status::changes_to_be_staged() {
         Ok(c) => c,
         Err(err) => {
@@ -122,10 +126,7 @@ async fn ensure_clean_status() -> CliResult<()> {
     }
 }
 
-// Keep the legacy boolean interface for checkout and older tests.
-pub async fn check_status() -> bool {
-    ensure_clean_status().await.is_err()
-}
+
 
 async fn switch_to_tracked_remote_branch(target: String) -> CliResult<()> {
     let (remote_name, remote_branch_name) = if let Some(rest) = target.strip_prefix("refs/remotes/")

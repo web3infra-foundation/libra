@@ -628,7 +628,6 @@ async fn execute_impl(args: CommitArgs) -> Result<(), CommitExecError> {
 pub async fn execute(args: CommitArgs) {
     if let Err(error) = execute_safe(args).await {
         eprintln!("{}", error.render());
-        std::process::exit(error.exit_code());
     }
 }
 
