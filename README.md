@@ -115,6 +115,36 @@ Update your `claude_desktop_config.json` as follows:
 > **Note**: The `cwd` (current working directory) must be set to the root of a valid Libra repository.
 > If `libra code` is launched outside of a repository, it will exit with an error.
 
+#### Claude Code Hook Forwarding
+
+Libra can ingest Claude Code hook events and persist them as AI session history.
+Instead of manually editing `.claude/settings.json`, run:
+
+```bash
+libra claude-code install-hooks
+```
+
+This installs forwarding entries for:
+
+- `SessionStart` → `libra claude-code session-start`
+- `UserPromptSubmit` → `libra claude-code prompt`
+- `PostToolUse` → `libra claude-code tool-use`
+- `Stop` → `libra claude-code stop`
+- `SessionEnd` → `libra claude-code session-end`
+
+The generated entries omit Claude's `matcher` field so the hooks run for the
+real runtime queries Claude emits for session lifecycle and tool events.
+
+Advanced usage:
+
+```bash
+# Use a custom command prefix (for local dev wrappers)
+libra claude-code install-hooks --command-prefix "go run ./cmd/libra/main.go"
+
+# Customize hook timeout seconds written into settings.json
+libra claude-code install-hooks --timeout 15
+```
+
 ### AI Provider Selection
 
 Libra Code supports multiple AI provider backends. Use the `--provider` and `--model` flags to choose which LLM to use:
