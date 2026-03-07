@@ -490,7 +490,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Commit(args) => command::commit::execute_safe(args).await?,
         Commands::Switch(args) => command::switch::execute_safe(args).await?,
         Commands::Rebase(args) => command::rebase::execute(args).await,
-        Commands::Merge(args) => command::merge::execute(args).await,
+        Commands::Merge(args) => command::merge::execute_safe(args).await?,
         Commands::Reset(args) => command::reset::execute(args).await,
         Commands::Mv(args) => {
             command::mv::execute(args)
