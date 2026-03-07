@@ -25,6 +25,7 @@ use crate::{
         reflog::{ReflogAction, ReflogContext, with_reflog},
     },
     utils::{
+        error::{CliError, CliResult},
         object_ext::{BlobExt, TreeExt},
         path, util,
     },
@@ -66,8 +67,14 @@ enum ResetMode {
 /// - Mixed: Moves HEAD and resets index (default)
 /// - Hard: Moves HEAD, resets index and working directory
 pub async fn execute(args: ResetArgs) {
+    if let Err(e) = execute_safe(args).await {
+        eprintln!("{}", e.render());
+    }
+}
+
+pub async fn execute_safe(args: ResetArgs) -> CliResult<()> {
     if !util::check_repo_exist() {
-        return;
+        return Err(CliError::fatal("not a libra repository"));
     }
 
     // Determine reset mode
@@ -82,31 +89,25 @@ pub async fn execute(args: ResetArgs) {
     // Handle pathspec reset (only affects index)
     if !args.pathspecs.is_empty() {
         reset_pathspecs(&args.pathspecs, &args.target).await;
-        return;
+        return Ok(());
     }
 
     // Resolve target commit
-    let target_commit_id = match resolve_commit(&args.target).await {
-        Ok(id) => id,
-        Err(e) => {
-            eprintln!("fatal: {e}");
-            return;
-        }
-    };
+    let target_commit_id = resolve_commit(&args.target)
+        .await
+        .map_err(CliError::fatal)?;
 
     // Perform reset based on mode
-    match perform_reset(target_commit_id, mode, &args.target).await {
-        Ok(_) => {
-            println!(
-                "HEAD is now at {} {}",
-                &target_commit_id.to_string()[..7],
-                get_commit_summary(&target_commit_id).unwrap_or_else(|_| "".to_string())
-            );
-        }
-        Err(e) => {
-            eprintln!("fatal: {e}");
-        }
-    }
+    perform_reset(target_commit_id, mode, &args.target)
+        .await
+        .map_err(CliError::fatal)?;
+
+    println!(
+        "HEAD is now at {} {}",
+        &target_commit_id.to_string()[..7],
+        get_commit_summary(&target_commit_id).unwrap_or_else(|_| "".to_string())
+    );
+    Ok(())
 }
 
 /// Reset specific files in the index to their state in the target commit.

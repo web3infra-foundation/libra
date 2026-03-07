@@ -175,8 +175,10 @@ pub async fn execute_safe(args: PushArgs) -> CliResult<()> {
     }
 
     // Check if remote is ancestor of local (for fast-forward check)
-    let remote_oid = ObjectHash::from_str(&remote_hash).unwrap();
-    let local_oid = ObjectHash::from_str(&commit_hash).unwrap();
+    let remote_oid = ObjectHash::from_str(&remote_hash)
+        .map_err(|_| CliError::fatal(format!("invalid remote hash: {remote_hash}")))?;
+    let local_oid = ObjectHash::from_str(&commit_hash)
+        .map_err(|_| CliError::fatal(format!("invalid local hash: {commit_hash}")))?;
     let zero_oid = zero_object_hash();
     let can_fast_forward = if remote_oid == zero_oid {
         true // New branch, always fast-forwardable
@@ -245,8 +247,10 @@ pub async fn execute_safe(args: PushArgs) -> CliResult<()> {
 
     // TODO 考虑remote有多个refs，可以少发一点commits
     let objs = incremental_objs(
-        ObjectHash::from_str(&commit_hash).unwrap(),
-        ObjectHash::from_str(&remote_hash).unwrap(),
+        ObjectHash::from_str(&commit_hash)
+            .map_err(|_| CliError::fatal(format!("invalid commit hash: {commit_hash}")))?,
+        ObjectHash::from_str(&remote_hash)
+            .map_err(|_| CliError::fatal(format!("invalid remote hash: {remote_hash}")))?,
     );
 
     {
@@ -262,7 +266,10 @@ pub async fn execute_safe(args: PushArgs) -> CliResult<()> {
     let (stream_tx, mut stream_rx) = mpsc::channel(1_000_000);
 
     let encoder = PackEncoder::new(objs.len(), 0, stream_tx); // TODO: diff slow, so window_size = 0
-    encoder.encode_async(entry_rx).await.unwrap();
+    encoder
+        .encode_async(entry_rx)
+        .await
+        .map_err(|e| CliError::fatal(format!("pack encoding failed: {e}")))?;
 
     for obj in objs.iter().cloned() {
         // TODO progress bar
@@ -285,7 +292,10 @@ pub async fn execute_safe(args: PushArgs) -> CliResult<()> {
     data.extend_from_slice(&pack_data);
     println!("Delta compression done.");
 
-    let res = client.send_pack(data.freeze()).await.unwrap(); // TODO: send stream
+    let res = client
+        .send_pack(data.freeze())
+        .await
+        .map_err(|e| CliError::fatal(format!("failed to send pack data: {e}")))?;
 
     if res.status() != 200 {
         return Err(CliError::fatal(format!(
@@ -293,7 +303,10 @@ pub async fn execute_safe(args: PushArgs) -> CliResult<()> {
             res.status()
         )));
     }
-    let mut data = res.bytes().await.unwrap();
+    let mut data = res
+        .bytes()
+        .await
+        .map_err(|e| CliError::fatal(format!("failed to read server response: {e}")))?;
     let (_, pkt_line) = read_pkt_line(&mut data);
     if pkt_line != "unpack ok\n" {
         return Err(CliError::fatal("unpack failed"));
@@ -304,7 +317,11 @@ pub async fn execute_safe(args: PushArgs) -> CliResult<()> {
         return Err(CliError::fatal(format!("ref update failed: {}", detail)));
     }
     let (len, _) = read_pkt_line(&mut data);
-    assert_eq!(len, 0);
+    if len != 0 {
+        return Err(CliError::fatal(
+            "unexpected trailing data in server response",
+        ));
+    }
 
     println!("{}", "Push success".green());
 
@@ -513,7 +530,7 @@ fn incremental_objs(local_ref: ObjectHash, remote_ref: ObjectHash) -> HashSet<En
         objs.insert(commit.into());
 
         print!("Counting objects: {}\r", objs.len());
-        std::io::stdout().flush().unwrap();
+        let _ = std::io::stdout().flush();
     }
 
     // root commit has no parent

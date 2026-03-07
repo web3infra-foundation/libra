@@ -10,7 +10,6 @@ use std::{
     str::FromStr,
 };
 
-use colored::Colorize;
 use git_internal::{
     errors::GitError,
     hash::ObjectHash,
@@ -32,10 +31,21 @@ use crate::{
         restore_working_directory_from_tree,
     },
     internal::head::Head,
-    utils::{object, object_ext::TreeExt, tree, util},
+    utils::{
+        error::{CliError, CliResult},
+        object,
+        object_ext::TreeExt,
+        tree, util,
+    },
 };
 
 pub async fn execute(stash_cmd: Stash) {
+    if let Err(e) = execute_safe(stash_cmd).await {
+        eprintln!("{}", e.render());
+    }
+}
+
+pub async fn execute_safe(stash_cmd: Stash) -> CliResult<()> {
     let result = match stash_cmd {
         Stash::Push { message } => push(message).await,
         Stash::Pop { stash } => pop(stash).await,
@@ -43,10 +53,7 @@ pub async fn execute(stash_cmd: Stash) {
         Stash::Apply { stash } => apply(stash).await,
         Stash::Drop { stash } => drop_stash(stash).await,
     };
-
-    if let Err(e) = result {
-        eprintln!("{}", format!("fatal: {}", e).red());
-    }
+    result.map_err(CliError::fatal)
 }
 
 async fn push(message: Option<String>) -> Result<(), String> {

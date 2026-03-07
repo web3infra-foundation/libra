@@ -141,10 +141,10 @@ async fn show_commit(commit_hash: &ObjectHash, args: &ShowArgs) -> CliResult<()>
 
         if args.stat {
             // Show the summary view.
-            show_diffstat(&commit, paths.clone()).await;
+            show_diffstat(&commit, paths.clone()).await?;
         } else if args.name_only {
             // Show only changed file names.
-            let changed_files = get_changed_files_for_commit(&commit, &paths).await;
+            let changed_files = get_changed_files_for_commit(&commit, &paths).await?;
             if !changed_files.is_empty() {
                 println!();
                 for file in changed_files {
@@ -153,7 +153,7 @@ async fn show_commit(commit_hash: &ObjectHash, args: &ShowArgs) -> CliResult<()>
             }
         } else {
             // Show the full patch.
-            let diff_output = generate_diff(&commit, paths).await;
+            let diff_output = generate_diff(&commit, paths).await?;
             if !diff_output.is_empty() {
                 println!();
                 print!("{}", diff_output);
@@ -290,11 +290,11 @@ fn display_commit_info(commit: &Commit, args: &ShowArgs) {
 }
 
 /// Renders a simple diffstat summary.
-async fn show_diffstat(commit: &Commit, paths: Vec<PathBuf>) {
-    let changed_files = get_changed_files_for_commit(commit, &paths).await;
+async fn show_diffstat(commit: &Commit, paths: Vec<PathBuf>) -> CliResult<()> {
+    let changed_files = get_changed_files_for_commit(commit, &paths).await?;
 
     if changed_files.is_empty() {
-        return;
+        return Ok(());
     }
 
     println!();
@@ -329,6 +329,7 @@ async fn show_diffstat(commit: &Commit, paths: Vec<PathBuf>) {
         deletions,
         if deletions != 1 { "s" } else { "" }
     );
+    Ok(())
 }
 
 fn show_bad_revision_error(object_ref: &str) -> CliError {

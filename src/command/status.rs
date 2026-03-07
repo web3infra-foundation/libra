@@ -26,6 +26,7 @@ use crate::{
     command::calc_file_blob_hash,
     internal::{config::Config, head::Head},
     utils::{
+        error::CliResult,
         ignore::IgnorePolicy,
         object_ext::{CommitExt, TreeExt},
         path, util,
@@ -758,6 +759,11 @@ fn format_colored_status(
 
 pub async fn execute(args: StatusArgs) {
     execute_to(args, &mut std::io::stdout()).await
+}
+
+pub async fn execute_safe(args: StatusArgs) -> CliResult<()> {
+    execute_to(args, &mut std::io::stdout()).await;
+    Ok(())
 }
 
 /// Check if the working tree is clean.

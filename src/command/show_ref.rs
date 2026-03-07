@@ -3,6 +3,7 @@
 use clap::Parser;
 
 use crate::internal::{branch::Branch, head::Head, tag};
+use crate::utils::error::{CliError, CliResult};
 
 #[derive(Parser, Debug)]
 pub struct ShowRefArgs {
@@ -28,6 +29,10 @@ pub struct ShowRefArgs {
 
 pub async fn execute(args: ShowRefArgs) -> Result<(), String> {
     run_show_ref(args).await
+}
+
+pub async fn execute_safe(args: ShowRefArgs) -> CliResult<()> {
+    run_show_ref(args).await.map_err(CliError::failure)
 }
 
 async fn run_show_ref(args: ShowRefArgs) -> Result<(), String> {

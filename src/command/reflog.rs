@@ -16,7 +16,6 @@ use git_internal::{hash::ObjectHash, internal::object::commit::Commit};
 use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait, sqlx::types::chrono};
 
 use crate::{
-    cli_error,
     command::load_object,
     internal::{
         config,
@@ -24,6 +23,7 @@ use crate::{
         model::reflog::Model,
         reflog::{HEAD, Reflog, ReflogError},
     },
+    utils::error::{CliError, CliResult},
 };
 
 #[derive(Parser, Debug)]
@@ -76,6 +76,13 @@ enum Subcommands {
 }
 
 pub async fn execute(args: ReflogArgs) {
+    if let Err(e) = execute_safe(args).await {
+        eprintln!("{}", e.render());
+        std::process::exit(e.exit_code());
+    }
+}
+
+pub async fn execute_safe(args: ReflogArgs) -> CliResult<()> {
     match args.command {
         Subcommands::Show {
             ref_name,
@@ -117,44 +124,28 @@ struct ReflogShowOptions {
     stat: bool,
 }
 
-async fn handle_show(ref_name: &str, options: ReflogShowOptions) {
+async fn handle_show(ref_name: &str, options: ReflogShowOptions) -> CliResult<()> {
     let db = get_db_conn_instance().await;
 
     // Parse date filters
-    let since_ts = match options
+    let since_ts = options
         .since
         .as_deref()
         .map(crate::internal::log::date_parser::parse_date)
         .transpose()
-    {
-        Ok(ts) => ts,
-        Err(e) => {
-            eprintln!("fatal: invalid --since date: {e}");
-            return;
-        }
-    };
+        .map_err(|e| CliError::fatal(format!("invalid --since date: {e}")))?;
 
-    let until_ts = match options
+    let until_ts = options
         .until
         .as_deref()
         .map(crate::internal::log::date_parser::parse_date)
         .transpose()
-    {
-        Ok(ts) => ts,
-        Err(e) => {
-            eprintln!("fatal: invalid --until date: {e}");
-            return;
-        }
-    };
+        .map_err(|e| CliError::fatal(format!("invalid --until date: {e}")))?;
 
     let ref_name = parse_ref_name(ref_name).await;
-    let logs = match Reflog::find_all(db, &ref_name).await {
-        Ok(logs) => logs,
-        Err(e) => {
-            cli_error!(e, "fatal: failed to get reflog entries");
-            return;
-        }
-    };
+    let logs = Reflog::find_all(db, &ref_name)
+        .await
+        .map_err(|e| CliError::fatal(format!("failed to get reflog entries: {e}")))?;
 
     // Preserve original indices before filtering
     let logs_with_index: Vec<_> = logs.into_iter().enumerate().collect();
@@ -197,7 +188,9 @@ async fn handle_show(ref_name: &str, options: ReflogShowOptions) {
     let _ = less.wait().expect("failed to wait on child");
 
     #[cfg(not(unix))]
-    println!("{formatter}")
+    println!("{formatter}");
+
+    Ok(())
 }
 
 // `partial_ref_name` is the branch name entered by the user.
@@ -218,20 +211,21 @@ async fn parse_ref_name(partial_ref_name: &str) -> String {
     format!("refs/heads/{partial_ref_name}")
 }
 
-async fn handle_exists(ref_name: &str) {
+async fn handle_exists(ref_name: &str) -> CliResult<()> {
     let db = get_db_conn_instance().await;
     let log = Reflog::find_one(db, ref_name)
         .await
-        .expect("fatal: failed to get reflog entry");
-    match log {
-        Some(_) => {}
-        None => {
-            eprintln!("fatal: reflog entry for '{}' not found", ref_name);
-        }
+        .map_err(|e| CliError::fatal(format!("failed to get reflog entry: {e}")))?;
+    if log.is_none() {
+        return Err(CliError::failure(format!(
+            "reflog entry for '{}' not found",
+            ref_name
+        )));
     }
+    Ok(())
 }
 
-async fn handle_delete(selectors: &[String]) {
+async fn handle_delete(selectors: &[String]) -> CliResult<()> {
     let mut groups = HashMap::new();
     for selector in selectors {
         if let Some(parsed) = parse_reflog_selector(selector) {
@@ -241,8 +235,9 @@ async fn handle_delete(selectors: &[String]) {
                 .push(parsed);
             continue;
         }
-        eprintln!("fatal: invalid reflog entry format: {selector}");
-        return;
+        return Err(CliError::fatal(format!(
+            "invalid reflog entry format: {selector}"
+        )));
     }
 
     let groups = groups
@@ -253,11 +248,12 @@ async fn handle_delete(selectors: &[String]) {
         })
         .collect::<Vec<_>>();
     for group in groups {
-        delete_single_group(&group).await;
+        delete_single_group(&group).await?;
     }
+    Ok(())
 }
 
-async fn delete_single_group(group: &[(&str, usize)]) {
+async fn delete_single_group(group: &[(&str, usize)]) -> CliResult<()> {
     let db = get_db_conn_instance().await;
     // clone this to move it into async block to make compiler happy :(
     let group = group
@@ -288,7 +284,7 @@ async fn delete_single_group(group: &[(&str, usize)]) {
         })
     })
     .await
-    .expect("fatal: failed to delete reflog entries")
+    .map_err(|e| CliError::fatal(format!("failed to delete reflog entries: {e}")))
 }
 
 fn parse_reflog_selector(selector: &str) -> Option<(&str, usize)> {

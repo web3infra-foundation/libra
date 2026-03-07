@@ -54,12 +54,9 @@ pub async fn execute_safe(args: MergeArgs) -> CliResult<()> {
         CliError::fatal(format!("not a valid object name: '{}'", current_commit_id))
     })?;
 
-    let lca = lca_commit(&current_commit, &target_commit).await;
+    let lca = lca_commit(&current_commit, &target_commit).await?;
 
-    if lca.is_none() {
-        return Err(CliError::fatal("refusing to merge unrelated histories"));
-    }
-    let lca = lca.expect("checked above");
+    let lca = lca.ok_or_else(|| CliError::fatal("refusing to merge unrelated histories"))?;
 
     if lca.id == target_commit.id {
         // no need to merge
@@ -81,32 +78,32 @@ pub async fn execute_safe(args: MergeArgs) -> CliResult<()> {
     }
 }
 
-async fn lca_commit(lhs: &Commit, rhs: &Commit) -> Option<Commit> {
-    let lhs_reachable = log::get_reachable_commits(lhs.id.to_string(), None).await;
-    let rhs_reachable = log::get_reachable_commits(rhs.id.to_string(), None).await;
+async fn lca_commit(lhs: &Commit, rhs: &Commit) -> Result<Option<Commit>, CliError> {
+    let lhs_reachable = log::get_reachable_commits(lhs.id.to_string(), None).await?;
+    let rhs_reachable = log::get_reachable_commits(rhs.id.to_string(), None).await?;
 
     // Commit `eq` is based on tree_id, so we shouldn't use it here
 
     for commit in lhs_reachable.iter() {
         if commit.id == rhs.id {
-            return Some(commit.to_owned());
+            return Ok(Some(commit.to_owned()));
         }
     }
 
     for commit in rhs_reachable.iter() {
         if commit.id == lhs.id {
-            return Some(commit.to_owned());
+            return Ok(Some(commit.to_owned()));
         }
     }
 
     for lhs_parent in lhs_reachable.iter() {
         for rhs_parent in rhs_reachable.iter() {
             if lhs_parent.id == rhs_parent.id {
-                return Some(lhs_parent.to_owned());
+                return Ok(Some(lhs_parent.to_owned()));
             }
         }
     }
-    None
+    Ok(None)
 }
 
 /// try merge in fast-forward mode, if it's not possible, do nothing

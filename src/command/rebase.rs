@@ -27,6 +27,7 @@ use crate::{
         reflog::{ReflogAction, ReflogContext, ReflogError, with_reflog},
     },
     utils::{
+        error::CliResult,
         ignore::IgnorePolicy,
         object_ext::{BlobExt, TreeExt},
         path, util, worktree,
@@ -493,6 +494,12 @@ pub async fn execute(args: RebaseArgs) {
     };
 
     start_rebase(&upstream).await;
+}
+
+/// Thin wrapper for CLI dispatch. Internal errors are still handled via `eprintln!`.
+pub async fn execute_safe(args: RebaseArgs) -> CliResult<()> {
+    execute(args).await;
+    Ok(())
 }
 
 /// Start a new rebase operation

@@ -19,6 +19,7 @@ use crate::{
     command::calc_file_blob_hash,
     internal::{branch::Branch, head::Head, protocol::lfs_client::LFSClient},
     utils::{
+        error::{CliError, CliResult},
         lfs,
         object_ext::{BlobExt, CommitExt, TreeExt},
         path,
@@ -44,9 +45,15 @@ pub struct RestoreArgs {
 }
 
 pub async fn execute(args: RestoreArgs) {
-    if let Err(e) = execute_checked(args).await {
-        eprintln!("fatal: {e}");
+    if let Err(e) = execute_safe(args).await {
+        eprintln!("{}", e.render());
     }
+}
+
+pub async fn execute_safe(args: RestoreArgs) -> CliResult<()> {
+    execute_checked(args)
+        .await
+        .map_err(|e| CliError::fatal(e.to_string()))
 }
 
 pub async fn execute_checked(args: RestoreArgs) -> io::Result<()> {

@@ -239,7 +239,9 @@ impl LocalClient {
 
                 let commits = stream::iter(want)
                     .then(|branch_hash| async move {
-                        get_reachable_commits(branch_hash.to_string(), depth).await
+                        get_reachable_commits(branch_hash.to_string(), depth)
+                            .await
+                            .unwrap_or_default()
                     })
                     .flat_map(stream::iter)
                     .collect::<Vec<Commit>>()

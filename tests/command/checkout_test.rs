@@ -22,15 +22,17 @@ async fn configure_identity_for_test() {
 async fn test_check_branch() {
     println!("\n\x1b[1mTest check_branch function.\x1b[0m");
 
-    // For non-existent branches, it should return None
-    assert_eq!(check_branch("non_existent_branch").await, None);
-    // For the current branch, it should return None
+    // For non-existent branches, it should return Err
+    assert!(check_branch("non_existent_branch").await.is_err());
+    // For the current branch, it should return Ok(None)
     assert_eq!(
-        check_branch(&get_current_branch().await.unwrap_or("main".to_string())).await,
+        check_branch(&get_current_branch().await.unwrap_or("main".to_string()))
+            .await
+            .unwrap(),
         None
     );
-    // For other existing branches, it should return Some(false)
-    assert_eq!(check_branch("new_branch_01").await, Some(false));
+    // For other existing branches, it should return Ok(Some(false))
+    assert_eq!(check_branch("new_branch_01").await.unwrap(), Some(false));
 }
 
 async fn test_switch_branch() {
@@ -38,7 +40,7 @@ async fn test_switch_branch() {
 
     let show_all_branches = async || {
         // Use the list_branches function of the branch module to list all current local branches
-        branch::list_branches(branch::BranchListMode::Local, &[], &[]).await;
+        let _ = branch::list_branches(branch::BranchListMode::Local, &[], &[]).await;
         println!(
             "Current branch is '{}'.",
             get_current_branch()
@@ -50,11 +52,11 @@ async fn test_switch_branch() {
 
     // Switch to the new branch and back
     show_all_branches().await;
-    switch_branch("new_branch_01").await;
+    switch_branch("new_branch_01").await.unwrap();
     show_all_branches().await;
-    switch_branch("new_branch_02").await;
+    switch_branch("new_branch_02").await.unwrap();
     show_all_branches().await;
-    switch_branch("main").await;
+    switch_branch("main").await.unwrap();
     show_all_branches().await;
 }
 

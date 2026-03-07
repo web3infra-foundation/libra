@@ -813,7 +813,7 @@ async fn test_branch_contains_commit_filter() {
                 &resolve_commits(&contains).await,
                 &resolve_commits(&no_contains).await,
             )
-            .await;
+            .unwrap();
             let mut names: Vec<String> = branches.into_iter().map(|b| b.name).collect();
             names.sort();
             names

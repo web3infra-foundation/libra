@@ -16,7 +16,10 @@ use crate::{
         head::Head,
         tag::{self, TagObject},
     },
-    utils::util,
+    utils::{
+        error::{CliError, CliResult},
+        util,
+    },
 };
 
 #[derive(Parser, Debug)]
@@ -45,7 +48,24 @@ pub async fn execute(args: DescribeArgs) -> Result<(), String> {
     if !util::check_repo_exist() {
         return Err("fatal: not a libra repository".to_string());
     }
+    execute_inner(args).await
+}
 
+pub async fn execute_safe(args: DescribeArgs) -> CliResult<()> {
+    if !util::check_repo_exist() {
+        return Err(CliError::repo_not_found());
+    }
+    execute_inner(args).await.map_err(|e| {
+        let trimmed = e.trim().to_string();
+        if let Some(rest) = trimmed.strip_prefix("fatal: ") {
+            CliError::fatal(rest.to_string())
+        } else {
+            CliError::failure(trimmed)
+        }
+    })
+}
+
+async fn execute_inner(args: DescribeArgs) -> Result<(), String> {
     // 1. Confirm the starting commit hash to start from (defaults to HEAD)
     let start_hash_str = if let Some(c) = args.commit {
         c

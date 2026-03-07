@@ -111,9 +111,13 @@ async fn test_reflog_show_invalid_date() {
     };
     commit::execute(commit_args).await;
 
-    // Test with invalid date format - should show error message
+    // Test with invalid date format - should return error, not panic
     let args = reflog::ReflogArgs::parse_from(["reflog", "show", "--since", "invalid-date-format"]);
-    reflog::execute(args).await; // Should print error but not panic
+    let result = reflog::execute_safe(args).await;
+    assert!(
+        result.is_err(),
+        "invalid --since date should return an error"
+    );
 }
 
 #[tokio::test]

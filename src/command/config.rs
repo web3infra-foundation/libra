@@ -8,6 +8,7 @@ use sea_orm::DatabaseConnection;
 use tokio::sync::Mutex;
 
 use crate::internal::config;
+use crate::utils::error::{CliError, CliResult};
 
 /// Cached database connection for Global scope, paired with the resolved DB path.
 ///
@@ -602,6 +603,20 @@ pub async fn execute(args: ConfigArgs) {
     if let Err(e) = execute_safe(args).await {
         eprintln!("{e}");
     }
+}
+
+/// Execute the `config` command returning `CliResult` for the CLI dispatch.
+pub async fn execute_cli(args: ConfigArgs) -> CliResult<()> {
+    execute_safe(args).await.map_err(|e| {
+        let trimmed = e.trim().to_string();
+        if let Some(rest) = trimmed.strip_prefix("error: ") {
+            CliError::failure(rest.to_string())
+        } else if let Some(rest) = trimmed.strip_prefix("fatal: ") {
+            CliError::fatal(rest.to_string())
+        } else {
+            CliError::failure(trimmed)
+        }
+    })
 }
 
 /// Execute the `config` command and return errors to the caller instead of

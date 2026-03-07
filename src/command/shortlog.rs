@@ -54,6 +54,8 @@ use std::{collections::HashMap, io::Write};
 use clap::Parser;
 use git_internal::internal::object::commit::Commit;
 
+use crate::utils::error::{CliError, CliResult};
+
 use crate::internal::{head::Head, log::date_parser::parse_date};
 
 #[derive(Parser, Debug)]
@@ -214,11 +216,16 @@ pub async fn execute_to(args: ShortlogArgs, writer: &mut impl Write) -> std::io:
 }
 
 pub async fn execute(args: ShortlogArgs) {
-    if let Err(e) = execute_to(args, &mut std::io::stdout()).await {
-        // Ignore broken pipe errors which happen when piping to head/less
-        if e.kind() != std::io::ErrorKind::BrokenPipe {
-            eprintln!("error: {}", e);
-        }
+    if let Err(e) = execute_safe(args).await {
+        eprintln!("{}", e.render());
+    }
+}
+
+pub async fn execute_safe(args: ShortlogArgs) -> CliResult<()> {
+    match execute_to(args, &mut std::io::stdout()).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(e) => Err(CliError::fatal(format!("shortlog output error: {e}"))),
     }
 }
 
@@ -248,6 +255,7 @@ async fn get_commits_for_shortlog(
 
     let mut commits: Vec<Commit> = get_reachable_commits(commit_hash, None)
         .await
+        .unwrap_or_default()
         .into_iter()
         .filter(|c| passes_filter(c, since_ts, until_ts))
         .collect();

@@ -9,7 +9,10 @@ use git_internal::internal::index::{Index, IndexEntry};
 
 use crate::{
     command::calc_file_blob_hash,
-    utils::{path, util},
+    utils::{
+        error::{CliError, CliResult},
+        path, util,
+    },
 };
 
 #[derive(Parser, Debug)]
@@ -49,6 +52,26 @@ pub async fn execute(args: MvArgs) -> Result<(), String> {
     if !util::check_repo_exist() {
         return Err("fatal: not a libra repository".to_string());
     }
+    execute_inner(args).await
+}
+
+pub async fn execute_safe(args: MvArgs) -> CliResult<()> {
+    if !util::check_repo_exist() {
+        return Err(CliError::repo_not_found());
+    }
+    execute_inner(args).await.map_err(|e| {
+        let trimmed = e.trim().to_string();
+        if let Some(rest) = trimmed.strip_prefix("fatal: ") {
+            CliError::fatal(rest.to_string())
+        } else if trimmed.starts_with("usage: ") {
+            CliError::command_usage("invalid arguments").with_usage(trimmed)
+        } else {
+            CliError::failure(trimmed)
+        }
+    })
+}
+
+async fn execute_inner(args: MvArgs) -> Result<(), String> {
     // If the user just types `git mv` without enough arguments, print usage information instead of an error message.
     if args.paths.len() < 2 {
         return Err(
