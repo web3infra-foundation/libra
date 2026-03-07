@@ -21,7 +21,7 @@ fn test_log_cli_outside_repository_returns_fatal_128() {
     assert_eq!(output.status.code(), Some(128));
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
-        "fatal: not a libra repository (or any of the parent directories): .libra\nHint: Run 'libra init' to create a repository in the current directory.\n"
+        "fatal: not a libra repository (or any of the parent directories): .libra\nHint: run 'libra init' to create a repository in the current directory.\n"
     );
 }
 
