@@ -157,7 +157,7 @@ fn decode_pack_expected(pack_path: &Path, kind: HashKind) -> Result<ExpectedPack
 
 #[test]
 #[serial]
-fn test_index_pack_cli_missing_file_panics_today() {
+fn test_index_pack_cli_missing_file_returns_fatal_128() {
     let repo = tempdir().unwrap();
     init_repo_via_cli(repo.path());
 
@@ -165,9 +165,15 @@ fn test_index_pack_cli_missing_file_panics_today() {
     let output = run_libra_command(&["index-pack", missing_pack.to_str().unwrap()], repo.path());
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(101));
-    assert!(stderr.contains("thread 'main'"));
-    assert!(stderr.contains("called `Result::unwrap()` on an `Err` value"));
+    assert_eq!(output.status.code(), Some(128));
+    assert!(!stderr.contains("thread 'main'"));
+    assert_eq!(
+        stderr,
+        format!(
+            "fatal: could not open '{}' for reading: No such file or directory (os error 2)\n",
+            missing_pack.display()
+        )
+    );
 }
 
 /// Compute fanout table from sorted hashes

@@ -27,16 +27,19 @@ fn test_log_cli_outside_repository_returns_fatal_128() {
 
 #[test]
 #[serial]
-fn test_log_cli_empty_repository_panics_today() {
+fn test_log_cli_empty_repository_returns_fatal_128() {
     let repo = tempdir().unwrap();
     init_repo_via_cli(repo.path());
 
     let output = run_libra_command(&["log", "--oneline"], repo.path());
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(101));
-    assert!(stderr.contains("thread 'main'"));
-    assert!(stderr.contains("fatal: your current branch 'main' does not have any commits yet"));
+    assert_eq!(output.status.code(), Some(128));
+    assert!(!stderr.contains("thread 'main'"));
+    assert_eq!(
+        stderr,
+        "fatal: your current branch 'main' does not have any commits yet\n"
+    );
 }
 
 #[tokio::test]

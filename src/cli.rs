@@ -479,7 +479,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Clean(args) => command::clean::execute_safe(args).await?,
         Commands::Stash(cmd) => command::stash::execute(cmd).await,
         Commands::Lfs(cmd) => command::lfs::execute(cmd).await,
-        Commands::Log(args) => command::log::execute(args).await,
+        Commands::Log(args) => command::log::execute_safe(args).await?,
         Commands::Shortlog(args) => command::shortlog::execute(args).await,
         Commands::Show(args) => command::show::execute(args).await,
         Commands::ShowRef(args) => command::show_ref::execute(args)
@@ -507,7 +507,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::CherryPick(args) => command::cherry_pick::execute(args).await,
         Commands::Push(args) => command::push::execute_safe(args).await?,
         Commands::CatFile(args) => command::cat_file::execute(args).await,
-        Commands::IndexPack(args) => command::index_pack::execute(args),
+        Commands::IndexPack(args) => command::index_pack::execute_safe(args)?,
         Commands::Fetch(args) => command::fetch::execute_safe(args).await?,
         Commands::Diff(args) => command::diff::execute(args).await,
         Commands::Blame(args) => command::blame::execute(args).await,

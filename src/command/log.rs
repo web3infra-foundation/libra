@@ -30,7 +30,11 @@ use crate::{
             formatter::{CommitFormatter, FormatContext, FormatType},
         },
     },
-    utils::{object_ext::TreeExt, util},
+    utils::{
+        error::{CliError, CliResult},
+        object_ext::TreeExt,
+        util,
+    },
 };
 
 #[derive(Parser, Debug)]
@@ -297,31 +301,35 @@ struct Reference {
 }
 
 pub async fn execute(args: LogArgs) {
+    if let Err(err) = execute_safe(args).await {
+        eprintln!("{}", err.render());
+    }
+}
+
+pub async fn execute_safe(args: LogArgs) -> CliResult<()> {
     let name_status = args.name_status;
     // Check parameter mutual exclusion: if both name flags and --patch are specified, prioritize the name display flags
     let name_only = args.name_only && !name_status;
     let patch = args.patch && !name_only && !name_status;
 
-    let since = match args.since.as_deref().map(parse_date).transpose() {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("fatal: {}", e);
-            return;
-        }
-    };
-    let until = match args.until.as_deref().map(parse_date).transpose() {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("fatal: {}", e);
-            return;
-        }
-    };
+    let since = args
+        .since
+        .as_deref()
+        .map(parse_date)
+        .transpose()
+        .map_err(|e| CliError::fatal(e.to_string()))?;
+    let until = args
+        .until
+        .as_deref()
+        .map(parse_date)
+        .transpose()
+        .map_err(|e| CliError::fatal(e.to_string()))?;
     let path_filters: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
     let filter = CommitFilter::new(args.author.clone(), since, until, path_filters.clone());
 
     let decorate_option = determine_decorate_option(&args)
         .await
-        .expect("fatal: invalid --decorate option");
+        .map_err(|value| CliError::fatal(format!("invalid --decorate option: {value}")))?;
 
     #[cfg(unix)]
     let mut process = Command::new("less")
@@ -330,7 +338,7 @@ pub async fn execute(args: LogArgs) {
         .stdin(Stdio::piped())
         .stdout(Stdio::inherit())
         .spawn()
-        .expect("failed to execute process");
+        .map_err(|e| CliError::fatal(format!("failed to execute pager: {e}")))?;
 
     let head = Head::current().await;
     // check if the current branch has any commits
@@ -342,11 +350,21 @@ pub async fn execute(args: LogArgs) {
     if let Some(n) = &branch_name {
         let branch = Branch::find_branch(n, None).await;
         if branch.is_none() {
-            panic!("fatal: your current branch '{n}' does not have any commits yet ");
-        };
-    };
+            return Err(CliError::fatal(format!(
+                "your current branch '{n}' does not have any commits yet"
+            )));
+        }
+    }
 
-    let commit_hash = Head::current_commit().await.unwrap().to_string();
+    let commit_hash = Head::current_commit()
+        .await
+        .ok_or_else(|| match branch_name.as_deref() {
+            Some(name) => CliError::fatal(format!(
+                "your current branch '{name}' does not have any commits yet"
+            )),
+            None => CliError::fatal("your current HEAD does not have any commits yet"),
+        })?
+        .to_string();
 
     let mut reachable_commits = get_reachable_commits(commit_hash.clone(), None).await;
     // default sort with signature time
@@ -521,9 +539,10 @@ pub async fn execute(args: LogArgs) {
         #[cfg(unix)]
         {
             if let Some(ref mut stdin) = process.stdin {
-                writeln!(stdin, "{message}").unwrap();
+                writeln!(stdin, "{message}")
+                    .map_err(|e| CliError::fatal(format!("failed to write pager output: {e}")))?;
             } else {
-                eprintln!("fatal: failed to capture stdin");
+                return Err(CliError::fatal("failed to capture pager stdin"));
             }
         }
         #[cfg(not(unix))]
@@ -534,8 +553,11 @@ pub async fn execute(args: LogArgs) {
 
     #[cfg(unix)]
     {
-        let _ = process.wait().expect("failed to wait on child");
+        process
+            .wait()
+            .map_err(|e| CliError::fatal(format!("failed to wait on pager: {e}")))?;
     }
+    Ok(())
 }
 
 async fn commit_touches_paths(commit: &Commit, filters: &[PathBuf]) -> bool {
