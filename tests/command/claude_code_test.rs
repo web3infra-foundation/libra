@@ -729,6 +729,195 @@ async fn test_claude_code_install_hooks_preserves_existing_and_is_idempotent() {
 
 #[tokio::test]
 #[serial]
+async fn test_claude_code_install_hooks_replaces_legacy_managed_matcher_entries() {
+    let temp = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+
+    let settings_path = claude_settings_file(temp.path());
+    fs::create_dir_all(settings_path.parent().expect("parent should exist")).unwrap();
+    fs::write(
+        &settings_path,
+        json!({
+            "hooks": {
+                "SessionStart": [
+                    {
+                        "matcher": "libra",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "libra claude-code session-start",
+                                "timeout": 10
+                            }
+                        ]
+                    }
+                ]
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let out = run_claude_code(&temp, &["install-hooks"]);
+    assert!(
+        out.status.success(),
+        "install-hooks failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let settings_json = fs::read_to_string(&settings_path).unwrap();
+    let settings: serde_json::Value = serde_json::from_str(&settings_json).unwrap();
+    let session_start_entries = settings["hooks"]["SessionStart"].as_array().unwrap();
+
+    assert_eq!(
+        session_start_entries
+            .iter()
+            .filter(|item| item["matcher"] == json!("libra"))
+            .count(),
+        0,
+        "legacy managed matcher entries should be removed"
+    );
+    assert_eq!(
+        session_start_entries
+            .iter()
+            .filter(|item| {
+                item.get("matcher").is_none()
+                    && item["hooks"][0]["command"] == json!("libra claude-code session-start")
+            })
+            .count(),
+        1,
+        "replacement managed hook should be installed globally"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_code_install_hooks_preserves_non_libra_hooks_in_legacy_matcher() {
+    let temp = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+
+    let settings_path = claude_settings_file(temp.path());
+    fs::create_dir_all(settings_path.parent().expect("parent should exist")).unwrap();
+    fs::write(
+        &settings_path,
+        json!({
+            "hooks": {
+                "SessionStart": [
+                    {
+                        "matcher": "libra",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "libra claude-code session-start",
+                                "timeout": 10
+                            },
+                            {
+                                "type": "command",
+                                "command": "echo keep"
+                            }
+                        ]
+                    }
+                ]
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let out = run_claude_code(&temp, &["install-hooks"]);
+    assert!(
+        out.status.success(),
+        "install-hooks failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let settings_json = fs::read_to_string(&settings_path).unwrap();
+    let settings: serde_json::Value = serde_json::from_str(&settings_json).unwrap();
+    let session_start_entries = settings["hooks"]["SessionStart"].as_array().unwrap();
+
+    assert!(
+        session_start_entries.iter().any(|item| {
+            item["matcher"] == json!("libra")
+                && item["hooks"].as_array().is_some_and(|hooks| {
+                    hooks.len() == 1 && hooks[0]["command"] == json!("echo keep")
+                })
+        }),
+        "non-libra hooks inside legacy matcher blocks should be preserved"
+    );
+    assert!(
+        session_start_entries.iter().any(|item| {
+            item.get("matcher").is_none()
+                && item["hooks"][0]["command"] == json!("libra claude-code session-start")
+        }),
+        "managed hook should be rewritten as a global entry"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_code_install_hooks_preserves_non_libra_global_hooks() {
+    let temp = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+
+    let settings_path = claude_settings_file(temp.path());
+    fs::create_dir_all(settings_path.parent().expect("parent should exist")).unwrap();
+    fs::write(
+        &settings_path,
+        json!({
+            "hooks": {
+                "SessionStart": [
+                    {
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "other-tool claude-code session-start",
+                                "timeout": 5
+                            }
+                        ]
+                    }
+                ]
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let out = run_claude_code(&temp, &["install-hooks"]);
+    assert!(
+        out.status.success(),
+        "install-hooks failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let settings_json = fs::read_to_string(&settings_path).unwrap();
+    let settings: serde_json::Value = serde_json::from_str(&settings_json).unwrap();
+    let session_start_entries = settings["hooks"]["SessionStart"].as_array().unwrap();
+
+    assert!(
+        session_start_entries.iter().any(|item| {
+            item.get("matcher").is_none()
+                && item["hooks"].as_array().is_some_and(|hooks| {
+                    hooks.iter().any(|hook| {
+                        hook["command"] == json!("other-tool claude-code session-start")
+                    })
+                })
+        }),
+        "non-libra global hooks should be preserved"
+    );
+    assert!(
+        session_start_entries.iter().any(|item| {
+            item.get("matcher").is_none()
+                && item["hooks"].as_array().is_some_and(|hooks| {
+                    hooks
+                        .iter()
+                        .any(|hook| hook["command"] == json!("libra claude-code session-start"))
+                })
+        }),
+        "managed hook should still be installed"
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_claude_code_install_hooks_supports_custom_command_prefix() {
     let temp = tempdir().unwrap();
     test::setup_with_new_libra_in(temp.path()).await;

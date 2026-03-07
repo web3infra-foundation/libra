@@ -279,29 +279,62 @@ fn upsert_libra_hook_forwarding(
             extra: BTreeMap::new(),
         };
 
-        let matchers = settings.hooks.entry((*event_name).to_string()).or_default();
-        if let Some(existing) = matchers
-            .iter_mut()
-            .find(|matcher| matcher_manages_command(matcher, &desired_entry.command))
-        {
-            if existing.hooks != vec![desired_entry.clone()] {
-                existing.hooks = vec![desired_entry];
+        let original_matchers = settings.hooks.remove(*event_name).unwrap_or_default();
+        let mut rebuilt_matchers = Vec::with_capacity(original_matchers.len() + 1);
+        let mut has_desired_entry = false;
+
+        for mut matcher in original_matchers {
+            if matcher.matcher.is_none() && matcher.hooks == vec![desired_entry.clone()] {
+                has_desired_entry = true;
+                rebuilt_matchers.push(matcher);
+                continue;
+            }
+
+            let matcher_name = matcher.matcher.as_deref();
+            let original_hook_count = matcher.hooks.len();
+            matcher.hooks.retain(|hook| {
+                !is_replaced_managed_hook(matcher_name, hook, &desired_entry.command, subcommand)
+            });
+            if matcher.hooks.len() != original_hook_count {
                 changed = true;
             }
-            continue;
+            if matcher.hooks.is_empty() {
+                continue;
+            }
+            rebuilt_matchers.push(matcher);
         }
 
-        matchers.push(ClaudeHookMatcher {
-            matcher: None,
-            hooks: vec![desired_entry],
-            extra: BTreeMap::new(),
-        });
-        changed = true;
+        if !has_desired_entry {
+            rebuilt_matchers.push(ClaudeHookMatcher {
+                matcher: None,
+                hooks: vec![desired_entry],
+                extra: BTreeMap::new(),
+            });
+            changed = true;
+        }
+
+        settings
+            .hooks
+            .insert((*event_name).to_string(), rebuilt_matchers);
     }
 
     changed
 }
 
+fn is_replaced_managed_hook(
+    matcher: Option<&str>,
+    hook: &ClaudeHookEntry,
+    desired_command: &str,
+    subcommand: &str,
+) -> bool {
+    hook.command == desired_command
+        || (matcher == Some("libra")
+            && hook
+                .command
+                .ends_with(&format!(" claude-code {subcommand}")))
+}
+
+#[cfg(test)]
 fn matcher_manages_command(matcher: &ClaudeHookMatcher, command: &str) -> bool {
     matcher.hooks.iter().any(|hook| hook.command == command)
 }
