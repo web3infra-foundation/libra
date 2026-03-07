@@ -34,7 +34,11 @@ struct CommandPopupState {
     visible: bool,
     /// Index of the currently highlighted command in the *filtered* list.
     selected: usize,
+    /// First visible item in the filtered popup list.
+    scroll_offset: usize,
 }
+
+const COMMAND_POPUP_MAX_VISIBLE: usize = 8;
 
 /// The bottom pane containing input area and status.
 pub struct BottomPane {
@@ -79,6 +83,7 @@ impl BottomPane {
                 commands: Vec::new(),
                 visible: false,
                 selected: 0,
+                scroll_offset: 0,
             },
             post_plan_selected: 0,
         }
@@ -207,11 +212,14 @@ impl BottomPane {
             let count = self.filtered_commands().len();
             if count == 0 {
                 self.command_popup.visible = false;
+                self.command_popup.scroll_offset = 0;
             } else if self.command_popup.selected >= count {
                 self.command_popup.selected = count.saturating_sub(1);
             }
+            self.ensure_command_popup_selection_visible(count);
         } else {
             self.command_popup.selected = 0;
+            self.command_popup.scroll_offset = 0;
         }
     }
 
@@ -219,12 +227,14 @@ impl BottomPane {
     pub fn dismiss_command_popup(&mut self) {
         self.command_popup.visible = false;
         self.command_popup.selected = 0;
+        self.command_popup.scroll_offset = 0;
     }
 
     /// Move selection up in the popup.
     pub fn command_popup_up(&mut self) {
         if self.command_popup.selected > 0 {
             self.command_popup.selected -= 1;
+            self.ensure_command_popup_selection_visible(self.filtered_commands().len());
         }
     }
 
@@ -233,6 +243,7 @@ impl BottomPane {
         let count = self.filtered_commands().len();
         if count > 0 && self.command_popup.selected < count - 1 {
             self.command_popup.selected += 1;
+            self.ensure_command_popup_selection_visible(count);
         }
     }
 
@@ -248,6 +259,7 @@ impl BottomPane {
             self.cursor_pos = self.input.len();
             self.command_popup.visible = false;
             self.command_popup.selected = 0;
+            self.command_popup.scroll_offset = 0;
             true
         } else {
             false
@@ -264,6 +276,26 @@ impl BottomPane {
             .filter(|(name, _)| name.to_lowercase().starts_with(&prefix_lower))
             .cloned()
             .collect()
+    }
+
+    fn ensure_command_popup_selection_visible(&mut self, count: usize) {
+        if count <= COMMAND_POPUP_MAX_VISIBLE {
+            self.command_popup.scroll_offset = 0;
+            return;
+        }
+
+        if self.command_popup.selected < self.command_popup.scroll_offset {
+            self.command_popup.scroll_offset = self.command_popup.selected;
+        } else {
+            let end = self.command_popup.scroll_offset + COMMAND_POPUP_MAX_VISIBLE;
+            if self.command_popup.selected >= end {
+                self.command_popup.scroll_offset =
+                    self.command_popup.selected + 1 - COMMAND_POPUP_MAX_VISIBLE;
+            }
+        }
+
+        let max_offset = count.saturating_sub(COMMAND_POPUP_MAX_VISIBLE);
+        self.command_popup.scroll_offset = self.command_popup.scroll_offset.min(max_offset);
     }
 
     /// Check if input is empty.
@@ -614,7 +646,7 @@ impl BottomPane {
             return;
         }
 
-        let max_visible: u16 = 8;
+        let max_visible = COMMAND_POPUP_MAX_VISIBLE as u16;
         let item_count = filtered.len() as u16;
         // +2 for border top/bottom
         let popup_height = item_count.min(max_visible) + 2;
@@ -641,7 +673,14 @@ impl BottomPane {
         // Build the list lines.
         let inner_width = clamped.width.saturating_sub(2) as usize; // borders
         let mut lines: Vec<Line<'static>> = Vec::new();
-        for (i, (name, desc)) in filtered.iter().enumerate() {
+        let start = self.command_popup.scroll_offset.min(filtered.len());
+        let end = (start + COMMAND_POPUP_MAX_VISIBLE).min(filtered.len());
+        for (i, (name, desc)) in filtered
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(end.saturating_sub(start))
+        {
             let is_selected = i == self.command_popup.selected;
             let prefix = format!("  /{:<16}", name);
             let remaining = inner_width.saturating_sub(prefix.len());
@@ -931,5 +970,51 @@ mod tests {
         assert!(bottom_of_box.contains("╰"));
         assert!(status.contains("Ready"));
         assert!(!status.contains("Enter: Send"));
+    }
+
+    #[test]
+    fn command_popup_scrolls_with_selection() {
+        let mut pane = BottomPane::new();
+        pane.set_command_hints(
+            (0..12)
+                .map(|i| (format!("cmd{i}"), format!("command {i}")))
+                .collect(),
+        );
+        pane.input = "/".to_string();
+        pane.cursor_pos = 1;
+        pane.sync_command_popup();
+
+        for _ in 0..9 {
+            pane.command_popup_down();
+        }
+
+        assert_eq!(pane.command_popup.selected, 9);
+        assert_eq!(pane.command_popup.scroll_offset, 2);
+    }
+
+    #[test]
+    fn command_popup_scroll_offset_clamps_after_filter_change() {
+        let mut pane = BottomPane::new();
+        pane.set_command_hints(
+            (0..12)
+                .map(|i| (format!("cmd{i}"), format!("command {i}")))
+                .collect(),
+        );
+        pane.input = "/".to_string();
+        pane.cursor_pos = 1;
+        pane.sync_command_popup();
+
+        for _ in 0..10 {
+            pane.command_popup_down();
+        }
+        assert!(pane.command_popup.scroll_offset > 0);
+
+        pane.input = "/cmd1".to_string();
+        pane.cursor_pos = pane.input.len();
+        pane.sync_command_popup();
+
+        assert_eq!(pane.filtered_commands().len(), 3);
+        assert_eq!(pane.command_popup.scroll_offset, 0);
+        assert_eq!(pane.command_popup.selected, 2);
     }
 }
