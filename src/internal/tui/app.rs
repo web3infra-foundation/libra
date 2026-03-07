@@ -1239,6 +1239,14 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             AppEvent::RequestUserInput { request } => {
                 self.handle_user_input_request(request);
             }
+            AppEvent::ExecuteWorkflowComplete { text, new_history } => {
+                self.agent_task = None;
+                self.history = new_history;
+                self.session.add_assistant_message(&text);
+                self.complete_streaming_assistant_cell(text);
+                self.widget.bottom_pane.set_status(AgentStatus::Idle);
+                self.schedule_draw();
+            }
         }
 
         Ok(false)
@@ -1378,7 +1386,10 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
     }
 
     async fn start_execute_workflow(&mut self, spec_json: &str) {
-        use crate::internal::ai::intentspec::types::IntentSpec;
+        use crate::internal::ai::{
+            intentspec::types::IntentSpec,
+            orchestrator::{Orchestrator, types::OrchestratorConfig},
+        };
 
         let spec: IntentSpec = match serde_json::from_str(spec_json) {
             Ok(s) => s,
@@ -1393,12 +1404,46 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             }
         };
 
-        self.widget.add_cell(Box::new(AssistantHistoryCell::new(format!(
-            "IntentSpec validated successfully!\n\n**Summary:** {}\n\n**Note:** Orchestrator execution is not yet implemented. This feature will be available in a future update.",
-            spec.intent.summary
-        ))));
-        self.widget.bottom_pane.set_status(AgentStatus::Idle);
+        self.widget
+            .add_cell(Box::new(AssistantHistoryCell::streaming()));
+        self.widget.bottom_pane.set_status(AgentStatus::Thinking);
         self.schedule_draw();
+
+        let model = self.model.clone();
+        let registry = self.registry.clone();
+        let working_dir = self.registry.working_dir().to_path_buf();
+        let coder_preamble = self
+            .agent_router
+            .get("coder")
+            .map(|a| a.system_prompt.clone());
+        let tx = self.app_event_tx.clone();
+        let history = self.history.clone();
+
+        let handle = tokio::spawn(async move {
+            let config = OrchestratorConfig {
+                working_dir,
+                base_commit: None,
+                coder_preamble,
+            };
+            let orchestrator = Orchestrator::new(model, registry, config);
+
+            let result = orchestrator.run(spec).await;
+
+            let summary = match &result {
+                Ok(r) => format_orchestrator_result(r),
+                Err(e) => format!("Orchestrator failed: {e}"),
+            };
+
+            let mut new_history = history;
+            new_history.push(Message::assistant(summary.clone()));
+
+            let _ = tx.send(AppEvent::ExecuteWorkflowComplete {
+                text: summary,
+                new_history,
+            });
+        });
+
+        self.agent_task = Some(handle);
     }
 
     async fn start_plan_workflow(&mut self, request: &str) {
@@ -1917,6 +1962,40 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         })?;
         Ok(())
     }
+}
+
+fn format_orchestrator_result(
+    result: &crate::internal::ai::orchestrator::types::OrchestratorResult,
+) -> String {
+    use crate::internal::ai::orchestrator::types::{DecisionOutcome, TaskNodeStatus};
+
+    let mut lines = Vec::new();
+    let decision_label = match result.decision {
+        DecisionOutcome::Commit => "Commit",
+        DecisionOutcome::HumanReviewRequired => "Human Review Required",
+        DecisionOutcome::Abandon => "Abandon",
+    };
+    lines.push(format!("## Orchestrator Result: {decision_label}"));
+    lines.push(String::new());
+
+    for tr in &result.task_results {
+        let status_icon = match tr.status {
+            TaskNodeStatus::Completed => "✓",
+            TaskNodeStatus::Failed => "✗",
+            _ => "○",
+        };
+        lines.push(format!(
+            "{} Task {} - {:?} (retries: {})",
+            status_icon, tr.task_id, tr.status, tr.retry_count
+        ));
+    }
+
+    if !result.system_report.overall_passed {
+        lines.push(String::new());
+        lines.push("System verification: FAILED".to_string());
+    }
+
+    lines.join("\n")
 }
 
 fn build_plan_prompt(request: &str) -> String {
