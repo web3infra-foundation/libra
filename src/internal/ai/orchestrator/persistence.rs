@@ -1,6 +1,7 @@
 use std::{
-    collections::{BTreeMap, HashMap},
-    path::Path,
+    collections::{BTreeMap, BTreeSet, HashMap},
+    fs,
+    path::{Path, PathBuf},
     process::Command,
     sync::Arc,
 };
@@ -11,23 +12,29 @@ use serde_json::json;
 use uuid::Uuid;
 
 use super::types::{
-    DecisionOutcome, ExecutionPlan, GateStage, OrchestratorError, PersistedExecution,
-    PersistedTaskArtifacts, SystemReport, TaskKind, TaskResult, ToolCallRecord,
+    DecisionOutcome, ExecutionPlan, GateStage, OrchestratorError, PersistedCheckpoint,
+    PersistedExecution, PersistedTaskArtifacts, SystemReport, TaskKind, TaskResult, ToolCallRecord,
 };
-use crate::internal::ai::mcp::{
-    resource::{
-        AgentInstanceParams, CreateDecisionParams, CreateEvidenceParams, CreatePatchSetParams,
-        CreateProvenanceParams, CreateRunParams, CreateToolInvocationParams, IoFootprintParams,
-        TouchedFileParams,
+use crate::internal::ai::{
+    intentspec::types::IntentSpec,
+    mcp::{
+        resource::{
+            AgentInstanceParams, ContextItemParams, CreateContextSnapshotParams,
+            CreateDecisionParams, CreateEvidenceParams, CreatePatchSetParams, CreatePlanParams,
+            CreateProvenanceParams, CreateRunParams, CreateToolInvocationParams, IoFootprintParams,
+            PlanStepParams, TouchedFileParams,
+        },
+        server::LibraMcpServer,
     },
-    server::LibraMcpServer,
 };
 
 const ZERO_COMMIT_SHA: &str = "0000000000000000000000000000000000000000";
 
 pub struct ExecutionPersistenceRequest<'a> {
     pub mcp_server: &'a Arc<LibraMcpServer>,
+    pub spec: &'a IntentSpec,
     pub execution_plan: &'a ExecutionPlan,
+    pub plan_revisions: &'a [ExecutionPlan],
     pub task_results: &'a [TaskResult],
     pub system_report: &'a SystemReport,
     pub decision: &'a DecisionOutcome,
@@ -58,13 +65,47 @@ struct EvidenceRequest<'a> {
     summary: Option<String>,
 }
 
+struct FinalDecisionRequest<'a> {
+    mcp_server: &'a Arc<LibraMcpServer>,
+    run_id: &'a str,
+    chosen_patchset_id: Option<&'a str>,
+    checkpoint_id: Option<&'a str>,
+    execution_plan: &'a ExecutionPlan,
+    task_results: &'a [TaskResult],
+    system_report: &'a SystemReport,
+    decision: &'a DecisionOutcome,
+}
+
 pub async fn persist_execution(
     request: ExecutionPersistenceRequest<'_>,
 ) -> Result<PersistedExecution, OrchestratorError> {
     let base_commit_sha = resolve_base_commit(request.base_commit, request.working_dir);
+    let initial_snapshot_id = if snapshot_on_run_start(request.spec) {
+        Some(
+            create_context_snapshot(
+                request.mcp_server,
+                &base_commit_sha,
+                build_snapshot_summary(
+                    request.spec,
+                    request.plan_revisions.first(),
+                    "Run start context snapshot",
+                ),
+                collect_snapshot_items(
+                    request.spec,
+                    request.plan_revisions.first(),
+                    request.working_dir,
+                    request.task_results,
+                ),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
     let run_id = create_run(
         request.mcp_server,
         &base_commit_sha,
+        initial_snapshot_id.as_deref(),
         request.task_results,
         request.decision,
         request.model_name,
@@ -83,6 +124,20 @@ pub async fn persist_execution(
         )
         .await?,
     );
+    let mut plan_ids = Vec::with_capacity(request.plan_revisions.len());
+    for plan in request.plan_revisions {
+        plan_ids.push(create_plan_revision(request.mcp_server, plan).await?);
+    }
+    let mut checkpoints = create_replan_checkpoints(
+        request.mcp_server,
+        request.spec,
+        &run_id,
+        &base_commit_sha,
+        request.plan_revisions,
+        request.working_dir,
+        request.task_results,
+    )
+    .await?;
 
     let task_index: HashMap<Uuid, _> = request
         .execution_plan
@@ -176,6 +231,26 @@ pub async fn persist_execution(
             persisted.evidence_ids.push(evidence_id);
         }
 
+        if let Some(review) = &result.review {
+            let summary = if review.issues.is_empty() {
+                review.summary.clone()
+            } else {
+                format!("{} [{}]", review.summary, review.issues.join("; "))
+            };
+            let evidence_id = create_evidence(EvidenceRequest {
+                mcp_server: request.mcp_server,
+                run_id: &run_id,
+                patchset_id: persisted.patchset_id.as_deref(),
+                kind: "review",
+                tool: "reviewer",
+                command: None,
+                exit_code: None,
+                summary: Some(summary),
+            })
+            .await?;
+            persisted.evidence_ids.push(evidence_id);
+        }
+
         persisted_tasks.push(persisted);
     }
 
@@ -187,24 +262,58 @@ pub async fn persist_execution(
     } else {
         None
     };
+    let final_checkpoint_id = if *request.decision == DecisionOutcome::HumanReviewRequired {
+        Some(
+            create_context_snapshot(
+                request.mcp_server,
+                &base_commit_sha,
+                build_snapshot_summary(
+                    request.spec,
+                    Some(request.execution_plan),
+                    "Human review checkpoint",
+                ),
+                collect_snapshot_items(
+                    request.spec,
+                    Some(request.execution_plan),
+                    request.working_dir,
+                    request.task_results,
+                ),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
 
     let decision_id = Some(
-        create_decision(
-            request.mcp_server,
-            &run_id,
-            chosen_patchset_id.as_deref(),
-            request.execution_plan,
-            request.task_results,
-            request.system_report,
-            request.decision,
-        )
+        create_decision(FinalDecisionRequest {
+            mcp_server: request.mcp_server,
+            run_id: &run_id,
+            chosen_patchset_id: chosen_patchset_id.as_deref(),
+            checkpoint_id: final_checkpoint_id.as_deref(),
+            execution_plan: request.execution_plan,
+            task_results: request.task_results,
+            system_report: request.system_report,
+            decision: request.decision,
+        })
         .await?,
     );
+    if let Some(snapshot_id) = final_checkpoint_id {
+        checkpoints.push(PersistedCheckpoint {
+            revision: request.execution_plan.revision,
+            reason: "human review required".to_string(),
+            snapshot_id: Some(snapshot_id),
+            decision_id: decision_id.clone(),
+        });
+    }
 
     Ok(PersistedExecution {
         run_id,
+        initial_snapshot_id,
         provenance_id,
         decision_id,
+        plan_ids,
+        checkpoints,
         tasks: persisted_tasks,
     })
 }
@@ -212,6 +321,7 @@ pub async fn persist_execution(
 async fn create_run(
     mcp_server: &Arc<LibraMcpServer>,
     base_commit_sha: &str,
+    context_snapshot_id: Option<&str>,
     task_results: &[TaskResult],
     decision: &DecisionOutcome,
     model_name: &str,
@@ -233,7 +343,7 @@ async fn create_run(
         task_id: Uuid::new_v4().to_string(),
         base_commit_sha: base_commit_sha.to_string(),
         status: Some(status.to_string()),
-        context_snapshot_id: None,
+        context_snapshot_id: context_snapshot_id.map(ToString::to_string),
         error: task_results.iter().find_map(|result| {
             (result.status == super::types::TaskNodeStatus::Failed).then(|| {
                 result
@@ -264,6 +374,73 @@ async fn create_run(
         .await
         .map_err(|e| OrchestratorError::ConfigError(format!("MCP create_run failed: {e:?}")))?;
     parse_created_id("run", &result)
+}
+
+async fn create_plan_revision(
+    mcp_server: &Arc<LibraMcpServer>,
+    plan: &ExecutionPlan,
+) -> Result<String, OrchestratorError> {
+    let steps = plan
+        .dag
+        .nodes
+        .iter()
+        .map(|node| {
+            let checks = serde_json::to_value(&node.checks).map_err(|e| {
+                OrchestratorError::ConfigError(format!("failed to encode plan checks: {e}"))
+            })?;
+            Ok(PlanStepParams {
+                description: node.title.clone(),
+                inputs: Some(serde_json::json!({
+                    "objective": node.objective,
+                    "kind": format!("{:?}", node.kind),
+                    "gateStage": node.gate_stage.as_ref().map(|stage| format!("{:?}", stage)),
+                    "revision": plan.revision,
+                    "scopeIn": node.scope_in,
+                    "scopeOut": node.scope_out,
+                    "touchFiles": node.contract.touch_files,
+                })),
+                outputs: Some(serde_json::json!({
+                    "expectedOutputs": node.contract.expected_outputs,
+                    "acceptanceCriteria": node.acceptance_criteria,
+                    "replanReason": plan.replan_reason,
+                })),
+                checks: Some(checks),
+                status: Some(
+                    match node.status {
+                        super::types::TaskNodeStatus::Pending => "pending",
+                        super::types::TaskNodeStatus::Running => "in_progress",
+                        super::types::TaskNodeStatus::Completed => "completed",
+                        super::types::TaskNodeStatus::Failed => "failed",
+                        super::types::TaskNodeStatus::Skipped => "skipped",
+                    }
+                    .to_string(),
+                ),
+                owner_role: node.owner_role.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, OrchestratorError>>()?;
+
+    let params = CreatePlanParams {
+        plan_version: Some(plan.revision),
+        pipeline_id: None,
+        fwindow: None,
+        steps: Some(steps),
+        tags: None,
+        external_ids: None,
+        actor_kind: Some("system".to_string()),
+        actor_id: Some("libra-plan".to_string()),
+    };
+
+    let actor = resolve_actor(
+        mcp_server,
+        params.actor_kind.as_deref(),
+        params.actor_id.as_deref(),
+    )?;
+    let result = mcp_server
+        .create_plan_impl(params, actor)
+        .await
+        .map_err(|e| OrchestratorError::ConfigError(format!("MCP create_plan failed: {e:?}")))?;
+    parse_created_id("plan", &result)
 }
 
 async fn create_provenance(
@@ -447,45 +624,30 @@ async fn create_evidence(request: EvidenceRequest<'_>) -> Result<String, Orchest
     parse_created_id("evidence", &result)
 }
 
-async fn create_decision(
-    mcp_server: &Arc<LibraMcpServer>,
-    run_id: &str,
-    chosen_patchset_id: Option<&str>,
-    execution_plan: &ExecutionPlan,
-    task_results: &[TaskResult],
-    system_report: &SystemReport,
-    decision: &DecisionOutcome,
-) -> Result<String, OrchestratorError> {
-    let decision_type = match decision {
+async fn create_decision(request: FinalDecisionRequest<'_>) -> Result<String, OrchestratorError> {
+    let decision_type = match request.decision {
         DecisionOutcome::Commit => "commit",
         DecisionOutcome::HumanReviewRequired => "checkpoint",
         DecisionOutcome::Abandon => "abandon",
     };
     let rationale = Some(format!(
         "{}; overall_passed={}; failed_tasks={}; checkpoints={}",
-        execution_plan.summary,
-        system_report.overall_passed,
-        task_results
+        request.execution_plan.summary,
+        request.system_report.overall_passed,
+        request
+            .task_results
             .iter()
             .filter(|result| result.status == super::types::TaskNodeStatus::Failed)
             .count(),
-        execution_plan.checkpoints.len()
+        request.execution_plan.checkpoints.len()
     ));
-    let checkpoint_id = (*decision == DecisionOutcome::HumanReviewRequired)
-        .then(|| {
-            execution_plan
-                .checkpoints
-                .last()
-                .map(|checkpoint| checkpoint.label.clone())
-        })
-        .flatten();
 
     let params = CreateDecisionParams {
-        run_id: run_id.to_string(),
+        run_id: request.run_id.to_string(),
         decision_type: decision_type.to_string(),
-        chosen_patchset_id: chosen_patchset_id.map(ToString::to_string),
+        chosen_patchset_id: request.chosen_patchset_id.map(ToString::to_string),
         result_commit_sha: None,
-        checkpoint_id,
+        checkpoint_id: request.checkpoint_id.map(ToString::to_string),
         rationale,
         tags: None,
         external_ids: None,
@@ -494,11 +656,12 @@ async fn create_decision(
     };
 
     let actor = resolve_actor(
-        mcp_server,
+        request.mcp_server,
         params.actor_kind.as_deref(),
         params.actor_id.as_deref(),
     )?;
-    let result = mcp_server
+    let result = request
+        .mcp_server
         .create_decision_impl(params, actor)
         .await
         .map_err(|e| {
@@ -646,9 +809,252 @@ fn resolve_base_commit(base_commit: Option<&str>, working_dir: &Path) -> String 
     }
 }
 
+async fn create_replan_checkpoints(
+    mcp_server: &Arc<LibraMcpServer>,
+    spec: &IntentSpec,
+    run_id: &str,
+    base_commit_sha: &str,
+    plan_revisions: &[ExecutionPlan],
+    working_dir: &Path,
+    task_results: &[TaskResult],
+) -> Result<Vec<PersistedCheckpoint>, OrchestratorError> {
+    if !checkpoint_on_replan(spec) && !checkpoint_before_replan(spec) {
+        return Ok(Vec::new());
+    }
+
+    let mut persisted = Vec::new();
+    for (index, entry) in spec.lifecycle.change_log.iter().enumerate() {
+        let Some(plan) = plan_revisions.get(index) else {
+            break;
+        };
+
+        let snapshot_id = if checkpoint_on_replan(spec) || checkpoint_before_replan(spec) {
+            Some(
+                create_context_snapshot(
+                    mcp_server,
+                    base_commit_sha,
+                    build_checkpoint_summary(plan, entry.reason.as_str()),
+                    collect_snapshot_items(spec, Some(plan), working_dir, task_results),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+        let decision_id = if checkpoint_before_replan(spec) {
+            Some(
+                create_checkpoint_decision(
+                    mcp_server,
+                    run_id,
+                    snapshot_id.as_deref(),
+                    plan,
+                    entry.reason.as_str(),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+        persisted.push(PersistedCheckpoint {
+            revision: plan.revision,
+            reason: entry.reason.clone(),
+            snapshot_id,
+            decision_id,
+        });
+    }
+
+    Ok(persisted)
+}
+
+async fn create_context_snapshot(
+    mcp_server: &Arc<LibraMcpServer>,
+    base_commit_sha: &str,
+    summary: String,
+    items: Vec<ContextItemParams>,
+) -> Result<String, OrchestratorError> {
+    let params = CreateContextSnapshotParams {
+        base_commit_sha: base_commit_sha.to_string(),
+        selection_strategy: if items.is_empty() {
+            "heuristic".to_string()
+        } else {
+            "explicit".to_string()
+        },
+        items: (!items.is_empty()).then_some(items),
+        summary: Some(summary),
+        tags: None,
+        external_ids: None,
+        actor_kind: Some("system".to_string()),
+        actor_id: Some("libra-orchestrator".to_string()),
+    };
+
+    let actor = resolve_actor(
+        mcp_server,
+        params.actor_kind.as_deref(),
+        params.actor_id.as_deref(),
+    )?;
+    let result = mcp_server
+        .create_context_snapshot_impl(params, actor)
+        .await
+        .map_err(|e| {
+            OrchestratorError::ConfigError(format!("MCP create_context_snapshot failed: {e:?}"))
+        })?;
+    parse_created_id("context snapshot", &result)
+}
+
+async fn create_checkpoint_decision(
+    mcp_server: &Arc<LibraMcpServer>,
+    run_id: &str,
+    checkpoint_id: Option<&str>,
+    plan: &ExecutionPlan,
+    reason: &str,
+) -> Result<String, OrchestratorError> {
+    let params = CreateDecisionParams {
+        run_id: run_id.to_string(),
+        decision_type: "checkpoint".to_string(),
+        chosen_patchset_id: None,
+        result_commit_sha: None,
+        checkpoint_id: checkpoint_id.map(ToString::to_string),
+        rationale: Some(format!(
+            "checkpoint before replanning plan revision {}: {}",
+            plan.revision, reason
+        )),
+        tags: None,
+        external_ids: None,
+        actor_kind: Some("system".to_string()),
+        actor_id: Some("libra-orchestrator".to_string()),
+    };
+
+    let actor = resolve_actor(
+        mcp_server,
+        params.actor_kind.as_deref(),
+        params.actor_id.as_deref(),
+    )?;
+    let result = mcp_server
+        .create_decision_impl(params, actor)
+        .await
+        .map_err(|e| {
+            OrchestratorError::ConfigError(format!("MCP create_checkpoint_decision failed: {e:?}"))
+        })?;
+    parse_created_id("decision", &result)
+}
+
+fn collect_snapshot_items(
+    spec: &IntentSpec,
+    plan: Option<&ExecutionPlan>,
+    working_dir: &Path,
+    task_results: &[TaskResult],
+) -> Vec<ContextItemParams> {
+    let mut candidates = BTreeSet::new();
+    if let Some(touch_hints) = &spec.intent.touch_hints {
+        candidates.extend(touch_hints.files.iter().cloned());
+    }
+    if let Some(plan) = plan {
+        for node in &plan.dag.nodes {
+            candidates.extend(node.contract.touch_files.iter().cloned());
+        }
+    }
+    for result in task_results {
+        for call in &result.tool_calls {
+            candidates.extend(call.paths_written.iter().cloned());
+            candidates.extend(call.paths_read.iter().cloned());
+        }
+    }
+
+    candidates
+        .into_iter()
+        .filter_map(|path| build_context_item(working_dir, path))
+        .collect()
+}
+
+fn build_context_item(working_dir: &Path, path: String) -> Option<ContextItemParams> {
+    if !is_literal_file_path(&path) {
+        return None;
+    }
+
+    let resolved = resolve_workspace_file(working_dir, &path)?;
+    let content_hash = hash_file_blob(working_dir, &resolved)?;
+    Some(ContextItemParams { path, content_hash })
+}
+
+fn resolve_workspace_file(working_dir: &Path, path: &str) -> Option<PathBuf> {
+    let workspace_root = fs::canonicalize(working_dir).ok()?;
+    let candidate = if Path::new(path).is_absolute() {
+        PathBuf::from(path)
+    } else {
+        workspace_root.join(path)
+    };
+    let canonical = fs::canonicalize(candidate).ok()?;
+    (canonical.is_file() && canonical.starts_with(&workspace_root)).then_some(canonical)
+}
+
+fn is_literal_file_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.ends_with('/')
+        && !path.contains('*')
+        && !path.contains('?')
+        && !path.contains('[')
+        && !path.contains('{')
+}
+
+fn hash_file_blob(working_dir: &Path, path: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .arg("hash-object")
+        .arg(path)
+        .current_dir(working_dir)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let hash = String::from_utf8(output.stdout).ok()?;
+    let trimmed = hash.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn build_snapshot_summary(spec: &IntentSpec, plan: Option<&ExecutionPlan>, prefix: &str) -> String {
+    match plan {
+        Some(plan) => format!(
+            "{prefix}: {} (intent {}, plan revision {})",
+            spec.intent.summary, spec.metadata.id, plan.revision
+        ),
+        None => format!(
+            "{prefix}: {} (intent {})",
+            spec.intent.summary, spec.metadata.id
+        ),
+    }
+}
+
+fn build_checkpoint_summary(plan: &ExecutionPlan, reason: &str) -> String {
+    format!(
+        "Checkpoint before replan after revision {}: {}",
+        plan.revision, reason
+    )
+}
+
+fn snapshot_on_run_start(spec: &IntentSpec) -> bool {
+    spec.libra
+        .as_ref()
+        .and_then(|libra| libra.run_policy.as_ref())
+        .is_none_or(|policy| policy.snapshot_on_run_start)
+}
+
+fn checkpoint_on_replan(spec: &IntentSpec) -> bool {
+    spec.libra
+        .as_ref()
+        .and_then(|libra| libra.context_pipeline.as_ref())
+        .is_none_or(|pipeline| pipeline.checkpoint_on_replan)
+}
+
+fn checkpoint_before_replan(spec: &IntentSpec) -> bool {
+    spec.libra
+        .as_ref()
+        .and_then(|libra| libra.decision_policy.as_ref())
+        .is_none_or(|policy| policy.checkpoint_before_replan)
+}
+
 #[cfg(test)]
 mod tests {
-    use std::{path::Path, sync::Arc};
+    use std::{collections::BTreeMap, path::Path, sync::Arc};
 
     use sea_orm::{ConnectionTrait, Database, Schema};
     use tempfile::tempdir;
@@ -659,6 +1065,7 @@ mod tests {
         internal::{
             ai::{
                 history::HistoryManager,
+                intentspec::types::*,
                 orchestrator::types::{
                     ExecutionCheckpoint, GateReport, GateResult, TaskContract, TaskDAG, TaskNode,
                     TaskNodeStatus, ToolDiffRecord,
@@ -686,14 +1093,172 @@ mod tests {
         Arc::new(LibraMcpServer::new(Some(history_manager), Some(storage)))
     }
 
+    fn test_spec(change_log: Vec<ChangeLogEntry>) -> IntentSpec {
+        IntentSpec {
+            api_version: "intentspec.io/v1alpha1".into(),
+            kind: "IntentSpec".into(),
+            metadata: Metadata {
+                id: "intent-1".into(),
+                created_at: "2025-01-01T00:00:00Z".into(),
+                created_by: CreatedBy {
+                    creator_type: CreatorType::User,
+                    id: "tester".into(),
+                    display_name: None,
+                },
+                target: Target {
+                    repo: RepoTarget {
+                        repo_type: RepoType::Local,
+                        locator: ".".into(),
+                    },
+                    base_ref: "HEAD".into(),
+                    workspace_id: None,
+                    labels: BTreeMap::new(),
+                },
+            },
+            intent: Intent {
+                summary: "Implement feature and verify it".into(),
+                problem_statement: "problem".into(),
+                change_type: ChangeType::Feature,
+                objectives: vec!["Update src/lib.rs".into()],
+                in_scope: vec!["src/".into()],
+                out_of_scope: vec![],
+                touch_hints: Some(TouchHints {
+                    files: vec!["src/lib.rs".into()],
+                    symbols: vec![],
+                    apis: vec![],
+                }),
+            },
+            acceptance: Acceptance {
+                success_criteria: vec!["tests pass".into()],
+                verification_plan: VerificationPlan {
+                    fast_checks: vec![],
+                    integration_checks: vec![],
+                    security_checks: vec![],
+                    release_checks: vec![],
+                },
+                quality_gates: None,
+            },
+            constraints: Constraints {
+                security: ConstraintSecurity {
+                    network_policy: NetworkPolicy::Deny,
+                    dependency_policy: DependencyPolicy::NoNew,
+                    crypto_policy: String::new(),
+                },
+                privacy: ConstraintPrivacy {
+                    data_classes_allowed: vec![DataClass::Public],
+                    redaction_required: false,
+                    retention_days: 1,
+                },
+                licensing: ConstraintLicensing {
+                    allowed_spdx: vec![],
+                    forbid_new_licenses: false,
+                },
+                platform: ConstraintPlatform {
+                    language_runtime: "rust".into(),
+                    supported_os: vec![],
+                },
+                resources: ConstraintResources {
+                    max_wall_clock_seconds: 30,
+                    max_cost_units: 0,
+                },
+            },
+            risk: Risk {
+                level: RiskLevel::Low,
+                rationale: String::new(),
+                factors: vec![],
+                human_in_loop: HumanInLoop {
+                    required: false,
+                    min_approvers: 0,
+                },
+            },
+            evidence: EvidencePolicy {
+                strategy: EvidenceStrategy::RepoFirst,
+                trust_tiers: vec![TrustTier::Repo],
+                domain_allowlist_mode: DomainAllowlistMode::Disabled,
+                allowed_domains: vec![],
+                blocked_domains: vec![],
+                min_citations_per_decision: 1,
+            },
+            security: SecurityPolicy {
+                tool_acl: ToolAcl {
+                    allow: vec![],
+                    deny: vec![],
+                },
+                secrets: SecretPolicy {
+                    policy: SecretAccessPolicy::DenyAll,
+                    allowed_scopes: vec![],
+                },
+                prompt_injection: PromptInjectionPolicy {
+                    treat_retrieved_content_as_untrusted: true,
+                    enforce_output_schema: true,
+                    disallow_instruction_from_evidence: true,
+                },
+                output_handling: OutputHandlingPolicy {
+                    encoding_policy: EncodingPolicy::StrictJson,
+                    no_direct_eval: true,
+                },
+            },
+            execution: ExecutionPolicy {
+                concurrency: ConcurrencyPolicy {
+                    max_parallel_tasks: 1,
+                },
+                retry: RetryPolicy {
+                    max_retries: 1,
+                    backoff_seconds: 0,
+                },
+                replan: ReplanPolicy {
+                    triggers: vec![ReplanTrigger::SecurityGateFail],
+                },
+            },
+            provenance: ProvenancePolicy {
+                require_slsa_provenance: true,
+                require_sbom: false,
+                transparency_log: TransparencyLogPolicy {
+                    mode: TransparencyMode::None,
+                },
+                bindings: ProvenanceBindings {
+                    embed_intent_spec_digest: true,
+                    embed_evidence_digests: true,
+                },
+            },
+            lifecycle: Lifecycle {
+                schema_version: "1".into(),
+                status: LifecycleStatus::Active,
+                change_log,
+            },
+            libra: Some(LibraBinding {
+                object_store: None,
+                context_pipeline: None,
+                plan_generation: None,
+                run_policy: None,
+                actor_mapping: None,
+                decision_policy: None,
+            }),
+            artifacts: Artifacts {
+                required: vec![],
+                retention: ArtifactRetention::default(),
+            },
+            extensions: BTreeMap::new(),
+        }
+    }
+
     #[tokio::test]
     async fn test_persist_execution_creates_object_chain() {
         let server = setup_server().await;
         let impl_task_id = Uuid::new_v4();
         let gate_task_id = Uuid::new_v4();
+        let spec = test_spec(vec![ChangeLogEntry {
+            at: "2025-01-01T00:01:00Z".into(),
+            by: "libra-orchestrator".into(),
+            reason: "security gate failed".into(),
+            diff_summary: "revision 2: replan in serial mode".into(),
+        }]);
         let plan = ExecutionPlan {
             intent_spec_id: "intent-1".to_string(),
             summary: "Implement feature and verify it".to_string(),
+            revision: 1,
+            parent_revision: None,
+            replan_reason: None,
             dag: TaskDAG {
                 nodes: vec![
                     TaskNode {
@@ -763,6 +1328,7 @@ mod tests {
                     }],
                 }],
                 policy_violations: vec![],
+                review: None,
             },
             TaskResult {
                 task_id: gate_task_id,
@@ -784,18 +1350,25 @@ mod tests {
                 retry_count: 0,
                 tool_calls: vec![],
                 policy_violations: vec![],
+                review: None,
             },
         ];
         let system_report = SystemReport {
             integration: GateReport::empty(),
             security: GateReport::empty(),
             release: GateReport::empty(),
+            review_passed: true,
+            review_findings: vec![],
+            artifacts_complete: true,
+            missing_artifacts: vec![],
             overall_passed: true,
         };
 
         let persisted = persist_execution(ExecutionPersistenceRequest {
             mcp_server: &server,
+            spec: &spec,
             execution_plan: &plan,
+            plan_revisions: std::slice::from_ref(&plan),
             task_results: &results,
             system_report: &system_report,
             decision: &DecisionOutcome::Commit,
@@ -807,8 +1380,11 @@ mod tests {
         .unwrap();
 
         assert!(!persisted.run_id.is_empty());
+        assert!(persisted.initial_snapshot_id.is_some());
         assert!(persisted.provenance_id.is_some());
         assert!(persisted.decision_id.is_some());
+        assert_eq!(persisted.plan_ids.len(), 1);
+        assert_eq!(persisted.checkpoints.len(), 1);
         assert_eq!(persisted.tasks.len(), 2);
         assert_eq!(persisted.tasks[0].tool_invocation_ids.len(), 1);
         assert!(persisted.tasks[0].patchset_id.is_some());
@@ -818,8 +1394,9 @@ mod tests {
         assert_eq!(history.list_objects("run").await.unwrap().len(), 1);
         assert_eq!(history.list_objects("patchset").await.unwrap().len(), 1);
         assert_eq!(history.list_objects("evidence").await.unwrap().len(), 1);
-        assert_eq!(history.list_objects("decision").await.unwrap().len(), 1);
+        assert_eq!(history.list_objects("decision").await.unwrap().len(), 2);
         assert_eq!(history.list_objects("provenance").await.unwrap().len(), 1);
         assert_eq!(history.list_objects("invocation").await.unwrap().len(), 1);
+        assert_eq!(history.list_objects("snapshot").await.unwrap().len(), 2);
     }
 }

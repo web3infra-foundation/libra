@@ -4,7 +4,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::internal::ai::{intentspec::types::Check, mcp::server::LibraMcpServer};
+use crate::internal::ai::{
+    intentspec::types::{ChangeLogEntry, Check},
+    mcp::server::LibraMcpServer,
+};
 
 /// Errors that can occur during orchestration.
 #[derive(Debug, thiserror::Error)]
@@ -205,6 +208,12 @@ pub struct ExecutionCheckpoint {
 pub struct ExecutionPlan {
     pub intent_spec_id: String,
     pub summary: String,
+    #[serde(default = "default_execution_revision")]
+    pub revision: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_revision: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replan_reason: Option<String>,
     pub dag: TaskDAG,
     #[serde(default)]
     pub parallel_groups: Vec<Vec<Uuid>>,
@@ -282,6 +291,15 @@ impl GateReport {
 
 /// Result of executing a single task.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReviewOutcome {
+    pub approved: bool,
+    pub summary: String,
+    #[serde(default)]
+    pub issues: Vec<String>,
+}
+
+/// Result of executing a single task.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskResult {
     pub task_id: Uuid,
     pub status: TaskNodeStatus,
@@ -294,6 +312,8 @@ pub struct TaskResult {
     pub tool_calls: Vec<ToolCallRecord>,
     #[serde(default)]
     pub policy_violations: Vec<PolicyViolation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<ReviewOutcome>,
 }
 
 /// Final decision outcome for the orchestration run.
@@ -311,6 +331,12 @@ pub struct SystemReport {
     pub integration: GateReport,
     pub security: GateReport,
     pub release: GateReport,
+    pub review_passed: bool,
+    #[serde(default)]
+    pub review_findings: Vec<String>,
+    pub artifacts_complete: bool,
+    #[serde(default)]
+    pub missing_artifacts: Vec<String>,
     pub overall_passed: bool,
 }
 
@@ -319,9 +345,15 @@ pub struct SystemReport {
 pub struct OrchestratorResult {
     pub decision: DecisionOutcome,
     pub execution_plan: ExecutionPlan,
+    #[serde(default)]
+    pub plan_revisions: Vec<ExecutionPlan>,
     pub task_results: Vec<TaskResult>,
     pub system_report: SystemReport,
     pub intent_spec_id: String,
+    #[serde(default)]
+    pub lifecycle_change_log: Vec<ChangeLogEntry>,
+    #[serde(default)]
+    pub replan_count: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persistence: Option<PersistedExecution>,
 }
@@ -338,16 +370,37 @@ pub struct PersistedTaskArtifacts {
     pub evidence_ids: Vec<String>,
 }
 
+/// Persisted checkpoint objects created during execution/replan.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PersistedCheckpoint {
+    pub revision: u32,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_id: Option<String>,
+}
+
 /// Persisted execution object chain for an orchestrator run.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PersistedExecution {
     pub run_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_snapshot_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision_id: Option<String>,
     #[serde(default)]
+    pub plan_ids: Vec<String>,
+    #[serde(default)]
+    pub checkpoints: Vec<PersistedCheckpoint>,
+    #[serde(default)]
     pub tasks: Vec<PersistedTaskArtifacts>,
+}
+
+fn default_execution_revision() -> u32 {
+    1
 }
 
 /// Configuration for the orchestrator.
@@ -357,6 +410,8 @@ pub struct OrchestratorConfig {
     pub base_commit: Option<String>,
     /// System prompt injected into each task's tool loop (e.g. coder agent prompt).
     pub coder_preamble: Option<String>,
+    /// Optional system prompt for the reviewer pass.
+    pub reviewer_preamble: Option<String>,
     /// Optional MCP server used to persist workflow objects.
     pub mcp_server: Option<Arc<LibraMcpServer>>,
 }
@@ -461,6 +516,9 @@ mod tests {
         let plan = ExecutionPlan {
             intent_spec_id: "spec-123".into(),
             summary: "summary".into(),
+            revision: 1,
+            parent_revision: None,
+            replan_reason: None,
             dag: TaskDAG {
                 nodes: vec![implementation_task(id)],
                 intent_spec_id: "spec-123".into(),
@@ -487,6 +545,9 @@ mod tests {
             execution_plan: ExecutionPlan {
                 intent_spec_id: "test".into(),
                 summary: "summary".into(),
+                revision: 2,
+                parent_revision: Some(1),
+                replan_reason: Some("security gate failed".into()),
                 dag: TaskDAG {
                     nodes: vec![implementation_task(id)],
                     intent_spec_id: "test".into(),
@@ -495,18 +556,33 @@ mod tests {
                 parallel_groups: vec![vec![id]],
                 checkpoints: vec![],
             },
+            plan_revisions: vec![],
             task_results: vec![],
             system_report: SystemReport {
                 integration: GateReport::empty(),
                 security: GateReport::empty(),
                 release: GateReport::empty(),
+                review_passed: true,
+                review_findings: vec![],
+                artifacts_complete: true,
+                missing_artifacts: vec![],
                 overall_passed: true,
             },
             intent_spec_id: "test".into(),
+            lifecycle_change_log: vec![],
+            replan_count: 1,
             persistence: Some(PersistedExecution {
                 run_id: "run-1".into(),
+                initial_snapshot_id: Some("snapshot-1".into()),
                 provenance_id: Some("prov-1".into()),
                 decision_id: Some("decision-1".into()),
+                plan_ids: vec!["plan-1".into()],
+                checkpoints: vec![PersistedCheckpoint {
+                    revision: 2,
+                    reason: "security gate failed".into(),
+                    snapshot_id: Some("snapshot-2".into()),
+                    decision_id: Some("checkpoint-1".into()),
+                }],
                 tasks: vec![PersistedTaskArtifacts {
                     task_id: id,
                     tool_invocation_ids: vec!["inv-1".into()],

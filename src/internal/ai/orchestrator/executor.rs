@@ -4,11 +4,15 @@ use std::{
     sync::Arc,
 };
 
+use serde::Deserialize;
 use serde_json::Value;
 
 use super::{
     gate, policy,
-    types::{GateReport, TaskDAG, TaskKind, TaskNode, TaskNodeStatus, TaskResult, ToolCallRecord},
+    types::{
+        GateReport, ReviewOutcome, TaskDAG, TaskKind, TaskNode, TaskNodeStatus, TaskResult,
+        ToolCallRecord,
+    },
 };
 use crate::internal::ai::{
     agent::{ToolLoopConfig, ToolLoopObserver, run_tool_loop_with_history_and_observer},
@@ -25,6 +29,7 @@ pub struct ExecutorConfig {
     pub backoff_seconds: u32,
     pub working_dir: PathBuf,
     pub spec: Arc<IntentSpec>,
+    pub reviewer_preamble: Option<String>,
 }
 
 struct TaskExecutionObserver {
@@ -103,6 +108,14 @@ impl ToolLoopObserver for TaskExecutionObserver {
     }
 }
 
+#[derive(Deserialize)]
+struct ReviewerDecision {
+    approved: bool,
+    summary: String,
+    #[serde(default)]
+    issues: Vec<String>,
+}
+
 /// Execute a single task with retry logic.
 pub async fn execute_task<M: CompletionModel>(
     task: &TaskNode,
@@ -118,6 +131,7 @@ pub async fn execute_task<M: CompletionModel>(
     let mut retry_count: u8 = 0;
     let mut accumulated_tool_calls = Vec::new();
     let mut accumulated_policy_violations = Vec::new();
+    let mut last_review = None;
 
     loop {
         let mut observer = TaskExecutionObserver::new(
@@ -140,15 +154,53 @@ pub async fn execute_task<M: CompletionModel>(
 
         let retryable_failure = match agent_result {
             Ok(turn) if policy_violations.is_empty() => {
-                return TaskResult {
-                    task_id: task.id,
-                    status: TaskNodeStatus::Completed,
-                    gate_report: None,
-                    agent_output: Some(turn.final_text),
-                    retry_count,
-                    tool_calls: accumulated_tool_calls,
-                    policy_violations: accumulated_policy_violations,
+                let review = match run_reviewer_pass(
+                    task,
+                    &turn.final_text,
+                    &accumulated_tool_calls,
+                    model,
+                    registry,
+                    config,
+                )
+                .await
+                {
+                    Ok(review) => review,
+                    Err(message) => {
+                        return TaskResult {
+                            task_id: task.id,
+                            status: TaskNodeStatus::Failed,
+                            gate_report: None,
+                            agent_output: Some(message),
+                            retry_count,
+                            tool_calls: accumulated_tool_calls,
+                            policy_violations: accumulated_policy_violations,
+                            review: None,
+                        };
+                    }
                 };
+                if let Some(review) = review.as_ref()
+                    && !review.approved
+                {
+                    last_review = Some(review.clone());
+                    (
+                        Some(turn.final_text),
+                        tool_calls,
+                        policy_violations,
+                        format!("review rejected: {}", review.summary),
+                        Some(review.clone()),
+                    )
+                } else {
+                    return TaskResult {
+                        task_id: task.id,
+                        status: TaskNodeStatus::Completed,
+                        gate_report: None,
+                        agent_output: Some(turn.final_text),
+                        retry_count,
+                        tool_calls: accumulated_tool_calls,
+                        policy_violations: accumulated_policy_violations,
+                        review,
+                    };
+                }
             }
             Ok(turn) => {
                 let reason = policy_violations
@@ -156,10 +208,16 @@ pub async fn execute_task<M: CompletionModel>(
                     .map(|violation| violation.message.clone())
                     .collect::<Vec<_>>()
                     .join("; ");
-                (Some(turn.final_text), tool_calls, policy_violations, reason)
+                (
+                    Some(turn.final_text),
+                    tool_calls,
+                    policy_violations,
+                    reason,
+                    None,
+                )
             }
             Err(CompletionError::ResponseError(msg)) => {
-                (Some(msg.clone()), tool_calls, policy_violations, msg)
+                (Some(msg.clone()), tool_calls, policy_violations, msg, None)
             }
             Err(e) => {
                 return TaskResult {
@@ -170,12 +228,16 @@ pub async fn execute_task<M: CompletionModel>(
                     retry_count,
                     tool_calls: accumulated_tool_calls,
                     policy_violations: accumulated_policy_violations,
+                    review: last_review,
                 };
             }
         };
 
         retry_count += 1;
-        let (agent_output, _, _, failure_reason) = retryable_failure;
+        let (agent_output, _, _, failure_reason, review) = retryable_failure;
+        if let Some(review) = review {
+            last_review = Some(review);
+        }
         if retry_count > config.max_retries {
             return TaskResult {
                 task_id: task.id,
@@ -185,6 +247,7 @@ pub async fn execute_task<M: CompletionModel>(
                 retry_count,
                 tool_calls: accumulated_tool_calls,
                 policy_violations: accumulated_policy_violations,
+                review: last_review,
             };
         }
 
@@ -217,7 +280,56 @@ async fn execute_gate_task(task: &TaskNode, working_dir: &Path) -> TaskResult {
         retry_count: 0,
         tool_calls: Vec::new(),
         policy_violations: Vec::new(),
+        review: None,
     }
+}
+
+async fn run_reviewer_pass<M: CompletionModel>(
+    task: &TaskNode,
+    agent_output: &str,
+    tool_calls: &[ToolCallRecord],
+    model: &M,
+    registry: &ToolRegistry,
+    config: &ExecutorConfig,
+) -> Result<Option<ReviewOutcome>, String> {
+    let Some(reviewer_preamble) = config.reviewer_preamble.clone() else {
+        return Ok(None);
+    };
+
+    let review_prompt = build_reviewer_prompt(task, agent_output, tool_calls);
+    let review_config = ToolLoopConfig {
+        preamble: Some(reviewer_preamble),
+        allowed_tools: Some(vec![
+            "read_file".to_string(),
+            "grep_files".to_string(),
+            "list_dir".to_string(),
+        ]),
+        max_steps: Some(6),
+        ..config.tool_loop_config.clone()
+    };
+
+    let mut observer = TaskExecutionObserver::new(
+        Arc::clone(&config.spec),
+        task.clone(),
+        config.working_dir.clone(),
+    );
+    let turn = run_tool_loop_with_history_and_observer(
+        model,
+        Vec::new(),
+        &review_prompt,
+        registry,
+        review_config,
+        &mut observer,
+    )
+    .await
+    .map_err(|err| format!("reviewer pass failed: {err}"))?;
+
+    let review = parse_reviewer_decision(&turn.final_text)?;
+    Ok(Some(ReviewOutcome {
+        approved: review.approved,
+        summary: review.summary,
+        issues: review.issues,
+    }))
 }
 
 /// Execute all tasks in the DAG in topological order.
@@ -366,6 +478,54 @@ fn build_task_prompt(task: &TaskNode) -> String {
     }
 
     parts.join("\n\n")
+}
+
+fn build_reviewer_prompt(
+    task: &TaskNode,
+    agent_output: &str,
+    tool_calls: &[ToolCallRecord],
+) -> String {
+    let touched_files = tool_calls
+        .iter()
+        .flat_map(|call| call.paths_written.iter().cloned())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    let mut parts = vec![
+        format!("## Review Task\n{}", task.title),
+        format!("## Objective\n{}", task.objective),
+        format!("## Candidate Output\n{}", agent_output.trim()),
+        "Return JSON only in this exact shape: {\"approved\":true|false,\"summary\":\"...\",\"issues\":[\"...\"]}".to_string(),
+    ];
+
+    if !touched_files.is_empty() {
+        parts.push(format!("## Touched Files\n{}", touched_files.join(", ")));
+    }
+
+    if !task.acceptance_criteria.is_empty() {
+        parts.push(format!(
+            "## Acceptance Criteria\n{}",
+            task.acceptance_criteria.join("\n")
+        ));
+    }
+
+    parts.join("\n\n")
+}
+
+fn parse_reviewer_decision(raw: &str) -> Result<ReviewerDecision, String> {
+    if let Ok(parsed) = serde_json::from_str::<ReviewerDecision>(raw.trim()) {
+        return Ok(parsed);
+    }
+
+    let start = raw
+        .find('{')
+        .ok_or_else(|| "reviewer response missing JSON object".to_string())?;
+    let end = raw
+        .rfind('}')
+        .ok_or_else(|| "reviewer response missing JSON terminator".to_string())?;
+    serde_json::from_str::<ReviewerDecision>(&raw[start..=end])
+        .map_err(|err| format!("invalid reviewer JSON: {err}"))
 }
 
 #[cfg(test)]
@@ -609,6 +769,7 @@ mod tests {
             backoff_seconds: 0,
             working_dir: dir.path().to_path_buf(),
             spec: spec(),
+            reviewer_preamble: None,
         };
         let result = execute_task(&implementation_task(), &model, &registry, &config).await;
         assert_eq!(result.status, TaskNodeStatus::Completed);

@@ -1430,6 +1430,10 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             .agent_router
             .get("coder")
             .map(|a| a.system_prompt.clone());
+        let reviewer_preamble = self
+            .agent_router
+            .get("reviewer")
+            .map(|a| a.system_prompt.clone());
         let mcp_server = self.mcp_server.clone();
         let tx = self.app_event_tx.clone();
         let history = self.history.clone();
@@ -1439,6 +1443,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 working_dir,
                 base_commit: None,
                 coder_preamble,
+                reviewer_preamble,
                 mcp_server,
             };
             let orchestrator = Orchestrator::new(model, registry, config);
@@ -1968,17 +1973,22 @@ fn format_orchestrator_result(
     lines.push(format!("## Orchestrator Result: {decision_label}"));
     lines.push(String::new());
     lines.push(format!(
-        "Plan: {} | Parallel groups: {}",
+        "Plan: {} | Parallel groups: {} | Replans: {}",
         result.execution_plan.summary,
-        result.execution_plan.parallel_groups.len()
+        result.execution_plan.parallel_groups.len(),
+        result.replan_count
     ));
     if let Some(persistence) = &result.persistence {
         lines.push(format!(
-            "Persisted Run: {} | Decision: {} | Tasks with MCP artifacts: {}",
+            "Persisted Run: {} | Decision: {} | Checkpoints: {} | Tasks with MCP artifacts: {}",
             persistence.run_id,
             persistence.decision_id.as_deref().unwrap_or("none"),
+            persistence.checkpoints.len(),
             persistence.tasks.len()
         ));
+        if let Some(snapshot_id) = &persistence.initial_snapshot_id {
+            lines.push(format!("Initial Snapshot: {snapshot_id}"));
+        }
     }
     lines.push(String::new());
 
@@ -2003,12 +2013,33 @@ fn format_orchestrator_result(
         lines.push(String::new());
         lines.push("System verification: FAILED".to_string());
     }
+    if !result.system_report.review_passed {
+        lines.push(format!(
+            "Review findings: {}",
+            result.system_report.review_findings.join(" | ")
+        ));
+    }
+    if !result.system_report.artifacts_complete {
+        lines.push(format!(
+            "Missing artifacts: {}",
+            result.system_report.missing_artifacts.join(", ")
+        ));
+    }
 
     if let Some(persistence) = &result.persistence {
         lines.push(String::new());
         lines.push("MCP Objects".to_string());
         if let Some(provenance_id) = &persistence.provenance_id {
             lines.push(format!("Provenance: {provenance_id}"));
+        }
+        for checkpoint in &persistence.checkpoints {
+            lines.push(format!(
+                "- Checkpoint rev {} | snapshot: {} | decision: {} | reason: {}",
+                checkpoint.revision,
+                checkpoint.snapshot_id.as_deref().unwrap_or("none"),
+                checkpoint.decision_id.as_deref().unwrap_or("none"),
+                checkpoint.reason
+            ));
         }
         for task in &persistence.tasks {
             lines.push(format!(

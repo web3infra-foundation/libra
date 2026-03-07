@@ -109,6 +109,9 @@ pub fn compile_execution_plan(spec: &IntentSpec) -> Result<ExecutionPlan, Orches
             dag.nodes.len(),
             max_parallel
         ),
+        revision: 1,
+        parent_revision: None,
+        replan_reason: None,
         parallel_groups: compute_parallel_groups(&dag),
         checkpoints,
         dag,

@@ -53,6 +53,10 @@ mod tests {
             integration: GateReport::empty(),
             security: GateReport::empty(),
             release: GateReport::empty(),
+            review_passed: true,
+            review_findings: vec![],
+            artifacts_complete: true,
+            missing_artifacts: vec![],
             overall_passed: true,
         }
     }
@@ -62,6 +66,10 @@ mod tests {
             integration: GateReport::empty(),
             security: GateReport::empty(),
             release: GateReport::empty(),
+            review_passed: true,
+            review_findings: vec![],
+            artifacts_complete: true,
+            missing_artifacts: vec![],
             overall_passed: false,
         }
     }
@@ -75,6 +83,7 @@ mod tests {
             retry_count: 0,
             tool_calls: vec![],
             policy_violations: vec![],
+            review: None,
         }
     }
 

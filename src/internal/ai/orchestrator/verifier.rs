@@ -1,22 +1,38 @@
-use super::types::{ExecutionPlan, GateReport, GateStage, SystemReport, TaskResult};
+use std::collections::BTreeSet;
 
-/// Build the system verification report from executed gate tasks.
-pub fn build_system_report(plan: &ExecutionPlan, task_results: &[TaskResult]) -> SystemReport {
+use super::types::{ExecutionPlan, GateReport, GateStage, SystemReport, TaskKind, TaskResult};
+use crate::internal::ai::intentspec::types::{ArtifactName, ArtifactStage, IntentSpec};
+
+/// Build the system verification report from executed gate tasks, review results,
+/// and required artifact contracts.
+pub fn build_system_report(
+    spec: &IntentSpec,
+    plan: &ExecutionPlan,
+    task_results: &[TaskResult],
+) -> SystemReport {
     let integration = gate_report_for_stage(plan, task_results, GateStage::Integration)
         .unwrap_or_else(GateReport::empty);
     let security = gate_report_for_stage(plan, task_results, GateStage::Security)
         .unwrap_or_else(GateReport::empty);
     let release = gate_report_for_stage(plan, task_results, GateStage::Release)
         .unwrap_or_else(GateReport::empty);
+    let (review_passed, review_findings) = review_report(plan, task_results);
+    let (artifacts_complete, missing_artifacts) = artifact_report(spec, plan, task_results);
 
     let overall_passed = integration.all_required_passed
         && security.all_required_passed
-        && release.all_required_passed;
+        && release.all_required_passed
+        && review_passed
+        && artifacts_complete;
 
     SystemReport {
         integration,
         security,
         release,
+        review_passed,
+        review_findings,
+        artifacts_complete,
+        missing_artifacts,
         overall_passed,
     }
 }
@@ -39,49 +55,342 @@ fn gate_report_for_stage(
         .and_then(|result| result.gate_report.clone())
 }
 
+fn review_report(plan: &ExecutionPlan, task_results: &[TaskResult]) -> (bool, Vec<String>) {
+    let implementation_ids = plan
+        .dag
+        .nodes
+        .iter()
+        .filter(|node| node.kind == TaskKind::Implementation)
+        .map(|node| node.id)
+        .collect::<BTreeSet<_>>();
+
+    let findings = task_results
+        .iter()
+        .filter(|result| implementation_ids.contains(&result.task_id))
+        .filter_map(|result| result.review.as_ref())
+        .filter(|review| !review.approved)
+        .map(|review| {
+            if review.issues.is_empty() {
+                review.summary.clone()
+            } else {
+                format!("{} [{}]", review.summary, review.issues.join("; "))
+            }
+        })
+        .collect::<Vec<_>>();
+
+    (findings.is_empty(), findings)
+}
+
+fn artifact_report(
+    spec: &IntentSpec,
+    plan: &ExecutionPlan,
+    task_results: &[TaskResult],
+) -> (bool, Vec<String>) {
+    let produced = produced_artifacts(plan, task_results);
+    let missing = spec
+        .artifacts
+        .required
+        .iter()
+        .filter(|artifact| artifact.required)
+        .filter(|artifact| !produced.contains(&artifact_key(&artifact.name, &artifact.stage)))
+        .map(|artifact| {
+            format!(
+                "{}@{}",
+                artifact_name_label(&artifact.name),
+                artifact_stage_label(&artifact.stage)
+            )
+        })
+        .collect::<Vec<_>>();
+
+    (missing.is_empty(), missing)
+}
+
+fn produced_artifacts(plan: &ExecutionPlan, task_results: &[TaskResult]) -> BTreeSet<String> {
+    let mut produced = BTreeSet::new();
+
+    for node in &plan.dag.nodes {
+        let Some(result) = task_results.iter().find(|result| result.task_id == node.id) else {
+            continue;
+        };
+
+        if node.kind == TaskKind::Implementation
+            && result.status == super::types::TaskNodeStatus::Completed
+            && result
+                .tool_calls
+                .iter()
+                .any(|call| !call.paths_written.is_empty() || !call.diffs.is_empty())
+        {
+            produced.insert(artifact_key(
+                &ArtifactName::Patchset,
+                &ArtifactStage::PerTask,
+            ));
+        }
+
+        if let Some(report) = &result.gate_report {
+            for check in &node.checks {
+                if report.results.iter().any(|gate| gate.check_id == check.id) {
+                    for artifact in &check.artifacts_produced {
+                        if let Some(name) = parse_artifact_name(artifact) {
+                            produced.insert(artifact_key(
+                                &name,
+                                &stage_for_gate(node.gate_stage.as_ref()),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    produced
+}
+
+fn stage_for_gate(stage: Option<&GateStage>) -> ArtifactStage {
+    match stage {
+        Some(GateStage::Integration) => ArtifactStage::Integration,
+        Some(GateStage::Security) => ArtifactStage::Security,
+        Some(GateStage::Release) => ArtifactStage::Release,
+        Some(GateStage::Fast) | None => ArtifactStage::PerTask,
+    }
+}
+
+fn parse_artifact_name(raw: &str) -> Option<ArtifactName> {
+    Some(match raw {
+        "patchset" => ArtifactName::Patchset,
+        "test-log" => ArtifactName::TestLog,
+        "build-log" => ArtifactName::BuildLog,
+        "sast-report" => ArtifactName::SastReport,
+        "sca-report" => ArtifactName::ScaReport,
+        "sbom" => ArtifactName::Sbom,
+        "provenance-attestation" => ArtifactName::ProvenanceAttestation,
+        "transparency-proof" => ArtifactName::TransparencyProof,
+        "release-notes" => ArtifactName::ReleaseNotes,
+        _ => return None,
+    })
+}
+
+fn artifact_key(name: &ArtifactName, stage: &ArtifactStage) -> String {
+    format!(
+        "{}@{}",
+        artifact_name_label(name),
+        artifact_stage_label(stage)
+    )
+}
+
+fn artifact_name_label(name: &ArtifactName) -> &'static str {
+    match name {
+        ArtifactName::Patchset => "patchset",
+        ArtifactName::TestLog => "test-log",
+        ArtifactName::BuildLog => "build-log",
+        ArtifactName::SastReport => "sast-report",
+        ArtifactName::ScaReport => "sca-report",
+        ArtifactName::Sbom => "sbom",
+        ArtifactName::ProvenanceAttestation => "provenance-attestation",
+        ArtifactName::TransparencyProof => "transparency-proof",
+        ArtifactName::ReleaseNotes => "release-notes",
+    }
+}
+
+fn artifact_stage_label(stage: &ArtifactStage) -> &'static str {
+    match stage {
+        ArtifactStage::PerTask => "per-task",
+        ArtifactStage::Integration => "integration",
+        ArtifactStage::Security => "security",
+        ArtifactStage::Release => "release",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::internal::ai::orchestrator::types::{
-        ExecutionCheckpoint, TaskContract, TaskDAG, TaskKind, TaskNode, TaskNodeStatus,
+    use crate::internal::ai::{
+        intentspec::types::{
+            Acceptance, Artifacts, ChangeLogEntry, ChangeType, Check, CheckKind, ConcurrencyPolicy,
+            ConstraintLicensing, ConstraintPlatform, ConstraintPrivacy, ConstraintResources,
+            ConstraintSecurity, Constraints, CreatedBy, CreatorType, DataClass, DependencyPolicy,
+            DomainAllowlistMode, EncodingPolicy, EvidencePolicy, EvidenceStrategy, ExecutionPolicy,
+            HumanInLoop, Intent, Lifecycle, LifecycleStatus, Metadata, NetworkPolicy,
+            OutputHandlingPolicy, PromptInjectionPolicy, ProvenanceBindings, ProvenancePolicy,
+            RepoTarget, RepoType, RetryPolicy, Risk, RiskLevel, SecretAccessPolicy, SecretPolicy,
+            SecurityPolicy, Target, ToolAcl, TransparencyLogPolicy, TransparencyMode, TrustTier,
+            VerificationPlan,
+        },
+        orchestrator::types::{
+            ExecutionCheckpoint, GateResult, ReviewOutcome, TaskContract, TaskDAG, TaskKind,
+            TaskNode, TaskNodeStatus,
+        },
     };
 
+    fn spec_with_required_artifacts() -> IntentSpec {
+        IntentSpec {
+            api_version: "intentspec.io/v1alpha1".into(),
+            kind: "IntentSpec".into(),
+            metadata: Metadata {
+                id: "test".into(),
+                created_at: "2025-01-01T00:00:00Z".into(),
+                created_by: CreatedBy {
+                    creator_type: CreatorType::User,
+                    id: "tester".into(),
+                    display_name: None,
+                },
+                target: Target {
+                    repo: RepoTarget {
+                        repo_type: RepoType::Local,
+                        locator: ".".into(),
+                    },
+                    base_ref: "HEAD".into(),
+                    workspace_id: None,
+                    labels: Default::default(),
+                },
+            },
+            intent: Intent {
+                summary: "summary".into(),
+                problem_statement: "problem".into(),
+                change_type: ChangeType::Feature,
+                objectives: vec!["ship".into()],
+                in_scope: vec!["src/".into()],
+                out_of_scope: vec![],
+                touch_hints: None,
+            },
+            acceptance: Acceptance {
+                success_criteria: vec!["tests pass".into()],
+                verification_plan: VerificationPlan {
+                    fast_checks: vec![],
+                    integration_checks: vec![],
+                    security_checks: vec![],
+                    release_checks: vec![],
+                },
+                quality_gates: None,
+            },
+            constraints: Constraints {
+                security: ConstraintSecurity {
+                    network_policy: NetworkPolicy::Deny,
+                    dependency_policy: DependencyPolicy::NoNew,
+                    crypto_policy: String::new(),
+                },
+                privacy: ConstraintPrivacy {
+                    data_classes_allowed: vec![DataClass::Public],
+                    redaction_required: false,
+                    retention_days: 30,
+                },
+                licensing: ConstraintLicensing {
+                    allowed_spdx: vec![],
+                    forbid_new_licenses: false,
+                },
+                platform: ConstraintPlatform {
+                    language_runtime: "rust".into(),
+                    supported_os: vec![],
+                },
+                resources: ConstraintResources {
+                    max_wall_clock_seconds: 300,
+                    max_cost_units: 0,
+                },
+            },
+            risk: Risk {
+                level: RiskLevel::Low,
+                rationale: "test".into(),
+                factors: vec![],
+                human_in_loop: HumanInLoop {
+                    required: false,
+                    min_approvers: 0,
+                },
+            },
+            evidence: EvidencePolicy {
+                strategy: EvidenceStrategy::RepoFirst,
+                trust_tiers: vec![TrustTier::Repo],
+                domain_allowlist_mode: DomainAllowlistMode::Disabled,
+                allowed_domains: vec![],
+                blocked_domains: vec![],
+                min_citations_per_decision: 1,
+            },
+            security: SecurityPolicy {
+                tool_acl: ToolAcl {
+                    allow: vec![],
+                    deny: vec![],
+                },
+                secrets: SecretPolicy {
+                    policy: SecretAccessPolicy::DenyAll,
+                    allowed_scopes: vec![],
+                },
+                prompt_injection: PromptInjectionPolicy {
+                    treat_retrieved_content_as_untrusted: true,
+                    enforce_output_schema: true,
+                    disallow_instruction_from_evidence: true,
+                },
+                output_handling: OutputHandlingPolicy {
+                    encoding_policy: EncodingPolicy::StrictJson,
+                    no_direct_eval: true,
+                },
+            },
+            execution: ExecutionPolicy {
+                retry: RetryPolicy {
+                    max_retries: 1,
+                    backoff_seconds: 0,
+                },
+                replan: crate::internal::ai::intentspec::types::ReplanPolicy { triggers: vec![] },
+                concurrency: ConcurrencyPolicy {
+                    max_parallel_tasks: 1,
+                },
+            },
+            artifacts: Artifacts {
+                required: vec![
+                    crate::internal::ai::intentspec::types::ArtifactReq {
+                        name: ArtifactName::Patchset,
+                        stage: ArtifactStage::PerTask,
+                        required: true,
+                        format: "git-diff".into(),
+                    },
+                    crate::internal::ai::intentspec::types::ArtifactReq {
+                        name: ArtifactName::TestLog,
+                        stage: ArtifactStage::Release,
+                        required: true,
+                        format: "text".into(),
+                    },
+                ],
+                retention: Default::default(),
+            },
+            provenance: ProvenancePolicy {
+                require_slsa_provenance: false,
+                require_sbom: false,
+                transparency_log: TransparencyLogPolicy {
+                    mode: TransparencyMode::None,
+                },
+                bindings: ProvenanceBindings {
+                    embed_intent_spec_digest: true,
+                    embed_evidence_digests: false,
+                },
+            },
+            lifecycle: Lifecycle {
+                schema_version: "1".into(),
+                status: LifecycleStatus::Active,
+                change_log: Vec::<ChangeLogEntry>::new(),
+            },
+            libra: None,
+            extensions: Default::default(),
+        }
+    }
+
     fn plan_with_gates() -> ExecutionPlan {
-        let integration_id = Uuid::new_v4();
-        let security_id = Uuid::new_v4();
+        let impl_id = Uuid::new_v4();
         let release_id = Uuid::new_v4();
         ExecutionPlan {
             intent_spec_id: "test".into(),
             summary: "summary".into(),
+            revision: 1,
+            parent_revision: None,
+            replan_reason: None,
             dag: TaskDAG {
                 nodes: vec![
                     TaskNode {
-                        id: integration_id,
-                        title: "Integration".into(),
-                        objective: "integration".into(),
+                        id: impl_id,
+                        title: "Implementation".into(),
+                        objective: "implementation".into(),
                         description: None,
-                        kind: TaskKind::Gate,
-                        gate_stage: Some(GateStage::Integration),
-                        owner_role: Some("verifier".into()),
-                        dependencies: vec![],
-                        constraints: vec![],
-                        acceptance_criteria: vec![],
-                        scope_in: vec![],
-                        scope_out: vec![],
-                        checks: vec![],
-                        contract: TaskContract::default(),
-                        status: TaskNodeStatus::Pending,
-                    },
-                    TaskNode {
-                        id: security_id,
-                        title: "Security".into(),
-                        objective: "security".into(),
-                        description: None,
-                        kind: TaskKind::Gate,
-                        gate_stage: Some(GateStage::Security),
-                        owner_role: Some("verifier".into()),
+                        kind: TaskKind::Implementation,
+                        gate_stage: None,
+                        owner_role: Some("coder".into()),
                         dependencies: vec![],
                         constraints: vec![],
                         acceptance_criteria: vec![],
@@ -104,7 +413,15 @@ mod tests {
                         acceptance_criteria: vec![],
                         scope_in: vec![],
                         scope_out: vec![],
-                        checks: vec![],
+                        checks: vec![Check {
+                            id: "release-test".into(),
+                            kind: CheckKind::Command,
+                            command: Some("cargo test".into()),
+                            timeout_seconds: None,
+                            expected_exit_code: None,
+                            required: true,
+                            artifacts_produced: vec!["test-log".into()],
+                        }],
                         contract: TaskContract::default(),
                         status: TaskNodeStatus::Pending,
                     },
@@ -114,45 +431,68 @@ mod tests {
             },
             parallel_groups: vec![],
             checkpoints: vec![ExecutionCheckpoint {
-                label: "after-security".into(),
-                after_tasks: vec![security_id],
+                label: "after-release".into(),
+                after_tasks: vec![release_id],
                 reason: "gate".into(),
             }],
         }
     }
 
-    fn gate_result(task_id: Uuid, passed: bool) -> TaskResult {
-        TaskResult {
-            task_id,
-            status: if passed {
-                TaskNodeStatus::Completed
-            } else {
-                TaskNodeStatus::Failed
-            },
-            gate_report: Some(GateReport {
-                results: vec![],
-                all_required_passed: passed,
-            }),
-            agent_output: None,
-            retry_count: 0,
-            tool_calls: vec![],
-            policy_violations: vec![],
-        }
-    }
-
     #[test]
-    fn test_build_system_report_from_gate_results() {
+    fn test_build_system_report_tracks_review_and_artifacts() {
+        let spec = spec_with_required_artifacts();
         let plan = plan_with_gates();
         let results = vec![
-            gate_result(plan.dag.nodes[0].id, true),
-            gate_result(plan.dag.nodes[1].id, true),
-            gate_result(plan.dag.nodes[2].id, false),
+            TaskResult {
+                task_id: plan.dag.nodes[0].id,
+                status: TaskNodeStatus::Completed,
+                gate_report: None,
+                agent_output: Some("done".into()),
+                retry_count: 0,
+                tool_calls: vec![crate::internal::ai::orchestrator::types::ToolCallRecord {
+                    tool_name: "apply_patch".into(),
+                    action: "write".into(),
+                    arguments_json: None,
+                    paths_read: vec![],
+                    paths_written: vec!["src/lib.rs".into()],
+                    success: true,
+                    summary: None,
+                    diffs: vec![],
+                }],
+                policy_violations: vec![],
+                review: Some(ReviewOutcome {
+                    approved: true,
+                    summary: "looks good".into(),
+                    issues: vec![],
+                }),
+            },
+            TaskResult {
+                task_id: plan.dag.nodes[1].id,
+                status: TaskNodeStatus::Completed,
+                gate_report: Some(GateReport {
+                    results: vec![GateResult {
+                        check_id: "release-test".into(),
+                        kind: "test".into(),
+                        passed: true,
+                        exit_code: 0,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        duration_ms: 1,
+                        timed_out: false,
+                    }],
+                    all_required_passed: true,
+                }),
+                agent_output: None,
+                retry_count: 0,
+                tool_calls: vec![],
+                policy_violations: vec![],
+                review: None,
+            },
         ];
 
-        let report = build_system_report(&plan, &results);
-        assert!(report.integration.all_required_passed);
-        assert!(report.security.all_required_passed);
-        assert!(!report.release.all_required_passed);
-        assert!(!report.overall_passed);
+        let report = build_system_report(&spec, &plan, &results);
+        assert!(report.review_passed);
+        assert!(report.artifacts_complete);
+        assert!(report.overall_passed);
     }
 }

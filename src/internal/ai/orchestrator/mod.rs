@@ -5,6 +5,7 @@ pub mod gate;
 pub mod persistence;
 pub mod planner;
 pub mod policy;
+pub mod replan;
 pub mod types;
 pub mod verifier;
 
@@ -59,47 +60,74 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
             }
         }
 
-        // Phase 1: Compile execution plan
-        let mut execution_plan = planner::compile_execution_plan(&spec)?;
-
-        // Phase 2: Execute tasks
         let tool_loop_config = crate::internal::ai::agent::ToolLoopConfig {
             preamble: self.config.coder_preamble.clone(),
             ..Default::default()
         };
+        let max_replans = replan::max_replans(&spec);
+        let mut replan_count = 0_u32;
+        let mut plan_revisions = Vec::new();
+        let (execution_plan, task_results, system_report, decision) = loop {
+            // Phase 1: Compile execution plan
+            let mut execution_plan = planner::compile_execution_plan(&spec)?;
+            execution_plan.revision = replan_count + 1;
+            execution_plan.parent_revision = (replan_count > 0).then_some(replan_count);
+            execution_plan.replan_reason = spec
+                .lifecycle
+                .change_log
+                .last()
+                .map(|entry| entry.reason.clone());
 
-        let executor_config = executor::ExecutorConfig {
-            tool_loop_config,
-            max_retries: spec.execution.retry.max_retries,
-            backoff_seconds: spec.execution.retry.backoff_seconds,
-            working_dir: self.config.working_dir.clone(),
-            spec: Arc::new(spec.clone()),
+            // Phase 2: Execute tasks
+            let executor_config = executor::ExecutorConfig {
+                tool_loop_config: tool_loop_config.clone(),
+                max_retries: spec.execution.retry.max_retries,
+                backoff_seconds: spec.execution.retry.backoff_seconds,
+                working_dir: self.config.working_dir.clone(),
+                spec: Arc::new(spec.clone()),
+                reviewer_preamble: self.config.reviewer_preamble.clone(),
+            };
+
+            let task_results = executor::execute_dag(
+                &mut execution_plan.dag,
+                &self.model,
+                &self.registry,
+                &executor_config,
+            )
+            .await;
+
+            // Phase 3: System verification
+            let system_report =
+                verifier::build_system_report(&spec, &execution_plan, &task_results);
+
+            if replan_count < max_replans
+                && let Some(directive) =
+                    replan::detect_replan(&spec, &execution_plan, &task_results, &system_report)
+            {
+                plan_revisions.push(execution_plan.clone());
+                replan_count += 1;
+                replan::apply_replan(&mut spec, replan_count + 1, &directive);
+                continue;
+            }
+
+            // Phase 4: Decision
+            let decision = decider::make_decision(
+                &task_results,
+                &system_report,
+                &spec.risk.level,
+                spec.risk.human_in_loop.required,
+            );
+            plan_revisions.push(execution_plan.clone());
+            break (execution_plan, task_results, system_report, decision);
         };
-
-        let task_results = executor::execute_dag(
-            &mut execution_plan.dag,
-            &self.model,
-            &self.registry,
-            &executor_config,
-        )
-        .await;
-
-        // Phase 3: System verification
-        let system_report = verifier::build_system_report(&execution_plan, &task_results);
-
-        // Phase 4: Decision
-        let decision = decider::make_decision(
-            &task_results,
-            &system_report,
-            &spec.risk.level,
-            spec.risk.human_in_loop.required,
-        );
 
         let persistence = if let Some(ref mcp_server) = self.config.mcp_server {
             Some(
                 persistence::persist_execution(persistence::ExecutionPersistenceRequest {
                     mcp_server,
+                    spec: &spec,
                     execution_plan: &execution_plan,
+                    plan_revisions: &plan_revisions,
                     task_results: &task_results,
                     system_report: &system_report,
                     decision: &decision,
@@ -116,9 +144,12 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
         Ok(OrchestratorResult {
             decision,
             execution_plan,
+            plan_revisions,
             task_results,
             system_report,
             intent_spec_id: spec.metadata.id.clone(),
+            lifecycle_change_log: spec.lifecycle.change_log.clone(),
+            replan_count,
             persistence,
         })
     }
@@ -310,6 +341,7 @@ mod tests {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
             coder_preamble: None,
+            reviewer_preamble: None,
             mcp_server: None,
         };
         let orchestrator = Orchestrator::new(model, registry, config);
@@ -330,6 +362,7 @@ mod tests {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
             coder_preamble: None,
+            reviewer_preamble: None,
             mcp_server: None,
         };
         let orchestrator = Orchestrator::new(model, registry, config);
@@ -350,6 +383,7 @@ mod tests {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
             coder_preamble: None,
+            reviewer_preamble: None,
             mcp_server: None,
         };
         let orchestrator = Orchestrator::new(model, registry, config);
@@ -359,5 +393,38 @@ mod tests {
         spec.intent.summary = String::new();
         let err = orchestrator.run(spec).await.unwrap_err();
         assert!(matches!(err, OrchestratorError::ValidationFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn test_orchestrator_replans_after_security_gate_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = MockOrchestratorModel;
+        let registry = Arc::new(ToolRegistry::new());
+        let config = OrchestratorConfig {
+            working_dir: dir.path().to_path_buf(),
+            base_commit: None,
+            coder_preamble: None,
+            reviewer_preamble: None,
+            mcp_server: None,
+        };
+        let orchestrator = Orchestrator::new(model, registry, config);
+        let mut spec = test_spec();
+        spec.execution.replan.triggers = vec![ReplanTrigger::SecurityGateFail];
+        spec.acceptance.verification_plan.security_checks = vec![Check {
+            id: "security-fail".into(),
+            kind: CheckKind::Command,
+            command: Some("false".into()),
+            timeout_seconds: Some(1),
+            expected_exit_code: None,
+            required: true,
+            artifacts_produced: vec![],
+        }];
+
+        let result = orchestrator.run(spec).await.unwrap();
+        assert_eq!(result.replan_count, 1);
+        assert_eq!(result.lifecycle_change_log.len(), 1);
+        assert_eq!(result.plan_revisions.len(), 2);
+        assert_eq!(result.execution_plan.revision, 2);
+        assert_eq!(result.decision, types::DecisionOutcome::Abandon);
     }
 }
