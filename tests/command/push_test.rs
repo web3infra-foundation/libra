@@ -2,6 +2,7 @@
 
 use std::{env, process::Command, time::Duration};
 
+use super::{create_committed_repo_via_cli, run_libra_command};
 use clap::Parser;
 use libra::{
     command::push,
@@ -38,6 +39,20 @@ fn init_temp_repo() -> TempDir {
 
     eprintln!("Initialized libra repo at: {temp_path:?}");
     temp_dir
+}
+
+#[test]
+#[serial]
+fn test_push_cli_without_remote_exits_zero_today() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["push"], repo.path());
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("fatal: no remote configured for branch 'main'")
+    );
 }
 
 #[tokio::test]

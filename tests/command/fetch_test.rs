@@ -2,6 +2,7 @@
 
 use std::{fs, process::Command, time::Duration};
 
+use super::{create_committed_repo_via_cli, run_libra_command};
 use libra::{
     command::fetch,
     internal::{
@@ -40,6 +41,20 @@ fn init_temp_repo() -> TempDir {
 
     eprintln!("Initialized libra repo at: {temp_path:?}");
     temp_dir
+}
+
+#[test]
+#[serial]
+fn test_fetch_cli_without_remote_returns_fatal_128() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["fetch"], repo.path());
+
+    assert_eq!(output.status.code(), Some(128));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("fatal: no remote configured for the current branch")
+    );
 }
 
 #[tokio::test]

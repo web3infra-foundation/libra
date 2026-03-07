@@ -169,6 +169,23 @@ async fn setup_repo_with_commit_with(
     (temp, guard)
 }
 
+#[test]
+#[serial]
+fn test_tag_cli_duplicate_tag_exits_zero_today() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["tag", "v1"], repo.path());
+    assert_cli_success(&output, "failed to create initial tag");
+
+    let output = run_libra_command(&["tag", "v1"], repo.path());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(stdout.contains("commit "));
+    assert!(stderr.contains("fatal: Tag 'v1' already exists"));
+}
+
 // Test cases
 
 #[tokio::test]

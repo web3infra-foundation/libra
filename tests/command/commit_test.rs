@@ -94,6 +94,25 @@ async fn test_commit_requires_configured_identity_in_strict_mode() {
     }
 }
 
+#[test]
+#[serial]
+fn test_commit_cli_without_identity_returns_fatal_128() {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+
+    std::fs::write(repo.path().join("identity.txt"), "identity\n").unwrap();
+
+    let output = run_libra_command(&["add", "identity.txt"], repo.path());
+    assert_cli_success(&output, "failed to stage identity fixture");
+
+    let output = run_libra_command(&["commit", "-m", "missing identity"], repo.path());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(128));
+    assert!(stderr.contains("fatal: Author identity unknown"));
+    assert!(stderr.contains("libra config --global user.email"));
+}
+
 #[tokio::test]
 #[serial]
 /// Tests normal commit functionality with both `--amend` and `--allow_empty` flags.

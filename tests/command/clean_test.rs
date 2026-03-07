@@ -67,7 +67,7 @@ async fn test_clean_requires_flag() {
         .output()
         .expect("failed to execute `libra clean`");
 
-    assert!(output.status.success());
+    assert_eq!(output.status.code(), Some(0));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("fatal: clean requires -f or -n"));
 

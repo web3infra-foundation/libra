@@ -11,6 +11,34 @@ use git_internal::{
 use libra::utils::{object_ext::TreeExt, util};
 
 use super::*;
+
+#[test]
+#[serial]
+fn test_log_cli_outside_repository_returns_fatal_128() {
+    let temp = tempdir().unwrap();
+
+    let output = run_libra_command(&["log", "--oneline"], temp.path());
+    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "fatal: not a libra repository (or any of the parent directories): .libra\n"
+    );
+}
+
+#[test]
+#[serial]
+fn test_log_cli_empty_repository_panics_today() {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+
+    let output = run_libra_command(&["log", "--oneline"], repo.path());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(101));
+    assert!(stderr.contains("thread 'main'"));
+    assert!(stderr.contains("fatal: your current branch 'main' does not have any commits yet"));
+}
+
 #[tokio::test]
 #[serial]
 /// Tests retrieval of commits reachable from a specific commit hash

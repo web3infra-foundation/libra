@@ -1,6 +1,7 @@
 //! Tests for the show command, verifying correct display of commits and tags.
 //! Tests use CLI commands via the libra binary.
 
+use super::{create_committed_repo_via_cli, run_libra_command};
 use std::process::Command;
 
 use serial_test::serial;
@@ -119,6 +120,17 @@ fn create_annotated_tag(temp_path: &std::path::Path, tag_name: &str, message: &s
             String::from_utf8_lossy(&output.stderr)
         );
     }
+}
+
+#[test]
+#[serial]
+fn test_show_cli_badref_returns_1_today() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["show", "badref"], repo.path());
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("fatal: bad revision 'badref'"));
 }
 
 /// Test that show can display a lightweight tag.

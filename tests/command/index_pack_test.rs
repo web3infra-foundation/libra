@@ -1,5 +1,6 @@
 //! Tests pack index generation validating offsets, CRC32, fanout tables, and trailer hashes.
 
+use super::{init_repo_via_cli, run_libra_command};
 use std::{
     collections::HashMap,
     fs,
@@ -19,6 +20,7 @@ use git_internal::{
     utils::HashAlgorithm,
 };
 use libra::command::index_pack::{build_index_v1, build_index_v2};
+use serial_test::serial;
 use sha1::{Digest, Sha1};
 use tempfile::tempdir;
 use tokio::sync::mpsc;
@@ -151,6 +153,21 @@ fn decode_pack_expected(pack_path: &Path, kind: HashKind) -> Result<ExpectedPack
         pack_hash: pack.signature,
         entries: map,
     })
+}
+
+#[test]
+#[serial]
+fn test_index_pack_cli_missing_file_panics_today() {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+
+    let missing_pack = repo.path().join("missing.pack");
+    let output = run_libra_command(&["index-pack", missing_pack.to_str().unwrap()], repo.path());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(101));
+    assert!(stderr.contains("thread 'main'"));
+    assert!(stderr.contains("called `Result::unwrap()` on an `Err` value"));
 }
 
 /// Compute fanout table from sorted hashes

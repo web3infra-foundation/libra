@@ -14,6 +14,20 @@ use libra::{
 };
 
 use super::*;
+
+#[test]
+#[serial]
+fn test_status_cli_outside_repository_returns_fatal_128() {
+    let temp = tempdir().unwrap();
+
+    let output = run_libra_command(&["status"], temp.path());
+    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "fatal: not a libra repository (or any of the parent directories): .libra\n"
+    );
+}
+
 #[tokio::test]
 #[serial]
 /// Tests --ignored flag: ignored files appear in outputs
