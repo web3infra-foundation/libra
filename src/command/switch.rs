@@ -126,8 +126,6 @@ pub async fn ensure_clean_status() -> CliResult<()> {
     }
 }
 
-
-
 async fn switch_to_tracked_remote_branch(target: String) -> CliResult<()> {
     let (remote_name, remote_branch_name) = if let Some(rest) = target.strip_prefix("refs/remotes/")
     {
