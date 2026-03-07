@@ -1,14 +1,20 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+
+use serde_json::Value;
 
 use super::{
-    gate,
-    types::{GateReport, TaskDAG, TaskNode, TaskNodeStatus, TaskResult},
+    gate, policy,
+    types::{GateReport, TaskDAG, TaskKind, TaskNode, TaskNodeStatus, TaskResult, ToolCallRecord},
 };
 use crate::internal::ai::{
-    agent::{ToolLoopConfig, run_tool_loop},
+    agent::{ToolLoopConfig, ToolLoopObserver, run_tool_loop_with_history_and_observer},
     completion::{CompletionError, CompletionModel},
-    intentspec::types::Check,
-    tools::registry::ToolRegistry,
+    intentspec::types::IntentSpec,
+    tools::{ToolOutput, registry::ToolRegistry},
 };
 
 /// Configuration for task execution.
@@ -17,32 +23,143 @@ pub struct ExecutorConfig {
     pub tool_loop_config: ToolLoopConfig,
     pub max_retries: u8,
     pub backoff_seconds: u32,
-    pub fast_checks: Vec<Check>,
     pub working_dir: PathBuf,
+    pub spec: Arc<IntentSpec>,
+}
+
+struct TaskExecutionObserver {
+    spec: Arc<IntentSpec>,
+    task: TaskNode,
+    working_dir: PathBuf,
+    in_flight: HashMap<String, ToolCallRecord>,
+    tool_calls: Vec<ToolCallRecord>,
+    violations: Vec<super::types::PolicyViolation>,
+}
+
+impl TaskExecutionObserver {
+    fn new(spec: Arc<IntentSpec>, task: TaskNode, working_dir: PathBuf) -> Self {
+        Self {
+            spec,
+            task,
+            working_dir,
+            in_flight: HashMap::new(),
+            tool_calls: Vec::new(),
+            violations: Vec::new(),
+        }
+    }
+
+    fn finish(self) -> (Vec<ToolCallRecord>, Vec<super::types::PolicyViolation>) {
+        (self.tool_calls, self.violations)
+    }
+}
+
+impl ToolLoopObserver for TaskExecutionObserver {
+    fn on_tool_call_preflight(
+        &mut self,
+        call_id: &str,
+        tool_name: &str,
+        arguments: &Value,
+    ) -> Result<(), String> {
+        match policy::evaluate_tool_call(
+            &self.spec,
+            &self.task,
+            tool_name,
+            arguments,
+            &self.working_dir,
+        ) {
+            Ok(preflight) => {
+                self.in_flight.insert(call_id.to_string(), preflight.record);
+                Ok(())
+            }
+            Err(violation) => {
+                self.violations.push(violation.clone());
+                Err(violation.message)
+            }
+        }
+    }
+
+    fn on_tool_call_end(
+        &mut self,
+        call_id: &str,
+        tool_name: &str,
+        result: &Result<ToolOutput, String>,
+    ) {
+        if let Some(mut record) = self.in_flight.remove(call_id) {
+            match result {
+                Ok(output) => {
+                    if let Err(violation) =
+                        policy::evaluate_tool_result(&self.spec, tool_name, output, &mut record)
+                    {
+                        self.violations.push(violation);
+                    }
+                }
+                Err(message) => {
+                    record.success = false;
+                    record.summary = Some(message.clone());
+                }
+            }
+            self.tool_calls.push(record);
+        }
+    }
 }
 
 /// Execute a single task with retry logic.
-///
-/// The retry loop: run agent → run fast gates → if gates fail, retry up to max_retries.
 pub async fn execute_task<M: CompletionModel>(
     task: &TaskNode,
     model: &M,
     registry: &ToolRegistry,
     config: &ExecutorConfig,
 ) -> TaskResult {
+    if task.kind == TaskKind::Gate {
+        return execute_gate_task(task, &config.working_dir).await;
+    }
+
     let prompt = build_task_prompt(task);
     let mut retry_count: u8 = 0;
+    let mut accumulated_tool_calls = Vec::new();
+    let mut accumulated_policy_violations = Vec::new();
 
     loop {
-        let agent_result =
-            run_tool_loop(model, &prompt, registry, config.tool_loop_config.clone()).await;
+        let mut observer = TaskExecutionObserver::new(
+            Arc::clone(&config.spec),
+            task.clone(),
+            config.working_dir.clone(),
+        );
+        let agent_result = run_tool_loop_with_history_and_observer(
+            model,
+            Vec::new(),
+            &prompt,
+            registry,
+            config.tool_loop_config.clone(),
+            &mut observer,
+        )
+        .await;
+        let (tool_calls, policy_violations) = observer.finish();
+        accumulated_tool_calls.extend(tool_calls.iter().cloned());
+        accumulated_policy_violations.extend(policy_violations.iter().cloned());
 
-        let agent_output = match agent_result {
-            Ok(output) => output,
+        let retryable_failure = match agent_result {
+            Ok(turn) if policy_violations.is_empty() => {
+                return TaskResult {
+                    task_id: task.id,
+                    status: TaskNodeStatus::Completed,
+                    gate_report: None,
+                    agent_output: Some(turn.final_text),
+                    retry_count,
+                    tool_calls: accumulated_tool_calls,
+                    policy_violations: accumulated_policy_violations,
+                };
+            }
+            Ok(turn) => {
+                let reason = policy_violations
+                    .iter()
+                    .map(|violation| violation.message.clone())
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                (Some(turn.final_text), tool_calls, policy_violations, reason)
+            }
             Err(CompletionError::ResponseError(msg)) => {
-                // Treat model/tool-loop response errors as retryable task failures.
-                tracing::warn!(task_id = %task.id, "agent response error: {}", msg);
-                msg
+                (Some(msg.clone()), tool_calls, policy_violations, msg)
             }
             Err(e) => {
                 return TaskResult {
@@ -51,39 +168,27 @@ pub async fn execute_task<M: CompletionModel>(
                     gate_report: None,
                     agent_output: Some(e.to_string()),
                     retry_count,
+                    tool_calls: accumulated_tool_calls,
+                    policy_violations: accumulated_policy_violations,
                 };
             }
         };
 
-        // Run fast gates
-        let gate_report = if config.fast_checks.is_empty() {
-            GateReport::empty()
-        } else {
-            gate::run_gates(&config.fast_checks, &config.working_dir).await
-        };
-
-        if gate_report.all_required_passed {
-            return TaskResult {
-                task_id: task.id,
-                status: TaskNodeStatus::Completed,
-                gate_report: Some(gate_report),
-                agent_output: Some(agent_output),
-                retry_count,
-            };
-        }
-
         retry_count += 1;
+        let (agent_output, _, _, failure_reason) = retryable_failure;
         if retry_count > config.max_retries {
             return TaskResult {
                 task_id: task.id,
                 status: TaskNodeStatus::Failed,
-                gate_report: Some(gate_report),
-                agent_output: Some(agent_output),
+                gate_report: None,
+                agent_output,
                 retry_count,
+                tool_calls: accumulated_tool_calls,
+                policy_violations: accumulated_policy_violations,
             };
         }
 
-        // Backoff before retry
+        tracing::warn!(task_id = %task.id, "retrying task after failure: {}", failure_reason);
         if config.backoff_seconds > 0 {
             tokio::time::sleep(std::time::Duration::from_secs(
                 config.backoff_seconds as u64,
@@ -93,11 +198,29 @@ pub async fn execute_task<M: CompletionModel>(
     }
 }
 
+async fn execute_gate_task(task: &TaskNode, working_dir: &Path) -> TaskResult {
+    let gate_report = if task.checks.is_empty() {
+        GateReport::empty()
+    } else {
+        gate::run_gates(&task.checks, working_dir).await
+    };
+
+    TaskResult {
+        task_id: task.id,
+        status: if gate_report.all_required_passed {
+            TaskNodeStatus::Completed
+        } else {
+            TaskNodeStatus::Failed
+        },
+        gate_report: Some(gate_report),
+        agent_output: None,
+        retry_count: 0,
+        tool_calls: Vec::new(),
+        policy_violations: Vec::new(),
+    }
+}
+
 /// Execute all tasks in the DAG in topological order.
-///
-/// Respects `max_parallel` for concurrent execution. When `max_parallel > 1`,
-/// ready tasks (whose dependencies are all completed) run concurrently up to
-/// the parallelism limit.
 pub async fn execute_dag<M: CompletionModel + 'static>(
     dag: &mut TaskDAG,
     model: &M,
@@ -118,10 +241,7 @@ pub async fn execute_dag<M: CompletionModel + 'static>(
             break;
         }
 
-        // Take up to max_parallel ready tasks
         let batch: Vec<_> = ready.into_iter().take(max_parallel).collect();
-
-        // Collect task snapshots for this batch
         let tasks: Vec<_> = batch
             .iter()
             .filter_map(|&id| dag.get(id).cloned())
@@ -134,7 +254,6 @@ pub async fn execute_dag<M: CompletionModel + 'static>(
         }
 
         if tasks.len() == 1 {
-            // Single task — no need for join
             let result = execute_task(&tasks[0], model, registry, config).await;
             if let Some(node) = dag.get_mut(result.task_id) {
                 node.status = result.status.clone();
@@ -144,7 +263,6 @@ pub async fn execute_dag<M: CompletionModel + 'static>(
             }
             results.push(result);
         } else {
-            // Multiple tasks — run concurrently
             let mut handles = Vec::with_capacity(tasks.len());
             for task in tasks {
                 let model = model.clone();
@@ -180,10 +298,29 @@ pub async fn execute_dag<M: CompletionModel + 'static>(
 
 fn build_task_prompt(task: &TaskNode) -> String {
     let mut parts = Vec::new();
+    parts.push(format!("## Task\n{}", task.title));
     parts.push(format!("## Objective\n{}", task.objective));
 
     if let Some(desc) = &task.description {
-        parts.push(format!("## Description\n{}", desc));
+        parts.push(format!("## Background\n{}", desc));
+    }
+
+    if !task.contract.touch_files.is_empty() {
+        parts.push(format!(
+            "## Touch Hints\nFiles: {}",
+            task.contract.touch_files.join(", ")
+        ));
+    }
+
+    if !task.contract.touch_symbols.is_empty() {
+        parts.push(format!(
+            "Symbols: {}",
+            task.contract.touch_symbols.join(", ")
+        ));
+    }
+
+    if !task.contract.touch_apis.is_empty() {
+        parts.push(format!("APIs: {}", task.contract.touch_apis.join(", ")));
     }
 
     if !task.acceptance_criteria.is_empty() {
@@ -191,18 +328,30 @@ fn build_task_prompt(task: &TaskNode) -> String {
             "## Acceptance Criteria\n{}",
             task.acceptance_criteria
                 .iter()
-                .map(|c| format!("- {}", c))
+                .map(|criterion| format!("- {}", criterion))
                 .collect::<Vec<_>>()
                 .join("\n")
         ));
     }
 
     if !task.scope_in.is_empty() {
-        parts.push(format!("## In Scope\n{}", task.scope_in.join(", ")));
+        parts.push(format!("## Write Scope\n{}", task.scope_in.join(", ")));
     }
 
     if !task.scope_out.is_empty() {
-        parts.push(format!("## Out of Scope\n{}", task.scope_out.join(", ")));
+        parts.push(format!("## Forbidden Scope\n{}", task.scope_out.join(", ")));
+    }
+
+    if !task.contract.expected_outputs.is_empty() {
+        parts.push(format!(
+            "## Expected Outputs\n{}",
+            task.contract
+                .expected_outputs
+                .iter()
+                .map(|output| format!("- {}", output))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
     }
 
     if !task.constraints.is_empty() {
@@ -210,7 +359,7 @@ fn build_task_prompt(task: &TaskNode) -> String {
             "## Constraints\n{}",
             task.constraints
                 .iter()
-                .map(|c| format!("- {}", c))
+                .map(|constraint| format!("- {}", constraint))
                 .collect::<Vec<_>>()
                 .join("\n")
         ));
@@ -221,9 +370,7 @@ fn build_task_prompt(task: &TaskNode) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::Path, sync::Arc};
-
-    use uuid::Uuid;
+    use std::{collections::BTreeMap, sync::Arc};
 
     use super::*;
     use crate::internal::ai::{
@@ -231,6 +378,8 @@ mod tests {
             CompletionError, CompletionRequest, CompletionResponse,
             message::{AssistantContent, Text},
         },
+        intentspec::types::*,
+        orchestrator::types::{TaskContract, TaskKind},
         tools::registry::ToolRegistry,
     };
 
@@ -258,199 +407,211 @@ mod tests {
         }
     }
 
-    fn make_task(objective: &str) -> TaskNode {
+    fn spec() -> Arc<IntentSpec> {
+        Arc::new(IntentSpec {
+            api_version: "intentspec.io/v1alpha1".into(),
+            kind: "IntentSpec".into(),
+            metadata: Metadata {
+                id: "test".into(),
+                created_at: "2025-01-01T00:00:00Z".into(),
+                created_by: CreatedBy {
+                    creator_type: CreatorType::User,
+                    id: "tester".into(),
+                    display_name: None,
+                },
+                target: Target {
+                    repo: RepoTarget {
+                        repo_type: RepoType::Local,
+                        locator: "/tmp".into(),
+                    },
+                    base_ref: "HEAD".into(),
+                    workspace_id: None,
+                    labels: BTreeMap::new(),
+                },
+            },
+            intent: Intent {
+                summary: "summary".into(),
+                problem_statement: "problem".into(),
+                change_type: ChangeType::Feature,
+                objectives: vec!["do thing".into()],
+                in_scope: vec!["src/".into()],
+                out_of_scope: vec![],
+                touch_hints: None,
+            },
+            acceptance: Acceptance {
+                success_criteria: vec!["tests pass".into()],
+                verification_plan: VerificationPlan {
+                    fast_checks: vec![],
+                    integration_checks: vec![],
+                    security_checks: vec![],
+                    release_checks: vec![],
+                },
+                quality_gates: None,
+            },
+            constraints: Constraints {
+                security: ConstraintSecurity {
+                    network_policy: NetworkPolicy::Allow,
+                    dependency_policy: DependencyPolicy::NoNew,
+                    crypto_policy: String::new(),
+                },
+                privacy: ConstraintPrivacy {
+                    data_classes_allowed: vec![DataClass::Public],
+                    redaction_required: false,
+                    retention_days: 30,
+                },
+                licensing: ConstraintLicensing {
+                    allowed_spdx: vec![],
+                    forbid_new_licenses: false,
+                },
+                platform: ConstraintPlatform {
+                    language_runtime: "rust".into(),
+                    supported_os: vec![],
+                },
+                resources: ConstraintResources {
+                    max_wall_clock_seconds: 60,
+                    max_cost_units: 10,
+                },
+            },
+            risk: Risk {
+                level: RiskLevel::Low,
+                rationale: "low".into(),
+                factors: vec![],
+                human_in_loop: HumanInLoop {
+                    required: false,
+                    min_approvers: 0,
+                },
+            },
+            evidence: EvidencePolicy {
+                strategy: EvidenceStrategy::RepoFirst,
+                trust_tiers: vec![TrustTier::Repo],
+                domain_allowlist_mode: DomainAllowlistMode::Disabled,
+                allowed_domains: vec![],
+                blocked_domains: vec![],
+                min_citations_per_decision: 1,
+            },
+            security: SecurityPolicy {
+                tool_acl: ToolAcl {
+                    allow: vec![ToolRule {
+                        tool: "*".into(),
+                        actions: vec!["*".into()],
+                        constraints: BTreeMap::new(),
+                    }],
+                    deny: vec![],
+                },
+                secrets: SecretPolicy {
+                    policy: SecretAccessPolicy::DenyAll,
+                    allowed_scopes: vec![],
+                },
+                prompt_injection: PromptInjectionPolicy {
+                    treat_retrieved_content_as_untrusted: true,
+                    enforce_output_schema: true,
+                    disallow_instruction_from_evidence: true,
+                },
+                output_handling: OutputHandlingPolicy {
+                    encoding_policy: EncodingPolicy::ContextualEscape,
+                    no_direct_eval: true,
+                },
+            },
+            execution: ExecutionPolicy {
+                retry: RetryPolicy {
+                    max_retries: 1,
+                    backoff_seconds: 0,
+                },
+                replan: ReplanPolicy { triggers: vec![] },
+                concurrency: ConcurrencyPolicy {
+                    max_parallel_tasks: 1,
+                },
+            },
+            artifacts: Artifacts {
+                required: vec![],
+                retention: ArtifactRetention { days: 30 },
+            },
+            provenance: ProvenancePolicy {
+                require_slsa_provenance: false,
+                require_sbom: false,
+                transparency_log: TransparencyLogPolicy {
+                    mode: TransparencyMode::None,
+                },
+                bindings: ProvenanceBindings {
+                    embed_intent_spec_digest: false,
+                    embed_evidence_digests: false,
+                },
+            },
+            lifecycle: Lifecycle {
+                schema_version: "1.0.0".into(),
+                status: LifecycleStatus::Active,
+                change_log: vec![],
+            },
+            libra: None,
+            extensions: BTreeMap::new(),
+        })
+    }
+
+    fn implementation_task() -> TaskNode {
         TaskNode {
-            id: Uuid::new_v4(),
-            objective: objective.into(),
-            description: None,
+            id: uuid::Uuid::new_v4(),
+            title: "Do thing".into(),
+            objective: "Do thing".into(),
+            description: Some("Implement change".into()),
+            kind: TaskKind::Implementation,
+            gate_stage: None,
+            owner_role: Some("coder".into()),
             dependencies: vec![],
-            constraints: vec![],
+            constraints: vec!["network:allow".into()],
             acceptance_criteria: vec!["tests pass".into()],
             scope_in: vec!["src/".into()],
             scope_out: vec![],
+            checks: vec![],
+            contract: TaskContract {
+                write_scope: vec!["src/".into()],
+                forbidden_scope: vec![],
+                touch_files: vec!["src/main.rs".into()],
+                touch_symbols: vec![],
+                touch_apis: vec![],
+                expected_outputs: vec!["tests pass".into()],
+            },
             status: TaskNodeStatus::Pending,
         }
     }
 
-    fn make_config(dir: &Path) -> ExecutorConfig {
-        ExecutorConfig {
+    #[tokio::test]
+    async fn test_execute_gate_task() {
+        let task = TaskNode {
+            kind: TaskKind::Gate,
+            gate_stage: Some(super::super::types::GateStage::Fast),
+            checks: vec![Check {
+                id: "ok".into(),
+                kind: CheckKind::Command,
+                command: Some("true".into()),
+                timeout_seconds: Some(10),
+                expected_exit_code: Some(0),
+                required: true,
+                artifacts_produced: vec![],
+            }],
+            ..implementation_task()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let result = execute_gate_task(&task, dir.path()).await;
+        assert_eq!(result.status, TaskNodeStatus::Completed);
+        assert!(result.gate_report.unwrap().all_required_passed);
+    }
+
+    #[tokio::test]
+    async fn test_execute_implementation_task() {
+        let model = MockModel {
+            final_text: "done".into(),
+        };
+        let registry = Arc::new(ToolRegistry::new());
+        let dir = tempfile::tempdir().unwrap();
+        let config = ExecutorConfig {
             tool_loop_config: ToolLoopConfig::default(),
             max_retries: 1,
             backoff_seconds: 0,
-            fast_checks: vec![],
-            working_dir: dir.to_path_buf(),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_execute_task_success() {
-        let model = MockModel {
-            final_text: "done".into(),
+            working_dir: dir.path().to_path_buf(),
+            spec: spec(),
         };
-        let registry = ToolRegistry::new();
-        let dir = tempfile::tempdir().unwrap();
-        let config = make_config(dir.path());
-        let task = make_task("do something");
-
-        let result = execute_task(&task, &model, &registry, &config).await;
+        let result = execute_task(&implementation_task(), &model, &registry, &config).await;
         assert_eq!(result.status, TaskNodeStatus::Completed);
         assert_eq!(result.retry_count, 0);
-    }
-
-    #[tokio::test]
-    async fn test_execute_task_with_fast_checks_pass() {
-        let model = MockModel {
-            final_text: "done".into(),
-        };
-        let registry = ToolRegistry::new();
-        let dir = tempfile::tempdir().unwrap();
-        let mut config = make_config(dir.path());
-        config.fast_checks = vec![Check {
-            id: "fc1".into(),
-            kind: crate::internal::ai::intentspec::types::CheckKind::Command,
-            command: Some("true".into()),
-            timeout_seconds: Some(10),
-            expected_exit_code: None,
-            required: true,
-            artifacts_produced: vec![],
-        }];
-
-        let task = make_task("do something");
-        let result = execute_task(&task, &model, &registry, &config).await;
-        assert_eq!(result.status, TaskNodeStatus::Completed);
-    }
-
-    #[tokio::test]
-    async fn test_execute_task_with_fast_checks_fail_then_retry() {
-        let model = MockModel {
-            final_text: "done".into(),
-        };
-        let registry = ToolRegistry::new();
-        let dir = tempfile::tempdir().unwrap();
-        let mut config = make_config(dir.path());
-        config.max_retries = 1;
-        config.fast_checks = vec![Check {
-            id: "fc1".into(),
-            kind: crate::internal::ai::intentspec::types::CheckKind::Command,
-            command: Some("false".into()),
-            timeout_seconds: Some(10),
-            expected_exit_code: None,
-            required: true,
-            artifacts_produced: vec![],
-        }];
-
-        let task = make_task("do something");
-        let result = execute_task(&task, &model, &registry, &config).await;
-        assert_eq!(result.status, TaskNodeStatus::Failed);
-        assert_eq!(result.retry_count, 2); // tried once + 1 retry + exceeded
-    }
-
-    #[tokio::test]
-    async fn test_execute_dag_ordering() {
-        let model = MockModel {
-            final_text: "done".into(),
-        };
-        let registry = Arc::new(ToolRegistry::new());
-        let dir = tempfile::tempdir().unwrap();
-        let config = make_config(dir.path());
-
-        let a = make_task("a");
-        let mut b = make_task("b");
-        b.dependencies = vec![a.id];
-
-        let mut dag = TaskDAG {
-            nodes: vec![a.clone(), b.clone()],
-            intent_spec_id: "test".into(),
-            max_parallel: 1,
-        };
-
-        let results = execute_dag(&mut dag, &model, &registry, &config).await;
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].task_id, a.id);
-        assert_eq!(results[1].task_id, b.id);
-    }
-
-    #[test]
-    fn test_build_task_prompt() {
-        let task = TaskNode {
-            id: Uuid::new_v4(),
-            objective: "Implement feature X".into(),
-            description: Some("Add new module".into()),
-            dependencies: vec![],
-            constraints: vec!["network:deny".into()],
-            acceptance_criteria: vec!["tests pass".into()],
-            scope_in: vec!["src/".into()],
-            scope_out: vec!["vendor/".into()],
-            status: TaskNodeStatus::Pending,
-        };
-        let prompt = build_task_prompt(&task);
-        assert!(prompt.contains("Implement feature X"));
-        assert!(prompt.contains("Add new module"));
-        assert!(prompt.contains("tests pass"));
-        assert!(prompt.contains("src/"));
-        assert!(prompt.contains("vendor/"));
-        assert!(prompt.contains("network:deny"));
-    }
-
-    #[tokio::test]
-    async fn test_execute_dag_parallel_independent() {
-        let model = MockModel {
-            final_text: "done".into(),
-        };
-        let registry = Arc::new(ToolRegistry::new());
-        let dir = tempfile::tempdir().unwrap();
-        let config = make_config(dir.path());
-
-        let a = make_task("a");
-        let b = make_task("b");
-        let c = make_task("c");
-
-        let mut dag = TaskDAG {
-            nodes: vec![a.clone(), b.clone(), c.clone()],
-            intent_spec_id: "test".into(),
-            max_parallel: 4,
-        };
-
-        let results = execute_dag(&mut dag, &model, &registry, &config).await;
-        assert_eq!(results.len(), 3);
-        // All should complete
-        for r in &results {
-            assert_eq!(r.status, TaskNodeStatus::Completed);
-        }
-    }
-
-    #[tokio::test]
-    async fn test_execute_dag_stops_on_failure() {
-        // Model that always produces a response, but the fast check will fail
-        let model = MockModel {
-            final_text: "done".into(),
-        };
-        let registry = Arc::new(ToolRegistry::new());
-        let dir = tempfile::tempdir().unwrap();
-        let mut config = make_config(dir.path());
-        config.max_retries = 0;
-        config.fast_checks = vec![Check {
-            id: "fail".into(),
-            kind: crate::internal::ai::intentspec::types::CheckKind::Command,
-            command: Some("false".into()),
-            timeout_seconds: Some(10),
-            expected_exit_code: None,
-            required: true,
-            artifacts_produced: vec![],
-        }];
-
-        let a = make_task("a");
-        let b = make_task("b");
-
-        let mut dag = TaskDAG {
-            nodes: vec![a.clone(), b.clone()],
-            intent_spec_id: "test".into(),
-            max_parallel: 1,
-        };
-
-        let results = execute_dag(&mut dag, &model, &registry, &config).await;
-        // First task fails, second should be skipped
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].status, TaskNodeStatus::Failed);
     }
 }

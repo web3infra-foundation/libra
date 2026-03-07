@@ -73,6 +73,8 @@ mod tests {
             gate_report: None,
             agent_output: None,
             retry_count: 0,
+            tool_calls: vec![],
+            policy_violations: vec![],
         }
     }
 

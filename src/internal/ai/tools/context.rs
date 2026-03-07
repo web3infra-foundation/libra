@@ -164,6 +164,14 @@ impl ToolOutput {
         }
     }
 
+    /// Get structured metadata attached to this output.
+    pub fn metadata(&self) -> Option<&serde_json::Value> {
+        match self {
+            ToolOutput::Function { metadata, .. } => metadata.as_ref(),
+            ToolOutput::Mcp { .. } => None,
+        }
+    }
+
     /// Check if the output indicates success.
     pub fn is_success(&self) -> bool {
         match self {

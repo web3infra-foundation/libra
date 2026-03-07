@@ -2,7 +2,9 @@ pub mod acl;
 pub mod decider;
 pub mod executor;
 pub mod gate;
+pub mod persistence;
 pub mod planner;
+pub mod policy;
 pub mod types;
 pub mod verifier;
 
@@ -20,9 +22,9 @@ use crate::internal::ai::{
 ///
 /// Phases:
 /// 0. Validate + repair IntentSpec
-/// 1. Generate task DAG from objectives
-/// 2. Execute tasks with retry
-/// 3. Run system verification
+/// 1. Compile an execution plan
+/// 2. Execute plan tasks with retry and policy enforcement
+/// 3. Build system verification report from gate tasks
 /// 4. Make decision
 pub struct Orchestrator<M: CompletionModel> {
     model: M,
@@ -57,8 +59,8 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
             }
         }
 
-        // Phase 1: Generate task DAG
-        let mut dag = planner::generate_task_dag(&spec);
+        // Phase 1: Compile execution plan
+        let mut execution_plan = planner::compile_execution_plan(&spec)?;
 
         // Phase 2: Execute tasks
         let tool_loop_config = crate::internal::ai::agent::ToolLoopConfig {
@@ -70,16 +72,20 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
             tool_loop_config,
             max_retries: spec.execution.retry.max_retries,
             backoff_seconds: spec.execution.retry.backoff_seconds,
-            fast_checks: spec.acceptance.verification_plan.fast_checks.clone(),
             working_dir: self.config.working_dir.clone(),
+            spec: Arc::new(spec.clone()),
         };
 
-        let task_results =
-            executor::execute_dag(&mut dag, &self.model, &self.registry, &executor_config).await;
+        let task_results = executor::execute_dag(
+            &mut execution_plan.dag,
+            &self.model,
+            &self.registry,
+            &executor_config,
+        )
+        .await;
 
         // Phase 3: System verification
-        let system_report =
-            verifier::run_system_verification(&spec, &self.config.working_dir).await;
+        let system_report = verifier::build_system_report(&execution_plan, &task_results);
 
         // Phase 4: Decision
         let decision = decider::make_decision(
@@ -89,11 +95,31 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
             spec.risk.human_in_loop.required,
         );
 
+        let persistence = if let Some(ref mcp_server) = self.config.mcp_server {
+            Some(
+                persistence::persist_execution(persistence::ExecutionPersistenceRequest {
+                    mcp_server,
+                    execution_plan: &execution_plan,
+                    task_results: &task_results,
+                    system_report: &system_report,
+                    decision: &decision,
+                    working_dir: &self.config.working_dir,
+                    base_commit: self.config.base_commit.as_deref(),
+                    model_name: std::any::type_name::<M>(),
+                })
+                .await?,
+            )
+        } else {
+            None
+        };
+
         Ok(OrchestratorResult {
             decision,
+            execution_plan,
             task_results,
             system_report,
             intent_spec_id: spec.metadata.id.clone(),
+            persistence,
         })
     }
 }
@@ -284,12 +310,14 @@ mod tests {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
             coder_preamble: None,
+            mcp_server: None,
         };
         let orchestrator = Orchestrator::new(model, registry, config);
         let spec = test_spec();
         let result = orchestrator.run(spec).await.unwrap();
         assert_eq!(result.decision, types::DecisionOutcome::Commit);
-        assert_eq!(result.task_results.len(), 1);
+        assert_eq!(result.task_results.len(), 5);
+        assert_eq!(result.execution_plan.dag.nodes.len(), 5);
         assert!(result.system_report.overall_passed);
     }
 
@@ -302,6 +330,7 @@ mod tests {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
             coder_preamble: None,
+            mcp_server: None,
         };
         let orchestrator = Orchestrator::new(model, registry, config);
         let mut spec = test_spec();
@@ -321,6 +350,7 @@ mod tests {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
             coder_preamble: None,
+            mcp_server: None,
         };
         let orchestrator = Orchestrator::new(model, registry, config);
         let mut spec = test_spec();

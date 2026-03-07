@@ -28,6 +28,15 @@ pub trait ToolLoopObserver: Send {
 
     fn on_tool_call_begin(&mut self, _call_id: &str, _tool_name: &str, _arguments: &Value) {}
 
+    fn on_tool_call_preflight(
+        &mut self,
+        _call_id: &str,
+        _tool_name: &str,
+        _arguments: &Value,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
     fn on_tool_call_end(
         &mut self,
         _call_id: &str,
@@ -167,6 +176,25 @@ pub async fn run_tool_loop_with_history_and_observer<M: CompletionModel, O: Tool
                     &call.function.name,
                     &call.function.arguments,
                 );
+
+                if let Err(reason) = observer.on_tool_call_preflight(
+                    &call.id,
+                    &call.function.name,
+                    &call.function.arguments,
+                ) {
+                    let blocked_result: Result<ToolOutput, String> = Err(reason.clone());
+                    observer.on_tool_call_end(&call.id, &call.function.name, &blocked_result);
+
+                    let result_json = ToolOutput::failure(reason).into_response();
+                    history.push(Message::User {
+                        content: OneOrMany::One(UserContent::ToolResult(ToolResult {
+                            id: call.id,
+                            name: call.function.name,
+                            result: result_json,
+                        })),
+                    });
+                    continue;
+                }
 
                 // Run PreToolUse hooks (may block the tool call)
                 if let Some(ref hook_runner) = config.hook_runner {

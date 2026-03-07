@@ -69,6 +69,7 @@ pub enum AppEvent {
         text: String,
         new_history: Vec<Message>,
         intent_id: Option<String>,
+        plan_id: Option<String>,
         spec_json: String,
     },
     /// Insert a history cell into the chat.

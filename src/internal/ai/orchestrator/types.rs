@@ -1,19 +1,26 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use uuid::Uuid;
+
+use crate::internal::ai::{intentspec::types::Check, mcp::server::LibraMcpServer};
 
 /// Errors that can occur during orchestration.
 #[derive(Debug, thiserror::Error)]
 pub enum OrchestratorError {
     #[error("intent spec validation failed: {0}")]
     ValidationFailed(String),
+    #[error("planning failed: {0}")]
+    PlanningFailed(String),
     #[error("task failed: {task_id} — {reason}")]
     TaskFailed { task_id: Uuid, reason: String },
     #[error("agent error: {0}")]
     AgentError(String),
     #[error("gate execution error: {0}")]
     GateExecutionError(String),
+    #[error("policy violation: {0}")]
+    PolicyViolation(String),
     #[error("config error: {0}")]
     ConfigError(String),
 }
@@ -29,13 +36,54 @@ pub enum TaskNodeStatus {
     Skipped,
 }
 
+/// High-level type of an execution task.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TaskKind {
+    Implementation,
+    Gate,
+}
+
+/// The verification stage represented by a gate task.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GateStage {
+    Fast,
+    Integration,
+    Security,
+    Release,
+}
+
+/// Contract for a compiled task.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct TaskContract {
+    #[serde(default)]
+    pub write_scope: Vec<String>,
+    #[serde(default)]
+    pub forbidden_scope: Vec<String>,
+    #[serde(default)]
+    pub touch_files: Vec<String>,
+    #[serde(default)]
+    pub touch_symbols: Vec<String>,
+    #[serde(default)]
+    pub touch_apis: Vec<String>,
+    #[serde(default)]
+    pub expected_outputs: Vec<String>,
+}
+
 /// A single task within the execution DAG.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskNode {
     pub id: Uuid,
+    pub title: String,
     pub objective: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    pub kind: TaskKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_stage: Option<GateStage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_role: Option<String>,
     #[serde(default)]
     pub dependencies: Vec<Uuid>,
     #[serde(default)]
@@ -46,7 +94,17 @@ pub struct TaskNode {
     pub scope_in: Vec<String>,
     #[serde(default)]
     pub scope_out: Vec<String>,
+    #[serde(default)]
+    pub checks: Vec<Check>,
+    #[serde(default)]
+    pub contract: TaskContract,
     pub status: TaskNodeStatus,
+}
+
+impl TaskNode {
+    pub fn is_gate(&self) -> bool {
+        self.kind == TaskKind::Gate
+    }
 }
 
 /// Directed acyclic graph of tasks to execute.
@@ -133,6 +191,64 @@ impl TaskDAG {
     }
 }
 
+/// A checkpoint in the compiled execution plan.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExecutionCheckpoint {
+    pub label: String,
+    #[serde(default)]
+    pub after_tasks: Vec<Uuid>,
+    pub reason: String,
+}
+
+/// The compiled execution plan derived from an IntentSpec.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExecutionPlan {
+    pub intent_spec_id: String,
+    pub summary: String,
+    pub dag: TaskDAG,
+    #[serde(default)]
+    pub parallel_groups: Vec<Vec<Uuid>>,
+    #[serde(default)]
+    pub checkpoints: Vec<ExecutionCheckpoint>,
+}
+
+/// A policy violation detected before or after a tool call.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PolicyViolation {
+    pub code: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+/// A summary of a tool call executed within a task.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ToolDiffRecord {
+    pub path: String,
+    pub change_type: String,
+    pub diff: String,
+}
+
+/// A summary of a tool call executed within a task.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ToolCallRecord {
+    pub tool_name: String,
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments_json: Option<Value>,
+    #[serde(default)]
+    pub paths_read: Vec<String>,
+    #[serde(default)]
+    pub paths_written: Vec<String>,
+    pub success: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub diffs: Vec<ToolDiffRecord>,
+}
+
 /// Result of executing a single verification check.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GateResult {
@@ -174,6 +290,10 @@ pub struct TaskResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_output: Option<String>,
     pub retry_count: u8,
+    #[serde(default)]
+    pub tool_calls: Vec<ToolCallRecord>,
+    #[serde(default)]
+    pub policy_violations: Vec<PolicyViolation>,
 }
 
 /// Final decision outcome for the orchestration run.
@@ -198,39 +318,78 @@ pub struct SystemReport {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OrchestratorResult {
     pub decision: DecisionOutcome,
+    pub execution_plan: ExecutionPlan,
     pub task_results: Vec<TaskResult>,
     pub system_report: SystemReport,
     pub intent_spec_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persistence: Option<PersistedExecution>,
+}
+
+/// MCP object IDs emitted during orchestrator persistence.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PersistedTaskArtifacts {
+    pub task_id: Uuid,
+    #[serde(default)]
+    pub tool_invocation_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patchset_id: Option<String>,
+    #[serde(default)]
+    pub evidence_ids: Vec<String>,
+}
+
+/// Persisted execution object chain for an orchestrator run.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PersistedExecution {
+    pub run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_id: Option<String>,
+    #[serde(default)]
+    pub tasks: Vec<PersistedTaskArtifacts>,
 }
 
 /// Configuration for the orchestrator.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct OrchestratorConfig {
     pub working_dir: PathBuf,
     pub base_commit: Option<String>,
     /// System prompt injected into each task's tool loop (e.g. coder agent prompt).
     pub coder_preamble: Option<String>,
+    /// Optional MCP server used to persist workflow objects.
+    pub mcp_server: Option<Arc<LibraMcpServer>>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn implementation_task(id: Uuid) -> TaskNode {
+        TaskNode {
+            id,
+            title: "Do thing".into(),
+            objective: "do thing".into(),
+            description: None,
+            kind: TaskKind::Implementation,
+            gate_stage: None,
+            owner_role: Some("coder".into()),
+            dependencies: vec![],
+            constraints: vec![],
+            acceptance_criteria: vec![],
+            scope_in: vec![],
+            scope_out: vec![],
+            checks: vec![],
+            contract: TaskContract::default(),
+            status: TaskNodeStatus::Pending,
+        }
+    }
+
     #[test]
     fn test_task_dag_topological_order_single() {
         let id = Uuid::new_v4();
         let dag = TaskDAG {
-            nodes: vec![TaskNode {
-                id,
-                objective: "do thing".into(),
-                description: None,
-                dependencies: vec![],
-                constraints: vec![],
-                acceptance_criteria: vec![],
-                scope_in: vec![],
-                scope_out: vec![],
-                status: TaskNodeStatus::Pending,
-            }],
+            nodes: vec![implementation_task(id)],
             intent_spec_id: "test".into(),
             max_parallel: 1,
         };
@@ -245,37 +404,17 @@ mod tests {
         let dag = TaskDAG {
             nodes: vec![
                 TaskNode {
-                    id: c,
-                    objective: "c".into(),
-                    description: None,
                     dependencies: vec![b],
-                    constraints: vec![],
-                    acceptance_criteria: vec![],
-                    scope_in: vec![],
-                    scope_out: vec![],
-                    status: TaskNodeStatus::Pending,
+                    objective: "c".into(),
+                    title: "c".into(),
+                    ..implementation_task(c)
                 },
+                implementation_task(a),
                 TaskNode {
-                    id: a,
-                    objective: "a".into(),
-                    description: None,
-                    dependencies: vec![],
-                    constraints: vec![],
-                    acceptance_criteria: vec![],
-                    scope_in: vec![],
-                    scope_out: vec![],
-                    status: TaskNodeStatus::Pending,
-                },
-                TaskNode {
-                    id: b,
-                    objective: "b".into(),
-                    description: None,
                     dependencies: vec![a],
-                    constraints: vec![],
-                    acceptance_criteria: vec![],
-                    scope_in: vec![],
-                    scope_out: vec![],
-                    status: TaskNodeStatus::Pending,
+                    objective: "b".into(),
+                    title: "b".into(),
+                    ..implementation_task(b)
                 },
             ],
             intent_spec_id: "test".into(),
@@ -290,111 +429,72 @@ mod tests {
     }
 
     #[test]
-    fn test_ready_tasks_with_deps() {
-        let a = Uuid::new_v4();
-        let b = Uuid::new_v4();
-        let dag = TaskDAG {
-            nodes: vec![
-                TaskNode {
-                    id: a,
-                    objective: "a".into(),
-                    description: None,
-                    dependencies: vec![],
-                    constraints: vec![],
-                    acceptance_criteria: vec![],
-                    scope_in: vec![],
-                    scope_out: vec![],
-                    status: TaskNodeStatus::Pending,
-                },
-                TaskNode {
-                    id: b,
-                    objective: "b".into(),
-                    description: None,
-                    dependencies: vec![a],
-                    constraints: vec![],
-                    acceptance_criteria: vec![],
-                    scope_in: vec![],
-                    scope_out: vec![],
-                    status: TaskNodeStatus::Pending,
-                },
-            ],
-            intent_spec_id: "test".into(),
-            max_parallel: 2,
-        };
-        // Only a is ready (b depends on a)
-        let ready = dag.ready_tasks();
-        assert!(ready.contains(&a));
-        assert!(!ready.contains(&b));
-    }
-
-    #[test]
-    fn test_ready_tasks_after_completion() {
+    fn test_ready_tasks_after_dependency_completion() {
         let a = Uuid::new_v4();
         let b = Uuid::new_v4();
         let mut dag = TaskDAG {
             nodes: vec![
                 TaskNode {
-                    id: a,
-                    objective: "a".into(),
-                    description: None,
-                    dependencies: vec![],
-                    constraints: vec![],
-                    acceptance_criteria: vec![],
-                    scope_in: vec![],
-                    scope_out: vec![],
                     status: TaskNodeStatus::Completed,
+                    ..implementation_task(a)
                 },
                 TaskNode {
-                    id: b,
-                    objective: "b".into(),
-                    description: None,
                     dependencies: vec![a],
-                    constraints: vec![],
-                    acceptance_criteria: vec![],
-                    scope_in: vec![],
-                    scope_out: vec![],
-                    status: TaskNodeStatus::Pending,
+                    objective: "b".into(),
+                    title: "b".into(),
+                    ..implementation_task(b)
                 },
             ],
             intent_spec_id: "test".into(),
             max_parallel: 2,
         };
         let ready = dag.ready_tasks();
-        assert!(ready.contains(&b));
-        // Mark b running, no more ready
+        assert_eq!(ready, vec![b]);
+
         dag.get_mut(b).unwrap().status = TaskNodeStatus::Running;
         assert!(dag.ready_tasks().is_empty());
     }
 
     #[test]
-    fn test_serde_roundtrip_task_dag() {
+    fn test_serde_roundtrip_execution_plan() {
         let id = Uuid::new_v4();
-        let dag = TaskDAG {
-            nodes: vec![TaskNode {
-                id,
-                objective: "test".into(),
-                description: Some("desc".into()),
-                dependencies: vec![],
-                constraints: vec!["no-network".into()],
-                acceptance_criteria: vec!["tests pass".into()],
-                scope_in: vec!["src/".into()],
-                scope_out: vec!["vendor/".into()],
-                status: TaskNodeStatus::Pending,
-            }],
+        let plan = ExecutionPlan {
             intent_spec_id: "spec-123".into(),
-            max_parallel: 2,
+            summary: "summary".into(),
+            dag: TaskDAG {
+                nodes: vec![implementation_task(id)],
+                intent_spec_id: "spec-123".into(),
+                max_parallel: 2,
+            },
+            parallel_groups: vec![vec![id]],
+            checkpoints: vec![ExecutionCheckpoint {
+                label: "after-fast".into(),
+                after_tasks: vec![id],
+                reason: "gate boundary".into(),
+            }],
         };
-        let json = serde_json::to_string(&dag).unwrap();
-        let back: TaskDAG = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.nodes.len(), 1);
-        assert_eq!(back.nodes[0].id, id);
-        assert_eq!(back.intent_spec_id, "spec-123");
+        let json = serde_json::to_string(&plan).unwrap();
+        let back: ExecutionPlan = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.parallel_groups.len(), 1);
+        assert_eq!(back.dag.nodes[0].id, id);
     }
 
     #[test]
     fn test_serde_roundtrip_orchestrator_result() {
+        let id = Uuid::new_v4();
         let result = OrchestratorResult {
             decision: DecisionOutcome::Commit,
+            execution_plan: ExecutionPlan {
+                intent_spec_id: "test".into(),
+                summary: "summary".into(),
+                dag: TaskDAG {
+                    nodes: vec![implementation_task(id)],
+                    intent_spec_id: "test".into(),
+                    max_parallel: 1,
+                },
+                parallel_groups: vec![vec![id]],
+                checkpoints: vec![],
+            },
             task_results: vec![],
             system_report: SystemReport {
                 integration: GateReport::empty(),
@@ -403,9 +503,22 @@ mod tests {
                 overall_passed: true,
             },
             intent_spec_id: "test".into(),
+            persistence: Some(PersistedExecution {
+                run_id: "run-1".into(),
+                provenance_id: Some("prov-1".into()),
+                decision_id: Some("decision-1".into()),
+                tasks: vec![PersistedTaskArtifacts {
+                    task_id: id,
+                    tool_invocation_ids: vec!["inv-1".into()],
+                    patchset_id: Some("patch-1".into()),
+                    evidence_ids: vec!["ev-1".into()],
+                }],
+            }),
         };
         let json = serde_json::to_string(&result).unwrap();
         let back: OrchestratorResult = serde_json::from_str(&json).unwrap();
         assert_eq!(back.decision, DecisionOutcome::Commit);
+        assert_eq!(back.execution_plan.dag.nodes.len(), 1);
+        assert_eq!(back.persistence.unwrap().tasks.len(), 1);
     }
 }

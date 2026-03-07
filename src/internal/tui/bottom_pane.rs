@@ -887,6 +887,12 @@ fn gradient_line(text: &str, colors: &[Color], phase: usize, bold: bool) -> Line
     Line::from(spans)
 }
 
+impl Default for BottomPane {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use ratatui::{buffer::Buffer, layout::Rect};
@@ -925,11 +931,5 @@ mod tests {
         assert!(bottom_of_box.contains("╰"));
         assert!(status.contains("Ready"));
         assert!(!status.contains("Enter: Send"));
-    }
-}
-
-impl Default for BottomPane {
-    fn default() -> Self {
-        Self::new()
     }
 }
