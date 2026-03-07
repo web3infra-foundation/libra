@@ -11,26 +11,41 @@ use git_internal::internal::object::{
     types::ActorRef,
 };
 use libra::{
-    internal::ai::{
-        history::HistoryManager,
-        mcp::{
-            resource::{CreateTaskParams, ListTasksParams},
-            server::LibraMcpServer,
+    internal::{
+        ai::{
+            history::HistoryManager,
+            mcp::{
+                resource::{CreateTaskParams, ListTasksParams},
+                server::LibraMcpServer,
+            },
         },
+        model::reference,
     },
     utils::{storage::local::LocalStorage, storage_ext::StorageExt},
 };
 use rmcp::{ServerHandler, handler::server::wrapper::Parameters};
+use sea_orm::{ConnectionTrait, Database, Schema};
 use tempfile::tempdir;
 use uuid::Uuid;
+
+async fn setup_test_db() -> sea_orm::DatabaseConnection {
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    let builder = db.get_database_backend();
+    let schema = Schema::new(builder);
+    let stmt = schema.create_table_from_entity(reference::Entity);
+    db.execute(builder.build(&stmt)).await.unwrap();
+    db
+}
 
 #[tokio::test]
 async fn test_mcp_integration_server_info() {
     let temp_dir = tempdir().unwrap();
     let storage = Arc::new(LocalStorage::new(temp_dir.path().join("objects")));
+    let db_conn = Arc::new(setup_test_db().await);
     let history_manager = Arc::new(HistoryManager::new(
         storage.clone(),
         temp_dir.path().to_path_buf(),
+        db_conn,
     ));
     let server = LibraMcpServer::new(Some(history_manager), Some(storage));
 
@@ -42,9 +57,11 @@ async fn test_mcp_integration_server_info() {
 async fn test_mcp_integration_list_resources() {
     let temp_dir = tempdir().unwrap();
     let storage = Arc::new(LocalStorage::new(temp_dir.path().join("objects")));
+    let db_conn = Arc::new(setup_test_db().await);
     let history_manager = Arc::new(HistoryManager::new(
         storage.clone(),
         temp_dir.path().to_path_buf(),
+        db_conn,
     ));
     let server = LibraMcpServer::new(Some(history_manager), Some(storage));
 
@@ -58,9 +75,11 @@ async fn test_mcp_integration_list_resources() {
 async fn test_mcp_integration_create_and_read_task() {
     let temp_dir = tempdir().unwrap();
     let storage = Arc::new(LocalStorage::new(temp_dir.path().join("objects")));
+    let db_conn = Arc::new(setup_test_db().await);
     let history_manager = Arc::new(HistoryManager::new(
         storage.clone(),
         temp_dir.path().to_path_buf(),
+        db_conn,
     ));
     let server = LibraMcpServer::new(Some(history_manager), Some(storage));
 
@@ -134,7 +153,7 @@ async fn test_mcp_integration_create_and_read_task() {
 }
 
 /// Helper: create a server with storage and history, returning all components.
-fn setup_server() -> (
+async fn setup_server() -> (
     LibraMcpServer,
     Arc<LocalStorage>,
     Arc<HistoryManager>,
@@ -142,9 +161,11 @@ fn setup_server() -> (
 ) {
     let temp_dir = tempdir().unwrap();
     let storage = Arc::new(LocalStorage::new(temp_dir.path().join("objects")));
+    let db_conn = Arc::new(setup_test_db().await);
     let history_manager = Arc::new(HistoryManager::new(
         storage.clone(),
         temp_dir.path().to_path_buf(),
+        db_conn,
     ));
     let server = LibraMcpServer::new(Some(history_manager.clone()), Some(storage.clone()));
     (server, storage, history_manager, temp_dir)
@@ -152,7 +173,7 @@ fn setup_server() -> (
 
 #[tokio::test]
 async fn test_history_latest_returns_real_hash() {
-    let (server, storage, history_manager, _temp_dir) = setup_server();
+    let (server, storage, history_manager, _temp_dir) = setup_server().await;
 
     // Before any history: should return "no history"
     let contents = server
@@ -187,7 +208,7 @@ async fn test_history_latest_returns_real_hash() {
 
 #[tokio::test]
 async fn test_context_active_no_active() {
-    let (server, _, _, _temp_dir) = setup_server();
+    let (server, _, _, _temp_dir) = setup_server().await;
 
     let contents = server
         .read_resource_impl("libra://context/active")
@@ -201,7 +222,7 @@ async fn test_context_active_no_active() {
 
 #[tokio::test]
 async fn test_list_context_snapshots_with_summary() {
-    let (server, storage, history_manager, _temp_dir) = setup_server();
+    let (server, storage, history_manager, _temp_dir) = setup_server().await;
     let actor = ActorRef::human("tester").unwrap();
     let _base = "a".repeat(64);
 
@@ -224,7 +245,7 @@ async fn test_list_context_snapshots_with_summary() {
 
 #[tokio::test]
 async fn test_list_plans_with_summary() {
-    let (server, storage, history_manager, _temp_dir) = setup_server();
+    let (server, storage, history_manager, _temp_dir) = setup_server().await;
     let actor = ActorRef::human("tester").unwrap();
     let _run_id = Uuid::new_v4();
 
@@ -247,7 +268,7 @@ async fn test_list_plans_with_summary() {
 
 #[tokio::test]
 async fn test_list_patchsets_with_summary() {
-    let (server, storage, history_manager, _temp_dir) = setup_server();
+    let (server, storage, history_manager, _temp_dir) = setup_server().await;
     let actor = ActorRef::human("tester").unwrap();
     let run_id = Uuid::new_v4();
     let base = "b".repeat(64);
@@ -271,7 +292,7 @@ async fn test_list_patchsets_with_summary() {
 
 #[tokio::test]
 async fn test_list_evidences_with_summary() {
-    let (server, storage, history_manager, _temp_dir) = setup_server();
+    let (server, storage, history_manager, _temp_dir) = setup_server().await;
     let actor = ActorRef::human("tester").unwrap();
     let run_id = Uuid::new_v4();
 
@@ -296,7 +317,7 @@ async fn test_list_evidences_with_summary() {
 
 #[tokio::test]
 async fn test_list_tool_invocations_with_summary() {
-    let (server, storage, history_manager, _temp_dir) = setup_server();
+    let (server, storage, history_manager, _temp_dir) = setup_server().await;
     let actor = ActorRef::human("tester").unwrap();
     let run_id = Uuid::new_v4();
 
@@ -320,7 +341,7 @@ async fn test_list_tool_invocations_with_summary() {
 
 #[tokio::test]
 async fn test_list_provenances_with_summary() {
-    let (server, storage, history_manager, _temp_dir) = setup_server();
+    let (server, storage, history_manager, _temp_dir) = setup_server().await;
     let actor = ActorRef::human("tester").unwrap();
     let run_id = Uuid::new_v4();
 
@@ -341,7 +362,7 @@ async fn test_list_provenances_with_summary() {
 
 #[tokio::test]
 async fn test_list_decisions_with_summary() {
-    let (server, storage, history_manager, _temp_dir) = setup_server();
+    let (server, storage, history_manager, _temp_dir) = setup_server().await;
     let actor = ActorRef::human("tester").unwrap();
     let run_id = Uuid::new_v4();
 
@@ -364,7 +385,7 @@ async fn test_list_decisions_with_summary() {
 /// Test that explicit actor_kind/actor_id params override the MCP default.
 #[tokio::test]
 async fn test_create_task_with_explicit_human_actor() {
-    let (server, _storage, _history_manager, _temp_dir) = setup_server();
+    let (server, _storage, _history_manager, _temp_dir) = setup_server().await;
 
     let params = CreateTaskParams {
         title: "Human-authored task".to_string(),
@@ -415,7 +436,7 @@ async fn test_create_task_with_explicit_human_actor() {
 /// Test creating a task with agent actor kind.
 #[tokio::test]
 async fn test_create_task_with_agent_actor() {
-    let (server, _storage, _history_manager, _temp_dir) = setup_server();
+    let (server, _storage, _history_manager, _temp_dir) = setup_server().await;
 
     let params = CreateTaskParams {
         title: "Agent-created task".to_string(),
@@ -444,7 +465,7 @@ async fn test_create_task_with_agent_actor() {
 /// Test that omitting actor_kind/actor_id defaults to mcp_client.
 #[tokio::test]
 async fn test_create_task_default_actor_is_mcp() {
-    let (server, _storage, _history_manager, _temp_dir) = setup_server();
+    let (server, _storage, _history_manager, _temp_dir) = setup_server().await;
 
     let params = CreateTaskParams {
         title: "Default actor task".to_string(),

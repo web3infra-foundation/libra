@@ -1464,7 +1464,13 @@ async fn rebase_worktree_guard(
     new_index: &git_internal::internal::index::Index,
     action: &str,
 ) -> bool {
-    let unstaged = status::changes_to_be_staged_with_policy(IgnorePolicy::Respect);
+    let unstaged = match status::changes_to_be_staged_with_policy(IgnorePolicy::Respect) {
+        Ok(c) => c,
+        Err(err) => {
+            eprintln!("fatal: failed to determine working tree status: {err}");
+            return false;
+        }
+    };
     if !unstaged.modified.is_empty() || !unstaged.deleted.is_empty() {
         status::execute(status::StatusArgs::default()).await;
         eprintln!("fatal: unstaged changes, can't {action}");

@@ -295,7 +295,8 @@ pub async fn execute(args: PushArgs) {
     }
     let (_, pkt_line) = read_pkt_line(&mut data);
     if !pkt_line.starts_with("ok".as_ref()) {
-        cli_error!(pkt_line, "fatal: ref update failed");
+        let detail = String::from_utf8_lossy(&pkt_line).trim().to_string();
+        cli_error!(detail, "fatal: ref update failed");
         return;
     }
     let (len, _) = read_pkt_line(&mut data);

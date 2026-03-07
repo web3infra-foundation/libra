@@ -22,7 +22,7 @@ use crate::{
     },
 };
 
-const DEFAULT_BRANCH: &str = "master";
+const DEFAULT_BRANCH: &str = "main";
 
 // NOTE: `src/command/init.rs` lines 3-20 are a protected merge-conflict block in this workspace.
 // The imports inside that block must stay as-is. To avoid `unused_imports` warnings without
@@ -490,7 +490,7 @@ pub async fn init(args: InitArgs) -> Result<(), InitError> {
     } else {
         cur_dir.join(ROOT_DIR)
     };
-    // check if format is supported,Now SHA-1 and SHA-256 are supported.
+    // Check if format is supported. Currently, SHA-1 and SHA-256 are supported.
     let object_format_value = args
         .object_format
         .as_ref()
@@ -634,7 +634,8 @@ pub async fn init(args: InitArgs) -> Result<(), InitError> {
     // Validate branch name according to the selected ref format
     validate_branch_name(&initial_branch_name, ref_format_mode)?;
 
-    // Create HEAD (store the branch name as before; ref format stored in config)
+    // Initialize HEAD reference pointing to the initial branch.
+    // The branch name is stored in the 'name' field.
     reference::ActiveModel {
         name: Set(Some(initial_branch_name.clone())),
         kind: Set(reference::ConfigKind::Head),
@@ -643,23 +644,19 @@ pub async fn init(args: InitArgs) -> Result<(), InitError> {
     .insert(&conn)
     .await?;
 
+    // Initialize 'intent' branch as an unborn branch (placeholder)
+    reference::ActiveModel {
+        name: Set(Some("intent".to_owned())),
+        kind: Set(reference::ConfigKind::Branch),
+        commit: Set(None), // Unborn
+        remote: Set(None),
+        ..Default::default()
+    }
+    .insert(&conn)
+    .await?;
+
     // Set .libra as hidden
     set_dir_hidden(root_dir.to_str().unwrap())?;
-
-    // Initialize the AI history orphan branch (refs/libra/intent) so it exists
-    // in parallel with the code branch from the very start.
-    // This also acts as a GC root — objects reachable from this ref will
-    // not be garbage-collected.
-    {
-        use crate::{internal::ai::history::HistoryManager, utils::storage::local::LocalStorage};
-
-        let objects_dir = root_dir.join("objects");
-        let storage = std::sync::Arc::new(LocalStorage::new(objects_dir));
-        let ai_history = HistoryManager::new(storage, root_dir.clone());
-        if let Err(e) = ai_history.init_branch().await {
-            cli_error!(e, "warning: failed to initialize AI history branch");
-        }
-    }
 
     // Apply shared permissions if requested
     if let Some(shared_mode) = &args.shared {

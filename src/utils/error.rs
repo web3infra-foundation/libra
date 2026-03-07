@@ -1,98 +1,258 @@
-//! User-facing error output utilities.
+//! User-facing CLI error rendering utilities.
 //!
-//! Provides the [`cli_error!`] macro that conditionally includes internal
-//! error details based on the build profile:
-//!
-//! - **Debug** builds (`cargo build`): includes the `Debug` representation
-//!   of the error so developers can see the full cause chain.
-//! - **Release** builds (`cargo build --release`): shows only the
-//!   user-friendly message, with no internal implementation details.
-//!
-//! # Usage
-//!
-//! ```ignore
-//! // Pattern A – error *is* the message (Display vs Debug):
-//! //   Release → "fatal: the repository is already initialized at '...'"
-//! //   Debug   → "fatal: Io(Custom { kind: AlreadyExists, … })"
-//! cli_error!("fatal" => e);
-//!
-//! // Pattern B – fixed message with hidden error cause (error first):
-//! //   Release → "fatal: failed to load commit"
-//! //   Debug   → "fatal: failed to load commit: InvalidCommitObject"
-//! cli_error!(e, "fatal: failed to load commit");
-//! cli_error!(e, "fatal: invalid url '{}'", url);
-//! ```
+//! The CLI uses [`CliError`] as the single user-visible error type at the
+//! process boundary. Domain errors inside commands should be mapped into
+//! [`CliError`] with an explicit exit code and hint set instead of printing raw
+//! internal causes to stderr.
 
-/// Print a user-facing error to stderr with build-profile–aware detail.
+use std::fmt;
+
+/// Shared CLI result type.
+pub type CliResult<T = ()> = Result<T, CliError>;
+
+/// High-level CLI error classes used to decide prefixes and exit codes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CliErrorKind {
+    UnknownCommand,
+    ParseUsage,
+    CommandUsage,
+    Fatal,
+    Failure,
+}
+
+/// Prefix level used for rendered messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorLevel {
+    Fatal,
+    Error,
+    Warning,
+}
+
+/// Structured hint text rendered after the main error line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hint(String);
+
+impl Hint {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self(text.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for Hint {
+    fn from(value: &str) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<String> for Hint {
+    fn from(value: String) -> Self {
+        Self::new(value)
+    }
+}
+
+/// User-facing CLI error with explicit rendering and exit semantics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CliError {
+    kind: CliErrorKind,
+    message: String,
+    hints: Vec<Hint>,
+    usage: Option<String>,
+}
+
+impl CliError {
+    pub fn unknown_command(message: impl Into<String>) -> Self {
+        Self {
+            kind: CliErrorKind::UnknownCommand,
+            message: message.into(),
+            hints: Vec::new(),
+            usage: None,
+        }
+    }
+
+    pub fn parse_usage(message: impl Into<String>) -> Self {
+        Self {
+            kind: CliErrorKind::ParseUsage,
+            message: message.into(),
+            hints: Vec::new(),
+            usage: None,
+        }
+    }
+
+    pub fn command_usage(message: impl Into<String>) -> Self {
+        Self {
+            kind: CliErrorKind::CommandUsage,
+            message: message.into(),
+            hints: Vec::new(),
+            usage: None,
+        }
+    }
+
+    pub fn fatal(message: impl Into<String>) -> Self {
+        Self {
+            kind: CliErrorKind::Fatal,
+            message: message.into(),
+            hints: Vec::new(),
+            usage: None,
+        }
+    }
+
+    pub fn failure(message: impl Into<String>) -> Self {
+        Self {
+            kind: CliErrorKind::Failure,
+            message: message.into(),
+            hints: Vec::new(),
+            usage: None,
+        }
+    }
+
+    pub fn kind(&self) -> CliErrorKind {
+        self.kind
+    }
+
+    pub fn level(&self) -> Option<ErrorLevel> {
+        match self.kind {
+            CliErrorKind::Fatal => Some(ErrorLevel::Fatal),
+            CliErrorKind::ParseUsage | CliErrorKind::CommandUsage | CliErrorKind::Failure => {
+                Some(ErrorLevel::Error)
+            }
+            CliErrorKind::UnknownCommand => None,
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub fn usage(&self) -> Option<&str> {
+        self.usage.as_deref()
+    }
+
+    pub fn hints(&self) -> &[Hint] {
+        &self.hints
+    }
+
+    pub fn with_hint(mut self, hint: impl Into<Hint>) -> Self {
+        self.hints.push(hint.into());
+        self
+    }
+
+    pub fn with_usage(mut self, usage: impl Into<String>) -> Self {
+        let usage = usage.into();
+        if !usage.trim().is_empty() {
+            self.usage = Some(usage);
+        }
+        self
+    }
+
+    pub fn exit_code(&self) -> i32 {
+        match self.kind {
+            CliErrorKind::UnknownCommand => 1,
+            CliErrorKind::ParseUsage => 2,
+            CliErrorKind::CommandUsage => 129,
+            CliErrorKind::Fatal => 128,
+            CliErrorKind::Failure => 1,
+        }
+    }
+
+    pub fn render(&self) -> String {
+        let mut lines = Vec::new();
+        match self.kind {
+            CliErrorKind::UnknownCommand => lines.push(self.message.clone()),
+            CliErrorKind::ParseUsage | CliErrorKind::CommandUsage | CliErrorKind::Failure => {
+                lines.push(format!("error: {}", self.message));
+            }
+            CliErrorKind::Fatal => lines.push(format!("fatal: {}", self.message)),
+        }
+
+        if let Some(usage) = &self.usage
+            && !usage.trim().is_empty()
+        {
+            lines.push(usage.trim_end().to_string());
+        }
+
+        for hint in &self.hints {
+            lines.extend(render_hint(hint.as_str()));
+        }
+
+        lines.join("\n")
+    }
+}
+
+fn render_hint(text: &str) -> Vec<String> {
+    text.lines().map(|line| format!("hint: {}", line)).collect()
+}
+
+impl fmt::Display for CliError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.render())
+    }
+}
+
+impl std::error::Error for CliError {}
+
+/// Print a user-facing error to stderr.
 ///
-/// See the [module-level documentation](self) for examples.
+/// New command code should prefer returning [`CliError`] instead of printing
+/// directly. This macro remains for legacy command paths during migration.
 #[macro_export]
 macro_rules! cli_error {
-    // ── Pattern A ──────────────────────────────────────────────────
-    // The error's own message IS the user-facing text.
-    //   Release  →  eprintln!("{prefix}: {e}")       (Display)
-    //   Debug    →  eprintln!("{prefix}: {e:?}")      (Debug)
-    //
-    // NOTE: In debug builds the output uses `{:?}` (Debug), not `{}`
-    // (Display), so you will see the Rust struct representation rather
-    // than the human-readable message. This is intentional — it surfaces
-    // the full cause chain for developers.
     ($prefix:expr => $err:expr) => {{
-        #[cfg(debug_assertions)]
-        eprintln!("{}: {:?}", $prefix, $err);
-        #[cfg(not(debug_assertions))]
         eprintln!("{}: {}", $prefix, $err);
     }};
-
-    // ── Pattern B ──────────────────────────────────────────────────
-    // Error cause first, then a human-readable message.
-    // The cause is appended only in debug builds.
-    //   Release  →  eprintln!(msg, args…)
-    //   Debug    →  eprint!(msg, args…) + eprintln!(": {:?}", err)
     ($err:expr, $($arg:tt)+) => {{
-        #[cfg(debug_assertions)]
-        {
-            eprint!($($arg)+);
-            eprintln!(": {:?}", $err);
-        }
-        #[cfg(not(debug_assertions))]
-        {
-            let _ = &$err;
-            eprintln!($($arg)+);
-        }
+        eprint!($($arg)+);
+        eprintln!(": {}", $err);
     }};
 }
 
 #[cfg(test)]
 mod tests {
-    use std::io;
+    use super::{CliError, CliErrorKind};
 
-    /// Verify Pattern A compiles with a std::io::Error (Display + Debug).
     #[test]
-    fn pattern_a_compiles_with_io_error() {
-        let err = io::Error::new(io::ErrorKind::NotFound, "gone");
-        cli_error!("fatal" => err);
+    fn fatal_render_uses_git_style_prefix() {
+        let rendered = CliError::fatal("failed to open index").render();
+        assert_eq!(rendered, "fatal: failed to open index");
     }
 
-    /// Verify Pattern B compiles with a plain message.
     #[test]
-    fn pattern_b_compiles_with_message() {
-        let err = io::Error::new(io::ErrorKind::PermissionDenied, "no access");
-        cli_error!(err, "fatal: failed to open file");
+    fn parse_usage_render_includes_usage_and_hints() {
+        let rendered = CliError::parse_usage("unexpected argument '--bad'")
+            .with_usage("Usage: libra add [OPTIONS] [PATHSPEC]...")
+            .with_hint("use '--help' to see available options.")
+            .render();
+        assert_eq!(
+            rendered,
+            "error: unexpected argument '--bad'\nUsage: libra add [OPTIONS] [PATHSPEC]...\nhint: use '--help' to see available options."
+        );
     }
 
-    /// Verify Pattern B compiles with format arguments.
     #[test]
-    fn pattern_b_compiles_with_format_args() {
-        let err = io::Error::new(io::ErrorKind::InvalidInput, "bad path");
-        let path = "/tmp/test";
-        cli_error!(err, "fatal: cannot read '{}'", path);
+    fn multiline_hint_prefixes_every_line() {
+        let rendered = CliError::failure("name and email are not configured")
+            .with_hint(
+                "to configure, run:\n  libra config --global user.name \"Some One\"\n  libra config --global user.email \"someone@example.com\"",
+            )
+            .render();
+        assert_eq!(
+            rendered,
+            "error: name and email are not configured\nhint: to configure, run:\nhint:   libra config --global user.name \"Some One\"\nhint:   libra config --global user.email \"someone@example.com\""
+        );
     }
 
-    /// Verify Pattern B compiles with non-error types (e.g. String).
     #[test]
-    fn pattern_b_compiles_with_string() {
-        let detail = String::from("ng refs/heads/main non-fast-forward");
-        cli_error!(detail, "fatal: ref update failed");
+    fn unknown_command_has_no_error_prefix() {
+        let err =
+            CliError::unknown_command("libra: 'wat' is not a libra command. See 'libra --help'.");
+        assert_eq!(err.kind(), CliErrorKind::UnknownCommand);
+        assert_eq!(
+            err.render(),
+            "libra: 'wat' is not a libra command. See 'libra --help'."
+        );
+        assert_eq!(err.exit_code(), 1);
     }
 }

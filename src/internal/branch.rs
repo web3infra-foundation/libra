@@ -9,6 +9,13 @@ use sea_orm::{
 
 use crate::internal::{db::get_db_conn_instance, model::reference};
 
+pub const DEFAULT_BRANCH: &str = "main";
+pub const INTENT_BRANCH: &str = "intent";
+
+pub fn is_locked_branch(name: &str) -> bool {
+    name == DEFAULT_BRANCH || name == INTENT_BRANCH
+}
+
 #[derive(Debug)]
 pub struct Branch {
     pub name: String,
@@ -77,10 +84,14 @@ impl Branch {
 
         branches
             .iter()
-            .map(|branch| Branch {
-                name: branch.name.as_ref().unwrap().clone(),
-                commit: ObjectHash::from_str(branch.commit.as_ref().unwrap()).unwrap(),
-                remote: branch.remote.clone(),
+            .filter_map(|branch| {
+                // Skip branches with no commit (unborn/placeholder)
+                let commit_str = branch.commit.as_ref()?;
+                Some(Branch {
+                    name: branch.name.as_ref().unwrap().clone(),
+                    commit: ObjectHash::from_str(commit_str).unwrap(),
+                    remote: branch.remote.clone(),
+                })
             })
             .collect()
     }
@@ -117,11 +128,15 @@ impl Branch {
     {
         let branch = query_reference_with_conn(db, branch_name, remote).await;
         match branch {
-            Some(branch) => Some(Branch {
-                name: branch.name.as_ref().unwrap().clone(),
-                commit: ObjectHash::from_str(branch.commit.as_ref().unwrap()).unwrap(),
-                remote: branch.remote.clone(),
-            }),
+            Some(branch) => {
+                // Return None if commit is None (unborn/placeholder)
+                let commit_str = branch.commit.as_ref()?;
+                Some(Branch {
+                    name: branch.name.as_ref().unwrap().clone(),
+                    commit: ObjectHash::from_str(commit_str).unwrap(),
+                    remote: branch.remote.clone(),
+                })
+            }
             None => None,
         }
     }

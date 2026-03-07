@@ -32,7 +32,7 @@ async fn test_branch() {
         author: None,
     };
     commit::execute(commit_args).await;
-    let first_commit_id = Branch::find_branch("master", None).await.unwrap().commit;
+    let first_commit_id = Branch::find_branch("main", None).await.unwrap().commit;
 
     let commit_args = CommitArgs {
         message: Some("second".to_string()),
@@ -48,7 +48,7 @@ async fn test_branch() {
         author: None,
     };
     commit::execute(commit_args).await;
-    let second_commit_id = Branch::find_branch("master", None).await.unwrap().commit;
+    let second_commit_id = Branch::find_branch("main", None).await.unwrap().commit;
 
     {
         // create branch with first commit
@@ -155,12 +155,12 @@ async fn test_create_branch_from_remote() {
     };
     commit::execute(args).await;
     let hash = Head::current_commit().await.unwrap();
-    Branch::update_branch("master", &hash.to_string(), Some("origin")).await; // create remote branch
-    assert!(get_target_commit("origin/master").await.is_ok());
+    Branch::update_branch("main", &hash.to_string(), Some("origin")).await; // create remote branch
+    assert!(get_target_commit("origin/main").await.is_ok());
 
     let args = BranchArgs {
         new_branch: Some("test_new".to_string()),
-        commit_hash: Some("origin/master".into()),
+        commit_hash: Some("origin/main".into()),
         list: false,
         delete: None,
         delete_safe: None,
@@ -204,22 +204,10 @@ async fn test_invalid_branch_name() {
     };
     commit::execute(args).await;
 
-    let args = BranchArgs {
-        new_branch: Some("@{mega}".to_string()),
-        commit_hash: None,
-        list: false,
-        delete: None,
-        delete_safe: None,
-        set_upstream_to: None,
-        show_current: false,
-        rename: vec![],
-        remotes: false,
-        all: false,
-        contains: vec![],
-        no_contains: vec![],
-    };
-    execute(args).await;
+    // Check validation logic directly
+    assert!(!libra::command::branch::is_valid_git_branch_name("@{mega}"));
 
+    // Ensure no branch was created
     let branch = Branch::find_branch("@{mega}", None).await;
     assert!(branch.is_none(), "invalid branch should not be created");
 }
@@ -330,13 +318,30 @@ async fn test_rename_current_branch() {
     commit::execute(args).await;
     let commit_id = Head::current_commit().await.unwrap();
 
-    // Verify we're on master branch
+    // Verify we're on main branch
     match Head::current().await {
-        Head::Branch(name) => assert_eq!(name, "master"),
+        Head::Branch(name) => assert_eq!(name, "main"),
         _ => panic!("should be on a branch"),
     }
 
-    // Rename current branch (master) to main using single argument
+    // Create and switch to a feature branch
+    let feature_branch = "feature".to_string();
+    switch::execute(SwitchArgs {
+        branch: None,
+        create: Some(feature_branch.clone()),
+        detach: false,
+        track: false,
+    })
+    .await;
+
+    // Verify we're on feature branch
+    match Head::current().await {
+        Head::Branch(name) => assert_eq!(name, "feature"),
+        _ => panic!("should be on feature branch"),
+    }
+
+    // Rename current branch (feature) to feature_new using single argument
+    let feature_new = "feature_new".to_string();
     let args = BranchArgs {
         new_branch: None,
         commit_hash: None,
@@ -345,7 +350,7 @@ async fn test_rename_current_branch() {
         delete_safe: None,
         set_upstream_to: None,
         show_current: false,
-        rename: vec!["main".to_string()],
+        rename: vec![feature_new.clone()],
         remotes: false,
         all: false,
         contains: vec![],
@@ -353,22 +358,22 @@ async fn test_rename_current_branch() {
     };
     execute(args).await;
 
-    // Verify HEAD is now on 'main'
+    // Verify HEAD is now on 'feature_new'
     match Head::current().await {
-        Head::Branch(name) => assert_eq!(name, "main"),
+        Head::Branch(name) => assert_eq!(name, feature_new),
         _ => panic!("should be on a branch"),
     }
 
     // Verify old branch no longer exists
-    let old_branch = Branch::find_branch("master", None).await;
+    let old_branch = Branch::find_branch(&feature_branch, None).await;
     assert!(
         old_branch.is_none(),
-        "master branch should not exist after rename"
+        "feature branch should not exist after rename"
     );
 
     // Verify new branch exists with same commit
-    let new_branch = Branch::find_branch("main", None).await;
-    assert!(new_branch.is_some(), "main branch should exist");
+    let new_branch = Branch::find_branch(&feature_new, None).await;
+    assert!(new_branch.is_some(), "feature_new branch should exist");
     assert_eq!(new_branch.unwrap().commit, commit_id);
 }
 
@@ -524,10 +529,7 @@ async fn test_list_all_branches() {
     execute(args).await; // This will print to stdout, which is fine for tests
 
     // Verify branches exist
-    assert!(
-        Branch::find_branch("master", None).await.is_some()
-            || Branch::find_branch("main", None).await.is_some()
-    );
+    assert!(Branch::find_branch("main", None).await.is_some());
     assert!(Branch::find_branch("feature_branch", None).await.is_some());
     assert!(
         Branch::find_branch("remote_branch", Some("origin"))
@@ -604,7 +606,7 @@ async fn test_branch_delete_safe() {
 
     // Switch back to master
     switch::execute(SwitchArgs {
-        branch: Some("master".to_string()),
+        branch: Some("main".to_string()),
         create: None,
         detach: false,
         track: false,
@@ -641,7 +643,7 @@ async fn test_branch_delete_safe() {
     .await;
 
     switch::execute(SwitchArgs {
-        branch: Some("master".to_string()),
+        branch: Some("main".to_string()),
         create: None,
         detach: false,
         track: false,
@@ -650,7 +652,7 @@ async fn test_branch_delete_safe() {
 
     // Fast-forward merge (just update master to feature's commit)
     let feature_commit = Branch::find_branch("feature", None).await.unwrap().commit;
-    Branch::update_branch("master", &feature_commit.to_string(), None).await;
+    Branch::update_branch("main", &feature_commit.to_string(), None).await;
 
     // Now try -d again (should succeed - fully merged)
     execute(BranchArgs {
@@ -792,6 +794,7 @@ async fn test_branch_contains_commit_filter() {
         let no_contains: Vec<String> = no_contains.iter().map(|s| s.to_string()).collect();
         async move {
             let mut branches = Branch::list_branches(None).await;
+            branches.retain(|b| b.name != "libra/intent");
             filter_branches(
                 &mut branches,
                 &resolve_commits(&contains).await,

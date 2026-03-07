@@ -3,8 +3,10 @@
 pub mod add;
 pub mod blame;
 pub mod branch;
+pub mod cat_file;
 pub mod checkout;
 pub mod cherry_pick;
+pub mod claude_code;
 pub mod clean;
 pub mod clone;
 pub mod cloud;

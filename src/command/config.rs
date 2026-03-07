@@ -1,6 +1,6 @@
 //! Config command for reading and writing settings across scopes, supporting key/value parsing and remote/branch associations.
 
-use std::path::PathBuf;
+use std::{path::PathBuf, process::Command};
 
 use clap::Parser;
 use once_cell::sync::Lazy;
@@ -280,6 +280,9 @@ pub struct ConfigArgs {
     /// This is only valid when `list` is set.
     #[clap(long("name-only"), requires = "list")]
     pub name_only: bool,
+    /// Import configuration values from Git
+    #[clap(long, group("mode"))]
+    pub import: bool,
     /// Use repository config file only (default)
     #[clap(long, group("scope"))]
     pub local: bool,
@@ -290,10 +293,10 @@ pub struct ConfigArgs {
     #[clap(long, group("scope"))]
     pub system: bool,
     /// The key string of the configuration entry, should be like configuration.[name].key
-    #[clap(value_name("key"), required_unless_present("list"))]
+    #[clap(value_name("key"))]
     pub key: Option<String>,
     /// the value or the possible value pattern of the configuration entry
-    #[clap(value_name("value_pattern"), required_unless_present("mode"))]
+    #[clap(value_name("value_pattern"))]
     pub valuepattern: Option<String>,
     /// If the target key is not present, return the given default value.
     /// This is only valid when `get` or `get-all` is set.
@@ -304,6 +307,20 @@ pub struct ConfigArgs {
 // argument-level tests live in the args_tests module near ConfigArgs
 
 impl ConfigArgs {
+    fn has_mode(&self) -> bool {
+        self.add
+            || self.get
+            || self.get_all
+            || self.unset
+            || self.unset_all
+            || self.list
+            || self.import
+    }
+
+    fn is_import_mode(&self) -> bool {
+        self.import || (!self.has_mode() && self.key.as_deref() == Some("import"))
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         // validate the default value is only present when get or get_all is set
         if self.default.is_some() && !(self.get || self.get_all) {
@@ -312,6 +329,26 @@ impl ConfigArgs {
         // validate that name_only is only valid when list is set
         if self.name_only && !self.list {
             return Err("--name-only is only valid when --list is set".to_string());
+        }
+        if self.is_import_mode() {
+            // Explicit flag form: `libra config --import` must not accept <key>.
+            if self.import && self.key.is_some() {
+                return Err("`libra config --import` does not accept <key>".to_string());
+            }
+            // Reject value_pattern for both explicit and implicit import forms.
+            if self.valuepattern.is_some() {
+                return Err("`libra config import` does not accept <value_pattern>".to_string());
+            }
+            return Ok(());
+        }
+
+        if !self.list && self.key.is_none() {
+            return Err("missing required argument: <key>".to_string());
+        }
+
+        // Default mode is `set`, which requires both key and value.
+        if !self.has_mode() && self.valuepattern.is_none() {
+            return Err("missing required argument: <value_pattern>".to_string());
         }
 
         Ok(())
@@ -341,6 +378,7 @@ impl ConfigArgs {
     ///     unset_all: false,
     ///     list: false,
     ///     name_only: false,
+    ///     import: false,
     ///     local: false,
     ///     global: true,
     ///     system: false,
@@ -407,7 +445,18 @@ impl ScopedConfig {
     async fn get_connection(scope: ConfigScope) -> Result<DatabaseConnection, String> {
         match scope {
             ConfigScope::Local => {
-                // Use the existing repository database connection
+                // Use try_get_storage_path to avoid panics when no repo exists.
+                let storage = crate::utils::util::try_get_storage_path(None).map_err(|_| {
+                    "fatal: not a libra repository (or any of the parent directories): .libra"
+                        .to_string()
+                })?;
+                let db_path = storage.join(crate::utils::util::DATABASE);
+                if !db_path.exists() {
+                    return Err(format!(
+                        "fatal: libra database not found at '{}'",
+                        db_path.display()
+                    ));
+                }
                 Ok(crate::internal::db::get_db_conn_instance().await.clone())
             }
             ConfigScope::Global => {
@@ -545,28 +594,43 @@ pub struct Key {
     key: String,
 }
 
-/// Execute the `config` command using parsed CLI arguments, printing any error
-/// to stderr instead of bubbling it up to the caller.
+/// Execute the `config` command, printing any error to stderr.
+///
+/// **Note:** Prefer [`execute_safe`] for programmatic / embedded callers so
+/// errors can be handled without terminating the process.
 pub async fn execute(args: ConfigArgs) {
-    if let Err(e) = execute_impl(args).await {
-        eprintln!("error: {e}");
+    if let Err(e) = execute_safe(args).await {
+        eprintln!("{e}");
     }
 }
 
-/// Internal implementation that returns Result for better error handling
-async fn execute_impl(args: ConfigArgs) -> Result<(), String> {
-    args.validate()?;
+/// Execute the `config` command and return errors to the caller instead of
+/// printing them.  This is the preferred entry point for library consumers,
+/// tests, and the top-level CLI dispatch.
+pub async fn execute_safe(args: ConfigArgs) -> Result<(), String> {
+    args.validate().map_err(|e| format!("error: {e}"))?;
 
     let scope = args.get_scope();
     let use_cascade = !args.has_explicit_scope();
 
+    if args.is_import_mode() {
+        return import_git_config(scope).await;
+    }
+
     if args.list {
         list_config(args.name_only, scope, use_cascade).await
     } else {
-        let origin_key = args.key.unwrap();
-        let key: Key = parse_key(origin_key).await;
+        let origin_key = args
+            .key
+            .as_deref()
+            .ok_or_else(|| "missing required argument: <key>".to_string())?;
+        let key = parse_key(origin_key)?;
         if args.add {
-            add_config(&key, &args.valuepattern.unwrap(), scope).await
+            let value = args
+                .valuepattern
+                .as_deref()
+                .ok_or_else(|| "missing required argument: <value_pattern>".to_string())?;
+            add_config(&key, value, scope).await
         } else if args.get {
             get_config(
                 &key,
@@ -591,9 +655,109 @@ async fn execute_impl(args: ConfigArgs) -> Result<(), String> {
             unset_all_config(&key, args.valuepattern.as_deref(), scope).await
         } else {
             // If none of the above flags are present, then default to setting a config
-            set_config(&key, &args.valuepattern.unwrap(), scope).await
+            let value = args
+                .valuepattern
+                .as_deref()
+                .ok_or_else(|| "missing required argument: <value_pattern>".to_string())?;
+            set_config(&key, value, scope).await
         }
     }
+}
+
+fn scope_to_git_flag(scope: ConfigScope) -> &'static str {
+    match scope {
+        ConfigScope::Local => "--local",
+        ConfigScope::Global => "--global",
+        ConfigScope::System => "--system",
+    }
+}
+
+fn scope_name(scope: ConfigScope) -> &'static str {
+    match scope {
+        ConfigScope::Local => "local",
+        ConfigScope::Global => "global",
+        ConfigScope::System => "system",
+    }
+}
+
+async fn import_git_config(scope: ConfigScope) -> Result<(), String> {
+    let git_flag = scope_to_git_flag(scope);
+    let output = Command::new("git")
+        .args(["config", git_flag, "--list", "-z"])
+        .output()
+        .map_err(|e| format!("failed to run `git config`: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let scope_label = scope_name(scope);
+        let mut msg = format!("error: failed to import Git {scope_label} config");
+        if !stderr.is_empty() {
+            // Strip Git's own "fatal: " prefix to avoid "error: ... fatal: ..." duplication.
+            let detail = stderr.strip_prefix("fatal: ").unwrap_or(&stderr);
+            msg.push_str(&format!("\n  {detail}"));
+        }
+        if scope == ConfigScope::Local {
+            msg.push_str(
+                "\nHint: Run this command inside a Git repository, or use `--global` / `--system`.",
+            );
+        }
+        return Err(msg);
+    }
+
+    let mut imported = 0usize;
+    let mut skipped = 0usize;
+    let mut ignored_invalid = 0usize;
+
+    for entry in output
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|chunk| !chunk.is_empty())
+    {
+        let raw = String::from_utf8_lossy(entry);
+        let Some((key_raw, value)) = raw.split_once('\n') else {
+            ignored_invalid += 1;
+            continue;
+        };
+        let key_raw = key_raw.trim();
+        let key = match parse_key(key_raw) {
+            Ok(key) => key,
+            Err(_) => {
+                ignored_invalid += 1;
+                continue;
+            }
+        };
+
+        let existing =
+            ScopedConfig::get_all(scope, &key.configuration, key.name.as_deref(), &key.key).await?;
+        if existing.iter().any(|v| v == value) {
+            skipped += 1;
+            continue;
+        }
+
+        ScopedConfig::insert(
+            scope,
+            &key.configuration,
+            key.name.as_deref(),
+            &key.key,
+            value,
+        )
+        .await?;
+        imported += 1;
+    }
+
+    let scope_label = scope_name(scope);
+    if imported > 0 {
+        println!("Imported {imported} entries from Git {scope_label} config.");
+    } else {
+        println!("No new entries to import from Git {scope_label} config.");
+    }
+    if skipped > 0 {
+        println!("  (skipped {skipped} duplicates)");
+    }
+    if ignored_invalid > 0 {
+        eprintln!("warning: ignored {ignored_invalid} unsupported Git config entries");
+    }
+    Ok(())
 }
 
 /// Parse the original key string to three fields: configuration, name and key
@@ -601,25 +765,36 @@ async fn execute_impl(args: ConfigArgs) -> Result<(), String> {
 /// If the original key parameter string does not contain a . symbol, an error is directly raised.
 /// If the original key parameter string contains exactly one . symbol, the entire key parameter string is parsed as configuration.key.
 /// If the original key parameter string contains more than one . symbol, the entire key parameter string is parsed as configuration.name.key, where the two . symbols correspond to the first . and the last . in the original parameter string.
-async fn parse_key(mut origin_key: String) -> Key {
+fn parse_key(mut origin_key: &str) -> Result<Key, String> {
     let configuration: String;
     let name: Option<String>;
-    (configuration, origin_key) = match origin_key.split_once(".") {
-        Some((first_part, remainer)) => (first_part.to_string(), remainer.to_string()),
+    (configuration, origin_key) = match origin_key.split_once('.') {
+        Some((first_part, remainer)) => (first_part.to_string(), remainer),
         None => {
-            panic!("error: key does not contain a section: {origin_key}");
+            let mut message = format!("error: key does not contain a section: {origin_key}");
+            if origin_key == "init" || origin_key == "clone" {
+                message.push_str(&format!(
+                    "\nHint: `{origin_key}` is a top-level command. Try `libra {origin_key}`."
+                ));
+            }
+            if origin_key == "import" {
+                message.push_str(
+                    "\nHint: Run `libra config --import` without extra key/value arguments.",
+                );
+            }
+            return Err(message);
         }
     };
-    (name, origin_key) = match origin_key.rsplit_once(".") {
+    let key: String;
+    (name, key) = match origin_key.rsplit_once('.') {
         Some((first_part, remainer)) => (Some(first_part.to_string()), remainer.to_string()),
-        None => (None, origin_key),
+        None => (None, origin_key.to_string()),
     };
-    let key: String = origin_key;
-    Key {
+    Ok(Key {
         configuration,
         name,
         key,
-    }
+    })
 }
 
 /// Add a configuration entry by the given key and value (create new one no matter old one is present or not)
@@ -898,5 +1073,32 @@ mod args_tests {
             args.err().unwrap().kind(),
             clap::error::ErrorKind::ArgumentConflict
         ));
+    }
+
+    #[test]
+    fn import_mode_is_valid_without_value() {
+        let args = ConfigArgs::try_parse_from(["config", "import"]).unwrap();
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn set_mode_requires_value() {
+        let args = ConfigArgs::try_parse_from(["config", "user.name"]).unwrap();
+        let err = args.validate().unwrap_err();
+        assert_eq!(err, "missing required argument: <value_pattern>");
+    }
+
+    #[test]
+    fn import_flag_rejects_positional_key() {
+        let args = ConfigArgs::try_parse_from(["config", "--import", "user.name"]).unwrap();
+        let err = args.validate().unwrap_err();
+        assert_eq!(err, "`libra config --import` does not accept <key>");
+    }
+
+    #[test]
+    fn import_implicit_rejects_value_pattern() {
+        let args = ConfigArgs::try_parse_from(["config", "import", "extra"]).unwrap();
+        let err = args.validate().unwrap_err();
+        assert_eq!(err, "`libra config import` does not accept <value_pattern>");
     }
 }

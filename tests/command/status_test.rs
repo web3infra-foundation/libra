@@ -150,7 +150,7 @@ async fn test_changes_to_be_staged() {
     fs::create_dir("not_ignore_dir").unwrap();
     let mut not_ignore_file_1 = fs::File::create("not_ignore_dir/not_ignore.1").unwrap();
 
-    let change = changes_to_be_staged();
+    let change = changes_to_be_staged().unwrap();
     assert!(
         !change
             .new
@@ -193,7 +193,7 @@ async fn test_changes_to_be_staged() {
     not_ignore_file_0.write_all(b"foo").unwrap();
     not_ignore_file_1.write_all(b"foo").unwrap();
 
-    let change = changes_to_be_staged();
+    let change = changes_to_be_staged().unwrap();
     assert!(
         !change
             .modified
@@ -226,7 +226,7 @@ async fn test_changes_to_be_staged() {
 
     not_ignore_file_1.write_all(b"foo").unwrap();
 
-    let change = changes_to_be_staged();
+    let change = changes_to_be_staged().unwrap();
     assert!(
         !change
             .deleted
@@ -1197,7 +1197,7 @@ async fn test_status_short_format_with_branch() {
 
     // Should show branch info in the first line with ## prefix
     assert!(
-        output_str.contains("## master"),
+        output_str.contains("## main"),
         "Short format with --branch should start with branch info (##). Got: {}",
         output_str
     );
@@ -1258,7 +1258,7 @@ async fn test_status_porcelain_format_with_branch() {
 
     // Should show branch info in the first line with ## prefix
     assert!(
-        output_str.contains("## master"),
+        output_str.contains("## main"),
         "Porcelain format with --branch should start with branch info (##). Got: {}",
         output_str
     );

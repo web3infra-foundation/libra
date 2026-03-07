@@ -10,7 +10,7 @@ use super::{
 use crate::{
     command::{branch, status::StatusArgs},
     internal::{
-        branch::Branch,
+        branch::{Branch, INTENT_BRANCH},
         db::get_db_conn_instance,
         head::Head,
         reflog::{ReflogAction, ReflogContext, with_reflog},
@@ -66,6 +66,13 @@ pub async fn execute(args: SwitchArgs) {
 
     match create {
         Some(new_branch_name) => {
+            if new_branch_name == INTENT_BRANCH {
+                eprintln!(
+                    "fatal: creating/switching to '{}' branch is not allowed",
+                    INTENT_BRANCH
+                );
+                std::process::exit(1);
+            }
             branch::create_branch(new_branch_name.clone(), branch).await;
             switch_to_branch(new_branch_name).await;
         }
@@ -87,7 +94,13 @@ pub async fn execute(args: SwitchArgs) {
 
 // Check status before change the branch
 pub async fn check_status() -> bool {
-    let unstaged: status::Changes = status::changes_to_be_staged();
+    let unstaged = match status::changes_to_be_staged() {
+        Ok(c) => c,
+        Err(err) => {
+            eprintln!("fatal: failed to determine working tree status: {err}");
+            return true;
+        }
+    };
     if !unstaged.deleted.is_empty() || !unstaged.modified.is_empty() {
         status::execute(StatusArgs::default()).await;
         eprintln!("fatal: unstaged changes, can't switch branch");
@@ -118,6 +131,11 @@ async fn switch_to_tracked_remote_branch(target: String) {
     } else {
         ("origin".to_string(), target)
     };
+
+    if remote_branch_name == "intent" {
+        eprintln!("fatal: switching to 'intent' branch is not allowed");
+        std::process::exit(1);
+    }
 
     let remote_tracking_ref = format!("refs/remotes/{remote_name}/{remote_branch_name}");
 
@@ -198,6 +216,10 @@ async fn switch_to_commit(commit_hash: ObjectHash) {
 }
 
 async fn switch_to_branch(branch_name: String) {
+    if branch_name == "intent" {
+        eprintln!("fatal: switching to 'intent' branch is not allowed");
+        std::process::exit(1);
+    }
     let db = get_db_conn_instance().await;
 
     let target_branch = match Branch::find_branch_with_conn(db, &branch_name, None).await {

@@ -182,7 +182,13 @@ pub async fn execute(args: RemoveArgs) {
     let mut diff_status = DiffStatus::default();
     if !args.force {
         let mut error_msg = String::new();
-        let changes_staged = changes_to_be_staged().polymerization();
+        let changes_staged = match changes_to_be_staged() {
+            Ok(c) => c.polymerization(),
+            Err(err) => {
+                eprintln!("fatal: {err}");
+                return;
+            }
+        };
         let changes_committed = changes_to_be_committed().await.polymerization();
         // Check for both
         let mut buf = Vec::new();

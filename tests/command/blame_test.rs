@@ -2,12 +2,15 @@
 
 use std::{fs, io::Write};
 
-use libra::command::{
-    add::{self, AddArgs},
-    blame::{self, BlameArgs},
-    commit::{self, CommitArgs},
-    get_target_commit,
-    init::{self, InitArgs},
+use libra::{
+    command::{
+        add::{self, AddArgs},
+        blame::{self, BlameArgs},
+        commit::{self, CommitArgs},
+        get_target_commit,
+        init::{self, InitArgs},
+    },
+    internal::config::Config,
 };
 use tempfile::tempdir;
 
@@ -32,7 +35,10 @@ async fn setup_repo_with_hash(
     })
     .await
     .unwrap();
-    test::ChangeDirGuard::new(temp.path())
+    let guard = test::ChangeDirGuard::new(temp.path());
+    Config::insert("user", None, "name", "Blame Test User").await;
+    Config::insert("user", None, "email", "blame-test@example.com").await;
+    guard
 }
 
 async fn prepare_history() -> (ObjectHash, ObjectHash) {

@@ -133,7 +133,7 @@ async fn test_basic_cherry_pick() {
 
     // --- 4. Switch back to master branch ---
     switch::execute(SwitchArgs {
-        branch: Some("master".to_string()),
+        branch: Some("main".to_string()),
         create: None,
         detach: false,
         track: false,
@@ -309,7 +309,7 @@ async fn test_cherry_pick_with_commit() {
 
     // Switch back to master
     switch::execute(SwitchArgs {
-        branch: Some("master".to_string()),
+        branch: Some("main".to_string()),
         create: None,
         detach: false,
         track: false,
@@ -455,7 +455,7 @@ async fn test_cherry_pick_multiple_commits() {
 
     // Switch back to master
     switch::execute(SwitchArgs {
-        branch: Some("master".to_string()),
+        branch: Some("main".to_string()),
         create: None,
         detach: false,
         track: false,
@@ -534,6 +534,8 @@ async fn test_cherry_pick_sha256_hash_handling() {
     })
     .await
     .unwrap();
+    libra::internal::config::Config::insert("user", None, "name", "Cherry Test User").await;
+    libra::internal::config::Config::insert("user", None, "email", "cherry-test@example.com").await;
 
     // base commit on main
     fs::write("base.txt", "base").unwrap();

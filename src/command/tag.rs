@@ -158,12 +158,23 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::{cli::parse_async, internal::tag};
+    use crate::{cli::parse_async, internal::tag, utils::test::ChangeDirGuard};
 
-    async fn setup_repo_with_commit() -> tempfile::TempDir {
+    async fn setup_repo_with_commit() -> (tempfile::TempDir, ChangeDirGuard) {
         let temp_dir = tempdir().unwrap();
-        std::env::set_current_dir(temp_dir.path()).unwrap();
+        let guard = ChangeDirGuard::new(temp_dir.path());
         parse_async(Some(&["libra", "init"])).await.unwrap();
+        parse_async(Some(&["libra", "config", "user.name", "Tag Test User"]))
+            .await
+            .unwrap();
+        parse_async(Some(&[
+            "libra",
+            "config",
+            "user.email",
+            "tag-test@example.com",
+        ]))
+        .await
+        .unwrap();
         fs::write("test.txt", "hello").unwrap();
         parse_async(Some(&["libra", "add", "test.txt"]))
             .await
@@ -171,13 +182,13 @@ mod tests {
         parse_async(Some(&["libra", "commit", "-m", "Initial commit"]))
             .await
             .unwrap();
-        temp_dir
+        (temp_dir, guard)
     }
 
     #[tokio::test]
     #[serial]
     async fn test_create_and_list_lightweight_tag() {
-        let _temp_dir = setup_repo_with_commit().await;
+        let (_temp_dir, _guard) = setup_repo_with_commit().await;
         create_tag("v1.0-light", None, false).await;
         let tags = tag::list().await.unwrap();
         assert_eq!(tags.len(), 1);
@@ -188,7 +199,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_create_and_list_lightweight_tag_force() {
-        let _temp_dir = setup_repo_with_commit().await;
+        let (_temp_dir, _guard) = setup_repo_with_commit().await;
         create_tag("v1.0-light", None, false).await;
         create_tag("v1.0-light", None, true).await;
         let tags = tag::list().await.unwrap();
@@ -200,7 +211,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_create_and_list_annotated_tag() {
-        let _temp_dir = setup_repo_with_commit().await;
+        let (_temp_dir, _guard) = setup_repo_with_commit().await;
         create_tag("v1.0-annotated", Some("Release v1.0".to_string()), false).await;
         let tags = tag::list().await.unwrap();
         assert_eq!(tags.len(), 1);
@@ -211,7 +222,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_create_and_list_annotated_tag_force() {
-        let _temp_dir = setup_repo_with_commit().await;
+        let (_temp_dir, _guard) = setup_repo_with_commit().await;
         create_tag("v1.0-annotated", Some("Release v1.0".to_string()), false).await;
         create_tag("v1.0-annotated", Some("Release v2.0".to_string()), true).await;
         let tags = tag::list().await.unwrap();
@@ -231,7 +242,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_show_lightweight_tag() {
-        let _temp_dir = setup_repo_with_commit().await;
+        let (_temp_dir, _guard) = setup_repo_with_commit().await;
         create_tag("v1.0-light", None, false).await;
         let result = tag::find_tag_and_commit("v1.0-light").await;
         assert!(result.is_ok());
@@ -243,7 +254,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_show_annotated_tag() {
-        let _temp_dir = setup_repo_with_commit().await;
+        let (_temp_dir, _guard) = setup_repo_with_commit().await;
         create_tag("v1.0-annotated", Some("Test message".to_string()), false).await;
         let result = tag::find_tag_and_commit("v1.0-annotated").await;
         assert!(result.is_ok());
@@ -262,7 +273,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_delete_tag() {
-        let _temp_dir = setup_repo_with_commit().await;
+        let (_temp_dir, _guard) = setup_repo_with_commit().await;
         create_tag("v1.0", None, false).await;
         delete_tag("v1.0").await;
         let tags = tag::list().await.unwrap();

@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS `reference` (
     -- remote can't be ''. If kind is Tag, remote must be NULL.
     `remote` TEXT CHECK (remote <> '' OR remote IS NULL),
     CHECK (
-        (kind <> 'Tag' OR (kind = 'Tag' AND remote IS NULL))
+        (kind <> 'Tag' OR remote IS NULL)
     )
 );
 CREATE TABLE IF NOT EXISTS `reflog` (

@@ -7,7 +7,6 @@ use tempfile::tempdir;
 use super::*;
 #[tokio::test]
 #[serial]
-#[should_panic]
 /// A commit with no file changes should fail if `allow_empty` is false.
 /// This test verifies that the commit command rejects empty changesets
 /// when not explicitly permitted.
@@ -29,7 +28,70 @@ async fn test_execute_commit_with_empty_index_fail() {
         no_verify: false,
         author: None,
     };
-    commit::execute(args).await;
+    let result = execute_safe(args).await;
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("nothing to commit"));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_commit_requires_configured_identity_in_strict_mode() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    // Isolate global/system config so that the host machine's real
+    // ~/.libra/config.db (which may contain user.name / user.email) does not
+    // leak into the cascade lookup and make the test pass incorrectly.
+    let fake_global = temp_path.path().join("fake_global.db");
+    let fake_system = temp_path.path().join("fake_system.db");
+    // SAFETY: this test is #[serial], so no other threads are reading env vars.
+    unsafe {
+        std::env::set_var("LIBRA_CONFIG_GLOBAL_DB", &fake_global);
+        std::env::set_var("LIBRA_CONFIG_SYSTEM_DB", &fake_system);
+    }
+
+    use libra::internal::config::Config;
+    Config::remove_config("user", None, "name", None, true).await;
+    Config::remove_config("user", None, "email", None, true).await;
+    Config::insert("user", None, "useConfigOnly", "true").await;
+
+    test::ensure_file("identity.txt", Some("identity"));
+    add::execute(AddArgs {
+        pathspec: vec!["identity.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        verbose: false,
+        force: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+
+    let result = execute_safe(CommitArgs {
+        message: Some("should fail without identity".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    })
+    .await;
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("Author identity unknown"));
+
+    // Restore env vars so subsequent serial tests are not affected.
+    // SAFETY: this test is #[serial], so no other threads are reading env vars.
+    unsafe {
+        std::env::remove_var("LIBRA_CONFIG_GLOBAL_DB");
+        std::env::remove_var("LIBRA_CONFIG_SYSTEM_DB");
+    }
 }
 
 #[tokio::test]
@@ -359,6 +421,9 @@ async fn test_commit_sha256() {
     })
     .await
     .unwrap();
+    use libra::internal::config::Config;
+    Config::insert("user", None, "name", "SHA256 User").await;
+    Config::insert("user", None, "email", "sha256@example.com").await;
 
     // Create and add a file
     test::ensure_file("a.txt", Some("hello sha256"));
@@ -437,6 +502,8 @@ async fn test_commit_with_custom_author() {
 
     // Set default user config using libra's internal config
     use libra::internal::config::Config;
+    Config::remove_config("user", None, "name", None, true).await;
+    Config::remove_config("user", None, "email", None, true).await;
     Config::insert("user", None, "name", "Default User").await;
     Config::insert("user", None, "email", "default@example.com").await;
 
@@ -494,6 +561,8 @@ async fn test_commit_amend_with_custom_author() {
 
     // Set default user config
     use libra::internal::config::Config;
+    Config::remove_config("user", None, "name", None, true).await;
+    Config::remove_config("user", None, "email", None, true).await;
     Config::insert("user", None, "name", "Default User").await;
     Config::insert("user", None, "email", "default@example.com").await;
 
@@ -548,7 +617,6 @@ async fn test_commit_amend_with_custom_author() {
 
 #[tokio::test]
 #[serial]
-#[should_panic(expected = "nothing to commit, working tree clean")]
 async fn test_commit_empty_working_tree() {
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
@@ -568,7 +636,9 @@ async fn test_commit_empty_working_tree() {
         author: None,
     };
 
-    commit::execute(args).await;
+    let result = execute_safe(args).await;
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("nothing to commit"));
 }
 
 #[tokio::test]
