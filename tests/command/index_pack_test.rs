@@ -170,7 +170,7 @@ fn test_index_pack_cli_missing_file_returns_fatal_128() {
     assert_eq!(
         stderr,
         format!(
-            "fatal: could not open '{}' for reading: No such file or directory (os error 2)\n",
+            "fatal: could not open '{}' for reading: No such file or directory\n",
             missing_pack.display()
         )
     );

@@ -35,7 +35,14 @@ impl ChangeDirGuard {
 
 impl Drop for ChangeDirGuard {
     fn drop(&mut self) {
-        env::set_current_dir(&self.old_dir).unwrap();
+        let fallback = find_cargo_dir();
+        let target = if self.old_dir.exists() {
+            &self.old_dir
+        } else {
+            // Temp test directories may already be gone when the guard drops.
+            &fallback
+        };
+        env::set_current_dir(target).unwrap();
     }
 }
 

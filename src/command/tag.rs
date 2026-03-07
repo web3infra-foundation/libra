@@ -70,14 +70,14 @@ pub async fn execute_safe(args: TagArgs) -> CliResult<()> {
     Ok(())
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[allow(dead_code)]
 async fn create_tag(tag_name: &str, message: Option<String>, force: bool) {
     if let Err(err) = create_tag_safe(tag_name, message, force).await {
         eprintln!("{}", err.render());
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[allow(dead_code)]
 async fn list_tags(show_lines: usize) {
     match render_tags(show_lines).await {
         Ok(s) => print!("{}", s),
@@ -145,7 +145,7 @@ pub async fn render_tags(show_lines: usize) -> Result<String, anyhow::Error> {
     Ok(output)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[allow(dead_code)]
 async fn delete_tag(tag_name: &str) {
     if let Err(err) = delete_tag_safe(tag_name).await {
         eprintln!("{}", err.render());
@@ -160,7 +160,7 @@ async fn delete_tag_safe(tag_name: &str) -> CliResult<()> {
     Ok(())
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[allow(dead_code)]
 async fn show_tag(tag_name: &str) {
     if let Err(err) = show_tag_safe(tag_name).await {
         eprintln!("{}", err.render());

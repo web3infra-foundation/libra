@@ -67,7 +67,11 @@ pub fn execute_safe(args: IndexPackArgs) -> CliResult<()> {
     }
 
     std::fs::File::open(&pack_file).map_err(|e| {
-        CliError::fatal(format!("could not open '{}' for reading: {}", pack_file, e))
+        CliError::fatal(format!(
+            "could not open '{}' for reading: {}",
+            pack_file,
+            format_io_error(&e)
+        ))
     })?;
 
     if let Some(version) = args.index_version {
@@ -85,6 +89,14 @@ pub fn execute_safe(args: IndexPackArgs) -> CliResult<()> {
 
 fn index_pack_error(err: GitError) -> CliError {
     CliError::fatal(format!("failed to build pack index: {err}"))
+}
+
+fn format_io_error(err: &std::io::Error) -> String {
+    match err.kind() {
+        std::io::ErrorKind::NotFound => "No such file or directory".to_string(),
+        std::io::ErrorKind::PermissionDenied => "Permission denied".to_string(),
+        _ => err.to_string(),
+    }
 }
 
 /// Build index file for pack file, version 1

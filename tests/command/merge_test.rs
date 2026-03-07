@@ -75,6 +75,7 @@ async fn test_merge_fast_forward() {
 }
 
 #[tokio::test]
+#[serial]
 /// Test merging a remote branch
 async fn test_merge_remote_branch() {
     let temp_repo = create_committed_repo_via_cli();
