@@ -21,7 +21,7 @@ use crate::internal::{
         mcp::{resource::CreateIntentParams, server::LibraMcpServer},
         providers::{
             anthropic::{CLAUDE_3_5_SONNET, Client as AnthropicClient},
-            codex::{CODEX_01, Client as CodexClient},
+            codex::CODEX_01,
             deepseek::client::Client as DeepSeekClient,
             gemini::{Client as GeminiClient, GEMINI_2_5_FLASH},
             ollama::Client as OllamaClient,
@@ -493,15 +493,19 @@ async fn execute_tui(args: CodeArgs) {
             .await;
         }
         CodeProvider::Codex => {
-            let client = match CodexClient::from_env() {
-                Ok(client) => client,
+            let ws_client = match crate::internal::ai::providers::codex::Client::from_env() {
+                Ok(c) => c,
                 Err(_) => {
                     eprintln!("error: OPENAI_API_KEY is not set");
                     return;
                 }
             };
             let model_name = args.model.unwrap_or_else(|| CODEX_01.to_string());
-            let mut model = client.completion_model(&model_name);
+            let mut model = crate::internal::ai::providers::codex::Model::new(
+                ws_client,
+                &model_name,
+                Some(mcp_server.clone()),
+            );
             if let Err(e) = model.connect().await {
                 eprintln!("error: Failed to connect to Codex WebSocket: {}", e);
                 return;

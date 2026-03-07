@@ -1,5 +1,7 @@
 //! Codex completion model implementation using WebSocket.
 
+use std::sync::Arc;
+
 use crate::internal::ai::{
     client::CompletionClient,
     completion::{
@@ -7,22 +9,39 @@ use crate::internal::ai::{
         message::{AssistantContent, Text},
         request::{CompletionRequest, CompletionResponse},
     },
+    mcp::server::LibraMcpServer,
     providers::codex::client::CodexWebSocket,
 };
 
 pub const CODEX_01: &str = "codex-01";
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Model {
     client: CodexWebSocket,
     model: String,
+    mcp_server: Option<Arc<LibraMcpServer>>,
+}
+
+impl std::fmt::Debug for Model {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Model")
+            .field("client", &self.client)
+            .field("model", &self.model)
+            .field("mcp_server", &self.mcp_server.is_some())
+            .finish()
+    }
 }
 
 impl Model {
-    pub fn new(client: CodexWebSocket, model: impl Into<String>) -> Self {
+    pub fn new(
+        client: CodexWebSocket,
+        model: impl Into<String>,
+        mcp_server: Option<Arc<LibraMcpServer>>,
+    ) -> Self {
         Self {
             client,
             model: model.into(),
+            mcp_server,
         }
     }
 
@@ -130,8 +149,8 @@ impl CompletionModelTrait for Model {
                 }
             }
 
-            // Auto-add and commit changes to Libra
-            if let Err(_e) = commit_to_libra(&file_changes).await {
+            // Auto-add and commit changes to Libra via MCP
+            if let Err(_e) = self.commit_to_libra(&file_changes).await {
                 // Silently ignore commit errors
             }
         }
@@ -384,53 +403,110 @@ impl CompletionClient for CodexWebSocket {
     type Model = Model;
 
     fn completion_model(&self, model: impl Into<String>) -> Self::Model {
-        Model::new(self.clone(), model)
+        Model::new(self.clone(), model, None)
     }
 }
 
 pub type CodexModel = Model;
 
-async fn commit_to_libra(
-    file_changes: &[FileChange],
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use std::process::Command;
+impl Model {
+    /// Commit file changes to Libra via MCP tools
+    async fn commit_to_libra(
+        &self,
+        file_changes: &[FileChange],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use git_internal::internal::object::types::ActorRef;
 
-    // Get list of changed files
-    let files: Vec<String> = file_changes.iter().map(|c| c.path.clone()).collect();
-    if files.is_empty() {
-        return Ok(());
-    }
+        use crate::internal::ai::mcp::resource::{
+            ArtifactParams, CreatePatchSetParams, TouchedFileParams,
+        };
 
-    // Run `libra add` for all changed files
-    let add_result = Command::new("libra").args(["add", "-A"]).output();
+        // Get list of changed files
+        let files: Vec<String> = file_changes.iter().map(|c| c.path.clone()).collect();
+        if files.is_empty() {
+            return Ok(());
+        }
 
-    match add_result {
-        Ok(output) => {
-            if !output.status.success() {
-                // Log add failure silently
+        // Convert file changes to TouchedFileParams
+        let touched_files: Vec<TouchedFileParams> = file_changes
+            .iter()
+            .map(|c| {
+                let change_type = match c.operation.as_str() {
+                    "create" => "add",
+                    "write" => "modify",
+                    "delete" => "delete",
+                    _ => "modify",
+                };
+                let lines = c
+                    .content
+                    .as_ref()
+                    .map(|s| s.lines().count() as u32)
+                    .unwrap_or(0);
+                TouchedFileParams {
+                    path: c.path.clone(),
+                    change_type: change_type.to_string(),
+                    lines_added: lines,
+                    lines_deleted: 0,
+                }
+            })
+            .collect();
+
+        // Build diff artifact from file changes (concatenate all file contents)
+        let diff_content: String = file_changes
+            .iter()
+            .filter_map(|c| c.content.as_ref())
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let diff_artifact = if !diff_content.is_empty() {
+            Some(ArtifactParams {
+                store: "memory".to_string(),
+                key: format!("codex-diff-{}", uuid::Uuid::new_v4()),
+                content_type: Some("text/plain".to_string()),
+                size_bytes: Some(diff_content.len() as u64),
+                hash: None,
+            })
+        } else {
+            None
+        };
+
+        // Use placeholder for base commit (Libra uses SHA-256 internally)
+        // "0" * 64 = "0000...000" is accepted by normalize_commit_anchor
+        let base_commit = "0".repeat(64);
+
+        // Create ActorRef for Codex
+        let actor =
+            ActorRef::agent("codex").map_err(|e| format!("failed to create actor: {}", e))?;
+
+        // Create PatchSet via MCP
+        if let Some(mcp_server) = &self.mcp_server {
+            let params = CreatePatchSetParams {
+                run_id: uuid::Uuid::new_v4().to_string(),
+                generation: 1,
+                base_commit_sha: base_commit,
+                touched_files: Some(touched_files),
+                rationale: Some(format!("Codex generated files: {}", files.join(", "))),
+                apply_status: Some("applied".to_string()),
+                diff_format: Some("unified_diff".to_string()),
+                diff_artifact,
+                tags: None,
+                external_ids: None,
+                actor_kind: Some("agent".to_string()),
+                actor_id: Some("codex".to_string()),
+            };
+
+            // Call the MCP tool directly via create_patchset_impl
+            match mcp_server.create_patchset_impl(params, actor).await {
+                Ok(_result) => {
+                    // tracing::info!("Created patchset via MCP: {:?}", _result);
+                }
+                Err(_e) => {
+                    // tracing::warn!("Failed to create patchset via MCP: {:?}", _e);
+                }
             }
         }
-        Err(_e) => {
-            // Log add error silently
-        }
+
+        Ok(())
     }
-
-    // Run `libra commit` with a message
-    let message = format!("Codex: {}", files.join(", "));
-    let commit_result = Command::new("libra")
-        .args(["commit", "-m", &message])
-        .output();
-
-    match commit_result {
-        Ok(output) => {
-            if !output.status.success() {
-                // Log commit failure silently
-            }
-        }
-        Err(_e) => {
-            // Log commit error silently
-        }
-    }
-
-    Ok(())
 }
