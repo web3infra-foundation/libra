@@ -7,6 +7,21 @@
 //! - Date filtering (`--since`, `--until`)
 //! - Grouping logic (merging authors with same name but different emails when `-e` is absent)
 
+use super::*;
+
+#[test]
+#[serial]
+fn test_shortlog_cli_outside_repository_returns_fatal_128() {
+    let temp = tempdir().unwrap();
+    let output = run_libra_command(&["shortlog"], temp.path());
+    assert_eq!(output.status.code(), Some(128));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("fatal: not a libra repository"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
 use clap::Parser;
 use git_internal::{
     hash::ObjectHash,
@@ -16,8 +31,6 @@ use git_internal::{
     },
 };
 use libra::internal::log::date_parser::parse_date;
-
-use super::*;
 
 fn create_signature(signature_type: SignatureType, name: &str) -> Signature {
     Signature::from_data(

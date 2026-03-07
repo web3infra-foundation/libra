@@ -67,9 +67,10 @@ async fn test_clean_requires_flag() {
         .output()
         .expect("failed to execute `libra clean`");
 
-    assert!(output.status.success());
+    assert_eq!(output.status.code(), Some(128));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("fatal: clean requires -f or -n"));
+    assert!(stderr.contains("Hint:"));
 
     assert!(std::path::Path::new("untracked.txt").exists());
 }
@@ -224,8 +225,8 @@ async fn test_clean_force_with_missing_index() {
 
 #[tokio::test]
 #[serial]
-/// Tests clean fails on a corrupted index and does not delete files.
-async fn test_clean_force_with_corrupted_index() {
+/// Tests clean reports a fatal error for a corrupted index and keeps files.
+async fn test_clean_force_with_corrupted_index_returns_fatal_128() {
     let test_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(test_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(test_dir.path());
@@ -242,9 +243,9 @@ async fn test_clean_force_with_corrupted_index() {
         .output()
         .expect("failed to execute `libra clean`");
 
-    assert!(output.status.success());
+    assert_eq!(output.status.code(), Some(128));
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("Failed to load index"));
+    assert!(stderr.contains("fatal: failed to load index"));
     assert!(std::path::Path::new("untracked.txt").exists());
 }
 
@@ -342,8 +343,8 @@ async fn test_clean_force_does_not_follow_symlink_dirs() {
 #[cfg(unix)]
 #[tokio::test]
 #[serial]
-/// Tests clean reports permission errors during deletion.
-async fn test_clean_force_permission_error() {
+/// Tests clean reports a fatal error when deletion is denied.
+async fn test_clean_force_permission_error_returns_fatal_128() {
     let test_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(test_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(test_dir.path());
@@ -362,7 +363,9 @@ async fn test_clean_force_permission_error() {
         .output()
         .expect("failed to execute `libra clean`");
 
-    assert!(output.status.success());
+    assert_eq!(output.status.code(), Some(128));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("fatal: failed to remove"));
     assert!(std::path::Path::new("protected/untracked.txt").exists());
 
     let mut perms = fs::metadata("protected").unwrap().permissions();

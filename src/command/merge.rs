@@ -17,7 +17,10 @@ use crate::{
         head::Head,
         reflog::{ReflogAction, ReflogContext, with_reflog},
     },
-    utils::util,
+    utils::{
+        error::{CliError, CliResult},
+        util,
+    },
 };
 
 #[derive(Parser, Debug)]
@@ -27,35 +30,42 @@ pub struct MergeArgs {
 }
 
 pub async fn execute(args: MergeArgs) {
-    let target_commit_hash = get_target_commit(&args.branch).await;
-    if target_commit_hash.is_err() {
-        eprintln!("{}", target_commit_hash.err().unwrap());
-        return;
+    if let Err(err) = execute_safe(args).await {
+        eprintln!("{}", err.render());
     }
-    let commit_hash = target_commit_hash.unwrap();
-    let target_commit: Commit = load_object(&commit_hash).unwrap();
+}
+
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Resolves the merge target, performs fast-forward or
+/// recursive merge, stages results, and updates refs.
+pub async fn execute_safe(args: MergeArgs) -> CliResult<()> {
+    let commit_hash = get_target_commit(&args.branch)
+        .await
+        .map_err(|_| CliError::failure(format!("{} - not something we can merge", args.branch)))?;
+    let target_commit: Commit = load_object(&commit_hash)
+        .map_err(|_| CliError::fatal(format!("not a valid object name: '{}'", commit_hash)))?;
 
     // Handle the case where merging into an empty branch or merging with remote when no local commits exist
     // If the current HEAD doesn't point to any commit, perform a fast-forward merge directly
     let current_commit_id = Head::current_commit().await;
     if current_commit_id.is_none() {
-        merge_ff(target_commit, &args.branch).await;
-        return;
+        return merge_ff(target_commit, &args.branch).await;
     }
 
-    let current_commit: Commit = load_object(&current_commit_id.unwrap()).unwrap();
+    // INVARIANT: `current_commit_id` is `Some` — the `None` case returns above.
+    let current_commit_id = current_commit_id.unwrap();
+    let current_commit: Commit = load_object(&current_commit_id).map_err(|_| {
+        CliError::fatal(format!("not a valid object name: '{}'", current_commit_id))
+    })?;
 
-    let lca = lca_commit(&current_commit, &target_commit).await;
+    let lca = lca_commit(&current_commit, &target_commit).await?;
 
-    if lca.is_none() {
-        eprintln!("fatal: fatal: refusing to merge unrelated histories");
-        return;
-    }
-    let lca = lca.unwrap();
+    let lca = lca.ok_or_else(|| CliError::fatal("refusing to merge unrelated histories"))?;
 
     if lca.id == target_commit.id {
         // no need to merge
         println!("Already up to date.");
+        Ok(())
     } else if lca.id == current_commit.id {
         println!(
             "Updating {}..{}",
@@ -63,43 +73,45 @@ pub async fn execute(args: MergeArgs) {
             &target_commit.id.to_string()[..6]
         );
         // fast-forward merge
-        merge_ff(target_commit, &args.branch).await;
+        merge_ff(target_commit, &args.branch).await
     } else {
         // didn't support yet
-        eprintln!("fatal: Not possible to fast-forward merge, try merge manually");
+        Err(CliError::fatal(
+            "Not possible to fast-forward merge, try merge manually",
+        ))
     }
 }
 
-async fn lca_commit(lhs: &Commit, rhs: &Commit) -> Option<Commit> {
-    let lhs_reachable = log::get_reachable_commits(lhs.id.to_string(), None).await;
-    let rhs_reachable = log::get_reachable_commits(rhs.id.to_string(), None).await;
+async fn lca_commit(lhs: &Commit, rhs: &Commit) -> Result<Option<Commit>, CliError> {
+    let lhs_reachable = log::get_reachable_commits(lhs.id.to_string(), None).await?;
+    let rhs_reachable = log::get_reachable_commits(rhs.id.to_string(), None).await?;
 
     // Commit `eq` is based on tree_id, so we shouldn't use it here
 
     for commit in lhs_reachable.iter() {
         if commit.id == rhs.id {
-            return Some(commit.to_owned());
+            return Ok(Some(commit.to_owned()));
         }
     }
 
     for commit in rhs_reachable.iter() {
         if commit.id == lhs.id {
-            return Some(commit.to_owned());
+            return Ok(Some(commit.to_owned()));
         }
     }
 
     for lhs_parent in lhs_reachable.iter() {
         for rhs_parent in rhs_reachable.iter() {
             if lhs_parent.id == rhs_parent.id {
-                return Some(lhs_parent.to_owned());
+                return Ok(Some(lhs_parent.to_owned()));
             }
         }
     }
-    None
+    Ok(None)
 }
 
 /// try merge in fast-forward mode, if it's not possible, do nothing
-async fn merge_ff(target_commit: Commit, target_branch_name: &str) {
+async fn merge_ff(target_commit: Commit, target_branch_name: &str) -> CliResult<()> {
     println!("Fast-forward");
     let db = get_db_conn_instance().await;
 
@@ -147,16 +159,16 @@ async fn merge_ff(target_commit: Commit, target_branch_name: &str) {
     )
     .await
     {
-        eprintln!("fatal: {}", e);
-        return;
-    };
+        return Err(CliError::fatal(e.to_string()));
+    }
 
     // Only restore the working directory *after* the pointers have been updated.
-    restore::execute(RestoreArgs {
+    restore::execute_safe(RestoreArgs {
         worktree: true,
         staged: true,
         source: None, // `restore` without source defaults to HEAD, which is now correct.
         pathspec: vec![util::working_dir_string()],
     })
-    .await;
+    .await?;
+    Ok(())
 }

@@ -7,6 +7,19 @@ use libra::utils::path;
 
 use super::*;
 
+#[test]
+#[serial]
+fn test_mv_cli_outside_repository_returns_fatal_128() {
+    let temp = tempdir().unwrap();
+    let output = run_libra_command(&["mv", "a.txt", "b.txt"], temp.path());
+    assert_eq!(output.status.code(), Some(128));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("fatal: not a libra repository"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
 async fn stage_file(path: &str, content: &str) {
     test::ensure_file(path, Some(content));
     add::execute(AddArgs {
@@ -32,7 +45,7 @@ async fn test_mv_moves_tracked_file_to_new_path() {
 
     stage_file("a.txt", "hello").await;
 
-    let result = mv::execute(MvArgs {
+    let result = mv::execute_safe(MvArgs {
         paths: vec!["a.txt".to_string(), "b.txt".to_string()],
         verbose: false,
         dry_run: false,
@@ -60,7 +73,7 @@ async fn test_mv_moves_tracked_file_into_directory() {
     stage_file("move_me.txt", "content").await;
     fs::create_dir_all("dest").unwrap();
 
-    let result = mv::execute(MvArgs {
+    let result = mv::execute_safe(MvArgs {
         paths: vec!["move_me.txt".to_string(), "dest".to_string()],
         verbose: false,
         dry_run: false,
@@ -88,7 +101,7 @@ async fn test_mv_resolves_paths_from_current_subdirectory() {
     stage_file("sub/a.txt", "content").await;
 
     let _sub_guard = ChangeDirGuard::new(temp_path.path().join("sub"));
-    let result = mv::execute(MvArgs {
+    let result = mv::execute_safe(MvArgs {
         paths: vec!["a.txt".to_string(), "b.txt".to_string()],
         verbose: false,
         dry_run: false,
@@ -117,7 +130,7 @@ async fn test_mv_moves_directory_with_tracked_files() {
     stage_file("src_dir/sub/b.txt", "b").await;
     fs::create_dir_all("dest").unwrap();
 
-    let result = mv::execute(MvArgs {
+    let result = mv::execute_safe(MvArgs {
         paths: vec!["src_dir".to_string(), "dest".to_string()],
         verbose: false,
         dry_run: false,
@@ -149,7 +162,7 @@ async fn test_mv_force_overwrites_tracked_destination_and_replaces_index_entry()
     stage_file("src.txt", "new-content").await;
     stage_file("dst.txt", "old-content").await;
 
-    let result = mv::execute(MvArgs {
+    let result = mv::execute_safe(MvArgs {
         paths: vec!["src.txt".to_string(), "dst.txt".to_string()],
         verbose: false,
         dry_run: false,
@@ -185,7 +198,7 @@ async fn test_mv_rebuilds_index_entry_from_destination_file() {
     index.add(src_entry);
     index.save(path::index()).unwrap();
 
-    let result = mv::execute(MvArgs {
+    let result = mv::execute_safe(MvArgs {
         paths: vec!["src.txt".to_string(), "dst.txt".to_string()],
         verbose: false,
         dry_run: false,
@@ -509,7 +522,7 @@ async fn test_mv_moves_mixed_directory_and_updates_only_tracked_index_entries() 
     test::ensure_file("src_dir/untracked.txt", Some("u"));
     fs::create_dir_all("dest").unwrap();
 
-    let result = mv::execute(MvArgs {
+    let result = mv::execute_safe(MvArgs {
         paths: vec!["src_dir".to_string(), "dest".to_string()],
         verbose: false,
         dry_run: false,

@@ -361,21 +361,7 @@ fn parse_error_components(err: &clap::Error) -> (String, Option<String>, Vec<Str
 }
 
 fn repo_not_found_error() -> CliError {
-    CliError::fatal("not a libra repository (or any of the parent directories): .libra")
-}
-
-fn legacy_string_error_to_cli_error(message: String) -> CliError {
-    let trimmed = message.trim().to_string();
-    if let Some(fatal) = trimmed.strip_prefix("fatal: ") {
-        return CliError::fatal(fatal.to_string());
-    }
-    if let Some(error) = trimmed.strip_prefix("error: ") {
-        return CliError::failure(error.to_string());
-    }
-    if trimmed.starts_with("usage: ") {
-        return CliError::command_usage("invalid arguments").with_usage(trimmed);
-    }
-    CliError::failure(trimmed)
+    CliError::repo_not_found()
 }
 
 fn is_top_level_unknown_command(argv: &[String], err: &clap::Error) -> Option<String> {
@@ -457,7 +443,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
     match args.command {
         Commands::Init(args) => {
             let original_dir = utils::util::cur_dir();
-            command::init::execute(args).await; // set working directory as args.repo_directory
+            command::init::execute_safe(args).await?; // set working directory as args.repo_directory
             set_local_hash_kind().await?; // set hash kind after init
             env::set_current_dir(&original_dir).map_err(|e| {
                 CliError::fatal(format!(
@@ -473,57 +459,41 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
             .await
             .map_err(|e| CliError::fatal(e.to_string()))?,
         Commands::Add(args) => command::add::execute_safe(args).await?,
-        Commands::Rm(args) => command::remove::execute(args).await,
-        Commands::Restore(args) => command::restore::execute(args).await,
-        Commands::Status(args) => command::status::execute(args).await,
-        Commands::Clean(args) => command::clean::execute(args).await,
-        Commands::Stash(cmd) => command::stash::execute(cmd).await,
-        Commands::Lfs(cmd) => command::lfs::execute(cmd).await,
-        Commands::Log(args) => command::log::execute(args).await,
-        Commands::Shortlog(args) => command::shortlog::execute(args).await,
-        Commands::Show(args) => command::show::execute(args).await,
-        Commands::ShowRef(args) => command::show_ref::execute(args)
-            .await
-            .map_err(legacy_string_error_to_cli_error)?,
-        Commands::Branch(args) => command::branch::execute(args).await,
-        Commands::Tag(args) => command::tag::execute(args).await,
-        Commands::Commit(args) => {
-            command::commit::execute_safe(args)
-                .await
-                .map_err(CliError::fatal)?;
-        }
-        Commands::Switch(args) => command::switch::execute(args).await,
-        Commands::Rebase(args) => command::rebase::execute(args).await,
-        Commands::Merge(args) => command::merge::execute(args).await,
-        Commands::Reset(args) => command::reset::execute(args).await,
-        Commands::Mv(args) => {
-            command::mv::execute(args)
-                .await
-                .map_err(legacy_string_error_to_cli_error)?;
-        }
-        Commands::Describe(args) => command::describe::execute(args)
-            .await
-            .map_err(legacy_string_error_to_cli_error)?,
-        Commands::CherryPick(args) => command::cherry_pick::execute(args).await,
-        Commands::Push(args) => command::push::execute(args).await,
-        Commands::CatFile(args) => command::cat_file::execute(args).await,
-        Commands::IndexPack(args) => command::index_pack::execute(args),
+        Commands::Rm(args) => command::remove::execute_safe(args).await?,
+        Commands::Restore(args) => command::restore::execute_safe(args).await?,
+        Commands::Status(args) => command::status::execute_safe(args).await?,
+        Commands::Clean(args) => command::clean::execute_safe(args).await?,
+        Commands::Stash(cmd) => command::stash::execute_safe(cmd).await?,
+        Commands::Lfs(cmd) => command::lfs::execute_safe(cmd).await?,
+        Commands::Log(args) => command::log::execute_safe(args).await?,
+        Commands::Shortlog(args) => command::shortlog::execute_safe(args).await?,
+        Commands::Show(args) => command::show::execute_safe(args).await?,
+        Commands::ShowRef(args) => command::show_ref::execute_safe(args).await?,
+        Commands::Branch(args) => command::branch::execute_safe(args).await?,
+        Commands::Tag(args) => command::tag::execute_safe(args).await?,
+        Commands::Commit(args) => command::commit::execute_safe(args).await?,
+        Commands::Switch(args) => command::switch::execute_safe(args).await?,
+        Commands::Rebase(args) => command::rebase::execute_safe(args).await?,
+        Commands::Merge(args) => command::merge::execute_safe(args).await?,
+        Commands::Reset(args) => command::reset::execute_safe(args).await?,
+        Commands::Mv(args) => command::mv::execute_safe(args).await?,
+        Commands::Describe(args) => command::describe::execute_safe(args).await?,
+        Commands::CherryPick(args) => command::cherry_pick::execute_safe(args).await?,
+        Commands::Push(args) => command::push::execute_safe(args).await?,
+        Commands::CatFile(args) => command::cat_file::execute_safe(args).await?,
+        Commands::IndexPack(args) => command::index_pack::execute_safe(args)?,
         Commands::Fetch(args) => command::fetch::execute_safe(args).await?,
-        Commands::Diff(args) => command::diff::execute(args).await,
-        Commands::Blame(args) => command::blame::execute(args).await,
-        Commands::Revert(args) => command::revert::execute(args).await,
-        Commands::Remote(cmd) => command::remote::execute(cmd).await,
-        Commands::Open(args) => command::open::execute(args).await,
-        Commands::Pull(args) => command::pull::execute(args).await,
-        Commands::Config(args) => {
-            command::config::execute_safe(args)
-                .await
-                .map_err(legacy_string_error_to_cli_error)?;
-        }
-        Commands::Checkout(args) => command::checkout::execute(args).await,
-        Commands::Reflog(args) => command::reflog::execute(args).await,
-        Commands::Worktree(args) => command::worktree::execute(args).await,
-        Commands::Cloud(args) => command::cloud::execute(args).await,
+        Commands::Diff(args) => command::diff::execute_safe(args).await?,
+        Commands::Blame(args) => command::blame::execute_safe(args).await?,
+        Commands::Revert(args) => command::revert::execute_safe(args).await?,
+        Commands::Remote(cmd) => command::remote::execute_safe(cmd).await?,
+        Commands::Open(args) => command::open::execute_safe(args).await?,
+        Commands::Pull(args) => command::pull::execute_safe(args).await?,
+        Commands::Config(args) => command::config::execute_safe(args).await?,
+        Commands::Checkout(args) => command::checkout::execute_safe(args).await?,
+        Commands::Reflog(args) => command::reflog::execute_safe(args).await?,
+        Commands::Worktree(args) => command::worktree::execute_safe(args).await?,
+        Commands::Cloud(args) => command::cloud::execute_safe(args).await?,
     }
 
     // Wait for any background storage tasks (e.g. object indexing) to complete
@@ -608,7 +578,7 @@ mod tests {
         let msg = err.render();
         // Clap should include its own "tip: a similar subcommand exists: 'init'".
         assert!(
-            msg.contains("hint:") || msg.contains("similar"),
+            msg.contains("Hint:") || msg.contains("similar"),
             "expected clap fuzzy-match suggestion, got: {msg}"
         );
     }

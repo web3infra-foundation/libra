@@ -114,6 +114,9 @@ pub async fn execute(args: AddArgs) {
     }
 }
 
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Stages changes by resolving pathspecs, respecting
+/// ignore policy, and writing blob objects to storage.
 pub async fn execute_safe(args: AddArgs) -> CliResult<()> {
     let workdir = util::try_working_dir().map_err(|source| {
         if source.kind() == io::ErrorKind::NotFound {
@@ -251,7 +254,7 @@ fn finish_ignored(ignored: Vec<String>) -> CliResult<()> {
     sorted.sort();
     sorted.dedup();
     let mut message =
-        String::from("The following paths are ignored by one of your .libraignore files:");
+        String::from("the following paths are ignored by one of your .libraignore files:");
     for path in sorted {
         message.push('\n');
         message.push_str(&path);
@@ -531,7 +534,7 @@ mod test {
         assert!(err.render().contains("ignored.txt"));
         assert!(
             err.render()
-                .contains("hint: use -f if you really want to add them.")
+                .contains("Hint: use -f if you really want to add them.")
         );
     }
 }

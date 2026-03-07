@@ -10,6 +10,19 @@ use libra::command::{
 
 use super::*;
 
+#[test]
+#[serial]
+fn test_reset_cli_outside_repository_returns_fatal_128() {
+    let temp = tempdir().unwrap();
+    let output = run_libra_command(&["reset", "HEAD"], temp.path());
+    assert_eq!(output.status.code(), Some(128));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("fatal: not a libra repository"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
 /// Setup a standard test repository with 4 commits and branches
 async fn setup_standard_repo(
     temp_path: &std::path::Path,

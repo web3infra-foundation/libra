@@ -19,6 +19,7 @@ use crate::{
     common_utils::format_commit_msg,
     internal::{branch::Branch, head::Head},
     utils::{
+        error::{CliError, CliResult},
         object_ext::{BlobExt, TreeExt},
         path, util,
     },
@@ -41,28 +42,30 @@ pub struct RevertArgs {
 /// This function reverts a specified commit by applying the inverse changes
 /// and creating a new commit that undoes the original commit
 pub async fn execute(args: RevertArgs) {
-    // Check if we're in a valid repository
-    if !util::check_repo_exist() {
-        return;
+    if let Err(e) = execute_safe(args).await {
+        eprintln!("{}", e.render());
     }
+}
+
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Reverses one or more commits by replaying their inverse
+/// changes into the index/worktree and optionally creating new commits.
+pub async fn execute_safe(args: RevertArgs) -> CliResult<()> {
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
 
     // Ensure we're on a branch, not in detached HEAD state
     // Todo: For now, we do not handle the case when the repository is in a detached HEAD state.
     let current_head = Head::current().await;
     if let Head::Detached(_) = current_head {
-        eprintln!("fatal: You are in a 'detached HEAD' state.");
-        eprintln!("Reverting is not allowed in this state as it does not update any branch.");
-        return;
+        return Err(CliError::fatal(
+            "You are in a 'detached HEAD' state.\nReverting is not allowed in this state as it does not update any branch.",
+        ));
     }
 
     // Resolve the commit reference to a ObjectHash hash
-    let commit_id = match resolve_commit(&args.commit).await {
-        Ok(id) => id,
-        Err(e) => {
-            eprintln!("fatal: {e}");
-            return;
-        }
-    };
+    let commit_id = resolve_commit(&args.commit)
+        .await
+        .map_err(CliError::fatal)?;
 
     // Perform the actual revert operation
     match revert_single_commit(&commit_id, &args).await {
@@ -78,10 +81,13 @@ pub async fn execute(args: RevertArgs) {
             }
         }
         Err(e) => {
-            eprintln!("error: on conflict: {e}");
-            eprintln!("error: could not revert {}", &commit_id.to_string()[..7]);
+            return Err(CliError::failure(format!(
+                "on conflict: {e}\nerror: could not revert {}",
+                &commit_id.to_string()[..7]
+            )));
         }
     }
+    Ok(())
 }
 
 /// Revert a single commit by applying its parent's state

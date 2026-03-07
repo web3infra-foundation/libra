@@ -16,7 +16,6 @@ use git_internal::{hash::ObjectHash, internal::object::commit::Commit};
 use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait, sqlx::types::chrono};
 
 use crate::{
-    cli_error,
     command::load_object,
     internal::{
         config,
@@ -24,6 +23,7 @@ use crate::{
         model::reflog::Model,
         reflog::{HEAD, Reflog, ReflogError},
     },
+    utils::error::{CliError, CliResult},
 };
 
 #[derive(Parser, Debug)]
@@ -76,6 +76,15 @@ enum Subcommands {
 }
 
 pub async fn execute(args: ReflogArgs) {
+    if let Err(e) = execute_safe(args).await {
+        eprintln!("{}", e.render());
+    }
+}
+
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Dispatches to the show, delete, or exists sub-command
+/// for reflog management.
+pub async fn execute_safe(args: ReflogArgs) -> CliResult<()> {
     match args.command {
         Subcommands::Show {
             ref_name,
@@ -117,44 +126,28 @@ struct ReflogShowOptions {
     stat: bool,
 }
 
-async fn handle_show(ref_name: &str, options: ReflogShowOptions) {
+async fn handle_show(ref_name: &str, options: ReflogShowOptions) -> CliResult<()> {
     let db = get_db_conn_instance().await;
 
     // Parse date filters
-    let since_ts = match options
+    let since_ts = options
         .since
         .as_deref()
         .map(crate::internal::log::date_parser::parse_date)
         .transpose()
-    {
-        Ok(ts) => ts,
-        Err(e) => {
-            eprintln!("fatal: invalid --since date: {e}");
-            return;
-        }
-    };
+        .map_err(|e| CliError::fatal(format!("invalid --since date: {e}")))?;
 
-    let until_ts = match options
+    let until_ts = options
         .until
         .as_deref()
         .map(crate::internal::log::date_parser::parse_date)
         .transpose()
-    {
-        Ok(ts) => ts,
-        Err(e) => {
-            eprintln!("fatal: invalid --until date: {e}");
-            return;
-        }
-    };
+        .map_err(|e| CliError::fatal(format!("invalid --until date: {e}")))?;
 
     let ref_name = parse_ref_name(ref_name).await;
-    let logs = match Reflog::find_all(db, &ref_name).await {
-        Ok(logs) => logs,
-        Err(e) => {
-            cli_error!(e, "fatal: failed to get reflog entries");
-            return;
-        }
-    };
+    let logs = Reflog::find_all(db, &ref_name)
+        .await
+        .map_err(|e| CliError::fatal(format!("failed to get reflog entries: {e}")))?;
 
     // Preserve original indices before filtering
     let logs_with_index: Vec<_> = logs.into_iter().enumerate().collect();
@@ -184,20 +177,25 @@ async fn handle_show(ref_name: &str, options: ReflogShowOptions) {
         .stdin(Stdio::piped())
         .stdout(Stdio::inherit())
         .spawn()
-        .expect("failed to execute process");
+        .map_err(|e| CliError::fatal(format!("failed to start pager: {e}")))?;
 
     #[cfg(unix)]
     if let Some(ref mut stdin) = less.stdin {
-        writeln!(stdin, "{}", formatter).expect("fatal: failed to write to stdin");
+        writeln!(stdin, "{}", formatter)
+            .map_err(|e| CliError::fatal(format!("failed to write to pager: {e}")))?;
     } else {
-        eprintln!("fatal: failed to capture stdin");
+        return Err(CliError::fatal("failed to capture pager stdin"));
     }
 
     #[cfg(unix)]
-    let _ = less.wait().expect("failed to wait on child");
+    let _ = less
+        .wait()
+        .map_err(|e| CliError::fatal(format!("pager exited with error: {e}")))?;
 
     #[cfg(not(unix))]
-    println!("{formatter}")
+    println!("{formatter}");
+
+    Ok(())
 }
 
 // `partial_ref_name` is the branch name entered by the user.
@@ -218,20 +216,21 @@ async fn parse_ref_name(partial_ref_name: &str) -> String {
     format!("refs/heads/{partial_ref_name}")
 }
 
-async fn handle_exists(ref_name: &str) {
+async fn handle_exists(ref_name: &str) -> CliResult<()> {
     let db = get_db_conn_instance().await;
     let log = Reflog::find_one(db, ref_name)
         .await
-        .expect("fatal: failed to get reflog entry");
-    match log {
-        Some(_) => {}
-        None => {
-            eprintln!("fatal: reflog entry for '{}' not found", ref_name);
-        }
+        .map_err(|e| CliError::fatal(format!("failed to get reflog entry: {e}")))?;
+    if log.is_none() {
+        return Err(CliError::failure(format!(
+            "reflog entry for '{}' not found",
+            ref_name
+        )));
     }
+    Ok(())
 }
 
-async fn handle_delete(selectors: &[String]) {
+async fn handle_delete(selectors: &[String]) -> CliResult<()> {
     let mut groups = HashMap::new();
     for selector in selectors {
         if let Some(parsed) = parse_reflog_selector(selector) {
@@ -241,8 +240,9 @@ async fn handle_delete(selectors: &[String]) {
                 .push(parsed);
             continue;
         }
-        eprintln!("fatal: invalid reflog entry format: {selector}");
-        return;
+        return Err(CliError::fatal(format!(
+            "invalid reflog entry format: {selector}"
+        )));
     }
 
     let groups = groups
@@ -253,11 +253,12 @@ async fn handle_delete(selectors: &[String]) {
         })
         .collect::<Vec<_>>();
     for group in groups {
-        delete_single_group(&group).await;
+        delete_single_group(&group).await?;
     }
+    Ok(())
 }
 
-async fn delete_single_group(group: &[(&str, usize)]) {
+async fn delete_single_group(group: &[(&str, usize)]) -> CliResult<()> {
     let db = get_db_conn_instance().await;
     // clone this to move it into async block to make compiler happy :(
     let group = group
@@ -288,7 +289,7 @@ async fn delete_single_group(group: &[(&str, usize)]) {
         })
     })
     .await
-    .expect("fatal: failed to delete reflog entries")
+    .map_err(|e| CliError::fatal(format!("failed to delete reflog entries: {e}")))
 }
 
 fn parse_reflog_selector(selector: &str) -> Option<(&str, usize)> {
@@ -474,11 +475,17 @@ impl Display for ReflogFormatter<'_> {
     }
 }
 
+// INVARIANT: `commit_hash` comes from the reflog which only stores valid hashes
+// pointing to existing objects. If the object store is corrupt, panicking during
+// formatting is acceptable.
 fn find_commit(commit_hash: &str) -> Commit {
     let hash = ObjectHash::from_str(commit_hash).unwrap();
     load_object::<Commit>(&hash).unwrap()
 }
 
+// INVARIANT: reflog timestamps are always valid Unix timestamps written by our
+// own code. `from_timestamp` only returns `None` for out-of-range values that
+// cannot occur in practice.
 fn format_datetime(timestamp: i64) -> String {
     let naive = chrono::DateTime::from_timestamp(timestamp, 0).unwrap();
     let local = naive.with_timezone(&chrono::Local);

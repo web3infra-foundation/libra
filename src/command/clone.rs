@@ -100,6 +100,10 @@ pub async fn execute(args: CloneArgs) {
     }
 }
 
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Fetches objects from a remote URL, writes refs/config,
+/// and checks out the working tree. Restores the original working directory on
+/// failure.
 pub async fn execute_safe(args: CloneArgs) -> CliResult<()> {
     let original_dir = util::cur_dir();
     let result = execute_clone(args, &original_dir).await;
