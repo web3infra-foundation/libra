@@ -131,7 +131,7 @@ pub async fn execute_safe(command: RemoteCmds) -> CliResult<()> {
         }
         RemoteCmds::GetUrl { push, all, name } => {
             if Config::remote_config(&name).await.is_none() {
-                return Err(CliError::fatal(format!("No such remote: {name}")));
+                return Err(CliError::fatal(format!("no such remote: {name}")));
             }
             // If --push, prefer explicit pushurl entries; fall back to url if none.
             if push {
@@ -172,7 +172,7 @@ pub async fn execute_safe(command: RemoteCmds) -> CliResult<()> {
             value,
         } => {
             if Config::remote_config(&name).await.is_none() {
-                return Err(CliError::fatal(format!("No such remote: {name}")));
+                return Err(CliError::fatal(format!("no such remote: {name}")));
             }
             // Determine which config key to operate on
             let key = if push { "pushurl" } else { "url" };
@@ -229,7 +229,7 @@ async fn show_remote_verbose(remote: &str) {
 async fn prune_remote(name: &str, dry_run: bool) -> Result<(), CliError> {
     // Check if the remote exists
     let Some(remote_config) = Config::remote_config(name).await else {
-        return Err(CliError::fatal(format!("No such remote: {}", name)));
+        return Err(CliError::fatal(format!("no such remote: {}", name)));
     };
 
     // Get remote client

@@ -229,7 +229,7 @@ pub async fn create_branch_safe(
 async fn delete_branch(branch_name: String) -> CliResult<()> {
     if branch::is_locked_branch(&branch_name) {
         return Err(CliError::fatal(format!(
-            "The '{}' branch is locked and cannot be deleted.",
+            "the '{}' branch is locked and cannot be deleted",
             branch_name
         )));
     }
@@ -260,7 +260,7 @@ async fn delete_branch(branch_name: String) -> CliResult<()> {
 async fn delete_branch_safe(branch_name: String) -> CliResult<()> {
     if branch::is_locked_branch(&branch_name) {
         return Err(CliError::fatal(format!(
-            "The '{}' branch is locked and cannot be deleted.",
+            "the '{}' branch is locked and cannot be deleted",
             branch_name
         )));
     }
@@ -345,14 +345,14 @@ async fn rename_branch(args: Vec<String>) -> CliResult<()> {
 
     if branch::is_locked_branch(&new_name) {
         return Err(CliError::fatal(format!(
-            "The '{}' branch is locked and cannot be overwritten.",
+            "the '{}' branch is locked and cannot be overwritten",
             new_name
         )));
     }
 
     if branch::is_locked_branch(&old_name) {
         return Err(CliError::fatal(format!(
-            "The '{}' branch is locked and cannot be renamed.",
+            "the '{}' branch is locked and cannot be renamed",
             old_name
         )));
     }

@@ -183,8 +183,8 @@ pub async fn execute_safe(args: RemoveArgs) -> CliResult<()> {
                 // If ignore_unmatch is false, error if the pathspec does not match any tracked files (consistent with Git behavior).
                 let error_msg = format!("pathspec '{path_str}' did not match any files");
                 return Err(CliError::fatal(error_msg)
-                    .with_hint("Run 'libra status' to inspect tracked paths.")
-                    .with_hint("Use '--ignore-unmatch' to ignore missing paths."));
+                    .with_hint("run 'libra status' to inspect tracked paths.")
+                    .with_hint("use '--ignore-unmatch' to ignore missing paths."));
             }
         }
     }

@@ -102,10 +102,10 @@ pub async fn execute_safe(args: PushArgs) -> CliResult<()> {
             if let Some(remote) = remote {
                 remote
             } else {
-                return Err(CliError::fatal("No configured push destination.")
-                    .with_hint("Add a remote with 'libra remote add <name> <url>'.")
+                return Err(CliError::fatal("no configured push destination")
+                    .with_hint("add a remote with 'libra remote add <name> <url>'.")
                     .with_hint(
-                        "Or push to an explicit destination with 'libra push <name> <branch>'.",
+                        "or push to an explicit destination with 'libra push <name> <branch>'.",
                     ));
             }
         }
@@ -193,8 +193,8 @@ pub async fn execute_safe(args: PushArgs) -> CliResult<()> {
     if !can_fast_forward && !args.force {
         return Err(
             CliError::fatal(format!("cannot push to '{}' (non-fast-forward)", branch))
-                .with_hint("Integrate the remote changes first, for example with 'libra pull'.")
-                .with_hint("Or use '--force' to overwrite the remote history."),
+                .with_hint("integrate the remote changes first, for example with 'libra pull'.")
+                .with_hint("or use '--force' to overwrite the remote history."),
         );
     } else if !can_fast_forward && args.force {
         // Force push case - only show warning when force is actually needed

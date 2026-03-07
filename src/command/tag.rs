@@ -88,8 +88,8 @@ async fn create_tag_safe(tag_name: &str, message: Option<String>, force: bool) -
             .map(|rest| format!("tag {rest}"))
             .unwrap_or(message);
         CliError::fatal(message)
-            .with_hint(format!("Delete it first with 'libra tag -d {}'.", tag_name))
-            .with_hint("Or choose a different tag name.")
+            .with_hint(format!("delete it first with 'libra tag -d {}'.", tag_name))
+            .with_hint("or choose a different tag name.")
     })?;
     Ok(())
 }

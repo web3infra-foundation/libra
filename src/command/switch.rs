@@ -247,7 +247,7 @@ async fn switch_to_branch(branch_name: String) -> CliResult<()> {
             } else {
                 return Err(
                     CliError::fatal(format!("invalid reference: {}", &branch_name))
-                        .with_hint(format!("Create it with 'libra switch -c {}'.", branch_name)),
+                        .with_hint(format!("create it with 'libra switch -c {}'.", branch_name)),
                 );
             }
         }

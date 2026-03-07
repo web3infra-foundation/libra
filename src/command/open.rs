@@ -59,7 +59,7 @@ pub async fn execute_safe(args: OpenArgs) -> CliResult<()> {
                 } else if let Some(first) = remotes.first() {
                     first.url.clone()
                 } else {
-                    return Err(CliError::fatal("No remote configured"));
+                    return Err(CliError::fatal("no remote configured"));
                 }
             }
         }

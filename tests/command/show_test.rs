@@ -135,7 +135,7 @@ fn test_show_cli_badref_returns_fatal_128() {
     assert!(stderr.contains(
         "fatal: ambiguous argument 'badref': unknown revision or path not in the working tree."
     ));
-    assert!(stderr.contains("Hint: Use '--' to separate paths from revisions"));
+    assert!(stderr.contains("Hint: use '--' to separate paths from revisions"));
 }
 
 /// Test that show can display a lightweight tag.

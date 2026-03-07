@@ -51,7 +51,7 @@ fn test_push_cli_without_remote_returns_fatal_128() {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert_eq!(output.status.code(), Some(128));
-    assert!(stderr.contains("fatal: No configured push destination."));
+    assert!(stderr.contains("fatal: no configured push destination"));
     assert!(stderr.contains("Hint:"));
 }
 

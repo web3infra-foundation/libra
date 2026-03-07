@@ -340,7 +340,7 @@ fn show_bad_revision_error(object_ref: &str) -> CliError {
         "ambiguous argument '{}': unknown revision or path not in the working tree.",
         object_ref
     ))
-    .with_hint("Use '--' to separate paths from revisions, for example 'libra show -- <file>'.")
+    .with_hint("use '--' to separate paths from revisions, for example 'libra show -- <file>'.")
 }
 
 #[cfg(test)]

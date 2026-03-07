@@ -85,7 +85,7 @@ async fn test_commit_requires_configured_identity_in_strict_mode() {
     .await;
     assert!(result.is_err());
     let rendered = result.unwrap_err().render();
-    assert!(rendered.contains("fatal: Author identity unknown"));
+    assert!(rendered.contains("fatal: author identity unknown"));
     assert!(rendered.contains("Hint:"));
 
     // Restore env vars so subsequent serial tests are not affected.
@@ -112,7 +112,7 @@ fn test_commit_cli_without_identity_succeeds_with_warning() {
 
     assert_eq!(output.status.code(), Some(0));
     assert!(stderr.contains("Warning: Name and email are not configured"));
-    assert!(stderr.contains("Hint: Run 'libra config --global user.name"));
+    assert!(stderr.contains("Hint: run 'libra config --global user.name"));
 }
 
 #[test]
@@ -133,8 +133,8 @@ fn test_commit_cli_use_config_only_returns_fatal_128() {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert_eq!(output.status.code(), Some(128));
-    assert!(stderr.contains("fatal: Author identity unknown"));
-    assert!(stderr.contains("Hint: Run 'libra config --global user.name"));
+    assert!(stderr.contains("fatal: author identity unknown"));
+    assert!(stderr.contains("Hint: run 'libra config --global user.name"));
 }
 
 #[tokio::test]

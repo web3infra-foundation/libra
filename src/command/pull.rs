@@ -62,13 +62,13 @@ pub async fn execute_safe(args: PullArgs) -> CliResult<()> {
                 Ok(())
             }
             None => Err(CliError::failure(
-                "There is no tracking information for the current branch.",
+                "there is no tracking information for the current branch",
             )
-            .with_hint("Run 'libra branch --set-upstream-to=<remote>/<branch>' to track a branch.")
+            .with_hint("run 'libra branch --set-upstream-to=<remote>/<branch>' to track a branch.")
             .with_hint(
-                "Or specify a remote and branch, for example 'libra pull <remote> <branch>'.",
+                "or specify a remote and branch, for example 'libra pull <remote> <branch>'.",
             )),
         },
-        _ => Err(CliError::failure("You are not currently on a branch.")),
+        _ => Err(CliError::failure("you are not currently on a branch")),
     }
 }

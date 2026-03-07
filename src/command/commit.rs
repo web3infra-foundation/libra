@@ -233,22 +233,22 @@ fn detect_host_name() -> Option<String> {
 fn missing_identity_error(name_missing: bool, email_missing: bool) -> CliError {
     let config_hint = match (name_missing, email_missing) {
         (true, true) => {
-            "Run 'libra config --global user.name \"Your Name\"' and 'libra config --global user.email \"you@example.com\"'."
+            "run 'libra config --global user.name \"Your Name\"' and 'libra config --global user.email \"you@example.com\"'."
         }
         (true, false) => {
-            "Run 'libra config --global user.name \"Your Name\"' to set your default identity."
+            "run 'libra config --global user.name \"Your Name\"' to set your default identity."
         }
         (false, true) => {
-            "Run 'libra config --global user.email \"you@example.com\"' to set your default identity."
+            "run 'libra config --global user.email \"you@example.com\"' to set your default identity."
         }
         (false, false) => {
-            "Run 'libra config --global --edit' to inspect your identity configuration."
+            "run 'libra config --global --edit' to inspect your identity configuration."
         }
     };
 
-    CliError::fatal("Author identity unknown")
+    CliError::fatal("author identity unknown")
         .with_hint(config_hint)
-        .with_hint("Omit '--global' to set the identity only in this repository.")
+        .with_hint("omit '--global' to set the identity only in this repository.")
 }
 
 fn classify_commit_error(message: String) -> CliError {
@@ -267,7 +267,7 @@ fn classify_commit_error(message: String) -> CliError {
 fn print_auto_detected_identity_warning() {
     eprintln!("Warning: Name and email are not configured; using an auto-detected identity.");
     eprintln!(
-        "Hint: Run 'libra config --global user.name \"Your Name\"' and 'libra config --global user.email \"you@example.com\"'."
+        "Hint: run 'libra config --global user.name \"Your Name\"' and 'libra config --global user.email \"you@example.com\"'."
     );
 }
 

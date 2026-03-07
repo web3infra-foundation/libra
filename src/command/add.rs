@@ -254,7 +254,7 @@ fn finish_ignored(ignored: Vec<String>) -> CliResult<()> {
     sorted.sort();
     sorted.dedup();
     let mut message =
-        String::from("The following paths are ignored by one of your .libraignore files:");
+        String::from("the following paths are ignored by one of your .libraignore files:");
     for path in sorted {
         message.push('\n');
         message.push_str(&path);

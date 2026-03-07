@@ -38,8 +38,8 @@ fn run_clean(args: CleanArgs) -> CliResult<()> {
         return Err(CliError::fatal(
             "clean requires -f or -n (use -f to remove files, -n to dry-run)",
         )
-        .with_hint("Use 'libra clean -n' to preview removals.")
-        .with_hint("Use 'libra clean -f' to remove untracked files."));
+        .with_hint("use 'libra clean -n' to preview removals.")
+        .with_hint("use 'libra clean -f' to remove untracked files."));
     }
 
     let index_path = path::index();
