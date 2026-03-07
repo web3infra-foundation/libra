@@ -123,6 +123,7 @@ async fn execute_inner(args: DescribeArgs) -> Result<(), String> {
             .map_err(|_| format!("fatal: failed to load commit {}", curr_hash))?;
 
         for parent_id_str in commit.parent_commit_ids {
+            // INVARIANT: parent IDs stored in commits are always valid hex hashes.
             let parent_hash = ObjectHash::from_str(&parent_id_str.to_string()).unwrap();
             if !visited.contains(&parent_hash) {
                 visited.insert(parent_hash);

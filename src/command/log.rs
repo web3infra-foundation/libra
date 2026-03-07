@@ -908,7 +908,10 @@ async fn create_reference_commit_map() -> HashMap<ObjectHash, Vec<Reference>> {
             });
     }
 
-    let all_tags = crate::internal::tag::list().await.expect("fatal: ");
+    let all_tags = crate::internal::tag::list().await.unwrap_or_else(|e| {
+        tracing::warn!("failed to list tags for log decoration: {e}");
+        Vec::new()
+    });
     for tag in all_tags {
         let commit_id = match tag.object {
             crate::internal::tag::TagObject::Commit(c) => c.id,

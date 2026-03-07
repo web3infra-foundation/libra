@@ -296,7 +296,12 @@ async fn test_worktree_add_rejects_existing_non_empty_directory() {
     fs::write(wt_path.join("a.txt"), b"local-data")
         .expect("failed to seed pre-existing target content");
 
-    let _ = exec_async(vec!["worktree", "add", "wt_non_empty"]).await;
+    assert!(
+        exec_async(vec!["worktree", "add", "wt_non_empty"])
+            .await
+            .is_err(),
+        "adding worktree to non-empty directory should fail"
+    );
 
     assert!(
         !wt_path.join(".libra").exists(),
@@ -382,7 +387,12 @@ async fn test_worktree_add_rolls_back_link_on_restore_failure() {
     fs::write(wt_path.join("conflict"), b"blocking file")
         .expect("failed to create conflicting path in target");
 
-    let _ = exec_async(vec!["worktree", "add", "wt_restore_fail"]).await;
+    assert!(
+        exec_async(vec!["worktree", "add", "wt_restore_fail"])
+            .await
+            .is_err(),
+        "adding worktree with conflicting file should fail"
+    );
 
     assert!(
         !wt_path.join(".libra").exists(),
@@ -451,7 +461,12 @@ async fn test_worktree_add_rolls_back_populated_files_when_state_save_fails() {
     fs::set_permissions(&storage_dir, read_only)
         .expect("failed to set storage directory read-only");
 
-    let _ = exec_async(vec!["worktree", "add", "wt_state_save_fail"]).await;
+    assert!(
+        exec_async(vec!["worktree", "add", "wt_state_save_fail"])
+            .await
+            .is_err(),
+        "adding worktree with unwritable state should fail"
+    );
 
     let mut restore_mode = fs::metadata(&storage_dir)
         .expect("failed to stat storage directory")
@@ -547,7 +562,10 @@ async fn test_worktree_corrupted_state_file_is_handled_without_side_effects() {
     fs::write(&state_path, b"{ invalid json").expect("failed to corrupt state file");
     let before = fs::read_to_string(&state_path).unwrap();
 
-    let _ = exec_async(vec!["worktree", "list"]).await;
+    assert!(
+        exec_async(vec!["worktree", "list"]).await.is_err(),
+        "listing worktrees with corrupt state should fail"
+    );
 
     let after = fs::read_to_string(&state_path).unwrap();
     assert_eq!(
@@ -557,7 +575,12 @@ async fn test_worktree_corrupted_state_file_is_handled_without_side_effects() {
 
     let new_path = repo_dir.path().join("wt_from_corrupt");
     assert!(!new_path.exists());
-    let _ = exec_async(vec!["worktree", "add", "wt_from_corrupt"]).await;
+    assert!(
+        exec_async(vec!["worktree", "add", "wt_from_corrupt"])
+            .await
+            .is_err(),
+        "adding worktree with corrupt state should fail"
+    );
     assert!(
         !new_path.exists(),
         "add should not create target directory when worktree state cannot be loaded"
@@ -798,7 +821,12 @@ async fn test_worktree_move_main_is_rejected_without_side_effects() {
     let dest = repo_dir.path().join("moved_main");
     assert!(!dest.exists());
 
-    let _ = exec_async(vec!["worktree", "move", ".", "moved_main"]).await;
+    assert!(
+        exec_async(vec!["worktree", "move", ".", "moved_main"])
+            .await
+            .is_err(),
+        "moving main worktree should fail"
+    );
 
     assert!(
         !dest.exists(),
@@ -843,7 +871,12 @@ async fn test_worktree_move_locked_is_rejected_without_side_effects() {
 
     let src_canonical = src.canonicalize().unwrap();
 
-    let _ = exec_async(vec!["worktree", "move", "wt_locked", "wt_locked_moved"]).await;
+    assert!(
+        exec_async(vec!["worktree", "move", "wt_locked", "wt_locked_moved"])
+            .await
+            .is_err(),
+        "moving locked worktree should fail"
+    );
 
     assert!(
         src.is_dir(),
@@ -885,7 +918,12 @@ async fn test_worktree_move_rejects_duplicate_destination() {
 
     let before_paths = worktree_paths();
 
-    let _ = exec_async(vec!["worktree", "move", "wt_a", "wt_b"]).await;
+    assert!(
+        exec_async(vec!["worktree", "move", "wt_a", "wt_b"])
+            .await
+            .is_err(),
+        "moving worktree to occupied path should fail"
+    );
 
     assert!(
         src.is_dir(),
@@ -920,13 +958,17 @@ async fn test_worktree_move_rejects_destination_inside_storage() {
 
     let before_paths = worktree_paths();
 
-    let _ = exec_async(vec![
-        "worktree",
-        "move",
-        "wt_storage_src",
-        ".libra/moved_inside_storage",
-    ])
-    .await;
+    assert!(
+        exec_async(vec![
+            "worktree",
+            "move",
+            "wt_storage_src",
+            ".libra/moved_inside_storage",
+        ])
+        .await
+        .is_err(),
+        "moving worktree into storage should fail"
+    );
 
     assert!(
         src.is_dir(),
@@ -1034,7 +1076,12 @@ async fn test_worktree_remove_locked_is_rejected_without_side_effects() {
 
     let before_paths = worktree_paths();
 
-    let _ = exec_async(vec!["worktree", "remove", "wt_for_remove"]).await;
+    assert!(
+        exec_async(vec!["worktree", "remove", "wt_for_remove"])
+            .await
+            .is_err(),
+        "removing locked worktree should fail"
+    );
 
     assert!(
         wt_path.is_dir(),
@@ -1322,7 +1369,12 @@ async fn test_worktree_remove_main_is_rejected_with_separate_libra_dir() {
     let _guard_wt = test::ChangeDirGuard::new(&wt_path);
     let before_paths = worktree_paths();
 
-    let _ = exec_async(vec!["worktree", "remove", main_path_str.as_str()]).await;
+    assert!(
+        exec_async(vec!["worktree", "remove", main_path_str.as_str()])
+            .await
+            .is_err(),
+        "removing main worktree should fail"
+    );
 
     let after_paths = worktree_paths();
     assert_eq!(

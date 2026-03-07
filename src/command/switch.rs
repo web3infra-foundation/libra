@@ -84,14 +84,18 @@ pub async fn execute_safe(args: SwitchArgs) -> CliResult<()> {
         }
         None => match detach {
             true => {
-                let branch = branch.expect("clap requires branch when not creating");
+                let branch = branch.ok_or_else(|| {
+                    CliError::command_usage("branch name is required when using --detach")
+                })?;
                 let commit_base = get_commit_base(&branch)
                     .await
                     .map_err(|e| CliError::fatal(e.to_string()))?;
                 switch_to_commit(commit_base).await
             }
             false => {
-                switch_to_branch(branch.expect("clap requires branch when not detaching")).await
+                let branch =
+                    branch.ok_or_else(|| CliError::command_usage("branch name is required"))?;
+                switch_to_branch(branch).await
             }
         },
     }
@@ -224,7 +228,7 @@ async fn switch_to_commit(commit_hash: ObjectHash) -> CliResult<()> {
     };
 
     // Only restore the working directory *after* HEAD has been successfully updated.
-    restore_to_commit(commit_hash).await;
+    restore_to_commit(commit_hash).await?;
     println!("HEAD is now at {}", &commit_hash.to_string()[..7]);
     Ok(())
 }
@@ -296,19 +300,19 @@ async fn switch_to_branch(branch_name: String) -> CliResult<()> {
         return Err(CliError::fatal(e.to_string()));
     }
 
-    restore_to_commit(target_commit_id).await;
+    restore_to_commit(target_commit_id).await?;
     println!("Switched to branch '{}'", target_branch.name);
     Ok(())
 }
 
-async fn restore_to_commit(commit_id: ObjectHash) {
+async fn restore_to_commit(commit_id: ObjectHash) -> CliResult<()> {
     let restore_args = RestoreArgs {
         worktree: true,
         staged: true,
         source: Some(commit_id.to_string()),
         pathspec: vec![util::working_dir_string()],
     };
-    restore::execute(restore_args).await;
+    restore::execute_safe(restore_args).await
 }
 
 #[cfg(test)]

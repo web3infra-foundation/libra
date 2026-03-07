@@ -764,6 +764,12 @@ pub async fn execute(args: StatusArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Computes staged, unstaged, and untracked sets then
 /// prints a concise summary via [`execute_to`].
+///
+/// # Known limitations
+///
+/// `execute_to()` handles errors internally with `unwrap()` and never propagates
+/// them, so this wrapper always returns `Ok(())` even when the status fails.
+// TODO: refactor execute_to() to return CliResult so errors propagate to callers.
 pub async fn execute_safe(args: StatusArgs) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
     execute_to(args, &mut std::io::stdout()).await;

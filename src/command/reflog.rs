@@ -178,17 +178,20 @@ async fn handle_show(ref_name: &str, options: ReflogShowOptions) -> CliResult<()
         .stdin(Stdio::piped())
         .stdout(Stdio::inherit())
         .spawn()
-        .expect("failed to execute process");
+        .map_err(|e| CliError::fatal(format!("failed to start pager: {e}")))?;
 
     #[cfg(unix)]
     if let Some(ref mut stdin) = less.stdin {
-        writeln!(stdin, "{}", formatter).expect("fatal: failed to write to stdin");
+        writeln!(stdin, "{}", formatter)
+            .map_err(|e| CliError::fatal(format!("failed to write to pager: {e}")))?;
     } else {
-        eprintln!("fatal: failed to capture stdin");
+        return Err(CliError::fatal("failed to capture pager stdin"));
     }
 
     #[cfg(unix)]
-    let _ = less.wait().expect("failed to wait on child");
+    let _ = less
+        .wait()
+        .map_err(|e| CliError::fatal(format!("pager exited with error: {e}")))?;
 
     #[cfg(not(unix))]
     println!("{formatter}");
@@ -473,11 +476,17 @@ impl Display for ReflogFormatter<'_> {
     }
 }
 
+// INVARIANT: `commit_hash` comes from the reflog which only stores valid hashes
+// pointing to existing objects. If the object store is corrupt, panicking during
+// formatting is acceptable.
 fn find_commit(commit_hash: &str) -> Commit {
     let hash = ObjectHash::from_str(commit_hash).unwrap();
     load_object::<Commit>(&hash).unwrap()
 }
 
+// INVARIANT: reflog timestamps are always valid Unix timestamps written by our
+// own code. `from_timestamp` only returns `None` for out-of-range values that
+// cannot occur in practice.
 fn format_datetime(timestamp: i64) -> String {
     let naive = chrono::DateTime::from_timestamp(timestamp, 0).unwrap();
     let local = naive.with_timezone(&chrono::Local);

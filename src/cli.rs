@@ -480,7 +480,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Describe(args) => command::describe::execute_safe(args).await?,
         Commands::CherryPick(args) => command::cherry_pick::execute_safe(args).await?,
         Commands::Push(args) => command::push::execute_safe(args).await?,
-        Commands::CatFile(args) => command::cat_file::execute(args).await,
+        Commands::CatFile(args) => command::cat_file::execute_safe(args).await?,
         Commands::IndexPack(args) => command::index_pack::execute_safe(args)?,
         Commands::Fetch(args) => command::fetch::execute_safe(args).await?,
         Commands::Diff(args) => command::diff::execute_safe(args).await?,
@@ -493,7 +493,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Checkout(args) => command::checkout::execute_safe(args).await?,
         Commands::Reflog(args) => command::reflog::execute_safe(args).await?,
         Commands::Worktree(args) => command::worktree::execute_safe(args).await?,
-        Commands::Cloud(args) => command::cloud::execute(args).await,
+        Commands::Cloud(args) => command::cloud::execute_safe(args).await?,
     }
 
     // Wait for any background storage tasks (e.g. object indexing) to complete

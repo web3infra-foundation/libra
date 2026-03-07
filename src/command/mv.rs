@@ -60,16 +60,9 @@ pub async fn execute(args: MvArgs) -> Result<(), String> {
 /// updates the index accordingly.
 pub async fn execute_safe(args: MvArgs) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
-    execute_inner(args).await.map_err(|e| {
-        let trimmed = e.trim().to_string();
-        if let Some(rest) = trimmed.strip_prefix("fatal: ") {
-            CliError::fatal(rest.to_string())
-        } else if trimmed.starts_with("usage: ") {
-            CliError::command_usage("invalid arguments").with_usage(trimmed)
-        } else {
-            CliError::failure(trimmed)
-        }
-    })
+    execute_inner(args)
+        .await
+        .map_err(CliError::from_legacy_string)
 }
 
 async fn execute_inner(args: MvArgs) -> Result<(), String> {

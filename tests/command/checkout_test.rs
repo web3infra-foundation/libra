@@ -103,7 +103,9 @@ async fn test_checkout_module_functions() {
         no_verify: false,
         author: None,
     };
-    commit::execute(commit_args).await;
+    commit::execute_safe(commit_args)
+        .await
+        .expect("initial commit should succeed");
 
     // Create tow new branch
     branch::create_branch(String::from("new_branch_01"), get_current_branch().await).await;
@@ -153,7 +155,9 @@ async fn test_checkout_module_functions_sha256() {
         no_verify: false,
         author: None,
     };
-    commit::execute(commit_args).await;
+    commit::execute_safe(commit_args)
+        .await
+        .expect("initial commit should succeed");
 
     // Ensure HEAD commit uses SHA-256 (64 hex chars)
     let head_commit = Head::current_commit().await.expect("HEAD missing");
@@ -193,7 +197,7 @@ async fn checkout_restore_rejects_sha1_hash_in_sha256_repo() {
 
     // create and commit a file
     test::ensure_file("foo.txt", Some("v1"));
-    add::execute(AddArgs {
+    add::execute_safe(AddArgs {
         pathspec: vec!["foo.txt".into()],
         all: false,
         update: false,
@@ -203,8 +207,9 @@ async fn checkout_restore_rejects_sha1_hash_in_sha256_repo() {
         dry_run: false,
         ignore_errors: false,
     })
-    .await;
-    commit::execute(commit::CommitArgs {
+    .await
+    .expect("add should succeed");
+    commit::execute_safe(commit::CommitArgs {
         message: Some("init".into()),
         file: None,
         allow_empty: false,
@@ -217,13 +222,14 @@ async fn checkout_restore_rejects_sha1_hash_in_sha256_repo() {
         no_verify: false,
         author: None,
     })
-    .await;
+    .await
+    .expect("commit should succeed");
 
     // modify the file
     test::ensure_file("foo.txt", Some("v2"));
 
     // try to restore using a SHA-1 length hash in a SHA-256 repo; should no-op
-    restore::execute(RestoreArgs {
+    let _ = restore::execute_safe(RestoreArgs {
         worktree: true,
         staged: true,
         source: Some("4b825dc642cb6eb9a060e54bf8d69288fbee4904".into()),
@@ -260,7 +266,7 @@ async fn test_checkout_new_branch_with_dirty_worktree_returns_error() {
 
     // Create initial commit so HEAD exists
     test::ensure_file("base.txt", Some("base"));
-    add::execute(AddArgs {
+    add::execute_safe(AddArgs {
         pathspec: vec!["base.txt".into()],
         all: false,
         update: false,
@@ -270,8 +276,9 @@ async fn test_checkout_new_branch_with_dirty_worktree_returns_error() {
         dry_run: false,
         ignore_errors: false,
     })
-    .await;
-    commit::execute(commit::CommitArgs {
+    .await
+    .expect("add should succeed");
+    commit::execute_safe(commit::CommitArgs {
         message: Some("initial".into()),
         file: None,
         allow_empty: false,
@@ -284,11 +291,12 @@ async fn test_checkout_new_branch_with_dirty_worktree_returns_error() {
         no_verify: false,
         author: None,
     })
-    .await;
+    .await
+    .expect("initial commit should succeed");
 
     // Stage a change without committing — working tree is "dirty"
     test::ensure_file("dirty.txt", Some("uncommitted"));
-    add::execute(AddArgs {
+    add::execute_safe(AddArgs {
         pathspec: vec!["dirty.txt".into()],
         all: false,
         update: false,
@@ -298,7 +306,8 @@ async fn test_checkout_new_branch_with_dirty_worktree_returns_error() {
         dry_run: false,
         ignore_errors: false,
     })
-    .await;
+    .await
+    .expect("add dirty file should succeed");
 
     let result =
         checkout::execute_safe(CheckoutArgs::try_parse_from(["checkout", "-b", "new"]).unwrap())

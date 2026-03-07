@@ -25,7 +25,6 @@ pub enum CliErrorKind {
 pub enum ErrorLevel {
     Fatal,
     Error,
-    Warning,
 }
 
 /// Structured hint text rendered after the main error line.
@@ -66,7 +65,7 @@ pub struct CliError {
 impl CliError {
     pub fn repo_not_found() -> Self {
         Self::fatal("not a libra repository (or any of the parent directories): .libra")
-            .with_hint("Run 'libra init' to create a repository in the current directory.")
+            .with_hint("run 'libra init' to create a repository in the current directory.")
     }
 
     pub fn unknown_command(message: impl Into<String>) -> Self {
@@ -126,6 +125,11 @@ impl CliError {
             Self::fatal(rest.to_string())
         } else if let Some(rest) = trimmed.strip_prefix("error: ") {
             Self::failure(rest.to_string())
+        } else if let Some(rest) = trimmed.strip_prefix("warning: ") {
+            // Strip the prefix so rendering doesn't produce "error: warning: …"
+            Self::failure(rest.to_string())
+        } else if let Some(rest) = trimmed.strip_prefix("usage: ") {
+            Self::command_usage("invalid arguments").with_usage(format!("usage: {rest}"))
         } else {
             Self::failure(trimmed)
         }
@@ -273,7 +277,7 @@ mod tests {
         let rendered = CliError::repo_not_found().render();
         assert_eq!(
             rendered,
-            "fatal: not a libra repository (or any of the parent directories): .libra\nHint: Run 'libra init' to create a repository in the current directory."
+            "fatal: not a libra repository (or any of the parent directories): .libra\nHint: run 'libra init' to create a repository in the current directory."
         );
     }
 
@@ -322,5 +326,19 @@ mod tests {
             .with_hint("third")
             .render();
         assert_eq!(rendered, "error: bad\nHint: first\nHint: second");
+    }
+
+    #[test]
+    fn from_legacy_string_strips_warning_prefix() {
+        let err = CliError::from_legacy_string("warning: something off");
+        assert_eq!(err.kind(), CliErrorKind::Failure);
+        assert_eq!(err.render(), "error: something off");
+    }
+
+    #[test]
+    fn from_legacy_string_handles_usage_prefix() {
+        let err = CliError::from_legacy_string("usage: libra mv <source> <dest>");
+        assert_eq!(err.kind(), CliErrorKind::CommandUsage);
+        assert!(err.render().contains("usage: libra mv <source> <dest>"));
     }
 }

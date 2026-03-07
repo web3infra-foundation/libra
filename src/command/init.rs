@@ -607,14 +607,28 @@ pub async fn init(args: InitArgs) -> Result<(), InitError> {
     #[cfg(target_os = "windows")]
     {
         // On Windows, we need to convert the path to a UNC path
-        let database = database.to_str().unwrap().replace("\\", "/");
+        let database = database
+            .to_str()
+            .ok_or_else(|| {
+                InitError::ConversionFailed(format!(
+                    "database path contains invalid UTF-8: {}",
+                    database.display()
+                ))
+            })?
+            .replace("\\", "/");
         conn = db::create_database(database.as_str()).await?;
     }
 
     #[cfg(not(target_os = "windows"))]
     {
         // On Unix-like systems, we do no more
-        conn = db::create_database(database.to_str().unwrap()).await?;
+        let db_str = database.to_str().ok_or_else(|| {
+            InitError::ConversionFailed(format!(
+                "database path contains invalid UTF-8: {}",
+                database.display()
+            ))
+        })?;
+        conn = db::create_database(db_str).await?;
     }
 
     // Create config table with bare parameter consideration and store ref format

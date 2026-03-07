@@ -52,7 +52,8 @@ pub async fn execute_safe(args: MergeArgs) -> CliResult<()> {
         return merge_ff(target_commit, &args.branch).await;
     }
 
-    let current_commit_id = current_commit_id.expect("checked above");
+    // INVARIANT: `current_commit_id` is `Some` — the `None` case returns above.
+    let current_commit_id = current_commit_id.unwrap();
     let current_commit: Commit = load_object(&current_commit_id).map_err(|_| {
         CliError::fatal(format!("not a valid object name: '{}'", current_commit_id))
     })?;
@@ -162,12 +163,12 @@ async fn merge_ff(target_commit: Commit, target_branch_name: &str) -> CliResult<
     }
 
     // Only restore the working directory *after* the pointers have been updated.
-    restore::execute(RestoreArgs {
+    restore::execute_safe(RestoreArgs {
         worktree: true,
         staged: true,
         source: None, // `restore` without source defaults to HEAD, which is now correct.
         pathspec: vec![util::working_dir_string()],
     })
-    .await;
+    .await?;
     Ok(())
 }

@@ -333,7 +333,7 @@ pub async fn execute_safe(args: PushArgs) -> CliResult<()> {
 
     // set after push success
     if args.set_upstream {
-        branch::set_upstream(&branch, &format!("{repository}/{branch}")).await;
+        branch::set_upstream_safe(&branch, &format!("{repository}/{branch}")).await?;
     }
     Ok(())
 }
