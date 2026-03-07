@@ -2,9 +2,11 @@
 //!
 //! Provides the user input area and status display at the bottom of the TUI.
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -276,8 +278,8 @@ impl BottomPane {
             return 6;
         }
         if self.status != AgentStatus::AwaitingUserInput {
-            // Normal mode: status(1) + input(3) + help(1) = 5
-            return 5;
+            // Normal mode: rounded input box(5, with 3-line input inner area) + statusline(1) = 6
+            return 6;
         }
 
         let questions = match &self.user_input_questions {
@@ -317,22 +319,17 @@ impl BottomPane {
             return self.render_post_plan_dialog(area, buf);
         }
 
-        // Split area into status bar and input area
+        // Split area into input area and status bar.
         let chunks = Layout::vertical([
-            Constraint::Length(1), // Status bar
-            Constraint::Length(3), // Input area
-            Constraint::Length(1), // Help text
+            Constraint::Length(5), // Rounded input box (3-line inner input)
+            Constraint::Length(1), // Status line
         ])
         .split(area);
 
-        // Render status bar
-        self.render_status_bar(chunks[0], buf);
-
         // Render input area
-        let cursor_pos = self.render_input_area(chunks[1], buf);
-
-        // Render help text
-        self.render_help_text(chunks[2], buf);
+        let cursor_pos = self.render_input_area(chunks[0], buf);
+        // Render status bar below the input box
+        self.render_status_bar(chunks[1], buf);
 
         // Render command popup (floats above the bottom pane)
         if self.command_popup.visible && self.status == AgentStatus::Idle {
@@ -340,6 +337,49 @@ impl BottomPane {
         }
 
         cursor_pos
+    }
+
+    /// Return the clickable input hitbox for focus handling.
+    pub fn input_hitbox(&self, area: Rect) -> Option<Rect> {
+        if self.status == AgentStatus::AwaitingPostPlanChoice {
+            return None;
+        }
+
+        if self.status != AgentStatus::AwaitingUserInput {
+            let chunks =
+                Layout::vertical([Constraint::Length(5), Constraint::Length(1)]).split(area);
+            return Some(chunks[0]);
+        }
+
+        let questions = self.user_input_questions.as_ref()?;
+        let question = questions.get(self.user_input_current_question)?;
+        let options = question.options.as_deref().unwrap_or_default();
+        let is_freeform = options.is_empty();
+
+        let option_lines = if is_freeform {
+            0u16
+        } else {
+            let extra = if question.is_other { 1u16 } else { 0 };
+            options.len() as u16 + extra
+        };
+        let question_area_height = 1 + 1 + option_lines;
+        let notes_height = if !is_freeform { 3u16 } else { 0 };
+
+        let chunks = Layout::vertical([
+            Constraint::Length(1),                    // Status bar
+            Constraint::Length(question_area_height), // Question + options
+            Constraint::Length(3),                    // Freeform input
+            Constraint::Length(notes_height),         // Notes
+            Constraint::Length(1),                    // Help text
+        ])
+        .split(area);
+
+        let hit = if is_freeform { chunks[2] } else { chunks[3] };
+        if hit.width > 0 && hit.height > 0 {
+            Some(hit)
+        } else {
+            None
+        }
     }
 
     /// Render the bottom pane in user-input mode (questions + options).
@@ -631,21 +671,24 @@ impl BottomPane {
     }
 
     fn render_status_bar(&self, area: Rect, buf: &mut Buffer) {
-        let status_text = match self.status {
-            AgentStatus::Idle => "● Ready",
-            AgentStatus::Thinking => "● Thinking...",
-            AgentStatus::ExecutingTool => "● Executing tool...",
-            AgentStatus::AwaitingUserInput => "● Awaiting input...",
-            AgentStatus::AwaitingPostPlanChoice => "● Plan complete — choose next step",
+        let phase = animation_phase(120);
+        let status_line = match self.status {
+            AgentStatus::Idle => Line::styled("● Ready", Style::default().fg(Color::Green).bold()),
+            AgentStatus::Thinking => {
+                gradient_line("● Thinking...", &thinking_colors(), phase, true)
+            }
+            AgentStatus::ExecutingTool => {
+                gradient_line("● Executing tool...", &executing_tool_colors(), phase, true)
+            }
+            AgentStatus::AwaitingUserInput => Line::styled(
+                "● Awaiting input...",
+                Style::default().fg(Color::Magenta).bold(),
+            ),
+            AgentStatus::AwaitingPostPlanChoice => Line::styled(
+                "● Plan complete — choose next step",
+                Style::default().fg(Color::Magenta).bold(),
+            ),
         };
-
-        let status_color = match self.status {
-            AgentStatus::Idle => Color::Green,
-            AgentStatus::Thinking | AgentStatus::ExecutingTool => Color::Yellow,
-            AgentStatus::AwaitingUserInput | AgentStatus::AwaitingPostPlanChoice => Color::Magenta,
-        };
-
-        let status_line = Line::styled(status_text, Style::default().fg(status_color).bold());
         Paragraph::new(status_line).render(area, buf);
     }
 
@@ -658,24 +701,32 @@ impl BottomPane {
 
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(border_style);
 
         let inner = block.inner(area);
 
         let content_width = inner.width as usize;
-        let (display_text, cursor_x) = if self.input.is_empty() {
+        let content_height = inner.height as usize;
+        let (display_text, cursor_x, cursor_y) = if self.input.is_empty() {
             let placeholder = if self.status == AgentStatus::AwaitingUserInput {
                 "Type custom answer..."
             } else {
                 "Type your message..."
             };
             (
-                Text::styled(placeholder, Style::default().add_modifier(Modifier::DIM)),
+                Text::from(vec![Line::styled(
+                    placeholder,
+                    Style::default().add_modifier(Modifier::DIM),
+                )]),
+                0u16,
                 0u16,
             )
         } else {
-            let (visible, cursor_x) = self.visible_input_and_cursor_x(content_width);
-            (Text::raw(visible), cursor_x)
+            let (lines, cursor_x, cursor_y) =
+                self.visible_input_and_cursor(content_width, content_height);
+            let text_lines = lines.into_iter().map(Line::raw).collect::<Vec<_>>();
+            (Text::from(text_lines), cursor_x, cursor_y)
         };
 
         Paragraph::new(display_text).block(block).render(area, buf);
@@ -686,7 +737,7 @@ impl BottomPane {
 
         Some(Position {
             x: inner.x.saturating_add(cursor_x),
-            y: inner.y,
+            y: inner.y.saturating_add(cursor_y),
         })
     }
 
@@ -727,57 +778,154 @@ impl BottomPane {
             .unwrap_or(self.input.len())
     }
 
-    fn visible_input_and_cursor_x(&self, content_width: usize) -> (String, u16) {
-        if content_width == 0 {
-            return (String::new(), 0);
+    fn visible_input_and_cursor(
+        &self,
+        content_width: usize,
+        content_height: usize,
+    ) -> (Vec<String>, u16, u16) {
+        if content_width == 0 || content_height == 0 {
+            return (Vec::new(), 0, 0);
         }
 
-        let prefix = &self.input[..self.cursor_pos.min(self.input.len())];
-        let cursor_col = prefix.width();
+        let mut wrapped_lines: Vec<String> = Vec::new();
+        let mut current_line = String::new();
+        let mut current_col = 0usize;
+        let mut cursor_row = 0usize;
+        let mut cursor_col = 0usize;
+        let mut line_index = 0usize;
 
-        let max_cursor_col = content_width.saturating_sub(1);
-        let scroll_cols = cursor_col.saturating_sub(max_cursor_col);
+        for (idx, ch) in self.input.char_indices() {
+            if ch == '\n' {
+                if idx == self.cursor_pos {
+                    cursor_row = line_index;
+                    cursor_col = current_col;
+                }
+                wrapped_lines.push(std::mem::take(&mut current_line));
+                line_index += 1;
+                current_col = 0;
+                continue;
+            }
 
-        let start_byte = byte_index_at_display_col(&self.input, scroll_cols);
-        let visible = take_by_display_width(&self.input[start_byte..], content_width);
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
+            if current_col + ch_width > content_width && current_col > 0 {
+                wrapped_lines.push(std::mem::take(&mut current_line));
+                line_index += 1;
+                current_col = 0;
+            }
 
-        let cursor_x = (cursor_col.saturating_sub(scroll_cols)).min(u16::MAX as usize) as u16;
+            if idx == self.cursor_pos {
+                cursor_row = line_index;
+                cursor_col = current_col;
+            }
 
-        (visible.to_string(), cursor_x)
+            current_line.push(ch);
+            current_col += ch_width;
+        }
+
+        if self.cursor_pos == self.input.len() {
+            cursor_row = line_index;
+            cursor_col = current_col;
+        }
+
+        wrapped_lines.push(current_line);
+
+        let start_row = cursor_row.saturating_sub(content_height.saturating_sub(1));
+        let end_row = (start_row + content_height).min(wrapped_lines.len());
+        let mut visible_lines = wrapped_lines[start_row..end_row].to_vec();
+        while visible_lines.len() < content_height {
+            visible_lines.push(String::new());
+        }
+
+        let cursor_y = cursor_row.saturating_sub(start_row).min(u16::MAX as usize) as u16;
+        let max_cursor_x = content_width.saturating_sub(1);
+        let cursor_x = cursor_col.min(max_cursor_x).min(u16::MAX as usize) as u16;
+        (visible_lines, cursor_x, cursor_y)
     }
 }
 
-fn byte_index_at_display_col(s: &str, col: usize) -> usize {
-    if col == 0 {
-        return 0;
-    }
-
-    let mut acc = 0usize;
-    for (byte_idx, ch) in s.char_indices() {
-        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if acc + w > col {
-            return byte_idx;
-        }
-        acc += w;
-    }
-    s.len()
+fn animation_phase(step_ms: u128) -> usize {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    (millis / step_ms.max(1)) as usize
 }
 
-fn take_by_display_width(s: &str, max_cols: usize) -> &str {
-    if max_cols == 0 {
-        return "";
-    }
-    let mut acc = 0usize;
-    let mut end = 0usize;
-    for (byte_idx, ch) in s.char_indices() {
-        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if acc + w > max_cols {
-            break;
+fn thinking_colors() -> [Color; 5] {
+    [
+        Color::Rgb(110, 170, 255),
+        Color::Rgb(135, 200, 255),
+        Color::Rgb(230, 242, 255),
+        Color::Rgb(135, 200, 255),
+        Color::Rgb(110, 170, 255),
+    ]
+}
+
+fn executing_tool_colors() -> [Color; 5] {
+    [
+        Color::Rgb(120, 190, 255),
+        Color::Rgb(120, 230, 210),
+        Color::Rgb(230, 250, 240),
+        Color::Rgb(120, 230, 210),
+        Color::Rgb(120, 190, 255),
+    ]
+}
+
+fn gradient_line(text: &str, colors: &[Color], phase: usize, bold: bool) -> Line<'static> {
+    let spans = text
+        .chars()
+        .enumerate()
+        .map(|(idx, ch)| {
+            let color = colors[(idx + phase) % colors.len()];
+            let mut style = Style::default().fg(color);
+            if bold {
+                style = style.bold();
+            }
+            Span::styled(ch.to_string(), style)
+        })
+        .collect::<Vec<_>>();
+    Line::from(spans)
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::{buffer::Buffer, layout::Rect};
+
+    use super::BottomPane;
+    use crate::internal::tui::app_event::AgentStatus;
+
+    fn row_text(buf: &Buffer, y: u16, width: u16) -> String {
+        let mut out = String::new();
+        for x in 0..width {
+            out.push_str(buf[(x, y)].symbol());
         }
-        acc += w;
-        end = byte_idx + ch.len_utf8();
+        out
     }
-    &s[..end.min(s.len())]
+
+    #[test]
+    fn normal_mode_height_is_six_lines() {
+        let pane = BottomPane::new();
+        assert_eq!(pane.desired_height(), 6);
+    }
+
+    #[test]
+    fn statusline_renders_below_rounded_input_box() {
+        let mut pane = BottomPane::new();
+        pane.status = AgentStatus::Idle;
+
+        let area = Rect::new(0, 0, 40, 6);
+        let mut buf = Buffer::empty(area);
+        let _ = pane.render(area, &mut buf);
+
+        let top = row_text(&buf, 0, area.width);
+        let bottom_of_box = row_text(&buf, 4, area.width);
+        let status = row_text(&buf, 5, area.width);
+
+        assert!(top.contains("╭"));
+        assert!(bottom_of_box.contains("╰"));
+        assert!(status.contains("Ready"));
+        assert!(!status.contains("Enter: Send"));
+    }
 }
 
 impl Default for BottomPane {

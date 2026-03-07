@@ -105,15 +105,8 @@ impl ChatWidget {
         // Render chat area
         self.render_chat_area(chunks[0], buf);
 
-        // Track input area for mouse hit-testing (approximate: the input box
-        // is at roughly rows 1..4 within the bottom pane).
-        let input_y = chunks[1].y.saturating_add(1);
-        self.last_input_area = Some(Rect {
-            x: chunks[1].x,
-            y: input_y,
-            width: chunks[1].width,
-            height: 3.min(chunks[1].height.saturating_sub(2)),
-        });
+        // Track the active input area for mouse hit-testing.
+        self.last_input_area = self.bottom_pane.input_hitbox(chunks[1]);
 
         self.bottom_pane.render(chunks[1], buf)
     }
