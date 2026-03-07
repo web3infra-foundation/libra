@@ -124,13 +124,17 @@ fn create_annotated_tag(temp_path: &std::path::Path, tag_name: &str, message: &s
 
 #[test]
 #[serial]
-fn test_show_cli_badref_returns_1_today() {
+fn test_show_cli_badref_returns_fatal_128() {
     let repo = create_committed_repo_via_cli();
 
     let output = run_libra_command(&["show", "badref"], repo.path());
+    let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("fatal: bad revision 'badref'"));
+    assert_eq!(output.status.code(), Some(128));
+    assert!(stderr.contains(
+        "fatal: ambiguous argument 'badref': unknown revision or path not in the working tree."
+    ));
+    assert!(stderr.contains("Hint: Use '--' to separate paths from revisions"));
 }
 
 /// Test that show can display a lightweight tag.

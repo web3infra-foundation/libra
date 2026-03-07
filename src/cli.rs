@@ -481,7 +481,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Lfs(cmd) => command::lfs::execute(cmd).await,
         Commands::Log(args) => command::log::execute_safe(args).await?,
         Commands::Shortlog(args) => command::shortlog::execute(args).await,
-        Commands::Show(args) => command::show::execute(args).await,
+        Commands::Show(args) => command::show::execute_safe(args).await?,
         Commands::ShowRef(args) => command::show_ref::execute(args)
             .await
             .map_err(legacy_string_error_to_cli_error)?,
