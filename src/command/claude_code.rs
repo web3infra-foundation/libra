@@ -1,10 +1,10 @@
 //! Entry point for ingesting Claude Code hook events and persisting them as AI history.
 
 use std::{
-    collections::{BTreeMap, hash_map::DefaultHasher},
-    hash::{Hash, Hasher},
+    collections::BTreeMap,
+    fs,
     io::Read,
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
@@ -12,12 +12,19 @@ use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 use git_internal::hash::{HashKind, set_hash_kind};
-use serde::Deserialize;
-use serde_json::{Map, Value, json};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 use crate::{
     internal::{
-        ai::{history::HistoryManager, session::SessionState},
+        ai::{
+            history::HistoryManager,
+            session::{
+                AgentHookParser, ClaudeCodeAgentParser, LifecycleEvent, LifecycleEventKind,
+                SessionHookEnvelope, SessionState, append_raw_hook_event, apply_lifecycle_event,
+                make_dedup_key, normalize_json_value, validate_session_hook_envelope,
+            },
+        },
         db,
     },
     utils::{object::write_git_object, storage::local::LocalStorage, util},
@@ -29,19 +36,19 @@ const MAX_PROCESSED_EVENT_KEYS: usize = 200;
 const MAX_RAW_HOOK_EVENTS: usize = 200;
 const MAX_TOOL_EVENTS: usize = 200;
 const MAX_TRANSCRIPT_PATH_BYTES: usize = 4096;
-const DEDUP_IDENTITY_KEYS: &[&str] = &[
-    "event_id",
-    "request_id",
-    "turn_id",
-    "message_id",
-    "tool_use_id",
-    "sequence",
-    "timestamp",
-];
 const CLAUDE_SESSION_TYPE: &str = "claude_session";
 /// Persisted blob schema identifier for Claude hook-ingested session payloads.
 const CLAUDE_SESSION_SCHEMA: &str = "libra.claude_session.v1";
-const LIFECYCLE_EVENTS: &[&str] = &["SessionStart", "Stop", "SessionStop", "SessionEnd"];
+const CLAUDE_SETTINGS_DIR: &str = ".claude";
+const CLAUDE_SETTINGS_FILE: &str = "settings.json";
+const DEFAULT_HOOK_TIMEOUT_SECS: u64 = 10;
+const CLAUDE_HOOK_FORWARD_MAP: &[(&str, &str)] = &[
+    ("SessionStart", "session-start"),
+    ("UserPromptSubmit", "prompt"),
+    ("PostToolUse", "tool-use"),
+    ("Stop", "stop"),
+    ("SessionEnd", "session-end"),
+];
 
 /// Subcommands that map to Claude Code hook events.
 #[derive(Subcommand, Debug)]
@@ -56,21 +63,28 @@ pub enum ClaudeCodeCommand {
     Stop(ClaudeCodeArgs),
     #[command(about = "Handle SessionEnd hook event")]
     SessionEnd(ClaudeCodeArgs),
+    #[command(about = "Install Claude hook forwarding into .claude/settings.json")]
+    InstallHooks(InstallHooksArgs),
 }
 
 /// Placeholder args reserved for future `claude-code` command options.
 #[derive(Parser, Debug, Clone)]
 pub struct ClaudeCodeArgs {}
 
-#[derive(Debug, Deserialize)]
-struct HookEnvelope {
-    hook_event_name: String,
-    session_id: String,
-    cwd: String,
-    #[serde(default)]
-    transcript_path: Option<String>,
-    #[serde(flatten)]
-    extra: Map<String, Value>,
+#[derive(Parser, Debug, Clone)]
+pub struct InstallHooksArgs {
+    #[arg(
+        long,
+        default_value = "libra",
+        help = "Command prefix used when generating Claude hook command entries"
+    )]
+    pub command_prefix: String,
+    #[arg(
+        long,
+        default_value_t = DEFAULT_HOOK_TIMEOUT_SECS,
+        help = "Timeout in seconds for each generated Claude hook command"
+    )]
+    pub timeout: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +100,34 @@ struct PersistOutcome {
     already_exists: bool,
 }
 
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct ClaudeSettings {
+    #[serde(default)]
+    hooks: BTreeMap<String, Vec<ClaudeHookMatcher>>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+struct ClaudeHookMatcher {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    matcher: Option<String>,
+    hooks: Vec<ClaudeHookEntry>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+struct ClaudeHookEntry {
+    #[serde(rename = "type")]
+    entry_type: String,
+    command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timeout: Option<u64>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
 /// Ingest one Claude hook event from stdin JSON and update/persist session state.
 ///
 /// Stdin must be UTF-8 JSON with at least:
@@ -93,6 +135,178 @@ struct PersistOutcome {
 /// - `session_id`
 /// - `cwd`
 pub async fn execute(cmd: ClaudeCodeCommand) -> Result<()> {
+    match cmd {
+        ClaudeCodeCommand::InstallHooks(args) => install_hooks(args),
+        other => {
+            let expected_hook = claude_command_expected_hook(&other)?;
+            let parser = ClaudeCodeAgentParser;
+            process_hook_event(expected_hook, &parser).await
+        }
+    }
+}
+
+fn claude_command_expected_hook(cmd: &ClaudeCodeCommand) -> Result<&'static str> {
+    match cmd {
+        ClaudeCodeCommand::SessionStart(_) => Ok("SessionStart"),
+        ClaudeCodeCommand::Prompt(_) => Ok("UserPromptSubmit"),
+        ClaudeCodeCommand::ToolUse(_) => Ok("PostToolUse"),
+        ClaudeCodeCommand::Stop(_) => Ok("Stop"),
+        ClaudeCodeCommand::SessionEnd(_) => Ok("SessionEnd"),
+        ClaudeCodeCommand::InstallHooks(_) => {
+            bail!("install-hooks does not map to hook event name")
+        }
+    }
+}
+
+fn install_hooks(args: InstallHooksArgs) -> Result<()> {
+    if args.command_prefix.trim().is_empty() {
+        bail!("invalid --command-prefix: value cannot be empty");
+    }
+    if args.timeout == 0 {
+        bail!("invalid --timeout: value must be greater than 0");
+    }
+
+    let project_root = resolve_project_root()?;
+    let settings_path = project_root
+        .join(CLAUDE_SETTINGS_DIR)
+        .join(CLAUDE_SETTINGS_FILE);
+    let mut settings = load_claude_settings(&settings_path)?;
+    let changed = upsert_libra_hook_forwarding(&mut settings, &args.command_prefix, args.timeout);
+
+    if changed {
+        write_claude_settings(&settings_path, &settings)?;
+        println!(
+            "Installed Claude hook forwarding at {}",
+            settings_path.display()
+        );
+    } else {
+        println!(
+            "Claude hook forwarding is already up to date at {}",
+            settings_path.display()
+        );
+    }
+
+    Ok(())
+}
+
+fn resolve_project_root() -> Result<PathBuf> {
+    if let Ok(repo_root) = util::try_working_dir() {
+        return Ok(repo_root);
+    }
+    std::env::current_dir().context("failed to read current directory")
+}
+
+fn load_claude_settings(path: &Path) -> Result<ClaudeSettings> {
+    if !path.exists() {
+        return Ok(ClaudeSettings::default());
+    }
+
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("failed to read Claude settings file '{}'", path.display()))?;
+    if content.trim().is_empty() {
+        return Ok(ClaudeSettings::default());
+    }
+
+    serde_json::from_str(&content)
+        .map_err(|e| anyhow!("invalid Claude settings JSON at '{}': {e}", path.display()))
+}
+
+fn write_claude_settings(path: &Path, settings: &ClaudeSettings) -> Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        anyhow!(
+            "invalid Claude settings path without parent: '{}'",
+            path.display()
+        )
+    })?;
+    fs::create_dir_all(parent).with_context(|| {
+        format!(
+            "failed to create Claude settings directory '{}'",
+            parent.display()
+        )
+    })?;
+
+    let mut data = serde_json::to_vec_pretty(settings)
+        .context("failed to serialize Claude settings to JSON")?;
+    data.push(b'\n');
+
+    let tmp_path = path.with_extension("json.tmp");
+    fs::write(&tmp_path, &data).with_context(|| {
+        format!(
+            "failed to write temporary Claude settings file '{}'",
+            tmp_path.display()
+        )
+    })?;
+
+    #[cfg(windows)]
+    {
+        if path.exists() {
+            match fs::remove_file(path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    let _ = fs::remove_file(&tmp_path);
+                    return Err(anyhow!(
+                        "failed to replace existing Claude settings file '{}': {e}",
+                        path.display()
+                    ));
+                }
+            }
+        }
+    }
+
+    fs::rename(&tmp_path, path).with_context(|| {
+        format!(
+            "failed to replace Claude settings file '{}' with '{}'",
+            path.display(),
+            tmp_path.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn upsert_libra_hook_forwarding(
+    settings: &mut ClaudeSettings,
+    command_prefix: &str,
+    timeout: u64,
+) -> bool {
+    let mut changed = false;
+
+    for (event_name, subcommand) in CLAUDE_HOOK_FORWARD_MAP {
+        let desired_entry = ClaudeHookEntry {
+            entry_type: "command".to_string(),
+            command: format!("{command_prefix} claude-code {subcommand}"),
+            timeout: Some(timeout),
+            extra: BTreeMap::new(),
+        };
+
+        let matchers = settings.hooks.entry((*event_name).to_string()).or_default();
+        if let Some(existing) = matchers
+            .iter_mut()
+            .find(|matcher| matcher_manages_command(matcher, &desired_entry.command))
+        {
+            if existing.hooks != vec![desired_entry.clone()] {
+                existing.hooks = vec![desired_entry];
+                changed = true;
+            }
+            continue;
+        }
+
+        matchers.push(ClaudeHookMatcher {
+            matcher: None,
+            hooks: vec![desired_entry],
+            extra: BTreeMap::new(),
+        });
+        changed = true;
+    }
+
+    changed
+}
+
+fn matcher_manages_command(matcher: &ClaudeHookMatcher, command: &str) -> bool {
+    matcher.hooks.iter().any(|hook| hook.command == command)
+}
+
+async fn process_hook_event(expected_hook: &str, parser: &impl AgentHookParser) -> Result<()> {
     let mut stdin_bytes = Vec::new();
     std::io::stdin()
         .take((MAX_STDIN_BYTES + 1) as u64)
@@ -107,16 +321,16 @@ pub async fn execute(cmd: ClaudeCodeCommand) -> Result<()> {
         bail!("hook input is empty");
     }
 
-    let envelope: HookEnvelope =
+    let envelope: SessionHookEnvelope =
         serde_json::from_str(&stdin).map_err(|e| anyhow!("invalid hook JSON payload: {e}"))?;
+    validate_session_hook_envelope(&envelope, MAX_TRANSCRIPT_PATH_BYTES)?;
 
-    validate_core_fields(&envelope)?;
-
-    let expected = expected_event_names(&cmd);
-    if !expected.contains(&envelope.hook_event_name.as_str()) {
+    if envelope.hook_event_name != expected_hook
+        && !(expected_hook == "Stop" && envelope.hook_event_name == "SessionStop")
+    {
         bail!(
-            "hook_event_name mismatch: expected one of {:?}, got '{}'",
-            expected,
+            "hook_event_name mismatch: expected '{}', got '{}'",
+            expected_hook,
             envelope.hook_event_name
         );
     }
@@ -158,9 +372,9 @@ pub async fn execute(cmd: ClaudeCodeCommand) -> Result<()> {
         session.metadata.remove("hook_reported_cwd");
     }
 
-    let dedup_key = dedup_key(&envelope);
+    let dedup_key = make_dedup_key(parser, &envelope);
     if dedup_hit(&session, dedup_key.as_deref()) {
-        if !is_session_end(&cmd) {
+        if envelope.hook_event_name != "SessionEnd" {
             return Ok(());
         }
         // For SessionEnd, only skip when persistence is already confirmed.
@@ -170,13 +384,14 @@ pub async fn execute(cmd: ClaudeCodeCommand) -> Result<()> {
         }
     }
 
-    apply_event(&mut session, &envelope, &cmd)?;
+    let event = parser.parse_hook_event(&envelope.hook_event_name, &envelope)?;
+    apply_hook_event(&mut session, &envelope, &event)?;
     if let Some(event_key) = dedup_key {
         append_processed_event_key(&mut session, event_key);
     }
 
-    if is_session_end(&cmd) {
-        match persist_session_history(&storage_path, &session).await {
+    if event.kind == LifecycleEventKind::SessionEnd {
+        match persist_session_history(&storage_path, &session, parser.source_name()).await {
             Ok(outcome) => {
                 session
                     .metadata
@@ -239,36 +454,6 @@ pub async fn execute(cmd: ClaudeCodeCommand) -> Result<()> {
     Ok(())
 }
 
-fn validate_core_fields(envelope: &HookEnvelope) -> Result<()> {
-    if envelope.hook_event_name.trim().is_empty() {
-        bail!("missing required field: hook_event_name");
-    }
-    if envelope.session_id.trim().is_empty() {
-        bail!("missing required field: session_id");
-    }
-    validate_session_id(&envelope.session_id)?;
-    if envelope.cwd.trim().is_empty() {
-        bail!("missing required field: cwd");
-    }
-    if let Some(transcript_path) = envelope.transcript_path.as_deref() {
-        validate_transcript_path(transcript_path)?;
-    }
-    Ok(())
-}
-
-fn validate_session_id(session_id: &str) -> Result<()> {
-    if session_id.len() > 128 {
-        bail!("invalid session_id: length exceeds 128 characters");
-    }
-    if session_id
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-    {
-        return Ok(());
-    }
-    bail!("invalid session_id: only [A-Za-z0-9._-] are allowed")
-}
-
 async fn set_hash_kind_from_repo() -> Result<()> {
     let object_format = crate::internal::config::Config::get("core", None, "objectformat")
         .await
@@ -283,121 +468,32 @@ async fn set_hash_kind_from_repo() -> Result<()> {
     Ok(())
 }
 
-fn validate_transcript_path(path: &str) -> Result<()> {
-    if path.trim().is_empty() {
-        bail!("invalid transcript_path: empty value");
-    }
-    if path.len() > MAX_TRANSCRIPT_PATH_BYTES {
-        bail!("invalid transcript_path: length exceeds {MAX_TRANSCRIPT_PATH_BYTES} characters");
-    }
-    if path.contains('\0') {
-        bail!("invalid transcript_path: contains NUL byte");
-    }
-    Ok(())
-}
-
-fn expected_event_names(cmd: &ClaudeCodeCommand) -> &'static [&'static str] {
-    match cmd {
-        ClaudeCodeCommand::SessionStart(_) => &["SessionStart"],
-        ClaudeCodeCommand::Prompt(_) => &["UserPromptSubmit"],
-        ClaudeCodeCommand::ToolUse(_) => &["PostToolUse"],
-        ClaudeCodeCommand::Stop(_) => &["Stop", "SessionStop"],
-        ClaudeCodeCommand::SessionEnd(_) => &["SessionEnd"],
-    }
-}
-
-fn is_session_end(cmd: &ClaudeCodeCommand) -> bool {
-    matches!(cmd, ClaudeCodeCommand::SessionEnd(_))
-}
-
-fn apply_event(
+fn apply_hook_event(
     session: &mut SessionState,
-    envelope: &HookEnvelope,
-    cmd: &ClaudeCodeCommand,
+    envelope: &SessionHookEnvelope,
+    event: &LifecycleEvent,
 ) -> Result<()> {
     session.updated_at = Utc::now();
 
-    if let Some(transcript_path) = &envelope.transcript_path {
+    if let Some(session_ref) = &event.session_ref {
         // Keep this as opaque metadata only; do not use it for file I/O without validation.
         session.metadata.insert(
             "transcript_path".to_string(),
-            Value::String(transcript_path.clone()),
+            Value::String(session_ref.clone()),
         );
     }
 
-    let raw_events = session
-        .metadata
-        .entry("raw_hook_events".to_string())
-        .or_insert_with(|| Value::Array(Vec::new()));
-    if let Value::Array(events) = raw_events {
-        // Keep normalized raw fragments for audit/debug and deterministic hashing.
-        events.push(json!({
-            "hook_event_name": envelope.hook_event_name,
-            "payload": normalize_value(Value::Object(envelope.extra.clone())),
-        }));
-        if events.len() > MAX_RAW_HOOK_EVENTS {
-            let drop_n = events.len() - MAX_RAW_HOOK_EVENTS;
-            events.drain(0..drop_n);
-        }
-    }
+    append_raw_hook_event(session, envelope, MAX_RAW_HOOK_EVENTS);
+    apply_lifecycle_event(session, event, MAX_TOOL_EVENTS);
 
-    match cmd {
-        ClaudeCodeCommand::SessionStart(_) => {
+    match event.kind {
+        LifecycleEventKind::SessionStart
+        | LifecycleEventKind::TurnStart
+        | LifecycleEventKind::ToolUse => {
             set_phase(session, ClaudeSessionPhase::Active);
-            if let Some(v) = envelope.extra.get("model") {
-                session.metadata.insert("model".to_string(), v.clone());
-            }
-            if let Some(v) = envelope.extra.get("source") {
-                session.metadata.insert("source".to_string(), v.clone());
-            }
         }
-        ClaudeCodeCommand::Prompt(_) => {
-            set_phase(session, ClaudeSessionPhase::Active);
-            if let Some(prompt) = find_string(envelope, &["prompt", "message", "user_prompt"]) {
-                session.add_user_message(&prompt);
-            }
-        }
-        ClaudeCodeCommand::ToolUse(_) => {
-            set_phase(session, ClaudeSessionPhase::Active);
-            let tools_entry = session
-                .metadata
-                .entry("tool_events".to_string())
-                .or_insert_with(|| Value::Array(Vec::new()));
-            if let Value::Array(items) = tools_entry {
-                items.push(json!({
-                    "tool_name": find_string(envelope, &["tool_name"]).unwrap_or_default(),
-                    "input": envelope.extra.get("tool_input").cloned().unwrap_or(Value::Null),
-                    "response": envelope.extra.get("tool_response").cloned().unwrap_or(Value::Null),
-                    "timestamp": Utc::now().to_rfc3339(),
-                }));
-                if items.len() > MAX_TOOL_EVENTS {
-                    let drop_n = items.len() - MAX_TOOL_EVENTS;
-                    items.drain(0..drop_n);
-                }
-            }
-        }
-        ClaudeCodeCommand::Stop(_) => {
-            set_phase(session, ClaudeSessionPhase::Stopped);
-            if let Some(msg) = find_string(
-                envelope,
-                &["last_assistant_message", "assistant_message", "message"],
-            ) {
-                session
-                    .metadata
-                    .insert("last_assistant_message".to_string(), json!(msg));
-                let should_append = session
-                    .messages
-                    .last()
-                    .map(|m| m.role != "assistant" || m.content != msg)
-                    .unwrap_or(true);
-                if should_append {
-                    session.add_assistant_message(&msg);
-                }
-            }
-        }
-        ClaudeCodeCommand::SessionEnd(_) => {
-            set_phase(session, ClaudeSessionPhase::Ended);
-        }
+        LifecycleEventKind::TurnEnd => set_phase(session, ClaudeSessionPhase::Stopped),
+        LifecycleEventKind::SessionEnd => set_phase(session, ClaudeSessionPhase::Ended),
     }
 
     Ok(())
@@ -412,82 +508,6 @@ fn set_phase(session: &mut SessionState, phase: ClaudeSessionPhase) {
     session
         .metadata
         .insert("claude_session_phase".to_string(), json!(value));
-}
-
-fn find_string(envelope: &HookEnvelope, keys: &[&str]) -> Option<String> {
-    for key in keys {
-        if let Some(Value::String(v)) = envelope.extra.get(*key) {
-            return Some(v.clone());
-        }
-    }
-    None
-}
-
-fn dedup_identity_value(value: &Value) -> Option<String> {
-    match value {
-        Value::String(v) => Some(v.clone()),
-        Value::Number(v) => Some(v.to_string()),
-        Value::Bool(v) => Some(v.to_string()),
-        _ => None,
-    }
-}
-
-fn dedup_identity(envelope: &HookEnvelope) -> Option<String> {
-    for key in DEDUP_IDENTITY_KEYS {
-        if let Some(value) = envelope.extra.get(*key)
-            && let Some(identity) = dedup_identity_value(value)
-        {
-            return Some(format!("{key}:{identity}"));
-        }
-    }
-    None
-}
-
-fn make_event_key(envelope: &HookEnvelope) -> Option<String> {
-    let identity = dedup_identity(envelope)?;
-
-    // DefaultHasher output is only used for short-lived in-session dedup keys.
-    let mut hasher = DefaultHasher::new();
-    envelope.hook_event_name.hash(&mut hasher);
-    envelope.session_id.hash(&mut hasher);
-    identity.hash(&mut hasher);
-    // Hash canonicalized payload to keep dedup stable across key order differences.
-    let normalized = normalize_value(Value::Object(envelope.extra.clone()));
-    if let Ok(canonical_extra) = serde_json::to_string(&normalized) {
-        canonical_extra.hash(&mut hasher);
-    }
-
-    Some(format!(
-        "{}:{}:{:x}",
-        envelope.hook_event_name,
-        envelope.session_id,
-        hasher.finish()
-    ))
-}
-
-fn make_lifecycle_fallback_key(envelope: &HookEnvelope) -> Option<String> {
-    if !LIFECYCLE_EVENTS.contains(&envelope.hook_event_name.as_str()) {
-        return None;
-    }
-
-    let mut hasher = DefaultHasher::new();
-    envelope.hook_event_name.hash(&mut hasher);
-    envelope.session_id.hash(&mut hasher);
-    let normalized = normalize_value(Value::Object(envelope.extra.clone()));
-    if let Ok(canonical_extra) = serde_json::to_string(&normalized) {
-        canonical_extra.hash(&mut hasher);
-    }
-
-    Some(format!(
-        "lifecycle:{}:{}:{:x}",
-        envelope.hook_event_name,
-        envelope.session_id,
-        hasher.finish()
-    ))
-}
-
-fn dedup_key(envelope: &HookEnvelope) -> Option<String> {
-    make_event_key(envelope).or_else(|| make_lifecycle_fallback_key(envelope))
 }
 
 fn dedup_hit(session: &SessionState, key: Option<&str>) -> bool {
@@ -534,6 +554,7 @@ fn session_persisted(session: &SessionState) -> bool {
 async fn persist_session_history(
     storage_path: &Path,
     session: &SessionState,
+    source_name: &str,
 ) -> anyhow::Result<PersistOutcome> {
     let objects_dir = storage_path.join("objects");
     std::fs::create_dir_all(&objects_dir)?;
@@ -557,7 +578,7 @@ async fn persist_session_history(
         "session": session,
         "raw_hook_events": session.metadata.get("raw_hook_events").cloned().unwrap_or(Value::Array(vec![])),
         "ingest_meta": {
-            "source": "claude_code_hook",
+            "source": source_name,
             "ingested_at": Utc::now().to_rfc3339(),
         }
     });
@@ -576,22 +597,8 @@ async fn persist_session_history(
 }
 
 fn to_canonical_json_bytes(value: &Value) -> Result<Vec<u8>, serde_json::Error> {
-    let normalized = normalize_value(value.clone());
+    let normalized = normalize_json_value(value.clone());
     serde_json::to_vec(&normalized)
-}
-
-fn normalize_value(value: Value) -> Value {
-    match value {
-        Value::Object(map) => {
-            let sorted: BTreeMap<String, Value> = map
-                .into_iter()
-                .map(|(k, v)| (k, normalize_value(v)))
-                .collect();
-            Value::Object(sorted.into_iter().collect())
-        }
-        Value::Array(items) => Value::Array(items.into_iter().map(normalize_value).collect()),
-        scalar => scalar,
-    }
 }
 
 #[cfg(test)]
@@ -600,21 +607,22 @@ mod tests {
 
     #[test]
     fn event_key_is_stable_for_same_payload() {
-        let env = HookEnvelope {
+        let provider = ClaudeCodeAgentParser;
+        let env = SessionHookEnvelope {
             hook_event_name: "UserPromptSubmit".to_string(),
             session_id: "s1".to_string(),
             cwd: "/tmp".to_string(),
             transcript_path: None,
             extra: {
-                let mut m = Map::new();
+                let mut m = serde_json::Map::new();
                 m.insert("prompt".to_string(), Value::String("hello".to_string()));
                 m.insert("event_id".to_string(), Value::String("evt-1".to_string()));
                 m
             },
         };
 
-        let k1 = make_event_key(&env);
-        let k2 = make_event_key(&env);
+        let k1 = make_dedup_key(&provider, &env);
+        let k2 = make_dedup_key(&provider, &env);
         assert_eq!(k1, k2);
         assert!(k1.is_some());
     }
@@ -637,26 +645,26 @@ mod tests {
 
     #[test]
     fn validate_core_fields_rejects_missing() {
-        let env = HookEnvelope {
+        let env = SessionHookEnvelope {
             hook_event_name: "".to_string(),
             session_id: "a".to_string(),
             cwd: "/tmp".to_string(),
             transcript_path: None,
-            extra: Map::new(),
+            extra: serde_json::Map::new(),
         };
-        assert!(validate_core_fields(&env).is_err());
+        assert!(validate_session_hook_envelope(&env, MAX_TRANSCRIPT_PATH_BYTES).is_err());
     }
 
     #[test]
     fn validate_core_fields_rejects_invalid_session_id() {
-        let env = HookEnvelope {
+        let env = SessionHookEnvelope {
             hook_event_name: "SessionStart".to_string(),
             session_id: "../unsafe".to_string(),
             cwd: "/tmp".to_string(),
             transcript_path: None,
-            extra: Map::new(),
+            extra: serde_json::Map::new(),
         };
-        assert!(validate_core_fields(&env).is_err());
+        assert!(validate_session_hook_envelope(&env, MAX_TRANSCRIPT_PATH_BYTES).is_err());
     }
 
     #[test]
@@ -669,49 +677,122 @@ mod tests {
             }
         });
 
-        let canonical = serde_json::to_string(&normalize_value(value)).unwrap();
+        let canonical = serde_json::to_string(&normalize_json_value(value)).unwrap();
         assert_eq!(canonical, r#"{"a":{"k1":1,"k2":2},"z":1}"#);
     }
 
     #[test]
     fn validate_core_fields_rejects_invalid_transcript_path() {
-        let env = HookEnvelope {
+        let env = SessionHookEnvelope {
             hook_event_name: "SessionStart".to_string(),
             session_id: "s1".to_string(),
             cwd: "/tmp".to_string(),
             transcript_path: Some("\0bad".to_string()),
-            extra: Map::new(),
+            extra: serde_json::Map::new(),
         };
-        assert!(validate_core_fields(&env).is_err());
+        assert!(validate_session_hook_envelope(&env, MAX_TRANSCRIPT_PATH_BYTES).is_err());
     }
 
     #[test]
     fn event_key_absent_without_identity() {
-        let env = HookEnvelope {
+        let provider = ClaudeCodeAgentParser;
+        let env = SessionHookEnvelope {
             hook_event_name: "UserPromptSubmit".to_string(),
             session_id: "s1".to_string(),
             cwd: "/tmp".to_string(),
             transcript_path: None,
             extra: {
-                let mut m = Map::new();
+                let mut m = serde_json::Map::new();
                 m.insert("prompt".to_string(), Value::String("hello".to_string()));
                 m
             },
         };
-        assert!(make_event_key(&env).is_none());
-        assert!(dedup_key(&env).is_none());
+        assert!(make_dedup_key(&provider, &env).is_none());
     }
 
     #[test]
     fn lifecycle_event_uses_fallback_key_without_identity() {
-        let env = HookEnvelope {
+        let provider = ClaudeCodeAgentParser;
+        let env = SessionHookEnvelope {
             hook_event_name: "SessionStart".to_string(),
             session_id: "s1".to_string(),
             cwd: "/tmp".to_string(),
             transcript_path: None,
-            extra: Map::new(),
+            extra: serde_json::Map::new(),
         };
-        assert!(make_event_key(&env).is_none());
-        assert!(dedup_key(&env).is_some());
+        assert!(make_dedup_key(&provider, &env).is_some());
+    }
+
+    #[test]
+    fn upsert_libra_hook_forwarding_is_idempotent() {
+        let mut settings = ClaudeSettings::default();
+        assert!(upsert_libra_hook_forwarding(&mut settings, "libra", 10));
+        assert!(!upsert_libra_hook_forwarding(&mut settings, "libra", 10));
+
+        for (event_name, subcommand) in CLAUDE_HOOK_FORWARD_MAP {
+            let matchers = settings
+                .hooks
+                .get(*event_name)
+                .expect("expected event key to be present");
+            let libra_matchers: Vec<&ClaudeHookMatcher> = matchers
+                .iter()
+                .filter(|matcher| {
+                    matcher.matcher.is_none()
+                        && matcher_manages_command(
+                            matcher,
+                            &format!("libra claude-code {subcommand}"),
+                        )
+                })
+                .collect();
+            assert_eq!(
+                libra_matchers.len(),
+                1,
+                "expected a single managed hook entry for {}",
+                event_name
+            );
+            assert_eq!(
+                libra_matchers[0].hooks[0].command,
+                format!("libra claude-code {subcommand}")
+            );
+        }
+    }
+
+    #[test]
+    fn upsert_libra_hook_forwarding_preserves_existing_matchers() {
+        let mut settings = ClaudeSettings::default();
+        settings.hooks.insert(
+            "SessionStart".to_string(),
+            vec![ClaudeHookMatcher {
+                matcher: Some("startup".to_string()),
+                hooks: vec![ClaudeHookEntry {
+                    entry_type: "command".to_string(),
+                    command: "echo keep".to_string(),
+                    timeout: Some(3),
+                    extra: BTreeMap::new(),
+                }],
+                extra: BTreeMap::new(),
+            }],
+        );
+
+        assert!(upsert_libra_hook_forwarding(&mut settings, "libra", 10));
+
+        let session_start = settings
+            .hooks
+            .get("SessionStart")
+            .expect("SessionStart should exist");
+        assert!(
+            session_start.iter().any(|matcher| {
+                matcher.matcher.as_deref() == Some("startup")
+                    && matcher.hooks[0].command == "echo keep"
+            }),
+            "existing matcher should be preserved"
+        );
+        assert!(
+            session_start.iter().any(|matcher| {
+                matcher.matcher.is_none()
+                    && matcher_manages_command(matcher, "libra claude-code session-start")
+            }),
+            "managed hook should be added without matcher"
+        );
     }
 }

@@ -35,8 +35,22 @@ fn run_hook_in(workdir: &Path, subcmd: &str, payload: &str) -> std::process::Out
     child.wait_with_output().expect("wait failed")
 }
 
+fn run_claude_code_in(workdir: &Path, args: &[&str]) -> std::process::Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_libra"));
+    cmd.current_dir(workdir)
+        .arg("claude-code")
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    cmd.output().expect("failed to run claude-code command")
+}
+
 fn run_hook(temp: &tempfile::TempDir, subcmd: &str, payload: &str) -> std::process::Output {
     run_hook_in(temp.path(), subcmd, payload)
+}
+
+fn run_claude_code(temp: &tempfile::TempDir, args: &[&str]) -> std::process::Output {
+    run_claude_code_in(temp.path(), args)
 }
 
 fn session_file(repo_root: &Path, id: &str) -> PathBuf {
@@ -44,6 +58,10 @@ fn session_file(repo_root: &Path, id: &str) -> PathBuf {
         .join(".libra")
         .join("sessions")
         .join(format!("{id}.json"))
+}
+
+fn claude_settings_file(repo_root: &Path) -> PathBuf {
+    repo_root.join(".claude").join("settings.json")
 }
 
 async fn build_history_manager(temp: &tempfile::TempDir) -> HistoryManager {
@@ -600,4 +618,150 @@ async fn test_claude_code_session_end_persist_failure_returns_error() {
     let session: serde_json::Value = serde_json::from_str(&session_json).unwrap();
     assert_eq!(session["metadata"]["persist_failed"], json!(true));
     assert_eq!(session["metadata"]["persisted"], json!(false));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_code_install_hooks_creates_forwarding_entries() {
+    let temp = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+
+    let out = run_claude_code(&temp, &["install-hooks"]);
+    assert!(
+        out.status.success(),
+        "install-hooks failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let settings_path = claude_settings_file(temp.path());
+    let content = fs::read_to_string(&settings_path).expect("settings file should be created");
+    let settings: serde_json::Value = serde_json::from_str(&content).expect("settings json");
+
+    let expected = vec![
+        ("SessionStart", "session-start"),
+        ("UserPromptSubmit", "prompt"),
+        ("PostToolUse", "tool-use"),
+        ("Stop", "stop"),
+        ("SessionEnd", "session-end"),
+    ];
+
+    for (event_name, subcmd) in expected {
+        let entries = settings["hooks"][event_name]
+            .as_array()
+            .expect("event entry should be array");
+        let libra = entries
+            .iter()
+            .find(|item| item.get("matcher").is_none())
+            .expect("managed hook should omit matcher");
+        assert_eq!(libra["hooks"][0]["type"], json!("command"));
+        assert_eq!(
+            libra["hooks"][0]["command"],
+            json!(format!("libra claude-code {subcmd}"))
+        );
+        assert_eq!(libra["hooks"][0]["timeout"], json!(10));
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_code_install_hooks_preserves_existing_and_is_idempotent() {
+    let temp = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+
+    let settings_path = claude_settings_file(temp.path());
+    fs::create_dir_all(settings_path.parent().expect("parent should exist")).unwrap();
+    fs::write(
+        &settings_path,
+        json!({
+            "hooks": {
+                "SessionStart": [
+                    {
+                        "matcher": "startup",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "echo keep"
+                            }
+                        ]
+                    }
+                ]
+            },
+            "enabledPlugins": {
+                "example": true
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let first = run_claude_code(&temp, &["install-hooks"]);
+    assert!(
+        first.status.success(),
+        "install-hooks failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let second = run_claude_code(&temp, &["install-hooks"]);
+    assert!(
+        second.status.success(),
+        "second install-hooks failed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+
+    let settings_json = fs::read_to_string(&settings_path).unwrap();
+    let settings: serde_json::Value = serde_json::from_str(&settings_json).unwrap();
+    assert_eq!(settings["enabledPlugins"]["example"], json!(true));
+
+    let session_start_entries = settings["hooks"]["SessionStart"].as_array().unwrap();
+    let startup_count = session_start_entries
+        .iter()
+        .filter(|item| item["matcher"] == json!("startup"))
+        .count();
+    let managed_count = session_start_entries
+        .iter()
+        .filter(|item| {
+            item.get("matcher").is_none()
+                && item["hooks"][0]["command"] == json!("libra claude-code session-start")
+        })
+        .count();
+    assert_eq!(startup_count, 1, "existing startup matcher should remain");
+    assert_eq!(managed_count, 1, "managed hook should not duplicate");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_code_install_hooks_supports_custom_command_prefix() {
+    let temp = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+
+    let custom_prefix = "go run ./cmd/entire/main.go";
+    let out = run_claude_code(
+        &temp,
+        &[
+            "install-hooks",
+            "--command-prefix",
+            custom_prefix,
+            "--timeout",
+            "15",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "install-hooks failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let settings_path = claude_settings_file(temp.path());
+    let settings_json = fs::read_to_string(settings_path).unwrap();
+    let settings: serde_json::Value = serde_json::from_str(&settings_json).unwrap();
+
+    let prompt_entries = settings["hooks"]["UserPromptSubmit"].as_array().unwrap();
+    let libra = prompt_entries
+        .iter()
+        .find(|item| item.get("matcher").is_none())
+        .expect("managed hook should omit matcher");
+    assert_eq!(
+        libra["hooks"][0]["command"],
+        json!(format!("{custom_prefix} claude-code prompt"))
+    );
+    assert_eq!(libra["hooks"][0]["timeout"], json!(15));
 }
