@@ -30,7 +30,7 @@ async fn test_execute_commit_with_empty_index_fail() {
     };
     let result = execute_safe(args).await;
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("nothing to commit"));
+    assert!(result.unwrap_err().render().contains("nothing to commit"));
 }
 
 #[tokio::test]
@@ -84,7 +84,9 @@ async fn test_commit_requires_configured_identity_in_strict_mode() {
     })
     .await;
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("Author identity unknown"));
+    let rendered = result.unwrap_err().render();
+    assert!(rendered.contains("fatal: Author identity unknown"));
+    assert!(rendered.contains("Hint:"));
 
     // Restore env vars so subsequent serial tests are not affected.
     // SAFETY: this test is #[serial], so no other threads are reading env vars.
@@ -96,7 +98,7 @@ async fn test_commit_requires_configured_identity_in_strict_mode() {
 
 #[test]
 #[serial]
-fn test_commit_cli_without_identity_returns_fatal_128() {
+fn test_commit_cli_without_identity_succeeds_with_warning() {
     let repo = tempdir().unwrap();
     init_repo_via_cli(repo.path());
 
@@ -108,9 +110,31 @@ fn test_commit_cli_without_identity_returns_fatal_128() {
     let output = run_libra_command(&["commit", "-m", "missing identity"], repo.path());
     let stderr = String::from_utf8_lossy(&output.stderr);
 
+    assert_eq!(output.status.code(), Some(0));
+    assert!(stderr.contains("Warning: Name and email are not configured"));
+    assert!(stderr.contains("Hint: Run 'libra config --global user.name"));
+}
+
+#[test]
+#[serial]
+fn test_commit_cli_use_config_only_returns_fatal_128() {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+
+    let output = run_libra_command(&["config", "user.useConfigOnly", "true"], repo.path());
+    assert_cli_success(&output, "failed to enable useConfigOnly");
+
+    std::fs::write(repo.path().join("identity.txt"), "identity\n").unwrap();
+
+    let output = run_libra_command(&["add", "identity.txt"], repo.path());
+    assert_cli_success(&output, "failed to stage identity fixture");
+
+    let output = run_libra_command(&["commit", "-m", "missing identity"], repo.path());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
     assert_eq!(output.status.code(), Some(128));
     assert!(stderr.contains("fatal: Author identity unknown"));
-    assert!(stderr.contains("libra config --global user.email"));
+    assert!(stderr.contains("Hint: Run 'libra config --global user.name"));
 }
 
 #[tokio::test]
@@ -657,7 +681,7 @@ async fn test_commit_empty_working_tree() {
 
     let result = execute_safe(args).await;
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("nothing to commit"));
+    assert!(result.unwrap_err().render().contains("nothing to commit"));
 }
 
 #[tokio::test]

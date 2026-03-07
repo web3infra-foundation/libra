@@ -487,11 +487,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
             .map_err(legacy_string_error_to_cli_error)?,
         Commands::Branch(args) => command::branch::execute_safe(args).await?,
         Commands::Tag(args) => command::tag::execute_safe(args).await?,
-        Commands::Commit(args) => {
-            command::commit::execute_safe(args)
-                .await
-                .map_err(CliError::fatal)?;
-        }
+        Commands::Commit(args) => command::commit::execute_safe(args).await?,
         Commands::Switch(args) => command::switch::execute_safe(args).await?,
         Commands::Rebase(args) => command::rebase::execute(args).await,
         Commands::Merge(args) => command::merge::execute(args).await,
