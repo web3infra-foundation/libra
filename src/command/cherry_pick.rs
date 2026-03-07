@@ -64,9 +64,7 @@ pub async fn execute(args: CherryPickArgs) {
 }
 
 pub async fn execute_safe(args: CherryPickArgs) -> CliResult<()> {
-    if !util::check_repo_exist() {
-        return Err(CliError::fatal("not a libra repository"));
-    }
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
 
     if let Head::Detached(_) = Head::current().await {
         return Err(CliError::fatal("cannot cherry-pick on detached HEAD"));

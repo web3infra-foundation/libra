@@ -222,6 +222,7 @@ pub async fn execute(args: ShortlogArgs) {
 }
 
 pub async fn execute_safe(args: ShortlogArgs) -> CliResult<()> {
+    crate::utils::util::require_repo().map_err(|_| CliError::repo_not_found())?;
     match execute_to(args, &mut std::io::stdout()).await {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
@@ -253,6 +254,9 @@ async fn get_commits_for_shortlog(
         Head::Detached(hash) => hash.to_string(),
     };
 
+    // TODO: `unwrap_or_default` silently swallows storage errors from
+    // `get_reachable_commits`. Propagate the error once this function returns
+    // `Result`.
     let mut commits: Vec<Commit> = get_reachable_commits(commit_hash, None)
         .await
         .unwrap_or_default()

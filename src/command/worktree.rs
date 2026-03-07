@@ -124,9 +124,7 @@ pub async fn execute(args: WorktreeArgs) {
 }
 
 pub async fn execute_safe(args: WorktreeArgs) -> CliResult<()> {
-    if !util::check_repo_exist() {
-        return Err(CliError::fatal("not a libra repository"));
-    }
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
 
     match args.command {
         WorktreeSubcommand::Add { path } => add_worktree(path).await,

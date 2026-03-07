@@ -53,10 +53,7 @@ pub async fn execute(args: BlameArgs) {
 }
 
 pub async fn execute_safe(args: BlameArgs) -> CliResult<()> {
-    // check if we're in a valid repository
-    if !util::check_repo_exist() {
-        return Err(CliError::fatal("not a libra repository"));
-    }
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
 
     let commit_id = get_target_commit(&args.commit)
         .await

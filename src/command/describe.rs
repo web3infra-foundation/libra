@@ -52,9 +52,7 @@ pub async fn execute(args: DescribeArgs) -> Result<(), String> {
 }
 
 pub async fn execute_safe(args: DescribeArgs) -> CliResult<()> {
-    if !util::check_repo_exist() {
-        return Err(CliError::repo_not_found());
-    }
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
     execute_inner(args).await.map_err(|e| {
         let trimmed = e.trim().to_string();
         if let Some(rest) = trimmed.strip_prefix("fatal: ") {

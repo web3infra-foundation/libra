@@ -15,7 +15,12 @@ use crate::{
     command::status,
     internal::{head::Head, protocol::lfs_client::LFSClient},
     lfs_structs::LockListQuery,
-    utils::{error::CliResult, lfs, path, path_ext::PathExt, util},
+    utils::{
+        error::{CliError, CliResult},
+        lfs, path,
+        path_ext::PathExt,
+        util,
+    },
 };
 
 /// [Docs](https://github.com/git-lfs/git-lfs/tree/main/docs/man)
@@ -218,6 +223,7 @@ pub async fn execute(cmd: LfsCmds) {
 
 /// Thin wrapper for CLI dispatch. Internal errors are still handled via `eprintln!`.
 pub async fn execute_safe(cmd: LfsCmds) -> CliResult<()> {
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
     execute(cmd).await;
     Ok(())
 }

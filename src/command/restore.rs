@@ -51,6 +51,7 @@ pub async fn execute(args: RestoreArgs) {
 }
 
 pub async fn execute_safe(args: RestoreArgs) -> CliResult<()> {
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
     execute_checked(args)
         .await
         .map_err(|e| CliError::fatal(e.to_string()))

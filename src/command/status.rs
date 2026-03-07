@@ -26,7 +26,7 @@ use crate::{
     command::calc_file_blob_hash,
     internal::{config::Config, head::Head},
     utils::{
-        error::CliResult,
+        error::{CliError, CliResult},
         ignore::IgnorePolicy,
         object_ext::{CommitExt, TreeExt},
         path, util,
@@ -762,6 +762,7 @@ pub async fn execute(args: StatusArgs) {
 }
 
 pub async fn execute_safe(args: StatusArgs) -> CliResult<()> {
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
     execute_to(args, &mut std::io::stdout()).await;
     Ok(())
 }

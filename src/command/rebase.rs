@@ -27,7 +27,7 @@ use crate::{
         reflog::{ReflogAction, ReflogContext, ReflogError, with_reflog},
     },
     utils::{
-        error::CliResult,
+        error::{CliError, CliResult},
         ignore::IgnorePolicy,
         object_ext::{BlobExt, TreeExt},
         path, util, worktree,
@@ -498,6 +498,7 @@ pub async fn execute(args: RebaseArgs) {
 
 /// Thin wrapper for CLI dispatch. Internal errors are still handled via `eprintln!`.
 pub async fn execute_safe(args: RebaseArgs) -> CliResult<()> {
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
     execute(args).await;
     Ok(())
 }

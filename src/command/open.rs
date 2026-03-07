@@ -26,7 +26,7 @@ pub async fn execute(args: OpenArgs) {
 }
 
 pub async fn execute_safe(args: OpenArgs) -> CliResult<()> {
-    let in_repo = crate::utils::util::check_repo_exist();
+    let in_repo = crate::utils::util::require_repo().is_ok();
 
     let remote_url = if let Some(input) = args.remote {
         if in_repo {

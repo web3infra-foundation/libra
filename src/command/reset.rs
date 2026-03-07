@@ -73,9 +73,7 @@ pub async fn execute(args: ResetArgs) {
 }
 
 pub async fn execute_safe(args: ResetArgs) -> CliResult<()> {
-    if !util::check_repo_exist() {
-        return Err(CliError::fatal("not a libra repository"));
-    }
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
 
     // Determine reset mode
     let mode = if args.soft {

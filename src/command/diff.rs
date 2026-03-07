@@ -26,7 +26,7 @@ use crate::{
     command::{get_target_commit, load_object},
     internal::head::Head,
     utils::{
-        error::CliResult,
+        error::{CliError, CliResult},
         ignore::{self, IgnorePolicy},
         object_ext::TreeExt,
         path, util,
@@ -195,6 +195,7 @@ pub async fn execute(args: DiffArgs) {
 
 /// Thin wrapper for CLI dispatch. Internal errors are still handled via `eprintln!`.
 pub async fn execute_safe(args: DiffArgs) -> CliResult<()> {
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
     execute(args).await;
     Ok(())
 }

@@ -55,7 +55,10 @@ pub async fn execute_safe(args: CheckoutArgs) -> CliResult<()> {
     }
 
     if switch::check_status().await {
-        return Ok(());
+        // Status details already printed by check_status.
+        return Err(CliError::failure(
+            "local changes would be overwritten by checkout",
+        ));
     }
 
     match (args.branch, args.new_branch) {

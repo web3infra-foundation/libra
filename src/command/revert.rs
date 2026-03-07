@@ -48,10 +48,7 @@ pub async fn execute(args: RevertArgs) {
 }
 
 pub async fn execute_safe(args: RevertArgs) -> CliResult<()> {
-    // Check if we're in a valid repository
-    if !util::check_repo_exist() {
-        return Err(CliError::fatal("not a libra repository"));
-    }
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
 
     // Ensure we're on a branch, not in detached HEAD state
     // Todo: For now, we do not handle the case when the repository is in a detached HEAD state.
