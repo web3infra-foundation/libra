@@ -64,6 +64,11 @@ pub struct CliError {
 }
 
 impl CliError {
+    pub fn repo_not_found() -> Self {
+        Self::fatal("not a libra repository (or any of the parent directories): .libra")
+            .with_hint("Run 'libra init' to create a repository in the current directory.")
+    }
+
     pub fn unknown_command(message: impl Into<String>) -> Self {
         Self {
             kind: CliErrorKind::UnknownCommand,
@@ -136,7 +141,16 @@ impl CliError {
     }
 
     pub fn with_hint(mut self, hint: impl Into<Hint>) -> Self {
-        self.hints.push(hint.into());
+        if self.hints.len() >= 2 {
+            return self;
+        }
+
+        let hint = normalize_hint_text(hint.into().0);
+        if hint.trim().is_empty() {
+            return self;
+        }
+
+        self.hints.push(Hint::new(hint));
         self
     }
 
@@ -182,8 +196,26 @@ impl CliError {
     }
 }
 
+fn normalize_hint_text(text: String) -> String {
+    text.lines()
+        .map(strip_hint_prefix)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn strip_hint_prefix(line: &str) -> String {
+    let trimmed = line.trim_start();
+    if let Some(stripped) = trimmed.strip_prefix("Hint:") {
+        return stripped.trim_start().to_string();
+    }
+    if let Some(stripped) = trimmed.strip_prefix("hint:") {
+        return stripped.trim_start().to_string();
+    }
+    line.to_string()
+}
+
 fn render_hint(text: &str) -> Vec<String> {
-    text.lines().map(|line| format!("hint: {}", line)).collect()
+    text.lines().map(|line| format!("Hint: {}", line)).collect()
 }
 
 impl fmt::Display for CliError {
@@ -220,6 +252,15 @@ mod tests {
     }
 
     #[test]
+    fn repo_not_found_includes_standard_hint() {
+        let rendered = CliError::repo_not_found().render();
+        assert_eq!(
+            rendered,
+            "fatal: not a libra repository (or any of the parent directories): .libra\nHint: Run 'libra init' to create a repository in the current directory."
+        );
+    }
+
+    #[test]
     fn parse_usage_render_includes_usage_and_hints() {
         let rendered = CliError::parse_usage("unexpected argument '--bad'")
             .with_usage("Usage: libra add [OPTIONS] [PATHSPEC]...")
@@ -227,7 +268,7 @@ mod tests {
             .render();
         assert_eq!(
             rendered,
-            "error: unexpected argument '--bad'\nUsage: libra add [OPTIONS] [PATHSPEC]...\nhint: use '--help' to see available options."
+            "error: unexpected argument '--bad'\nUsage: libra add [OPTIONS] [PATHSPEC]...\nHint: use '--help' to see available options."
         );
     }
 
@@ -240,7 +281,7 @@ mod tests {
             .render();
         assert_eq!(
             rendered,
-            "error: name and email are not configured\nhint: to configure, run:\nhint:   libra config --global user.name \"Some One\"\nhint:   libra config --global user.email \"someone@example.com\""
+            "error: name and email are not configured\nHint: to configure, run:\nHint:   libra config --global user.name \"Some One\"\nHint:   libra config --global user.email \"someone@example.com\""
         );
     }
 
@@ -254,5 +295,15 @@ mod tests {
             "libra: 'wat' is not a libra command. See 'libra --help'."
         );
         assert_eq!(err.exit_code(), 1);
+    }
+
+    #[test]
+    fn with_hint_strips_prefix_and_limits_count() {
+        let rendered = CliError::failure("bad")
+            .with_hint("hint: first")
+            .with_hint("Hint: second")
+            .with_hint("third")
+            .render();
+        assert_eq!(rendered, "error: bad\nHint: first\nHint: second");
     }
 }

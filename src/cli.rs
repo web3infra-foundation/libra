@@ -361,7 +361,7 @@ fn parse_error_components(err: &clap::Error) -> (String, Option<String>, Vec<Str
 }
 
 fn repo_not_found_error() -> CliError {
-    CliError::fatal("not a libra repository (or any of the parent directories): .libra")
+    CliError::repo_not_found()
 }
 
 fn legacy_string_error_to_cli_error(message: String) -> CliError {
@@ -608,7 +608,7 @@ mod tests {
         let msg = err.render();
         // Clap should include its own "tip: a similar subcommand exists: 'init'".
         assert!(
-            msg.contains("hint:") || msg.contains("similar"),
+            msg.contains("Hint:") || msg.contains("similar"),
             "expected clap fuzzy-match suggestion, got: {msg}"
         );
     }

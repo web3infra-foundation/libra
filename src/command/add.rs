@@ -531,7 +531,7 @@ mod test {
         assert!(err.render().contains("ignored.txt"));
         assert!(
             err.render()
-                .contains("hint: use -f if you really want to add them.")
+                .contains("Hint: use -f if you really want to add them.")
         );
     }
 }

@@ -149,9 +149,14 @@ pub fn storage_path() -> PathBuf {
     try_get_storage_path(None).unwrap()
 }
 
-/// Check if libra repo exists
+/// Return an error instead of printing when the current directory is not a repository.
+pub fn require_repo() -> io::Result<()> {
+    try_get_storage_path(None).map(|_| ())
+}
+
+/// Legacy repository check that still prints for commands not yet migrated.
 pub fn check_repo_exist() -> bool {
-    if try_get_storage_path(None).is_err() {
+    if require_repo().is_err() {
         eprintln!("fatal: not a libra repository (or any of the parent directories): .libra");
         return false;
     }
