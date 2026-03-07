@@ -21,7 +21,7 @@ use crate::internal::{
         mcp::{resource::CreateIntentParams, server::LibraMcpServer},
         providers::{
             anthropic::{CLAUDE_3_5_SONNET, Client as AnthropicClient},
-            codex::{Client as CodexClient, CODEX_01},
+            codex::{CODEX_01, Client as CodexClient},
             deepseek::client::Client as DeepSeekClient,
             gemini::{Client as GeminiClient, GEMINI_2_5_FLASH},
             ollama::Client as OllamaClient,

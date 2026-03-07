@@ -1,11 +1,10 @@
 //! Codex WebSocket client for Libra.
 
-use std::fmt;
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, Mutex, oneshot};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::internal::ai::client::Provider;
@@ -145,13 +144,17 @@ impl CodexWebSocket {
                                 if method_str.contains("agent_message")
                                     && let Some(params) = json.get("params")
                                     && let Some(msg_obj) = params.get("msg")
-                                    && let Some(delta) = msg_obj.get("delta").and_then(|d| d.as_str())
+                                    && let Some(delta) =
+                                        msg_obj.get("delta").and_then(|d| d.as_str())
                                 {
                                     let mut msgs = agent_messages_clone.lock().await;
+                                    msgs.clear();
                                     msgs.push(delta.to_string());
                                 }
                                 // Handle turn completion
-                                if method_str.contains("turn/completed") || method_str.contains("turnCompleted") {
+                                if method_str.contains("turn/completed")
+                                    || method_str.contains("turnCompleted")
+                                {
                                     // eprintln!("[Codex] Turn completed notification received");
                                     if let Some(tx) = completion_tx_clone.lock().await.take() {
                                         let _ = tx.send(());
@@ -169,9 +172,10 @@ impl CodexWebSocket {
                                             serde_json::json!({
                                                 "requestId": request_id,
                                                 "approved": true
-                                            })
+                                            }),
                                         );
-                                        if let Some(ref sender) = *sender_for_approval.lock().await {
+                                        if let Some(ref sender) = *sender_for_approval.lock().await
+                                        {
                                             // eprintln!("[Codex] Sending auto-approval");
                                             let _ = sender.send(Message::Text(msg.to_json())).await;
                                         }
@@ -193,25 +197,35 @@ impl CodexWebSocket {
 
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
-        let _init_result = self.send_request("initialize", serde_json::json!({
-            "protocolVersion": "1.0",
-            "capabilities": {},
-            "clientInfo": {
-                "name": "libra",
-                "version": "1.0.0"
-            }
-        })).await;
+        let _init_result = self
+            .send_request(
+                "initialize",
+                serde_json::json!({
+                    "protocolVersion": "1.0",
+                    "capabilities": {},
+                    "clientInfo": {
+                        "name": "libra",
+                        "version": "1.0.0"
+                    }
+                }),
+            )
+            .await;
 
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
         let thread_id_clone = self.thread_id.clone();
-        let thread_result = self.send_request("thread/start", serde_json::json!({})).await;
+        let thread_result = self
+            .send_request("thread/start", serde_json::json!({}))
+            .await;
 
         #[allow(clippy::collapsible_if, clippy::collapsible_else_if)]
-
         if let Ok(result) = thread_result {
             if let Some(result_obj) = result.get("result") {
-                if let Some(thread_id_val) = result_obj.get("threadId").or_else(|| result_obj.get("thread_id")).and_then(|v| v.as_str()) {
+                if let Some(thread_id_val) = result_obj
+                    .get("threadId")
+                    .or_else(|| result_obj.get("thread_id"))
+                    .and_then(|v| v.as_str())
+                {
                     let mut tid = thread_id_clone.lock().await;
                     *tid = Some(thread_id_val.to_string());
                 } else {
@@ -249,7 +263,7 @@ impl CodexWebSocket {
             return Err("WebSocket not connected".into());
         }
 
-        for _ in 0..100 {
+        for _ in 0..600 {
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             let responses = self.responses.lock().await;
             if let Some(response) = responses.get(&id) {
@@ -278,7 +292,7 @@ impl CodexWebSocket {
         }
 
         // Create oneshot channel for completion signal
-        let (tx, rx) = oneshot::channel();
+        let (tx, _rx) = oneshot::channel();
         {
             let mut completion = self.completion_tx.lock().await;
             *completion = Some(tx);
@@ -306,18 +320,24 @@ impl CodexWebSocket {
         //     }
         // }
 
-        // Poll thread/read until turn is completed
-        for i in 0..60 {
+        // Poll thread/read until turn is completed (max 5 minutes)
+        for _i in 0..600 {
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
-            let turn_result = self.send_request("thread/read", serde_json::json!({
-                "includeTurns": true,
-                "threadId": thread_id
-            })).await;
+            let turn_result = self
+                .send_request(
+                    "thread/read",
+                    serde_json::json!({
+                        "includeTurns": true,
+                        "threadId": thread_id
+                    }),
+                )
+                .await;
 
             if let Ok(turn_result) = turn_result {
                 // Check result.thread.turns[-1].status (from thread/read API)
-                let status = turn_result.get("result")
+                let status = turn_result
+                    .get("result")
                     .and_then(|r| r.get("thread"))
                     .and_then(|t| t.get("turns"))
                     .and_then(|arr| arr.as_array())

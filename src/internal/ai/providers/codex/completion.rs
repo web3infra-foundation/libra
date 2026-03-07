@@ -1,11 +1,10 @@
 //! Codex completion model implementation using WebSocket.
 
-
 use crate::internal::ai::{
     client::CompletionClient,
     completion::{
-        message::{AssistantContent, Text},
         CompletionError, CompletionModel as CompletionModelTrait,
+        message::{AssistantContent, Text},
         request::{CompletionRequest, CompletionResponse},
     },
     providers::codex::client::CodexWebSocket,
@@ -36,7 +35,6 @@ impl Model {
     }
 }
 
-
 impl CompletionModelTrait for Model {
     type Response = serde_json::Value;
 
@@ -51,21 +49,22 @@ impl CompletionModelTrait for Model {
                 use crate::internal::ai::completion::message::Message;
                 if let Message::User { content } = msg {
                     let text = match content {
-                        crate::internal::ai::completion::message::OneOrMany::One(c) => {
-                            match c {
-                                crate::internal::ai::completion::message::UserContent::Text(t) => t.text.clone(),
-                                _ => format!("{:?}", c),
+                        crate::internal::ai::completion::message::OneOrMany::One(c) => match c {
+                            crate::internal::ai::completion::message::UserContent::Text(t) => {
+                                t.text.clone()
                             }
-                        }
-                        crate::internal::ai::completion::message::OneOrMany::Many(vec) => {
-                            vec.iter()
-                                .map(|c| match c {
-                                    crate::internal::ai::completion::message::UserContent::Text(t) => t.text.clone(),
-                                    _ => format!("{:?}", c),
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n")
-                        }
+                            _ => format!("{:?}", c),
+                        },
+                        crate::internal::ai::completion::message::OneOrMany::Many(vec) => vec
+                            .iter()
+                            .map(|c| match c {
+                                crate::internal::ai::completion::message::UserContent::Text(t) => {
+                                    t.text.clone()
+                                }
+                                _ => format!("{:?}", c),
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
                     };
                     Some(text)
                 } else {
@@ -74,13 +73,37 @@ impl CompletionModelTrait for Model {
             })
             .unwrap_or_default();
 
+        // Get the working directory for Codex to use
+        let working_dir = crate::utils::util::working_dir();
+        let working_dir_str = working_dir.to_string_lossy().to_string();
+
+        // Snapshot current files before Codex runs
+        let mut previous_files = std::collections::HashSet::new();
+        if working_dir.exists()
+            && let Ok(entries) = std::fs::read_dir(&working_dir)
+        {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file()
+                    && let Ok(rel_path) = path.strip_prefix(&working_dir)
+                {
+                    let rel_str = rel_path.to_string_lossy().replace("\\", "/");
+                    if !rel_str.starts_with(".git") && !rel_str.starts_with(".libra") {
+                        previous_files.insert(rel_str);
+                    }
+                }
+            }
+        }
+
         // Set approvalPolicy to "never" to auto-approve all operations (file changes, command execution)
+        // Also set cwd to use Libra's working directory
         let params = serde_json::json!({
             "input": [{
                 "type": "text",
                 "text": user_message
             }],
-            "approvalPolicy": "never"
+            "approvalPolicy": "never",
+            "cwd": working_dir_str
         });
 
         let result = self
@@ -91,40 +114,41 @@ impl CompletionModelTrait for Model {
             .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
 
         // Extract content and file changes from response
-        let (content, file_changes) = extract_content_and_changes(&result);
+        let (content, mut file_changes) = extract_content_and_changes(&result);
+
+        // If no file changes from response, detect them from file system
+        if file_changes.is_empty() {
+            let detected_changes = detect_file_changes(&working_dir, &previous_files);
+            file_changes = detected_changes;
+        }
 
         // Apply file changes to working directory
         if !file_changes.is_empty() {
-            // eprintln!("[Codex] Applying {} file changes...", file_changes.len());
             for change in &file_changes {
-                // eprintln!("[Codex] - {}: {}", change.operation, change.path);
-                if let Err(e) = apply_file_change(change) {
-                    // eprintln!("[Codex] Failed to apply change to {}: {}", change.path, e);
+                if let Err(_e) = apply_file_change(change) {
+                    // Silently ignore apply errors
                 }
             }
 
             // Auto-add and commit changes to Libra
-            // eprintln!("[Codex] Committing changes to Libra...");
-            if let Err(e) = commit_to_libra(&file_changes).await {
-                // eprintln!("[Codex] Failed to commit: {}", e);
+            if let Err(_e) = commit_to_libra(&file_changes).await {
+                // Silently ignore commit errors
             }
         }
 
         if content.is_empty() {
             // Fallback to streaming message if response extraction failed
             let message = self.client.get_agent_messages().await;
-            // eprintln!("[Codex] Using fallback message, len: {}", message.len());
             if !message.is_empty() {
                 return Ok(CompletionResponse {
-                    content: vec![AssistantContent::Text(Text { text: message.join("
-") })],
+                    content: vec![AssistantContent::Text(Text {
+                        text: message.join(
+                            "
+",
+                        ),
+                    })],
                     raw_response: result,
                 });
-            }
-        } else {
-            // eprintln!("[Codex] Extracted content from response, {} items", content.len());
-            for (i, c) in content.iter().enumerate() {
-                // eprintln!("[Codex] Content {}: {:?}", i, c);
             }
         };
 
@@ -142,26 +166,59 @@ impl CompletionModelTrait for Model {
 struct FileChange {
     path: String,
     diff: String,
-    operation: String, // "add", "update", "delete"
+    operation: String,       // "add", "update", "delete"
     content: Option<String>, // Full content for new files
 }
 
-fn extract_content_and_changes(response: &serde_json::Value) -> (Vec<AssistantContent>, Vec<FileChange>) {
-    let mut content = Vec::new();
+/// Detect file changes in the working directory by comparing with a previous snapshot
+fn detect_file_changes(
+    working_dir: &std::path::Path,
+    previous_files: &std::collections::HashSet<String>,
+) -> Vec<FileChange> {
     let mut file_changes = Vec::new();
 
-    // Debug: print the full response
-    let resp_str = serde_json::to_string(&response).unwrap_or_default();
-    // eprintln!("[Codex] extract_content_and_changes, response len: {}", resp_str.len());
-    // eprintln!("[Codex] response preview: {}", resp_str.chars().take(200).collect::<String>());
-    // Also check for error in status
-    if let Some(status) = response.get("result").and_then(|r| r.get("thread")).and_then(|t| t.get("status")) {
-        // eprintln!("[Codex] thread status: {:?}", status);
-    // Check for error details
-    if let Some(error) = response.get("result").and_then(|r| r.get("error")) {
-        // eprintln!("[Codex] error in response: {:?}", error);
+    if !working_dir.exists() {
+        return file_changes;
     }
+
+    // Walk through all files in the working directory
+    if let Ok(entries) = std::fs::read_dir(working_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                // Get relative path
+                if let Ok(rel_path) = path.strip_prefix(working_dir) {
+                    let rel_str = rel_path.to_string_lossy().replace("\\", "/");
+                    // Skip .git and .libra directories
+                    if rel_str.starts_with(".git") || rel_str.starts_with(".libra") {
+                        continue;
+                    }
+
+                    // Check if this is a new file
+                    if !previous_files.contains(&rel_str) {
+                        // Read the file content
+                        if let Ok(content) = std::fs::read_to_string(&path) {
+                            file_changes.push(FileChange {
+                                path: rel_str,
+                                diff: String::new(),
+                                operation: "add".to_string(),
+                                content: Some(content),
+                            });
+                        }
+                    }
+                }
+            }
+        }
     }
+
+    file_changes
+}
+
+fn extract_content_and_changes(
+    response: &serde_json::Value,
+) -> (Vec<AssistantContent>, Vec<FileChange>) {
+    let mut content = Vec::new();
+    let mut file_changes = Vec::new();
 
     // Try result.turn first
     if let Some(turn) = response.get("result").and_then(|r| r.get("turn")) {
@@ -169,15 +226,13 @@ fn extract_content_and_changes(response: &serde_json::Value) -> (Vec<AssistantCo
     }
 
     // If not found, try result.thread.turns (from thread/read API)
-    if content.is_empty() && file_changes.is_empty() {
-        if let Some(thread) = response.get("result").and_then(|r| r.get("thread")) {
-            if let Some(turns) = thread.get("turns").and_then(|t| t.as_array()) {
-                // Get the last turn
-                if let Some(last_turn) = turns.last() {
-                    extract_from_turn(last_turn, &mut content, &mut file_changes);
-                }
-            }
-        }
+    if content.is_empty()
+        && file_changes.is_empty()
+        && let Some(thread) = response.get("result").and_then(|r| r.get("thread"))
+        && let Some(turns) = thread.get("turns").and_then(|t| t.as_array())
+        && let Some(last_turn) = turns.last()
+    {
+        extract_from_turn(last_turn, &mut content, &mut file_changes);
     }
 
     if content.is_empty() {
@@ -189,7 +244,11 @@ fn extract_content_and_changes(response: &serde_json::Value) -> (Vec<AssistantCo
     (content, file_changes)
 }
 
-fn extract_from_turn(turn: &serde_json::Value, content: &mut Vec<AssistantContent>, file_changes: &mut Vec<FileChange>) {
+fn extract_from_turn(
+    turn: &serde_json::Value,
+    content: &mut Vec<AssistantContent>,
+    file_changes: &mut Vec<FileChange>,
+) {
     if let Some(items) = turn.get("items").and_then(|i| i.as_array()) {
         for item in items {
             if let Some(item_type) = item.get("type").and_then(|t| t.as_str()) {
@@ -204,12 +263,25 @@ fn extract_from_turn(turn: &serde_json::Value, content: &mut Vec<AssistantConten
                     "fileChange" => {
                         if let Some(changes) = item.get("changes").and_then(|c| c.as_array()) {
                             for change in changes {
-                                let path = change.get("path").and_then(|p| p.as_str()).unwrap_or("").to_string();
-                                let diff = change.get("diff").and_then(|d| d.as_str()).unwrap_or("").to_string();
+                                let path = change
+                                    .get("path")
+                                    .and_then(|p| p.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let diff = change
+                                    .get("diff")
+                                    .and_then(|d| d.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
                                 // Try to get content for new files
-                                let content_field = change.get("content").and_then(|c| c.as_str()).map(String::from);
+                                let content_field = change
+                                    .get("content")
+                                    .and_then(|c| c.as_str())
+                                    .map(String::from);
                                 let operation = if let Some(kind) = change.get("kind") {
-                                    if let Some(kind_type) = kind.get("type").and_then(|t| t.as_str()) {
+                                    if let Some(kind_type) =
+                                        kind.get("type").and_then(|t| t.as_str())
+                                    {
                                         kind_type.to_string()
                                     } else {
                                         "update".to_string()
@@ -249,15 +321,14 @@ fn apply_file_change(change: &FileChange) -> Result<(), Box<dyn std::error::Erro
         }
         "add" | "update" => {
             // First try content field for new files
-            if change.operation == "add" {
-                if let Some(ref file_content) = change.content {
-                    if let Some(parent) = file_path.parent() {
-                        std::fs::create_dir_all(parent)?;
-                    }
-                    std::fs::write(&file_path, file_content)?;
-                    // eprintln!("[Codex] Wrote new file from content: {}", change.path);
-                    return Ok(());
-                }
+            if change.operation == "add"
+                && let Some(ref file_content) = change.content
+                && let Some(parent) = file_path.parent()
+            {
+                std::fs::create_dir_all(parent)?;
+                std::fs::write(&file_path, file_content)?;
+                // eprintln!("[Codex] Wrote new file from content: {}", change.path);
+                return Ok(());
             }
 
             // Try to apply the diff using diffy
@@ -280,7 +351,7 @@ fn apply_file_change(change: &FileChange) -> Result<(), Box<dyn std::error::Erro
                             std::fs::write(&file_path, &new_content)?;
                             // eprintln!("[Codex] Applied diff to: {}", change.path);
                         }
-                        Err(e) => {
+                        Err(_e) => {
                             // If diff application fails, write the entire content if it's a new file
                             if !file_path.exists() {
                                 if let Some(parent) = file_path.parent() {
@@ -288,9 +359,6 @@ fn apply_file_change(change: &FileChange) -> Result<(), Box<dyn std::error::Erro
                                 }
                                 // For add operation, the diff might contain the full content
                                 std::fs::write(&file_path, &change.diff)?;
-                                // eprintln!("[Codex] Wrote new file: {}", change.path);
-                            } else {
-                                // eprintln!("[Codex] Failed to apply diff to {}: {}", change.path, e);
                             }
                         }
                     }
@@ -322,7 +390,9 @@ impl CompletionClient for CodexWebSocket {
 
 pub type CodexModel = Model;
 
-async fn commit_to_libra(file_changes: &[FileChange]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn commit_to_libra(
+    file_changes: &[FileChange],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use std::process::Command;
 
     // Get list of changed files
@@ -332,21 +402,16 @@ async fn commit_to_libra(file_changes: &[FileChange]) -> Result<(), Box<dyn std:
     }
 
     // Run `libra add` for all changed files
-    let add_result = Command::new("libra")
-        .args(["add", "-A"])
-        .output();
+    let add_result = Command::new("libra").args(["add", "-A"]).output();
 
     match add_result {
         Ok(output) => {
-            if output.status.success() {
-                // eprintln!("[Codex] Added files to Libra");
-            } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                // eprintln!("[Codex] Add failed: {}", stderr);
+            if !output.status.success() {
+                // Log add failure silently
             }
         }
-        Err(e) => {
-            // eprintln!("[Codex] Failed to run add: {}", e);
+        Err(_e) => {
+            // Log add error silently
         }
     }
 
@@ -358,16 +423,12 @@ async fn commit_to_libra(file_changes: &[FileChange]) -> Result<(), Box<dyn std:
 
     match commit_result {
         Ok(output) => {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                // eprintln!("[Codex] Committed to Libra: {}", stdout.trim());
-            } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                // eprintln!("[Codex] Commit failed: {}", stderr);
+            if !output.status.success() {
+                // Log commit failure silently
             }
         }
-        Err(e) => {
-            // eprintln!("[Codex] Failed to run commit: {}", e);
+        Err(_e) => {
+            // Log commit error silently
         }
     }
 

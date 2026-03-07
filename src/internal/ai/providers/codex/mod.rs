@@ -7,4 +7,4 @@ pub mod client;
 pub mod completion;
 
 pub use client::{Client, CodexProvider, CodexWebSocket};
-pub use completion::{CodexModel, Model, CODEX_01};
+pub use completion::{CODEX_01, CodexModel, Model};
