@@ -222,6 +222,12 @@ pub async fn execute(cmd: LfsCmds) {
 }
 
 /// Thin wrapper for CLI dispatch. Internal errors are still handled via `eprintln!`.
+///
+/// # Known limitations
+///
+/// `execute()` handles errors internally with `eprintln!` and never propagates
+/// them, so this wrapper always returns `Ok(())` even when the command fails.
+// TODO: refactor execute() to return CliResult so errors propagate to callers.
 pub async fn execute_safe(cmd: LfsCmds) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
     execute(cmd).await;

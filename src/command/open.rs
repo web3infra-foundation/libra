@@ -27,6 +27,9 @@ pub async fn execute(args: OpenArgs) {
     }
 }
 
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Resolves the remote URL and opens it in the default
+/// browser.
 pub async fn execute_safe(args: OpenArgs) -> CliResult<()> {
     let in_repo = crate::utils::util::require_repo().is_ok();
 

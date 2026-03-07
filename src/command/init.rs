@@ -196,7 +196,9 @@ pub async fn execute(args: InitArgs) {
         std::process::exit(e.exit_code());
     }
 }
-
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Creates `.libra` storage, seeds HEAD and default
+/// refs/config, and initialises the backing SQLite database.
 pub async fn execute_safe(args: InitArgs) -> CliResult<()> {
     let from_git = args.from_git_repository.clone();
     let is_bare = args.bare;

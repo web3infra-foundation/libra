@@ -45,6 +45,9 @@ pub async fn execute(stash_cmd: Stash) {
     }
 }
 
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Dispatches to stash sub-commands (push, pop, list,
+/// apply, drop).
 pub async fn execute_safe(stash_cmd: Stash) -> CliResult<()> {
     let result = match stash_cmd {
         Stash::Push { message } => push(message).await,

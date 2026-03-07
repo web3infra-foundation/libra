@@ -33,6 +33,8 @@ pub async fn execute(args: ShowRefArgs) -> Result<(), String> {
     run_show_ref(args).await
 }
 
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Lists all refs (branches, tags) with their object IDs.
 pub async fn execute_safe(args: ShowRefArgs) -> CliResult<()> {
     run_show_ref(args).await.map_err(CliError::failure)
 }

@@ -82,6 +82,9 @@ pub async fn execute(args: ReflogArgs) {
     }
 }
 
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Dispatches to the show, delete, or exists sub-command
+/// for reflog management.
 pub async fn execute_safe(args: ReflogArgs) -> CliResult<()> {
     match args.command {
         Subcommands::Show {

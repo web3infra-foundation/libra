@@ -26,6 +26,8 @@ pub async fn execute(args: CleanArgs) {
     }
 }
 
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Removes untracked files from the working tree.
 pub async fn execute_safe(args: CleanArgs) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
     run_clean(args)

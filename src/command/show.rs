@@ -59,6 +59,9 @@ pub async fn execute(args: ShowArgs) {
     }
 }
 
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Resolves a revision (commit, tag, tree, blob, or
+/// `<rev>:<path>`) and prints its contents with diff formatting.
 pub async fn execute_safe(args: ShowArgs) -> CliResult<()> {
     let object_ref = args.object.as_deref().unwrap_or("HEAD");
 

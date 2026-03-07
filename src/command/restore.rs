@@ -50,6 +50,9 @@ pub async fn execute(args: RestoreArgs) {
     }
 }
 
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Resets files or entire trees from a commit or the
+/// index, respecting pathspecs and staged-vs-worktree targets.
 pub async fn execute_safe(args: RestoreArgs) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
     execute_checked(args)
@@ -58,9 +61,6 @@ pub async fn execute_safe(args: RestoreArgs) -> CliResult<()> {
 }
 
 pub async fn execute_checked(args: RestoreArgs) -> io::Result<()> {
-    if !util::check_repo_exist() {
-        return Ok(());
-    }
     let staged = args.staged;
     let mut worktree = args.worktree;
     // If neither option is specified, by default the `working tree` is restored.

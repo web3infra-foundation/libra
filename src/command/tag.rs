@@ -42,6 +42,9 @@ pub async fn execute(args: TagArgs) {
     }
 }
 
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Lists, creates, or deletes tags depending on the
+/// provided arguments.
 pub async fn execute_safe(args: TagArgs) -> CliResult<()> {
     if args.list || args.n_lines.is_some() {
         let show_lines = args.n_lines.unwrap_or(0);
@@ -70,18 +73,10 @@ pub async fn execute_safe(args: TagArgs) -> CliResult<()> {
     Ok(())
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 async fn create_tag(tag_name: &str, message: Option<String>, force: bool) {
     if let Err(err) = create_tag_safe(tag_name, message, force).await {
         eprintln!("{}", err.render());
-    }
-}
-
-#[allow(dead_code)]
-async fn list_tags(show_lines: usize) {
-    match render_tags(show_lines).await {
-        Ok(s) => print!("{}", s),
-        Err(e) => eprintln!("fatal: {}", e),
     }
 }
 
@@ -145,7 +140,7 @@ pub async fn render_tags(show_lines: usize) -> Result<String, anyhow::Error> {
     Ok(output)
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 async fn delete_tag(tag_name: &str) {
     if let Err(err) = delete_tag_safe(tag_name).await {
         eprintln!("{}", err.render());
@@ -158,13 +153,6 @@ async fn delete_tag_safe(tag_name: &str) -> CliResult<()> {
         .map_err(|e| CliError::fatal(e.to_string()))?;
     println!("Deleted tag '{}'", tag_name);
     Ok(())
-}
-
-#[allow(dead_code)]
-async fn show_tag(tag_name: &str) {
-    if let Err(err) = show_tag_safe(tag_name).await {
-        eprintln!("{}", err.render());
-    }
 }
 
 async fn show_tag_safe(tag_name: &str) -> CliResult<()> {

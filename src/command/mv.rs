@@ -55,6 +55,9 @@ pub async fn execute(args: MvArgs) -> Result<(), String> {
     execute_inner(args).await
 }
 
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Moves or renames files in the working directory and
+/// updates the index accordingly.
 pub async fn execute_safe(args: MvArgs) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
     execute_inner(args).await.map_err(|e| {

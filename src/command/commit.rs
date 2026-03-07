@@ -116,24 +116,37 @@ fn parse_author(author: &str) -> Result<(String, String), String> {
     ))
 }
 
+/// A user's name + email pair used for commit authoring and committing.
 #[derive(Clone, Debug)]
 struct UserIdentity {
     name: String,
     email: String,
 }
 
+/// How the committer identity was obtained.
+///
+/// `ConfigOrEnv` — explicitly configured via `user.name`/`user.email` or
+/// `GIT_COMMITTER_*` environment variables.  
+/// `AutoDetected` — inferred from the system (hostname, OS user) because no
+/// explicit configuration was found.  A warning is printed when this variant
+/// is used so the user knows the identity may not be what they intended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum IdentitySource {
     ConfigOrEnv,
     AutoDetected,
 }
 
+/// The result of [`resolve_committer_identity`]: a [`UserIdentity`] together
+/// with metadata indicating how it was resolved ([`IdentitySource`]).
 #[derive(Debug)]
 struct ResolvedIdentity {
     identity: UserIdentity,
     source: IdentitySource,
 }
 
+/// Internal error type that bridges legacy `String` errors from `execute_impl`
+/// with the structured `CliError` type. Converted via `into_cli()` at the
+/// `execute_safe` boundary.
 #[derive(Debug)]
 enum CommitExecError {
     Cli(CliError),
@@ -274,15 +287,16 @@ async fn resolve_committer_identity() -> Result<ResolvedIdentity, CliError> {
         .unwrap_or(false);
 
     if use_config_only {
-        if let (Some(name), Some(email)) = (config_name, config_email) {
+        if let (Some(name), Some(email)) = (config_name.clone(), config_email.clone()) {
             return Ok(ResolvedIdentity {
                 identity: UserIdentity { name, email },
                 source: IdentitySource::ConfigOrEnv,
             });
         }
         // Report which field(s) are missing — using *config-only* perspective.
-        let name_missing = get_user_config_value("name").await.is_none();
-        let email_missing = get_user_config_value("email").await.is_none();
+        // Reuse the already-fetched values instead of querying config again.
+        let name_missing = config_name.is_none();
+        let email_missing = config_email.is_none();
         return Err(missing_identity_error(name_missing, email_missing));
     }
 
@@ -618,6 +632,9 @@ pub async fn execute(args: CommitArgs) {
     }
 }
 
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Collects staged changes, resolves committer identity,
+/// builds tree and commit objects, and updates HEAD.
 pub async fn execute_safe(args: CommitArgs) -> CliResult<()> {
     execute_impl(args).await.map_err(CommitExecError::into_cli)
 }
@@ -836,6 +853,53 @@ mod test {
 
     use super::*;
     use crate::utils::test::*;
+
+    #[test]
+    fn test_classify_commit_error_nothing_to_commit() {
+        let err = classify_commit_error("nothing to commit, working tree clean".to_string());
+        assert_eq!(
+            err.exit_code(),
+            1,
+            "nothing-to-commit is a non-fatal failure"
+        );
+        assert!(
+            err.message().contains("nothing to commit"),
+            "message should be preserved: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn test_classify_commit_error_fatal_prefix() {
+        let err = classify_commit_error("fatal: could not read tree".to_string());
+        assert_eq!(err.exit_code(), 128, "fatal prefix should map to exit 128");
+        assert!(
+            err.message().contains("could not read tree"),
+            "message should strip prefix: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn test_classify_commit_error_error_prefix() {
+        let err = classify_commit_error("error: pathspec 'x' did not match any file".to_string());
+        assert_eq!(err.exit_code(), 1, "error prefix should map to exit 1");
+        assert!(
+            err.message().contains("pathspec"),
+            "message should strip prefix: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn test_classify_commit_error_unknown_prefix() {
+        let err = classify_commit_error("some unexpected message".to_string());
+        assert_eq!(
+            err.exit_code(),
+            128,
+            "unknown messages should default to fatal (128)"
+        );
+    }
 
     #[test]
     ///Testing basic parameter parsing functionality.

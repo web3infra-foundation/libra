@@ -35,6 +35,9 @@ pub async fn execute(args: MergeArgs) {
     }
 }
 
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Resolves the merge target, performs fast-forward or
+/// recursive merge, stages results, and updates refs.
 pub async fn execute_safe(args: MergeArgs) -> CliResult<()> {
     let commit_hash = get_target_commit(&args.branch)
         .await

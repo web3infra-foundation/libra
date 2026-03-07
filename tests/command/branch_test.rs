@@ -979,3 +979,47 @@ async fn test_branch_contains_commit_filter() {
         "`--contains base --no-contains d2 --no-contains m2` should match nothing"
     );
 }
+
+/// Verifies that `filter_branches` propagates errors instead of silently
+/// skipping corrupt branches. When a branch points to a non-existent commit
+/// hash, the BFS in `commit_contains` should fail and that error must surface
+/// from `filter_branches`.
+#[test]
+#[serial]
+fn test_filter_branches_propagates_error_for_corrupt_commit() {
+    use std::str::FromStr;
+
+    use git_internal::hash::ObjectHash;
+    use libra::internal::branch::Branch;
+
+    // Fabricate a branch whose commit hash does not exist in any storage.
+    let bogus_hash =
+        ObjectHash::from_str("0000000000000000000000000000000000000000000000000000000000000000")
+            .expect("valid hex");
+    let corrupt_branch = Branch {
+        name: "corrupt".into(),
+        commit: bogus_hash,
+        remote: None,
+    };
+
+    // `contains_set` with a real-looking hash forces BFS traversal.
+    let mut branches = vec![corrupt_branch];
+    let mut contains = HashSet::new();
+    contains.insert(
+        ObjectHash::from_str("1111111111111111111111111111111111111111111111111111111111111111")
+            .expect("valid hex"),
+    );
+    let no_contains = HashSet::new();
+
+    let result = filter_branches(&mut branches, &contains, &no_contains);
+    assert!(
+        result.is_err(),
+        "filter_branches should propagate error for corrupt commit, got Ok"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.message().contains("failed to load commit"),
+        "error should mention failed commit load, got: {}",
+        err.message()
+    );
+}

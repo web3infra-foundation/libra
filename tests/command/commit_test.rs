@@ -779,3 +779,81 @@ async fn test_commit_amend_without_changes() {
     // This should succeed even without staged changes
     commit::execute(amend_args).await;
 }
+
+/// When no identity is configured and `useConfigOnly` is false, the commit
+/// should succeed using an auto-detected identity (system username + hostname)
+/// and the warning message should mention auto-detection.
+#[tokio::test]
+#[serial]
+async fn test_commit_with_auto_detected_identity_succeeds() {
+    use libra::internal::config::Config;
+
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    // Isolate from host config so no user.name/email leaks in
+    let fake_global = temp_path.path().join("fake_global.db");
+    let fake_system = temp_path.path().join("fake_system.db");
+    // SAFETY: this test is #[serial], so no other threads are reading env vars.
+    unsafe {
+        std::env::set_var("LIBRA_CONFIG_GLOBAL_DB", &fake_global);
+        std::env::set_var("LIBRA_CONFIG_SYSTEM_DB", &fake_system);
+        // Clear env vars that could provide identity
+        std::env::remove_var("GIT_COMMITTER_NAME");
+        std::env::remove_var("GIT_COMMITTER_EMAIL");
+        std::env::remove_var("GIT_AUTHOR_NAME");
+        std::env::remove_var("GIT_AUTHOR_EMAIL");
+        std::env::remove_var("EMAIL");
+        std::env::remove_var("LIBRA_COMMITTER_NAME");
+        std::env::remove_var("LIBRA_COMMITTER_EMAIL");
+    }
+
+    // Ensure useConfigOnly is NOT set (default)
+    Config::remove_config("user", None, "name", None, true).await;
+    Config::remove_config("user", None, "email", None, true).await;
+
+    test::ensure_file("autodetect.txt", Some("content"));
+    add::execute(add::AddArgs {
+        pathspec: vec!["autodetect.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        verbose: false,
+        force: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+
+    let result = execute_safe(CommitArgs {
+        message: Some("auto-detect identity test".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    })
+    .await;
+
+    // The commit should succeed (auto-detected identity) unless the OS has
+    // no username/hostname — in that case it would fail with missing identity.
+    // On most systems this succeeds.
+    assert!(
+        result.is_ok(),
+        "commit with auto-detected identity should succeed on most systems, got: {:?}",
+        result.err()
+    );
+
+    // Restore env vars so subsequent serial tests are not affected.
+    // SAFETY: this test is #[serial], so no other threads are reading env vars.
+    unsafe {
+        std::env::remove_var("LIBRA_CONFIG_GLOBAL_DB");
+        std::env::remove_var("LIBRA_CONFIG_SYSTEM_DB");
+    }
+}

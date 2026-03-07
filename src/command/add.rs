@@ -114,6 +114,9 @@ pub async fn execute(args: AddArgs) {
     }
 }
 
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Stages changes by resolving pathspecs, respecting
+/// ignore policy, and writing blob objects to storage.
 pub async fn execute_safe(args: AddArgs) -> CliResult<()> {
     let workdir = util::try_working_dir().map_err(|source| {
         if source.kind() == io::ErrorKind::NotFound {

@@ -135,7 +135,9 @@ pub async fn execute_to(args: ShortlogArgs, writer: &mut impl Write) -> std::io:
         None
     };
 
-    let commits = get_commits_for_shortlog(&args, since_ts, until_ts).await;
+    let commits = get_commits_for_shortlog(&args, since_ts, until_ts)
+        .await
+        .map_err(|e| std::io::Error::other(e.message().to_string()))?;
 
     let mut author_map: HashMap<String, AuthorStats> = HashMap::new();
 
@@ -222,6 +224,9 @@ pub async fn execute(args: ShortlogArgs) {
     }
 }
 
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Summarises commit history by author, delegating to
+/// [`execute_to`] for formatted output.
 pub async fn execute_safe(args: ShortlogArgs) -> CliResult<()> {
     crate::utils::util::require_repo().map_err(|_| CliError::repo_not_found())?;
     match execute_to(args, &mut std::io::stdout()).await {
@@ -235,7 +240,7 @@ async fn get_commits_for_shortlog(
     _args: &ShortlogArgs,
     since_ts: Option<i64>,
     until_ts: Option<i64>,
-) -> Vec<Commit> {
+) -> CliResult<Vec<Commit>> {
     use crate::command::log::get_reachable_commits;
 
     let head = Head::current().await;
@@ -247,27 +252,22 @@ async fn get_commits_for_shortlog(
             match branch {
                 Some(h) => h,
                 None => {
-                    eprintln!("fatal: current branch has no commits");
-                    return Vec::new();
+                    return Err(CliError::fatal("current branch has no commits"));
                 }
             }
         }
         Head::Detached(hash) => hash.to_string(),
     };
 
-    // TODO: `unwrap_or_default` silently swallows storage errors from
-    // `get_reachable_commits`. Propagate the error once this function returns
-    // `Result`.
     let mut commits: Vec<Commit> = get_reachable_commits(commit_hash, None)
-        .await
-        .unwrap_or_default()
+        .await?
         .into_iter()
         .filter(|c| passes_filter(c, since_ts, until_ts))
         .collect();
 
     commits.sort_by_key(|b| std::cmp::Reverse(b.author.timestamp));
 
-    commits
+    Ok(commits)
 }
 
 fn passes_filter(commit: &Commit, since_ts: Option<i64>, until_ts: Option<i64>) -> bool {

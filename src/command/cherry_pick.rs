@@ -63,6 +63,9 @@ pub async fn execute(args: CherryPickArgs) {
     }
 }
 
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Replays one or more commit changes onto the current
+/// branch, optionally creating new commits or leaving them staged.
 pub async fn execute_safe(args: CherryPickArgs) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
 

@@ -72,6 +72,9 @@ pub async fn execute(args: ResetArgs) {
     }
 }
 
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Moves HEAD (and optionally the index/worktree) to a
+/// target commit using soft, mixed, or hard mode.
 pub async fn execute_safe(args: ResetArgs) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
 

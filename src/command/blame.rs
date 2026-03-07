@@ -52,6 +52,9 @@ pub async fn execute(args: BlameArgs) {
     }
 }
 
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Walks commit history for the target file, attributing
+/// each line to the commit that last changed it.
 pub async fn execute_safe(args: BlameArgs) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
 

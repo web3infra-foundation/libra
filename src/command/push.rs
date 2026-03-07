@@ -73,6 +73,9 @@ pub async fn execute(args: PushArgs) {
     }
 }
 
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Validates arguments, reads remote configuration,
+/// negotiates with the server, and sends local refs and pack data.
 pub async fn execute_safe(args: PushArgs) -> CliResult<()> {
     if args.repository.is_some() ^ args.refspec.is_some() {
         // must provide both or none

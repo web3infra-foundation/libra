@@ -318,3 +318,68 @@ async fn test_show_nonexistent_tag() {
         stderr
     );
 }
+
+/// Test that `show::execute_safe` returns a structured `CliError` for an
+/// invalid object reference when called through the API.
+#[tokio::test]
+#[serial]
+async fn test_show_execute_safe_bad_ref_returns_cli_error() {
+    use libra::{
+        command::show::{ShowArgs, execute_safe},
+        utils::test::{self, ChangeDirGuard},
+    };
+    use tempfile::tempdir;
+
+    let temp = tempdir().expect("failed to create temp dir");
+    test::setup_with_new_libra_in(temp.path()).await;
+    let _guard = ChangeDirGuard::new(temp.path());
+
+    let args = ShowArgs {
+        object: Some("nonexistent_ref_abc123".to_string()),
+        no_patch: false,
+        oneline: false,
+        name_only: false,
+        stat: false,
+        pathspec: vec![],
+    };
+    let result = execute_safe(args).await;
+    assert!(result.is_err(), "execute_safe should fail for bad ref");
+    let err = result.unwrap_err();
+    assert_eq!(
+        err.exit_code(),
+        128,
+        "bad revision should be fatal (exit 128)"
+    );
+    assert!(
+        err.message().contains("bad revision") || err.message().contains("unknown revision"),
+        "error should mention bad revision, got: {}",
+        err.message()
+    );
+}
+
+/// Test that `show::execute_safe` returns a structured `CliError` for an
+/// invalid `<rev>:<path>` pattern.
+#[tokio::test]
+#[serial]
+async fn test_show_execute_safe_bad_rev_path_returns_cli_error() {
+    use libra::{
+        command::show::{ShowArgs, execute_safe},
+        utils::test::{self, ChangeDirGuard},
+    };
+    use tempfile::tempdir;
+
+    let temp = tempdir().expect("failed to create temp dir");
+    test::setup_with_new_libra_in(temp.path()).await;
+    let _guard = ChangeDirGuard::new(temp.path());
+
+    let args = ShowArgs {
+        object: Some("HEAD:nonexistent_file.txt".to_string()),
+        no_patch: false,
+        oneline: false,
+        name_only: false,
+        stat: false,
+        pathspec: vec![],
+    };
+    let result = execute_safe(args).await;
+    assert!(result.is_err(), "execute_safe should fail for bad rev:path");
+}

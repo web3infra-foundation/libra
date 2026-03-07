@@ -92,6 +92,9 @@ pub async fn execute(args: BranchArgs) {
     }
 }
 
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Creates, deletes, renames, or lists branches depending
+/// on the provided arguments.
 pub async fn execute_safe(args: BranchArgs) -> CliResult<()> {
     if let Some(new_branch) = args.new_branch {
         create_branch_safe(new_branch, args.commit_hash).await
@@ -102,9 +105,9 @@ pub async fn execute_safe(args: BranchArgs) -> CliResult<()> {
     } else if args.show_current {
         show_current_branch().await;
         Ok(())
-    } else if args.set_upstream_to.is_some() {
+    } else if let Some(upstream) = args.set_upstream_to {
         match Head::current().await {
-            Head::Branch(name) => set_upstream_safe(&name, &args.set_upstream_to.unwrap()).await,
+            Head::Branch(name) => set_upstream_safe(&name, &upstream).await,
             Head::Detached(_) => Err(CliError::fatal("HEAD is detached")),
         }
     } else if !args.rename.is_empty() {
@@ -516,7 +519,9 @@ pub fn filter_branches(
     contains_set: &HashSet<ObjectHash>,
     no_contains_set: &HashSet<ObjectHash>,
 ) -> CliResult<()> {
-    // Filter branches, propagating errors
+    // Filter branches, propagating errors.
+    // `retain` doesn't support fallible predicates, so we capture the first
+    // error and short-circuit the remaining iterations.
     let mut error: Option<CliError> = None;
     branches.retain(|branch| {
         if error.is_some() {

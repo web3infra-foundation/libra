@@ -315,6 +315,9 @@ pub async fn execute(args: LogArgs) {
     }
 }
 
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Walks commit history applying filters (date range,
+/// author, path) and renders formatted log output.
 pub async fn execute_safe(args: LogArgs) -> CliResult<()> {
     let name_status = args.name_status;
     // Check parameter mutual exclusion: if both name flags and --patch are specified, prioritize the name display flags
@@ -706,7 +709,15 @@ pub async fn compute_commit_stat(
         Ok(blob) => blob.data,
         Err(_) => {
             let file = util::to_workdir_path(file);
-            std::fs::read(&file).unwrap_or_default()
+            std::fs::read(&file).unwrap_or_else(|e| {
+                eprintln!(
+                    "warning: failed to read blob {} for '{}': {}",
+                    hash,
+                    file.display(),
+                    e
+                );
+                Vec::new()
+            })
         }
     };
 
@@ -943,7 +954,15 @@ pub(crate) async fn generate_diff(
         Ok(blob) => blob.data,
         Err(_) => {
             let file = util::to_workdir_path(file);
-            std::fs::read(&file).unwrap_or_default()
+            std::fs::read(&file).unwrap_or_else(|e| {
+                eprintln!(
+                    "warning: failed to read blob {} for '{}': {}",
+                    hash,
+                    file.display(),
+                    e
+                );
+                Vec::new()
+            })
         }
     };
 

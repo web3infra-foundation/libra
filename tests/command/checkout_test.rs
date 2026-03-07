@@ -234,3 +234,83 @@ async fn checkout_restore_rejects_sha1_hash_in_sha256_repo() {
     let content = std::fs::read_to_string(util::working_dir().join("foo.txt")).unwrap();
     assert_eq!(content, "v2", "invalid hash should not restore file");
 }
+
+/// Verifies that `checkout -b` returns a [`CliError`] when the worktree has
+/// uncommitted staged changes that would be overwritten.
+#[tokio::test]
+#[serial]
+async fn test_checkout_new_branch_with_dirty_worktree_returns_error() {
+    use clap::Parser;
+    use libra::{
+        command::{
+            add::{self, AddArgs},
+            checkout::{self, CheckoutArgs},
+            commit,
+        },
+        internal::config::Config,
+        utils::test::{self, ChangeDirGuard},
+    };
+
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    Config::insert("user", None, "name", "Checkout Tester").await;
+    Config::insert("user", None, "email", "checkout@test.com").await;
+
+    // Create initial commit so HEAD exists
+    test::ensure_file("base.txt", Some("base"));
+    add::execute(AddArgs {
+        pathspec: vec!["base.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        verbose: false,
+        force: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+    commit::execute(commit::CommitArgs {
+        message: Some("initial".into()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    })
+    .await;
+
+    // Stage a change without committing — working tree is "dirty"
+    test::ensure_file("dirty.txt", Some("uncommitted"));
+    add::execute(AddArgs {
+        pathspec: vec!["dirty.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        verbose: false,
+        force: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+
+    let result =
+        checkout::execute_safe(CheckoutArgs::try_parse_from(["checkout", "-b", "new"]).unwrap())
+            .await;
+    assert!(
+        result.is_err(),
+        "checkout should fail when worktree is dirty"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.message().contains("local changes"),
+        "error should mention local changes, got: {}",
+        err.message()
+    );
+}

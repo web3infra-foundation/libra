@@ -602,29 +602,23 @@ pub struct Key {
 /// **Note:** Prefer [`execute_safe`] for programmatic / embedded callers so
 /// errors can be handled without terminating the process.
 pub async fn execute(args: ConfigArgs) {
-    if let Err(e) = execute_safe(args).await {
+    if let Err(e) = execute_inner(args).await {
         eprintln!("{e}");
     }
 }
 
-/// Execute the `config` command returning `CliResult` for the CLI dispatch.
-pub async fn execute_cli(args: ConfigArgs) -> CliResult<()> {
-    execute_safe(args).await.map_err(|e| {
-        let trimmed = e.trim().to_string();
-        if let Some(rest) = trimmed.strip_prefix("error: ") {
-            CliError::failure(rest.to_string())
-        } else if let Some(rest) = trimmed.strip_prefix("fatal: ") {
-            CliError::fatal(rest.to_string())
-        } else {
-            CliError::failure(trimmed)
-        }
-    })
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. This is the preferred entry point for CLI dispatch,
+/// library consumers, and tests.
+pub async fn execute_safe(args: ConfigArgs) -> CliResult<()> {
+    execute_inner(args)
+        .await
+        .map_err(CliError::from_legacy_string)
 }
 
-/// Execute the `config` command and return errors to the caller instead of
-/// printing them.  This is the preferred entry point for library consumers,
-/// tests, and the top-level CLI dispatch.
-pub async fn execute_safe(args: ConfigArgs) -> Result<(), String> {
+/// Inner implementation that returns legacy `Result<(), String>` with
+/// human-readable prefixed error messages.
+async fn execute_inner(args: ConfigArgs) -> Result<(), String> {
     args.validate().map_err(|e| format!("error: {e}"))?;
 
     let scope = args.get_scope();

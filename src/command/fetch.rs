@@ -176,6 +176,9 @@ pub async fn execute(args: FetchArgs) {
     }
 }
 
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Negotiates with remotes, downloads pack data, and
+/// updates remote-tracking refs.
 pub async fn execute_safe(args: FetchArgs) -> CliResult<()> {
     tracing::debug!("`fetch` args: {:?}", args);
 
@@ -192,7 +195,11 @@ pub async fn execute_safe(args: FetchArgs) -> CliResult<()> {
         Some(remote) => remote,
         None => match Config::get_current_remote().await {
             Ok(Some(remote)) => remote,
-            Ok(None) => return Ok(()),
+            Ok(None) => {
+                return Err(CliError::fatal(
+                    "no configured remote for the current branch",
+                ));
+            }
             Err(_) => return Err(CliError::fatal("HEAD is detached")),
         },
     };

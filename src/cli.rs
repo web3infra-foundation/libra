@@ -489,7 +489,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Remote(cmd) => command::remote::execute_safe(cmd).await?,
         Commands::Open(args) => command::open::execute_safe(args).await?,
         Commands::Pull(args) => command::pull::execute_safe(args).await?,
-        Commands::Config(args) => command::config::execute_cli(args).await?,
+        Commands::Config(args) => command::config::execute_safe(args).await?,
         Commands::Checkout(args) => command::checkout::execute_safe(args).await?,
         Commands::Reflog(args) => command::reflog::execute_safe(args).await?,
         Commands::Worktree(args) => command::worktree::execute_safe(args).await?,

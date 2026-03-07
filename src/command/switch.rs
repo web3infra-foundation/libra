@@ -49,6 +49,9 @@ pub async fn execute(args: SwitchArgs) {
     }
 }
 
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Validates clean working-tree state, then switches,
+/// creates, or detaches HEAD to the requested branch.
 pub async fn execute_safe(args: SwitchArgs) -> CliResult<()> {
     ensure_clean_status().await?;
     let SwitchArgs {

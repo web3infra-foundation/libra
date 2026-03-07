@@ -99,6 +99,9 @@ pub async fn execute(command: RemoteCmds) {
     }
 }
 
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Dispatches to remote sub-commands (add, remove, rename,
+/// set-url, list, show).
 pub async fn execute_safe(command: RemoteCmds) -> CliResult<()> {
     match command {
         RemoteCmds::Add { name, url } => {

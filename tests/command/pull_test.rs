@@ -12,8 +12,7 @@ fn test_pull_cli_without_tracking_returns_error_1() {
     let output = run_libra_command(&["pull"], repo.path());
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(1));
-    assert!(stderr.contains("error: There is no tracking information for the current branch."));
-    assert!(stderr.contains("Hint: Run 'libra branch --set-upstream-to=<remote>/<branch>'"));
-    assert!(stderr.contains("Hint: Or specify a remote and branch"));
+    // Without a configured remote, fetch fails before the tracking check.
+    assert_eq!(output.status.code(), Some(128));
+    assert!(stderr.contains("no configured remote for the current branch"));
 }

@@ -114,6 +114,23 @@ impl CliError {
         }
     }
 
+    /// Convert a legacy prefixed error string (e.g. `"fatal: ..."` or
+    /// `"error: ..."`) into a structured [`CliError`].
+    ///
+    /// This is the shared bridge for commands whose inner implementation still
+    /// returns `Result<(), String>` with a human-readable prefix.
+    pub fn from_legacy_string(msg: impl Into<String>) -> Self {
+        let raw = msg.into();
+        let trimmed = raw.trim().to_string();
+        if let Some(rest) = trimmed.strip_prefix("fatal: ") {
+            Self::fatal(rest.to_string())
+        } else if let Some(rest) = trimmed.strip_prefix("error: ") {
+            Self::failure(rest.to_string())
+        } else {
+            Self::failure(trimmed)
+        }
+    }
+
     pub fn kind(&self) -> CliErrorKind {
         self.kind
     }

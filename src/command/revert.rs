@@ -47,6 +47,9 @@ pub async fn execute(args: RevertArgs) {
     }
 }
 
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Reverses one or more commits by replaying their inverse
+/// changes into the index/worktree and optionally creating new commits.
 pub async fn execute_safe(args: RevertArgs) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
 

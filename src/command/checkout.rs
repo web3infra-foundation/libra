@@ -36,6 +36,9 @@ pub async fn execute(args: CheckoutArgs) {
     }
 }
 
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Validates arguments, checks for local changes, then
+/// delegates to branch switching or creation via restore utilities.
 pub async fn execute_safe(args: CheckoutArgs) -> CliResult<()> {
     if let Some(ref branch_name) = args.branch
         && branch_name == INTENT_BRANCH
@@ -103,7 +106,7 @@ pub async fn switch_branch(branch_name: &str) -> CliResult<()> {
 }
 
 async fn create_and_switch_new_branch(new_branch: &str) -> CliResult<()> {
-    branch::create_branch(new_branch.to_string(), get_current_branch().await).await;
+    branch::create_branch_safe(new_branch.to_string(), get_current_branch().await).await?;
     switch_branch(new_branch).await?;
     println!("Switched to a new branch '{new_branch}'");
     Ok(())
@@ -114,10 +117,10 @@ async fn get_remote(branch_name: &str) -> CliResult<()> {
 
     create_and_switch_new_branch(branch_name).await?;
     // Set branch upstream
-    branch::set_upstream(branch_name, &remote_branch_name).await;
+    branch::set_upstream_safe(branch_name, &remote_branch_name).await?;
     // Synchronous branches
     // Use the pull command to update the local branch with the latest changes from the remote branch
-    pull::execute(pull::PullArgs::make(None, None)).await;
+    pull::execute_safe(pull::PullArgs::make(None, None)).await?;
     Ok(())
 }
 

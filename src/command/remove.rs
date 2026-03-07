@@ -83,6 +83,9 @@ pub async fn execute(args: RemoveArgs) {
     }
 }
 
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Removes paths from the index and optionally from the
+/// working tree, supporting recursive and cache-only modes.
 pub async fn execute_safe(args: RemoveArgs) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
     let idx_file = path::index();

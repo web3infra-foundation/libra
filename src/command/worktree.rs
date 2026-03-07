@@ -123,6 +123,9 @@ pub async fn execute(args: WorktreeArgs) {
     }
 }
 
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Dispatches to the appropriate worktree sub-command
+/// (add, list, lock, unlock, move, prune, remove, repair).
 pub async fn execute_safe(args: WorktreeArgs) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
 

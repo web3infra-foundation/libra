@@ -197,6 +197,12 @@ pub async fn execute(args: DiffArgs) {
 }
 
 /// Thin wrapper for CLI dispatch. Internal errors are still handled via `eprintln!`.
+///
+/// # Known limitations
+///
+/// `execute()` handles errors internally with `eprintln!` and never propagates
+/// them, so this wrapper always returns `Ok(())` even when the diff fails.
+// TODO: refactor execute() to return CliResult so errors propagate to callers.
 pub async fn execute_safe(args: DiffArgs) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
     execute(args).await;
@@ -204,6 +210,7 @@ pub async fn execute_safe(args: DiffArgs) -> CliResult<()> {
 }
 
 async fn get_commit_blobs(commit_hash: &ObjectHash) -> Vec<(PathBuf, ObjectHash)> {
+    // TODO: replace unwrap() with error propagation once execute() returns Result
     let commit = load_object::<Commit>(commit_hash).unwrap();
     let tree = load_object::<Tree>(&commit.tree_id).unwrap();
     tree.get_plain_items()
@@ -221,6 +228,7 @@ fn get_files_blobs(
         .filter(|path| !ignore::should_ignore(path, policy, index))
         .map(|p| {
             let path = util::workdir_to_absolute(p);
+            // TODO: replace unwrap() with error propagation once execute() returns Result
             let data = std::fs::read(&path).unwrap();
             (p.to_owned(), calculate_object_hash(ObjectType::Blob, &data))
         })

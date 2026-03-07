@@ -51,16 +51,13 @@ pub async fn execute(args: DescribeArgs) -> Result<(), String> {
     execute_inner(args).await
 }
 
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting.
 pub async fn execute_safe(args: DescribeArgs) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
-    execute_inner(args).await.map_err(|e| {
-        let trimmed = e.trim().to_string();
-        if let Some(rest) = trimmed.strip_prefix("fatal: ") {
-            CliError::fatal(rest.to_string())
-        } else {
-            CliError::failure(trimmed)
-        }
-    })
+    execute_inner(args)
+        .await
+        .map_err(CliError::from_legacy_string)
 }
 
 async fn execute_inner(args: DescribeArgs) -> Result<(), String> {
