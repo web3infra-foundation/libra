@@ -473,10 +473,10 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
             .await
             .map_err(|e| CliError::fatal(e.to_string()))?,
         Commands::Add(args) => command::add::execute_safe(args).await?,
-        Commands::Rm(args) => command::remove::execute(args).await,
+        Commands::Rm(args) => command::remove::execute_safe(args).await?,
         Commands::Restore(args) => command::restore::execute(args).await,
         Commands::Status(args) => command::status::execute(args).await,
-        Commands::Clean(args) => command::clean::execute(args).await,
+        Commands::Clean(args) => command::clean::execute_safe(args).await?,
         Commands::Stash(cmd) => command::stash::execute(cmd).await,
         Commands::Lfs(cmd) => command::lfs::execute(cmd).await,
         Commands::Log(args) => command::log::execute(args).await,
@@ -486,13 +486,13 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
             .await
             .map_err(legacy_string_error_to_cli_error)?,
         Commands::Branch(args) => command::branch::execute(args).await,
-        Commands::Tag(args) => command::tag::execute(args).await,
+        Commands::Tag(args) => command::tag::execute_safe(args).await?,
         Commands::Commit(args) => {
             command::commit::execute_safe(args)
                 .await
                 .map_err(CliError::fatal)?;
         }
-        Commands::Switch(args) => command::switch::execute(args).await,
+        Commands::Switch(args) => command::switch::execute_safe(args).await?,
         Commands::Rebase(args) => command::rebase::execute(args).await,
         Commands::Merge(args) => command::merge::execute(args).await,
         Commands::Reset(args) => command::reset::execute(args).await,
@@ -505,7 +505,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
             .await
             .map_err(legacy_string_error_to_cli_error)?,
         Commands::CherryPick(args) => command::cherry_pick::execute(args).await,
-        Commands::Push(args) => command::push::execute(args).await,
+        Commands::Push(args) => command::push::execute_safe(args).await?,
         Commands::CatFile(args) => command::cat_file::execute(args).await,
         Commands::IndexPack(args) => command::index_pack::execute(args),
         Commands::Fetch(args) => command::fetch::execute_safe(args).await?,
