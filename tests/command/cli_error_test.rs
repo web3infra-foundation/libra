@@ -85,8 +85,12 @@ fn runtime_fatal_uses_exit_code_128() {
     assert_eq!(output.status.code(), Some(128));
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(
-        stderr,
-        "fatal: not a libra repository (or any of the parent directories): .libra\n"
+    assert!(
+        stderr.contains("fatal: not a libra repository"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("Hint: run 'libra init'"),
+        "missing init hint in stderr: {stderr}"
     );
 }

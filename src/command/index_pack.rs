@@ -25,6 +25,8 @@ use git_internal::{
 };
 use sha1::{Digest, Sha1};
 
+use crate::utils::error::{CliError, CliResult};
+
 #[derive(Parser, Debug)]
 pub struct IndexPackArgs {
     /// Pack file path
@@ -42,31 +44,58 @@ pub struct IndexPackArgs {
 }
 
 pub fn execute(args: IndexPackArgs) {
+    if let Err(err) = execute_safe(args) {
+        eprintln!("{}", err.render());
+    }
+}
+
+pub fn execute_safe(args: IndexPackArgs) -> CliResult<()> {
     let pack_file = args.pack_file;
-    let index_file = args.index_file.unwrap_or_else(|| {
-        if !pack_file.ends_with(".pack") {
-            eprintln!("fatal: pack-file does not end with '.pack'");
-            return String::new();
+    let index_file = match args.index_file {
+        Some(index_file) => index_file,
+        None => {
+            if !pack_file.ends_with(".pack") {
+                return Err(CliError::fatal("pack-file does not end with '.pack'"));
+            }
+            pack_file.replace(".pack", ".idx")
         }
-        pack_file.replace(".pack", ".idx")
-    });
-    if index_file.is_empty() {
-        return;
-    }
+    };
     if index_file == pack_file {
-        eprintln!("fatal: pack-file and index-file are the same file");
-        return;
+        return Err(CliError::fatal(
+            "pack-file and index-file are the same file",
+        ));
     }
+
+    std::fs::File::open(&pack_file).map_err(|e| {
+        CliError::fatal(format!(
+            "could not open '{}' for reading: {}",
+            pack_file,
+            format_io_error(&e)
+        ))
+    })?;
 
     if let Some(version) = args.index_version {
         match version {
-            1 => build_index_v1(&pack_file, &index_file).unwrap(),
-            2 => build_index_v2(&pack_file, &index_file).unwrap(),
-            _ => eprintln!("fatal: unsupported index version"),
+            1 => build_index_v1(&pack_file, &index_file).map_err(index_pack_error)?,
+            2 => build_index_v2(&pack_file, &index_file).map_err(index_pack_error)?,
+            _ => return Err(CliError::fatal("unsupported index version")),
         }
     } else {
         // default version = 1
-        build_index_v1(&pack_file, &index_file).unwrap();
+        build_index_v1(&pack_file, &index_file).map_err(index_pack_error)?;
+    }
+    Ok(())
+}
+
+fn index_pack_error(err: GitError) -> CliError {
+    CliError::fatal(format!("failed to build pack index: {err}"))
+}
+
+fn format_io_error(err: &std::io::Error) -> String {
+    match err.kind() {
+        std::io::ErrorKind::NotFound => "No such file or directory".to_string(),
+        std::io::ErrorKind::PermissionDenied => "Permission denied".to_string(),
+        _ => err.to_string(),
     }
 }
 

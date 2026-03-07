@@ -14,6 +14,8 @@ use serial_test::serial;
 use tempfile::{TempDir, tempdir};
 use tokio::{process::Command as TokioCommand, time::timeout};
 
+use super::{create_committed_repo_via_cli, run_libra_command};
+
 /// Helper function: Initialize a temporary Libra repository
 fn init_temp_repo() -> TempDir {
     let temp_dir = tempfile::tempdir().expect("Failed to create temporary directory");
@@ -40,6 +42,19 @@ fn init_temp_repo() -> TempDir {
 
     eprintln!("Initialized libra repo at: {temp_path:?}");
     temp_dir
+}
+
+#[test]
+#[serial]
+fn test_fetch_cli_without_remote_is_noop_like_git() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["fetch"], repo.path());
+
+    // Without a configured remote, fetch should fail with a fatal error.
+    assert_eq!(output.status.code(), Some(128));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("no configured remote for the current branch"));
 }
 
 #[tokio::test]

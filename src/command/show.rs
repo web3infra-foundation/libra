@@ -10,55 +10,67 @@ use git_internal::{
 };
 
 use crate::{
-    cli_error,
     command::{
         load_object,
         log::{ChangeType, generate_diff, get_changed_files_for_commit},
     },
     common_utils::parse_commit_msg,
     internal::tag,
-    utils::{client_storage::ClientStorage, object_ext::TreeExt, path, util},
+    utils::{
+        client_storage::ClientStorage,
+        error::{CliError, CliResult},
+        object_ext::TreeExt,
+        path, util,
+    },
 };
 
-/// 显示各种类型的对象
+/// Shows commits, tags, trees, or blobs.
 #[derive(Parser, Debug)]
 pub struct ShowArgs {
-    /// 对象名称（提交、标签等）或 <对象>:<路径>。默认为 HEAD
+    /// Object name (commit, tag, etc.) or `<object>:<path>`. Defaults to `HEAD`.
     #[clap(value_name = "OBJECT")]
     pub object: Option<String>,
 
-    /// 不显示 diff 输出（仅显示提交信息）
+    /// Skip patch output and only show object metadata.
     #[clap(long, short = 's')]
     pub no_patch: bool,
 
-    /// --pretty=oneline 的简写
+    /// Shorthand for `--pretty=oneline`.
     #[clap(long)]
     pub oneline: bool,
 
-    /// 仅显示改变文件的文件名
+    /// Show only changed file names.
     #[clap(long)]
     pub name_only: bool,
 
-    /// 显示差异统计信息（文件更改摘要）
+    /// Show diff statistics.
     #[clap(long)]
     pub stat: bool,
 
-    /// 限制输出的路径
+    /// Limit output to matching paths.
     #[clap(value_name = "PATHS", num_args = 0..)]
     pub pathspec: Vec<String>,
 }
 
-/// 执行 show 命令
+/// Executes the show command.
 pub async fn execute(args: ShowArgs) {
+    if let Err(err) = execute_safe(args).await {
+        eprintln!("{}", err.render());
+    }
+}
+
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Resolves a revision (commit, tag, tree, blob, or
+/// `<rev>:<path>`) and prints its contents with diff formatting.
+pub async fn execute_safe(args: ShowArgs) -> CliResult<()> {
     let object_ref = args.object.as_deref().unwrap_or("HEAD");
 
-    // 检查是否是 <提交>:<路径> 语法
+    // Handle `<revision>:<path>` lookups before generic revision resolution.
     if let Some((rev, path)) = object_ref.split_once(':') {
-        show_commit_file(rev, path, &args).await;
-        return;
+        return show_commit_file(rev, path, &args).await;
     }
 
-    // 首先尝试作为引用解析（分支/标签/HEAD）
+    // Resolve refs first so tags keep their custom rendering.
     if let Ok(commit_hash) = util::get_commit_base(object_ref).await {
         // Use find_tag_and_commit to check if it's a tag and get tag info
         match tag::find_tag_and_commit(object_ref).await {
@@ -71,83 +83,71 @@ pub async fn execute(args: ShowArgs) {
                     } else {
                         commit_hash
                     };
-                    show_tag_by_hash(&tag_hash, &args).await;
+                    return show_tag_by_hash(&tag_hash, &args).await;
                 } else {
                     // Lightweight tag points directly to commit
-                    show_commit(&commit_hash, &args).await;
+                    return show_commit(&commit_hash, &args).await;
                 }
             }
             _ => {
                 // Not a tag or tag doesn't exist, show as commit
-                show_commit(&commit_hash, &args).await;
+                return show_commit(&commit_hash, &args).await;
             }
         }
-        return;
     }
 
-    // 尝试解析为直接的哈希值
+    // Fall back to direct object IDs.
     if let Ok(hash) = ObjectHash::from_str(object_ref) {
-        show_object_by_hash(&hash, &args).await;
-        return;
+        return show_object_by_hash(&hash, &args).await;
     }
 
-    eprintln!("fatal: bad revision '{}'", object_ref);
-    std::process::exit(1);
+    Err(show_bad_revision_error(object_ref))
 }
 
-/// 通过哈希值显示对象（自动检测类型）
+/// Shows an object by hash after resolving its object type.
 fn show_object_by_hash<'a>(
     hash: &'a ObjectHash,
     args: &'a ShowArgs,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = CliResult<()>> + 'a>> {
     Box::pin(async move {
         let storage = ClientStorage::init(path::objects());
 
-        let obj_type = match storage.get_object_type(hash) {
-            Ok(t) => t,
-            Err(e) => {
-                cli_error!(e, "fatal: could not read object {}", hash);
-                std::process::exit(1);
-            }
-        };
+        let obj_type = storage
+            .get_object_type(hash)
+            .map_err(|e| CliError::fatal(format!("could not read object {}: {}", hash, e)))?;
 
         match obj_type {
             ObjectType::Commit => show_commit(hash, args).await,
             ObjectType::Tag => show_tag_by_hash(hash, args).await,
             ObjectType::Tree => show_tree(hash).await,
             ObjectType::Blob => show_blob(hash).await,
-            _ => {
-                eprintln!("fatal: unsupported object type for {}", hash);
-                std::process::exit(1);
-            }
+            _ => Err(CliError::fatal(format!(
+                "unsupported object type for {}",
+                hash
+            ))),
         }
     })
 }
 
-/// 显示提交及其详细信息和差异
-async fn show_commit(commit_hash: &ObjectHash, args: &ShowArgs) {
-    // 加载提交对象
-    let commit = match load_object::<Commit>(commit_hash) {
-        Ok(c) => c,
-        Err(e) => {
-            cli_error!(e, "fatal: could not load commit {}", commit_hash);
-            std::process::exit(1);
-        }
-    };
+/// Shows a commit together with optional diff output.
+async fn show_commit(commit_hash: &ObjectHash, args: &ShowArgs) -> CliResult<()> {
+    // Load the commit before rendering any metadata or diff output.
+    let commit = load_object::<Commit>(commit_hash)
+        .map_err(|e| CliError::fatal(format!("could not load commit {}: {}", commit_hash, e)))?;
 
-    // 显示提交信息
+    // Render the commit header first.
     display_commit_info(&commit, args);
 
-    // 如果未禁用，显示差异或文件列表
+    // Render patch-style details when requested.
     if !args.no_patch {
         let paths: Vec<PathBuf> = args.pathspec.iter().map(util::to_workdir_path).collect();
 
         if args.stat {
-            // 显示差异统计
-            show_diffstat(&commit, paths.clone()).await;
+            // Show the summary view.
+            show_diffstat(&commit, paths.clone()).await?;
         } else if args.name_only {
-            // 仅显示改变的文件名
-            let changed_files = get_changed_files_for_commit(&commit, &paths).await;
+            // Show only changed file names.
+            let changed_files = get_changed_files_for_commit(&commit, &paths).await?;
             if !changed_files.is_empty() {
                 println!();
                 for file in changed_files {
@@ -155,21 +155,22 @@ async fn show_commit(commit_hash: &ObjectHash, args: &ShowArgs) {
                 }
             }
         } else {
-            // 显示完整差异
-            let diff_output = generate_diff(&commit, paths).await;
+            // Show the full patch.
+            let diff_output = generate_diff(&commit, paths).await?;
             if !diff_output.is_empty() {
                 println!();
                 print!("{}", diff_output);
             }
         }
     }
+    Ok(())
 }
 
-/// 显示标签对象
-async fn show_tag_by_hash(hash: &ObjectHash, args: &ShowArgs) {
+/// Shows an annotated or lightweight tag.
+async fn show_tag_by_hash(hash: &ObjectHash, args: &ShowArgs) -> CliResult<()> {
     match tag::load_object_trait(hash).await {
         Ok(tag::TagObject::Tag(tag_obj)) => {
-            // 显示标签信息
+            // Render the annotated tag header.
             println!("{} {}", "tag".yellow(), tag_obj.tag_name);
             println!(
                 "Tagger: {} <{}>",
@@ -184,33 +185,27 @@ async fn show_tag_by_hash(hash: &ObjectHash, args: &ShowArgs) {
             println!("{}", tag_obj.message.trim());
             println!();
 
-            // 显示标签指向的对象
-            show_object_by_hash(&tag_obj.object_hash, args).await;
+            // Continue with the tagged object.
+            show_object_by_hash(&tag_obj.object_hash, args).await?;
         }
         Ok(tag::TagObject::Commit(commit)) => {
-            // 指向提交的轻量级标签
-            show_commit(&commit.id, args).await;
+            // Lightweight tags point directly to commits.
+            show_commit(&commit.id, args).await?;
         }
         Ok(_) => {
-            eprintln!("fatal: tag points to unsupported object type");
-            std::process::exit(1);
+            return Err(CliError::fatal("tag points to unsupported object type"));
         }
         Err(e) => {
-            eprintln!("fatal: {}", e);
-            std::process::exit(1);
+            return Err(CliError::fatal(e.to_string()));
         }
     }
+    Ok(())
 }
 
-/// 显示树对象
-async fn show_tree(hash: &ObjectHash) {
-    let tree = match load_object::<Tree>(hash) {
-        Ok(t) => t,
-        Err(e) => {
-            cli_error!(e, "fatal: could not load tree {}", hash);
-            std::process::exit(1);
-        }
-    };
+/// Shows a tree object.
+async fn show_tree(hash: &ObjectHash) -> CliResult<()> {
+    let tree = load_object::<Tree>(hash)
+        .map_err(|e| CliError::fatal(format!("could not load tree {}: {}", hash, e)))?;
 
     println!("{} {}\n", "tree".yellow(), hash);
 
@@ -220,77 +215,63 @@ async fn show_tree(hash: &ObjectHash) {
             item.mode as u32, item.mode, item.id, item.name
         );
     }
+    Ok(())
 }
 
-/// 显示二进制对象
-async fn show_blob(hash: &ObjectHash) {
-    let blob = match load_object::<Blob>(hash) {
-        Ok(b) => b,
-        Err(e) => {
-            cli_error!(e, "fatal: could not load blob {}", hash);
-            std::process::exit(1);
-        }
-    };
+/// Shows a blob as text when possible.
+async fn show_blob(hash: &ObjectHash) -> CliResult<()> {
+    let blob = load_object::<Blob>(hash)
+        .map_err(|e| CliError::fatal(format!("could not load blob {}: {}", hash, e)))?;
 
-    // 尝试作为文本显示，否则显示二进制信息
+    // Print text blobs directly and summarize binary blobs.
     match String::from_utf8(blob.data.clone()) {
         Ok(text) => print!("{}", text),
         Err(_) => {
             println!("Binary file (size: {} bytes)", blob.data.len());
         }
     }
+    Ok(())
 }
 
-/// 显示提交中的特定文件
-async fn show_commit_file(rev: &str, file_path: &str, _args: &ShowArgs) {
-    // 将修订版本解析为提交
-    let commit_hash = match util::get_commit_base(rev).await {
-        Ok(h) => h,
-        Err(e) => {
-            eprintln!("fatal: {}", e);
-            std::process::exit(1);
-        }
-    };
+/// Shows a file from a specific revision.
+async fn show_commit_file(rev: &str, file_path: &str, _args: &ShowArgs) -> CliResult<()> {
+    // Resolve the revision before looking up the path.
+    let commit_hash = util::get_commit_base(rev)
+        .await
+        .map_err(|_| show_bad_revision_error(rev))?;
 
-    let commit = match load_object::<Commit>(&commit_hash) {
-        Ok(c) => c,
-        Err(e) => {
-            cli_error!(e, "fatal: could not load commit");
-            std::process::exit(1);
-        }
-    };
+    let commit = load_object::<Commit>(&commit_hash)
+        .map_err(|e| CliError::fatal(format!("could not load commit {}: {}", commit_hash, e)))?;
 
-    // 获取树
-    let tree = match load_object::<Tree>(&commit.tree_id) {
-        Ok(t) => t,
-        Err(e) => {
-            cli_error!(e, "fatal: could not load tree");
-            std::process::exit(1);
-        }
-    };
+    // Load the tree for the resolved commit.
+    let tree = load_object::<Tree>(&commit.tree_id)
+        .map_err(|e| CliError::fatal(format!("could not load tree {}: {}", commit.tree_id, e)))?;
 
-    // 在树中查找文件
+    // Find the target path inside the tree.
     let items = tree.get_plain_items();
     let target_path = PathBuf::from(file_path);
 
     if let Some((_, blob_hash)) = items.iter().find(|(path, _)| path == &target_path) {
-        show_blob(blob_hash).await;
+        show_blob(blob_hash).await?;
     } else {
-        eprintln!("fatal: path '{}' does not exist in '{}'", file_path, rev);
-        std::process::exit(1);
+        return Err(CliError::fatal(format!(
+            "path '{}' does not exist in '{}'",
+            file_path, rev
+        )));
     }
+    Ok(())
 }
 
-/// 根据格式选项显示提交信息
+/// Renders the commit header using the selected format.
 fn display_commit_info(commit: &Commit, args: &ShowArgs) {
     if args.oneline {
-        // 单行格式：短哈希 + 消息
+        // Oneline format prints the short hash and the first subject line.
         let short_hash = &commit.id.to_string()[..7];
         let (msg, _) = parse_commit_msg(&commit.message);
         let first_line = msg.lines().next().unwrap_or("");
         println!("{} {}", short_hash.yellow(), first_line);
     } else {
-        // 完整格式
+        // Full format matches the default `show` header layout.
         println!("{} {}", "commit".yellow(), commit.id.to_string().yellow());
         println!(
             "Author: {} <{}>",
@@ -298,12 +279,12 @@ fn display_commit_info(commit: &Commit, args: &ShowArgs) {
             commit.author.email.trim()
         );
 
-        // 格式化时间戳
+        // Format the commit timestamp for display.
         let date = chrono::DateTime::from_timestamp(commit.committer.timestamp as i64, 0)
             .unwrap_or(chrono::DateTime::UNIX_EPOCH);
         println!("Date:   {}", date.to_rfc2822());
 
-        // 显示消息
+        // Print the commit message body.
         let (msg, _) = parse_commit_msg(&commit.message);
         for line in msg.lines() {
             println!("    {}", line);
@@ -311,17 +292,17 @@ fn display_commit_info(commit: &Commit, args: &ShowArgs) {
     }
 }
 
-/// 显示差异统计（更改摘要）
-async fn show_diffstat(commit: &Commit, paths: Vec<PathBuf>) {
-    let changed_files = get_changed_files_for_commit(commit, &paths).await;
+/// Renders a simple diffstat summary.
+async fn show_diffstat(commit: &Commit, paths: Vec<PathBuf>) -> CliResult<()> {
+    let changed_files = get_changed_files_for_commit(commit, &paths).await?;
 
     if changed_files.is_empty() {
-        return;
+        return Ok(());
     }
 
     println!();
 
-    // 统计更改
+    // Count summary totals while printing each changed path.
     let mut additions = 0;
     let mut deletions = 0;
 
@@ -351,6 +332,15 @@ async fn show_diffstat(commit: &Commit, paths: Vec<PathBuf>) {
         deletions,
         if deletions != 1 { "s" } else { "" }
     );
+    Ok(())
+}
+
+fn show_bad_revision_error(object_ref: &str) -> CliError {
+    CliError::fatal(format!(
+        "ambiguous argument '{}': unknown revision or path not in the working tree.",
+        object_ref
+    ))
+    .with_hint("use '--' to separate paths from revisions, for example 'libra show -- <file>'.")
 }
 
 #[cfg(test)]
@@ -359,33 +349,33 @@ mod tests {
 
     #[test]
     fn test_args_parsing() {
-        // 测试默认值（HEAD）
+        // Default object is `HEAD`.
         let args = ShowArgs::try_parse_from(["show"]).unwrap();
         assert_eq!(args.object, None);
         assert!(!args.no_patch);
         assert!(!args.oneline);
 
-        // 测试提交哈希
+        // Explicit object argument.
         let args = ShowArgs::try_parse_from(["show", "abc123"]).unwrap();
         assert_eq!(args.object, Some("abc123".to_string()));
 
-        // 测试 --no-patch
+        // `--no-patch` flag.
         let args = ShowArgs::try_parse_from(["show", "--no-patch"]).unwrap();
         assert!(args.no_patch);
 
-        // 测试 --oneline
+        // `--oneline` flag.
         let args = ShowArgs::try_parse_from(["show", "--oneline"]).unwrap();
         assert!(args.oneline);
 
-        // 测试 --name-only
+        // `--name-only` flag.
         let args = ShowArgs::try_parse_from(["show", "--name-only"]).unwrap();
         assert!(args.name_only);
 
-        // 测试 --stat
+        // `--stat` flag.
         let args = ShowArgs::try_parse_from(["show", "--stat"]).unwrap();
         assert!(args.stat);
 
-        // 测试 <提交>:<路径> 语法
+        // `<revision>:<path>` syntax.
         let args = ShowArgs::try_parse_from(["show", "HEAD:test.txt"]).unwrap();
         assert_eq!(args.object, Some("HEAD:test.txt".to_string()));
     }

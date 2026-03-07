@@ -8,9 +8,13 @@ use git_internal::{errors::GitError, internal::index::Index};
 use tokio::fs;
 
 use crate::{
-    cli_error,
     command::status::{changes_to_be_committed, changes_to_be_staged},
-    utils::{path, path_ext::PathExt, util},
+    utils::{
+        error::{CliError, CliResult},
+        path,
+        path_ext::PathExt,
+        util,
+    },
 };
 
 #[derive(Parser, Debug, Clone)]
@@ -74,17 +78,23 @@ struct DiffStatus {
 }
 
 pub async fn execute(args: RemoveArgs) {
-    if !util::check_repo_exist() {
-        return;
+    if let Err(err) = execute_safe(args).await {
+        eprintln!("{}", err.render());
     }
+}
+
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Removes paths from the index and optionally from the
+/// working tree, supporting recursive and cache-only modes.
+pub async fn execute_safe(args: RemoveArgs) -> CliResult<()> {
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
     let idx_file = path::index();
     let mut remove_list = Vec::new();
     let mut remove_dir_list = Vec::new();
     let mut index = match Index::load(&idx_file) {
         Ok(index) => index,
         Err(err) => {
-            eprintln!("fatal: {}", err);
-            return;
+            return Err(CliError::fatal(err.to_string()));
         }
     };
 
@@ -93,8 +103,10 @@ pub async fn execute(args: RemoveArgs) {
         let data = match std::fs::read(file) {
             Ok(d) => d,
             Err(e) => {
-                eprintln!("fatal: cannot read pathspec file '{}': {}", file, e);
-                return;
+                return Err(CliError::fatal(format!(
+                    "cannot read pathspec file '{}': {}",
+                    file, e
+                )));
             }
         };
 
@@ -129,15 +141,13 @@ pub async fn execute(args: RemoveArgs) {
     match validate_pathspec(&pathspecs, &index, args.ignore_unmatch) {
         Ok(_) => (),
         Err(err) => {
-            eprintln!("fatal: {}", err);
-            return;
+            return Err(CliError::fatal(err.to_string()));
         }
     }
 
     if !dirs.is_empty() && !args.recursive {
         let error_msg = format!("not removing '{}' recursively without -r", dirs[0]);
-        eprintln!("fatal: {error_msg}");
-        return;
+        return Err(CliError::fatal(error_msg));
     }
 
     // Build the remove list from input paths, handling tracked files and optionally ignoring untracked paths based on the `ignore_unmatch` flag.
@@ -172,8 +182,9 @@ pub async fn execute(args: RemoveArgs) {
             } else if !args.ignore_unmatch {
                 // If ignore_unmatch is false, error if the pathspec does not match any tracked files (consistent with Git behavior).
                 let error_msg = format!("pathspec '{path_str}' did not match any files");
-                eprintln!("fatal: {error_msg}");
-                return;
+                return Err(CliError::fatal(error_msg)
+                    .with_hint("run 'libra status' to inspect tracked paths.")
+                    .with_hint("use '--ignore-unmatch' to ignore missing paths."));
             }
         }
     }
@@ -185,8 +196,7 @@ pub async fn execute(args: RemoveArgs) {
         let changes_staged = match changes_to_be_staged() {
             Ok(c) => c.polymerization(),
             Err(err) => {
-                eprintln!("fatal: {err}");
-                return;
+                return Err(CliError::fatal(err.to_string()));
             }
         };
         let changes_committed = changes_to_be_committed().await.polymerization();
@@ -231,7 +241,7 @@ pub async fn execute(args: RemoveArgs) {
             // Print error reason
             if let Some(files) = diff_status.index_commit.as_ref() {
                 error_msg.push_str(&format!(
-                    "error: the following {} changes staged in the index:\n",
+                    "the following {} changes staged in the index:\n",
                     if files.len() > 1 {
                         "files have"
                     } else {
@@ -245,7 +255,7 @@ pub async fn execute(args: RemoveArgs) {
             }
             if let Some(files) = diff_status.index_workingtree.as_ref() {
                 error_msg.push_str(&format!(
-                    "error: the following {} local modifications:\n",
+                    "the following {} local modifications:\n",
                     if files.len() > 1 {
                         "files have"
                     } else {
@@ -259,20 +269,21 @@ pub async fn execute(args: RemoveArgs) {
             }
         }
         if !diff_status.index_commit_workingtree.is_empty() {
-            error_msg.push_str(&format!("error: the following {} staged content different from both the\nfile and the HEAD:\n",
+            error_msg.push_str(&format!(
+                "the following {} staged content different from both the\nfile and the HEAD:\n",
                 if diff_status.index_commit_workingtree.len() > 1 {
                     "files have"
                 } else {
                     "file has"
-                }));
+                }
+            ));
             for file in diff_status.index_commit_workingtree {
                 error_msg.push_str(&format!("\t{}\n", file));
             }
             error_msg.push_str("(use -f to force removal)");
         }
         if !error_msg.is_empty() {
-            eprintln!("{}", error_msg);
-            return;
+            return Err(CliError::failure(error_msg.trim_end().to_string()));
         }
     }
 
@@ -287,24 +298,37 @@ pub async fn execute(args: RemoveArgs) {
         for path_str in remove_list {
             let path = PathBuf::from(&path_str);
             if let Err(e) = fs::remove_file(&path).await {
-                cli_error!(e, "error: failed to remove file '{}'", &path.display());
+                return Err(CliError::failure(format!(
+                    "failed to remove file '{}': {}",
+                    path.display(),
+                    e
+                )));
             }
         }
         for path_str in remove_dir_list {
             let path = PathBuf::from(&path_str);
             if args.recursive {
                 if let Err(e) = fs::remove_dir_all(&path).await {
-                    cli_error!(e, "error: failed to remove directory '{}'", &path.display());
+                    return Err(CliError::failure(format!(
+                        "failed to remove directory '{}': {}",
+                        path.display(),
+                        e
+                    )));
                 }
             } else if let Err(e) = fs::remove_dir(&path).await {
-                cli_error!(e, "error: failed to remove directory '{}'", &path.display());
+                return Err(CliError::failure(format!(
+                    "failed to remove directory '{}': {}",
+                    path.display(),
+                    e
+                )));
             }
         }
     }
 
     if index.save(&idx_file).is_err() {
-        eprintln!("fatal: failed to save index");
+        return Err(CliError::fatal("failed to save index"));
     }
+    Ok(())
 }
 
 /// check if pathspec is all valid(in index)

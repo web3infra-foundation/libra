@@ -28,7 +28,13 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use crate::{
     command::load_object,
     internal::{ai::history::HistoryManager, db, model::reference},
-    utils::{client_storage::ClientStorage, path, storage::local::LocalStorage, util},
+    utils::{
+        client_storage::ClientStorage,
+        error::{CliError, CliResult},
+        path,
+        storage::local::LocalStorage,
+        util,
+    },
 };
 
 const CAT_FILE_LONG_ABOUT: &str = "Inspect Git objects or Libra AI history objects.
@@ -166,6 +172,20 @@ pub async fn execute(args: CatFileArgs) {
         eprintln!("fatal: one of '-t', '-s', '-p', '-e' or an --ai* flag is required");
         std::process::exit(129);
     }
+}
+
+/// Thin wrapper for CLI dispatch. Internal errors are still handled via
+/// `eprintln!` + `process::exit`.
+///
+/// # Known limitations
+///
+/// `execute()` handles errors internally and never propagates them, so this
+/// wrapper always returns `Ok(())` even when cat-file fails.
+// TODO: refactor execute() to return CliResult so errors propagate to callers.
+pub async fn execute_safe(args: CatFileArgs) -> CliResult<()> {
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
+    execute(args).await;
+    Ok(())
 }
 
 /// Resolve a user-supplied object reference to an `ObjectHash`.

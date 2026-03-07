@@ -15,9 +15,12 @@ use git_internal::{
 };
 
 use crate::{
-    cli_error,
     command::{get_target_commit, load_object},
-    utils::{object_ext::TreeExt, util},
+    utils::{
+        error::{CliError, CliResult},
+        object_ext::TreeExt,
+        util,
+    },
 };
 
 #[derive(Parser, Debug)]
@@ -44,39 +47,30 @@ struct LineBlame {
 }
 
 pub async fn execute(args: BlameArgs) {
-    // check if we're in a valid repository
-    if !util::check_repo_exist() {
-        return;
+    if let Err(e) = execute_safe(args).await {
+        eprintln!("{}", e.render());
     }
+}
 
-    let commit_id = match get_target_commit(&args.commit).await {
-        Ok(id) => id,
-        Err(e) => {
-            eprintln!("fatal: {}", e);
-            return;
-        }
-    };
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Walks commit history for the target file, attributing
+/// each line to the commit that last changed it.
+pub async fn execute_safe(args: BlameArgs) -> CliResult<()> {
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
 
-    let commit_obj = match load_object::<Commit>(&commit_id) {
-        Ok(obj) => obj,
-        Err(e) => {
-            cli_error!(e, "fatal: failed to load commit");
-            return;
-        }
-    };
+    let commit_id = get_target_commit(&args.commit)
+        .await
+        .map_err(|e| CliError::fatal(e.to_string()))?;
+
+    let commit_obj = load_object::<Commit>(&commit_id)
+        .map_err(|e| CliError::fatal(format!("failed to load commit: {e}")))?;
 
     // get the final file content (the version we're blaming)
-    let target_lines = match get_file_lines(&commit_obj, &args.file) {
-        Ok(lines) => lines,
-        Err(e) => {
-            eprintln!("{}", e);
-            return;
-        }
-    };
+    let target_lines = get_file_lines(&commit_obj, &args.file).map_err(CliError::fatal)?;
 
     if target_lines.is_empty() {
         println!("File is empty");
-        return;
+        return Ok(());
     }
 
     // Initialize blame: assume all lines come from the target commit initially
@@ -155,8 +149,7 @@ pub async fn execute(args: BlameArgs) {
                 .filter(|b| b.line_number >= start && b.line_number <= end)
                 .collect(),
             Err(e) => {
-                eprintln!("error: invalid line range: {}", e);
-                return;
+                return Err(CliError::command_usage(format!("invalid line range: {e}")));
             }
         }
     } else {
@@ -226,6 +219,7 @@ pub async fn execute(args: BlameArgs) {
     {
         print!("{}", output);
     }
+    Ok(())
 }
 fn get_file_lines(commit: &Commit, file_path: &str) -> Result<Vec<String>, String> {
     let tree =

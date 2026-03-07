@@ -27,7 +27,6 @@ use tokio::sync::mpsc;
 use url::Url;
 
 use crate::{
-    cli_error,
     command::branch,
     git_protocol::{ServiceType::ReceivePack, add_pkt_line_string, read_pkt_line},
     internal::{
@@ -41,7 +40,10 @@ use crate::{
         },
         reflog::{Reflog, ReflogAction, ReflogContext, ReflogError},
     },
-    utils::object_ext::{BlobExt, CommitExt, TreeExt},
+    utils::{
+        error::{CliError, CliResult},
+        object_ext::{BlobExt, CommitExt, TreeExt},
+    },
 };
 
 #[derive(Parser, Debug)]
@@ -66,19 +68,30 @@ pub struct PushArgs {
 }
 
 pub async fn execute(args: PushArgs) {
+    if let Err(err) = execute_safe(args).await {
+        eprintln!("{}", err.render());
+    }
+}
+
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Validates arguments, reads remote configuration,
+/// negotiates with the server, and sends local refs and pack data.
+pub async fn execute_safe(args: PushArgs) -> CliResult<()> {
     if args.repository.is_some() ^ args.refspec.is_some() {
         // must provide both or none
-        eprintln!("fatal: both repository and refspec should be provided");
-        return;
+        return Err(CliError::command_usage(
+            "both repository and refspec should be provided",
+        ));
     }
     if args.set_upstream && args.refspec.is_none() {
-        eprintln!("fatal: --set-upstream requires a branch name");
-        return;
+        return Err(CliError::command_usage(
+            "--set-upstream requires a branch name",
+        ));
     }
 
     let branch = match Head::current().await {
         Head::Branch(name) => name,
-        Head::Detached(_) => panic!("fatal: HEAD is detached while pushing"),
+        Head::Detached(_) => return Err(CliError::fatal("HEAD is detached while pushing")),
     };
 
     let repository = match args.repository {
@@ -89,8 +102,11 @@ pub async fn execute(args: PushArgs) {
             if let Some(remote) = remote {
                 remote
             } else {
-                eprintln!("fatal: no remote configured for branch '{branch}'");
-                return;
+                return Err(CliError::fatal("no configured push destination")
+                    .with_hint("add a remote with 'libra remote add <name> <url>'.")
+                    .with_hint(
+                        "or push to an explicit destination with 'libra push <name> <branch>'.",
+                    ));
             }
         }
     };
@@ -100,8 +116,7 @@ pub async fn execute(args: PushArgs) {
     let commit_hash = match Branch::find_branch(&branch, None).await {
         Some(branch_info) => branch_info.commit.to_string(),
         None => {
-            eprintln!("fatal: branch '{}' not found", branch);
-            return;
+            return Err(CliError::fatal(format!("branch '{}' not found", branch)));
         }
     };
 
@@ -117,32 +132,33 @@ pub async fn execute(args: PushArgs) {
     }) {
         Ok(u) => u,
         Err(e) => {
-            cli_error!(e, "fatal: invalid remote url '{}'", repo_url);
-            return;
+            return Err(CliError::fatal(format!(
+                "invalid remote url '{}': {}",
+                repo_url, e
+            )));
         }
     };
 
     // Local file path remote is not supported for push; avoid pretending success.
     if url.scheme() == "file" {
-        eprintln!("fatal: pushing to local file repositories is not yet supported");
-        return;
+        return Err(CliError::fatal(
+            "pushing to local file repositories is not yet supported",
+        ));
     }
 
     let client = HttpsClient::from_url(&url);
     let discovery = match client.discovery_reference(ReceivePack).await {
         Ok(result) => result,
         Err(e) => {
-            cli_error!("fatal" => e);
-            return;
+            return Err(CliError::fatal(e.to_string()));
         }
     };
     let local_kind = get_hash_kind();
     if discovery.hash_kind != local_kind {
-        eprintln!(
-            "fatal: remote object format '{}' does not match local '{}'",
+        return Err(CliError::fatal(format!(
+            "remote object format '{}' does not match local '{}'",
             discovery.hash_kind, local_kind
-        );
-        return;
+        )));
     }
     set_wire_hash_kind(discovery.hash_kind);
     let refs = discovery.refs;
@@ -158,12 +174,14 @@ pub async fn execute(args: PushArgs) {
         .unwrap_or(ObjectHash::zero_str(get_hash_kind()));
     if remote_hash == commit_hash {
         println!("Everything up-to-date");
-        return;
+        return Ok(());
     }
 
     // Check if remote is ancestor of local (for fast-forward check)
-    let remote_oid = ObjectHash::from_str(&remote_hash).unwrap();
-    let local_oid = ObjectHash::from_str(&commit_hash).unwrap();
+    let remote_oid = ObjectHash::from_str(&remote_hash)
+        .map_err(|_| CliError::fatal(format!("invalid remote hash: {remote_hash}")))?;
+    let local_oid = ObjectHash::from_str(&commit_hash)
+        .map_err(|_| CliError::fatal(format!("invalid local hash: {commit_hash}")))?;
     let zero_oid = zero_object_hash();
     let can_fast_forward = if remote_oid == zero_oid {
         true // New branch, always fast-forwardable
@@ -173,16 +191,11 @@ pub async fn execute(args: PushArgs) {
 
     // If remote has commits that local doesn't have and force is not specified, reject push
     if !can_fast_forward && !args.force {
-        eprintln!("fatal: cannot push to '{}' (non-fast-forward)", branch);
-        eprintln!(
-            "hint: Updates were rejected because the remote contains work that you do not have locally."
+        return Err(
+            CliError::fatal(format!("cannot push to '{}' (non-fast-forward)", branch))
+                .with_hint("integrate the remote changes first, for example with 'libra pull'.")
+                .with_hint("or use '--force' to overwrite the remote history."),
         );
-        eprintln!("hint: This is usually caused by another repository pushing to the same ref.");
-        eprintln!(
-            "hint: You may want to first integrate the remote changes (e.g., 'libra pull ...')"
-        );
-        eprintln!("hint: before pushing again, or use '--force' to overwrite the remote history.");
-        return;
     } else if !can_fast_forward && args.force {
         // Force push case - only show warning when force is actually needed
         println!(
@@ -219,7 +232,7 @@ pub async fn execute(args: PushArgs) {
                 );
             }
         }
-        return;
+        return Ok(());
     }
 
     let mut data = BytesMut::new();
@@ -237,8 +250,10 @@ pub async fn execute(args: PushArgs) {
 
     // TODO 考虑remote有多个refs，可以少发一点commits
     let objs = incremental_objs(
-        ObjectHash::from_str(&commit_hash).unwrap(),
-        ObjectHash::from_str(&remote_hash).unwrap(),
+        ObjectHash::from_str(&commit_hash)
+            .map_err(|_| CliError::fatal(format!("invalid commit hash: {commit_hash}")))?,
+        ObjectHash::from_str(&remote_hash)
+            .map_err(|_| CliError::fatal(format!("invalid remote hash: {remote_hash}")))?,
     );
 
     {
@@ -246,8 +261,7 @@ pub async fn execute(args: PushArgs) {
         let client = LFSClient::from_url(&url);
         let res = client.push_objects(&objs).await;
         if res.is_err() {
-            eprintln!("fatal: LFS files upload failed, stop pushing");
-            return;
+            return Err(CliError::fatal("LFS files upload failed, stop pushing"));
         }
     }
 
@@ -255,7 +269,10 @@ pub async fn execute(args: PushArgs) {
     let (stream_tx, mut stream_rx) = mpsc::channel(1_000_000);
 
     let encoder = PackEncoder::new(objs.len(), 0, stream_tx); // TODO: diff slow, so window_size = 0
-    encoder.encode_async(entry_rx).await.unwrap();
+    encoder
+        .encode_async(entry_rx)
+        .await
+        .map_err(|e| CliError::fatal(format!("pack encoding failed: {e}")))?;
 
     for obj in objs.iter().cloned() {
         // TODO progress bar
@@ -265,7 +282,7 @@ pub async fn execute(args: PushArgs) {
         };
         if let Err(e) = entry_tx.send(meta_entry).await {
             tracing::error!("fatal: failed to send entry: {}", e);
-            return;
+            return Err(CliError::fatal(format!("failed to send entry: {e}")));
         }
     }
     drop(entry_tx);
@@ -278,39 +295,47 @@ pub async fn execute(args: PushArgs) {
     data.extend_from_slice(&pack_data);
     println!("Delta compression done.");
 
-    let res = client.send_pack(data.freeze()).await.unwrap(); // TODO: send stream
+    let res = client
+        .send_pack(data.freeze())
+        .await
+        .map_err(|e| CliError::fatal(format!("failed to send pack data: {e}")))?;
 
     if res.status() != 200 {
-        eprintln!(
-            "fatal: unexpected server response (status {})",
+        return Err(CliError::fatal(format!(
+            "unexpected server response (status {})",
             res.status()
-        );
-        return;
+        )));
     }
-    let mut data = res.bytes().await.unwrap();
+    let mut data = res
+        .bytes()
+        .await
+        .map_err(|e| CliError::fatal(format!("failed to read server response: {e}")))?;
     let (_, pkt_line) = read_pkt_line(&mut data);
     if pkt_line != "unpack ok\n" {
-        eprintln!("fatal: unpack failed");
-        return;
+        return Err(CliError::fatal("unpack failed"));
     }
     let (_, pkt_line) = read_pkt_line(&mut data);
     if !pkt_line.starts_with("ok".as_ref()) {
         let detail = String::from_utf8_lossy(&pkt_line).trim().to_string();
-        cli_error!(detail, "fatal: ref update failed");
-        return;
+        return Err(CliError::fatal(format!("ref update failed: {}", detail)));
     }
     let (len, _) = read_pkt_line(&mut data);
-    assert_eq!(len, 0);
+    if len != 0 {
+        return Err(CliError::fatal(
+            "unexpected trailing data in server response",
+        ));
+    }
 
     println!("{}", "Push success".green());
 
     let remote_tracking_branch = format!("refs/remotes/{}/{}", repository, branch);
-    update_remote_tracking(&remote_tracking_branch, &commit_hash, &repository).await;
+    update_remote_tracking(&remote_tracking_branch, &commit_hash, &repository).await?;
 
     // set after push success
     if args.set_upstream {
-        branch::set_upstream(&branch, &format!("{repository}/{branch}")).await;
+        branch::set_upstream_safe(&branch, &format!("{repository}/{branch}")).await?;
     }
+    Ok(())
 }
 
 /// Updates the remote tracking branch reference and records a Push action in the reflog.
@@ -328,7 +353,7 @@ async fn update_remote_tracking(
     remote_tracking_branch: &str,
     commit_hash: &str,
     remote_name: &str,
-) {
+) -> CliResult<()> {
     let remote_tracking_branch = remote_tracking_branch.to_string();
     let commit_hash = commit_hash.to_string();
     let remote_name = remote_name.to_string();
@@ -368,8 +393,12 @@ async fn update_remote_tracking(
         .await;
 
     if let Err(e) = transaction_result {
-        cli_error!(e, "fatal: failed to update remote tracking branch");
+        return Err(CliError::fatal(format!(
+            "failed to update remote tracking branch: {}",
+            e
+        )));
     }
+    Ok(())
 }
 
 /// collect all commits from `commit_id` to root commit
@@ -504,7 +533,7 @@ fn incremental_objs(local_ref: ObjectHash, remote_ref: ObjectHash) -> HashSet<En
         objs.insert(commit.into());
 
         print!("Counting objects: {}\r", objs.len());
-        std::io::stdout().flush().unwrap();
+        let _ = std::io::stdout().flush();
     }
 
     // root commit has no parent

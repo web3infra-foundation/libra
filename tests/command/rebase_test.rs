@@ -12,6 +12,19 @@ use tempfile::tempdir;
 
 use super::*;
 
+#[test]
+#[serial]
+fn test_rebase_cli_outside_repository_returns_fatal_128() {
+    let temp = tempdir().unwrap();
+    let output = run_libra_command(&["rebase", "main"], temp.path());
+    assert_eq!(output.status.code(), Some(128));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("fatal: not a libra repository"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
 fn commit_messages_from_head(start: &ObjectHash, max: usize) -> Vec<String> {
     let mut messages = Vec::new();
     let mut current = Some(*start);

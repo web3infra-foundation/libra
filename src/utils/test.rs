@@ -35,35 +35,41 @@ impl ChangeDirGuard {
 
 impl Drop for ChangeDirGuard {
     fn drop(&mut self) {
-        env::set_current_dir(&self.old_dir).unwrap();
+        let fallback = find_cargo_dir_opt().unwrap_or_else(std::env::temp_dir);
+        let target = if self.old_dir.exists() {
+            &self.old_dir
+        } else {
+            // Temp test directories may already be gone when the guard drops.
+            &fallback
+        };
+        // Silently ignore errors to avoid aborting during stack unwinding.
+        let _ = env::set_current_dir(target);
+    }
+}
+
+/// Returns `Some(path)` to the workspace root (containing `Cargo.toml`),
+/// or `None` if it cannot be determined.
+fn find_cargo_dir_opt() -> Option<PathBuf> {
+    if let Ok(path) = env::var("CARGO_MANIFEST_DIR") {
+        return Some(PathBuf::from(path));
+    }
+    // vscode DEBUG test does not have the CARGO_MANIFEST_DIR macro, manually try to find cargo.toml
+    println!("CARGO_MANIFEST_DIR not found, try to find Cargo.toml manually");
+    let mut path = util::cur_dir();
+    loop {
+        path.push("Cargo.toml");
+        if path.exists() {
+            path.pop();
+            return Some(path);
+        }
+        if !path.pop() || !path.pop() {
+            return None;
+        }
     }
 }
 
 pub fn find_cargo_dir() -> PathBuf {
-    let cargo_path = env::var("CARGO_MANIFEST_DIR");
-
-    match cargo_path {
-        Ok(path) => PathBuf::from(path),
-        Err(_) => {
-            // vscode DEBUG test does not have the CARGO_MANIFEST_DIR macro, manually try to find cargo.toml
-            println!("CARGO_MANIFEST_DIR not found, try to find Cargo.toml manually");
-            let mut path = util::cur_dir();
-
-            loop {
-                path.push("Cargo.toml");
-                if path.exists() {
-                    break;
-                }
-                if !path.pop() {
-                    panic!("Could not find CARGO_MANIFEST_DIR");
-                }
-            }
-
-            path.pop();
-
-            path
-        }
-    }
+    find_cargo_dir_opt().expect("Could not find CARGO_MANIFEST_DIR")
 }
 
 /// Sets up a clean environment for testing.

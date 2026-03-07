@@ -15,7 +15,10 @@ use crate::{
         head::Head,
         reflog::{ReflogAction, ReflogContext, with_reflog},
     },
-    utils::util::{self, get_commit_base},
+    utils::{
+        error::{CliError, CliResult},
+        util::{self, get_commit_base},
+    },
 };
 
 #[derive(Parser, Debug)]
@@ -41,10 +44,16 @@ pub struct SwitchArgs {
 }
 
 pub async fn execute(args: SwitchArgs) {
-    if check_status().await {
-        return;
+    if let Err(err) = execute_safe(args).await {
+        eprintln!("{}", err.render());
     }
+}
 
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Validates clean working-tree state, then switches,
+/// creates, or detaches HEAD to the requested branch.
+pub async fn execute_safe(args: SwitchArgs) -> CliResult<()> {
+    ensure_clean_status().await?;
     let SwitchArgs {
         branch,
         create,
@@ -56,65 +65,68 @@ pub async fn execute(args: SwitchArgs) {
         let target = match branch {
             Some(branch) => branch,
             None => {
-                eprintln!("fatal: missing remote branch name");
-                return;
+                return Err(CliError::fatal("missing remote branch name"));
             }
         };
-        switch_to_tracked_remote_branch(target).await;
-        return;
+        return switch_to_tracked_remote_branch(target).await;
     }
 
     match create {
         Some(new_branch_name) => {
             if new_branch_name == INTENT_BRANCH {
-                eprintln!(
-                    "fatal: creating/switching to '{}' branch is not allowed",
+                return Err(CliError::fatal(format!(
+                    "creating/switching to '{}' branch is not allowed",
                     INTENT_BRANCH
-                );
-                std::process::exit(1);
+                )));
             }
             branch::create_branch(new_branch_name.clone(), branch).await;
-            switch_to_branch(new_branch_name).await;
+            switch_to_branch(new_branch_name).await
         }
         None => match detach {
             true => {
-                let commit_base = get_commit_base(&branch.unwrap()).await;
-                if let Err(e) = commit_base {
-                    eprintln!("fatal: {}", e);
-                    return;
-                }
-                switch_to_commit(commit_base.unwrap()).await;
+                let branch = branch.ok_or_else(|| {
+                    CliError::command_usage("branch name is required when using --detach")
+                })?;
+                let commit_base = get_commit_base(&branch)
+                    .await
+                    .map_err(|e| CliError::fatal(e.to_string()))?;
+                switch_to_commit(commit_base).await
             }
             false => {
-                switch_to_branch(branch.unwrap()).await;
+                let branch =
+                    branch.ok_or_else(|| CliError::command_usage("branch name is required"))?;
+                switch_to_branch(branch).await
             }
         },
     }
 }
 
-// Check status before change the branch
-pub async fn check_status() -> bool {
+/// Check status before changing branches and return a user-facing error on failure.
+///
+/// When uncommitted or unstaged changes are detected, this prints the current
+/// status summary (via `status::execute`) and returns a descriptive
+/// [`CliError`] so callers can decide how to surface the problem.
+pub async fn ensure_clean_status() -> CliResult<()> {
     let unstaged = match status::changes_to_be_staged() {
         Ok(c) => c,
         Err(err) => {
-            eprintln!("fatal: failed to determine working tree status: {err}");
-            return true;
+            return Err(CliError::fatal(format!(
+                "failed to determine working tree status: {err}"
+            )));
         }
     };
     if !unstaged.deleted.is_empty() || !unstaged.modified.is_empty() {
         status::execute(StatusArgs::default()).await;
-        eprintln!("fatal: unstaged changes, can't switch branch");
-        true
+        Err(CliError::fatal("unstaged changes, can't switch branch"))
     } else if !status::changes_to_be_committed().await.is_empty() {
         status::execute(StatusArgs::default()).await;
-        eprintln!("fatal: uncommitted changes, can't switch branch");
-        true
+        Err(CliError::fatal("uncommitted changes, can't switch branch"))
     } else {
-        false
+        Ok(())
     }
 }
 
-async fn switch_to_tracked_remote_branch(target: String) {
+async fn switch_to_tracked_remote_branch(target: String) -> CliResult<()> {
     let (remote_name, remote_branch_name) = if let Some(rest) = target.strip_prefix("refs/remotes/")
     {
         match rest.split_once('/') {
@@ -122,8 +134,7 @@ async fn switch_to_tracked_remote_branch(target: String) {
                 (remote_name.to_string(), remote_branch_name.to_string())
             }
             None => {
-                eprintln!("fatal: invalid remote branch '{target}'");
-                return;
+                return Err(CliError::fatal(format!("invalid remote branch '{target}'")));
             }
         }
     } else if let Some((remote_name, remote_branch_name)) = target.split_once('/') {
@@ -133,8 +144,9 @@ async fn switch_to_tracked_remote_branch(target: String) {
     };
 
     if remote_branch_name == "intent" {
-        eprintln!("fatal: switching to 'intent' branch is not allowed");
-        std::process::exit(1);
+        return Err(CliError::fatal(
+            "switching to 'intent' branch is not allowed",
+        ));
     }
 
     let remote_tracking_ref = format!("refs/remotes/{remote_name}/{remote_branch_name}");
@@ -142,8 +154,12 @@ async fn switch_to_tracked_remote_branch(target: String) {
     let remote_tracking_branch = match Branch::find_branch(&remote_tracking_ref, None).await {
         Some(branch) => branch,
         None => {
-            eprintln!("fatal: remote branch '{remote_name}/{remote_branch_name}' not found");
-            return;
+            return Err(CliError::fatal(format!(
+                "remote branch '{remote_name}/{remote_branch_name}' not found"
+            ))
+            .with_hint(format!(
+                "Run 'libra fetch {remote_name}' to update remote-tracking branches."
+            )));
         }
     };
 
@@ -151,8 +167,9 @@ async fn switch_to_tracked_remote_branch(target: String) {
         .await
         .is_some()
     {
-        eprintln!("fatal: a branch named '{remote_branch_name}' already exists");
-        return;
+        return Err(CliError::fatal(format!(
+            "a branch named '{remote_branch_name}' already exists"
+        )));
     }
 
     Branch::update_branch(
@@ -166,11 +183,11 @@ async fn switch_to_tracked_remote_branch(target: String) {
         &format!("{remote_name}/{remote_branch_name}"),
     )
     .await;
-    switch_to_branch(remote_branch_name).await;
+    switch_to_branch(remote_branch_name).await
 }
 
 /// change the working directory to the version of commit_hash
-async fn switch_to_commit(commit_hash: ObjectHash) {
+async fn switch_to_commit(commit_hash: ObjectHash) -> CliResult<()> {
     let db = get_db_conn_instance().await;
 
     let old_oid = Head::current_commit_with_conn(db)
@@ -206,19 +223,20 @@ async fn switch_to_commit(commit_hash: ObjectHash) {
     )
     .await
     {
-        eprintln!("fatal: {e}");
-        return;
+        return Err(CliError::fatal(e.to_string()));
     };
 
     // Only restore the working directory *after* HEAD has been successfully updated.
-    restore_to_commit(commit_hash).await;
+    restore_to_commit(commit_hash).await?;
     println!("HEAD is now at {}", &commit_hash.to_string()[..7]);
+    Ok(())
 }
 
-async fn switch_to_branch(branch_name: String) {
+async fn switch_to_branch(branch_name: String) -> CliResult<()> {
     if branch_name == "intent" {
-        eprintln!("fatal: switching to 'intent' branch is not allowed");
-        std::process::exit(1);
+        return Err(CliError::fatal(
+            "switching to 'intent' branch is not allowed",
+        ));
     }
     let db = get_db_conn_instance().await;
 
@@ -226,11 +244,15 @@ async fn switch_to_branch(branch_name: String) {
         Some(b) => b,
         None => {
             if !Branch::search_branch(&branch_name).await.is_empty() {
-                eprintln!("fatal: a branch is expected, got remote branch {branch_name}");
+                return Err(CliError::fatal(format!(
+                    "a branch is expected, got remote branch {branch_name}"
+                )));
             } else {
-                eprintln!("fatal: branch '{}' not found", &branch_name);
+                return Err(
+                    CliError::fatal(format!("invalid reference: {}", &branch_name))
+                        .with_hint(format!("create it with 'libra switch -c {}'.", branch_name)),
+                );
             }
-            return;
         }
     };
     let target_commit_id = target_branch.commit;
@@ -247,7 +269,7 @@ async fn switch_to_branch(branch_name: String) {
 
     if from_ref_name == branch_name {
         println!("Already on '{branch_name}'");
-        return;
+        return Ok(());
     }
 
     let action = ReflogAction::Switch {
@@ -274,22 +296,22 @@ async fn switch_to_branch(branch_name: String) {
     )
     .await
     {
-        eprintln!("fatal: {e}");
-        return;
+        return Err(CliError::fatal(e.to_string()));
     }
 
-    restore_to_commit(target_commit_id).await;
+    restore_to_commit(target_commit_id).await?;
     println!("Switched to branch '{}'", target_branch.name);
+    Ok(())
 }
 
-async fn restore_to_commit(commit_id: ObjectHash) {
+async fn restore_to_commit(commit_id: ObjectHash) -> CliResult<()> {
     let restore_args = RestoreArgs {
         worktree: true,
         staged: true,
         source: Some(commit_id.to_string()),
         pathspec: vec![util::working_dir_string()],
     };
-    restore::execute(restore_args).await;
+    restore::execute_safe(restore_args).await
 }
 
 #[cfg(test)]

@@ -16,7 +16,10 @@ use crate::{
         head::Head,
         tag::{self, TagObject},
     },
-    utils::util,
+    utils::{
+        error::{CliError, CliResult},
+        util,
+    },
 };
 
 #[derive(Parser, Debug)]
@@ -40,12 +43,22 @@ struct TagInfo {
     is_annotated: bool,
 }
 
-pub async fn execute(args: DescribeArgs) -> Result<(), String> {
-    // Check if it is in the libra repository.
-    if !util::check_repo_exist() {
-        return Err("fatal: not a libra repository".to_string());
+pub async fn execute(args: DescribeArgs) {
+    if let Err(e) = execute_safe(args).await {
+        eprintln!("{}", e.render());
     }
+}
 
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting.
+pub async fn execute_safe(args: DescribeArgs) -> CliResult<()> {
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
+    execute_inner(args)
+        .await
+        .map_err(CliError::from_legacy_string)
+}
+
+async fn execute_inner(args: DescribeArgs) -> Result<(), String> {
     // 1. Confirm the starting commit hash to start from (defaults to HEAD)
     let start_hash_str = if let Some(c) = args.commit {
         c
@@ -108,6 +121,7 @@ pub async fn execute(args: DescribeArgs) -> Result<(), String> {
             .map_err(|_| format!("fatal: failed to load commit {}", curr_hash))?;
 
         for parent_id_str in commit.parent_commit_ids {
+            // INVARIANT: parent IDs stored in commits are always valid hex hashes.
             let parent_hash = ObjectHash::from_str(&parent_id_str.to_string()).unwrap();
             if !visited.contains(&parent_hash) {
                 visited.insert(parent_hash);

@@ -25,7 +25,6 @@ pub enum CliErrorKind {
 pub enum ErrorLevel {
     Fatal,
     Error,
-    Warning,
 }
 
 /// Structured hint text rendered after the main error line.
@@ -64,6 +63,11 @@ pub struct CliError {
 }
 
 impl CliError {
+    pub fn repo_not_found() -> Self {
+        Self::fatal("not a libra repository (or any of the parent directories): .libra")
+            .with_hint("run 'libra init' to create a repository in the current directory.")
+    }
+
     pub fn unknown_command(message: impl Into<String>) -> Self {
         Self {
             kind: CliErrorKind::UnknownCommand,
@@ -109,6 +113,28 @@ impl CliError {
         }
     }
 
+    /// Convert a legacy prefixed error string (e.g. `"fatal: ..."` or
+    /// `"error: ..."`) into a structured [`CliError`].
+    ///
+    /// This is the shared bridge for commands whose inner implementation still
+    /// returns `Result<(), String>` with a human-readable prefix.
+    pub fn from_legacy_string(msg: impl Into<String>) -> Self {
+        let raw = msg.into();
+        let trimmed = raw.trim().to_string();
+        if let Some(rest) = trimmed.strip_prefix("fatal: ") {
+            Self::fatal(rest.to_string())
+        } else if let Some(rest) = trimmed.strip_prefix("error: ") {
+            Self::failure(rest.to_string())
+        } else if let Some(rest) = trimmed.strip_prefix("warning: ") {
+            // Strip the prefix so rendering doesn't produce "error: warning: …"
+            Self::failure(rest.to_string())
+        } else if let Some(rest) = trimmed.strip_prefix("usage: ") {
+            Self::command_usage("invalid arguments").with_usage(format!("usage: {rest}"))
+        } else {
+            Self::failure(trimmed)
+        }
+    }
+
     pub fn kind(&self) -> CliErrorKind {
         self.kind
     }
@@ -136,7 +162,16 @@ impl CliError {
     }
 
     pub fn with_hint(mut self, hint: impl Into<Hint>) -> Self {
-        self.hints.push(hint.into());
+        if self.hints.len() >= 2 {
+            return self;
+        }
+
+        let hint = normalize_hint_text(hint.into().0);
+        if hint.trim().is_empty() {
+            return self;
+        }
+
+        self.hints.push(Hint::new(hint));
         self
     }
 
@@ -182,8 +217,28 @@ impl CliError {
     }
 }
 
+fn normalize_hint_text(text: String) -> String {
+    text.lines()
+        .map(strip_hint_prefix)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn strip_hint_prefix(line: &str) -> String {
+    let trimmed = line.trim_start();
+    if let Some(stripped) = trimmed.strip_prefix("Hint:") {
+        return stripped.trim_start().to_string();
+    }
+    if let Some(stripped) = trimmed.strip_prefix("hint:") {
+        return stripped.trim_start().to_string();
+    }
+    line.to_string()
+}
+
+// NOTE: We use "Hint:" (capital H) rather than Git's lowercase "hint:". This is
+// a deliberate stylistic choice for Libra — not a bug.
 fn render_hint(text: &str) -> Vec<String> {
-    text.lines().map(|line| format!("hint: {}", line)).collect()
+    text.lines().map(|line| format!("Hint: {}", line)).collect()
 }
 
 impl fmt::Display for CliError {
@@ -220,6 +275,15 @@ mod tests {
     }
 
     #[test]
+    fn repo_not_found_includes_standard_hint() {
+        let rendered = CliError::repo_not_found().render();
+        assert_eq!(
+            rendered,
+            "fatal: not a libra repository (or any of the parent directories): .libra\nHint: run 'libra init' to create a repository in the current directory."
+        );
+    }
+
+    #[test]
     fn parse_usage_render_includes_usage_and_hints() {
         let rendered = CliError::parse_usage("unexpected argument '--bad'")
             .with_usage("Usage: libra add [OPTIONS] [PATHSPEC]...")
@@ -227,7 +291,7 @@ mod tests {
             .render();
         assert_eq!(
             rendered,
-            "error: unexpected argument '--bad'\nUsage: libra add [OPTIONS] [PATHSPEC]...\nhint: use '--help' to see available options."
+            "error: unexpected argument '--bad'\nUsage: libra add [OPTIONS] [PATHSPEC]...\nHint: use '--help' to see available options."
         );
     }
 
@@ -240,7 +304,7 @@ mod tests {
             .render();
         assert_eq!(
             rendered,
-            "error: name and email are not configured\nhint: to configure, run:\nhint:   libra config --global user.name \"Some One\"\nhint:   libra config --global user.email \"someone@example.com\""
+            "error: name and email are not configured\nHint: to configure, run:\nHint:   libra config --global user.name \"Some One\"\nHint:   libra config --global user.email \"someone@example.com\""
         );
     }
 
@@ -254,5 +318,29 @@ mod tests {
             "libra: 'wat' is not a libra command. See 'libra --help'."
         );
         assert_eq!(err.exit_code(), 1);
+    }
+
+    #[test]
+    fn with_hint_strips_prefix_and_limits_count() {
+        let rendered = CliError::failure("bad")
+            .with_hint("hint: first")
+            .with_hint("Hint: second")
+            .with_hint("third")
+            .render();
+        assert_eq!(rendered, "error: bad\nHint: first\nHint: second");
+    }
+
+    #[test]
+    fn from_legacy_string_strips_warning_prefix() {
+        let err = CliError::from_legacy_string("warning: something off");
+        assert_eq!(err.kind(), CliErrorKind::Failure);
+        assert_eq!(err.render(), "error: something off");
+    }
+
+    #[test]
+    fn from_legacy_string_handles_usage_prefix() {
+        let err = CliError::from_legacy_string("usage: libra mv <source> <dest>");
+        assert_eq!(err.kind(), CliErrorKind::CommandUsage);
+        assert!(err.render().contains("usage: libra mv <source> <dest>"));
     }
 }
