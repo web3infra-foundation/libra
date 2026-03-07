@@ -9,6 +9,19 @@ use serial_test::serial;
 use tempfile::tempdir;
 
 use super::*;
+
+#[test]
+#[serial]
+fn test_branch_cli_invalid_start_point_returns_fatal_128() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["branch", "new", "badref"], repo.path());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(128));
+    assert!(stderr.contains("fatal: not a valid object name: 'badref'"));
+}
+
 #[tokio::test]
 #[serial]
 /// Tests core branch management functionality including creation and listing.

@@ -13,6 +13,7 @@ use crate::{
         config::Config,
         head::Head,
     },
+    utils::error::{CliError, CliResult},
 };
 
 pub enum BranchListMode {
@@ -86,23 +87,31 @@ pub struct BranchArgs {
     pub no_contains: Vec<String>,
 }
 pub async fn execute(args: BranchArgs) {
+    if let Err(err) = execute_safe(args).await {
+        eprintln!("{}", err.render());
+    }
+}
+
+pub async fn execute_safe(args: BranchArgs) -> CliResult<()> {
     if let Some(new_branch) = args.new_branch {
-        create_branch(new_branch, args.commit_hash).await;
+        create_branch_safe(new_branch, args.commit_hash).await
     } else if let Some(branch_to_delete) = args.delete {
         delete_branch(branch_to_delete).await;
+        Ok(())
     } else if let Some(branch_to_delete) = args.delete_safe {
         delete_branch_safe(branch_to_delete).await;
+        Ok(())
     } else if args.show_current {
         show_current_branch().await;
+        Ok(())
     } else if args.set_upstream_to.is_some() {
         match Head::current().await {
-            Head::Branch(name) => set_upstream(&name, &args.set_upstream_to.unwrap()).await,
-            Head::Detached(_) => {
-                eprintln!("fatal: HEAD is detached");
-            }
-        };
+            Head::Branch(name) => set_upstream_safe(&name, &args.set_upstream_to.unwrap()).await,
+            Head::Detached(_) => Err(CliError::fatal("HEAD is detached")),
+        }
     } else if !args.rename.is_empty() {
         rename_branch(args.rename).await;
+        Ok(())
     } else {
         // Default behavior: list branches
         // priority: `--all` > `--remote` > `--list` (default when no manipulate options given)
@@ -115,17 +124,23 @@ pub async fn execute(args: BranchArgs) {
         };
 
         list_branches(list_mode, &args.contains, &args.no_contains).await;
+        Ok(())
     }
 }
 
 pub async fn set_upstream(branch: &str, upstream: &str) {
+    if let Err(err) = set_upstream_safe(branch, upstream).await {
+        eprintln!("{}", err.render());
+    }
+}
+
+pub async fn set_upstream_safe(branch: &str, upstream: &str) -> CliResult<()> {
     let branch_config = Config::branch_config(branch).await;
     if branch_config.is_none() {
         let (remote, remote_branch) = match upstream.split_once('/') {
             Some((remote, branch)) => (remote, branch),
             None => {
-                eprintln!("fatal: invalid upstream '{upstream}'");
-                return;
+                return Err(CliError::fatal(format!("invalid upstream '{}'", upstream)));
             }
         };
         Config::insert("branch", Some(branch), "remote", remote).await;
@@ -139,51 +154,77 @@ pub async fn set_upstream(branch: &str, upstream: &str) {
         .await;
     }
     println!("Branch '{branch}' set up to track remote branch '{upstream}'");
+    Ok(())
 }
 
 pub async fn create_branch(new_branch: String, branch_or_commit: Option<String>) {
+    if let Err(err) = create_branch_safe(new_branch, branch_or_commit).await {
+        eprintln!("{}", err.render());
+    }
+}
+
+pub async fn create_branch_safe(
+    new_branch: String,
+    branch_or_commit: Option<String>,
+) -> CliResult<()> {
     tracing::debug!("create branch: {} from {:?}", new_branch, branch_or_commit);
 
     if !is_valid_git_branch_name(&new_branch) {
-        eprintln!("fatal: invalid branch name: {new_branch}");
-        std::process::exit(1);
+        return Err(CliError::fatal(format!(
+            "'{}' is not a valid branch name",
+            new_branch
+        )));
     }
     if branch::is_locked_branch(&new_branch) {
-        eprintln!(
-            "fatal: The '{}' branch is locked and cannot be created.",
+        return Err(CliError::fatal(format!(
+            "the '{}' branch is locked and cannot be created",
             new_branch
-        );
-        std::process::exit(1);
+        )));
     }
 
     // check if branch exists
     let branch = Branch::find_branch(&new_branch, None).await;
     if branch.is_some() {
-        eprintln!("fatal: A branch named '{new_branch}' already exists.");
-        std::process::exit(1);
+        return Err(CliError::fatal(format!(
+            "a branch named '{}' already exists",
+            new_branch
+        )));
     }
 
+    let base_name = branch_or_commit.clone();
     let commit_id = match branch_or_commit {
-        Some(branch_or_commit) => {
-            let commit = get_target_commit(&branch_or_commit).await;
-            match commit {
-                Ok(commit) => commit,
-                Err(e) => {
-                    eprintln!("fatal: {e}");
-                    std::process::exit(1);
-                }
+        Some(branch_or_commit) => get_target_commit(&branch_or_commit).await.map_err(|_| {
+            CliError::fatal(format!("not a valid object name: '{}'", branch_or_commit))
+        })?,
+        None => {
+            if let Some(commit_id) = Head::current_commit().await {
+                commit_id
+            } else {
+                let current = match Head::current().await {
+                    Head::Branch(name) => name,
+                    Head::Detached(commit_hash) => commit_hash.to_string(),
+                };
+                return Err(CliError::fatal(format!(
+                    "not a valid object name: '{}'",
+                    current
+                )));
             }
         }
-        None => Head::current_commit().await.unwrap(),
     };
     tracing::debug!("base commit_id: {}", commit_id);
 
     // check if commit_hash exists
-    let _ = load_object::<Commit>(&commit_id)
-        .unwrap_or_else(|_| panic!("fatal: not a valid object name: '{commit_id}'"));
+    let commit_id_display = commit_id.to_string();
+    load_object::<Commit>(&commit_id).map_err(|_| {
+        CliError::fatal(format!(
+            "not a valid object name: '{}'",
+            base_name.as_deref().unwrap_or(commit_id_display.as_str())
+        ))
+    })?;
 
     // create branch
     Branch::update_branch(&new_branch, &commit_id.to_string(), None).await;
+    Ok(())
 }
 
 async fn delete_branch(branch_name: String) {

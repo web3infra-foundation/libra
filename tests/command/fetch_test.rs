@@ -45,16 +45,14 @@ fn init_temp_repo() -> TempDir {
 
 #[test]
 #[serial]
-fn test_fetch_cli_without_remote_returns_fatal_128() {
+fn test_fetch_cli_without_remote_is_noop_like_git() {
     let repo = create_committed_repo_via_cli();
 
     let output = run_libra_command(&["fetch"], repo.path());
 
-    assert_eq!(output.status.code(), Some(128));
-    assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("fatal: no remote configured for the current branch")
-    );
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stdout).trim().is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).trim().is_empty());
 }
 
 #[tokio::test]

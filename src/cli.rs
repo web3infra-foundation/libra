@@ -485,7 +485,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::ShowRef(args) => command::show_ref::execute(args)
             .await
             .map_err(legacy_string_error_to_cli_error)?,
-        Commands::Branch(args) => command::branch::execute(args).await,
+        Commands::Branch(args) => command::branch::execute_safe(args).await?,
         Commands::Tag(args) => command::tag::execute_safe(args).await?,
         Commands::Commit(args) => {
             command::commit::execute_safe(args)
@@ -514,7 +514,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Revert(args) => command::revert::execute(args).await,
         Commands::Remote(cmd) => command::remote::execute(cmd).await,
         Commands::Open(args) => command::open::execute(args).await,
-        Commands::Pull(args) => command::pull::execute(args).await,
+        Commands::Pull(args) => command::pull::execute_safe(args).await?,
         Commands::Config(args) => {
             command::config::execute_safe(args)
                 .await

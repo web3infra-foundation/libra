@@ -192,11 +192,7 @@ pub async fn execute_safe(args: FetchArgs) -> CliResult<()> {
         Some(remote) => remote,
         None => match Config::get_current_remote().await {
             Ok(Some(remote)) => remote,
-            Ok(None) => {
-                return Err(CliError::fatal(
-                    "no remote configured for the current branch",
-                ));
-            }
+            Ok(None) => return Ok(()),
             Err(_) => return Err(CliError::fatal("HEAD is detached")),
         },
     };
