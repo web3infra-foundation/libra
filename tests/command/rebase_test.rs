@@ -25,6 +25,36 @@ fn test_rebase_cli_outside_repository_returns_fatal_128() {
     );
 }
 
+#[test]
+#[serial]
+fn test_rebase_cli_missing_upstream_returns_usage_129() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["rebase"], repo.path());
+    assert_eq!(output.status.code(), Some(129));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Usage:"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_rebase_cli_invalid_upstream_returns_fatal_128() {
+    let repo = create_committed_repo_via_cli();
+    let output = run_libra_command(&["rebase", "nonexistent-upstream"], repo.path());
+    assert_eq!(output.status.code(), Some(128));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("fatal:"),
+        "expected fatal error for invalid upstream, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("nonexistent-upstream"),
+        "stderr should include invalid ref name, got: {stderr}"
+    );
+}
+
 fn commit_messages_from_head(start: &ObjectHash, max: usize) -> Vec<String> {
     let mut messages = Vec::new();
     let mut current = Some(*start);

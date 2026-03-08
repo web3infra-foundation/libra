@@ -98,7 +98,7 @@ async fn test_commit_requires_configured_identity_in_strict_mode() {
 
 #[test]
 #[serial]
-fn test_commit_cli_without_identity_succeeds_with_warning() {
+fn test_commit_cli_without_identity_returns_fatal_128() {
     let repo = tempdir().unwrap();
     init_repo_via_cli(repo.path());
 
@@ -110,8 +110,8 @@ fn test_commit_cli_without_identity_succeeds_with_warning() {
     let output = run_libra_command(&["commit", "-m", "missing identity"], repo.path());
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(0));
-    assert!(stderr.contains("Warning: Name and email are not configured"));
+    assert_eq!(output.status.code(), Some(128));
+    assert!(stderr.contains("fatal: author identity unknown"));
     assert!(stderr.contains("Hint: run 'libra config --global user.name"));
 }
 
@@ -780,12 +780,11 @@ async fn test_commit_amend_without_changes() {
     commit::execute(amend_args).await;
 }
 
-/// When no identity is configured and `useConfigOnly` is false, the commit
-/// should succeed using an auto-detected identity (system username + hostname)
-/// and the warning message should mention auto-detection.
+/// Without explicit identity (config/env), commit should fail with the same
+/// "author identity unknown" style error as Git.
 #[tokio::test]
 #[serial]
-async fn test_commit_with_auto_detected_identity_succeeds() {
+async fn test_commit_without_identity_fails_by_default() {
     use libra::internal::config::Config;
 
     let temp_path = tempdir().unwrap();
@@ -841,14 +840,10 @@ async fn test_commit_with_auto_detected_identity_succeeds() {
     })
     .await;
 
-    // The commit should succeed (auto-detected identity) unless the OS has
-    // no username/hostname — in that case it would fail with missing identity.
-    // On most systems this succeeds.
-    assert!(
-        result.is_ok(),
-        "commit with auto-detected identity should succeed on most systems, got: {:?}",
-        result.err()
-    );
+    assert!(result.is_err(), "commit should fail without identity");
+    let rendered = result.unwrap_err().render();
+    assert!(rendered.contains("fatal: author identity unknown"));
+    assert!(rendered.contains("Hint:"));
 
     // Restore env vars so subsequent serial tests are not affected.
     // SAFETY: this test is #[serial], so no other threads are reading env vars.
