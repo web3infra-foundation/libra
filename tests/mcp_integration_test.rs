@@ -19,8 +19,9 @@ use libra::{
             history::HistoryManager,
             mcp::{
                 resource::{
-                    CreateDecisionParams, CreateEvidenceParams, CreatePlanParams, CreateRunParams,
-                    CreateTaskParams, ListTasksParams, UpdateIntentParams,
+                    CreateDecisionParams, CreateEvidenceParams, CreatePatchSetParams,
+                    CreatePlanParams, CreateProvenanceParams, CreateRunParams, CreateTaskParams,
+                    CreateToolInvocationParams, ListTasksParams, UpdateIntentParams,
                 },
                 server::LibraMcpServer,
             },
@@ -192,6 +193,114 @@ async fn test_create_run_requires_existing_task() {
     let err = result.unwrap_err();
     assert!(
         err.message.contains("task_id not found"),
+        "unexpected error: {}",
+        err.message
+    );
+}
+
+#[tokio::test]
+async fn test_create_patchset_requires_existing_run() {
+    let (server, _storage, _history_manager, _temp_dir) = setup_server().await;
+    let actor = server.default_actor().unwrap();
+
+    let result = server
+        .create_patchset_impl(
+            CreatePatchSetParams {
+                run_id: Uuid::new_v4().to_string(),
+                generation: 1,
+                sequence: None,
+                base_commit_sha: "a".repeat(64),
+                touched_files: None,
+                rationale: None,
+                diff_format: None,
+                diff_artifact: None,
+                tags: None,
+                external_ids: None,
+                actor_kind: None,
+                actor_id: None,
+            },
+            actor,
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "patchset creation should fail when run does not exist"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.message.contains("run_id not found"),
+        "unexpected error: {}",
+        err.message
+    );
+}
+
+#[tokio::test]
+async fn test_create_tool_invocation_requires_existing_run() {
+    let (server, _storage, _history_manager, _temp_dir) = setup_server().await;
+    let actor = server.default_actor().unwrap();
+
+    let result = server
+        .create_tool_invocation_impl(
+            CreateToolInvocationParams {
+                run_id: Uuid::new_v4().to_string(),
+                tool_name: "read_file".to_string(),
+                status: None,
+                args_json: None,
+                io_footprint: None,
+                result_summary: None,
+                artifacts: None,
+                tags: None,
+                external_ids: None,
+                actor_kind: None,
+                actor_id: None,
+            },
+            actor,
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "tool invocation creation should fail when run does not exist"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.message.contains("run_id not found"),
+        "unexpected error: {}",
+        err.message
+    );
+}
+
+#[tokio::test]
+async fn test_create_provenance_requires_existing_run() {
+    let (server, _storage, _history_manager, _temp_dir) = setup_server().await;
+    let actor = server.default_actor().unwrap();
+
+    let result = server
+        .create_provenance_impl(
+            CreateProvenanceParams {
+                run_id: Uuid::new_v4().to_string(),
+                provider: "openai".to_string(),
+                model: "gpt-4o".to_string(),
+                parameters_json: None,
+                temperature: None,
+                max_tokens: None,
+                tags: None,
+                external_ids: None,
+                actor_kind: None,
+                actor_id: None,
+            },
+            actor,
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "provenance creation should fail when run does not exist"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.message.contains("run_id not found"),
         "unexpected error: {}",
         err.message
     );

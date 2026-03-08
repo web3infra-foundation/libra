@@ -19,9 +19,7 @@ use rmcp::{
     RoleServer, ServerHandler, handler::server::router::tool::ToolRouter, model::*,
     service::RequestContext, tool_handler,
 };
-use uuid::Uuid;
 
-// use uuid::Uuid;
 use crate::{
     internal::ai::history::HistoryManager,
     utils::{storage::Storage, storage_ext::StorageExt},
@@ -138,12 +136,11 @@ impl LibraMcpServer {
     /// If nothing is active, returns `{"active": false}`.
     async fn read_active_context(&self) -> Result<Vec<ResourceContents>, ErrorData> {
         use git_internal::internal::object::{
-            context::ContextSnapshot,
-            run::Run,
-            run_event::{RunEvent, RunEventKind},
-            task::Task,
-            task_event::{TaskEvent, TaskEventKind},
+            context::ContextSnapshot, run::Run, run_event::RunEventKind, task::Task,
+            task_event::TaskEventKind,
         };
+
+        use super::resource::{run_status_label, task_status_label};
 
         let history = self
             .intent_history_manager
@@ -155,58 +152,9 @@ impl LibraMcpServer {
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
         let uri = "libra://context/active";
-        let run_status_label = |kind: &RunEventKind| match kind {
-            RunEventKind::Created => "created",
-            RunEventKind::Patching => "patching",
-            RunEventKind::Validating => "validating",
-            RunEventKind::Completed => "completed",
-            RunEventKind::Failed => "failed",
-            RunEventKind::Checkpointed => "checkpointed",
-        };
-        let task_status_label = |kind: &TaskEventKind| match kind {
-            TaskEventKind::Created => "draft",
-            TaskEventKind::Running => "running",
-            TaskEventKind::Blocked => "blocked",
-            TaskEventKind::Done => "done",
-            TaskEventKind::Failed => "failed",
-            TaskEventKind::Cancelled => "cancelled",
-        };
 
-        let mut latest_run_events = std::collections::HashMap::<Uuid, RunEvent>::new();
-        let run_events = history
-            .list_objects("run_event")
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-        for (_id, hash) in run_events {
-            if let Ok(event) = storage.get_json::<RunEvent>(&hash).await {
-                latest_run_events
-                    .entry(event.run_id())
-                    .and_modify(|current| {
-                        if event.header().created_at() > current.header().created_at() {
-                            *current = event.clone();
-                        }
-                    })
-                    .or_insert(event);
-            }
-        }
-
-        let mut latest_task_events = std::collections::HashMap::<Uuid, TaskEvent>::new();
-        let task_events = history
-            .list_objects("task_event")
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-        for (_id, hash) in task_events {
-            if let Ok(event) = storage.get_json::<TaskEvent>(&hash).await {
-                latest_task_events
-                    .entry(event.task_id())
-                    .and_modify(|current| {
-                        if event.header().created_at() > current.header().created_at() {
-                            *current = event.clone();
-                        }
-                    })
-                    .or_insert(event);
-            }
-        }
+        let latest_run_events = self.latest_run_events().await?;
+        let latest_task_events = self.latest_task_events().await?;
 
         // 1. Find the latest active Run (UUID v7 is lexicographically time-ordered)
         let runs = history
@@ -220,7 +168,6 @@ impl LibraMcpServer {
             if let Ok(run) = storage.get_json::<Run>(&hash).await {
                 let status_kind = latest_run_events
                     .get(&run.header().object_id())
-                    .map(|event| event.kind())
                     .cloned()
                     .unwrap_or(RunEventKind::Created);
                 if matches!(status_kind, RunEventKind::Completed | RunEventKind::Failed) {
@@ -235,12 +182,13 @@ impl LibraMcpServer {
 
         if let Some(run) = &active_run {
             // Serialize run info
+            let run_status = latest_run_events
+                .get(&run.header().object_id())
+                .map(|kind| run_status_label(kind))
+                .unwrap_or("created");
             let run_obj = serde_json::json!({
                 "id": run.header().object_id().to_string(),
-                "status": latest_run_events
-                    .get(&run.header().object_id())
-                    .map(|event| run_status_label(event.kind()))
-                    .unwrap_or("created"),
+                "status": run_status,
                 "task_id": run.task().to_string(),
                 "base_commit_sha": run.commit().to_string(),
             });
@@ -254,13 +202,14 @@ impl LibraMcpServer {
             if let Some(hash) = task_hash
                 && let Ok(task) = storage.get_json::<Task>(&hash).await
             {
+                let task_status = latest_task_events
+                    .get(&task.header().object_id())
+                    .map(|kind| task_status_label(kind))
+                    .unwrap_or("draft");
                 let task_obj = serde_json::json!({
                     "id": task.header().object_id().to_string(),
                     "title": task.title(),
-                    "status": latest_task_events
-                        .get(&task.header().object_id())
-                        .map(|event| task_status_label(event.kind()))
-                        .unwrap_or("draft"),
+                    "status": task_status,
                     "goal_type": task.goal().map(|g| g.to_string()),
                     "constraints": task.constraints(),
                     "acceptance_criteria": task.acceptance_criteria(),
@@ -311,7 +260,6 @@ impl LibraMcpServer {
                 if let Ok(task) = storage.get_json::<Task>(&hash).await {
                     let status_kind = latest_task_events
                         .get(&task.header().object_id())
-                        .map(|event| event.kind())
                         .cloned()
                         .unwrap_or(TaskEventKind::Created);
                     if matches!(

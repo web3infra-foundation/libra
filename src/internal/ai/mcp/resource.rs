@@ -196,7 +196,9 @@ impl LibraMcpServer {
         Ok(Some(object))
     }
 
-    async fn latest_task_events(&self) -> Result<HashMap<Uuid, TaskEventKind>, ErrorData> {
+    pub(super) async fn latest_task_events(
+        &self,
+    ) -> Result<HashMap<Uuid, TaskEventKind>, ErrorData> {
         let history = self
             .intent_history_manager
             .as_ref()
@@ -231,7 +233,7 @@ impl LibraMcpServer {
             .collect())
     }
 
-    async fn latest_run_events(&self) -> Result<HashMap<Uuid, RunEventKind>, ErrorData> {
+    pub(super) async fn latest_run_events(&self) -> Result<HashMap<Uuid, RunEventKind>, ErrorData> {
         let history = self
             .intent_history_manager
             .as_ref()
@@ -342,7 +344,7 @@ fn parse_run_event_kind(status: &str) -> Result<RunEventKind, ErrorData> {
     }
 }
 
-fn task_status_label(kind: &TaskEventKind) -> &'static str {
+pub(super) fn task_status_label(kind: &TaskEventKind) -> &'static str {
     match kind {
         TaskEventKind::Created => "draft",
         TaskEventKind::Running => "running",
@@ -353,7 +355,7 @@ fn task_status_label(kind: &TaskEventKind) -> &'static str {
     }
 }
 
-fn run_status_label(kind: &RunEventKind) -> &'static str {
+pub(super) fn run_status_label(kind: &RunEventKind) -> &'static str {
     match kind {
         RunEventKind::Created => "created",
         RunEventKind::Patching => "patching",
