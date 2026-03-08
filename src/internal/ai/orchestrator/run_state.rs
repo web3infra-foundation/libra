@@ -175,6 +175,7 @@ mod tests {
             parent_revision: Some(2),
             replan_reason: Some("test".into()),
             tasks: vec![TaskSpec {
+                step: git_internal::internal::object::plan::PlanStep::new("task"),
                 task: git_task,
                 objective: "task".into(),
                 kind: TaskKind::Implementation,

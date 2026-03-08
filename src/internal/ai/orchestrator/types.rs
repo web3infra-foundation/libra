@@ -1,6 +1,6 @@
 use std::{path::PathBuf, sync::Arc};
 
-use git_internal::internal::object::task::Task as GitTask;
+use git_internal::internal::object::{plan::PlanStep, task::Task as GitTask};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -79,6 +79,7 @@ pub struct TaskContract {
 /// A static task specification produced by planning.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskSpec {
+    pub step: PlanStep,
     pub task: GitTask,
     pub objective: String,
     pub kind: TaskKind,
@@ -97,6 +98,10 @@ pub struct TaskSpec {
 }
 
 impl TaskSpec {
+    pub fn step_id(&self) -> Uuid {
+        self.step.step_id()
+    }
+
     pub fn id(&self) -> Uuid {
         self.task.header().object_id()
     }
@@ -417,6 +422,7 @@ mod tests {
         let mut task = GitTask::new(actor, "Do thing", None).unwrap();
         task.set_description(None);
         TaskSpec {
+            step: PlanStep::new("Do thing"),
             task,
             objective: "do thing".into(),
             kind: TaskKind::Implementation,
@@ -447,6 +453,7 @@ mod tests {
             let mut task = GitTask::new(actor, "b", None).unwrap();
             task.add_dependency(a);
             TaskSpec {
+                step: PlanStep::new("b"),
                 task,
                 objective: "b".into(),
                 kind: TaskKind::Implementation,

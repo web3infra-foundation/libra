@@ -1,6 +1,9 @@
 use std::collections::{BTreeSet, HashMap};
 
-use git_internal::internal::object::task::{GoalType, Task as GitTask};
+use git_internal::internal::object::{
+    plan::PlanStep,
+    task::{GoalType, Task as GitTask},
+};
 use uuid::Uuid;
 
 use super::types::{
@@ -514,7 +517,28 @@ fn git_task(
 }
 
 fn task_spec(task: GitTask, meta: TaskSpecMeta) -> TaskSpec {
+    let mut step = PlanStep::new(task.title().to_string());
+    step.set_inputs(Some(serde_json::json!({
+        "objective": meta.objective,
+        "kind": format!("{:?}", meta.kind),
+        "gateStage": meta.gate_stage.as_ref().map(|stage| format!("{:?}", stage)),
+        "scopeIn": meta.scope_in,
+        "scopeOut": meta.scope_out,
+        "touchFiles": meta.contract.touch_files,
+        "touchSymbols": meta.contract.touch_symbols,
+        "touchApis": meta.contract.touch_apis,
+        "constraints": task.constraints(),
+        "expectedOutputs": meta.contract.expected_outputs,
+        "acceptanceCriteria": task.acceptance_criteria(),
+        "ownerRole": meta.owner_role,
+    })));
+    if !meta.checks.is_empty() {
+        step.set_checks(Some(serde_json::to_value(&meta.checks).unwrap_or_else(|_| serde_json::json!([]))));
+    }
+    let mut task = task;
+    task.set_origin_step_id(Some(step.step_id()));
     TaskSpec {
+        step,
         task,
         objective: meta.objective,
         kind: meta.kind,

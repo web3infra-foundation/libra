@@ -68,6 +68,7 @@ pub fn build_git_task(intent_id: Option<Uuid>, task: &TaskSpec) -> Result<GitTas
         git_task.add_acceptance_criterion(criterion.clone());
     }
     git_task.set_intent(intent_id);
+    git_task.set_origin_step_id(Some(task.step_id()));
     for dependency in task.dependencies() {
         git_task.add_dependency(*dependency);
     }
@@ -81,7 +82,7 @@ pub fn parse_object_id(value: &str) -> Result<Uuid> {
 }
 
 fn task_to_plan_step(task: &TaskSpec) -> PlanStep {
-    let mut step = PlanStep::new(task.title().to_string());
+    let mut step = task.step.clone();
     step.set_inputs(Some(json!({
         "taskId": task.id(),
         "objective": task.objective,
@@ -125,6 +126,7 @@ mod tests {
         git_task.add_constraint("network:deny");
         git_task.add_acceptance_criterion("tests pass");
         TaskSpec {
+            step: PlanStep::new("Implement auth"),
             task: git_task,
             objective: "Update auth flow".into(),
             kind: TaskKind::Implementation,
@@ -154,12 +156,14 @@ mod tests {
 
     #[test]
     fn builds_git_task() {
-        let built = build_git_task(Some(Uuid::new_v4()), &task()).expect("git task");
+        let task = task();
+        let built = build_git_task(Some(Uuid::new_v4()), &task).expect("git task");
         assert_eq!(built.title(), "Implement auth");
         assert!(built.description().is_some());
         assert_eq!(built.constraints(), &["network:deny".to_string()]);
         assert_eq!(built.acceptance_criteria(), &["tests pass".to_string()]);
         assert_eq!(built.dependencies().len(), 1);
+        assert_eq!(built.origin_step_id(), Some(task.step_id()));
     }
 
     #[test]

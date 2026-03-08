@@ -473,6 +473,7 @@ mod tests {
         let actor = ActorRef::agent("test-policy").unwrap();
         let task = GitTask::new(actor, "edit", None).unwrap();
         TaskSpec {
+            step: git_internal::internal::object::plan::PlanStep::new("edit"),
             task,
             objective: "edit file".into(),
             kind: TaskKind::Implementation,

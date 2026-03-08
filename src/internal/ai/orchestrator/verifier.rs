@@ -397,6 +397,7 @@ mod tests {
             replan_reason: None,
             tasks: vec![
                 TaskSpec {
+                    step: git_internal::internal::object::plan::PlanStep::new("Implementation"),
                     task: impl_task,
                     objective: "implementation".into(),
                     kind: TaskKind::Implementation,
@@ -408,6 +409,7 @@ mod tests {
                     contract: TaskContract::default(),
                 },
                 TaskSpec {
+                    step: git_internal::internal::object::plan::PlanStep::new("Release"),
                     task: release_task,
                     objective: "release".into(),
                     kind: TaskKind::Gate,

@@ -1177,6 +1177,7 @@ mod tests {
         task.add_constraint("network:allow");
         task.add_acceptance_criterion("tests pass");
         TaskSpec {
+            step: git_internal::internal::object::plan::PlanStep::new("Do thing"),
             task,
             objective: "Do thing".into(),
             kind: TaskKind::Implementation,

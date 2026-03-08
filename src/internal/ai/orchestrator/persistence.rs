@@ -1349,6 +1349,7 @@ mod tests {
             replan_reason: None,
             tasks: vec![
                 TaskSpec {
+                    step: git_internal::internal::object::plan::PlanStep::new("Edit source"),
                     task: impl_task,
                     objective: "Update src/lib.rs".to_string(),
                     kind: TaskKind::Implementation,
@@ -1360,6 +1361,7 @@ mod tests {
                     contract: TaskContract::default(),
                 },
                 TaskSpec {
+                    step: git_internal::internal::object::plan::PlanStep::new("Run fast checks"),
                     task: gate_task,
                     objective: "Verify".to_string(),
                     kind: TaskKind::Gate,
