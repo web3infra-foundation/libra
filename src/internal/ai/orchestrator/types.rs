@@ -293,6 +293,8 @@ pub struct PersistedCheckpoint {
     pub snapshot_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dagrs_checkpoint_id: Option<String>,
 }
 
 /// Persisted execution object chain for an orchestrator run.
@@ -345,6 +347,18 @@ pub trait OrchestratorObserver: Send + Sync {
 
     fn on_reviewer_completed(&self, _task: &TaskSpec, _review: Option<&ReviewOutcome>) {}
 
+    fn on_graph_progress(&self, _completed: usize, _total: usize) {}
+
+    fn on_graph_checkpoint_saved(
+        &self,
+        _checkpoint_id: &str,
+        _pc: usize,
+        _completed_nodes: usize,
+    ) {
+    }
+
+    fn on_graph_checkpoint_restored(&self, _checkpoint_id: &str, _pc: usize) {}
+
     fn on_replan(
         &self,
         _current_revision: u32,
@@ -366,6 +380,9 @@ fn default_execution_revision() -> u32 {
 pub struct OrchestratorConfig {
     pub working_dir: PathBuf,
     pub base_commit: Option<String>,
+    /// TODO: keep as a placeholder until checkpoint/resume is redesigned around
+    /// userspace-fs change tracking. dagrs-native resume remains disabled.
+    pub dagrs_resume_checkpoint_id: Option<String>,
     /// System prompt injected into each task's tool loop (e.g. coder agent prompt).
     pub coder_preamble: Option<String>,
     /// Optional system prompt for the reviewer pass.
@@ -511,6 +528,7 @@ mod tests {
                 revision: 2,
                 task_statuses: vec![],
                 task_results: vec![],
+                dagrs_runtime: Default::default(),
             },
             task_results: vec![],
             system_report: SystemReport {
@@ -537,6 +555,7 @@ mod tests {
                     reason: "security gate failed".into(),
                     snapshot_id: Some("snapshot-2".into()),
                     decision_id: Some("checkpoint-1".into()),
+                    dagrs_checkpoint_id: Some("ckpt-1".into()),
                 }],
                 tasks: vec![PersistedTaskArtifacts {
                     task_id: id,

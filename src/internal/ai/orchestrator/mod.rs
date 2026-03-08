@@ -91,6 +91,7 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
                 working_dir: self.config.working_dir.clone(),
                 spec: Arc::new(spec.clone()),
                 reviewer_preamble: self.config.reviewer_preamble.clone(),
+                dagrs_resume_checkpoint_id: self.config.dagrs_resume_checkpoint_id.clone(),
                 observer: observer.clone(),
             };
 
@@ -216,6 +217,13 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("done:{}", task.title));
+        }
+
+        fn on_graph_progress(&self, completed: usize, total: usize) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("graph:{completed}/{total}"));
         }
     }
 
@@ -388,6 +396,7 @@ mod tests {
         let config = OrchestratorConfig {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
+            dagrs_resume_checkpoint_id: None,
             coder_preamble: None,
             reviewer_preamble: None,
             mcp_server: None,
@@ -414,6 +423,7 @@ mod tests {
         let config = OrchestratorConfig {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
+            dagrs_resume_checkpoint_id: None,
             coder_preamble: None,
             reviewer_preamble: None,
             mcp_server: None,
@@ -426,6 +436,7 @@ mod tests {
         assert!(events.iter().any(|event| event.starts_with("plan:")));
         assert!(events.iter().any(|event| event.starts_with("start:")));
         assert!(events.iter().any(|event| event.starts_with("done:")));
+        assert!(events.iter().any(|event| event.starts_with("graph:")));
         assert_eq!(result.decision, types::DecisionOutcome::Commit);
     }
 
@@ -437,6 +448,7 @@ mod tests {
         let config = OrchestratorConfig {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
+            dagrs_resume_checkpoint_id: None,
             coder_preamble: None,
             reviewer_preamble: None,
             mcp_server: None,
@@ -459,6 +471,7 @@ mod tests {
         let config = OrchestratorConfig {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
+            dagrs_resume_checkpoint_id: None,
             coder_preamble: None,
             reviewer_preamble: None,
             mcp_server: None,
@@ -481,6 +494,7 @@ mod tests {
         let config = OrchestratorConfig {
             working_dir: dir.path().to_path_buf(),
             base_commit: None,
+            dagrs_resume_checkpoint_id: None,
             coder_preamble: None,
             reviewer_preamble: None,
             mcp_server: None,

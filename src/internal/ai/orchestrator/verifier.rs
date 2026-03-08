@@ -499,6 +499,7 @@ mod tests {
                 })
                 .collect(),
             task_results: results,
+            dagrs_runtime: Default::default(),
         };
 
         let report = build_system_report(&spec, &plan, &run_state);

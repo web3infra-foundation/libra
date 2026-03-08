@@ -307,6 +307,7 @@ mod tests {
                 })
                 .collect(),
             task_results: results,
+            dagrs_runtime: Default::default(),
         }
     }
 

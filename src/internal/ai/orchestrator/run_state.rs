@@ -13,6 +13,27 @@ pub struct TaskStatusSnapshot {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct DagrsCheckpointSnapshot {
+    pub checkpoint_id: String,
+    pub pc: usize,
+    pub completed_nodes: usize,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct DagrsRuntimeSnapshot {
+    #[serde(default)]
+    pub completed_nodes: usize,
+    #[serde(default)]
+    pub total_nodes: usize,
+    #[serde(default)]
+    pub checkpoints: Vec<DagrsCheckpointSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restored_checkpoint_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restored_checkpoint_pc: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct RunStateSnapshot {
     #[serde(default)]
     pub intent_spec_id: String,
@@ -22,6 +43,8 @@ pub struct RunStateSnapshot {
     pub task_statuses: Vec<TaskStatusSnapshot>,
     #[serde(default)]
     pub task_results: Vec<TaskResult>,
+    #[serde(default)]
+    pub dagrs_runtime: DagrsRuntimeSnapshot,
 }
 
 impl RunStateSnapshot {
@@ -49,6 +72,7 @@ impl RunStateSnapshot {
 #[derive(Clone, Default)]
 pub struct RunStateStore {
     results: Arc<Mutex<HashMap<Uuid, TaskResult>>>,
+    dagrs_runtime: Arc<Mutex<DagrsRuntimeSnapshot>>,
 }
 
 impl RunStateStore {
@@ -57,15 +81,53 @@ impl RunStateStore {
     }
 
     pub async fn record_result(&self, result: TaskResult) {
-        self.results.lock().await.insert(result.task_id, result);
+        let task_id = result.task_id;
+        self.results.lock().await.insert(task_id, result);
     }
 
     pub async fn has_results(&self) -> bool {
         !self.results.lock().await.is_empty()
     }
 
+    pub async fn record_graph_progress(&self, completed_nodes: usize, total_nodes: usize) {
+        let mut runtime = self.dagrs_runtime.lock().await;
+        runtime.completed_nodes = completed_nodes;
+        runtime.total_nodes = total_nodes;
+    }
+
+    pub async fn increment_graph_completed(&self, total_nodes: usize) -> usize {
+        let mut runtime = self.dagrs_runtime.lock().await;
+        runtime.total_nodes = total_nodes;
+        runtime.completed_nodes = runtime.completed_nodes.saturating_add(1).min(total_nodes);
+        runtime.completed_nodes
+    }
+
+    pub async fn record_graph_checkpoint(
+        &self,
+        checkpoint_id: String,
+        pc: usize,
+        completed_nodes: usize,
+    ) {
+        let mut runtime = self.dagrs_runtime.lock().await;
+        runtime.checkpoints.push(DagrsCheckpointSnapshot {
+            checkpoint_id,
+            pc,
+            completed_nodes,
+        });
+    }
+
+    pub async fn record_graph_restore(&self, checkpoint_id: String, pc: usize) {
+        let mut runtime = self.dagrs_runtime.lock().await;
+        runtime.restored_checkpoint_id = Some(checkpoint_id);
+        runtime.restored_checkpoint_pc = Some(pc);
+    }
+
     pub async fn snapshot(&self, plan: &ExecutionPlanSpec) -> RunStateSnapshot {
         let results = self.results.lock().await;
+        let mut dagrs_runtime = self.dagrs_runtime.lock().await.clone();
+        if dagrs_runtime.total_nodes == 0 {
+            dagrs_runtime.total_nodes = plan.tasks.len();
+        }
         let task_statuses = plan
             .tasks
             .iter()
@@ -88,6 +150,7 @@ impl RunStateStore {
             revision: plan.revision,
             task_statuses,
             task_results,
+            dagrs_runtime,
         }
     }
 }

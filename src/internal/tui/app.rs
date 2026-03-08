@@ -1594,6 +1594,31 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     ));
                 }
 
+                fn on_graph_progress(&self, completed: usize, total: usize) {
+                    if completed == total && total > 0 {
+                        self.send_note(format!("dagrs graph finished: {completed}/{total} tasks reached terminal state"));
+                    }
+                }
+
+                fn on_graph_checkpoint_saved(
+                    &self,
+                    checkpoint_id: &str,
+                    pc: usize,
+                    completed_nodes: usize,
+                ) {
+                    self.send_note(format!(
+                        "dagrs checkpoint saved  \nid: {} | pc: {} | completed: {}",
+                        checkpoint_id, pc, completed_nodes
+                    ));
+                }
+
+                fn on_graph_checkpoint_restored(&self, checkpoint_id: &str, pc: usize) {
+                    self.send_note(format!(
+                        "dagrs checkpoint restored  \nid: {} | pc: {}",
+                        checkpoint_id, pc
+                    ));
+                }
+
                 fn on_replan(
                     &self,
                     current_revision: u32,
@@ -1622,6 +1647,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             let config = OrchestratorConfig {
                 working_dir,
                 base_commit: None,
+                dagrs_resume_checkpoint_id: None,
                 coder_preamble,
                 reviewer_preamble,
                 mcp_server,
@@ -2238,10 +2264,11 @@ fn format_orchestrator_result(
         }
         for checkpoint in &persistence.checkpoints {
             lines.push(format!(
-                "- Checkpoint rev {} | snapshot: {} | decision: {} | reason: {}",
+                "- Checkpoint rev {} | snapshot: {} | decision: {} | dagrs: {} | reason: {}",
                 checkpoint.revision,
                 checkpoint.snapshot_id.as_deref().unwrap_or("none"),
                 checkpoint.decision_id.as_deref().unwrap_or("none"),
+                checkpoint.dagrs_checkpoint_id.as_deref().unwrap_or("none"),
                 checkpoint.reason
             ));
         }

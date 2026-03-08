@@ -5,7 +5,11 @@ use std::{
 };
 
 use async_trait::async_trait;
-use dagrs::{Action, DefaultNode, EnvVar, Graph, InChannels, Node, NodeTable, OutChannels, Output};
+use dagrs::{
+    Action, CheckpointConfig, DefaultNode, EnvVar, FileCheckpointStore, Graph, InChannels, Node,
+    NodeTable, OutChannels, Output,
+};
+use dagrs::event::GraphEvent;
 use serde::Deserialize;
 use serde_json::Value;
 use uuid::Uuid;
@@ -35,6 +39,7 @@ pub struct ExecutorConfig {
     pub working_dir: PathBuf,
     pub spec: Arc<IntentSpec>,
     pub reviewer_preamble: Option<String>,
+    pub dagrs_resume_checkpoint_id: Option<String>,
     pub observer: Option<Arc<dyn OrchestratorObserver>>,
 }
 
@@ -537,6 +542,7 @@ fn build_dagrs_graph<M: CompletionModel + 'static>(
     run_state: RunStateStore,
 ) -> Result<Graph, OrchestratorError> {
     let mut graph = Graph::new();
+    configure_graph_runtime(&mut graph, plan, config);
     let mut node_table = NodeTable::new();
     let mut dagrs_ids = HashMap::new();
     let index = task_index(&plan.tasks);
@@ -580,6 +586,104 @@ fn build_dagrs_graph<M: CompletionModel + 'static>(
     Ok(graph)
 }
 
+fn configure_graph_runtime(graph: &mut Graph, plan: &ExecutionPlanSpec, config: &ExecutorConfig) {
+    if !dagrs_checkpointing_enabled(&config.spec) {
+        return;
+    }
+
+    let checkpoint_dir = dagrs_checkpoint_dir(&config.working_dir, plan);
+    graph.set_checkpoint_store(Box::new(FileCheckpointStore::new(checkpoint_dir)));
+
+    let checkpoint_interval = usize::from(plan.max_parallel.max(1));
+    graph.set_checkpoint_config(
+        CheckpointConfig::enabled()
+            .with_node_interval(checkpoint_interval)
+            .with_max_checkpoints(8),
+    );
+}
+
+fn dagrs_checkpointing_enabled(spec: &IntentSpec) -> bool {
+    let checkpoint_on_replan = spec
+        .libra
+        .as_ref()
+        .and_then(|libra| libra.context_pipeline.as_ref())
+        .is_none_or(|pipeline| pipeline.checkpoint_on_replan);
+    let checkpoint_before_replan = spec
+        .libra
+        .as_ref()
+        .and_then(|libra| libra.decision_policy.as_ref())
+        .is_none_or(|policy| policy.checkpoint_before_replan);
+    checkpoint_on_replan || checkpoint_before_replan
+}
+
+fn dagrs_checkpoint_dir(working_dir: &Path, plan: &ExecutionPlanSpec) -> PathBuf {
+    working_dir
+        .join(".libra")
+        .join("dagrs-checkpoints")
+        .join(sanitize_checkpoint_component(&plan.intent_spec_id))
+        .join(format!("rev-{}", plan.revision))
+}
+
+fn sanitize_checkpoint_component(raw: &str) -> String {
+    let sanitized: String = raw
+        .chars()
+        .map(|ch| match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' => ch,
+            _ => '_',
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "intent-spec".to_string()
+    } else {
+        sanitized
+    }
+}
+
+async fn monitor_graph_events(
+    mut events: tokio::sync::broadcast::Receiver<GraphEvent>,
+    run_state: RunStateStore,
+    observer: Option<Arc<dyn OrchestratorObserver>>,
+    total_nodes: usize,
+) {
+    run_state.record_graph_progress(0, total_nodes).await;
+    loop {
+        match events.recv().await {
+            Ok(GraphEvent::NodeSuccess { .. })
+            | Ok(GraphEvent::NodeFailed { .. })
+            | Ok(GraphEvent::NodeSkipped { .. }) => {
+                let next_completed = run_state.increment_graph_completed(total_nodes).await;
+                if let Some(observer) = &observer {
+                    observer.on_graph_progress(next_completed, total_nodes);
+                }
+            }
+            Ok(GraphEvent::CheckpointSaved {
+                checkpoint_id,
+                pc,
+                completed_nodes,
+            }) => {
+                run_state
+                    .record_graph_checkpoint(checkpoint_id.clone(), pc, completed_nodes)
+                    .await;
+                if let Some(observer) = &observer {
+                    observer.on_graph_checkpoint_saved(&checkpoint_id, pc, completed_nodes);
+                }
+            }
+            Ok(GraphEvent::CheckpointRestored { checkpoint_id, pc }) => {
+                run_state
+                    .record_graph_restore(checkpoint_id.clone(), pc)
+                    .await;
+                if let Some(observer) = &observer {
+                    observer.on_graph_checkpoint_restored(&checkpoint_id, pc);
+                }
+            }
+            Ok(GraphEvent::GraphFinished) => break,
+            Ok(_) => {}
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        }
+    }
+}
+
 /// Execute all tasks in the DAG in topological order.
 pub async fn execute_dag<M: CompletionModel + 'static>(
     plan_spec: &ExecutionPlanSpec,
@@ -587,6 +691,12 @@ pub async fn execute_dag<M: CompletionModel + 'static>(
     registry: &Arc<ToolRegistry>,
     config: &ExecutorConfig,
 ) -> Result<RunStateSnapshot, OrchestratorError> {
+    if config.dagrs_resume_checkpoint_id.is_some() {
+        return Err(OrchestratorError::ConfigError(
+            "dagrs checkpoint resume is not supported yet; TODO: redesign resume semantics after userspace-fs checkpoint integration".to_string(),
+        ));
+    }
+
     let run_state = RunStateStore::new();
     let plan_snapshot = plan_spec.clone();
     let model_snapshot = model.clone();
@@ -605,7 +715,20 @@ pub async fn execute_dag<M: CompletionModel + 'static>(
     .await
     .map_err(|err| OrchestratorError::ConfigError(format!("failed to build dagrs graph: {err}")))??;
 
-    if let Err(err) = graph.async_start().await {
+    let event_monitor = tokio::spawn(monitor_graph_events(
+        graph.subscribe(),
+        run_state.clone(),
+        config.observer.clone(),
+        plan_spec.tasks.len(),
+    ));
+
+    let execution_result = graph.async_start().await;
+    drop(graph);
+    if let Err(err) = event_monitor.await {
+        tracing::warn!("dagrs event monitor terminated unexpectedly: {}", err);
+    }
+
+    if let Err(ref err) = execution_result {
         tracing::warn!("dagrs execution terminated with error: {}", err);
         if !run_state.has_results().await {
             return Err(OrchestratorError::AgentError(format!(
@@ -1108,6 +1231,7 @@ mod tests {
             working_dir: dir.path().to_path_buf(),
             spec: spec(),
             reviewer_preamble: None,
+            dagrs_resume_checkpoint_id: None,
             observer: None,
         };
         let task = implementation_task();
@@ -1151,6 +1275,7 @@ mod tests {
             working_dir: dir.path().to_path_buf(),
             spec: spec(),
             reviewer_preamble: None,
+            dagrs_resume_checkpoint_id: None,
             observer: Some(Arc::new(RecordingObserver {
                 starts: Arc::clone(&starts),
             })),
@@ -1181,6 +1306,8 @@ mod tests {
         let start_order = starts.lock().unwrap().clone();
         assert_eq!(start_order, vec!["A", "C", "B"]);
         assert_eq!(run_state.task_results.len(), 3);
+        assert_eq!(run_state.dagrs_runtime.total_nodes, 3);
+        assert_eq!(run_state.dagrs_runtime.completed_nodes, 3);
         assert!(run_state
             .ordered_task_results()
             .iter()
@@ -1200,6 +1327,7 @@ mod tests {
             working_dir: dir.path().to_path_buf(),
             spec: spec(),
             reviewer_preamble: None,
+            dagrs_resume_checkpoint_id: None,
             observer: Some(Arc::new(RecordingObserver {
                 starts: Arc::clone(&starts),
             })),
@@ -1224,6 +1352,42 @@ mod tests {
         assert_eq!(run_state.task_results.len(), 1);
         assert_eq!(run_state.task_results[0].task_id, failing.id);
         assert_eq!(run_state.task_results[0].status, TaskNodeStatus::Failed);
+        assert_eq!(run_state.dagrs_runtime.total_nodes, 2);
+        assert_eq!(run_state.dagrs_runtime.completed_nodes, 2);
         assert_eq!(run_state.status_for(later.id), TaskNodeStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn execute_dag_rejects_unimplemented_checkpoint_resume() {
+        let registry = Arc::new(ToolRegistry::new());
+        let dir = tempfile::tempdir().unwrap();
+
+        let task = implementation_task();
+        let plan = plan_for_tasks(vec![task], 1);
+
+        let resume_config = ExecutorConfig {
+            tool_loop_config: ToolLoopConfig::default(),
+            max_retries: 0,
+            backoff_seconds: 0,
+            working_dir: dir.path().to_path_buf(),
+            spec: spec(),
+            reviewer_preamble: None,
+            dagrs_resume_checkpoint_id: Some("todo".into()),
+            observer: None,
+        };
+        let err = execute_dag(
+            &plan,
+            &MockModel {
+                final_text: "done".into(),
+            },
+            &registry,
+            &resume_config,
+        )
+        .await
+        .expect_err("resume should remain disabled until checkpoint semantics are redesigned");
+
+        let message = err.to_string();
+        assert!(message.contains("not supported yet"));
+        assert!(message.contains("userspace-fs"));
     }
 }

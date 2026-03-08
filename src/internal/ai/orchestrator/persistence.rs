@@ -308,8 +308,32 @@ pub async fn persist_execution(
             reason: "human review required".to_string(),
             snapshot_id: Some(snapshot_id),
             decision_id: decision_id.clone(),
+            dagrs_checkpoint_id: request
+                .run_state
+                .dagrs_runtime
+                .checkpoints
+                .last()
+                .map(|checkpoint| checkpoint.checkpoint_id.clone()),
         });
     }
+
+    checkpoints.extend(
+        request
+            .run_state
+            .dagrs_runtime
+            .checkpoints
+            .iter()
+            .map(|checkpoint| PersistedCheckpoint {
+                revision: request.execution_plan_spec.revision,
+                reason: format!(
+                    "dagrs runtime checkpoint at pc {} after {} completed nodes",
+                    checkpoint.pc, checkpoint.completed_nodes
+                ),
+                snapshot_id: None,
+                decision_id: None,
+                dagrs_checkpoint_id: Some(checkpoint.checkpoint_id.clone()),
+            }),
+    );
 
     Ok(PersistedExecution {
         run_id,
@@ -854,6 +878,7 @@ async fn create_replan_checkpoints(
             reason: entry.reason.clone(),
             snapshot_id,
             decision_id,
+            dagrs_checkpoint_id: None,
         });
     }
 
@@ -1370,6 +1395,7 @@ mod tests {
                 })
                 .collect(),
             task_results: results.clone(),
+            dagrs_runtime: Default::default(),
         };
 
         let persisted = persist_execution(ExecutionPersistenceRequest {
