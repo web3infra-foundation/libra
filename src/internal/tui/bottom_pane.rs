@@ -69,6 +69,8 @@ pub struct BottomPane {
     pub post_plan_selected: usize,
     /// Current working directory shown in the input border.
     cwd: Option<PathBuf>,
+    /// Current retry notice shown in the status line.
+    retry_notice: Option<String>,
 }
 
 impl BottomPane {
@@ -92,6 +94,7 @@ impl BottomPane {
             },
             post_plan_selected: 0,
             cwd: None,
+            retry_notice: None,
         }
     }
 
@@ -189,11 +192,20 @@ impl BottomPane {
     /// Set the agent status.
     pub fn set_status(&mut self, status: AgentStatus) {
         self.status = status;
+        if status != AgentStatus::Retrying {
+            self.retry_notice = None;
+        }
     }
 
     /// Set the current working directory badge shown on the input border.
     pub fn set_cwd(&mut self, cwd: PathBuf) {
         self.cwd = Some(cwd);
+    }
+
+    /// Show a transient retry notice in the status line.
+    pub fn set_retry_notice(&mut self, notice: String) {
+        self.retry_notice = Some(notice);
+        self.status = AgentStatus::Retrying;
     }
 
     // ── Slash-command autocomplete popup ────────────────────────────
@@ -727,6 +739,14 @@ impl BottomPane {
             AgentStatus::Thinking => {
                 gradient_line("● Thinking...", &thinking_colors(), phase, true)
             }
+            AgentStatus::Retrying => gradient_line(
+                self.retry_notice
+                    .as_deref()
+                    .unwrap_or("● Retrying model request..."),
+                &executing_tool_colors(),
+                phase,
+                true,
+            ),
             AgentStatus::ExecutingTool => {
                 gradient_line("● Executing tool...", &executing_tool_colors(), phase, true)
             }
@@ -838,7 +858,7 @@ impl BottomPane {
                     "[Enter: Send] [PgUp/PgDn: Scroll] [Shift+Drag: Select] [Ctrl+C: Exit]"
                 }
             }
-            AgentStatus::Thinking | AgentStatus::ExecutingTool => {
+            AgentStatus::Thinking | AgentStatus::Retrying | AgentStatus::ExecutingTool => {
                 "[Esc: Interrupt] [PgUp/PgDn: Scroll] [Shift+Drag: Select] [Ctrl+C: Exit]"
             }
             AgentStatus::AwaitingUserInput => {

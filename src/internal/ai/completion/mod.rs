@@ -1,5 +1,6 @@
 pub mod message;
 pub mod request;
+pub mod retry;
 
 use std::future::Future;
 
@@ -8,6 +9,9 @@ pub use message::{
     UserContent,
 };
 pub use request::{CompletionRequest, CompletionResponse};
+pub use retry::{
+    CompletionRetryEvent, CompletionRetryObserver, CompletionRetryPolicy, RetryingCompletionModel,
+};
 use thiserror::Error;
 
 #[derive(Debug, Error)]

@@ -1,6 +1,6 @@
 //! Utility functions for tool handlers.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::{
     internal::ai::tools::error::{ToolError, ToolResult},
@@ -22,6 +22,20 @@ pub fn validate_path(path: &Path, working_dir: &Path) -> ToolResult<()> {
     }
 
     Ok(())
+}
+
+/// Resolve an absolute or relative path inside the working directory.
+///
+/// Relative paths are interpreted from `working_dir`. The returned path is
+/// always absolute and must remain within the working directory boundary.
+pub fn resolve_path(path: &Path, working_dir: &Path) -> ToolResult<PathBuf> {
+    let resolved = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        working_dir.join(path)
+    };
+    validate_path(&resolved, working_dir)?;
+    Ok(resolved)
 }
 
 #[cfg(test)]
@@ -55,5 +69,13 @@ mod tests {
         // Since /etc is not under /tmp/work, this should fail
         let result = validate_path(&path, &working_dir);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_path_relative_to_working_dir() {
+        let working_dir = PathBuf::from("/tmp/work");
+        let path = PathBuf::from("src/main.rs");
+        let resolved = resolve_path(&path, &working_dir).unwrap();
+        assert_eq!(resolved, PathBuf::from("/tmp/work/src/main.rs"));
     }
 }

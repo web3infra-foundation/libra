@@ -23,7 +23,7 @@ use crate::internal::ai::tools::{
     error::ToolError,
     registry::ToolHandler,
     spec::{FunctionParameters, ToolSpec},
-    utils::validate_path,
+    utils::resolve_path,
 };
 
 pub struct ListDirHandler;
@@ -71,13 +71,9 @@ impl ToolHandler for ListDirHandler {
             ));
         }
 
-        let path = Path::new(&args.dir_path);
-        if !path.is_absolute() {
-            return Err(ToolError::PathNotAbsolute(path.to_path_buf()));
-        }
-        validate_path(path, &working_dir)?;
+        let path = resolve_path(Path::new(&args.dir_path), &working_dir)?;
 
-        let entries = list_dir_slice(path, args.offset, args.limit, args.depth).await?;
+        let entries = list_dir_slice(&path, args.offset, args.limit, args.depth).await?;
 
         let mut output = Vec::with_capacity(entries.len() + 1);
         output.push(format!("Absolute path: {}", path.display()));
@@ -93,7 +89,7 @@ impl ToolHandler for ListDirHandler {
         )
         .with_parameters(FunctionParameters::object(
             [
-                ("dir_path", "string", "Absolute path to the directory to list"),
+                ("dir_path", "string", "Path to the directory to list, absolute or relative to the working directory"),
                 ("offset", "integer", "1-indexed entry number to start listing from (default: 1)"),
                 ("limit", "integer", "Maximum number of entries to return (default: 25)"),
                 ("depth", "integer", "Maximum directory depth to traverse (default: 2, must be >= 1)"),
@@ -512,15 +508,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_relative_path_fails() {
+    async fn test_relative_path_resolves_inside_working_dir() {
         let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join("relative")).unwrap();
         let result = ListDirHandler
             .handle(make_invocation(
-                serde_json::json!({ "dir_path": "relative/path" }),
+                serde_json::json!({ "dir_path": "relative" }),
                 temp.path().to_path_buf(),
             ))
-            .await;
-        assert!(matches!(result, Err(ToolError::PathNotAbsolute(_))));
+            .await
+            .unwrap();
+        assert!(result.as_text().unwrap().contains(&format!(
+            "Absolute path: {}",
+            temp.path().join("relative").display()
+        )));
     }
 
     #[tokio::test]

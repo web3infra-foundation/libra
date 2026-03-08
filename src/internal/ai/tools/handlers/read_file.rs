@@ -14,7 +14,7 @@ use crate::internal::ai::tools::{
     error::ToolError,
     registry::ToolHandler,
     spec::{FunctionParameters, ToolSpec},
-    utils::validate_path,
+    utils::resolve_path,
 };
 
 /// Handler for reading file contents.
@@ -60,15 +60,10 @@ impl ToolHandler for ReadFileHandler {
         }
 
         // Validate and resolve path
-        let path = Path::new(&args.file_path);
-        if !path.is_absolute() {
-            return Err(ToolError::PathNotAbsolute(path.to_path_buf()));
-        }
-
-        validate_path(path, &working_dir)?;
+        let path = resolve_path(Path::new(&args.file_path), &working_dir)?;
 
         // Read the file
-        let lines = read_file_slice(path, args.offset, args.limit).await?;
+        let lines = read_file_slice(&path, args.offset, args.limit).await?;
 
         Ok(ToolOutput::success(lines.join("\n")))
     }
@@ -80,7 +75,7 @@ impl ToolHandler for ReadFileHandler {
         )
         .with_parameters(FunctionParameters::object(
             [
-                ("file_path", "string", "Absolute path to the file to read"),
+                ("file_path", "string", "Path to the file to read, absolute or relative to the working directory"),
                 ("offset", "integer", "1-indexed line number to start reading from (default: 1)"),
                 ("limit", "integer", "Maximum number of lines to return (default: 2000)"),
             ],
@@ -299,7 +294,12 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let working_dir = temp_dir.path().to_path_buf();
         let handler = ReadFileHandler;
-        // Use relative path - should fail
+        let file_path = working_dir.join("relative").join("path.txt");
+        tokio::fs::create_dir_all(file_path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&file_path, "hello").await.unwrap();
+
         let invocation = ToolInvocation::new(
             "call-1",
             "read_file",
@@ -314,8 +314,8 @@ mod tests {
             working_dir,
         );
 
-        let result = handler.handle(invocation).await;
-        assert!(matches!(result, Err(ToolError::PathNotAbsolute(_))));
+        let result = handler.handle(invocation).await.unwrap();
+        assert!(result.as_text().unwrap().contains("L1: hello"));
     }
 
     #[tokio::test]

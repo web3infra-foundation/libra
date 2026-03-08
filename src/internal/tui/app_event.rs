@@ -23,6 +23,13 @@ pub enum AgentEvent {
     },
     /// Error during agent execution.
     Error { message: String },
+    /// The underlying model request is being retried after a transient failure.
+    Retrying {
+        attempt: u32,
+        total_attempts: u32,
+        delay_ms: u64,
+        error: String,
+    },
 }
 
 /// Current status of the agent.
@@ -33,6 +40,8 @@ pub enum AgentStatus {
     Idle,
     /// Agent is thinking/processing.
     Thinking,
+    /// Agent is retrying a transient model request.
+    Retrying,
     /// Agent is executing a tool.
     ExecutingTool,
     /// Agent is waiting for user input (via `request_user_input` tool).

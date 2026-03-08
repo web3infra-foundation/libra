@@ -14,7 +14,7 @@ use crate::internal::ai::tools::{
     error::ToolError,
     registry::ToolHandler,
     spec::{FunctionParameters, ToolSpec},
-    utils::validate_path,
+    utils::resolve_path,
 };
 
 pub struct GrepFilesHandler;
@@ -63,14 +63,7 @@ impl ToolHandler for GrepFilesHandler {
 
         // Resolve path: use provided path or fall back to working_dir.
         let search_path = match &args.path {
-            Some(p) => {
-                let path = Path::new(p);
-                if !path.is_absolute() {
-                    return Err(ToolError::PathNotAbsolute(path.to_path_buf()));
-                }
-                validate_path(path, &working_dir)?;
-                path.to_path_buf()
-            }
+            Some(p) => resolve_path(Path::new(p), &working_dir)?,
             None => working_dir.clone(),
         };
 
@@ -99,7 +92,7 @@ impl ToolHandler for GrepFilesHandler {
             [
                 ("pattern", "string", "Regular expression pattern to search for"),
                 ("include", "string", "Optional glob limiting which files are searched (e.g. \"*.rs\" or \"*.{ts,tsx}\")"),
-                ("path", "string", "Directory or file path to search (defaults to the working directory)"),
+                ("path", "string", "Directory or file path to search, absolute or relative to the working directory (defaults to the working directory)"),
                 ("limit", "integer", "Maximum number of file paths to return (default: 100, max: 2000)"),
             ],
             [("pattern", true)],
@@ -320,6 +313,23 @@ mod tests {
             .await;
 
         assert!(matches!(result, Err(ToolError::PathOutsideWorkingDir(_))));
+    }
+
+    #[tokio::test]
+    async fn test_grep_files_relative_path_resolves_inside_working_dir() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join("src")).unwrap();
+        fs::write(temp.path().join("src").join("f.txt"), "needle").unwrap();
+
+        let result = GrepFilesHandler
+            .handle(make_invocation(
+                serde_json::json!({ "pattern": "needle", "path": "src" }),
+                temp.path().to_path_buf(),
+            ))
+            .await
+            .unwrap();
+
+        assert!(result.as_text().unwrap().contains("src/f.txt"));
     }
 
     #[tokio::test]

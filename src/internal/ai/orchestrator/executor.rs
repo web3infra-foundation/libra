@@ -8,6 +8,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::{
+    acl::{AclVerdict, check_tool_acl},
     gate, policy,
     types::{
         GateReport, OrchestratorObserver, ReviewOutcome, TaskDAG, TaskKind, TaskNode,
@@ -150,7 +151,8 @@ pub async fn execute_task<M: CompletionModel>(
         return execute_gate_task(task, &config.working_dir).await;
     }
 
-    let prompt = build_task_prompt(task);
+    let allowed_tools = allowed_tools_for_task(&config.spec, task);
+    let prompt = build_task_prompt(task, &config.working_dir, &allowed_tools);
     let mut retry_count: u8 = 0;
     let mut accumulated_tool_calls = Vec::new();
     let mut accumulated_policy_violations = Vec::new();
@@ -163,12 +165,16 @@ pub async fn execute_task<M: CompletionModel>(
             config.working_dir.clone(),
             config.observer.clone(),
         );
+        let tool_loop_config = ToolLoopConfig {
+            allowed_tools: Some(allowed_tools.clone()),
+            ..config.tool_loop_config.clone()
+        };
         let agent_result = run_tool_loop_with_history_and_observer(
             model,
             Vec::new(),
             &prompt,
             registry,
-            config.tool_loop_config.clone(),
+            tool_loop_config,
             &mut observer,
         )
         .await;
@@ -323,14 +329,17 @@ async fn run_reviewer_pass<M: CompletionModel>(
         return Ok(None);
     };
 
-    let review_prompt = build_reviewer_prompt(task, agent_output, tool_calls);
+    let allowed_tools = allowed_tools_for_reviewer(&config.spec);
+    let review_prompt = build_reviewer_prompt(
+        task,
+        agent_output,
+        tool_calls,
+        &config.working_dir,
+        &allowed_tools,
+    );
     let review_config = ToolLoopConfig {
         preamble: Some(reviewer_preamble),
-        allowed_tools: Some(vec![
-            "read_file".to_string(),
-            "grep_files".to_string(),
-            "list_dir".to_string(),
-        ]),
+        allowed_tools: Some(allowed_tools),
         max_steps: Some(6),
         ..config.tool_loop_config.clone()
     };
@@ -452,7 +461,7 @@ pub async fn execute_dag<M: CompletionModel + 'static>(
     results
 }
 
-fn build_task_prompt(task: &TaskNode) -> String {
+fn build_task_prompt(task: &TaskNode, working_dir: &Path, allowed_tools: &[String]) -> String {
     let mut parts = Vec::new();
     parts.push(format!("## Task\n{}", task.title));
     parts.push(format!("## Objective\n{}", task.objective));
@@ -460,6 +469,19 @@ fn build_task_prompt(task: &TaskNode) -> String {
     if let Some(desc) = &task.description {
         parts.push(format!("## Background\n{}", desc));
     }
+
+    parts.push(format!(
+        "## Runtime Workspace\nWorking directory: {}\nAll file access must stay inside this directory.",
+        working_dir.display()
+    ));
+
+    if !allowed_tools.is_empty() {
+        parts.push(format!("## Allowed Tools\n{}", allowed_tools.join(", ")));
+    }
+
+    parts.push(
+        "## Path Rules\nUse repository-relative paths for read_file, list_dir, and grep_files. The runtime will resolve them from the working directory. Never invent or use paths outside the current workspace.".to_string(),
+    );
 
     if !task.contract.touch_files.is_empty() {
         parts.push(format!(
@@ -528,6 +550,8 @@ fn build_reviewer_prompt(
     task: &TaskNode,
     agent_output: &str,
     tool_calls: &[ToolCallRecord],
+    working_dir: &Path,
+    allowed_tools: &[String],
 ) -> String {
     let touched_files = tool_calls
         .iter()
@@ -539,6 +563,11 @@ fn build_reviewer_prompt(
     let mut parts = vec![
         format!("## Review Task\n{}", task.title),
         format!("## Objective\n{}", task.objective),
+        format!(
+            "## Runtime Workspace\nWorking directory: {}\nAll file access must stay inside this directory.",
+            working_dir.display()
+        ),
+        format!("## Allowed Tools\n{}", allowed_tools.join(", ")),
         format!("## Candidate Output\n{}", agent_output.trim()),
         "Return JSON only in this exact shape: {\"approved\":true|false,\"summary\":\"...\",\"issues\":[\"...\"]}".to_string(),
     ];
@@ -555,6 +584,52 @@ fn build_reviewer_prompt(
     }
 
     parts.join("\n\n")
+}
+
+fn allowed_tools_for_task(spec: &IntentSpec, task: &TaskNode) -> Vec<String> {
+    let mut tools = Vec::new();
+
+    if acl_allows(&spec.security.tool_acl, "workspace.fs", "read") {
+        tools.extend([
+            "read_file".to_string(),
+            "list_dir".to_string(),
+            "grep_files".to_string(),
+        ]);
+    }
+
+    if task.kind == TaskKind::Implementation
+        && acl_allows(&spec.security.tool_acl, "workspace.fs", "write")
+    {
+        tools.push("apply_patch".to_string());
+    }
+
+    if task.kind == TaskKind::Implementation
+        && acl_allows(&spec.security.tool_acl, "shell", "execute")
+    {
+        tools.push("shell".to_string());
+    }
+
+    tools
+}
+
+fn allowed_tools_for_reviewer(spec: &IntentSpec) -> Vec<String> {
+    if acl_allows(&spec.security.tool_acl, "workspace.fs", "read") {
+        vec![
+            "read_file".to_string(),
+            "list_dir".to_string(),
+            "grep_files".to_string(),
+        ]
+    } else {
+        Vec::new()
+    }
+}
+
+fn acl_allows(
+    acl: &crate::internal::ai::intentspec::types::ToolAcl,
+    tool: &str,
+    action: &str,
+) -> bool {
+    matches!(check_tool_acl(acl, tool, action), AclVerdict::Allow)
 }
 
 fn parse_reviewer_decision(raw: &str) -> Result<ReviewerDecision, String> {
@@ -582,7 +657,7 @@ mod tests {
             CompletionError, CompletionRequest, CompletionResponse,
             message::{AssistantContent, Text},
         },
-        intentspec::types::*,
+        intentspec::{profiles, types::*},
         orchestrator::types::{TaskContract, TaskKind},
         tools::registry::ToolRegistry,
     };
@@ -819,5 +894,27 @@ mod tests {
         let result = execute_task(&implementation_task(), &model, &registry, &config).await;
         assert_eq!(result.status, TaskNodeStatus::Completed);
         assert_eq!(result.retry_count, 0);
+    }
+
+    #[test]
+    fn task_prompt_includes_runtime_workspace() {
+        let prompt = build_task_prompt(
+            &implementation_task(),
+            Path::new("/tmp/workspace"),
+            &["read_file".into(), "apply_patch".into()],
+        );
+        assert!(prompt.contains("Working directory: /tmp/workspace"));
+        assert!(prompt.contains("Allowed Tools"));
+    }
+
+    #[test]
+    fn default_acl_does_not_expose_shell_to_coder() {
+        let task = implementation_task();
+        let mut spec = (*spec()).clone();
+        spec.security = profiles::default_security();
+        let tools = allowed_tools_for_task(&spec, &task);
+        assert!(tools.contains(&"read_file".to_string()));
+        assert!(tools.contains(&"apply_patch".to_string()));
+        assert!(!tools.contains(&"shell".to_string()));
     }
 }

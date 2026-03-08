@@ -35,7 +35,10 @@ use crate::{
             ToolLoopConfig, profile::AgentProfileRouter, run_tool_loop_with_history_and_observer,
         },
         commands::CommandDispatcher,
-        completion::{CompletionModel, Message},
+        completion::{
+            CompletionModel, CompletionRetryEvent, CompletionRetryObserver, CompletionRetryPolicy,
+            Message, RetryingCompletionModel,
+        },
         intentspec::{
             IntentDraft, ResolveContext, RiskLevel, render_summary, repair_intentspec,
             resolve_intentspec, validate_intentspec,
@@ -164,7 +167,7 @@ pub struct App<M: CompletionModel> {
     /// The chat widget.
     widget: ChatWidget,
     /// The completion model used by the agent loop.
-    model: M,
+    model: RetryingCompletionModel<M>,
     /// The tool registry.
     registry: Arc<ToolRegistry>,
     /// Tool loop runtime config.
@@ -223,6 +226,20 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         app_config: AppConfig,
     ) -> Self {
         let (app_event_tx, app_event_rx) = mpsc::unbounded_channel();
+        struct TuiRetryObserver {
+            tx: UnboundedSender<AppEvent>,
+        }
+
+        impl CompletionRetryObserver for TuiRetryObserver {
+            fn on_retry(&self, event: &CompletionRetryEvent) {
+                let _ = self.tx.send(AppEvent::AgentEvent(AgentEvent::Retrying {
+                    attempt: event.next_attempt,
+                    total_attempts: event.total_attempts,
+                    delay_ms: event.delay.as_millis().min(u128::from(u64::MAX)) as u64,
+                    error: event.error.clone(),
+                }));
+            }
+        }
         let history = app_config.session.to_history();
         let default_allowed_tools = registry
             .tool_specs()
@@ -237,7 +254,11 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         Self {
             tui,
             widget,
-            model,
+            model: RetryingCompletionModel::new(model)
+                .with_policy(CompletionRetryPolicy::default())
+                .with_observer(Arc::new(TuiRetryObserver {
+                    tx: app_event_tx.clone(),
+                })),
             registry,
             config,
             default_allowed_tools,
@@ -339,7 +360,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 _ = animation_tick.tick() => {
                     if matches!(
                         self.widget.bottom_pane.status,
-                        AgentStatus::Thinking | AgentStatus::ExecutingTool
+                        AgentStatus::Thinking | AgentStatus::Retrying | AgentStatus::ExecutingTool
                     ) {
                         self.schedule_draw();
                     }
@@ -574,7 +595,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 }
                 _ => {}
             },
-            AgentStatus::Thinking | AgentStatus::ExecutingTool => {
+            AgentStatus::Thinking | AgentStatus::Retrying | AgentStatus::ExecutingTool => {
                 // During processing, only handle Escape for interrupt
                 if key.code == KeyCode::Esc {
                     self.interrupt_agent_task();
@@ -1132,6 +1153,19 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
                         self.complete_streaming_assistant_cell(format!("Error: {}", message));
                         self.widget.bottom_pane.set_status(AgentStatus::Idle);
+                        self.schedule_draw();
+                    }
+                    AgentEvent::Retrying {
+                        attempt,
+                        total_attempts,
+                        delay_ms,
+                        error,
+                    } => {
+                        let reason = summarize_retry_error(&error);
+                        self.widget.bottom_pane.set_retry_notice(format!(
+                            "● Retrying request {attempt}/{total_attempts} in {:.1}s ({reason})",
+                            delay_ms as f64 / 1000.0
+                        ));
                         self.schedule_draw();
                     }
                 }
@@ -1732,6 +1766,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             }
 
             let mut observer = PlanObserver::new(tx.clone());
+            let fallback_history = history.clone();
             let run_result = run_tool_loop_with_history_and_observer(
                 &model,
                 history,
@@ -1743,12 +1778,25 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             .await;
 
             let turn = match run_result {
-                Ok(turn) => turn,
+                Ok(turn) => Some(turn),
                 Err(e) => {
-                    let _ = tx.send(AppEvent::AgentEvent(AgentEvent::Error {
-                        message: e.to_string(),
-                    }));
-                    return;
+                    if observer.risk_prompted
+                        && observer.selected_risk.is_some()
+                        && observer.draft.is_some()
+                    {
+                        let _ = tx.send(AppEvent::InsertHistoryCell(Box::new(
+                            AssistantHistoryCell::new(format!(
+                                "Planner response failed after draft submission. Continuing with the submitted draft.\nReason: {}",
+                                e
+                            )),
+                        )));
+                        None
+                    } else {
+                        let _ = tx.send(AppEvent::AgentEvent(AgentEvent::Error {
+                            message: e.to_string(),
+                        }));
+                        return;
+                    }
                 }
             };
 
@@ -1900,7 +1948,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             summary.push_str("\n\n");
             summary.push_str(&plan_summary);
 
-            let mut new_history = turn.history;
+            let mut new_history = turn.map(|turn| turn.history).unwrap_or(fallback_history);
             new_history.push(Message::assistant(summary.clone()));
 
             let _ = tx.send(AppEvent::PlanWorkflowComplete {
@@ -2200,6 +2248,21 @@ fn format_orchestrator_result(
     }
 
     lines.join("\n")
+}
+
+fn summarize_retry_error(error: &str) -> String {
+    let lowered = error.to_ascii_lowercase();
+    if lowered.contains("timeout") {
+        "timeout".to_string()
+    } else if lowered.contains("429") || lowered.contains("rate limit") {
+        "rate limited".to_string()
+    } else if lowered.contains("503") || lowered.contains("overloaded") {
+        "upstream overloaded".to_string()
+    } else if lowered.contains("connection") || lowered.contains("sending request") {
+        "network issue".to_string()
+    } else {
+        "transient error".to_string()
+    }
 }
 
 fn render_execution_plan_summary(plan: &ExecutionPlan, plan_id: Option<&str>) -> String {
