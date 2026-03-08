@@ -2,8 +2,9 @@ use anyhow::{Context, Result};
 use rmcp::model::CallToolResult;
 
 use crate::internal::ai::{
-    intentspec::{IntentSpec, canonical::to_canonical_json},
+    intentspec::IntentSpec,
     mcp::{resource::CreateIntentParams, server::LibraMcpServer},
+    workflow_objects::build_git_intent,
 };
 
 /// Persist an IntentSpec to the MCP server as a git-internal Intent object.
@@ -14,15 +15,33 @@ use crate::internal::ai::{
 /// 3. Calls the MCP create_intent_impl method to store the object.
 /// 4. Returns the created Intent ID.
 pub async fn persist_intentspec(spec: &IntentSpec, mcp_server: &LibraMcpServer) -> Result<String> {
-    let canonical =
-        to_canonical_json(spec).context("Failed to serialize IntentSpec to canonical JSON")?;
+    let intent = build_git_intent(spec)?;
+    let canonical = intent
+        .spec()
+        .map(|spec| serde_json::to_string(&spec.0))
+        .transpose()
+        .context("Failed to serialize git-internal Intent spec")?;
 
     let params = CreateIntentParams {
-        content: spec.intent.summary.clone(),
-        structured_content: Some(canonical),
+        content: intent.prompt().to_string(),
+        structured_content: canonical,
         parent_id: None,
-        parent_ids: None,
-        analysis_context_frame_ids: None,
+        parent_ids: if intent.parents().is_empty() {
+            None
+        } else {
+            Some(intent.parents().iter().map(ToString::to_string).collect())
+        },
+        analysis_context_frame_ids: if intent.analysis_context_frames().is_empty() {
+            None
+        } else {
+            Some(
+                intent
+                    .analysis_context_frames()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+            )
+        },
         status: Some("active".to_string()),
         commit_sha: None, // Will be set when completed
         reason: None,
@@ -112,14 +131,29 @@ mod tests {
     #[test]
     fn test_create_params_construction() {
         let spec = create_dummy_spec();
-        let canonical = to_canonical_json(&spec).expect("Should serialize");
+        let intent = build_git_intent(&spec).expect("intent");
+        let canonical = serde_json::to_string(&intent.spec().expect("spec").0).expect("json");
 
         let params = CreateIntentParams {
-            content: canonical.clone(),
+            content: intent.prompt().to_string(),
             structured_content: Some(canonical.clone()),
             parent_id: None,
-            parent_ids: None,
-            analysis_context_frame_ids: None,
+            parent_ids: if intent.parents().is_empty() {
+                None
+            } else {
+                Some(intent.parents().iter().map(ToString::to_string).collect())
+            },
+            analysis_context_frame_ids: if intent.analysis_context_frames().is_empty() {
+                None
+            } else {
+                Some(
+                    intent
+                        .analysis_context_frames()
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect(),
+                )
+            },
             status: Some("active".to_string()),
             commit_sha: None,
             reason: None,
@@ -128,7 +162,7 @@ mod tests {
             actor_id: Some("libra-plan".to_string()),
         };
 
-        assert_eq!(params.content, canonical);
+        assert_eq!(params.content, "Test Spec");
         assert!(params.structured_content.is_some());
         assert_eq!(
             params.structured_content.as_deref(),
@@ -153,11 +187,12 @@ mod tests {
     #[test]
     fn test_persist_params_use_summary_as_prompt_and_canonical_as_content() {
         let spec = create_dummy_spec();
-        let canonical = to_canonical_json(&spec).expect("Should serialize");
+        let intent = build_git_intent(&spec).expect("intent");
+        let canonical = serde_json::to_string(&intent.spec().expect("spec").0).expect("json");
 
         // Simulate what persist_intentspec does internally
         let params = CreateIntentParams {
-            content: spec.intent.summary.clone(),
+            content: intent.prompt().to_string(),
             structured_content: Some(canonical.clone()),
             parent_id: None,
             parent_ids: None,

@@ -38,6 +38,7 @@ pub mod providers;
 pub mod session;
 pub mod tools;
 pub mod util;
+pub mod workflow_objects;
 
 pub use agent::{Agent, AgentBuilder, ChatAgent};
 pub use completion::{Chat, CompletionModel, Message, Prompt};

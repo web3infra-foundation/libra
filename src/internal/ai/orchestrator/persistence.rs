@@ -26,11 +26,12 @@ use crate::internal::ai::{
         resource::{
             AgentInstanceParams, ContextItemParams, CreateContextSnapshotParams,
             CreateDecisionParams, CreateEvidenceParams, CreatePatchSetParams, CreatePlanParams,
-            CreateProvenanceParams, CreateRunParams, CreateToolInvocationParams, IoFootprintParams,
-            PlanStepParams, TouchedFileParams,
+            CreateProvenanceParams, CreateRunParams, CreateTaskParams,
+            CreateToolInvocationParams, IoFootprintParams, PlanStepParams, TouchedFileParams,
         },
         server::LibraMcpServer,
     },
+    workflow_objects::{build_git_plan, parse_object_id},
 };
 
 const ZERO_COMMIT_SHA: &str = "0000000000000000000000000000000000000000";
@@ -80,6 +81,17 @@ struct FinalDecisionRequest<'a> {
     decision: &'a DecisionOutcome,
 }
 
+struct RunRequest<'a> {
+    mcp_server: &'a Arc<LibraMcpServer>,
+    task_id: &'a str,
+    base_commit_sha: &'a str,
+    plan_id: Option<&'a str>,
+    context_snapshot_id: Option<&'a str>,
+    task_results: &'a [TaskResult],
+    decision: &'a DecisionOutcome,
+    model_name: &'a str,
+}
+
 pub async fn persist_execution(
     request: ExecutionPersistenceRequest<'_>,
 ) -> Result<PersistedExecution, OrchestratorError> {
@@ -122,15 +134,23 @@ pub async fn persist_execution(
         parent_plan_id = Some(plan_id.clone());
         plan_ids.push(plan_id);
     }
-    let run_id = create_run(
+    let root_task_id = create_execution_task(
         request.mcp_server,
-        &base_commit_sha,
-        plan_ids.last().map(String::as_str),
-        initial_snapshot_id.as_deref(),
-        task_results,
-        request.decision,
-        request.model_name,
+        &intent_id,
+        request.execution_plan_spec.summary.as_str(),
+        request.spec.intent.problem_statement.as_str(),
     )
+    .await?;
+    let run_id = create_run(RunRequest {
+        mcp_server: request.mcp_server,
+        task_id: &root_task_id,
+        base_commit_sha: &base_commit_sha,
+        plan_id: plan_ids.last().map(String::as_str),
+        context_snapshot_id: initial_snapshot_id.as_deref(),
+        task_results,
+        decision: request.decision,
+        model_name: request.model_name,
+    })
     .await?;
 
     let provenance_id = Some(
@@ -355,35 +375,28 @@ pub async fn persist_execution(
     })
 }
 
-async fn create_run(
-    mcp_server: &Arc<LibraMcpServer>,
-    base_commit_sha: &str,
-    plan_id: Option<&str>,
-    context_snapshot_id: Option<&str>,
-    task_results: &[TaskResult],
-    decision: &DecisionOutcome,
-    model_name: &str,
-) -> Result<String, OrchestratorError> {
-    let status = match decision {
+async fn create_run(request: RunRequest<'_>) -> Result<String, OrchestratorError> {
+    let status = match request.decision {
         DecisionOutcome::Abandon => "failed",
         DecisionOutcome::Commit | DecisionOutcome::HumanReviewRequired => "completed",
     };
     let metrics_json = json!({
-        "taskCount": task_results.len(),
-        "completedTasks": task_results.iter().filter(|result| result.status == super::types::TaskNodeStatus::Completed).count(),
-        "failedTasks": task_results.iter().filter(|result| result.status == super::types::TaskNodeStatus::Failed).count(),
-        "toolCalls": task_results.iter().map(|result| result.tool_calls.len()).sum::<usize>(),
-        "policyViolations": task_results.iter().map(|result| result.policy_violations.len()).sum::<usize>(),
+        "taskCount": request.task_results.len(),
+        "completedTasks": request.task_results.iter().filter(|result| result.status == super::types::TaskNodeStatus::Completed).count(),
+        "failedTasks": request.task_results.iter().filter(|result| result.status == super::types::TaskNodeStatus::Failed).count(),
+        "toolCalls": request.task_results.iter().map(|result| result.tool_calls.len()).sum::<usize>(),
+        "policyViolations": request.task_results.iter().map(|result| result.policy_violations.len()).sum::<usize>(),
+        "model": request.model_name,
     })
     .to_string();
 
     let params = CreateRunParams {
-        task_id: Uuid::new_v4().to_string(),
-        base_commit_sha: base_commit_sha.to_string(),
-        plan_id: plan_id.map(ToString::to_string),
+        task_id: request.task_id.to_string(),
+        base_commit_sha: request.base_commit_sha.to_string(),
+        plan_id: request.plan_id.map(ToString::to_string),
         status: Some(status.to_string()),
-        context_snapshot_id: context_snapshot_id.map(ToString::to_string),
-        error: task_results.iter().find_map(|result| {
+        context_snapshot_id: request.context_snapshot_id.map(ToString::to_string),
+        error: request.task_results.iter().find_map(|result| {
             (result.status == super::types::TaskNodeStatus::Failed).then(|| {
                 result
                     .agent_output
@@ -393,10 +406,13 @@ async fn create_run(
         }),
         agent_instances: Some(vec![AgentInstanceParams {
             role: "orchestrator".to_string(),
-            provider_route: Some(model_name.to_string()),
+            provider_route: Some(request.model_name.to_string()),
         }]),
         metrics_json: Some(metrics_json),
-        reason: Some(format!("orchestrator finished with decision {decision:?}")),
+        reason: Some(format!(
+            "orchestrator finished with decision {:?}",
+            request.decision
+        )),
         orchestrator_version: Some("libra-intentspec".to_string()),
         tags: None,
         external_ids: None,
@@ -405,15 +421,56 @@ async fn create_run(
     };
 
     let actor = resolve_actor(
+        request.mcp_server,
+        params.actor_kind.as_deref(),
+        params.actor_id.as_deref(),
+    )?;
+    let result = request
+        .mcp_server
+        .create_run_impl(params, actor)
+        .await
+        .map_err(|e| OrchestratorError::ConfigError(format!("MCP create_run failed: {e:?}")))?;
+    parse_created_id("run", &result)
+}
+
+async fn create_execution_task(
+    mcp_server: &Arc<LibraMcpServer>,
+    intent_id: &str,
+    title: &str,
+    description: &str,
+) -> Result<String, OrchestratorError> {
+    let params = CreateTaskParams {
+        title: title.to_string(),
+        description: Some(description.to_string()),
+        goal_type: None,
+        constraints: None,
+        acceptance_criteria: None,
+        requested_by_kind: None,
+        requested_by_id: None,
+        dependencies: None,
+        intent_id: Some(intent_id.to_string()),
+        parent_task_id: None,
+        origin_step_id: None,
+        status: Some("running".to_string()),
+        reason: Some("orchestrator execution root task".to_string()),
+        tags: None,
+        external_ids: None,
+        actor_kind: Some("system".to_string()),
+        actor_id: Some("libra-executor".to_string()),
+    };
+
+    let actor = resolve_actor(
         mcp_server,
         params.actor_kind.as_deref(),
         params.actor_id.as_deref(),
     )?;
     let result = mcp_server
-        .create_run_impl(params, actor)
+        .create_task_impl(params, actor)
         .await
-        .map_err(|e| OrchestratorError::ConfigError(format!("MCP create_run failed: {e:?}")))?;
-    parse_created_id("run", &result)
+        .map_err(|e| {
+            OrchestratorError::ConfigError(format!("MCP create_task failed: {e:?}"))
+        })?;
+    parse_created_id("task", &result)
 }
 
 async fn create_plan_revision(
@@ -422,32 +479,21 @@ async fn create_plan_revision(
     parent_plan_id: Option<&str>,
     plan: &ExecutionPlanSpec,
 ) -> Result<String, OrchestratorError> {
-    let steps = plan
-        .tasks
+    let git_plan = build_git_plan(
+        parse_object_id(intent_id)
+            .map_err(|e| OrchestratorError::ConfigError(format!("invalid intent id: {e}")))?,
+        plan,
+    )
+    .map_err(|e| OrchestratorError::ConfigError(format!("failed to build git plan: {e}")))?;
+    let steps = git_plan
+        .steps()
         .iter()
-        .map(|task| {
-            let checks = serde_json::to_value(&task.checks).map_err(|e| {
-                OrchestratorError::ConfigError(format!("failed to encode plan checks: {e}"))
-            })?;
-            Ok(PlanStepParams {
-                description: task.title.clone(),
-                inputs: Some(serde_json::json!({
-                    "objective": task.objective,
-                    "kind": format!("{:?}", task.kind),
-                    "gateStage": task.gate_stage.as_ref().map(|stage| format!("{:?}", stage)),
-                    "revision": plan.revision,
-                    "scopeIn": task.scope_in,
-                    "scopeOut": task.scope_out,
-                    "touchFiles": task.contract.touch_files,
-                    "expectedOutputs": task.contract.expected_outputs,
-                    "acceptanceCriteria": task.acceptance_criteria,
-                    "ownerRole": task.owner_role,
-                    "replanReason": plan.replan_reason,
-                })),
-                checks: Some(checks),
-            })
+        .map(|step| PlanStepParams {
+            description: step.description().to_string(),
+            inputs: step.inputs().cloned(),
+            checks: step.checks().cloned(),
         })
-        .collect::<Result<Vec<_>, OrchestratorError>>()?;
+        .collect::<Vec<_>>();
 
     let params = CreatePlanParams {
         intent_id: intent_id.to_string(),
@@ -593,7 +639,7 @@ async fn create_patchset(
             "{}: {}",
             request.task_title, request.task_objective
         )),
-        diff_format: diff_text.as_ref().map(|_| "unified".to_string()),
+        diff_format: diff_text.as_ref().map(|_| "unified_diff".to_string()),
         diff_artifact: None,
         tags: None,
         external_ids: None,

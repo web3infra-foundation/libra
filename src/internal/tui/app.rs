@@ -59,6 +59,7 @@ use crate::{
                 UserInputRequest, UserInputResponse,
             },
         },
+        workflow_objects::{build_git_plan, parse_object_id},
     },
 };
 
@@ -2352,32 +2353,20 @@ async fn persist_execution_plan(
     intent_id: &str,
     mcp_server: &Arc<LibraMcpServer>,
 ) -> Result<String, String> {
-    let steps = plan
-        .tasks
+    let git_plan = build_git_plan(
+        parse_object_id(intent_id).map_err(|e| format!("invalid intent id: {e}"))?,
+        plan,
+    )
+    .map_err(|e| format!("failed to build git plan: {e}"))?;
+    let steps = git_plan
+        .steps()
         .iter()
-        .map(|task| {
-            let checks = serde_json::to_value(&task.checks)
-                .map_err(|e| format!("failed to encode plan checks: {e}"))?;
-            Ok(crate::internal::ai::mcp::resource::PlanStepParams {
-                description: task.title.clone(),
-                inputs: Some(serde_json::json!({
-                    "objective": task.objective,
-                    "kind": format!("{:?}", task.kind),
-                    "gateStage": task.gate_stage.as_ref().map(|stage| format!("{:?}", stage)),
-                    "scopeIn": task.scope_in,
-                    "scopeOut": task.scope_out,
-                    "touchFiles": task.contract.touch_files,
-                    "touchSymbols": task.contract.touch_symbols,
-                    "touchApis": task.contract.touch_apis,
-                    "constraints": task.constraints,
-                    "expectedOutputs": task.contract.expected_outputs,
-                    "acceptanceCriteria": task.acceptance_criteria,
-                    "ownerRole": task.owner_role,
-                })),
-                checks: Some(checks),
-            })
+        .map(|step| crate::internal::ai::mcp::resource::PlanStepParams {
+            description: step.description().to_string(),
+            inputs: step.inputs().cloned(),
+            checks: step.checks().cloned(),
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect::<Vec<_>>();
 
     let params = CreatePlanParams {
         intent_id: intent_id.to_string(),
