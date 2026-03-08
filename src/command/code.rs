@@ -163,9 +163,12 @@ async fn create_initial_intent(mcp_server: &Arc<LibraMcpServer>) {
         content: "Libra Code session started".to_string(),
         structured_content: None,
         parent_id: None,
+        parent_ids: None,
+        analysis_context_frame_ids: None,
         status: Some("active".to_string()),
-        task_id: None,
         commit_sha: None,
+        reason: None,
+        next_intent_id: None,
         actor_kind: Some("system".to_string()),
         actor_id: Some("libra-code".to_string()),
     };

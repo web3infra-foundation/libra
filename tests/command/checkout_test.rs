@@ -323,3 +323,76 @@ async fn test_checkout_new_branch_with_dirty_worktree_returns_error() {
         err.message()
     );
 }
+
+/// Checking out the current branch should be a no-op even when the worktree
+/// is dirty (Git prints "Already on ...").
+#[tokio::test]
+#[serial]
+async fn test_checkout_current_branch_with_dirty_worktree_succeeds() {
+    use clap::Parser;
+    use libra::{
+        command::{
+            add::{self, AddArgs},
+            checkout::{self, CheckoutArgs},
+            commit,
+        },
+        internal::config::Config,
+        utils::test::{self, ChangeDirGuard},
+    };
+
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    Config::insert("user", None, "name", "Checkout Tester").await;
+    Config::insert("user", None, "email", "checkout@test.com").await;
+
+    test::ensure_file("base.txt", Some("base"));
+    add::execute_safe(AddArgs {
+        pathspec: vec!["base.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        verbose: false,
+        force: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await
+    .expect("add should succeed");
+    commit::execute_safe(commit::CommitArgs {
+        message: Some("initial".into()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    })
+    .await
+    .expect("initial commit should succeed");
+
+    // Dirty the worktree with unstaged content.
+    test::ensure_file("base.txt", Some("base\nlocal change"));
+
+    let current = get_current_branch()
+        .await
+        .expect("current branch should be present");
+    let args = CheckoutArgs::try_parse_from(["checkout", current.as_str()]).unwrap();
+    let result = checkout::execute_safe(args).await;
+    assert!(
+        result.is_ok(),
+        "checkout current branch should not fail on dirty worktree"
+    );
+
+    let after = get_current_branch()
+        .await
+        .expect("current branch should still be present");
+    assert_eq!(after, current, "branch should remain unchanged");
+    let content = std::fs::read_to_string("base.txt").unwrap();
+    assert_eq!(content, "base\nlocal change");
+}

@@ -102,7 +102,7 @@ async fn test_ai_flow_local() {
     println!("Stored Run: {}", run_hash);
 
     // 2.7. User creates a Plan
-    let plan = Plan::new(actor.clone()).unwrap();
+    let plan = Plan::new(actor.clone(), Uuid::new_v4()).unwrap();
     let plan_hash = storage.put_tracked(&plan, &history_manager).await.unwrap();
     println!("Stored Plan: {}", plan_hash);
 

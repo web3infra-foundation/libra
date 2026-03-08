@@ -56,6 +56,15 @@ pub async fn execute_safe(args: CheckoutArgs) -> CliResult<()> {
         )));
     }
 
+    // Match Git behavior: checking out the current branch is a no-op and should
+    // not be blocked by unrelated local changes.
+    if let Some(ref target_branch) = args.branch
+        && get_current_branch().await == Some(target_branch.clone())
+    {
+        println!("Already on {target_branch}");
+        return Ok(());
+    }
+
     switch::ensure_clean_status()
         .await
         .map_err(|_| CliError::failure("local changes would be overwritten by checkout"))?;

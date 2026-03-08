@@ -123,27 +123,6 @@ struct UserIdentity {
     email: String,
 }
 
-/// How the committer identity was obtained.
-///
-/// `ConfigOrEnv` — explicitly configured via `user.name`/`user.email` or
-/// `GIT_COMMITTER_*` environment variables.  
-/// `AutoDetected` — inferred from the system (hostname, OS user) because no
-/// explicit configuration was found.  A warning is printed when this variant
-/// is used so the user knows the identity may not be what they intended.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum IdentitySource {
-    ConfigOrEnv,
-    AutoDetected,
-}
-
-/// The result of [`resolve_committer_identity`]: a [`UserIdentity`] together
-/// with metadata indicating how it was resolved ([`IdentitySource`]).
-#[derive(Debug)]
-struct ResolvedIdentity {
-    identity: UserIdentity,
-    source: IdentitySource,
-}
-
 /// Internal error type that bridges legacy `String` errors from `execute_impl`
 /// with the structured `CliError` type. Converted via `into_cli()` at the
 /// `execute_safe` boundary.
@@ -205,31 +184,6 @@ fn env_first_non_empty(keys: &[&str]) -> Option<String> {
     })
 }
 
-fn command_first_non_empty(program: &str, args: &[&str]) -> Option<String> {
-    Command::new(program)
-        .args(args)
-        .output()
-        .ok()
-        .and_then(|output| {
-            if !output.status.success() {
-                return None;
-            }
-            let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            (!value.is_empty()).then_some(value)
-        })
-}
-
-fn detect_system_username() -> Option<String> {
-    env_first_non_empty(&["USER", "USERNAME"])
-        .or_else(|| command_first_non_empty("id", &["-un"]))
-        .or_else(|| command_first_non_empty("whoami", &[]))
-}
-
-fn detect_host_name() -> Option<String> {
-    command_first_non_empty("hostname", &[])
-        .filter(|host| !host.is_empty() && host != "(none)" && host != "localhost")
-}
-
 fn missing_identity_error(name_missing: bool, email_missing: bool) -> CliError {
     let config_hint = match (name_missing, email_missing) {
         (true, true) => {
@@ -264,21 +218,14 @@ fn classify_commit_error(message: String) -> CliError {
     CliError::fatal(message)
 }
 
-fn print_auto_detected_identity_warning() {
-    eprintln!("Warning: Name and email are not configured; using an auto-detected identity.");
-    eprintln!(
-        "Hint: run 'libra config --global user.name \"Your Name\"' and 'libra config --global user.email \"you@example.com\"'."
-    );
-}
-
-async fn resolve_committer_identity() -> Result<ResolvedIdentity, CliError> {
+async fn resolve_committer_identity() -> Result<UserIdentity, CliError> {
     // Step 1: check libra config (highest precedence after explicit --author)
     let config_name = get_user_config_value("name").await;
     let config_email = get_user_config_value("email").await;
 
-    // Step 2: check user.useConfigOnly BEFORE falling back to env vars / auto-detect.
-    // When useConfigOnly is true, only config values are acceptable — env vars and
-    // auto-detection are both skipped so the user is forced to configure identity
+    // Step 2: check user.useConfigOnly BEFORE falling back to env vars.
+    // When useConfigOnly is true, only config values are acceptable — env vars are
+    // skipped so the user is forced to configure identity
     // explicitly.  This is stricter than Git (which still honours GIT_AUTHOR_*
     // env vars) and prevents silent identity leakage from server environments.
     let use_config_only = get_user_config_value("useConfigOnly")
@@ -288,10 +235,7 @@ async fn resolve_committer_identity() -> Result<ResolvedIdentity, CliError> {
 
     if use_config_only {
         if let (Some(name), Some(email)) = (config_name.clone(), config_email.clone()) {
-            return Ok(ResolvedIdentity {
-                identity: UserIdentity { name, email },
-                source: IdentitySource::ConfigOrEnv,
-            });
+            return Ok(UserIdentity { name, email });
         }
         // Report which field(s) are missing — using *config-only* perspective.
         // Reuse the already-fetched values instead of querying config again.
@@ -318,27 +262,7 @@ async fn resolve_committer_identity() -> Result<ResolvedIdentity, CliError> {
     });
 
     if let (Some(name), Some(email)) = (name.clone(), email.clone()) {
-        return Ok(ResolvedIdentity {
-            identity: UserIdentity { name, email },
-            source: IdentitySource::ConfigOrEnv,
-        });
-    }
-
-    // Auto-detection
-    let detected_user = detect_system_username();
-    let detected_host = detect_host_name();
-
-    if let (Some(user), Some(host)) = (detected_user, detected_host) {
-        let final_name = name.unwrap_or(user.clone());
-        // Construct email: user@host.
-        let final_email = email.unwrap_or_else(|| format!("{}@{}", user, host));
-        return Ok(ResolvedIdentity {
-            identity: UserIdentity {
-                name: final_name,
-                email: final_email,
-            },
-            source: IdentitySource::AutoDetected,
-        });
+        return Ok(UserIdentity { name, email });
     }
 
     Err(missing_identity_error(name.is_none(), email.is_none()))
@@ -347,9 +271,8 @@ async fn resolve_committer_identity() -> Result<ResolvedIdentity, CliError> {
 /// Create author and committer signatures based on the provided arguments
 async fn create_commit_signatures(
     author_override: Option<&str>,
-) -> Result<(Signature, Signature, UserIdentity, IdentitySource), CommitExecError> {
-    let resolved_identity = resolve_committer_identity().await?;
-    let committer_identity = resolved_identity.identity;
+) -> Result<(Signature, Signature, UserIdentity), CommitExecError> {
+    let committer_identity = resolve_committer_identity().await?;
 
     // Create author signature (use override if provided)
     let author = if let Some(author_str) = author_override {
@@ -370,12 +293,7 @@ async fn create_commit_signatures(
         committer_identity.email.clone(),
     );
 
-    Ok((
-        author,
-        committer,
-        committer_identity,
-        resolved_identity.source,
-    ))
+    Ok((author, committer, committer_identity))
 }
 
 fn first_message_line(message: &str) -> String {
@@ -401,9 +319,11 @@ async fn print_commit_summary(commit: &Commit, message: &str, staged_changes: &s
     let file_count =
         staged_changes.new.len() + staged_changes.modified.len() + staged_changes.deleted.len();
     if file_count > 0 {
+        let files_word = if file_count == 1 { "file" } else { "files" };
         println!(
-            " {} files changed (new: {}, modified: {}, deleted: {})",
+            " {} {} changed (new: {}, modified: {}, deleted: {})",
             file_count,
+            files_word,
             staged_changes.new.len(),
             staged_changes.modified.len(),
             staged_changes.deleted.len()
@@ -507,7 +427,7 @@ async fn execute_impl(args: CommitArgs) -> Result<(), CommitExecError> {
     let parents_commit_ids = get_parents_ids().await;
 
     // Create author and committer signatures (respecting --author override)
-    let (author, committer, committer_identity, identity_source) =
+    let (author, committer, committer_identity) =
         create_commit_signatures(args.author.as_deref()).await?;
 
     // Amend commits are only supported for a single parent commit.
@@ -619,9 +539,6 @@ async fn execute_impl(args: CommitArgs) -> Result<(), CommitExecError> {
     /* update HEAD */
     update_head_and_reflog(&commit.id.to_string(), &commit_message).await?;
     print_commit_summary(&commit, &commit_message, &staged_changes).await;
-    if identity_source == IdentitySource::AutoDetected {
-        print_auto_detected_identity_warning();
-    }
     Ok(())
 }
 

@@ -80,27 +80,44 @@ where
 
 /// Ask for username and password (CLI interaction)
 fn ask_username_password() -> (String, String) {
-    print!("username: ");
-    // Normally your OS will buffer output by line when it's connected to a terminal,
-    // which is why it usually flushes when a newline is written to stdout.
-    io::stdout().flush().unwrap(); // ensure the prompt is shown
-    let mut username = String::new();
-    io::stdin().read_line(&mut username).unwrap();
-    username = username.trim().to_string();
+    let read_prompt = |prompt: &str| -> String {
+        print!("{prompt}");
+        // Normally your OS will buffer output by line when it's connected to a terminal,
+        // which is why it usually flushes when a newline is written to stdout.
+        if let Err(err) = io::stdout().flush() {
+            eprintln!("warning: failed to flush stdout: {err}");
+        }
+
+        let mut value = String::new();
+        if let Err(err) = io::stdin().read_line(&mut value) {
+            eprintln!("error: failed to read input: {err}");
+            return String::new();
+        }
+        value.trim().to_string()
+    };
+
+    let username = read_prompt("username: ");
     tracing::debug!("username: {}", username);
 
     print!("password: ");
-    io::stdout().flush().unwrap();
+    if let Err(err) = io::stdout().flush() {
+        eprintln!("warning: failed to flush stdout: {err}");
+    }
+
     let password = if std::env::var("LIBRA_NO_HIDE_PASSWORD").is_ok() {
         // for test
-        let mut password = String::new();
-        io::stdin().read_line(&mut password).unwrap();
-        password = password.trim().to_string();
-        tracing::debug!("password: {}", password);
-        password
+        read_prompt("")
     } else {
-        // error in test environment: "No such device or address"
-        read_password().unwrap() // hide password
+        // In non-tty environments, hidden input can fail (for example: "No such device or address").
+        match read_password() {
+            Ok(password) => password.trim().to_string(),
+            Err(err) => {
+                eprintln!(
+                    "warning: failed to read hidden password ({err}); falling back to plain input."
+                );
+                read_prompt("")
+            }
+        }
     };
     (username, password)
 }

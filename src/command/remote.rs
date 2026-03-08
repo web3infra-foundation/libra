@@ -105,6 +105,9 @@ pub async fn execute(command: RemoteCmds) {
 pub async fn execute_safe(command: RemoteCmds) -> CliResult<()> {
     match command {
         RemoteCmds::Add { name, url } => {
+            if Config::remote_config(&name).await.is_some() {
+                return Err(CliError::fatal(format!("remote {name} already exists")));
+            }
             Config::insert("remote", Some(&name), "url", &url).await;
         }
         RemoteCmds::Remove { name } => {
