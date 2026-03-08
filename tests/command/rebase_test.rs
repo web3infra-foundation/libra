@@ -32,10 +32,7 @@ fn test_rebase_cli_missing_upstream_returns_usage_129() {
     let output = run_libra_command(&["rebase"], repo.path());
     assert_eq!(output.status.code(), Some(129));
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("Usage:"),
-        "unexpected stderr: {stderr}"
-    );
+    assert!(stderr.contains("Usage:"), "unexpected stderr: {stderr}");
 }
 
 #[test]

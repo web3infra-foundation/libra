@@ -885,7 +885,6 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
                         // Create context snapshot
                         let snapshot_params = CreateContextSnapshotParams {
-                            base_commit_sha: "0000000000000000000000000000000000000000".to_string(),
                             selection_strategy: "heuristic".to_string(),
                             items: None,
                             summary: Some(format!("Context for: {}", text_clone)),

@@ -217,7 +217,8 @@ impl<S: Storage + Send + Sync + ?Sized> StorageExt for S {
         // Create ArtifactRef
         // Key is the Git Object Hash string
         // Store is unified as "libra"
-        let artifact = ArtifactRef::new("libra", object_hash.to_string()).map_err(|e| anyhow!(e))?;
+        let artifact =
+            ArtifactRef::new("libra", object_hash.to_string()).map_err(|e| anyhow!(e))?;
 
         Ok(artifact)
     }

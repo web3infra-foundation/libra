@@ -324,7 +324,7 @@ pub struct CreateIntentParams {
     /// The prompt or goal content (raw user input / natural language description).
     pub content: String,
     /// AI-analyzed structured content (e.g. canonical IntentSpec JSON).
-    /// Stored in the Intent object's `content` field. When `None`, the Intent
+    /// Stored in the Intent object's `spec` field. When `None`, the Intent
     /// is created without structured content (Draft state).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub structured_content: Option<String>,
@@ -334,10 +334,8 @@ pub struct CreateIntentParams {
     pub parent_ids: Option<Vec<String>>,
     /// Context frames used while deriving the structured intent spec.
     pub analysis_context_frame_ids: Option<Vec<String>>,
-    /// Status: "draft", "active", "completed", "discarded".
+    /// Initial lifecycle status: "draft", "active"/"analyzed", "completed", "cancelled"/"discarded".
     pub status: Option<String>,
-    /// Optional ID of the task derived from this intent.
-    pub task_id: Option<String>,
     /// SHA of the code commit this intent resulted in (cross-reference to the code branch).
     pub commit_sha: Option<String>,
     /// Optional human-readable lifecycle reason for emitted intent event.
@@ -449,7 +447,6 @@ pub struct ListRunsParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct CreateContextSnapshotParams {
-    pub base_commit_sha: String,
     pub selection_strategy: String,
     pub items: Option<Vec<ContextItemParams>>,
     pub summary: Option<String>,
@@ -485,12 +482,6 @@ pub struct CreatePlanParams {
     pub parent_plan_ids: Option<Vec<String>>,
     /// Planning-time context frame ids.
     pub context_frame_ids: Option<Vec<String>>,
-    /// Deprecated compatibility field (ignored in 0.7.0 object model).
-    pub plan_version: Option<u32>,
-    /// Deprecated compatibility field from pre-0.7 pipeline model (ignored).
-    pub pipeline_id: Option<String>,
-    /// Deprecated compatibility field from pre-0.7 pipeline model (ignored).
-    pub fwindow: Option<(u32, u32)>,
     pub steps: Option<Vec<PlanStepParams>>,
     /// Search tags (key-value pairs)
     pub tags: Option<HashMap<String, String>>,
@@ -506,10 +497,7 @@ pub struct CreatePlanParams {
 pub struct PlanStepParams {
     pub description: String,
     pub inputs: Option<serde_json::Value>,
-    pub outputs: Option<serde_json::Value>,
     pub checks: Option<serde_json::Value>,
-    pub status: Option<String>,
-    pub owner_role: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -525,8 +513,6 @@ pub struct CreatePatchSetParams {
     pub base_commit_sha: String,
     pub touched_files: Option<Vec<TouchedFileParams>>,
     pub rationale: Option<String>,
-    /// Deprecated compatibility field; apply/reject now lives in Decision/RunEvent.
-    pub apply_status: Option<String>,
     pub diff_format: Option<String>,
     pub diff_artifact: Option<ArtifactParams>,
     /// Search tags (key-value pairs)
@@ -613,8 +599,6 @@ pub struct CreateProvenanceParams {
     pub provider: String,
     pub model: String,
     pub parameters_json: Option<String>,
-    /// Compatibility payload: folded into `parameters.token_usage`.
-    pub token_usage_json: Option<String>,
     pub temperature: Option<f64>,
     pub max_tokens: Option<u64>,
     /// Search tags (key-value pairs)
@@ -696,14 +680,15 @@ impl LibraMcpServer {
             intent.set_spec(Some(parse_intent_spec(spec)));
         }
 
-        let analysis_context_frames =
-            parse_uuid_vec(params.analysis_context_frame_ids, "analysis_context_frame_ids")?;
+        let analysis_context_frames = parse_uuid_vec(
+            params.analysis_context_frame_ids,
+            "analysis_context_frame_ids",
+        )?;
         if !analysis_context_frames.is_empty() {
             intent.set_analysis_context_frames(analysis_context_frames);
         }
 
-        // 0.7 moved lifecycle/commit state into IntentEvent. Keep compatibility by
-        // emitting an initial lifecycle event from create_intent params.
+        // 0.7 stores intent lifecycle/commit state in IntentEvent.
         let mut lifecycle_kind = match params.status.as_deref() {
             Some(status) => parse_intent_event_kind(status)?,
             None => None,
@@ -726,7 +711,8 @@ impl LibraMcpServer {
                 event.set_result_commit(Some(ih));
             }
             event.set_reason(params.reason);
-            if let Some(next_intent_id) = parse_optional_uuid(params.next_intent_id, "next_intent_id")?
+            if let Some(next_intent_id) =
+                parse_optional_uuid(params.next_intent_id, "next_intent_id")?
             {
                 event.set_next_intent_id(Some(next_intent_id));
             }
@@ -880,7 +866,8 @@ impl LibraMcpServer {
             event.set_result_commit(Some(ih));
         }
         event.set_reason(params.reason);
-        if let Some(next_intent_id) = parse_optional_uuid(params.next_intent_id, "next_intent_id")? {
+        if let Some(next_intent_id) = parse_optional_uuid(params.next_intent_id, "next_intent_id")?
+        {
             event.set_next_intent_id(Some(next_intent_id));
         }
 
@@ -1218,21 +1205,15 @@ impl LibraMcpServer {
             }
         };
 
-        // base_commit_sha is unused in 0.6.0 ContextSnapshot::new
-        let _ = crate::internal::ai::util::normalize_commit_anchor(&params.base_commit_sha)
-            .map_err(|e| ErrorData::invalid_params(e, None))?;
-
         let mut snapshot = ContextSnapshot::new(actor, strategy)
             .map_err(|e| ErrorData::invalid_params(e, None))?;
 
         if let Some(items) = params.items {
             for item in items {
                 use git_internal::hash::ObjectHash;
-                let mut ctx_item = ContextItem::new(
-                    parse_context_item_kind(item.kind.as_deref()),
-                    item.path,
-                )
-                    .map_err(|e| ErrorData::invalid_params(e, None))?;
+                let mut ctx_item =
+                    ContextItem::new(parse_context_item_kind(item.kind.as_deref()), item.path)
+                        .map_err(|e| ErrorData::invalid_params(e, None))?;
                 ctx_item.preview = item.preview;
 
                 if let Some(blob_hash) = item.blob_hash.or(item.content_hash) {
@@ -1353,7 +1334,8 @@ impl LibraMcpServer {
         actor: ActorRef,
     ) -> Result<CallToolResult, ErrorData> {
         let intent_id = parse_uuid(&params.intent_id, "intent_id")?;
-        let mut plan = Plan::new(actor, intent_id).map_err(|e| ErrorData::internal_error(e, None))?;
+        let mut plan =
+            Plan::new(actor, intent_id).map_err(|e| ErrorData::internal_error(e, None))?;
 
         let parent_plan_ids = parse_uuid_vec(params.parent_plan_ids, "parent_plan_ids")?;
         if !parent_plan_ids.is_empty() {
@@ -1862,7 +1844,7 @@ impl LibraMcpServer {
 
         let mut prov = Provenance::new(actor, run_id, params.provider, params.model)
             .map_err(|e| ErrorData::internal_error(e, None))?;
-        let mut parameters = if let Some(parameters_json) = params.parameters_json {
+        let parameters = if let Some(parameters_json) = params.parameters_json {
             Some(
                 serde_json::from_str(&parameters_json)
                     .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?,
@@ -1870,18 +1852,6 @@ impl LibraMcpServer {
         } else {
             None
         };
-        if let Some(token_usage_json) = params.token_usage_json {
-            let token_usage = serde_json::from_str(&token_usage_json)
-                .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
-            let mut root = parameters.unwrap_or_else(|| serde_json::json!({}));
-            if !root.is_object() {
-                root = serde_json::json!({ "raw_parameters": root });
-            }
-            if let Some(obj) = root.as_object_mut() {
-                obj.insert("token_usage".to_string(), token_usage);
-            }
-            parameters = Some(root);
-        }
         prov.set_parameters(parameters);
         prov.set_temperature(params.temperature);
         prov.set_max_tokens(params.max_tokens);

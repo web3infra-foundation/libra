@@ -522,7 +522,9 @@ async fn preflight_rebase(args: &RebaseArgs) -> CliResult<()> {
         Ok(true) => {
             return Err(CliError::fatal("rebase already in progress")
                 .with_hint("use 'libra rebase --continue' to continue rebasing.")
-                .with_hint("use 'libra rebase --abort' to abort and restore the original branch."));
+                .with_hint(
+                    "use 'libra rebase --abort' to abort and restore the original branch.",
+                ));
         }
         Ok(false) => {}
         Err(err) => {
@@ -532,7 +534,9 @@ async fn preflight_rebase(args: &RebaseArgs) -> CliResult<()> {
         }
     }
 
-    resolve_branch_or_commit(upstream).await.map_err(CliError::fatal)?;
+    resolve_branch_or_commit(upstream)
+        .await
+        .map_err(CliError::fatal)?;
     Ok(())
 }
 

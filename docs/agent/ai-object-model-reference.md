@@ -82,13 +82,13 @@ Libra MCP `list_intents`, `list_tasks`, and `list_runs` rebuild status from the 
 - `list_runs`: latest `RunEvent`-derived status.
 - Other list tools summarize immutable object fields directly.
 
-## Compatibility Inputs in MCP
+## MCP Input Policy (Current)
 
-Some MCP request fields are preserved only for compatibility and are not mapped to 0.7 object fields directly:
+MCP parameter schemas now only expose fields that map to current `git-internal 0.7` object model semantics.
 
-- `CreatePlanParams.pipeline_id` / `fwindow` / `plan_version`: accepted but ignored.
-- `CreatePatchSetParams.apply_status`: accepted but ignored.
-- `CreateProvenanceParams.token_usage_json`: merged into `parameters.token_usage`.
+- Removed pre-0.7 compatibility inputs (pipeline/fwindow/apply-status/token-usage shim).
+- Removed stale Intent task-link input (`CreateIntentParams.task_id`), because task provenance belongs on `Task.intent`.
+- Removed `CreateContextSnapshotParams.base_commit_sha` because `ContextSnapshot` has no commit anchor field in 0.7.
 
 ## Active Context Resource
 

@@ -24,7 +24,6 @@ pub async fn persist_intentspec(spec: &IntentSpec, mcp_server: &LibraMcpServer) 
         parent_ids: None,
         analysis_context_frame_ids: None,
         status: Some("active".to_string()),
-        task_id: None,    // IntentSpec drives the plan, not a task yet
         commit_sha: None, // Will be set when completed
         reason: None,
         next_intent_id: None,
@@ -122,7 +121,6 @@ mod tests {
             parent_ids: None,
             analysis_context_frame_ids: None,
             status: Some("active".to_string()),
-            task_id: None,
             commit_sha: None,
             reason: None,
             next_intent_id: None,
@@ -165,7 +163,6 @@ mod tests {
             parent_ids: None,
             analysis_context_frame_ids: None,
             status: Some("active".to_string()),
-            task_id: None,
             commit_sha: None,
             reason: None,
             next_intent_id: None,

@@ -166,7 +166,6 @@ async fn create_initial_intent(mcp_server: &Arc<LibraMcpServer>) {
         parent_ids: None,
         analysis_context_frame_ids: None,
         status: Some("active".to_string()),
-        task_id: None,
         commit_sha: None,
         reason: None,
         next_intent_id: None,
