@@ -30,9 +30,13 @@ pub async fn establish_connection(db_path: &str) -> Result<DatabaseConnection, I
 
     let mut option = ConnectOptions::new(format!("sqlite://{db_path}"));
     option.sqlx_logging(false); // TODO use better option
-    Database::connect(option)
+    let conn = Database::connect(option)
         .await
-        .map_err(|err| IOError::other(format!("Database connection error: {err:?}")))
+        .map_err(|err| IOError::other(format!("Database connection error: {err:?}")))?;
+    ensure_ai_projection_schema(&conn)
+        .await
+        .map_err(|err| IOError::other(format!("Failed to setup AI projection schema: {err:?}")))?;
+    Ok(conn)
 }
 // #[cfg(not(test))]
 // static DB_CONN: OnceCell<DbConn> = OnceCell::const_new();
@@ -122,20 +126,28 @@ async fn setup_database_model(conn: &DatabaseConnection) -> Result<(), Transacti
     .await
 }
 
-/// create table using sql in `src/sql/sqlite_20240331_init.sql`
+const BOOTSTRAP_SQL: &str = include_str!("../../sql/sqlite_20260309_init.sql");
+
+/// create table using the SQLite bootstrap schema
 async fn setup_database_sql(conn: &DatabaseConnection) -> Result<(), TransactionError<DbErr>> {
     conn.transaction::<_, _, DbErr>(|txn| {
         Box::pin(async move {
             let backend = txn.get_database_backend();
 
             // `include_str!` will expand the file while compiling, so `.sql` is not needed after that
-            const SETUP_SQL: &str = include_str!("../../sql/sqlite_20240331_init.sql");
-            txn.execute(Statement::from_string(backend, SETUP_SQL))
+            txn.execute(Statement::from_string(backend, BOOTSTRAP_SQL))
                 .await?;
             Ok(())
         })
     })
     .await
+}
+
+async fn ensure_ai_projection_schema(conn: &DatabaseConnection) -> Result<(), DbErr> {
+    let backend = conn.get_database_backend();
+    conn.execute(Statement::from_string(backend, BOOTSTRAP_SQL))
+        .await?;
+    Ok(())
 }
 
 /// Create a new SQLite database file at the specified path.
@@ -479,5 +491,32 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(all_objects.len(), 4, "Should have 4 objects total");
+    }
+
+    #[tokio::test]
+    async fn test_establish_connection_backfills_ai_projection_tables() {
+        let mut db_path_buf = std::env::temp_dir();
+        db_path_buf.push("test_ai_projection_backfill.db");
+        let db_path = db_path_buf.to_str().unwrap();
+
+        if Path::new(db_path).exists() {
+            fs::remove_file(db_path).unwrap();
+        }
+
+        fs::File::create(db_path).unwrap();
+
+        let conn = establish_connection(db_path).await.unwrap();
+        let backend = conn.get_database_backend();
+        let stmt = Statement::from_sql_and_values(
+            backend,
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+            ["ai_thread".into()],
+        );
+        let row = conn.query_one(stmt).await.unwrap();
+
+        assert!(row.is_some(), "expected ai_thread table to exist");
+
+        conn.close().await.unwrap();
+        fs::remove_file(db_path).unwrap();
     }
 }
