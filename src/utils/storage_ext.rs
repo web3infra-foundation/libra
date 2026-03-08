@@ -6,12 +6,14 @@ use git_internal::{
         context::ContextSnapshot,
         decision::Decision,
         evidence::Evidence,
-        integrity::IntegrityHash,
+        intent_event::IntentEvent,
         patchset::PatchSet,
         plan::Plan,
         provenance::Provenance,
         run::Run,
+        run_event::RunEvent,
         task::Task,
+        task_event::TaskEvent,
         tool::ToolInvocation,
         types::{ArtifactRef, ObjectType},
     },
@@ -27,6 +29,33 @@ pub trait Identifiable {
 }
 
 impl Identifiable for Task {
+    fn object_id(&self) -> String {
+        self.header().object_id().to_string()
+    }
+    fn object_type(&self) -> String {
+        self.header().object_type().to_string()
+    }
+}
+
+impl Identifiable for IntentEvent {
+    fn object_id(&self) -> String {
+        self.header().object_id().to_string()
+    }
+    fn object_type(&self) -> String {
+        self.header().object_type().to_string()
+    }
+}
+
+impl Identifiable for TaskEvent {
+    fn object_id(&self) -> String {
+        self.header().object_id().to_string()
+    }
+    fn object_type(&self) -> String {
+        self.header().object_type().to_string()
+    }
+}
+
+impl Identifiable for RunEvent {
     fn object_id(&self) -> String {
         self.header().object_id().to_string()
     }
@@ -185,15 +214,10 @@ impl<S: Storage + Send + Sync + ?Sized> StorageExt for S {
             .await
             .map_err(|e| anyhow!(e))?;
 
-        // Compute Integrity Hash (SHA256) for ArtifactRef
-        let integrity_hash = IntegrityHash::compute(data);
-
         // Create ArtifactRef
         // Key is the Git Object Hash string
         // Store is unified as "libra"
-        let artifact = ArtifactRef::new("libra", object_hash.to_string())
-            .map_err(|e| anyhow!(e))?
-            .with_hash(integrity_hash);
+        let artifact = ArtifactRef::new("libra", object_hash.to_string()).map_err(|e| anyhow!(e))?;
 
         Ok(artifact)
     }

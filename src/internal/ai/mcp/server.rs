@@ -19,6 +19,7 @@ use rmcp::{
     RoleServer, ServerHandler, handler::server::router::tool::ToolRouter, model::*,
     service::RequestContext, tool_handler,
 };
+use uuid::Uuid;
 
 // use uuid::Uuid;
 use crate::{
@@ -138,8 +139,10 @@ impl LibraMcpServer {
     async fn read_active_context(&self) -> Result<Vec<ResourceContents>, ErrorData> {
         use git_internal::internal::object::{
             context::ContextSnapshot,
-            run::{Run, RunStatus},
+            run::Run,
+            run_event::{RunEvent, RunEventKind},
             task::Task,
+            task_event::{TaskEvent, TaskEventKind},
         };
 
         let history = self
@@ -152,6 +155,58 @@ impl LibraMcpServer {
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
         let uri = "libra://context/active";
+        let run_status_label = |kind: &RunEventKind| match kind {
+            RunEventKind::Created => "created",
+            RunEventKind::Patching => "patching",
+            RunEventKind::Validating => "validating",
+            RunEventKind::Completed => "completed",
+            RunEventKind::Failed => "failed",
+            RunEventKind::Checkpointed => "checkpointed",
+        };
+        let task_status_label = |kind: &TaskEventKind| match kind {
+            TaskEventKind::Created => "draft",
+            TaskEventKind::Running => "running",
+            TaskEventKind::Blocked => "blocked",
+            TaskEventKind::Done => "done",
+            TaskEventKind::Failed => "failed",
+            TaskEventKind::Cancelled => "cancelled",
+        };
+
+        let mut latest_run_events = std::collections::HashMap::<Uuid, RunEvent>::new();
+        let run_events = history
+            .list_objects("run_event")
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        for (_id, hash) in run_events {
+            if let Ok(event) = storage.get_json::<RunEvent>(&hash).await {
+                latest_run_events
+                    .entry(event.run_id())
+                    .and_modify(|current| {
+                        if event.header().created_at() > current.header().created_at() {
+                            *current = event.clone();
+                        }
+                    })
+                    .or_insert(event);
+            }
+        }
+
+        let mut latest_task_events = std::collections::HashMap::<Uuid, TaskEvent>::new();
+        let task_events = history
+            .list_objects("task_event")
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        for (_id, hash) in task_events {
+            if let Ok(event) = storage.get_json::<TaskEvent>(&hash).await {
+                latest_task_events
+                    .entry(event.task_id())
+                    .and_modify(|current| {
+                        if event.header().created_at() > current.header().created_at() {
+                            *current = event.clone();
+                        }
+                    })
+                    .or_insert(event);
+            }
+        }
 
         // 1. Find the latest active Run (UUID v7 is lexicographically time-ordered)
         let runs = history
@@ -163,13 +218,16 @@ impl LibraMcpServer {
         // Iterate in reverse so the latest (by UUID sort) is checked first
         for (_id, hash) in runs.into_iter().rev() {
             if let Ok(run) = storage.get_json::<Run>(&hash).await {
-                match run.status() {
-                    RunStatus::Completed | RunStatus::Failed => continue,
-                    _ => {
-                        active_run = Some(run);
-                        break;
-                    }
+                let status_kind = latest_run_events
+                    .get(&run.header().object_id())
+                    .map(|event| event.kind())
+                    .cloned()
+                    .unwrap_or(RunEventKind::Created);
+                if matches!(status_kind, RunEventKind::Completed | RunEventKind::Failed) {
+                    continue;
                 }
+                active_run = Some(run);
+                break;
             }
         }
 
@@ -179,7 +237,10 @@ impl LibraMcpServer {
             // Serialize run info
             let run_obj = serde_json::json!({
                 "id": run.header().object_id().to_string(),
-                "status": run.status().as_str(),
+                "status": latest_run_events
+                    .get(&run.header().object_id())
+                    .map(|event| run_status_label(event.kind()))
+                    .unwrap_or("created"),
                 "task_id": run.task().to_string(),
                 "base_commit_sha": run.commit().to_string(),
             });
@@ -196,7 +257,10 @@ impl LibraMcpServer {
                 let task_obj = serde_json::json!({
                     "id": task.header().object_id().to_string(),
                     "title": task.title(),
-                    "status": task.status().as_str(),
+                    "status": latest_task_events
+                        .get(&task.header().object_id())
+                        .map(|event| task_status_label(event.kind()))
+                        .unwrap_or("draft"),
                     "goal_type": task.goal().map(|g| g.to_string()),
                     "constraints": task.constraints(),
                     "acceptance_criteria": task.acceptance_criteria(),
@@ -245,15 +309,21 @@ impl LibraMcpServer {
             let mut found_task = false;
             for (_id, hash) in tasks.into_iter().rev() {
                 if let Ok(task) = storage.get_json::<Task>(&hash).await {
-                    use git_internal::internal::object::task::TaskStatus;
-                    match task.status() {
-                        TaskStatus::Done | TaskStatus::Failed | TaskStatus::Cancelled => continue,
-                        _ => {}
+                    let status_kind = latest_task_events
+                        .get(&task.header().object_id())
+                        .map(|event| event.kind())
+                        .cloned()
+                        .unwrap_or(TaskEventKind::Created);
+                    if matches!(
+                        status_kind,
+                        TaskEventKind::Done | TaskEventKind::Failed | TaskEventKind::Cancelled
+                    ) {
+                        continue;
                     }
                     let task_obj = serde_json::json!({
                         "id": task.header().object_id().to_string(),
                         "title": task.title(),
-                        "status": task.status().as_str(),
+                        "status": task_status_label(&status_kind),
                         "goal_type": task.goal().map(|g| g.to_string()),
                         "constraints": task.constraints(),
                         "acceptance_criteria": task.acceptance_criteria(),

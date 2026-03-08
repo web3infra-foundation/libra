@@ -845,11 +845,13 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                                 .clone()
                                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
                             base_commit_sha: "0000000000000000000000000000000000000000".to_string(),
+                            plan_id: None,
                             status: Some("created".to_string()),
                             context_snapshot_id: None,
                             error: None,
                             agent_instances: None,
                             metrics_json: None,
+                            reason: None,
                             orchestrator_version: None,
                             tags: None,
                             external_ids: None,

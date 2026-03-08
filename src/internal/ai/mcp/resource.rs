@@ -27,12 +27,15 @@ use git_internal::internal::object::{
     context::{ContextItem, ContextItemKind, ContextSnapshot, SelectionStrategy},
     decision::{Decision, DecisionType},
     evidence::{Evidence, EvidenceKind},
-    intent::{Intent, IntentStatus},
-    patchset::{ApplyStatus, ChangeType, PatchSet, TouchedFile},
-    plan::{Plan, PlanStep, StepStatus},
+    intent::{Intent, IntentSpec},
+    intent_event::{IntentEvent, IntentEventKind},
+    patchset::{ChangeType, DiffFormat, PatchSet, TouchedFile},
+    plan::{Plan, PlanStep},
     provenance::Provenance,
-    run::{Run, RunStatus},
-    task::{GoalType, Task, TaskStatus},
+    run::Run,
+    run_event::{RunEvent, RunEventKind},
+    task::{GoalType, Task},
+    task_event::{TaskEvent, TaskEventKind},
     tool::{IoFootprint, ToolInvocation, ToolStatus},
     types::{ActorKind, ActorRef, ArtifactRef},
 };
@@ -44,6 +47,7 @@ use rmcp::{
     service::RequestContext,
     tool, tool_router,
 };
+use serde::Serialize;
 use uuid::Uuid;
 
 use crate::{
@@ -101,23 +105,207 @@ impl LibraMcpServer {
         }
         self.default_actor()
     }
+
+    async fn store_object<T>(&self, object: &T) -> Result<(), ErrorData>
+    where
+        T: Serialize + Send + Sync + Identifiable,
+    {
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
+
+        if let Some(history) = &self.intent_history_manager {
+            storage
+                .put_tracked(object, history)
+                .await
+                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        } else {
+            storage
+                .put_json(object)
+                .await
+                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        }
+        Ok(())
+    }
+
+    async fn latest_task_events(&self) -> Result<HashMap<Uuid, TaskEventKind>, ErrorData> {
+        let history = self
+            .intent_history_manager
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
+
+        let objects = history
+            .list_objects("task_event")
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        let mut latest = HashMap::<Uuid, TaskEvent>::new();
+        for (_id, hash) in objects {
+            if let Ok(event) = storage.get_json::<TaskEvent>(&hash).await {
+                latest
+                    .entry(event.task_id())
+                    .and_modify(|current| {
+                        if event.header().created_at() > current.header().created_at() {
+                            *current = event.clone();
+                        }
+                    })
+                    .or_insert(event);
+            }
+        }
+
+        Ok(latest
+            .into_iter()
+            .map(|(task_id, event)| (task_id, event.kind().clone()))
+            .collect())
+    }
+
+    async fn latest_run_events(&self) -> Result<HashMap<Uuid, RunEventKind>, ErrorData> {
+        let history = self
+            .intent_history_manager
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
+
+        let objects = history
+            .list_objects("run_event")
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        let mut latest = HashMap::<Uuid, RunEvent>::new();
+        for (_id, hash) in objects {
+            if let Ok(event) = storage.get_json::<RunEvent>(&hash).await {
+                latest
+                    .entry(event.run_id())
+                    .and_modify(|current| {
+                        if event.header().created_at() > current.header().created_at() {
+                            *current = event.clone();
+                        }
+                    })
+                    .or_insert(event);
+            }
+        }
+
+        Ok(latest
+            .into_iter()
+            .map(|(run_id, event)| (run_id, event.kind().clone()))
+            .collect())
+    }
 }
 
 /// Helper to convert local ArtifactParams to git_internal::ArtifactRef
 fn convert_artifact(p: ArtifactParams) -> Result<ArtifactRef, ErrorData> {
-    let mut artifact =
-        ArtifactRef::new(p.store, p.key).map_err(|e| ErrorData::invalid_params(e, None))?;
+    ArtifactRef::new(p.store, p.key).map_err(|e| ErrorData::invalid_params(e, None))
+}
 
-    artifact.set_content_type(p.content_type);
-    artifact.set_size_bytes(p.size_bytes);
+fn parse_uuid(value: &str, field: &str) -> Result<Uuid, ErrorData> {
+    let normalized = value.trim().trim_start_matches("uuid:");
+    normalized
+        .parse::<Uuid>()
+        .map_err(|e| ErrorData::invalid_params(format!("invalid {field}: {e}"), None))
+}
 
-    if let Some(hash_hex) = p.hash {
-        artifact = artifact
-            .with_hash_hex(hash_hex)
-            .map_err(|e| ErrorData::invalid_params(e, None))?;
+fn parse_optional_uuid(value: Option<String>, field: &str) -> Result<Option<Uuid>, ErrorData> {
+    value.map(|v| parse_uuid(&v, field)).transpose()
+}
+
+fn parse_uuid_vec(values: Option<Vec<String>>, field: &str) -> Result<Vec<Uuid>, ErrorData> {
+    values
+        .unwrap_or_default()
+        .into_iter()
+        .map(|v| parse_uuid(&v, field))
+        .collect()
+}
+
+fn parse_intent_spec(spec: String) -> IntentSpec {
+    match serde_json::from_str::<serde_json::Value>(&spec) {
+        Ok(value) => IntentSpec(value),
+        Err(_) => IntentSpec::from(spec),
     }
+}
 
-    Ok(artifact)
+fn parse_intent_event_kind(status: &str) -> Result<Option<IntentEventKind>, ErrorData> {
+    match status {
+        "draft" => Ok(None),
+        "active" | "analyzed" => Ok(Some(IntentEventKind::Analyzed)),
+        "completed" => Ok(Some(IntentEventKind::Completed)),
+        "cancelled" => Ok(Some(IntentEventKind::Cancelled)),
+        _ => Err(ErrorData::invalid_params("invalid intent status", None)),
+    }
+}
+
+fn intent_status_label(kind: Option<&IntentEventKind>) -> &'static str {
+    match kind {
+        Some(IntentEventKind::Analyzed) => "active",
+        Some(IntentEventKind::Completed) => "completed",
+        Some(IntentEventKind::Cancelled) => "cancelled",
+        Some(IntentEventKind::Other(_)) => "other",
+        None => "draft",
+    }
+}
+
+fn parse_task_event_kind(status: &str) -> Result<TaskEventKind, ErrorData> {
+    match status {
+        "draft" | "created" => Ok(TaskEventKind::Created),
+        "running" => Ok(TaskEventKind::Running),
+        "blocked" => Ok(TaskEventKind::Blocked),
+        "done" | "completed" => Ok(TaskEventKind::Done),
+        "failed" => Ok(TaskEventKind::Failed),
+        "cancelled" => Ok(TaskEventKind::Cancelled),
+        _ => Err(ErrorData::invalid_params("invalid task status", None)),
+    }
+}
+
+fn parse_run_event_kind(status: &str) -> Result<RunEventKind, ErrorData> {
+    match status {
+        "created" => Ok(RunEventKind::Created),
+        "patching" => Ok(RunEventKind::Patching),
+        "validating" => Ok(RunEventKind::Validating),
+        "completed" => Ok(RunEventKind::Completed),
+        "failed" => Ok(RunEventKind::Failed),
+        "checkpointed" => Ok(RunEventKind::Checkpointed),
+        _ => Err(ErrorData::invalid_params("invalid run status", None)),
+    }
+}
+
+fn task_status_label(kind: &TaskEventKind) -> &'static str {
+    match kind {
+        TaskEventKind::Created => "draft",
+        TaskEventKind::Running => "running",
+        TaskEventKind::Blocked => "blocked",
+        TaskEventKind::Done => "done",
+        TaskEventKind::Failed => "failed",
+        TaskEventKind::Cancelled => "cancelled",
+    }
+}
+
+fn run_status_label(kind: &RunEventKind) -> &'static str {
+    match kind {
+        RunEventKind::Created => "created",
+        RunEventKind::Patching => "patching",
+        RunEventKind::Validating => "validating",
+        RunEventKind::Completed => "completed",
+        RunEventKind::Failed => "failed",
+        RunEventKind::Checkpointed => "checkpointed",
+    }
+}
+
+fn parse_context_item_kind(kind: Option<&str>) -> ContextItemKind {
+    match kind.unwrap_or("file").trim() {
+        "file" => ContextItemKind::File,
+        "url" => ContextItemKind::Url,
+        "snippet" => ContextItemKind::Snippet,
+        "command" => ContextItemKind::Command,
+        "image" => ContextItemKind::Image,
+        other => ContextItemKind::Other(other.to_string()),
+    }
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -140,12 +328,20 @@ pub struct CreateIntentParams {
     pub structured_content: Option<String>,
     /// ID of the parent intent, forming the history chain.
     pub parent_id: Option<String>,
+    /// IDs of parent intents (merge-style intent revision).
+    pub parent_ids: Option<Vec<String>>,
+    /// Context frames used while deriving the structured intent spec.
+    pub analysis_context_frame_ids: Option<Vec<String>>,
     /// Status: "draft", "active", "completed", "discarded".
     pub status: Option<String>,
     /// Optional ID of the task derived from this intent.
     pub task_id: Option<String>,
     /// SHA of the code commit this intent resulted in (cross-reference to the code branch).
     pub commit_sha: Option<String>,
+    /// Optional human-readable lifecycle reason for emitted intent event.
+    pub reason: Option<String>,
+    /// Optional follow-up intent id for completed lifecycle transitions.
+    pub next_intent_id: Option<String>,
     /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
     pub actor_kind: Option<String>,
     /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
@@ -156,10 +352,14 @@ pub struct CreateIntentParams {
 pub struct UpdateIntentParams {
     /// ID of the intent to update.
     pub intent_id: String,
-    /// New status: "draft", "active", "completed", "discarded".
+    /// Lifecycle status transition ("active"/"analyzed", "completed", "cancelled").
     pub status: Option<String>,
-    /// SHA of the code commit this intent resulted in (cross-reference to the code branch).
+    /// Resulting commit SHA for lifecycle events that produced a commit.
     pub commit_sha: Option<String>,
+    /// Optional human-readable lifecycle reason.
+    pub reason: Option<String>,
+    /// Optional follow-up intent id.
+    pub next_intent_id: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -182,8 +382,14 @@ pub struct CreateTaskParams {
     pub dependencies: Option<Vec<String>>,
     /// ID of the intent this task belongs to.
     pub intent_id: Option<String>,
+    /// Optional parent task id when decomposing larger work.
+    pub parent_task_id: Option<String>,
+    /// Optional originating plan step id that spawned this task.
+    pub origin_step_id: Option<String>,
     /// Task status: "draft", "running", "done", "failed", "cancelled". Defaults to "draft".
     pub status: Option<String>,
+    /// Optional reason for the initial task lifecycle event.
+    pub reason: Option<String>,
     /// Search tags (key-value pairs)
     pub tags: Option<HashMap<String, String>>,
     /// External ID mapping
@@ -204,6 +410,8 @@ pub struct ListTasksParams {
 pub struct CreateRunParams {
     pub task_id: String,
     pub base_commit_sha: String,
+    /// Optional selected plan revision.
+    pub plan_id: Option<String>,
     pub status: Option<String>,
     pub context_snapshot_id: Option<String>,
     pub error: Option<String>,
@@ -211,6 +419,8 @@ pub struct CreateRunParams {
     pub agent_instances: Option<Vec<AgentInstanceParams>>,
     /// Arbitrary metrics JSON (e.g. token counts, timings).
     pub metrics_json: Option<String>,
+    /// Optional lifecycle reason for the initial run event.
+    pub reason: Option<String>,
     /// Orchestrator version (default: libra-builtin)
     pub orchestrator_version: Option<String>,
     /// Search tags (key-value pairs)
@@ -253,8 +463,11 @@ pub struct CreateContextSnapshotParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ContextItemParams {
+    pub kind: Option<String>,
     pub path: String,
-    pub content_hash: String,
+    pub preview: Option<String>,
+    pub content_hash: Option<String>,
+    pub blob_hash: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -264,6 +477,12 @@ pub struct ListContextSnapshotsParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct CreatePlanParams {
+    /// Owning intent id for this plan revision.
+    pub intent_id: String,
+    /// Parent plan revisions for replanning/merge workflows.
+    pub parent_plan_ids: Option<Vec<String>>,
+    /// Planning-time context frame ids.
+    pub context_frame_ids: Option<Vec<String>>,
     pub plan_version: Option<u32>,
     /// ID of the ContextPipeline used as basis for this plan.
     pub pipeline_id: Option<String>,
@@ -299,6 +518,7 @@ pub struct ListPlansParams {
 pub struct CreatePatchSetParams {
     pub run_id: String,
     pub generation: u32,
+    pub sequence: Option<u32>,
     pub base_commit_sha: String,
     pub touched_files: Option<Vec<TouchedFileParams>>,
     pub rationale: Option<String>,
@@ -390,6 +610,8 @@ pub struct CreateProvenanceParams {
     pub model: String,
     pub parameters_json: Option<String>,
     pub token_usage_json: Option<String>,
+    pub temperature: Option<f64>,
+    pub max_tokens: Option<u64>,
     /// Search tags (key-value pairs)
     pub tags: Option<HashMap<String, String>>,
     /// External ID mapping
@@ -450,70 +672,61 @@ impl LibraMcpServer {
         params: CreateIntentParams,
         actor: ActorRef,
     ) -> Result<CallToolResult, ErrorData> {
-        let storage = self
-            .storage
-            .as_ref()
-            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
+        let mut parent_ids = parse_uuid_vec(params.parent_ids, "parent_ids")?;
+        if let Some(parent_id) = parse_optional_uuid(params.parent_id, "parent_id")? {
+            parent_ids.push(parent_id);
+        }
+        parent_ids.sort_unstable();
+        parent_ids.dedup();
 
-        let parent_id = if let Some(pid) = params.parent_id {
-            Some(
-                pid.parse::<Uuid>()
-                    .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?,
-            )
+        let mut intent = if parent_ids.is_empty() {
+            Intent::new(actor.clone(), params.content)
+                .map_err(|e| ErrorData::internal_error(e, None))?
         } else {
-            None
+            Intent::new_revision_chain(actor.clone(), params.content, &parent_ids)
+                .map_err(|e| ErrorData::invalid_params(e, None))?
         };
 
-        // Note: git-internal 0.6.0 Intent does not support direct task_id link (it uses Plan).
-        // We ignore params.task_id for the Intent object itself.
-
-        let mut intent =
-            Intent::new(actor, params.content).map_err(|e| ErrorData::internal_error(e, None))?;
-
-        // Store the AI-analyzed structured content (e.g. canonical IntentSpec JSON)
-        if params.structured_content.is_some() {
-            intent.set_content(params.structured_content);
+        if let Some(spec) = params.structured_content {
+            intent.set_spec(Some(parse_intent_spec(spec)));
         }
 
-        if let Some(pid) = parent_id {
-            intent.set_parent(Some(pid));
+        let analysis_context_frames =
+            parse_uuid_vec(params.analysis_context_frame_ids, "analysis_context_frame_ids")?;
+        if !analysis_context_frames.is_empty() {
+            intent.set_analysis_context_frames(analysis_context_frames);
         }
 
-        if let Some(status) = params.status {
-            intent.set_status(match status.as_str() {
-                "draft" => IntentStatus::Draft,
-                "active" => IntentStatus::Active,
-                "completed" => IntentStatus::Completed,
-                "cancelled" => IntentStatus::Cancelled,
-                _ => return Err(ErrorData::invalid_params("invalid intent status", None)),
-            });
-        }
-        if let Some(sha) = params.commit_sha {
-            let normalized = crate::internal::ai::util::normalize_commit_anchor(&sha)
-                .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
-
-            use git_internal::internal::object::integrity::IntegrityHash;
-            let ih = normalized
-                .parse::<IntegrityHash>()
-                .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
-            intent.set_commit(Some(ih));
+        // 0.7 moved lifecycle/commit state into IntentEvent. Keep compatibility by
+        // emitting an initial lifecycle event from create_intent params.
+        let mut lifecycle_kind = match params.status.as_deref() {
+            Some(status) => parse_intent_event_kind(status)?,
+            None => None,
+        };
+        if lifecycle_kind.is_none() && params.commit_sha.is_some() {
+            lifecycle_kind = Some(IntentEventKind::Completed);
         }
 
-        let hash = storage
-            .put_json(&intent)
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        self.store_object(&intent).await?;
 
-        // Track in the unified AI history branch
-        let history = self
-            .intent_history_manager
-            .as_ref()
-            .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
-
-        history
-            .append(&intent.object_type(), &intent.object_id(), hash)
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        if let Some(kind) = lifecycle_kind {
+            let mut event = IntentEvent::new(actor, intent.header().object_id(), kind)
+                .map_err(|e| ErrorData::internal_error(e, None))?;
+            if let Some(sha) = params.commit_sha {
+                let normalized = crate::internal::ai::util::normalize_commit_anchor(&sha)
+                    .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+                let ih = normalized
+                    .parse()
+                    .map_err(|e: String| ErrorData::invalid_params(e, None))?;
+                event.set_result_commit(Some(ih));
+            }
+            event.set_reason(params.reason);
+            if let Some(next_intent_id) = parse_optional_uuid(params.next_intent_id, "next_intent_id")?
+            {
+                event.set_next_intent_id(Some(next_intent_id));
+            }
+            self.store_object(&event).await?;
+        }
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Intent created with ID: {}",
@@ -554,6 +767,24 @@ impl LibraMcpServer {
             }
         }
 
+        let mut latest_events = HashMap::<Uuid, IntentEvent>::new();
+        let event_objects = history
+            .list_objects("intent_event")
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        for (_id, hash) in event_objects {
+            if let Ok(event) = storage.get_json::<IntentEvent>(&hash).await {
+                latest_events
+                    .entry(event.intent_id())
+                    .and_modify(|current| {
+                        if event.header().created_at() > current.header().created_at() {
+                            *current = event.clone();
+                        }
+                    })
+                    .or_insert(event);
+            }
+        }
+
         // Sort by created_at descending
         intents.sort_by_key(|b| std::cmp::Reverse(b.header().created_at()));
 
@@ -562,11 +793,20 @@ impl LibraMcpServer {
             .into_iter()
             .take(limit)
             .map(|i| {
+                let lifecycle = latest_events
+                    .get(&i.header().object_id())
+                    .map(|event| event.kind());
+                let spec_preview = i
+                    .spec()
+                    .map(|spec| spec.0.to_string().replace('\n', " "))
+                    .unwrap_or_else(|| "-".to_string());
                 format!(
-                    "ID: {} | Status: {} | Content: {:.50}",
+                    "ID: {} | Status: {} | Prompt: {:.50} | Parents: {} | Spec: {:.50}",
                     i.header().object_id(),
-                    i.status().unwrap_or(&IntentStatus::Draft),
-                    i.content().unwrap_or("-").replace('\n', " ")
+                    intent_status_label(lifecycle),
+                    i.prompt().replace('\n', " "),
+                    i.parents().len(),
+                    spec_preview
                 )
             })
             .collect();
@@ -596,13 +836,9 @@ impl LibraMcpServer {
             .intent_history_manager
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
-        let storage = self
-            .storage
-            .as_ref()
-            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
-        // 1. Find the intent blob hash via history
-        let blob_hash = history
+        // Ensure the target intent exists.
+        history
             .get_object_hash("intent", &params.intent_id)
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?
@@ -610,58 +846,44 @@ impl LibraMcpServer {
                 ErrorData::invalid_params(format!("Intent not found: {}", params.intent_id), None)
             })?;
 
-        // 2. Load the existing intent
-        let mut intent: Intent = storage
-            .get_json(&blob_hash)
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-
-        // 3. Apply updates
-        let mut changed = false;
-
-        if let Some(status) = params.status {
-            intent.set_status(match status.as_str() {
-                "draft" => IntentStatus::Draft,
-                "active" => IntentStatus::Active,
-                "completed" => IntentStatus::Completed,
-                "cancelled" => IntentStatus::Cancelled,
-                _ => return Err(ErrorData::invalid_params("invalid intent status", None)),
-            });
-            changed = true;
+        let mut event_kind = match params.status.as_deref() {
+            Some(status) => parse_intent_event_kind(status)?,
+            None => None,
+        };
+        if event_kind.is_none() && params.commit_sha.is_some() {
+            event_kind = Some(IntentEventKind::Completed);
         }
 
+        let Some(event_kind) = event_kind else {
+            return Err(ErrorData::invalid_params(
+                "No lifecycle transition to record. Provide 'status' and/or 'commit_sha'.",
+                None,
+            ));
+        };
+
+        let intent_id = parse_uuid(&params.intent_id, "intent_id")?;
+        let actor = self.default_actor()?;
+        let mut event = IntentEvent::new(actor, intent_id, event_kind)
+            .map_err(|e| ErrorData::internal_error(e, None))?;
+
         if let Some(sha) = params.commit_sha {
-            use git_internal::internal::object::integrity::IntegrityHash;
             let normalized = crate::internal::ai::util::normalize_commit_anchor(&sha)
                 .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
             let ih = normalized
-                .parse::<IntegrityHash>()
-                .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
-            intent.set_commit(Some(ih));
-            changed = true;
+                .parse()
+                .map_err(|e: String| ErrorData::invalid_params(e, None))?;
+            event.set_result_commit(Some(ih));
+        }
+        event.set_reason(params.reason);
+        if let Some(next_intent_id) = parse_optional_uuid(params.next_intent_id, "next_intent_id")? {
+            event.set_next_intent_id(Some(next_intent_id));
         }
 
-        if !changed {
-            return Err(ErrorData::invalid_params(
-                "No fields to update. Provide at least 'status' or 'commit_sha'.",
-                None,
-            ));
-        }
-
-        // 4. Write updated intent blob and update history
-        let new_hash = storage
-            .put_json(&intent)
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-
-        history
-            .append(&intent.object_type(), &intent.object_id(), new_hash)
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        self.store_object(&event).await?;
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Intent {} updated successfully",
-            intent.header().object_id()
+            params.intent_id
         ))]))
     }
 
@@ -685,11 +907,6 @@ impl LibraMcpServer {
         params: CreateTaskParams,
         actor: ActorRef,
     ) -> Result<CallToolResult, ErrorData> {
-        let storage = self
-            .storage
-            .as_ref()
-            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
-
         let goal_type = if let Some(gt) = params.goal_type {
             use std::str::FromStr;
             Some(GoalType::from_str(&gt).map_err(|e| ErrorData::invalid_params(e, None))?)
@@ -697,7 +914,7 @@ impl LibraMcpServer {
             None
         };
 
-        let mut task = Task::new(actor, params.title, goal_type)
+        let mut task = Task::new(actor.clone(), params.title, goal_type)
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
         if let Some(desc) = params.description {
@@ -737,53 +954,29 @@ impl LibraMcpServer {
 
         // Set intent if provided
         if let Some(intent_id_str) = params.intent_id {
-            // Normalize ID (handle uuid: prefix if any)
-            let intent_uuid = if let Some(stripped) = intent_id_str.trim().strip_prefix("uuid:") {
-                stripped.parse::<Uuid>()
-            } else {
-                intent_id_str.trim().parse::<Uuid>()
-            }
-            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
-
-            task.set_intent(Some(intent_uuid));
+            task.set_intent(Some(parse_uuid(&intent_id_str, "intent_id")?));
         }
 
-        // Set task status if explicitly provided
-        if let Some(s) = params.status {
-            task.set_status(match s.as_str() {
-                "draft" => TaskStatus::Draft,
-                "running" => TaskStatus::Running,
-                "done" => TaskStatus::Done,
-                "failed" => TaskStatus::Failed,
-                "cancelled" => TaskStatus::Cancelled,
-                _ => return Err(ErrorData::invalid_params("invalid task status", None)),
-            });
+        if let Some(parent_task_id) = params.parent_task_id {
+            task.set_parent(Some(parse_uuid(&parent_task_id, "parent_task_id")?));
         }
 
-        // Set tags and external_ids
-        // TODO: Enable these when git-internal is updated to expose header_mut/tags
-        // if let Some(tags) = params.tags {
-        //     task.header_mut().tags_mut().extend(tags);
-        // }
-        // if let Some(eids) = params.external_ids {
-        //     task.header_mut().external_ids_mut().extend(eids);
-        // }
-
-        let hash = storage
-            .put_json(&task)
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-
-        if let Some(history) = &self.intent_history_manager {
-            history
-                .append(
-                    &task.header().object_type().to_string(),
-                    &task.header().object_id().to_string(),
-                    hash,
-                )
-                .await
-                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        if let Some(origin_step_id) = params.origin_step_id {
+            task.set_origin_step_id(Some(parse_uuid(&origin_step_id, "origin_step_id")?));
         }
+
+        self.store_object(&task).await?;
+
+        let initial_status = params
+            .status
+            .as_deref()
+            .map(parse_task_event_kind)
+            .transpose()?
+            .unwrap_or(TaskEventKind::Created);
+        let mut task_event = TaskEvent::new(actor, task.header().object_id(), initial_status)
+            .map_err(|e| ErrorData::internal_error(e, None))?;
+        task_event.set_reason(params.reason);
+        self.store_object(&task_event).await?;
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Task created with ID: {}",
@@ -817,6 +1010,7 @@ impl LibraMcpServer {
             .list_objects("task")
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let latest_status = self.latest_task_events().await?;
 
         let mut tasks_info = Vec::new();
         let limit = params.limit.unwrap_or(10);
@@ -827,9 +1021,14 @@ impl LibraMcpServer {
             }
             // Read task from storage to get title/status
             if let Ok(task) = storage.get_json::<Task>(&hash).await {
+                let status_kind = latest_status
+                    .get(&task.header().object_id())
+                    .cloned()
+                    .unwrap_or(TaskEventKind::Created);
+                let status = task_status_label(&status_kind);
                 // Filter by status if requested
                 if let Some(status_filter) = &params.status
-                    && task.status().as_str() != status_filter
+                    && status != status_filter
                 {
                     continue;
                 }
@@ -838,7 +1037,7 @@ impl LibraMcpServer {
                     "ID: {} | Title: {} | Status: {}",
                     task.header().object_id(),
                     task.title(),
-                    task.status()
+                    status
                 ));
             }
         }
@@ -874,98 +1073,40 @@ impl LibraMcpServer {
         params: CreateRunParams,
         actor: ActorRef,
     ) -> Result<CallToolResult, ErrorData> {
-        let storage = self
-            .storage
-            .as_ref()
-            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
-
-        // Handle both regular UUID and uuid:... format
-        let task_id_str = params.task_id.trim();
-        let task_id = if let Some(stripped) = task_id_str.strip_prefix("uuid:") {
-            stripped.parse::<Uuid>()
-        } else {
-            task_id_str.parse::<Uuid>()
-        }
-        .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+        let task_id = parse_uuid(&params.task_id, "task_id")?;
 
         let base_commit_sha =
             crate::internal::ai::util::normalize_commit_anchor(&params.base_commit_sha)
                 .map_err(|e| ErrorData::invalid_params(e, None))?;
 
-        let mut run = Run::new(actor, task_id, &base_commit_sha)
+        let mut run = Run::new(actor.clone(), task_id, &base_commit_sha)
             .map_err(|e| ErrorData::invalid_params(e, None))?;
 
-        if let Some(s) = params.status {
-            run.set_status(match s.as_str() {
-                "created" => RunStatus::Created,
-                "patching" => RunStatus::Patching,
-                "validating" => RunStatus::Validating,
-                "completed" => RunStatus::Completed,
-                "failed" => RunStatus::Failed,
-                _ => return Err(ErrorData::invalid_params("invalid run status", None)),
-            });
+        if let Some(plan_id) = params.plan_id {
+            run.set_plan(Some(parse_uuid(&plan_id, "plan_id")?));
         }
         if let Some(id) = params.context_snapshot_id {
-            // Handle both regular UUID and uuid:... format
-            let id_str = id.trim();
-            let parsed = if let Some(stripped) = id_str.strip_prefix("uuid:") {
-                stripped.parse::<Uuid>()
-            } else {
-                id_str.parse::<Uuid>()
-            }
-            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
-            run.set_snapshot(Some(parsed));
+            run.set_snapshot(Some(parse_uuid(&id, "context_snapshot_id")?));
         }
-        if let Some(err) = params.error {
-            run.set_error(Some(err));
-        }
+        self.store_object(&run).await?;
 
-        // Add agent instances - Note: git-internal 0.6.0 Run does not support agent instances
-        // We ignore params.agent_instances for now
-        /*
-        if let Some(instances) = params.agent_instances {
-            for ai in instances {
-                run.add_agent_instance(AgentInstance {
-                    role: ai.role,
-                    provider_route: ai.provider_route,
-                });
-            }
-        }
-        */
-
-        // Set metrics
+        // 0.7 moved run lifecycle/error/metrics into RunEvent.
+        let initial_status = params
+            .status
+            .as_deref()
+            .map(parse_run_event_kind)
+            .transpose()?
+            .unwrap_or(RunEventKind::Created);
+        let mut run_event = RunEvent::new(actor, run.header().object_id(), initial_status)
+            .map_err(|e| ErrorData::internal_error(e, None))?;
+        run_event.set_reason(params.reason);
+        run_event.set_error(params.error);
         if let Some(metrics_json) = params.metrics_json {
-            let v = serde_json::from_str(&metrics_json)
+            let metrics = serde_json::from_str(&metrics_json)
                 .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
-            run.set_metrics(Some(v));
+            run_event.set_metrics(Some(metrics));
         }
-
-        // Set tags, external_ids, orchestrator_version
-        // orchestrator_version is currently hardcoded in Run::new but we can't change it easily without a setter
-        // However, we can set tags/external_ids
-        // TODO: Enable these when git-internal is updated to expose header_mut/tags
-        // if let Some(tags) = params.tags {
-        //     run.header_mut().tags_mut().extend(tags);
-        // }
-        // if let Some(eids) = params.external_ids {
-        //     run.header_mut().external_ids_mut().extend(eids);
-        // }
-
-        let hash = storage
-            .put_json(&run)
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-
-        if let Some(history) = &self.intent_history_manager {
-            history
-                .append(
-                    &run.header().object_type().to_string(),
-                    &run.header().object_id().to_string(),
-                    hash,
-                )
-                .await
-                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-        }
+        self.store_object(&run_event).await?;
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Run created with ID: {}",
@@ -999,6 +1140,7 @@ impl LibraMcpServer {
             .list_objects("run")
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let latest_status = self.latest_run_events().await?;
 
         let mut out = Vec::new();
         let limit = params.limit.unwrap_or(10);
@@ -1007,8 +1149,13 @@ impl LibraMcpServer {
                 break;
             }
             if let Ok(run) = storage.get_json::<Run>(&hash).await {
+                let status_kind = latest_status
+                    .get(&run.header().object_id())
+                    .cloned()
+                    .unwrap_or(RunEventKind::Created);
+                let status = run_status_label(&status_kind);
                 if let Some(status_filter) = &params.status
-                    && run.status().as_str() != status_filter
+                    && status != status_filter
                 {
                     continue;
                 }
@@ -1016,7 +1163,7 @@ impl LibraMcpServer {
                     "ID: {} | Task: {} | Status: {}",
                     run.header().object_id(),
                     run.task(),
-                    run.status()
+                    status
                 ));
             }
         }
@@ -1076,14 +1223,19 @@ impl LibraMcpServer {
         if let Some(items) = params.items {
             for item in items {
                 use git_internal::hash::ObjectHash;
-                let mut ctx_item = ContextItem::new(ContextItemKind::File, item.path)
+                let mut ctx_item = ContextItem::new(
+                    parse_context_item_kind(item.kind.as_deref()),
+                    item.path,
+                )
                     .map_err(|e| ErrorData::invalid_params(e, None))?;
+                ctx_item.preview = item.preview;
 
-                let blob_hash = item
-                    .content_hash
-                    .parse::<ObjectHash>()
-                    .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
-                ctx_item.set_blob(Some(blob_hash));
+                if let Some(blob_hash) = item.blob_hash.or(item.content_hash) {
+                    let blob_hash = blob_hash
+                        .parse::<ObjectHash>()
+                        .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+                    ctx_item.set_blob(Some(blob_hash));
+                }
 
                 snapshot.add_item(ctx_item);
             }
@@ -1195,67 +1347,27 @@ impl LibraMcpServer {
         params: CreatePlanParams,
         actor: ActorRef,
     ) -> Result<CallToolResult, ErrorData> {
-        let storage = self
-            .storage
-            .as_ref()
-            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
+        let intent_id = parse_uuid(&params.intent_id, "intent_id")?;
+        let mut plan = Plan::new(actor, intent_id).map_err(|e| ErrorData::internal_error(e, None))?;
 
-        let mut plan = Plan::new(actor).map_err(|e| ErrorData::internal_error(e, None))?;
-
-        if let Some(pid) = params.pipeline_id {
-            let parsed = pid
-                .parse::<Uuid>()
-                .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
-            plan.set_pipeline(Some(parsed));
+        let parent_plan_ids = parse_uuid_vec(params.parent_plan_ids, "parent_plan_ids")?;
+        if !parent_plan_ids.is_empty() {
+            plan.set_parents(parent_plan_ids);
         }
-        if let Some((start, end)) = params.fwindow {
-            plan.set_fwindow(Some((start, end)));
+        let context_frame_ids = parse_uuid_vec(params.context_frame_ids, "context_frame_ids")?;
+        if !context_frame_ids.is_empty() {
+            plan.set_context_frames(context_frame_ids);
         }
 
         if let Some(steps) = params.steps {
             for step in steps {
-                let status = match step.status.as_deref().unwrap_or("pending") {
-                    "pending" => StepStatus::Pending,
-                    "in_progress" => StepStatus::Progressing,
-                    "completed" => StepStatus::Completed,
-                    "failed" => StepStatus::Failed,
-                    "skipped" => StepStatus::Skipped,
-                    _ => return Err(ErrorData::invalid_params("invalid plan step status", None)),
-                };
-
                 let mut ps = PlanStep::new(step.description);
                 ps.set_inputs(step.inputs);
-                ps.set_outputs(step.outputs);
                 ps.set_checks(step.checks);
-                ps.set_status(status);
-
                 plan.add_step(ps);
             }
         }
-
-        // TODO: Enable these when git-internal is updated to expose header_mut/tags
-        // if let Some(tags) = params.tags {
-        //     plan.header_mut().tags_mut().extend(tags);
-        // }
-        // if let Some(eids) = params.external_ids {
-        //     plan.header_mut().external_ids_mut().extend(eids);
-        // }
-
-        let hash = storage
-            .put_json(&plan)
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-
-        if let Some(history) = &self.intent_history_manager {
-            history
-                .append(
-                    &plan.header().object_type().to_string(),
-                    &plan.header().object_id().to_string(),
-                    hash,
-                )
-                .await
-                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-        }
+        self.store_object(&plan).await?;
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Plan created with ID: {}",
@@ -1334,15 +1446,7 @@ impl LibraMcpServer {
         params: CreatePatchSetParams,
         actor: ActorRef,
     ) -> Result<CallToolResult, ErrorData> {
-        let storage = self
-            .storage
-            .as_ref()
-            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
-
-        let run_id = params
-            .run_id
-            .parse::<Uuid>()
-            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+        let run_id = parse_uuid(&params.run_id, "run_id")?;
 
         let base_commit_sha =
             crate::internal::ai::util::normalize_commit_anchor(&params.base_commit_sha)
@@ -1350,6 +1454,7 @@ impl LibraMcpServer {
 
         let mut patchset = PatchSet::new(actor, run_id, &base_commit_sha)
             .map_err(|e| ErrorData::invalid_params(e, None))?;
+        patchset.set_sequence(params.sequence.unwrap_or(params.generation));
 
         if let Some(files) = params.touched_files {
             for f in files {
@@ -1367,44 +1472,27 @@ impl LibraMcpServer {
             }
         }
         patchset.set_rationale(params.rationale);
-        if let Some(s) = params.apply_status {
-            patchset.set_apply_status(match s.as_str() {
-                "proposed" => ApplyStatus::Proposed,
-                "applied" => ApplyStatus::Applied,
-                "rejected" => ApplyStatus::Rejected,
-                _ => return Err(ErrorData::invalid_params("invalid apply_status", None)),
-            });
-        }
         if let Some(artifact_params) = params.diff_artifact {
             let artifact = convert_artifact(artifact_params)?;
             patchset.set_artifact(Some(artifact));
         }
 
-        // TODO: Set diff_format when git-internal supports it
-
-        // TODO: Enable these when git-internal is updated to expose header_mut/tags
-        // if let Some(tags) = params.tags {
-        //     patchset.header_mut().tags_mut().extend(tags);
-        // }
-        // if let Some(eids) = params.external_ids {
-        //     patchset.header_mut().external_ids_mut().extend(eids);
-        // }
-
-        let hash = storage
-            .put_json(&patchset)
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-
-        if let Some(history) = &self.intent_history_manager {
-            history
-                .append(
-                    &patchset.header().object_type().to_string(),
-                    &patchset.header().object_id().to_string(),
-                    hash,
-                )
-                .await
-                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        if let Some(format) = params.diff_format {
+            match format.as_str() {
+                "unified_diff" => {}
+                "git_diff" => {
+                    if patchset.format() != &DiffFormat::GitDiff {
+                        return Err(ErrorData::invalid_params(
+                            "git_diff format is not writable in git-internal 0.7.0 yet",
+                            None,
+                        ));
+                    }
+                }
+                _ => return Err(ErrorData::invalid_params("invalid diff_format", None)),
+            }
         }
+
+        self.store_object(&patchset).await?;
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "PatchSet created with ID: {}",
@@ -1447,11 +1535,12 @@ impl LibraMcpServer {
             }
             if let Ok(ps) = storage.get_json::<PatchSet>(&hash).await {
                 out.push(format!(
-                    "ID: {} | Run: {} | Files: {} | Status: {:?}",
+                    "ID: {} | Run: {} | Seq: {} | Files: {} | Format: {:?}",
                     ps.header().object_id(),
                     ps.run(),
+                    ps.sequence(),
                     ps.touched().len(),
-                    ps.apply_status(),
+                    ps.format(),
                 ));
             }
         }
@@ -1764,52 +1853,35 @@ impl LibraMcpServer {
         params: CreateProvenanceParams,
         actor: ActorRef,
     ) -> Result<CallToolResult, ErrorData> {
-        let storage = self
-            .storage
-            .as_ref()
-            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
-
-        let run_id = params
-            .run_id
-            .parse::<Uuid>()
-            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+        let run_id = parse_uuid(&params.run_id, "run_id")?;
 
         let mut prov = Provenance::new(actor, run_id, params.provider, params.model)
             .map_err(|e| ErrorData::internal_error(e, None))?;
-        if let Some(parameters_json) = params.parameters_json {
-            let v = serde_json::from_str(&parameters_json)
-                .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
-            prov.set_parameters(Some(v));
-        }
+        let mut parameters = if let Some(parameters_json) = params.parameters_json {
+            Some(
+                serde_json::from_str(&parameters_json)
+                    .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?,
+            )
+        } else {
+            None
+        };
         if let Some(token_usage_json) = params.token_usage_json {
-            let v = serde_json::from_str(&token_usage_json)
+            let token_usage = serde_json::from_str(&token_usage_json)
                 .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
-            prov.set_token_usage(Some(v));
+            let mut root = parameters.unwrap_or_else(|| serde_json::json!({}));
+            if !root.is_object() {
+                root = serde_json::json!({ "raw_parameters": root });
+            }
+            if let Some(obj) = root.as_object_mut() {
+                obj.insert("token_usage".to_string(), token_usage);
+            }
+            parameters = Some(root);
         }
+        prov.set_parameters(parameters);
+        prov.set_temperature(params.temperature);
+        prov.set_max_tokens(params.max_tokens);
 
-        // TODO: Enable these when git-internal is updated to expose header_mut/tags
-        // if let Some(tags) = params.tags {
-        //     prov.header_mut().tags_mut().extend(tags);
-        // }
-        // if let Some(eids) = params.external_ids {
-        //     prov.header_mut().external_ids_mut().extend(eids);
-        // }
-
-        let hash = storage
-            .put_json(&prov)
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-
-        if let Some(history) = &self.intent_history_manager {
-            history
-                .append(
-                    &prov.header().object_type().to_string(),
-                    &prov.header().object_id().to_string(),
-                    hash,
-                )
-                .await
-                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-        }
+        self.store_object(&prov).await?;
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Provenance created with ID: {}",
