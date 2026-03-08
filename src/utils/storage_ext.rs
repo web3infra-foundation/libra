@@ -256,7 +256,7 @@ mod tests {
         let artifact = storage.put_artifact(content).await.unwrap();
 
         assert_eq!(artifact.store(), "libra");
-        assert!(artifact.hash().is_some());
+        assert!(!artifact.key().is_empty());
 
         // Verify retrieval using standard storage get (simulating Artifact resolution)
         let key_hash = ObjectHash::from_str(artifact.key()).unwrap();

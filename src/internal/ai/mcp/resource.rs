@@ -14,13 +14,15 @@
 //!   All `create_*` tools accept optional `actor_kind` (`"human"`, `"agent"`, `"system"`,
 //!   `"mcp_client"`) and `actor_id` parameters to identify the creator. When omitted, the
 //!   actor is derived from the MCP client handshake or defaults to `mcp_client("mcp-user")`.
-//! - `list_*` returns summaries with key fields (ID, status, title, etc.) for quick browsing.
+//! - Status is event-sourced in git-internal 0.7.0 (`intent_event`, `task_event`, `run_event`).
+//!   `list_intents`/`list_tasks`/`list_runs` reconstruct status from latest events.
 //! - To fetch the full JSON payload, read the resource: `libra://object/{object_id}`.
 //!
 //! # object_type (history directory name)
 //!
 //! List tools call `HistoryManager::list_objects(object_type)` using the following types:
-//! `task`, `run`, `snapshot`, `plan`, `patchset`, `evidence`, `invocation`, `provenance`, `decision`, `intent`.
+//! `task`, `task_event`, `run`, `run_event`, `snapshot`, `plan`, `patchset`, `evidence`,
+//! `invocation`, `provenance`, `decision`, `intent`, `intent_event`.
 use std::collections::HashMap;
 
 use git_internal::internal::object::{
@@ -483,10 +485,11 @@ pub struct CreatePlanParams {
     pub parent_plan_ids: Option<Vec<String>>,
     /// Planning-time context frame ids.
     pub context_frame_ids: Option<Vec<String>>,
+    /// Deprecated compatibility field (ignored in 0.7.0 object model).
     pub plan_version: Option<u32>,
-    /// ID of the ContextPipeline used as basis for this plan.
+    /// Deprecated compatibility field from pre-0.7 pipeline model (ignored).
     pub pipeline_id: Option<String>,
-    /// Visible frame window (start, end) into the pipeline.
+    /// Deprecated compatibility field from pre-0.7 pipeline model (ignored).
     pub fwindow: Option<(u32, u32)>,
     pub steps: Option<Vec<PlanStepParams>>,
     /// Search tags (key-value pairs)
@@ -522,6 +525,7 @@ pub struct CreatePatchSetParams {
     pub base_commit_sha: String,
     pub touched_files: Option<Vec<TouchedFileParams>>,
     pub rationale: Option<String>,
+    /// Deprecated compatibility field; apply/reject now lives in Decision/RunEvent.
     pub apply_status: Option<String>,
     pub diff_format: Option<String>,
     pub diff_artifact: Option<ArtifactParams>,
@@ -609,6 +613,7 @@ pub struct CreateProvenanceParams {
     pub provider: String,
     pub model: String,
     pub parameters_json: Option<String>,
+    /// Compatibility payload: folded into `parameters.token_usage`.
     pub token_usage_json: Option<String>,
     pub temperature: Option<f64>,
     pub max_tokens: Option<u64>,

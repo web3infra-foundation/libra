@@ -360,7 +360,9 @@ impl ServerHandler for LibraMcpServer {
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 ..Default::default()
             },
-            instructions: Some("Libra MCP Server provides access to AI workflow objects (Task, Run, Plan) and version control history.".to_string()),
+            instructions: Some(
+                "Libra MCP Server exposes AI workflow objects and event logs (intent/task/run lifecycle events) backed by git-internal 0.7.0.".to_string(),
+            ),
         }
     }
 

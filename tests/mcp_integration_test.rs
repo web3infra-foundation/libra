@@ -5,7 +5,7 @@ use git_internal::internal::object::{
     decision::{Decision, DecisionType},
     evidence::{Evidence, EvidenceKind},
     patchset::{ChangeType, PatchSet, TouchedFile},
-    plan::{Plan, PlanStep, StepStatus},
+    plan::{Plan, PlanStep},
     provenance::Provenance,
     tool::{ToolInvocation, ToolStatus},
     types::ActorRef,
@@ -94,7 +94,10 @@ async fn test_mcp_integration_create_and_read_task() {
         requested_by_kind: None,
         requested_by_id: None,
         dependencies: None,
+        parent_task_id: None,
+        origin_step_id: None,
         status: None,
+        reason: None,
         tags: None,
         external_ids: None,
         actor_kind: None,
@@ -249,9 +252,8 @@ async fn test_list_plans_with_summary() {
     let actor = ActorRef::human("tester").unwrap();
     let _run_id = Uuid::new_v4();
 
-    let mut plan = Plan::new(actor).unwrap();
-    let mut step = PlanStep::new("step 1");
-    step.set_status(StepStatus::Pending);
+    let mut plan = Plan::new(actor, Uuid::new_v4()).unwrap();
+    let step = PlanStep::new("step 1");
     plan.add_step(step);
     storage.put_tracked(&plan, &history_manager).await.unwrap();
 
@@ -287,7 +289,7 @@ async fn test_list_patchsets_with_summary() {
     let text = val.get("text").unwrap().as_str().unwrap();
 
     assert!(text.contains("Files: 1"));
-    assert!(text.contains("Status:"));
+    assert!(text.contains("Format:"));
 }
 
 #[tokio::test]
@@ -397,7 +399,10 @@ async fn test_create_task_with_explicit_human_actor() {
         requested_by_kind: None,
         requested_by_id: None,
         dependencies: None,
+        parent_task_id: None,
+        origin_step_id: None,
         status: None,
+        reason: None,
         tags: None,
         external_ids: None,
         actor_kind: Some("human".to_string()),
@@ -448,7 +453,10 @@ async fn test_create_task_with_agent_actor() {
         requested_by_kind: None,
         requested_by_id: None,
         dependencies: None,
+        parent_task_id: None,
+        origin_step_id: None,
         status: None,
+        reason: None,
         tags: None,
         external_ids: None,
         actor_kind: Some("agent".to_string()),
@@ -477,7 +485,10 @@ async fn test_create_task_default_actor_is_mcp() {
         requested_by_kind: None,
         requested_by_id: None,
         dependencies: None,
+        parent_task_id: None,
+        origin_step_id: None,
         status: None,
+        reason: None,
         tags: None,
         external_ids: None,
         actor_kind: None,

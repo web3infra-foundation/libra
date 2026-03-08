@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use git_internal::internal::object::{
-    intent::{Intent, IntentStatus},
+    intent::Intent,
+    intent_event::{IntentEvent, IntentEventKind},
     task::Task,
     types::ActorRef,
 };
@@ -70,12 +71,13 @@ async fn test_intent_flow() {
         .unwrap();
     println!("Stored Root Intent: {}", root_hash);
 
-    // 4. Create Child Intent
-    let mut child_intent =
-        Intent::new(actor.clone(), "Sub-goal: Move Intent struct to libra").expect("child intent");
-
-    child_intent.set_parent(Some(root_intent.header().object_id()));
-    child_intent.set_status(IntentStatus::Active);
+    // 4. Create Child Intent (revision linked to root)
+    let child_intent = Intent::new_revision_from(
+        actor.clone(),
+        "Sub-goal: Move Intent struct to libra",
+        &root_intent,
+    )
+    .expect("child intent");
 
     let child_hash = storage
         .put_tracked(&child_intent, &ai_history)
@@ -83,19 +85,32 @@ async fn test_intent_flow() {
         .unwrap();
     println!("Stored Child Intent: {}", child_hash);
 
+    // 4.1 Record lifecycle via IntentEvent (0.7 model)
+    let mut child_event = IntentEvent::new(
+        actor.clone(),
+        child_intent.header().object_id(),
+        IntentEventKind::Analyzed,
+    )
+    .expect("intent event");
+    child_event.set_reason(Some("analysis completed".to_string()));
+    let child_event_hash = storage
+        .put_tracked(&child_event, &ai_history)
+        .await
+        .unwrap();
+    println!("Stored Child IntentEvent: {}", child_event_hash);
+
     // 5. Verify Retrieval
     let loaded_child: Intent = storage.get_json(&child_hash).await.unwrap();
     assert_eq!(
         loaded_child.header().object_id(),
         child_intent.header().object_id()
     );
-    assert_eq!(
-        loaded_child.parent(),
-        Some(root_intent.header().object_id())
-    );
+    assert_eq!(loaded_child.parents(), &[root_intent.header().object_id()]);
     assert_eq!(loaded_child.prompt(), child_intent.prompt());
     assert_eq!(loaded_child.header().created_by().id(), "jackie");
-    assert_eq!(loaded_child.status(), Some(&IntentStatus::Active));
+    let loaded_event: IntentEvent = storage.get_json(&child_event_hash).await.unwrap();
+    assert_eq!(loaded_event.intent_id(), child_intent.header().object_id());
+    assert_eq!(loaded_event.kind(), &IntentEventKind::Analyzed);
 
     // 6. Create a Task object on the SAME branch
     let task = Task::new(ActorRef::human("me").unwrap(), "Main Task", None).unwrap();
@@ -105,6 +120,12 @@ async fn test_intent_flow() {
     // 7. Verify both Intent and Task coexist on the single AI branch
     let intents = ai_history.list_objects("intent").await.unwrap();
     assert_eq!(intents.len(), 2, "Should have 2 intents on AI branch");
+    let intent_events = ai_history.list_objects("intent_event").await.unwrap();
+    assert_eq!(
+        intent_events.len(),
+        1,
+        "Should have 1 intent event on AI branch"
+    );
 
     let tasks = ai_history.list_objects("task").await.unwrap();
     assert_eq!(tasks.len(), 1, "Should have 1 task on same AI branch");

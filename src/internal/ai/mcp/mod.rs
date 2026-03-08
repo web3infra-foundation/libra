@@ -4,15 +4,18 @@
 //!
 //! | Tool Name | Description |
 //! |-----------|-------------|
+//! | `create_intent` | Create an immutable Intent revision. Input: `CreateIntentParams`. Output: Intent ID. |
+//! | `update_intent` | Append an Intent lifecycle event (analyzed/completed/cancelled). Input: `UpdateIntentParams`. |
+//! | `list_intents` | List recent Intent revisions with event-derived status. |
 //! | `create_task` | Create a new AI Task. Input: `CreateTaskParams`. Output: Task ID. |
-//! | `list_tasks` | List recent Tasks. Input: `ListTasksParams`. Output: List of task summaries. |
+//! | `list_tasks` | List recent Tasks with status reconstructed from `task_event`. |
 //! | `create_run` | Create a new Run for a Task. Input: `CreateRunParams`. Output: Run ID. |
-//! | `list_runs` | List recent Runs. Input: `ListRunsParams`. Output: List of run summaries. |
+//! | `list_runs` | List recent Runs with status reconstructed from `run_event`. |
 //! | `create_context_snapshot` | Create a Context Snapshot. Input: `CreateContextSnapshotParams`. Output: Snapshot ID. |
 //! | `list_context_snapshots` | List recent Snapshots. Input: `ListContextSnapshotsParams`. Output: List of summaries. |
-//! | `create_plan` | Create a Plan for a Run. Input: `CreatePlanParams`. Output: Plan ID. |
+//! | `create_plan` | Create a Plan for an Intent revision. Input: `CreatePlanParams`. Output: Plan ID. |
 //! | `list_plans` | List recent Plans. Input: `ListPlansParams`. Output: List of plan summaries. |
-//! | `create_patchset` | Create a PatchSet (proposed changes). Input: `CreatePatchSetParams`. Output: PatchSet ID. |
+//! | `create_patchset` | Create a PatchSet candidate (sequence + touched files + artifact). |
 //! | `list_patchsets` | List recent PatchSets. Input: `ListPatchSetsParams`. Output: List of summaries. |
 //! | `create_evidence` | Create Evidence (test/lint results). Input: `CreateEvidenceParams`. Output: Evidence ID. |
 //! | `list_evidences` | List recent Evidence. Input: `ListEvidencesParams`. Output: List of summaries. |
@@ -22,8 +25,6 @@
 //! | `list_provenances` | List recent Provenance records. Input: `ListProvenancesParams`. Output: List of summaries. |
 //! | `create_decision` | Record a Decision (Commit/Checkpoint). Input: `CreateDecisionParams`. Output: Decision ID. |
 //! | `list_decisions` | List recent Decisions. Input: `ListDecisionsParams`. Output: List of summaries. |
-//! | `create_intent` | Create a new Intent (Prompt). Input: `CreateIntentParams`. Output: Intent ID. |
-//! | `list_intents` | List recent Intents. Input: `ListIntentsParams`. Output: List of intent summaries. |
 //!
 //! See `resource.rs` for detailed parameter structures.
 
