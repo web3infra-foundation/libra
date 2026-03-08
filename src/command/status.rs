@@ -26,6 +26,7 @@ use crate::{
     command::calc_file_blob_hash,
     internal::{config::Config, head::Head},
     utils::{
+        error::{CliError, CliResult},
         ignore::IgnorePolicy,
         object_ext::{CommitExt, TreeExt},
         path, util,
@@ -758,6 +759,21 @@ fn format_colored_status(
 
 pub async fn execute(args: StatusArgs) {
     execute_to(args, &mut std::io::stdout()).await
+}
+
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Computes staged, unstaged, and untracked sets then
+/// prints a concise summary via [`execute_to`].
+///
+/// # Known limitations
+///
+/// `execute_to()` handles errors internally with `unwrap()` and never propagates
+/// them, so this wrapper always returns `Ok(())` even when the status fails.
+// TODO: refactor execute_to() to return CliResult so errors propagate to callers.
+pub async fn execute_safe(args: StatusArgs) -> CliResult<()> {
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
+    execute_to(args, &mut std::io::stdout()).await;
+    Ok(())
 }
 
 /// Check if the working tree is clean.

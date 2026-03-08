@@ -22,15 +22,17 @@ async fn configure_identity_for_test() {
 async fn test_check_branch() {
     println!("\n\x1b[1mTest check_branch function.\x1b[0m");
 
-    // For non-existent branches, it should return None
-    assert_eq!(check_branch("non_existent_branch").await, None);
-    // For the current branch, it should return None
+    // For non-existent branches, it should return Err
+    assert!(check_branch("non_existent_branch").await.is_err());
+    // For the current branch, it should return Ok(None)
     assert_eq!(
-        check_branch(&get_current_branch().await.unwrap_or("main".to_string())).await,
+        check_branch(&get_current_branch().await.unwrap_or("main".to_string()))
+            .await
+            .unwrap(),
         None
     );
-    // For other existing branches, it should return Some(false)
-    assert_eq!(check_branch("new_branch_01").await, Some(false));
+    // For other existing branches, it should return Ok(Some(false))
+    assert_eq!(check_branch("new_branch_01").await.unwrap(), Some(false));
 }
 
 async fn test_switch_branch() {
@@ -38,7 +40,7 @@ async fn test_switch_branch() {
 
     let show_all_branches = async || {
         // Use the list_branches function of the branch module to list all current local branches
-        branch::list_branches(branch::BranchListMode::Local, &[], &[]).await;
+        let _ = branch::list_branches(branch::BranchListMode::Local, &[], &[]).await;
         println!(
             "Current branch is '{}'.",
             get_current_branch()
@@ -50,11 +52,11 @@ async fn test_switch_branch() {
 
     // Switch to the new branch and back
     show_all_branches().await;
-    switch_branch("new_branch_01").await;
+    switch_branch("new_branch_01").await.unwrap();
     show_all_branches().await;
-    switch_branch("new_branch_02").await;
+    switch_branch("new_branch_02").await.unwrap();
     show_all_branches().await;
-    switch_branch("main").await;
+    switch_branch("main").await.unwrap();
     show_all_branches().await;
 }
 
@@ -101,7 +103,9 @@ async fn test_checkout_module_functions() {
         no_verify: false,
         author: None,
     };
-    commit::execute(commit_args).await;
+    commit::execute_safe(commit_args)
+        .await
+        .expect("initial commit should succeed");
 
     // Create tow new branch
     branch::create_branch(String::from("new_branch_01"), get_current_branch().await).await;
@@ -151,7 +155,9 @@ async fn test_checkout_module_functions_sha256() {
         no_verify: false,
         author: None,
     };
-    commit::execute(commit_args).await;
+    commit::execute_safe(commit_args)
+        .await
+        .expect("initial commit should succeed");
 
     // Ensure HEAD commit uses SHA-256 (64 hex chars)
     let head_commit = Head::current_commit().await.expect("HEAD missing");
@@ -191,7 +197,7 @@ async fn checkout_restore_rejects_sha1_hash_in_sha256_repo() {
 
     // create and commit a file
     test::ensure_file("foo.txt", Some("v1"));
-    add::execute(AddArgs {
+    add::execute_safe(AddArgs {
         pathspec: vec!["foo.txt".into()],
         all: false,
         update: false,
@@ -201,8 +207,9 @@ async fn checkout_restore_rejects_sha1_hash_in_sha256_repo() {
         dry_run: false,
         ignore_errors: false,
     })
-    .await;
-    commit::execute(commit::CommitArgs {
+    .await
+    .expect("add should succeed");
+    commit::execute_safe(commit::CommitArgs {
         message: Some("init".into()),
         file: None,
         allow_empty: false,
@@ -215,13 +222,14 @@ async fn checkout_restore_rejects_sha1_hash_in_sha256_repo() {
         no_verify: false,
         author: None,
     })
-    .await;
+    .await
+    .expect("commit should succeed");
 
     // modify the file
     test::ensure_file("foo.txt", Some("v2"));
 
     // try to restore using a SHA-1 length hash in a SHA-256 repo; should no-op
-    restore::execute(RestoreArgs {
+    let _ = restore::execute_safe(RestoreArgs {
         worktree: true,
         staged: true,
         source: Some("4b825dc642cb6eb9a060e54bf8d69288fbee4904".into()),
@@ -231,4 +239,160 @@ async fn checkout_restore_rejects_sha1_hash_in_sha256_repo() {
 
     let content = std::fs::read_to_string(util::working_dir().join("foo.txt")).unwrap();
     assert_eq!(content, "v2", "invalid hash should not restore file");
+}
+
+/// Verifies that `checkout -b` returns a [`CliError`] when the worktree has
+/// uncommitted staged changes that would be overwritten.
+#[tokio::test]
+#[serial]
+async fn test_checkout_new_branch_with_dirty_worktree_returns_error() {
+    use clap::Parser;
+    use libra::{
+        command::{
+            add::{self, AddArgs},
+            checkout::{self, CheckoutArgs},
+            commit,
+        },
+        internal::config::Config,
+        utils::test::{self, ChangeDirGuard},
+    };
+
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    Config::insert("user", None, "name", "Checkout Tester").await;
+    Config::insert("user", None, "email", "checkout@test.com").await;
+
+    // Create initial commit so HEAD exists
+    test::ensure_file("base.txt", Some("base"));
+    add::execute_safe(AddArgs {
+        pathspec: vec!["base.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        verbose: false,
+        force: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await
+    .expect("add should succeed");
+    commit::execute_safe(commit::CommitArgs {
+        message: Some("initial".into()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    })
+    .await
+    .expect("initial commit should succeed");
+
+    // Stage a change without committing — working tree is "dirty"
+    test::ensure_file("dirty.txt", Some("uncommitted"));
+    add::execute_safe(AddArgs {
+        pathspec: vec!["dirty.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        verbose: false,
+        force: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await
+    .expect("add dirty file should succeed");
+
+    let result =
+        checkout::execute_safe(CheckoutArgs::try_parse_from(["checkout", "-b", "new"]).unwrap())
+            .await;
+    assert!(
+        result.is_err(),
+        "checkout should fail when worktree is dirty"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.message().contains("local changes"),
+        "error should mention local changes, got: {}",
+        err.message()
+    );
+}
+
+/// Checking out the current branch should be a no-op even when the worktree
+/// is dirty (Git prints "Already on ...").
+#[tokio::test]
+#[serial]
+async fn test_checkout_current_branch_with_dirty_worktree_succeeds() {
+    use clap::Parser;
+    use libra::{
+        command::{
+            add::{self, AddArgs},
+            checkout::{self, CheckoutArgs},
+            commit,
+        },
+        internal::config::Config,
+        utils::test::{self, ChangeDirGuard},
+    };
+
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    Config::insert("user", None, "name", "Checkout Tester").await;
+    Config::insert("user", None, "email", "checkout@test.com").await;
+
+    test::ensure_file("base.txt", Some("base"));
+    add::execute_safe(AddArgs {
+        pathspec: vec!["base.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        verbose: false,
+        force: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await
+    .expect("add should succeed");
+    commit::execute_safe(commit::CommitArgs {
+        message: Some("initial".into()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    })
+    .await
+    .expect("initial commit should succeed");
+
+    // Dirty the worktree with unstaged content.
+    test::ensure_file("base.txt", Some("base\nlocal change"));
+
+    let current = get_current_branch()
+        .await
+        .expect("current branch should be present");
+    let args = CheckoutArgs::try_parse_from(["checkout", current.as_str()]).unwrap();
+    let result = checkout::execute_safe(args).await;
+    assert!(
+        result.is_ok(),
+        "checkout current branch should not fail on dirty worktree"
+    );
+
+    let after = get_current_branch()
+        .await
+        .expect("current branch should still be present");
+    assert_eq!(after, current, "branch should remain unchanged");
+    let content = std::fs::read_to_string("base.txt").unwrap();
+    assert_eq!(content, "base\nlocal change");
 }

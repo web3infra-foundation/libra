@@ -239,7 +239,19 @@ impl LocalClient {
 
                 let commits = stream::iter(want)
                     .then(|branch_hash| async move {
-                        get_reachable_commits(branch_hash.to_string(), depth).await
+                        // TODO: `unwrap_or_default` silently swallows storage
+                        // errors. Propagate once the surrounding pipeline
+                        // supports fallible streams.
+                        get_reachable_commits(branch_hash.to_string(), depth)
+                            .await
+                            .unwrap_or_else(|e| {
+                                tracing::warn!(
+                                    %branch_hash,
+                                    error = %e,
+                                    "failed to walk reachable commits; treating as empty"
+                                );
+                                Vec::new()
+                            })
                     })
                     .flat_map(stream::iter)
                     .collect::<Vec<Commit>>()

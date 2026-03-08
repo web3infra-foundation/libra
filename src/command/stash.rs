@@ -10,7 +10,6 @@ use std::{
     str::FromStr,
 };
 
-use colored::Colorize;
 use git_internal::{
     errors::GitError,
     hash::ObjectHash,
@@ -32,10 +31,24 @@ use crate::{
         restore_working_directory_from_tree,
     },
     internal::head::Head,
-    utils::{object, object_ext::TreeExt, tree, util},
+    utils::{
+        error::{CliError, CliResult},
+        object,
+        object_ext::TreeExt,
+        tree, util,
+    },
 };
 
 pub async fn execute(stash_cmd: Stash) {
+    if let Err(e) = execute_safe(stash_cmd).await {
+        eprintln!("{}", e.render());
+    }
+}
+
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Dispatches to stash sub-commands (push, pop, list,
+/// apply, drop).
+pub async fn execute_safe(stash_cmd: Stash) -> CliResult<()> {
     let result = match stash_cmd {
         Stash::Push { message } => push(message).await,
         Stash::Pop { stash } => pop(stash).await,
@@ -43,10 +56,7 @@ pub async fn execute(stash_cmd: Stash) {
         Stash::Apply { stash } => apply(stash).await,
         Stash::Drop { stash } => drop_stash(stash).await,
     };
-
-    if let Err(e) = result {
-        eprintln!("{}", format!("fatal: {}", e).red());
-    }
+    result.map_err(CliError::fatal)
 }
 
 async fn push(message: Option<String>) -> Result<(), String> {
@@ -247,6 +257,7 @@ async fn do_apply(stash: Option<String>) -> Result<(), String> {
     let merged_tree = merge_trees(&base_tree, &head_tree, &stash_tree, &git_dir)?;
 
     // Update working directory and index based on the merged tree
+    // INVARIANT: git_dir is always a child of workdir (e.g. "<repo>/.libra")
     let workdir = git_dir.parent().unwrap();
     let index_path = git_dir.join("index");
     let mut index = Index::new();
@@ -366,6 +377,7 @@ async fn has_changes() -> bool {
         }
         None => {
             // No HEAD commit yet (empty repository). Compare against the empty tree.
+            // INVARIANT: well-known empty tree hash is a valid hex string.
             ObjectHash::from_str("4b825dc642cb6eb9a060e54bf8d69288fbee4904").unwrap()
         }
     };
@@ -385,6 +397,7 @@ async fn has_changes() -> bool {
         return true;
     }
 
+    // INVARIANT: git_dir is always a child of workdir (e.g. "<repo>/.libra")
     let workdir = git_dir.parent().unwrap();
     for entry in index.tracked_entries(0) {
         let file_path = workdir.join(&entry.name);
@@ -433,7 +446,7 @@ fn resolve_stash_to_commit_hash(stash_ref: Option<String>) -> Result<(usize, Str
         return Err("No stash found".to_string());
     }
 
-    let git_dir = util::try_get_storage_path(None).unwrap();
+    let git_dir = util::try_get_storage_path(None).map_err(|e| e.to_string())?;
     let stash_log_path = git_dir.join("logs/refs/stash");
     if !stash_log_path.exists() {
         return Err("No stash found".to_string());

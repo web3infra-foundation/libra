@@ -5,6 +5,8 @@ use std::process::Command;
 
 use serial_test::serial;
 
+use super::{create_committed_repo_via_cli, run_libra_command};
+
 /// Initialize a temporary repository using CLI.
 fn init_temp_repo() -> tempfile::TempDir {
     let temp_dir = tempfile::tempdir().expect("Failed to create temporary directory");
@@ -119,6 +121,21 @@ fn create_annotated_tag(temp_path: &std::path::Path, tag_name: &str, message: &s
             String::from_utf8_lossy(&output.stderr)
         );
     }
+}
+
+#[test]
+#[serial]
+fn test_show_cli_badref_returns_fatal_128() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["show", "badref"], repo.path());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(128));
+    assert!(stderr.contains(
+        "fatal: ambiguous argument 'badref': unknown revision or path not in the working tree."
+    ));
+    assert!(stderr.contains("Hint: use '--' to separate paths from revisions"));
 }
 
 /// Test that show can display a lightweight tag.
@@ -300,4 +317,69 @@ async fn test_show_nonexistent_tag() {
         "Error output should indicate bad revision: {}",
         stderr
     );
+}
+
+/// Test that `show::execute_safe` returns a structured `CliError` for an
+/// invalid object reference when called through the API.
+#[tokio::test]
+#[serial]
+async fn test_show_execute_safe_bad_ref_returns_cli_error() {
+    use libra::{
+        command::show::{ShowArgs, execute_safe},
+        utils::test::{self, ChangeDirGuard},
+    };
+    use tempfile::tempdir;
+
+    let temp = tempdir().expect("failed to create temp dir");
+    test::setup_with_new_libra_in(temp.path()).await;
+    let _guard = ChangeDirGuard::new(temp.path());
+
+    let args = ShowArgs {
+        object: Some("nonexistent_ref_abc123".to_string()),
+        no_patch: false,
+        oneline: false,
+        name_only: false,
+        stat: false,
+        pathspec: vec![],
+    };
+    let result = execute_safe(args).await;
+    assert!(result.is_err(), "execute_safe should fail for bad ref");
+    let err = result.unwrap_err();
+    assert_eq!(
+        err.exit_code(),
+        128,
+        "bad revision should be fatal (exit 128)"
+    );
+    assert!(
+        err.message().contains("bad revision") || err.message().contains("unknown revision"),
+        "error should mention bad revision, got: {}",
+        err.message()
+    );
+}
+
+/// Test that `show::execute_safe` returns a structured `CliError` for an
+/// invalid `<rev>:<path>` pattern.
+#[tokio::test]
+#[serial]
+async fn test_show_execute_safe_bad_rev_path_returns_cli_error() {
+    use libra::{
+        command::show::{ShowArgs, execute_safe},
+        utils::test::{self, ChangeDirGuard},
+    };
+    use tempfile::tempdir;
+
+    let temp = tempdir().expect("failed to create temp dir");
+    test::setup_with_new_libra_in(temp.path()).await;
+    let _guard = ChangeDirGuard::new(temp.path());
+
+    let args = ShowArgs {
+        object: Some("HEAD:nonexistent_file.txt".to_string()),
+        no_patch: false,
+        oneline: false,
+        name_only: false,
+        stat: false,
+        pathspec: vec![],
+    };
+    let result = execute_safe(args).await;
+    assert!(result.is_err(), "execute_safe should fail for bad rev:path");
 }

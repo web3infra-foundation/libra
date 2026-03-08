@@ -30,7 +30,7 @@ async fn test_execute_commit_with_empty_index_fail() {
     };
     let result = execute_safe(args).await;
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("nothing to commit"));
+    assert!(result.unwrap_err().render().contains("nothing to commit"));
 }
 
 #[tokio::test]
@@ -84,7 +84,9 @@ async fn test_commit_requires_configured_identity_in_strict_mode() {
     })
     .await;
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("Author identity unknown"));
+    let rendered = result.unwrap_err().render();
+    assert!(rendered.contains("fatal: author identity unknown"));
+    assert!(rendered.contains("Hint:"));
 
     // Restore env vars so subsequent serial tests are not affected.
     // SAFETY: this test is #[serial], so no other threads are reading env vars.
@@ -92,6 +94,47 @@ async fn test_commit_requires_configured_identity_in_strict_mode() {
         std::env::remove_var("LIBRA_CONFIG_GLOBAL_DB");
         std::env::remove_var("LIBRA_CONFIG_SYSTEM_DB");
     }
+}
+
+#[test]
+#[serial]
+fn test_commit_cli_without_identity_returns_fatal_128() {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+
+    std::fs::write(repo.path().join("identity.txt"), "identity\n").unwrap();
+
+    let output = run_libra_command(&["add", "identity.txt"], repo.path());
+    assert_cli_success(&output, "failed to stage identity fixture");
+
+    let output = run_libra_command(&["commit", "-m", "missing identity"], repo.path());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(128));
+    assert!(stderr.contains("fatal: author identity unknown"));
+    assert!(stderr.contains("Hint: run 'libra config --global user.name"));
+}
+
+#[test]
+#[serial]
+fn test_commit_cli_use_config_only_returns_fatal_128() {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+
+    let output = run_libra_command(&["config", "user.useConfigOnly", "true"], repo.path());
+    assert_cli_success(&output, "failed to enable useConfigOnly");
+
+    std::fs::write(repo.path().join("identity.txt"), "identity\n").unwrap();
+
+    let output = run_libra_command(&["add", "identity.txt"], repo.path());
+    assert_cli_success(&output, "failed to stage identity fixture");
+
+    let output = run_libra_command(&["commit", "-m", "missing identity"], repo.path());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(128));
+    assert!(stderr.contains("fatal: author identity unknown"));
+    assert!(stderr.contains("Hint: run 'libra config --global user.name"));
 }
 
 #[tokio::test]
@@ -638,7 +681,7 @@ async fn test_commit_empty_working_tree() {
 
     let result = execute_safe(args).await;
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("nothing to commit"));
+    assert!(result.unwrap_err().render().contains("nothing to commit"));
 }
 
 #[tokio::test]
@@ -735,4 +778,77 @@ async fn test_commit_amend_without_changes() {
 
     // This should succeed even without staged changes
     commit::execute(amend_args).await;
+}
+
+/// Without explicit identity (config/env), commit should fail with the same
+/// "author identity unknown" style error as Git.
+#[tokio::test]
+#[serial]
+async fn test_commit_without_identity_fails_by_default() {
+    use libra::internal::config::Config;
+
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    // Isolate from host config so no user.name/email leaks in
+    let fake_global = temp_path.path().join("fake_global.db");
+    let fake_system = temp_path.path().join("fake_system.db");
+    // SAFETY: this test is #[serial], so no other threads are reading env vars.
+    unsafe {
+        std::env::set_var("LIBRA_CONFIG_GLOBAL_DB", &fake_global);
+        std::env::set_var("LIBRA_CONFIG_SYSTEM_DB", &fake_system);
+        // Clear env vars that could provide identity
+        std::env::remove_var("GIT_COMMITTER_NAME");
+        std::env::remove_var("GIT_COMMITTER_EMAIL");
+        std::env::remove_var("GIT_AUTHOR_NAME");
+        std::env::remove_var("GIT_AUTHOR_EMAIL");
+        std::env::remove_var("EMAIL");
+        std::env::remove_var("LIBRA_COMMITTER_NAME");
+        std::env::remove_var("LIBRA_COMMITTER_EMAIL");
+    }
+
+    // Ensure useConfigOnly is NOT set (default)
+    Config::remove_config("user", None, "name", None, true).await;
+    Config::remove_config("user", None, "email", None, true).await;
+
+    test::ensure_file("autodetect.txt", Some("content"));
+    add::execute(add::AddArgs {
+        pathspec: vec!["autodetect.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        verbose: false,
+        force: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+
+    let result = execute_safe(CommitArgs {
+        message: Some("auto-detect identity test".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    })
+    .await;
+
+    assert!(result.is_err(), "commit should fail without identity");
+    let rendered = result.unwrap_err().render();
+    assert!(rendered.contains("fatal: author identity unknown"));
+    assert!(rendered.contains("Hint:"));
+
+    // Restore env vars so subsequent serial tests are not affected.
+    // SAFETY: this test is #[serial], so no other threads are reading env vars.
+    unsafe {
+        std::env::remove_var("LIBRA_CONFIG_GLOBAL_DB");
+        std::env::remove_var("LIBRA_CONFIG_SYSTEM_DB");
+    }
 }

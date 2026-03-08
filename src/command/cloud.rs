@@ -28,6 +28,7 @@ use crate::{
     },
     utils::{
         d1_client::D1Client,
+        error::{CliError, CliResult},
         path,
         storage::{Storage, local::LocalStorage, remote::RemoteStorage},
         util,
@@ -106,6 +107,20 @@ pub async fn execute(args: CloudArgs) {
             }
         }
     }
+}
+
+/// Thin wrapper for CLI dispatch. Internal errors are still handled via
+/// `eprintln!` + `process::exit`.
+///
+/// # Known limitations
+///
+/// `execute()` handles errors internally and never propagates them, so this
+/// wrapper always returns `Ok(())` even when the cloud command fails.
+// TODO: refactor execute() to return CliResult so errors propagate to callers.
+pub async fn execute_safe(args: CloudArgs) -> CliResult<()> {
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
+    execute(args).await;
+    Ok(())
 }
 
 /// Execute sync command - uploads objects to R2, indexes to D1, and registers project name

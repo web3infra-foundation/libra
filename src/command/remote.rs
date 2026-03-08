@@ -8,6 +8,7 @@ use git_internal::hash::get_hash_kind;
 use crate::{
     command::fetch::RemoteClient,
     internal::{branch::Branch, config::Config, protocol::set_wire_hash_kind},
+    utils::error::{CliError, CliResult},
 };
 
 #[derive(Subcommand, Debug)]
@@ -93,19 +94,31 @@ pub enum RemoteCmds {
 }
 
 pub async fn execute(command: RemoteCmds) {
+    if let Err(e) = execute_safe(command).await {
+        eprintln!("{}", e.render());
+    }
+}
+
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Dispatches to remote sub-commands (add, remove, rename,
+/// set-url, list, show).
+pub async fn execute_safe(command: RemoteCmds) -> CliResult<()> {
     match command {
         RemoteCmds::Add { name, url } => {
+            if Config::remote_config(&name).await.is_some() {
+                return Err(CliError::fatal(format!("remote {name} already exists")));
+            }
             Config::insert("remote", Some(&name), "url", &url).await;
         }
         RemoteCmds::Remove { name } => {
-            if let Err(e) = Config::remove_remote(&name).await {
-                eprintln!("{e}");
-            }
+            Config::remove_remote(&name)
+                .await
+                .map_err(|e| CliError::failure(e.to_string()))?;
         }
         RemoteCmds::Rename { old, new } => {
-            if let Err(e) = Config::rename_remote(&old, &new).await {
-                eprintln!("{e}");
-            }
+            Config::rename_remote(&old, &new)
+                .await
+                .map_err(|e| CliError::failure(e.to_string()))?;
         }
         RemoteCmds::List => {
             let remotes = Config::all_remote_configs().await;
@@ -121,8 +134,7 @@ pub async fn execute(command: RemoteCmds) {
         }
         RemoteCmds::GetUrl { push, all, name } => {
             if Config::remote_config(&name).await.is_none() {
-                eprintln!("fatal: No such remote: {name}");
-                return;
+                return Err(CliError::fatal(format!("no such remote: {name}")));
             }
             // If --push, prefer explicit pushurl entries; fall back to url if none.
             if push {
@@ -135,14 +147,16 @@ pub async fn execute(command: RemoteCmds) {
                     } else if let Some(u) = push_urls.first() {
                         println!("{}", u);
                     }
-                    return;
+                    return Ok(());
                 }
                 // fall through to read regular url if no pushurl configured
             }
 
             let urls = Config::get_all("remote", Some(&name), "url").await;
             if urls.is_empty() {
-                eprintln!("fatal: no URL configured for remote '{name}'");
+                return Err(CliError::fatal(format!(
+                    "no URL configured for remote '{name}'"
+                )));
             } else if all || push {
                 // --all prints all URLs; --push with no pushurl also prints all regular urls
                 for url in urls {
@@ -161,8 +175,7 @@ pub async fn execute(command: RemoteCmds) {
             value,
         } => {
             if Config::remote_config(&name).await.is_none() {
-                eprintln!("fatal: No such remote: {name}");
-                return;
+                return Err(CliError::fatal(format!("no such remote: {name}")));
             }
             // Determine which config key to operate on
             let key = if push { "pushurl" } else { "url" };
@@ -170,13 +183,13 @@ pub async fn execute(command: RemoteCmds) {
             if add {
                 // Insert a new URL entry
                 Config::insert("remote", Some(&name), key, &value).await;
-                return;
+                return Ok(());
             }
 
             if delete {
                 // Delete matching entries; if --all then delete all matching, else delete first matching
                 Config::remove_config("remote", Some(&name), key, Some(&value), all).await;
-                return;
+                return Ok(());
             }
 
             // Default: replace behavior
@@ -193,9 +206,10 @@ pub async fn execute(command: RemoteCmds) {
             }
         }
         RemoteCmds::Prune { name, dry_run } => {
-            prune_remote(&name, dry_run).await;
+            prune_remote(&name, dry_run).await?;
         }
     }
+    Ok(())
 }
 
 async fn show_remote_verbose(remote: &str) {
@@ -206,6 +220,7 @@ async fn show_remote_verbose(remote: &str) {
             println!("{remote} {url} (fetch)");
         }
         None => {
+            // This is a display helper called in a loop; print inline rather than propagating.
             eprintln!("fatal: no URL configured for remote '{remote}'");
         }
     }
@@ -214,48 +229,38 @@ async fn show_remote_verbose(remote: &str) {
     }
 }
 
-async fn prune_remote(name: &str, dry_run: bool) {
+async fn prune_remote(name: &str, dry_run: bool) -> Result<(), CliError> {
     // Check if the remote exists
     let Some(remote_config) = Config::remote_config(name).await else {
-        eprintln!("fatal: No such remote: {}", name);
-        return;
+        return Err(CliError::fatal(format!("no such remote: {}", name)));
     };
 
     // Get remote client
-    let remote_client = match RemoteClient::from_spec(&remote_config.url) {
-        Ok(client) => client,
-        Err(e) => {
-            eprintln!(
-                "fatal: Failed to create remote client from '{}': {}",
-                remote_config.url, e
-            );
-            return;
-        }
-    };
+    let remote_client = RemoteClient::from_spec(&remote_config.url).map_err(|e| {
+        CliError::fatal(format!(
+            "Failed to create remote client from '{}': {}",
+            remote_config.url, e
+        ))
+    })?;
 
     // Discover remote references
-    let discovery = match remote_client
+    let discovery = remote_client
         .discovery_reference(crate::git_protocol::ServiceType::UploadPack)
         .await
-    {
-        Ok(discovery) => discovery,
-        Err(e) => {
-            eprintln!(
-                "fatal: Failed to discover remote references for '{}' at '{}': {}",
+        .map_err(|e| {
+            CliError::fatal(format!(
+                "Failed to discover remote references for '{}' at '{}': {}",
                 name, remote_config.url, e
-            );
-            return;
-        }
-    };
+            ))
+        })?;
 
     // Verify hash kind compatibility
     let local_kind = get_hash_kind();
     if discovery.hash_kind != local_kind {
-        eprintln!(
-            "fatal: remote object format '{}' does not match local '{}'",
+        return Err(CliError::fatal(format!(
+            "remote object format '{}' does not match local '{}'",
             discovery.hash_kind, local_kind
-        );
-        return;
+        )));
     }
 
     set_wire_hash_kind(discovery.hash_kind);
@@ -311,4 +316,5 @@ async fn prune_remote(name: &str, dry_run: bool) {
         n if dry_run => println!("\nWould prune {} stale remote-tracking branch(es).", n),
         n => println!("\nPruned {} stale remote-tracking branch(es).", n),
     }
+    Ok(())
 }

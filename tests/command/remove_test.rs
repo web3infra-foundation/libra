@@ -19,6 +19,20 @@ fn create_file(path: &str, content: &str) -> PathBuf {
     path
 }
 
+#[test]
+#[serial]
+fn test_remove_cli_missing_pathspec_returns_fatal_128() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["rm", "no-such.txt"], repo.path());
+
+    assert_eq!(output.status.code(), Some(128));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("fatal: pathspec 'no-such.txt' did not match any files")
+    );
+}
+
 #[tokio::test]
 #[serial]
 /// Tests the basic remove functionality by removing a single file

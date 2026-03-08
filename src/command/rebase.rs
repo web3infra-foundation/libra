@@ -27,6 +27,7 @@ use crate::{
         reflog::{ReflogAction, ReflogContext, ReflogError, with_reflog},
     },
     utils::{
+        error::{CliError, CliResult},
         ignore::IgnorePolicy,
         object_ext::{BlobExt, TreeExt},
         path, util, worktree,
@@ -493,6 +494,50 @@ pub async fn execute(args: RebaseArgs) {
     };
 
     start_rebase(&upstream).await;
+}
+
+/// Safe CLI entry point with preflight validation for argument and state errors.
+///
+/// `execute()` still contains legacy `eprintln!`-style handling for deeper runtime
+/// failures, but this wrapper now returns proper [`CliError`] for invalid inputs
+/// (such as missing/unknown upstream refs) so callers receive a non-zero exit code.
+pub async fn execute_safe(args: RebaseArgs) -> CliResult<()> {
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
+    preflight_rebase(&args).await?;
+    execute(args).await;
+    Ok(())
+}
+
+async fn preflight_rebase(args: &RebaseArgs) -> CliResult<()> {
+    if args.continue_rebase || args.abort || args.skip {
+        return Ok(());
+    }
+
+    let upstream = args
+        .upstream
+        .as_deref()
+        .ok_or_else(|| CliError::fatal("no upstream specified"))?;
+
+    match RebaseState::is_in_progress().await {
+        Ok(true) => {
+            return Err(CliError::fatal("rebase already in progress")
+                .with_hint("use 'libra rebase --continue' to continue rebasing.")
+                .with_hint(
+                    "use 'libra rebase --abort' to abort and restore the original branch.",
+                ));
+        }
+        Ok(false) => {}
+        Err(err) => {
+            return Err(CliError::fatal(format!(
+                "failed to check rebase state: {err}"
+            )));
+        }
+    }
+
+    resolve_branch_or_commit(upstream)
+        .await
+        .map_err(CliError::fatal)?;
+    Ok(())
 }
 
 /// Start a new rebase operation

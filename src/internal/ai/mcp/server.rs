@@ -20,7 +20,6 @@ use rmcp::{
     service::RequestContext, tool_handler,
 };
 
-// use uuid::Uuid;
 use crate::{
     internal::ai::history::HistoryManager,
     utils::{storage::Storage, storage_ext::StorageExt},
@@ -137,10 +136,11 @@ impl LibraMcpServer {
     /// If nothing is active, returns `{"active": false}`.
     async fn read_active_context(&self) -> Result<Vec<ResourceContents>, ErrorData> {
         use git_internal::internal::object::{
-            context::ContextSnapshot,
-            run::{Run, RunStatus},
-            task::Task,
+            context::ContextSnapshot, run::Run, run_event::RunEventKind, task::Task,
+            task_event::TaskEventKind,
         };
+
+        use super::resource::{run_status_label, task_status_label};
 
         let history = self
             .intent_history_manager
@@ -153,6 +153,9 @@ impl LibraMcpServer {
 
         let uri = "libra://context/active";
 
+        let latest_run_events = self.latest_run_events().await?;
+        let latest_task_events = self.latest_task_events().await?;
+
         // 1. Find the latest active Run (UUID v7 is lexicographically time-ordered)
         let runs = history
             .list_objects("run")
@@ -163,13 +166,15 @@ impl LibraMcpServer {
         // Iterate in reverse so the latest (by UUID sort) is checked first
         for (_id, hash) in runs.into_iter().rev() {
             if let Ok(run) = storage.get_json::<Run>(&hash).await {
-                match run.status() {
-                    RunStatus::Completed | RunStatus::Failed => continue,
-                    _ => {
-                        active_run = Some(run);
-                        break;
-                    }
+                let status_kind = latest_run_events
+                    .get(&run.header().object_id())
+                    .cloned()
+                    .unwrap_or(RunEventKind::Created);
+                if matches!(status_kind, RunEventKind::Completed | RunEventKind::Failed) {
+                    continue;
                 }
+                active_run = Some(run);
+                break;
             }
         }
 
@@ -177,9 +182,13 @@ impl LibraMcpServer {
 
         if let Some(run) = &active_run {
             // Serialize run info
+            let run_status = latest_run_events
+                .get(&run.header().object_id())
+                .map(|kind| run_status_label(kind))
+                .unwrap_or("created");
             let run_obj = serde_json::json!({
                 "id": run.header().object_id().to_string(),
-                "status": run.status().as_str(),
+                "status": run_status,
                 "task_id": run.task().to_string(),
                 "base_commit_sha": run.commit().to_string(),
             });
@@ -193,10 +202,14 @@ impl LibraMcpServer {
             if let Some(hash) = task_hash
                 && let Ok(task) = storage.get_json::<Task>(&hash).await
             {
+                let task_status = latest_task_events
+                    .get(&task.header().object_id())
+                    .map(|kind| task_status_label(kind))
+                    .unwrap_or("draft");
                 let task_obj = serde_json::json!({
                     "id": task.header().object_id().to_string(),
                     "title": task.title(),
-                    "status": task.status().as_str(),
+                    "status": task_status,
                     "goal_type": task.goal().map(|g| g.to_string()),
                     "constraints": task.constraints(),
                     "acceptance_criteria": task.acceptance_criteria(),
@@ -245,15 +258,20 @@ impl LibraMcpServer {
             let mut found_task = false;
             for (_id, hash) in tasks.into_iter().rev() {
                 if let Ok(task) = storage.get_json::<Task>(&hash).await {
-                    use git_internal::internal::object::task::TaskStatus;
-                    match task.status() {
-                        TaskStatus::Done | TaskStatus::Failed | TaskStatus::Cancelled => continue,
-                        _ => {}
+                    let status_kind = latest_task_events
+                        .get(&task.header().object_id())
+                        .cloned()
+                        .unwrap_or(TaskEventKind::Created);
+                    if matches!(
+                        status_kind,
+                        TaskEventKind::Done | TaskEventKind::Failed | TaskEventKind::Cancelled
+                    ) {
+                        continue;
                     }
                     let task_obj = serde_json::json!({
                         "id": task.header().object_id().to_string(),
                         "title": task.title(),
-                        "status": task.status().as_str(),
+                        "status": task_status_label(&status_kind),
                         "goal_type": task.goal().map(|g| g.to_string()),
                         "constraints": task.constraints(),
                         "acceptance_criteria": task.acceptance_criteria(),
@@ -290,7 +308,9 @@ impl ServerHandler for LibraMcpServer {
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 ..Default::default()
             },
-            instructions: Some("Libra MCP Server provides access to AI workflow objects (Task, Run, Plan) and version control history.".to_string()),
+            instructions: Some(
+                "Libra MCP Server exposes AI workflow objects and event logs (intent/task/run lifecycle events) backed by git-internal 0.7.0.".to_string(),
+            ),
         }
     }
 

@@ -608,3 +608,23 @@ async fn test_cat_file_ai_git_mutual_exclusion() {
         "AI and Git flags should be mutually exclusive"
     );
 }
+
+/// Running `cat-file` outside a repository should return exit code 128.
+#[test]
+#[serial]
+fn test_cat_file_cli_outside_repository_returns_fatal_128() {
+    let temp = tempfile::tempdir().unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp.path())
+        .args(["cat-file", "-t", "HEAD"])
+        .output()
+        .expect("Failed to execute cat-file");
+
+    assert_eq!(output.status.code(), Some(128));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("fatal: not a libra repository"),
+        "unexpected stderr: {stderr}"
+    );
+}

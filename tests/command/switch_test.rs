@@ -5,6 +5,17 @@ use libra::utils::{client_storage::ClientStorage, path};
 
 use super::*;
 
+#[test]
+#[serial]
+fn test_switch_cli_missing_branch_returns_fatal_128() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["switch", "no-such"], repo.path());
+
+    assert_eq!(output.status.code(), Some(128));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("fatal: invalid reference: no-such"));
+}
+
 // async fn test_check_status() {
 //     println!("\n\x1b[1mTest check_status function.\x1b[0m");
 //

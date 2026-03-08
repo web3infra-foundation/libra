@@ -21,8 +21,14 @@
 //! let restored = store.load_latest().unwrap();
 //! ```
 
+pub mod hook_ingest;
 pub mod state;
 pub mod store;
 
+pub use hook_ingest::{
+    AgentHookParser, ClaudeCodeAgentParser, LifecycleEvent, LifecycleEventKind,
+    SessionHookEnvelope, append_raw_hook_event, apply_lifecycle_event, make_dedup_key,
+    normalize_json_value, validate_session_hook_envelope,
+};
 pub use state::{SessionId, SessionMessage, SessionState};
 pub use store::{SessionInfo, SessionStore};

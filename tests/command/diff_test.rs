@@ -7,6 +7,19 @@ use libra::command::diff::{self, DiffArgs};
 
 use super::*;
 
+#[test]
+#[serial]
+fn test_diff_cli_outside_repository_returns_fatal_128() {
+    let temp = tempdir().unwrap();
+    let output = run_libra_command(&["diff"], temp.path());
+    assert_eq!(output.status.code(), Some(128));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("fatal: not a libra repository"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
 /// Helper function to create a file with content.
 fn create_file(path: &str, content: &str) {
     let mut file = fs::File::create(path).unwrap();
@@ -29,12 +42,21 @@ fn modify_file(path: &str, content: &str) {
 /// This tests the edge case where there are no commits and no staged changes.
 async fn test_diff_after_init() {
     let test_dir = tempdir().unwrap();
+    let output_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(test_dir.path()).await;
     let _guard = ChangeDirGuard::new(test_dir.path());
 
-    let args = DiffArgs::parse_from(["diff"]);
-
+    let output_file = output_dir.path().join("diff_output.txt");
+    let output_str = output_file.to_str().unwrap();
+    let args = DiffArgs::parse_from(["diff", "--output", output_str]);
     diff::execute(args).await;
+
+    // Empty repo should produce no diff output (or an empty file)
+    let content = fs::read_to_string(&output_file).unwrap_or_default();
+    assert!(
+        content.is_empty(),
+        "Expected no diff output after init, got: {content}"
+    );
 }
 
 #[tokio::test]
@@ -42,6 +64,7 @@ async fn test_diff_after_init() {
 /// Tests the basic diff functionality between working directory and HEAD.
 async fn test_basic_diff() {
     let test_dir = tempdir().unwrap();
+    let output_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(test_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(test_dir.path());
 
@@ -79,11 +102,25 @@ async fn test_basic_diff() {
     // Modify the file
     modify_file("file1.txt", "Modified content\nLine 2\nLine 3 changed\n");
 
-    // Run diff command
-    let args = DiffArgs::parse_from(["diff", "--algorithm", "histogram"]);
+    // Run diff command with output to file to avoid pager
+    let output_file = output_dir.path().join("diff_output.txt");
+    let output_str = output_file.to_str().unwrap();
+    let args = DiffArgs::parse_from(["diff", "--algorithm", "histogram", "--output", output_str]);
     diff::execute(args).await;
 
-    // We can't easily capture stdout, so we'll check that the command didn't panic
+    let content = fs::read_to_string(&output_file).unwrap();
+    assert!(
+        content.contains("diff --git"),
+        "Output should contain diff header"
+    );
+    assert!(
+        content.contains("-Initial content"),
+        "Output should show removed line"
+    );
+    assert!(
+        content.contains("+Modified content"),
+        "Output should show added line"
+    );
 }
 
 #[tokio::test]
@@ -91,6 +128,7 @@ async fn test_basic_diff() {
 /// Tests diff with staged changes
 async fn test_diff_staged() {
     let test_dir = tempdir().unwrap();
+    let output_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(test_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(test_dir.path());
 
@@ -146,11 +184,32 @@ async fn test_diff_staged() {
         "Modified content again\nLine 2\nLine 3 changed again\n",
     );
 
-    // Run diff command with --staged flag
-    let args = DiffArgs::parse_from(["diff", "--staged", "--algorithm", "histogram"]);
+    // Run diff command with --staged flag, output to file to avoid pager
+    let output_file = output_dir.path().join("diff_output.txt");
+    let output_str = output_file.to_str().unwrap();
+    let args = DiffArgs::parse_from([
+        "diff",
+        "--staged",
+        "--algorithm",
+        "histogram",
+        "--output",
+        output_str,
+    ]);
     diff::execute(args).await;
 
-    // The command should complete without panicking
+    let content = fs::read_to_string(&output_file).unwrap();
+    assert!(
+        content.contains("diff --git"),
+        "Staged diff should contain diff header"
+    );
+    assert!(
+        content.contains("-Initial content"),
+        "Staged diff should show removed line"
+    );
+    assert!(
+        content.contains("+Modified content"),
+        "Staged diff should show added line"
+    );
 }
 
 #[tokio::test]
@@ -158,6 +217,7 @@ async fn test_diff_staged() {
 /// Tests diff between two specific commits
 async fn test_diff_between_commits() {
     let test_dir = tempdir().unwrap();
+    let output_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(test_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(test_dir.path());
 
@@ -227,7 +287,9 @@ async fn test_diff_between_commits() {
     // Get the second commit hash
     let second_commit = Head::current_commit().await.unwrap();
 
-    // Run diff command comparing the two commits
+    // Run diff command comparing the two commits, output to file to avoid pager
+    let output_file = output_dir.path().join("diff_output.txt");
+    let output_str = output_file.to_str().unwrap();
     let args = DiffArgs::parse_from([
         "diff",
         "--old",
@@ -236,10 +298,24 @@ async fn test_diff_between_commits() {
         &second_commit.to_string(),
         "--algorithm",
         "histogram",
+        "--output",
+        output_str,
     ]);
     diff::execute(args).await;
 
-    // The command should complete without panicking
+    let content = fs::read_to_string(&output_file).unwrap();
+    assert!(
+        content.contains("diff --git"),
+        "Commit diff should contain diff header"
+    );
+    assert!(
+        content.contains("-Initial content"),
+        "Commit diff should show removed line"
+    );
+    assert!(
+        content.contains("+Modified content"),
+        "Commit diff should show added line"
+    );
 }
 
 #[tokio::test]
@@ -247,6 +323,7 @@ async fn test_diff_between_commits() {
 /// Tests diff with specific file path
 async fn test_diff_with_pathspec() {
     let test_dir = tempdir().unwrap();
+    let output_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(test_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(test_dir.path());
 
@@ -285,11 +362,33 @@ async fn test_diff_with_pathspec() {
     modify_file("file1.txt", "File 1 modified\nLine 2\nLine 3 changed\n");
     modify_file("file2.txt", "File 2 modified\nLine 2\nLine 3 changed\n");
 
-    // Run diff command with specific file path
-    let args = DiffArgs::parse_from(["diff", "--algorithm", "histogram", "file1.txt"]);
+    // Run diff command with specific file path, output to file to avoid pager
+    let output_file = output_dir.path().join("diff_output.txt");
+    let output_str = output_file.to_str().unwrap();
+    let args = DiffArgs::parse_from([
+        "diff",
+        "--algorithm",
+        "histogram",
+        "--output",
+        output_str,
+        "file1.txt",
+    ]);
     diff::execute(args).await;
 
-    // The command should complete without panicking
+    let content = fs::read_to_string(&output_file).unwrap();
+    assert!(
+        content.contains("diff --git"),
+        "Pathspec diff should contain diff header"
+    );
+    assert!(
+        content.contains("file1.txt"),
+        "Pathspec diff should reference file1.txt"
+    );
+    // file2.txt should NOT appear in the output since we filtered by pathspec
+    assert!(
+        !content.contains("file2.txt"),
+        "Pathspec diff should not contain file2.txt"
+    );
 }
 
 #[tokio::test]
@@ -297,6 +396,7 @@ async fn test_diff_with_pathspec() {
 /// Tests diff with output to a file
 async fn test_diff_output_to_file() {
     let test_dir = tempdir().unwrap();
+    let output_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(test_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(test_dir.path());
 
@@ -333,21 +433,22 @@ async fn test_diff_output_to_file() {
     // Modify the file
     modify_file("file1.txt", "Modified content\nLine 2\nLine 3 changed\n");
 
-    // Output file path
-    let output_file = "diff_output.txt";
+    // Output file path outside the repo
+    let output_file = output_dir.path().join("diff_output.txt");
+    let output_str = output_file.to_str().unwrap();
 
     // Run diff command with output to file
-    let args = DiffArgs::parse_from(["diff", "--algorithm", "histogram", "--output", output_file]);
+    let args = DiffArgs::parse_from(["diff", "--algorithm", "histogram", "--output", output_str]);
     diff::execute(args).await;
 
     // Verify the output file exists
     assert!(
-        fs::metadata(output_file).is_ok(),
+        fs::metadata(&output_file).is_ok(),
         "Output file should exist"
     );
 
     // Read the file content to make sure it contains diff output
-    let content = fs::read_to_string(output_file).unwrap();
+    let content = fs::read_to_string(&output_file).unwrap();
     assert!(
         content.contains("diff --git"),
         "Output should contain diff header"
@@ -359,6 +460,7 @@ async fn test_diff_output_to_file() {
 /// Tests diff with different algorithms
 async fn test_diff_algorithms() {
     let test_dir = tempdir().unwrap();
+    let output_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(test_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(test_dir.path());
 
@@ -402,40 +504,46 @@ async fn test_diff_algorithms() {
     );
 
     // Test histogram algorithm
+    let histogram_file = output_dir.path().join("histogram_diff.txt");
+    let histogram_str = histogram_file.to_str().unwrap();
     let args = DiffArgs::parse_from([
         "diff",
         "--algorithm",
         "histogram",
         "--output",
-        "histogram_diff.txt",
+        histogram_str,
     ]);
     diff::execute(args).await;
 
     // Test myers algorithm
-    let args = DiffArgs::parse_from(["diff", "--algorithm", "myers", "--output", "myers_diff.txt"]);
+    let myers_file = output_dir.path().join("myers_diff.txt");
+    let myers_str = myers_file.to_str().unwrap();
+    let args = DiffArgs::parse_from(["diff", "--algorithm", "myers", "--output", myers_str]);
     diff::execute(args).await;
 
     // Test myersMinimal algorithm
+    let myers_min_file = output_dir.path().join("myersMinimal_diff.txt");
+    let myers_min_str = myers_min_file.to_str().unwrap();
     let args = DiffArgs::parse_from([
         "diff",
         "--algorithm",
         "myersMinimal",
         "--output",
-        "myersMinimal_diff.txt",
+        myers_min_str,
     ]);
     diff::execute(args).await;
 
     // Verify all output files exist
     assert!(
-        fs::metadata("histogram_diff.txt").is_ok(),
+        fs::metadata(&histogram_file).is_ok(),
         "Histogram output file should exist"
     );
     assert!(
-        fs::metadata("myers_diff.txt").is_ok(),
+        fs::metadata(&myers_file).is_ok(),
         "Myers output file should exist"
     );
     assert!(
-        fs::metadata("myersMinimal_diff.txt").is_ok(),
+        fs::metadata(&myers_min_file).is_ok(),
         "MyersMinimal output file should exist"
     );
 }

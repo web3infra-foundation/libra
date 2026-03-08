@@ -52,7 +52,7 @@ fn ignored_path_returns_1_and_valid_paths_still_stage() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("ignored.txt"));
-    assert!(stderr.contains("hint: use -f if you really want to add them."));
+    assert!(stderr.contains("Hint: use -f if you really want to add them."));
 
     let status = run_libra(&["status", "--short"], &repo);
     let stdout = String::from_utf8_lossy(&status.stdout);

@@ -21,9 +21,12 @@ pub async fn persist_intentspec(spec: &IntentSpec, mcp_server: &LibraMcpServer) 
         content: spec.intent.summary.clone(),
         structured_content: Some(canonical),
         parent_id: None,
+        parent_ids: None,
+        analysis_context_frame_ids: None,
         status: Some("active".to_string()),
-        task_id: None,    // IntentSpec drives the plan, not a task yet
         commit_sha: None, // Will be set when completed
+        reason: None,
+        next_intent_id: None,
         actor_kind: Some("system".to_string()),
         actor_id: Some("libra-plan".to_string()),
     };
@@ -115,9 +118,12 @@ mod tests {
             content: canonical.clone(),
             structured_content: Some(canonical.clone()),
             parent_id: None,
+            parent_ids: None,
+            analysis_context_frame_ids: None,
             status: Some("active".to_string()),
-            task_id: None,
             commit_sha: None,
+            reason: None,
+            next_intent_id: None,
             actor_kind: Some("system".to_string()),
             actor_id: Some("libra-plan".to_string()),
         };
@@ -154,9 +160,12 @@ mod tests {
             content: spec.intent.summary.clone(),
             structured_content: Some(canonical.clone()),
             parent_id: None,
+            parent_ids: None,
+            analysis_context_frame_ids: None,
             status: Some("active".to_string()),
-            task_id: None,
             commit_sha: None,
+            reason: None,
+            next_intent_id: None,
             actor_kind: Some("system".to_string()),
             actor_id: Some("libra-plan".to_string()),
         };

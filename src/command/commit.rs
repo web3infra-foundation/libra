@@ -37,7 +37,13 @@ use crate::{
         head::Head,
         reflog::{ReflogAction, ReflogContext, with_reflog},
     },
-    utils::{client_storage::ClientStorage, lfs, object_ext::BlobExt, path, util},
+    utils::{
+        client_storage::ClientStorage,
+        error::{CliError, CliResult},
+        lfs,
+        object_ext::BlobExt,
+        path, util,
+    },
 };
 
 #[derive(Parser, Debug, Default)]
@@ -110,10 +116,41 @@ fn parse_author(author: &str) -> Result<(String, String), String> {
     ))
 }
 
+/// A user's name + email pair used for commit authoring and committing.
 #[derive(Clone, Debug)]
 struct UserIdentity {
     name: String,
     email: String,
+}
+
+/// Internal error type that bridges legacy `String` errors from `execute_impl`
+/// with the structured `CliError` type. Converted via `into_cli()` at the
+/// `execute_safe` boundary.
+#[derive(Debug)]
+enum CommitExecError {
+    Cli(CliError),
+    Message(String),
+}
+
+impl From<CliError> for CommitExecError {
+    fn from(value: CliError) -> Self {
+        Self::Cli(value)
+    }
+}
+
+impl From<String> for CommitExecError {
+    fn from(value: String) -> Self {
+        Self::Message(value)
+    }
+}
+
+impl CommitExecError {
+    fn into_cli(self) -> CliError {
+        match self {
+            Self::Cli(error) => error,
+            Self::Message(message) => classify_commit_error(message),
+        }
+    }
 }
 
 async fn get_user_config_value(key: &str) -> Option<String> {
@@ -138,38 +175,6 @@ async fn get_user_config_value(key: &str) -> Option<String> {
     None
 }
 
-fn missing_identity_message(name_missing: bool, email_missing: bool) -> String {
-    let mut lines = vec![
-        "Author identity unknown".to_string(),
-        "".to_string(),
-        "*** Please tell me who you are.".to_string(),
-        "".to_string(),
-        "Run".to_string(),
-        "".to_string(),
-    ];
-
-    if email_missing {
-        lines.push("  libra config --global user.email \"you@example.com\"".to_string());
-    }
-    if name_missing {
-        lines.push("  libra config --global user.name \"Your Name\"".to_string());
-    }
-
-    lines.push("".to_string());
-    lines.push("to set your account's default identity.".to_string());
-    lines.push("Omit --global to set the identity only in this repository.".to_string());
-
-    if email_missing {
-        lines.push("".to_string());
-        lines.push("fatal: no email was given and auto-detection is disabled".to_string());
-    } else if name_missing {
-        lines.push("".to_string());
-        lines.push("fatal: no name was given and auto-detection is disabled".to_string());
-    }
-
-    lines.join("\n")
-}
-
 fn env_first_non_empty(keys: &[&str]) -> Option<String> {
     keys.iter().find_map(|k| {
         env::var(k)
@@ -179,14 +184,48 @@ fn env_first_non_empty(keys: &[&str]) -> Option<String> {
     })
 }
 
-async fn resolve_committer_identity() -> Result<UserIdentity, String> {
+fn missing_identity_error(name_missing: bool, email_missing: bool) -> CliError {
+    let config_hint = match (name_missing, email_missing) {
+        (true, true) => {
+            "run 'libra config --global user.name \"Your Name\"' and 'libra config --global user.email \"you@example.com\"'."
+        }
+        (true, false) => {
+            "run 'libra config --global user.name \"Your Name\"' to set your default identity."
+        }
+        (false, true) => {
+            "run 'libra config --global user.email \"you@example.com\"' to set your default identity."
+        }
+        (false, false) => {
+            "run 'libra config --global --edit' to inspect your identity configuration."
+        }
+    };
+
+    CliError::fatal("author identity unknown")
+        .with_hint(config_hint)
+        .with_hint("omit '--global' to set the identity only in this repository.")
+}
+
+fn classify_commit_error(message: String) -> CliError {
+    if message == "nothing to commit, working tree clean" {
+        return CliError::failure(message);
+    }
+    if let Some(message) = message.strip_prefix("fatal: ") {
+        return CliError::fatal(message);
+    }
+    if let Some(message) = message.strip_prefix("error: ") {
+        return CliError::failure(message);
+    }
+    CliError::fatal(message)
+}
+
+async fn resolve_committer_identity() -> Result<UserIdentity, CliError> {
     // Step 1: check libra config (highest precedence after explicit --author)
     let config_name = get_user_config_value("name").await;
     let config_email = get_user_config_value("email").await;
 
-    // Step 2: check user.useConfigOnly BEFORE falling back to env vars / auto-detect.
-    // When useConfigOnly is true, only config values are acceptable — env vars and
-    // auto-detection are both skipped so the user is forced to configure identity
+    // Step 2: check user.useConfigOnly BEFORE falling back to env vars.
+    // When useConfigOnly is true, only config values are acceptable — env vars are
+    // skipped so the user is forced to configure identity
     // explicitly.  This is stricter than Git (which still honours GIT_AUTHOR_*
     // env vars) and prevents silent identity leakage from server environments.
     let use_config_only = get_user_config_value("useConfigOnly")
@@ -195,13 +234,14 @@ async fn resolve_committer_identity() -> Result<UserIdentity, String> {
         .unwrap_or(false);
 
     if use_config_only {
-        if let (Some(name), Some(email)) = (config_name, config_email) {
+        if let (Some(name), Some(email)) = (config_name.clone(), config_email.clone()) {
             return Ok(UserIdentity { name, email });
         }
         // Report which field(s) are missing — using *config-only* perspective.
-        let name_missing = get_user_config_value("name").await.is_none();
-        let email_missing = get_user_config_value("email").await.is_none();
-        return Err(missing_identity_message(name_missing, email_missing));
+        // Reuse the already-fetched values instead of querying config again.
+        let name_missing = config_name.is_none();
+        let email_missing = config_email.is_none();
+        return Err(missing_identity_error(name_missing, email_missing));
     }
 
     // Step 3: env-var fallback (GIT_COMMITTER_*, GIT_AUTHOR_*, EMAIL, LIBRA_COMMITTER_*)
@@ -225,38 +265,13 @@ async fn resolve_committer_identity() -> Result<UserIdentity, String> {
         return Ok(UserIdentity { name, email });
     }
 
-    // Auto-detection
-    // Detect user: try env "USER" or "USERNAME".
-    let detected_user = env::var("USER").or_else(|_| env::var("USERNAME")).ok();
-
-    // Detect host: run `hostname` command.
-    let detected_host = Command::new("hostname").output().ok().and_then(|output| {
-        let host = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        // Validate host: reject "(none)", "localhost", empty.
-        if host.is_empty() || host == "(none)" || host == "localhost" {
-            None
-        } else {
-            Some(host)
-        }
-    });
-
-    if let (Some(user), Some(host)) = (detected_user, detected_host) {
-        let final_name = name.unwrap_or(user.clone());
-        // Construct email: user@host.
-        let final_email = email.unwrap_or_else(|| format!("{}@{}", user, host));
-        return Ok(UserIdentity {
-            name: final_name,
-            email: final_email,
-        });
-    }
-
-    Err(missing_identity_message(name.is_none(), email.is_none()))
+    Err(missing_identity_error(name.is_none(), email.is_none()))
 }
 
 /// Create author and committer signatures based on the provided arguments
 async fn create_commit_signatures(
     author_override: Option<&str>,
-) -> Result<(Signature, Signature, UserIdentity), String> {
+) -> Result<(Signature, Signature, UserIdentity), CommitExecError> {
     let committer_identity = resolve_committer_identity().await?;
 
     // Create author signature (use override if provided)
@@ -304,9 +319,11 @@ async fn print_commit_summary(commit: &Commit, message: &str, staged_changes: &s
     let file_count =
         staged_changes.new.len() + staged_changes.modified.len() + staged_changes.deleted.len();
     if file_count > 0 {
+        let files_word = if file_count == 1 { "file" } else { "files" };
         println!(
-            " {} files changed (new: {}, modified: {}, deleted: {})",
+            " {} {} changed (new: {}, modified: {}, deleted: {})",
             file_count,
+            files_word,
             staged_changes.new.len(),
             staged_changes.modified.len(),
             staged_changes.deleted.len()
@@ -314,7 +331,7 @@ async fn print_commit_summary(commit: &Commit, message: &str, staged_changes: &s
     }
 }
 
-async fn execute_impl(args: CommitArgs) -> Result<(), String> {
+async fn execute_impl(args: CommitArgs) -> Result<(), CommitExecError> {
     /* check args */
     let auto_stage_applied = if args.all {
         // Mimic `git commit -a` by staging tracked modifications/deletions first
@@ -327,14 +344,14 @@ async fn execute_impl(args: CommitArgs) -> Result<(), String> {
     let tracked_entries = index.tracked_entries(0);
     // Skip empty commit check for --amend operations (allowed to modify message/author without changes)
     if tracked_entries.is_empty() && !args.allow_empty && !args.amend && !auto_stage_applied {
-        return Err("nothing to commit, working tree clean".to_string());
+        return Err("nothing to commit, working tree clean".to_string().into());
     }
 
     // Additional check: verify if there are any staged changes relative to HEAD
     // Skip this check for --amend operations
     let staged_changes = status::changes_to_be_committed().await;
     if staged_changes.is_empty() && !args.allow_empty && !args.amend {
-        return Err("nothing to commit, working tree clean".to_string());
+        return Err("nothing to commit, working tree clean".to_string().into());
     }
 
     // run pre commit hook
@@ -372,7 +389,8 @@ async fn execute_impl(args: CommitArgs) -> Result<(), String> {
                     "Hook {} failed with exit code {}",
                     hook_display,
                     output.status.code().unwrap_or(-1)
-                ));
+                )
+                .into());
             }
         }
     }
@@ -385,16 +403,15 @@ async fn execute_impl(args: CommitArgs) -> Result<(), String> {
         (None, Some(file_path)) => match tokio::fs::read_to_string(file_path).await {
             Ok(msg) => msg,
             Err(e) => {
-                return Err(format!(
-                    "fatal: failed to read commit message from file: {}",
-                    e
-                ));
+                return Err(
+                    format!("fatal: failed to read commit message from file: {}", e).into(),
+                );
             }
         },
         //no commit message, which is not supposed to happen
         (None, None) => {
             if !args.no_edit {
-                return Err("fatal: no commit message provided".to_string());
+                return Err("fatal: no commit message provided".to_string().into());
             } else {
                 //its ok to use "" because no_edit is True ,
                 //and we will use the message from the original commit
@@ -418,7 +435,8 @@ async fn execute_impl(args: CommitArgs) -> Result<(), String> {
         if parents_commit_ids.len() > 1 {
             return Err(
                 "fatal: --amend is not supported for merge commits with multiple parents"
-                    .to_string(),
+                    .to_string()
+                    .into(),
             );
         }
         let parent_commit = load_object::<Commit>(&parents_commit_ids[0]).map_err(|_| {
@@ -451,7 +469,9 @@ async fn execute_impl(args: CommitArgs) -> Result<(), String> {
             && !args.no_verify
             && !check_conventional_commits_message(&commit_message)
         {
-            return Err("fatal: commit message does not follow conventional commits".to_string());
+            return Err("fatal: commit message does not follow conventional commits"
+                .to_string()
+                .into());
         }
         let commit = Commit::new(
             author,
@@ -492,7 +512,9 @@ async fn execute_impl(args: CommitArgs) -> Result<(), String> {
     // check format(if needed)
     if args.conventional && !args.no_verify && !check_conventional_commits_message(&commit_message)
     {
-        return Err("fatal: commit message does not follow conventional commits".to_string());
+        return Err("fatal: commit message does not follow conventional commits"
+            .to_string()
+            .into());
     }
 
     // There must be a `blank line`(\n) before `message`, or remote unpack failed
@@ -521,14 +543,16 @@ async fn execute_impl(args: CommitArgs) -> Result<(), String> {
 }
 
 pub async fn execute(args: CommitArgs) {
-    if let Err(e) = execute_impl(args).await {
-        eprintln!("{e}");
-        std::process::exit(128);
+    if let Err(error) = execute_safe(args).await {
+        eprintln!("{}", error.render());
     }
 }
 
-pub async fn execute_safe(args: CommitArgs) -> Result<(), String> {
-    execute_impl(args).await
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Collects staged changes, resolves committer identity,
+/// builds tree and commit objects, and updates HEAD.
+pub async fn execute_safe(args: CommitArgs) -> CliResult<()> {
+    execute_impl(args).await.map_err(CommitExecError::into_cli)
 }
 
 /// recursively create tree from index's tracked entries
@@ -745,6 +769,53 @@ mod test {
 
     use super::*;
     use crate::utils::test::*;
+
+    #[test]
+    fn test_classify_commit_error_nothing_to_commit() {
+        let err = classify_commit_error("nothing to commit, working tree clean".to_string());
+        assert_eq!(
+            err.exit_code(),
+            1,
+            "nothing-to-commit is a non-fatal failure"
+        );
+        assert!(
+            err.message().contains("nothing to commit"),
+            "message should be preserved: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn test_classify_commit_error_fatal_prefix() {
+        let err = classify_commit_error("fatal: could not read tree".to_string());
+        assert_eq!(err.exit_code(), 128, "fatal prefix should map to exit 128");
+        assert!(
+            err.message().contains("could not read tree"),
+            "message should strip prefix: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn test_classify_commit_error_error_prefix() {
+        let err = classify_commit_error("error: pathspec 'x' did not match any file".to_string());
+        assert_eq!(err.exit_code(), 1, "error prefix should map to exit 1");
+        assert!(
+            err.message().contains("pathspec"),
+            "message should strip prefix: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn test_classify_commit_error_unknown_prefix() {
+        let err = classify_commit_error("some unexpected message".to_string());
+        assert_eq!(
+            err.exit_code(),
+            128,
+            "unknown messages should default to fatal (128)"
+        );
+    }
 
     #[test]
     ///Testing basic parameter parsing functionality.

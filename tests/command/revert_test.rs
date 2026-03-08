@@ -8,6 +8,19 @@ use tempfile::tempdir;
 
 use super::*;
 
+#[test]
+#[serial]
+fn test_revert_cli_outside_repository_returns_fatal_128() {
+    let temp = tempdir().unwrap();
+    let output = run_libra_command(&["revert", "HEAD"], temp.path());
+    assert_eq!(output.status.code(), Some(128));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("fatal: not a libra repository"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
 /// Test basic revert functionality with file additions, modifications, and deletions
 /// This test follows the workflow:
 /// 1. C1: Add 1.txt with content1
