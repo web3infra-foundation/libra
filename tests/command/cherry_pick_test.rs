@@ -13,6 +13,19 @@ use tempfile::tempdir;
 
 use super::*;
 
+#[test]
+#[serial]
+fn test_cherry_pick_cli_outside_repository_returns_fatal_128() {
+    let temp = tempdir().unwrap();
+    let output = run_libra_command(&["cherry-pick", "abc123"], temp.path());
+    assert_eq!(output.status.code(), Some(128));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("fatal: not a libra repository"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
 /// Test basic cherry-pick functionality
 /// This test follows the workflow:
 /// 1. Create a common ancestor commit (C1)
@@ -534,6 +547,8 @@ async fn test_cherry_pick_sha256_hash_handling() {
     })
     .await
     .unwrap();
+    libra::internal::config::Config::insert("user", None, "name", "Cherry Test User").await;
+    libra::internal::config::Config::insert("user", None, "email", "cherry-test@example.com").await;
 
     // base commit on main
     fs::write("base.txt", "base").unwrap();

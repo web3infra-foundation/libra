@@ -19,6 +19,20 @@ fn create_file(path: &str, content: &str) -> PathBuf {
     path
 }
 
+#[test]
+#[serial]
+fn test_remove_cli_missing_pathspec_returns_fatal_128() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["rm", "no-such.txt"], repo.path());
+
+    assert_eq!(output.status.code(), Some(128));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("fatal: pathspec 'no-such.txt' did not match any files")
+    );
+}
+
 #[tokio::test]
 #[serial]
 /// Tests the basic remove functionality by removing a single file
@@ -70,7 +84,7 @@ async fn test_remove_single_file() {
     );
 
     // Verify file is no longer in the index
-    let changes = changes_to_be_staged();
+    let changes = changes_to_be_staged().unwrap();
     assert!(
         !changes
             .new
@@ -137,7 +151,7 @@ async fn test_remove_cached() {
     assert!(file_path.exists(), "File should still exist in filesystem");
 
     // Verify file appears as new (untracked) in the index
-    let changes = changes_to_be_staged();
+    let changes = changes_to_be_staged().unwrap();
     assert!(
         changes
             .new
@@ -212,7 +226,7 @@ async fn test_remove_directory_recursive() {
     assert!(!file3.exists(), "File 3 should be removed");
 
     // Verify files are no longer in the index
-    let changes = changes_to_be_staged();
+    let changes = changes_to_be_staged().unwrap();
     for file in &[file1, file2, file3] {
         let file_str = file.to_str().unwrap();
         assert!(
@@ -372,7 +386,7 @@ async fn test_remove_modified_file() {
     assert!(!file_path.exists(), "File should be removed");
 
     // Verify file is not in the index.
-    let changes = changes_to_be_staged();
+    let changes = changes_to_be_staged().unwrap();
     assert!(
         !changes
             .new
@@ -501,7 +515,7 @@ async fn test_remove_dry_run() {
     assert!(file3.exists(), "File 3 should still exist after dry-run");
 
     // Verify files are still in the index by checking they don't appear as deleted
-    let changes = changes_to_be_staged();
+    let changes = changes_to_be_staged().unwrap();
     assert!(
         !changes
             .deleted
@@ -558,7 +572,7 @@ async fn test_remove_dry_run_cached() {
     assert!(file_path.exists(), "File should still exist in filesystem");
 
     // Verify file doesn't appear as deleted in changes
-    let changes = changes_to_be_staged();
+    let changes = changes_to_be_staged().unwrap();
     assert!(
         !changes
             .deleted
@@ -621,7 +635,7 @@ async fn test_remove_dry_run_recursive() {
     );
 
     // Verify files are still tracked by checking they don't appear as deleted
-    let changes = changes_to_be_staged();
+    let changes = changes_to_be_staged().unwrap();
     assert!(
         !changes
             .deleted

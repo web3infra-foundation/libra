@@ -4,7 +4,10 @@ use clap::Parser;
 use lazy_static::lazy_static;
 use regex::Regex;
 
-use crate::internal::config::Config;
+use crate::{
+    internal::config::Config,
+    utils::error::{CliError, CliResult},
+};
 
 #[derive(Parser, Debug)]
 pub struct OpenArgs {
@@ -19,7 +22,16 @@ lazy_static! {
 }
 
 pub async fn execute(args: OpenArgs) {
-    let in_repo = crate::utils::util::check_repo_exist();
+    if let Err(e) = execute_safe(args).await {
+        eprintln!("{}", e.render());
+    }
+}
+
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Resolves the remote URL and opens it in the default
+/// browser.
+pub async fn execute_safe(args: OpenArgs) -> CliResult<()> {
+    let in_repo = crate::utils::util::require_repo().is_ok();
 
     let remote_url = if let Some(input) = args.remote {
         if in_repo {
@@ -27,30 +39,27 @@ pub async fn execute(args: OpenArgs) {
             if remotes.iter().any(|r| r.name == input) {
                 Config::get_remote_url(&input).await
             } else {
-                // If not found in remotes, treat input as the URL directly
                 input
             }
         } else {
-            // Not in repo, treat input as URL directly
             input
         }
     } else {
         if !in_repo {
-            eprintln!("fatal: not a libra repository (or any of the parent directories): .libra");
-            return;
+            return Err(CliError::fatal(
+                "not a libra repository (or any of the parent directories): .libra",
+            ));
         }
         match Config::get_current_remote_url().await {
             Some(url) => url,
             None => {
-                // Fallback, try origin
                 let remotes = Config::all_remote_configs().await;
                 if let Some(origin) = remotes.iter().find(|r| r.name == "origin") {
                     origin.url.clone()
                 } else if let Some(first) = remotes.first() {
-                    first.url.clone() // Fallback to first available remote
+                    first.url.clone()
                 } else {
-                    eprintln!("fatal: No remote configured");
-                    return;
+                    return Err(CliError::fatal("no remote configured"));
                 }
             }
         }
@@ -59,18 +68,16 @@ pub async fn execute(args: OpenArgs) {
     let url = transform_url(&remote_url);
 
     if !is_safe_url(&url) {
-        eprintln!(
-            "fatal: calculated URL '{}' is unsafe or invalid. Only http/https are supported.",
+        return Err(CliError::fatal(format!(
+            "calculated URL '{}' is unsafe or invalid. Only http/https are supported.",
             url
-        );
-        return;
+        )));
     }
 
     println!("Opening {}", url);
 
-    if let Err(e) = open_browser(&url) {
-        eprintln!("error: failed to open browser: {}", e);
-    }
+    open_browser(&url).map_err(|e| CliError::fatal(format!("failed to open browser: {e}")))?;
+    Ok(())
 }
 
 fn open_browser(url: &str) -> std::io::Result<()> {

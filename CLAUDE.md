@@ -129,6 +129,8 @@ All PRs must pass these checks:
 - **Library code**: Use `thiserror` with domain-specific error enums (e.g., `InitError`, `GitError`)
 - **Command handlers**: `execute(args)` is the public async entry; may return early without Result for simple CLI feedback
 - **Database operations**: `_with_conn` suffix for transaction-safe variants accepting `ConnectionTrait`
+- **Avoid `unwrap()` / `expect()`**: Prefer returning `Result` and propagating errors with `?`, attaching human-readable context via `.context("...")` or `.with_context(|| format!(...))` so end-users see actionable messages instead of panics. `unwrap()`/`expect()` are acceptable only in **unit/integration tests** and where the logic is **obviously infallible** (e.g., compile-time-known constants) with a brief `// INVARIANT:` comment. All other code — including program startup and initialization — must handle errors gracefully and return actionable messages.
+- **User-friendly error messages**: All errors surfaced to the user must be human-readable and actionable. Avoid exposing raw internal errors; wrap them with context that explains *what went wrong*, *which resource was affected* (path, ref, object ID), and *how to fix it*.
 
 ### Patterns
 

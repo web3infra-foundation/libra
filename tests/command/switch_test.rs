@@ -5,6 +5,17 @@ use libra::utils::{client_storage::ClientStorage, path};
 
 use super::*;
 
+#[test]
+#[serial]
+fn test_switch_cli_missing_branch_returns_fatal_128() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["switch", "no-such"], repo.path());
+
+    assert_eq!(output.status.code(), Some(128));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("fatal: invalid reference: no-such"));
+}
+
 // async fn test_check_status() {
 //     println!("\n\x1b[1mTest check_status function.\x1b[0m");
 //
@@ -363,7 +374,9 @@ async fn create_commit_tree() {
     let index = Index::load(path::index()).unwrap();
     let storage = ClientStorage::init(path::objects());
 
-    let tree = commit::create_tree(&index, &storage, "".into()).await;
+    let tree = commit::create_tree(&index, &storage, "".into())
+        .await
+        .unwrap();
 
     let mut commit_1 = Commit::from_tree_id(tree.id, vec![], &format_commit_msg("commit_0", None));
     commit_1.committer.timestamp = 1;
@@ -371,7 +384,9 @@ async fn create_commit_tree() {
 
     let mut parents_ids = vec![];
     for i in 1..12 {
-        let tree = commit::create_tree(&index, &storage, "".into()).await;
+        let tree = commit::create_tree(&index, &storage, "".into())
+            .await
+            .unwrap();
 
         let mut commit = Commit::from_tree_id(
             tree.id,
@@ -383,7 +398,9 @@ async fn create_commit_tree() {
         parents_ids.push(commit.id);
     }
     {
-        let tree = commit::create_tree(&index, &storage, "".into()).await;
+        let tree = commit::create_tree(&index, &storage, "".into())
+            .await
+            .unwrap();
 
         let mut commit_last = Commit::from_tree_id(
             tree.id,

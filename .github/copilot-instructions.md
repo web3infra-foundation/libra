@@ -35,7 +35,8 @@ When generating code or design suggestions, assume this context: high concurrenc
 
 - Enforce rustfmt defaults. New/changed code should compile with zero warnings under cargo build --all-targets.
 - Treat clippy warnings as errors on new code (e.g., #![deny(clippy::all)] in new crates).
-- Avoid unwrap()/expect() in library code. Prefer returning Result<_, _> and propagating context via anyhow::Context or thiserror messages.
+- **Avoid `unwrap()` / `expect()`** in production code (library, CLI commands, internal modules, including startup/initialization). Prefer returning `Result` and propagating errors with `?`, attaching user-friendly context via `anyhow::Context` (`.context("...")` / `.with_context(|| format!(...))`) or domain-specific `thiserror` variants. `unwrap()`/`expect()` are acceptable only in **unit/integration tests** and where the logic is **obviously infallible** (e.g., compile-time-known constants) with a brief `// INVARIANT:` comment. All other code must use graceful error propagation with actionable, user-friendly messages. When reviewing code, flag `unwrap()` / `expect()` in other contexts and suggest a `Result`-based alternative.
+- All errors surfaced to the user must be human-readable and actionable. Avoid exposing raw internal errors; wrap them with context that explains what went wrong, which resource was affected, and how to fix it.
 - Prefer iterator/slice APIs over heap allocations in hot paths. Use SmallVec, bytes, or no-std-friendly patterns when relevant.
 - Document performance expectations for critical code paths (e.g., “expected throughput > X objects/second”, “allocation count < Y per object”).
 

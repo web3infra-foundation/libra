@@ -2,6 +2,7 @@
 
 use std::{
     collections::HashSet,
+    env,
     path::PathBuf,
     process::{Command, Stdio},
     str::FromStr,
@@ -26,15 +27,23 @@ use sea_orm::ConnectionTrait;
 
 use super::save_object;
 use crate::{
-    command::{load_object, status},
+    command::{
+        config::{ConfigScope, ScopedConfig},
+        load_object, status,
+    },
     common_utils::{check_conventional_commits_message, format_commit_msg},
     internal::{
         branch::Branch,
-        config::Config as UserConfig,
         head::Head,
         reflog::{ReflogAction, ReflogContext, with_reflog},
     },
-    utils::{client_storage::ClientStorage, lfs, object_ext::BlobExt, path, util},
+    utils::{
+        client_storage::ClientStorage,
+        error::{CliError, CliResult},
+        lfs,
+        object_ext::BlobExt,
+        path, util,
+    },
 };
 
 #[derive(Parser, Debug, Default)]
@@ -82,8 +91,8 @@ pub struct CommitArgs {
 }
 
 /// Parse author string in format "Name <email>" and return (name, email)
-/// If parsing fails, panic with an error message
-fn parse_author(author: &str) -> (String, String) {
+/// If parsing fails, return an error message
+fn parse_author(author: &str) -> Result<(String, String), String> {
     let author = author.trim();
 
     // Try to parse "Name <email>" format
@@ -96,70 +105,333 @@ fn parse_author(author: &str) -> (String, String) {
             let email = author[start_idx + 1..end_idx].trim().to_string();
 
             if !name.is_empty() && !email.is_empty() {
-                return (name, email);
+                return Ok((name, email));
             }
         }
     }
 
-    panic!(
+    Err(format!(
         "fatal: invalid author format '{}'. Expected format: 'Name <email>'",
         author
+    ))
+}
+
+/// A user's name + email pair used for commit authoring and committing.
+#[derive(Clone, Debug)]
+struct UserIdentity {
+    name: String,
+    email: String,
+}
+
+/// How the committer identity was obtained.
+///
+/// `ConfigOrEnv` — explicitly configured via `user.name`/`user.email` or
+/// `GIT_COMMITTER_*` environment variables.  
+/// `AutoDetected` — inferred from the system (hostname, OS user) because no
+/// explicit configuration was found.  A warning is printed when this variant
+/// is used so the user knows the identity may not be what they intended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IdentitySource {
+    ConfigOrEnv,
+    AutoDetected,
+}
+
+/// The result of [`resolve_committer_identity`]: a [`UserIdentity`] together
+/// with metadata indicating how it was resolved ([`IdentitySource`]).
+#[derive(Debug)]
+struct ResolvedIdentity {
+    identity: UserIdentity,
+    source: IdentitySource,
+}
+
+/// Internal error type that bridges legacy `String` errors from `execute_impl`
+/// with the structured `CliError` type. Converted via `into_cli()` at the
+/// `execute_safe` boundary.
+#[derive(Debug)]
+enum CommitExecError {
+    Cli(CliError),
+    Message(String),
+}
+
+impl From<CliError> for CommitExecError {
+    fn from(value: CliError) -> Self {
+        Self::Cli(value)
+    }
+}
+
+impl From<String> for CommitExecError {
+    fn from(value: String) -> Self {
+        Self::Message(value)
+    }
+}
+
+impl CommitExecError {
+    fn into_cli(self) -> CliError {
+        match self {
+            Self::Cli(error) => error,
+            Self::Message(message) => classify_commit_error(message),
+        }
+    }
+}
+
+async fn get_user_config_value(key: &str) -> Option<String> {
+    for scope in ConfigScope::CASCADE_ORDER {
+        if scope != ConfigScope::Local {
+            let Some(config_path) = scope.get_config_path() else {
+                continue;
+            };
+            if !config_path.exists() {
+                continue;
+            }
+        }
+
+        if let Ok(Some(value)) = ScopedConfig::get(scope, "user", None, key).await {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+
+    None
+}
+
+fn env_first_non_empty(keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|k| {
+        env::var(k)
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    })
+}
+
+fn command_first_non_empty(program: &str, args: &[&str]) -> Option<String> {
+    Command::new(program)
+        .args(args)
+        .output()
+        .ok()
+        .and_then(|output| {
+            if !output.status.success() {
+                return None;
+            }
+            let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            (!value.is_empty()).then_some(value)
+        })
+}
+
+fn detect_system_username() -> Option<String> {
+    env_first_non_empty(&["USER", "USERNAME"])
+        .or_else(|| command_first_non_empty("id", &["-un"]))
+        .or_else(|| command_first_non_empty("whoami", &[]))
+}
+
+fn detect_host_name() -> Option<String> {
+    command_first_non_empty("hostname", &[])
+        .filter(|host| !host.is_empty() && host != "(none)" && host != "localhost")
+}
+
+fn missing_identity_error(name_missing: bool, email_missing: bool) -> CliError {
+    let config_hint = match (name_missing, email_missing) {
+        (true, true) => {
+            "run 'libra config --global user.name \"Your Name\"' and 'libra config --global user.email \"you@example.com\"'."
+        }
+        (true, false) => {
+            "run 'libra config --global user.name \"Your Name\"' to set your default identity."
+        }
+        (false, true) => {
+            "run 'libra config --global user.email \"you@example.com\"' to set your default identity."
+        }
+        (false, false) => {
+            "run 'libra config --global --edit' to inspect your identity configuration."
+        }
+    };
+
+    CliError::fatal("author identity unknown")
+        .with_hint(config_hint)
+        .with_hint("omit '--global' to set the identity only in this repository.")
+}
+
+fn classify_commit_error(message: String) -> CliError {
+    if message == "nothing to commit, working tree clean" {
+        return CliError::failure(message);
+    }
+    if let Some(message) = message.strip_prefix("fatal: ") {
+        return CliError::fatal(message);
+    }
+    if let Some(message) = message.strip_prefix("error: ") {
+        return CliError::failure(message);
+    }
+    CliError::fatal(message)
+}
+
+fn print_auto_detected_identity_warning() {
+    eprintln!("Warning: Name and email are not configured; using an auto-detected identity.");
+    eprintln!(
+        "Hint: run 'libra config --global user.name \"Your Name\"' and 'libra config --global user.email \"you@example.com\"'."
     );
 }
 
+async fn resolve_committer_identity() -> Result<ResolvedIdentity, CliError> {
+    // Step 1: check libra config (highest precedence after explicit --author)
+    let config_name = get_user_config_value("name").await;
+    let config_email = get_user_config_value("email").await;
+
+    // Step 2: check user.useConfigOnly BEFORE falling back to env vars / auto-detect.
+    // When useConfigOnly is true, only config values are acceptable — env vars and
+    // auto-detection are both skipped so the user is forced to configure identity
+    // explicitly.  This is stricter than Git (which still honours GIT_AUTHOR_*
+    // env vars) and prevents silent identity leakage from server environments.
+    let use_config_only = get_user_config_value("useConfigOnly")
+        .await
+        .map(|v| v.to_lowercase() == "true")
+        .unwrap_or(false);
+
+    if use_config_only {
+        if let (Some(name), Some(email)) = (config_name.clone(), config_email.clone()) {
+            return Ok(ResolvedIdentity {
+                identity: UserIdentity { name, email },
+                source: IdentitySource::ConfigOrEnv,
+            });
+        }
+        // Report which field(s) are missing — using *config-only* perspective.
+        // Reuse the already-fetched values instead of querying config again.
+        let name_missing = config_name.is_none();
+        let email_missing = config_email.is_none();
+        return Err(missing_identity_error(name_missing, email_missing));
+    }
+
+    // Step 3: env-var fallback (GIT_COMMITTER_*, GIT_AUTHOR_*, EMAIL, LIBRA_COMMITTER_*)
+    let name = config_name.or_else(|| {
+        env_first_non_empty(&[
+            "GIT_COMMITTER_NAME",
+            "GIT_AUTHOR_NAME",
+            "LIBRA_COMMITTER_NAME",
+        ])
+    });
+    let email = config_email.or_else(|| {
+        env_first_non_empty(&[
+            "GIT_COMMITTER_EMAIL",
+            "GIT_AUTHOR_EMAIL",
+            "EMAIL",
+            "LIBRA_COMMITTER_EMAIL",
+        ])
+    });
+
+    if let (Some(name), Some(email)) = (name.clone(), email.clone()) {
+        return Ok(ResolvedIdentity {
+            identity: UserIdentity { name, email },
+            source: IdentitySource::ConfigOrEnv,
+        });
+    }
+
+    // Auto-detection
+    let detected_user = detect_system_username();
+    let detected_host = detect_host_name();
+
+    if let (Some(user), Some(host)) = (detected_user, detected_host) {
+        let final_name = name.unwrap_or(user.clone());
+        // Construct email: user@host.
+        let final_email = email.unwrap_or_else(|| format!("{}@{}", user, host));
+        return Ok(ResolvedIdentity {
+            identity: UserIdentity {
+                name: final_name,
+                email: final_email,
+            },
+            source: IdentitySource::AutoDetected,
+        });
+    }
+
+    Err(missing_identity_error(name.is_none(), email.is_none()))
+}
+
 /// Create author and committer signatures based on the provided arguments
-async fn create_commit_signatures(author_override: Option<&str>) -> (Signature, Signature) {
-    // Get default user info
-    let default_user_name = UserConfig::get("user", None, "name")
-        .await
-        .unwrap_or_else(|| "unknown".to_string());
-    let default_user_email = UserConfig::get("user", None, "email")
-        .await
-        .unwrap_or_else(|| "unknown".to_string());
+async fn create_commit_signatures(
+    author_override: Option<&str>,
+) -> Result<(Signature, Signature, UserIdentity, IdentitySource), CommitExecError> {
+    let resolved_identity = resolve_committer_identity().await?;
+    let committer_identity = resolved_identity.identity;
 
     // Create author signature (use override if provided)
     let author = if let Some(author_str) = author_override {
-        let (name, email) = parse_author(author_str);
+        let (name, email) = parse_author(author_str)?;
         Signature::new(SignatureType::Author, name, email)
     } else {
         Signature::new(
             SignatureType::Author,
-            default_user_name.clone(),
-            default_user_email.clone(),
+            committer_identity.name.clone(),
+            committer_identity.email.clone(),
         )
     };
 
     // Committer always uses default user info
     let committer = Signature::new(
         SignatureType::Committer,
-        default_user_name,
-        default_user_email,
+        committer_identity.name.clone(),
+        committer_identity.email.clone(),
     );
 
-    (author, committer)
+    Ok((
+        author,
+        committer,
+        committer_identity,
+        resolved_identity.source,
+    ))
 }
 
-pub async fn execute(args: CommitArgs) {
+fn first_message_line(message: &str) -> String {
+    message.lines().next().unwrap_or("").trim().to_string()
+}
+
+async fn print_commit_summary(commit: &Commit, message: &str, staged_changes: &status::Changes) {
+    let head_label = match Head::current().await {
+        Head::Branch(branch) => branch,
+        Head::Detached(_) => "detached".to_string(),
+    };
+
+    let commit_str = commit.id.to_string();
+    let short_id: String = commit_str.chars().take(7).collect();
+    let subject = first_message_line(message);
+
+    if commit.parent_commit_ids.is_empty() {
+        println!("[{} (root-commit) {}] {}", head_label, short_id, subject);
+    } else {
+        println!("[{} {}] {}", head_label, short_id, subject);
+    }
+
+    let file_count =
+        staged_changes.new.len() + staged_changes.modified.len() + staged_changes.deleted.len();
+    if file_count > 0 {
+        println!(
+            " {} files changed (new: {}, modified: {}, deleted: {})",
+            file_count,
+            staged_changes.new.len(),
+            staged_changes.modified.len(),
+            staged_changes.deleted.len()
+        );
+    }
+}
+
+async fn execute_impl(args: CommitArgs) -> Result<(), CommitExecError> {
     /* check args */
     let auto_stage_applied = if args.all {
         // Mimic `git commit -a` by staging tracked modifications/deletions first
-        auto_stage_tracked_changes()
+        auto_stage_tracked_changes()?
     } else {
         false
     };
-    let index = Index::load(path::index()).unwrap();
+    let index = Index::load(path::index()).map_err(|e| format!("failed to load index: {}", e))?;
     let storage = ClientStorage::init(path::objects());
     let tracked_entries = index.tracked_entries(0);
     // Skip empty commit check for --amend operations (allowed to modify message/author without changes)
     if tracked_entries.is_empty() && !args.allow_empty && !args.amend && !auto_stage_applied {
-        panic!("nothing to commit, working tree clean");
+        return Err("nothing to commit, working tree clean".to_string().into());
     }
 
     // Additional check: verify if there are any staged changes relative to HEAD
     // Skip this check for --amend operations
     let staged_changes = status::changes_to_be_committed().await;
     if staged_changes.is_empty() && !args.allow_empty && !args.amend {
-        panic!("nothing to commit, working tree clean");
+        return Err("nothing to commit, working tree clean".to_string().into());
     }
 
     // run pre commit hook
@@ -180,7 +452,7 @@ pub async fn execute(args: CommitArgs) {
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit())
                 .output()
-                .unwrap_or_else(|e| panic!("Failed to execute hook {hook_display}: {e}"));
+                .map_err(|e| format!("Failed to execute hook {hook_display}: {e}"))?;
 
             #[cfg(target_os = "windows")]
             let output = Command::new("powershell")
@@ -190,14 +462,15 @@ pub async fn execute(args: CommitArgs) {
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit())
                 .output()
-                .unwrap_or_else(|e| panic!("Failed to execute hook {hook_display}: {e}"));
+                .map_err(|e| format!("Failed to execute hook {hook_display}: {e}"))?;
 
             if !output.status.success() {
-                panic!(
+                return Err(format!(
                     "Hook {} failed with exit code {}",
                     hook_display,
                     output.status.code().unwrap_or(-1)
-                );
+                )
+                .into());
             }
         }
     }
@@ -209,12 +482,16 @@ pub async fn execute(args: CommitArgs) {
         //from file
         (None, Some(file_path)) => match tokio::fs::read_to_string(file_path).await {
             Ok(msg) => msg,
-            Err(e) => panic!("fatal: failed to read commit message from file: {}", e),
+            Err(e) => {
+                return Err(
+                    format!("fatal: failed to read commit message from file: {}", e).into(),
+                );
+            }
         },
         //no commit message, which is not supposed to happen
         (None, None) => {
             if !args.no_edit {
-                panic!("fatal: no commit message provided")
+                return Err("fatal: no commit message provided".to_string().into());
             } else {
                 //its ok to use "" because no_edit is True ,
                 //and we will use the message from the original commit
@@ -224,25 +501,30 @@ pub async fn execute(args: CommitArgs) {
         }
     };
     /* Create tree */
-    let tree = create_tree(&index, &storage, "".into()).await;
+    let tree = create_tree(&index, &storage, "".into()).await?;
 
     /* Create & save commit objects */
     let parents_commit_ids = get_parents_ids().await;
 
     // Create author and committer signatures (respecting --author override)
-    let (author, committer) = create_commit_signatures(args.author.as_deref()).await;
+    let (author, committer, committer_identity, identity_source) =
+        create_commit_signatures(args.author.as_deref()).await?;
 
     // Amend commits are only supported for a single parent commit.
     if args.amend {
         if parents_commit_ids.len() > 1 {
-            panic!("fatal: --amend is not supported for merge commits with multiple parents");
+            return Err(
+                "fatal: --amend is not supported for merge commits with multiple parents"
+                    .to_string()
+                    .into(),
+            );
         }
-        let parent_commit = load_object::<Commit>(&parents_commit_ids[0]).unwrap_or_else(|_| {
-            panic!(
+        let parent_commit = load_object::<Commit>(&parents_commit_ids[0]).map_err(|_| {
+            format!(
                 "fatal: not a valid object name: '{}'",
                 parents_commit_ids[0]
             )
-        });
+        })?;
         let grandpa_commit_id = parent_commit.parent_commit_ids;
         // if no_edit is True, use parent commit message;else use commit message from args
         let final_message = if args.no_edit {
@@ -252,16 +534,11 @@ pub async fn execute(args: CommitArgs) {
         };
         //Prepare commit message
         let commit_message = if args.signoff {
-            // get user
-            let user_name = UserConfig::get("user", None, "name")
-                .await
-                .unwrap_or_else(|| "unknown".to_string());
-            let user_email = UserConfig::get("user", None, "email")
-                .await
-                .unwrap_or_else(|| "unknown".to_string());
-
             // get sign line
-            let signoff_line = format!("Signed-off-by: {user_name} <{user_email}>");
+            let signoff_line = format!(
+                "Signed-off-by: {} <{}>",
+                committer_identity.name, committer_identity.email
+            );
             format!("{}\n\n{signoff_line}", final_message)
         } else {
             final_message.clone()
@@ -272,7 +549,9 @@ pub async fn execute(args: CommitArgs) {
             && !args.no_verify
             && !check_conventional_commits_message(&commit_message)
         {
-            panic!("fatal: commit message does not follow conventional commits");
+            return Err("fatal: commit message does not follow conventional commits"
+                .to_string()
+                .into());
         }
         let commit = Commit::new(
             author,
@@ -283,26 +562,28 @@ pub async fn execute(args: CommitArgs) {
         );
 
         storage
-            .put(&commit.id, &commit.to_data().unwrap(), commit.get_type())
-            .unwrap();
+            .put(
+                &commit.id,
+                &commit
+                    .to_data()
+                    .map_err(|e| format!("failed to serialize commit: {}", e))?,
+                commit.get_type(),
+            )
+            .map_err(|e| format!("failed to save commit: {}", e))?;
 
         /* update HEAD */
-        update_head_and_reflog(&commit.id.to_string(), &commit_message).await;
-        return;
+        update_head_and_reflog(&commit.id.to_string(), &commit_message).await?;
+        print_commit_summary(&commit, &commit_message, &staged_changes).await;
+        return Ok(());
     }
 
     //Prepare commit message
     let commit_message = if args.signoff {
-        // get user
-        let user_name = UserConfig::get("user", None, "name")
-            .await
-            .unwrap_or_else(|| "unknown".to_string());
-        let user_email = UserConfig::get("user", None, "email")
-            .await
-            .unwrap_or_else(|| "unknown".to_string());
-
         // get sign line
-        let signoff_line = format!("Signed-off-by: {user_name} <{user_email}>");
+        let signoff_line = format!(
+            "Signed-off-by: {} <{}>",
+            committer_identity.name, committer_identity.email
+        );
         format!("{}\n\n{signoff_line}", message)
     } else {
         message.clone()
@@ -311,7 +592,9 @@ pub async fn execute(args: CommitArgs) {
     // check format(if needed)
     if args.conventional && !args.no_verify && !check_conventional_commits_message(&commit_message)
     {
-        panic!("fatal: commit message does not follow conventional commits");
+        return Err("fatal: commit message does not follow conventional commits"
+            .to_string()
+            .into());
     }
 
     // There must be a `blank line`(\n) before `message`, or remote unpack failed
@@ -324,27 +607,61 @@ pub async fn execute(args: CommitArgs) {
     );
 
     storage
-        .put(&commit.id, &commit.to_data().unwrap(), commit.get_type())
-        .unwrap();
+        .put(
+            &commit.id,
+            &commit
+                .to_data()
+                .map_err(|e| format!("failed to serialize commit: {}", e))?,
+            commit.get_type(),
+        )
+        .map_err(|e| format!("failed to save commit: {}", e))?;
 
     /* update HEAD */
-    update_head_and_reflog(&commit.id.to_string(), &commit_message).await;
+    update_head_and_reflog(&commit.id.to_string(), &commit_message).await?;
+    print_commit_summary(&commit, &commit_message, &staged_changes).await;
+    if identity_source == IdentitySource::AutoDetected {
+        print_auto_detected_identity_warning();
+    }
+    Ok(())
+}
+
+pub async fn execute(args: CommitArgs) {
+    if let Err(error) = execute_safe(args).await {
+        eprintln!("{}", error.render());
+    }
+}
+
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Collects staged changes, resolves committer identity,
+/// builds tree and commit objects, and updates HEAD.
+pub async fn execute_safe(args: CommitArgs) -> CliResult<()> {
+    execute_impl(args).await.map_err(CommitExecError::into_cli)
 }
 
 /// recursively create tree from index's tracked entries
-pub async fn create_tree(index: &Index, storage: &ClientStorage, current_root: PathBuf) -> Tree {
+pub async fn create_tree(
+    index: &Index,
+    storage: &ClientStorage,
+    current_root: PathBuf,
+) -> Result<Tree, String> {
     // blob created when add file to index
-    let get_blob_entry = |path: &PathBuf| {
+    let get_blob_entry = |path: &PathBuf| -> Result<TreeItem, String> {
         let name = util::path_to_string(path);
-        let mete = index.get(&name, 0).unwrap();
-        let filename = path.file_name().unwrap().to_str().unwrap().to_string();
+        let mete = index
+            .get(&name, 0)
+            .ok_or_else(|| format!("failed to get index entry for {}", name))?;
+        let filename = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| format!("invalid filename in path: {:?}", path))?
+            .to_string();
 
-        TreeItem {
+        Ok(TreeItem {
             name: filename,
             mode: TreeItemMode::tree_item_type_from_bytes(format!("{:o}", mete.mode).as_bytes())
-                .unwrap(),
+                .map_err(|e| format!("invalid mode for {}: {}", name, e))?,
             id: mete.hash,
-        }
+        })
     };
 
     let mut tree_items: Vec<TreeItem> = Vec::new();
@@ -356,9 +673,12 @@ pub async fn create_tree(index: &Index, storage: &ClientStorage, current_root: P
         .filter(|path| path.starts_with(&current_root))
         .collect();
     for path in path_entries.iter() {
-        let in_current_path = path.parent().unwrap() == current_root;
+        let in_current_path = path
+            .parent()
+            .ok_or_else(|| format!("invalid path: {:?}", path))?
+            == current_root;
         if in_current_path {
-            let item = get_blob_entry(path);
+            let item = get_blob_entry(path)?;
             tree_items.push(item);
         } else {
             if path.components().count() == 1 {
@@ -368,10 +688,10 @@ pub async fn create_tree(index: &Index, storage: &ClientStorage, current_root: P
             let process_path = path
                 .components()
                 .nth(current_root.components().count())
-                .unwrap()
+                .ok_or_else(|| "failed to get next path component".to_string())?
                 .as_os_str()
                 .to_str()
-                .unwrap();
+                .ok_or_else(|| "invalid path component".to_string())?;
 
             if processed_path.contains(process_path) {
                 continue;
@@ -383,7 +703,7 @@ pub async fn create_tree(index: &Index, storage: &ClientStorage, current_root: P
                 storage,
                 current_root.clone().join(process_path),
             ))
-            .await;
+            .await?;
             tree_items.push(TreeItem {
                 name: process_path.to_string(),
                 mode: TreeItemMode::Tree,
@@ -395,24 +715,27 @@ pub async fn create_tree(index: &Index, storage: &ClientStorage, current_root: P
         // `from_tree_items` can't create empty tree, so use `from_bytes` instead
         if tree_items.is_empty() {
             let empty_id = ObjectHash::from_type_and_data(ObjectType::Tree, &[]);
-            Tree::from_bytes(&[], empty_id).unwrap()
+            Tree::from_bytes(&[], empty_id)
+                .map_err(|e| format!("failed to create empty tree: {}", e))?
         } else {
-            Tree::from_tree_items(tree_items).unwrap()
+            Tree::from_tree_items(tree_items)
+                .map_err(|e| format!("failed to create tree from items: {}", e))?
         }
     };
     // save
-    save_object(&tree, &tree.id).unwrap();
-    tree
+    save_object(&tree, &tree.id).map_err(|e| format!("failed to save tree object: {}", e))?;
+    Ok(tree)
 }
 
-fn auto_stage_tracked_changes() -> bool {
-    let pending = status::changes_to_be_staged();
+fn auto_stage_tracked_changes() -> Result<bool, String> {
+    let pending = status::changes_to_be_staged()
+        .map_err(|e| format!("failed to determine working tree status: {e}"))?;
     if pending.modified.is_empty() && pending.deleted.is_empty() {
-        return false;
+        return Ok(false);
     }
 
     let index_path = path::index();
-    let mut index = Index::load(&index_path).unwrap();
+    let mut index = Index::load(&index_path).map_err(|e| format!("failed to load index: {}", e))?;
     let workdir = util::working_dir();
     let mut touched = false;
 
@@ -424,7 +747,10 @@ fn auto_stage_tracked_changes() -> bool {
         // Refresh blob IDs for modified tracked files before updating the index
         let blob = blob_from_file(&abs);
         blob.save();
-        index.update(IndexEntry::new_from_file(&file, blob.id, &workdir).unwrap());
+        index.update(
+            IndexEntry::new_from_file(&file, blob.id, &workdir)
+                .map_err(|e| format!("failed to create index entry: {}", e))?,
+        );
         touched = true;
     }
 
@@ -437,9 +763,11 @@ fn auto_stage_tracked_changes() -> bool {
     }
 
     if touched {
-        index.save(&index_path).unwrap();
+        index
+            .save(&index_path)
+            .map_err(|e| format!("failed to save index: {}", e))?;
     }
-    touched
+    Ok(touched)
 }
 
 fn blob_from_file(path: impl AsRef<std::path::Path>) -> Blob {
@@ -450,9 +778,10 @@ fn blob_from_file(path: impl AsRef<std::path::Path>) -> Blob {
     }
 }
 
-/// get current head commit id as parent, if in branch, get branch's commit id, if detached head, get head's commit id
+/// Get the current HEAD commit ID as parent.
+///
+/// If on a branch, returns the branch's commit ID; if detached HEAD, returns the HEAD commit ID.
 async fn get_parents_ids() -> Vec<ObjectHash> {
-    // let current_commit_id = reference::Model::current_commit_hash(db).await.unwrap();
     let current_commit_id = Head::current_commit().await;
     match current_commit_id {
         Some(id) => vec![id],
@@ -460,37 +789,40 @@ async fn get_parents_ids() -> Vec<ObjectHash> {
     }
 }
 
-/// update HEAD to new commit, if in branch, update branch's commit id, if detached head, update head's commit id
-async fn update_head<C: ConnectionTrait>(db: &C, commit_id: &str) {
-    // let head = reference::Model::current_head(db).await.unwrap();
+/// Update HEAD to point to a new commit.
+///
+/// If on a branch, updates the branch's commit ID; if detached HEAD, updates the HEAD reference.
+async fn update_head<C: ConnectionTrait>(db: &C, commit_id: &str) -> Result<(), String> {
     match Head::current_with_conn(db).await {
         Head::Branch(name) => {
-            // in branch
             Branch::update_branch_with_conn(db, &name, commit_id, None).await;
         }
-        // None => {
         Head::Detached(_) => {
-            let head = Head::Detached(ObjectHash::from_str(commit_id).unwrap());
+            let head = Head::Detached(
+                ObjectHash::from_str(commit_id).map_err(|e| format!("invalid commit id: {}", e))?,
+            );
             Head::update_with_conn(db, head, None).await;
         }
     }
+    Ok(())
 }
 
-async fn update_head_and_reflog(commit_id: &str, commit_message: &str) {
+async fn update_head_and_reflog(commit_id: &str, commit_message: &str) -> Result<(), String> {
     let reflog_context = new_reflog_context(commit_id, commit_message).await;
     let commit_id = commit_id.to_string();
     with_reflog(
         reflog_context,
         |txn| {
             Box::pin(async move {
-                update_head(txn, &commit_id).await;
-                Ok(())
+                update_head(txn, &commit_id)
+                    .await
+                    .map_err(sea_orm::DbErr::Custom)
             })
         },
         true,
     )
     .await
-    .unwrap();
+    .map_err(|e| format!("failed to update reflog: {}", e))
 }
 
 async fn new_reflog_context(commit_id: &str, message: &str) -> ReflogContext {
@@ -520,6 +852,53 @@ mod test {
 
     use super::*;
     use crate::utils::test::*;
+
+    #[test]
+    fn test_classify_commit_error_nothing_to_commit() {
+        let err = classify_commit_error("nothing to commit, working tree clean".to_string());
+        assert_eq!(
+            err.exit_code(),
+            1,
+            "nothing-to-commit is a non-fatal failure"
+        );
+        assert!(
+            err.message().contains("nothing to commit"),
+            "message should be preserved: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn test_classify_commit_error_fatal_prefix() {
+        let err = classify_commit_error("fatal: could not read tree".to_string());
+        assert_eq!(err.exit_code(), 128, "fatal prefix should map to exit 128");
+        assert!(
+            err.message().contains("could not read tree"),
+            "message should strip prefix: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn test_classify_commit_error_error_prefix() {
+        let err = classify_commit_error("error: pathspec 'x' did not match any file".to_string());
+        assert_eq!(err.exit_code(), 1, "error prefix should map to exit 1");
+        assert!(
+            err.message().contains("pathspec"),
+            "message should strip prefix: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn test_classify_commit_error_unknown_prefix() {
+        let err = classify_commit_error("some unexpected message".to_string());
+        assert_eq!(
+            err.exit_code(),
+            128,
+            "unknown messages should default to fatal (128)"
+        );
+    }
 
     #[test]
     ///Testing basic parameter parsing functionality.
@@ -622,30 +1001,23 @@ mod test {
     #[test]
     fn test_parse_author() {
         // Valid author formats
-        let (name, email) = parse_author("John Doe <john@example.com>");
+        let (name, email) = parse_author("John Doe <john@example.com>").unwrap();
         assert_eq!(name, "John Doe");
         assert_eq!(email, "john@example.com");
 
-        let (name, email) = parse_author("  Jane Smith  <jane@test.org>  ");
+        let (name, email) = parse_author("  Jane Smith  <jane@test.org>  ").unwrap();
         assert_eq!(name, "Jane Smith");
         assert_eq!(email, "jane@test.org");
 
-        let (name, email) = parse_author("Multi Word Name <multi@word.com>");
+        let (name, email) = parse_author("Multi Word Name <multi@word.com>").unwrap();
         assert_eq!(name, "Multi Word Name");
         assert_eq!(email, "multi@word.com");
 
-        // Invalid formats should panic
-        let result = std::panic::catch_unwind(|| parse_author("invalid"));
-        assert!(result.is_err());
-
-        let result = std::panic::catch_unwind(|| parse_author("No Email"));
-        assert!(result.is_err());
-
-        let result = std::panic::catch_unwind(|| parse_author("<noemail@test.com>"));
-        assert!(result.is_err());
-
-        let result = std::panic::catch_unwind(|| parse_author("Name <"));
-        assert!(result.is_err());
+        // Invalid formats should return error
+        assert!(parse_author("invalid").is_err());
+        assert!(parse_author("No Email").is_err());
+        assert!(parse_author("<noemail@test.com>").is_err());
+        assert!(parse_author("Name <").is_err());
     }
 
     #[test]
@@ -767,7 +1139,7 @@ mod test {
         let storage = ClientStorage::init(temp_objects_dir);
 
         // 6. 调用 create_tree（current_root 设为空，因为 index 中路径是相对于仓库根的）
-        let tree = create_tree(&index, &storage, PathBuf::new()).await;
+        let tree = create_tree(&index, &storage, PathBuf::new()).await.unwrap();
 
         // 7. 原有验证逻辑（不变）
         assert!(storage.get(&tree.id).is_ok(), "根 tree 未保存到存储");

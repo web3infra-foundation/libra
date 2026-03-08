@@ -27,6 +27,7 @@ use crate::{
         reflog::{ReflogAction, ReflogContext, ReflogError, with_reflog},
     },
     utils::{
+        error::{CliError, CliResult},
         ignore::IgnorePolicy,
         object_ext::{BlobExt, TreeExt},
         path, util, worktree,
@@ -493,6 +494,19 @@ pub async fn execute(args: RebaseArgs) {
     };
 
     start_rebase(&upstream).await;
+}
+
+/// Thin wrapper for CLI dispatch. Internal errors are still handled via `eprintln!`.
+///
+/// # Known limitations
+///
+/// `execute()` handles errors internally with `eprintln!` and never propagates
+/// them, so this wrapper always returns `Ok(())` even when the rebase fails.
+// TODO: refactor execute() to return CliResult so errors propagate to callers.
+pub async fn execute_safe(args: RebaseArgs) -> CliResult<()> {
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
+    execute(args).await;
+    Ok(())
 }
 
 /// Start a new rebase operation
@@ -1464,7 +1478,13 @@ async fn rebase_worktree_guard(
     new_index: &git_internal::internal::index::Index,
     action: &str,
 ) -> bool {
-    let unstaged = status::changes_to_be_staged_with_policy(IgnorePolicy::Respect);
+    let unstaged = match status::changes_to_be_staged_with_policy(IgnorePolicy::Respect) {
+        Ok(c) => c,
+        Err(err) => {
+            eprintln!("fatal: failed to determine working tree status: {err}");
+            return false;
+        }
+    };
     if !unstaged.modified.is_empty() || !unstaged.deleted.is_empty() {
         status::execute(status::StatusArgs::default()).await;
         eprintln!("fatal: unstaged changes, can't {action}");

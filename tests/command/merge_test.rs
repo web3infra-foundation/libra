@@ -2,42 +2,31 @@
 
 use std::process::Command;
 
-use tempfile::TempDir;
+use libra::{
+    internal::{branch::Branch, head::Head},
+    utils::test::ChangeDirGuard,
+};
+use serial_test::serial;
 
-/// Helper function: Initialize a temporary Libra repository
-fn init_temp_repo() -> TempDir {
-    let temp_dir = tempfile::tempdir().expect("Failed to create temporary directory");
-    let temp_path = temp_dir.path();
+use super::{create_committed_repo_via_cli, run_libra_command};
 
-    println!("Temporary directory created at: {temp_path:?}");
-    assert!(
-        temp_path.is_dir(),
-        "Temporary path is not a valid directory"
-    );
+#[test]
+#[serial]
+fn test_merge_cli_missing_branch_returns_error_1() {
+    let repo = create_committed_repo_via_cli();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
-        .arg("init")
-        .output()
-        .expect("Failed to execute libra binary");
+    let output = run_libra_command(&["merge", "no-such"], repo.path());
+    let stderr = String::from_utf8_lossy(&output.stderr);
 
-    if !output.status.success() {
-        panic!(
-            "Failed to initialize libra repository: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    temp_dir
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr.contains("error: no-such - not something we can merge"));
 }
 
 #[tokio::test]
 /// Test fast-forward merge of local branches
 async fn test_merge_fast_forward() {
-    let temp_repo = init_temp_repo();
+    let temp_repo = create_committed_repo_via_cli();
     let temp_path = temp_repo.path();
-
-    // Create and switch to the feature branch
 
     Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(temp_path)
@@ -88,20 +77,49 @@ async fn test_merge_fast_forward() {
 }
 
 #[tokio::test]
+#[serial]
 /// Test merging a remote branch
 async fn test_merge_remote_branch() {
-    let temp_repo = init_temp_repo();
+    let temp_repo = create_committed_repo_via_cli();
     let temp_path = temp_repo.path();
 
-    // Simulate adding a remote branch
-    // FIX: Remove &
     Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(temp_path)
-        .args(["remote", "add", "origin", "https://example.com/repo.git"])
+        .args(["branch", "feature"])
         .output()
-        .expect("Failed to add remote");
+        .expect("Failed to create branch");
 
-    // Merge the remote branch
+    Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["checkout", "feature"])
+        .output()
+        .expect("Failed to checkout feature branch");
+
+    std::fs::write(temp_path.join("remote.txt"), "Remote content").expect("Failed to write file");
+
+    Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["add", "."])
+        .output()
+        .expect("Failed to add file");
+
+    Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["commit", "-m", "Add remote content"])
+        .output()
+        .expect("Failed to commit");
+
+    let _guard = ChangeDirGuard::new(temp_path);
+    let feature_commit = Head::current_commit()
+        .await
+        .expect("feature branch should have a tip");
+    Branch::update_branch("feature", &feature_commit.to_string(), Some("origin")).await;
+
+    Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["checkout", "main"])
+        .output()
+        .expect("Failed to checkout main branch");
 
     let merge_output = Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(temp_path)
@@ -116,12 +134,10 @@ async fn test_merge_remote_branch() {
 }
 
 #[tokio::test]
-/// Test merging branches with no common ancestor
-async fn test_merge_no_common_ancestor() {
-    let temp_repo = init_temp_repo();
+/// Test merging diverged branches without fast-forward support.
+async fn test_merge_diverged_branch_returns_fatal_128() {
+    let temp_repo = create_committed_repo_via_cli();
     let temp_path = temp_repo.path();
-
-    // Create and switch to branch1
 
     Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(temp_path)
@@ -151,13 +167,23 @@ async fn test_merge_no_common_ancestor() {
         .output()
         .expect("Failed to commit");
 
-    // Create and switch to branch2
+    Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["checkout", "main"])
+        .output()
+        .expect("Failed to checkout main branch");
 
     Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(temp_path)
-        .args(["checkout", "-b", "branch2", "HEAD~1"])
+        .args(["branch", "branch2"])
         .output()
         .expect("Failed to create branch");
+
+    Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["checkout", "branch2"])
+        .output()
+        .expect("Failed to checkout branch");
 
     // Commit changes on branch2
     let branch2_file = temp_path.join("branch2.txt");
@@ -175,16 +201,20 @@ async fn test_merge_no_common_ancestor() {
         .output()
         .expect("Failed to commit");
 
-    // Attempt to merge branches with no common ancestor
+    Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["checkout", "branch1"])
+        .output()
+        .expect("Failed to checkout branch1");
 
     let merge_output = Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(temp_path)
         .args(["merge", "branch2"])
         .output()
         .expect("Failed to merge branch");
+    assert_eq!(merge_output.status.code(), Some(128));
     assert!(
-        merge_output.status.success(),
-        "Merge no common ancestor branch failed: {}",
         String::from_utf8_lossy(&merge_output.stderr)
+            .contains("fatal: Not possible to fast-forward merge")
     );
 }

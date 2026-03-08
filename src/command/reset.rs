@@ -25,6 +25,7 @@ use crate::{
         reflog::{ReflogAction, ReflogContext, with_reflog},
     },
     utils::{
+        error::{CliError, CliResult},
         object_ext::{BlobExt, TreeExt},
         path, util,
     },
@@ -66,9 +67,16 @@ enum ResetMode {
 /// - Mixed: Moves HEAD and resets index (default)
 /// - Hard: Moves HEAD, resets index and working directory
 pub async fn execute(args: ResetArgs) {
-    if !util::check_repo_exist() {
-        return;
+    if let Err(e) = execute_safe(args).await {
+        eprintln!("{}", e.render());
     }
+}
+
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Moves HEAD (and optionally the index/worktree) to a
+/// target commit using soft, mixed, or hard mode.
+pub async fn execute_safe(args: ResetArgs) -> CliResult<()> {
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
 
     // Determine reset mode
     let mode = if args.soft {
@@ -81,80 +89,60 @@ pub async fn execute(args: ResetArgs) {
 
     // Handle pathspec reset (only affects index)
     if !args.pathspecs.is_empty() {
-        reset_pathspecs(&args.pathspecs, &args.target).await;
-        return;
+        reset_pathspecs(&args.pathspecs, &args.target).await?;
+        return Ok(());
     }
 
     // Resolve target commit
-    let target_commit_id = match resolve_commit(&args.target).await {
-        Ok(id) => id,
-        Err(e) => {
-            eprintln!("fatal: {e}");
-            return;
-        }
-    };
+    let target_commit_id = resolve_commit(&args.target)
+        .await
+        .map_err(CliError::fatal)?;
 
     // Perform reset based on mode
-    match perform_reset(target_commit_id, mode, &args.target).await {
-        Ok(_) => {
-            println!(
-                "HEAD is now at {} {}",
-                &target_commit_id.to_string()[..7],
-                get_commit_summary(&target_commit_id).unwrap_or_else(|_| "".to_string())
-            );
-        }
-        Err(e) => {
-            eprintln!("fatal: {e}");
-        }
-    }
+    perform_reset(target_commit_id, mode, &args.target)
+        .await
+        .map_err(CliError::fatal)?;
+
+    println!(
+        "HEAD is now at {} {}",
+        &target_commit_id.to_string()[..7],
+        get_commit_summary(&target_commit_id).unwrap_or_else(|_| "".to_string())
+    );
+    Ok(())
 }
 
 /// Reset specific files in the index to their state in the target commit.
 /// This function only affects the index, not the working directory.
-async fn reset_pathspecs(pathspecs: &[String], target: &str) {
+async fn reset_pathspecs(pathspecs: &[String], target: &str) -> CliResult<()> {
     // Reset specific files in index to target commit
-    let target_commit_id = match resolve_commit(target).await {
-        Ok(id) => id,
-        Err(e) => {
-            eprintln!("fatal: {e}");
-            return;
-        }
-    };
+    let target_commit_id = resolve_commit(target).await.map_err(CliError::fatal)?;
 
-    let commit: Commit = match load_object(&target_commit_id) {
-        Ok(c) => c,
-        Err(e) => {
-            cli_error!(e, "fatal: failed to load commit");
-            return;
-        }
-    };
+    let commit: Commit = load_object(&target_commit_id)
+        .map_err(|e| CliError::fatal(format!("failed to load commit: {e}")))?;
 
-    let tree: Tree = match load_object(&commit.tree_id) {
-        Ok(t) => t,
-        Err(e) => {
-            cli_error!(e, "fatal: failed to load tree");
-            return;
-        }
-    };
+    let tree: Tree = load_object(&commit.tree_id)
+        .map_err(|e| CliError::fatal(format!("failed to load tree: {e}")))?;
 
     let index_file = path::index();
-    let mut index = match Index::load(&index_file) {
-        Ok(idx) => idx,
-        Err(e) => {
-            cli_error!(e, "fatal: failed to load index");
-            return;
-        }
-    };
+    let mut index = Index::load(&index_file)
+        .map_err(|e| CliError::fatal(format!("failed to load index: {e}")))?;
     let mut changed = false;
 
     for pathspec in pathspecs {
         let relative_path = util::workdir_to_current(PathBuf::from(pathspec));
-        let path_str = relative_path.to_str().expect("Path contains invalid UTF-8");
+        let path_str = relative_path.to_str().ok_or_else(|| {
+            CliError::fatal(format!(
+                "path contains invalid UTF-8: {}",
+                relative_path.display()
+            ))
+        })?;
 
         match find_tree_item(&tree, path_str) {
             Some(item) => {
-                let blob: git_internal::internal::object::blob::Blob =
-                    load_object(&item.id).unwrap();
+                let blob: git_internal::internal::object::blob::Blob = load_object(&item.id)
+                    .map_err(|e| {
+                        CliError::fatal(format!("failed to load blob '{}': {e}", item.id))
+                    })?;
                 let entry = IndexEntry::new_from_blob(
                     path_str.to_string(),
                     item.id,
@@ -178,9 +166,12 @@ async fn reset_pathspecs(pathspecs: &[String], target: &str) {
         }
     }
 
-    if changed && let Err(e) = index.save(&index_file) {
-        cli_error!(e, "fatal: failed to save index");
+    if changed {
+        index
+            .save(&index_file)
+            .map_err(|e| CliError::fatal(format!("failed to save index: {e}")))?;
     }
+    Ok(())
 }
 
 /// Perform the actual reset operation based on the specified mode.

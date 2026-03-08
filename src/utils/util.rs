@@ -149,9 +149,14 @@ pub fn storage_path() -> PathBuf {
     try_get_storage_path(None).unwrap()
 }
 
-/// Check if libra repo exists
+/// Return an error instead of printing when the current directory is not a repository.
+pub fn require_repo() -> io::Result<()> {
+    try_get_storage_path(None).map(|_| ())
+}
+
+/// Legacy repository check that still prints for commands not yet migrated.
 pub fn check_repo_exist() -> bool {
-    if try_get_storage_path(None).is_err() {
+    if require_repo().is_err() {
         eprintln!("fatal: not a libra repository (or any of the parent directories): .libra");
         return false;
     }
@@ -185,9 +190,26 @@ pub fn working_dir() -> PathBuf {
     workdir
 }
 
+/// Get the working directory of the repository.
+pub fn try_working_dir() -> io::Result<PathBuf> {
+    let (_, workdir) = try_get_paths(None)?;
+    Ok(workdir)
+}
+
 /// Get the working directory of the repository as a string, panics if the path is not valid utf-8
 pub fn working_dir_string() -> String {
     working_dir().to_str().unwrap().to_string()
+}
+
+/// Get the working directory of the repository as UTF-8.
+pub fn try_working_dir_string() -> io::Result<String> {
+    let workdir = try_working_dir()?;
+    workdir.to_str().map(str::to_string).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("path '{}' is not valid UTF-8", workdir.display()),
+        )
+    })
 }
 
 /// Turn a path to a relative path to the working directory
@@ -199,6 +221,11 @@ pub fn to_workdir_path(path: impl AsRef<Path>) -> PathBuf {
 /// Turn a workdir path to absolute path
 pub fn workdir_to_absolute(path: impl AsRef<Path>) -> PathBuf {
     working_dir().join(path.as_ref())
+}
+
+/// Turn a workdir path to absolute path.
+pub fn try_workdir_to_absolute(path: impl AsRef<Path>) -> io::Result<PathBuf> {
+    Ok(try_working_dir()?.join(path.as_ref()))
 }
 
 /// Judge if the path is a sub path of the parent path

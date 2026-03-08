@@ -224,6 +224,7 @@ version = 2
 "registry+https://github.com/rust-lang/crates.io-index#lru-mem@0.3.0" = "184ca2e67374205c454c41ace5d29d4c922d88ad82bb905d1a00000c50f258c0"
 "registry+https://github.com/rust-lang/crates.io-index#lru-slab@0.1.2" = "06e496fcfc08bd9e8bd1bbb2ac11e889bc808c9c27d457494ceae406a8e7f587"
 "registry+https://github.com/rust-lang/crates.io-index#lru@0.12.5" = "c265e72ba68c54ed6b5b633c20b6cd8de98e108fb2489ff14bbc79ba1df4daa1"
+"registry+https://github.com/rust-lang/crates.io-index#matchers@0.2.0" = "740dd4b97739ac4ac86b1f65705e292fcb43895c5e2ef274871da22f6b0d523b"
 "registry+https://github.com/rust-lang/crates.io-index#matchit@0.8.4" = "6e81c53935b51314a8a97cb33528c3b225c9eee1ccdf61fdf59ca517664ff9ee"
 "registry+https://github.com/rust-lang/crates.io-index#md-5@0.10.6" = "18d6bb2181b839f6ffadadfb6b499f068c57050da40b6450a177982877ee6a93"
 "registry+https://github.com/rust-lang/crates.io-index#memchr@2.8.0" = "2e371594bab60c6e7265d54705a7d596bcdb8d32ef1fbd4ad019ab489a66d0b9"

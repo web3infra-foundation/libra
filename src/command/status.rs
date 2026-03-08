@@ -2,13 +2,15 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    io,
     io::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use clap::{Parser, ValueEnum};
 use colored::Colorize;
 use git_internal::{
+    errors::GitError,
     hash::{ObjectHash, get_hash_kind},
     internal::{
         index::Index,
@@ -24,7 +26,8 @@ use crate::{
     command::calc_file_blob_hash,
     internal::{config::Config, head::Head},
     utils::{
-        ignore::{self, IgnorePolicy},
+        error::{CliError, CliResult},
+        ignore::IgnorePolicy,
         object_ext::{CommitExt, TreeExt},
         path, util,
     },
@@ -92,6 +95,20 @@ pub struct Changes {
     pub new: Vec<PathBuf>,
     pub modified: Vec<PathBuf>,
     pub deleted: Vec<PathBuf>,
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum StatusError {
+    #[error("failed to open index '{path}': {source}")]
+    IndexLoad { path: PathBuf, source: GitError },
+    #[error("path '{path}' is not valid UTF-8")]
+    InvalidPathEncoding { path: PathBuf },
+    #[error("failed to hash '{path}': {source}")]
+    FileHash { path: PathBuf, source: io::Error },
+    #[error("failed to list files in '{path}': {source}")]
+    ListWorkdirFiles { path: PathBuf, source: io::Error },
+    #[error("failed to determine working directory: {source}")]
+    Workdir { source: io::Error },
 }
 
 /// Collapse untracked files into their parent directories when possible.
@@ -183,6 +200,12 @@ impl Changes {
         poly.extend(self.deleted.clone());
         poly
     }
+
+    pub fn extend(&mut self, other: Changes) {
+        self.new.extend(other.new);
+        self.modified.extend(other.modified);
+        self.deleted.extend(other.deleted);
+    }
 }
 
 async fn is_bare_repository() -> bool {
@@ -236,9 +259,21 @@ pub async fn execute_to(args: StatusArgs, writer: &mut impl Write) {
 
     // to cur_dir relative path
     let staged = changes_to_be_committed().await.to_relative();
-    let mut unstaged = changes_to_be_staged().to_relative();
+    let mut unstaged = match changes_to_be_staged() {
+        Ok(c) => c.to_relative(),
+        Err(err) => {
+            eprintln!("fatal: {err}");
+            return;
+        }
+    };
     let mut ignored_files = if args.ignored && !matches!(args.untracked_files, UntrackedFiles::No) {
-        list_ignored_files().to_relative().new
+        match list_ignored_files() {
+            Ok(c) => c.to_relative().new,
+            Err(err) => {
+                eprintln!("fatal: {err}");
+                return;
+            }
+        }
     } else {
         vec![]
     };
@@ -726,10 +761,33 @@ pub async fn execute(args: StatusArgs) {
     execute_to(args, &mut std::io::stdout()).await
 }
 
-/// Check if the working tree is clean
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Computes staged, unstaged, and untracked sets then
+/// prints a concise summary via [`execute_to`].
+///
+/// # Known limitations
+///
+/// `execute_to()` handles errors internally with `unwrap()` and never propagates
+/// them, so this wrapper always returns `Ok(())` even when the status fails.
+// TODO: refactor execute_to() to return CliResult so errors propagate to callers.
+pub async fn execute_safe(args: StatusArgs) -> CliResult<()> {
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
+    execute_to(args, &mut std::io::stdout()).await;
+    Ok(())
+}
+
+/// Check if the working tree is clean.
+///
+/// Returns `false` when the status cannot be determined (e.g. corrupt index).
 pub async fn is_clean() -> bool {
     let staged = changes_to_be_committed().await;
-    let unstaged = changes_to_be_staged();
+    let unstaged = match changes_to_be_staged() {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::error!("failed to calculate staged changes: {err}");
+            return false;
+        }
+    };
     staged.is_empty() && unstaged.is_empty()
 }
 
@@ -775,46 +833,116 @@ pub async fn changes_to_be_committed() -> Changes {
 }
 
 /// Compare the difference between `index` and the `workdir` using the default ignore rules.
-pub fn changes_to_be_staged() -> Changes {
+pub fn changes_to_be_staged() -> Result<Changes, StatusError> {
     changes_to_be_staged_with_policy(IgnorePolicy::Respect)
 }
 
 /// Variant of [`changes_to_be_staged`] that lets callers pick the ignore strategy explicitly.
 /// Commands such as `add --force` or `status --ignored` can switch policies as needed.
-pub fn changes_to_be_staged_with_policy(policy: IgnorePolicy) -> Changes {
-    let mut changes = Changes::default();
-    let workdir = util::working_dir();
-    let index = Index::load(path::index()).unwrap();
+pub fn changes_to_be_staged_with_policy(policy: IgnorePolicy) -> Result<Changes, StatusError> {
+    let workdir = util::try_working_dir().map_err(|source| StatusError::Workdir { source })?;
+    let index_path = path::try_index().map_err(|source| StatusError::Workdir { source })?;
+    let index = Index::load(&index_path).map_err(|source| StatusError::IndexLoad {
+        path: index_path.clone(),
+        source,
+    })?;
+    let (mut visible, ignored) = changes_to_be_staged_split_with_index(&workdir, &index)?;
+    match policy {
+        IgnorePolicy::Respect => Ok(visible),
+        IgnorePolicy::OnlyIgnored => Ok(ignored),
+        IgnorePolicy::IncludeIgnored => {
+            visible.extend(ignored);
+            Ok(visible)
+        }
+    }
+}
+
+pub fn changes_to_be_staged_split_safe() -> Result<(Changes, Changes), StatusError> {
+    let workdir = util::try_working_dir().map_err(|source| StatusError::Workdir { source })?;
+    let index_path = path::try_index().map_err(|source| StatusError::Workdir { source })?;
+    let index = Index::load(&index_path).map_err(|source| StatusError::IndexLoad {
+        path: index_path.clone(),
+        source,
+    })?;
+    changes_to_be_staged_split_with_index(&workdir, &index)
+}
+
+fn changes_to_be_staged_split_with_index(
+    workdir: &PathBuf,
+    index: &Index,
+) -> Result<(Changes, Changes), StatusError> {
+    let mut visible = Changes::default();
+    let mut ignored = Changes::default();
     let tracked_files = index.tracked_files();
     for file in tracked_files.iter() {
-        if ignore::should_ignore(file, policy, &index) {
-            continue;
-        }
-        let file_str = file.to_str().unwrap();
-        let file_abs = util::workdir_to_absolute(file);
+        let file_str = file
+            .to_str()
+            .ok_or_else(|| StatusError::InvalidPathEncoding { path: file.clone() })?;
+        let file_abs = workdir.join(file);
         if !file_abs.exists() {
-            changes.deleted.push(file.clone());
-        } else if index.is_modified(file_str, 0, &workdir) {
+            visible.deleted.push(file.clone());
+        } else if index.is_modified(file_str, 0, workdir) {
             // only calc the hash if the file is modified (metadata), for optimization
-            let file_hash = calc_file_blob_hash(&file_abs).unwrap();
+            let file_hash =
+                calc_file_blob_hash(&file_abs).map_err(|source| StatusError::FileHash {
+                    path: file_abs.clone(),
+                    source,
+                })?;
             if !index.verify_hash(file_str, 0, &file_hash) {
-                changes.modified.push(file.clone());
+                visible.modified.push(file.clone());
             }
         }
     }
-    let files = util::list_workdir_files().unwrap(); // to workdir
-    for file in ignore::filter_workdir_paths(files.into_iter(), policy, &index) {
-        let file_str = file.to_str().unwrap();
+    let files =
+        list_workdir_files_safe(workdir).map_err(|source| StatusError::ListWorkdirFiles {
+            path: workdir.clone(),
+            source,
+        })?; // to workdir
+    for file in files {
+        let file_str = file
+            .to_str()
+            .ok_or_else(|| StatusError::InvalidPathEncoding { path: file.clone() })?;
         if !index.tracked(file_str, 0) {
-            // file not tracked in `index`
-            changes.new.push(file);
+            let file_abs = workdir.join(&file);
+            if util::check_gitignore(workdir, &file_abs) {
+                ignored.new.push(file);
+            } else {
+                visible.new.push(file);
+            }
         }
     }
-    changes
+    Ok((visible, ignored))
+}
+
+fn list_workdir_files_safe(workdir: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+
+    for entry in walkdir::WalkDir::new(workdir)
+        .into_iter()
+        .filter_entry(|entry| {
+            entry.path() == workdir || entry.file_name() != std::ffi::OsStr::new(util::ROOT_DIR)
+        })
+    {
+        let entry = entry.map_err(|err| {
+            let err_text = err.to_string();
+            err.into_io_error()
+                .unwrap_or_else(|| io::Error::other(err_text))
+        })?;
+        let path = entry.path();
+
+        if entry.file_type().is_file() {
+            let relative = path
+                .strip_prefix(workdir)
+                .map_err(|err| io::Error::other(err.to_string()))?;
+            files.push(relative.to_path_buf());
+        }
+    }
+
+    Ok(files)
 }
 
 /// List ignored files (not tracked by index, but ignored by .libraignore) under workdir
-pub fn list_ignored_files() -> Changes {
+pub fn list_ignored_files() -> Result<Changes, StatusError> {
     changes_to_be_staged_with_policy(IgnorePolicy::OnlyIgnored)
 }
 

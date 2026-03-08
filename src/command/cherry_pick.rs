@@ -20,7 +20,6 @@ use git_internal::{
 use sea_orm::ConnectionTrait;
 
 use crate::{
-    cli_error,
     command::{load_object, save_object},
     common_utils::format_commit_msg,
     internal::{
@@ -29,6 +28,7 @@ use crate::{
         reflog::{ReflogAction, ReflogContext, with_reflog},
     },
     utils::{
+        error::{CliError, CliResult},
         object_ext::{BlobExt, TreeExt},
         path, util, worktree,
     },
@@ -58,33 +58,35 @@ pub struct CherryPickArgs {
 ///    TODO: Now, it will apply the picked commits exactly as they are,
 ///    without resolving any conflicts, and it will not take the state of the staging area into account.
 pub async fn execute(args: CherryPickArgs) {
-    if !util::check_repo_exist() {
-        return;
+    if let Err(e) = execute_safe(args).await {
+        eprintln!("{}", e.render());
     }
+}
+
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Replays one or more commit changes onto the current
+/// branch, optionally creating new commits or leaving them staged.
+pub async fn execute_safe(args: CherryPickArgs) -> CliResult<()> {
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
 
     if let Head::Detached(_) = Head::current().await {
-        eprintln!("fatal: cannot cherry-pick on detached HEAD");
-        return;
+        return Err(CliError::fatal("cannot cherry-pick on detached HEAD"));
     }
 
     // To simplify the implementation, we currently disallow cherry-picking multiple commits with --no-commit.
     // Unlike Git, which stages changes from all selected commits, this tool restricts the operation to a single commit.
     // This limitation may be lifted in the future if multi-commit support is implemented.
     if args.no_commit && args.commits.len() > 1 {
-        eprintln!("fatal: cannot cherry-pick multiple commits with --no-commit");
-        eprintln!("(use 'libra commit' to save the changes from the first cherry-pick)");
-        return;
+        return Err(
+            CliError::fatal("cannot cherry-pick multiple commits with --no-commit")
+                .with_hint("use 'libra commit' to save the changes from the first cherry-pick"),
+        );
     }
 
     let mut commit_ids = Vec::new();
     for commit_ref in &args.commits {
-        match resolve_commit(commit_ref).await {
-            Ok(id) => commit_ids.push(id),
-            Err(e) => {
-                eprintln!("fatal: {e}");
-                return;
-            }
-        }
+        let id = resolve_commit(commit_ref).await.map_err(CliError::fatal)?;
+        commit_ids.push(id);
     }
 
     for (i, commit_id) in commit_ids.iter().enumerate() {
@@ -102,12 +104,15 @@ pub async fn execute(args: CherryPickArgs) {
                 }
             }
             Err(e) => {
-                cli_error!(e, "error: failed to cherry-pick {}", &args.commits[i]);
                 // This simplified implementation does not handle conflicts or offer options to abort or skip.
-                return;
+                return Err(CliError::failure(format!(
+                    "failed to cherry-pick {}: {}",
+                    &args.commits[i], e
+                )));
             }
         }
     }
+    Ok(())
 }
 
 /// Cherry-pick a single commit onto the current branch

@@ -4,7 +4,10 @@ use clap::Parser;
 use git_internal::internal::object::types::ObjectType;
 use sea_orm::sqlx::types::chrono;
 
-use crate::internal::{tag, tag::TagObject};
+use crate::{
+    internal::{tag, tag::TagObject},
+    utils::error::{CliError, CliResult},
+};
 
 #[derive(Parser, Debug)]
 #[command(about = "Create, list, delete, or verify a tag object")]
@@ -34,38 +37,61 @@ pub struct TagArgs {
 }
 
 pub async fn execute(args: TagArgs) {
+    if let Err(err) = execute_safe(args).await {
+        eprintln!("{}", err.render());
+    }
+}
+
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Lists, creates, or deletes tags depending on the
+/// provided arguments.
+pub async fn execute_safe(args: TagArgs) -> CliResult<()> {
     if args.list || args.n_lines.is_some() {
         let show_lines = args.n_lines.unwrap_or(0);
-        list_tags(show_lines).await;
-        return;
+        let rendered = render_tags(show_lines)
+            .await
+            .map_err(|e| CliError::fatal(e.to_string()))?;
+        print!("{}", rendered);
+        return Ok(());
     }
 
     if let Some(name) = args.name {
         if args.delete {
-            delete_tag(&name).await;
+            delete_tag_safe(&name).await?;
         } else if args.message.is_some() {
-            create_tag(&name, args.message, args.force).await;
+            create_tag_safe(&name, args.message, args.force).await?;
         } else {
-            create_tag(&name, None, args.force).await;
-            show_tag(&name).await;
+            create_tag_safe(&name, None, args.force).await?;
+            show_tag_safe(&name).await?;
         }
     } else {
-        list_tags(0).await;
+        let rendered = render_tags(0)
+            .await
+            .map_err(|e| CliError::fatal(e.to_string()))?;
+        print!("{}", rendered);
     }
+    Ok(())
 }
 
+#[cfg(test)]
 async fn create_tag(tag_name: &str, message: Option<String>, force: bool) {
-    match tag::create(tag_name, message, force).await {
-        Ok(_) => (),
-        Err(e) => eprintln!("fatal: {}", e),
+    if let Err(err) = create_tag_safe(tag_name, message, force).await {
+        eprintln!("{}", err.render());
     }
 }
 
-async fn list_tags(show_lines: usize) {
-    match render_tags(show_lines).await {
-        Ok(s) => print!("{}", s),
-        Err(e) => eprintln!("fatal: {}", e),
-    }
+async fn create_tag_safe(tag_name: &str, message: Option<String>, force: bool) -> CliResult<()> {
+    tag::create(tag_name, message, force).await.map_err(|e| {
+        let message = e.to_string();
+        let message = message
+            .strip_prefix("Tag ")
+            .map(|rest| format!("tag {rest}"))
+            .unwrap_or(message);
+        CliError::fatal(message)
+            .with_hint(format!("delete it first with 'libra tag -d {}'.", tag_name))
+            .with_hint("or choose a different tag name.")
+    })?;
+    Ok(())
 }
 
 pub async fn render_tags(show_lines: usize) -> Result<String, anyhow::Error> {
@@ -114,14 +140,22 @@ pub async fn render_tags(show_lines: usize) -> Result<String, anyhow::Error> {
     Ok(output)
 }
 
+#[cfg(test)]
 async fn delete_tag(tag_name: &str) {
-    match tag::delete(tag_name).await {
-        Ok(_) => println!("Deleted tag '{}'", tag_name),
-        Err(e) => eprintln!("fatal: {}", e),
+    if let Err(err) = delete_tag_safe(tag_name).await {
+        eprintln!("{}", err.render());
     }
 }
 
-async fn show_tag(tag_name: &str) {
+async fn delete_tag_safe(tag_name: &str) -> CliResult<()> {
+    tag::delete(tag_name)
+        .await
+        .map_err(|e| CliError::fatal(e.to_string()))?;
+    println!("Deleted tag '{}'", tag_name);
+    Ok(())
+}
+
+async fn show_tag_safe(tag_name: &str) -> CliResult<()> {
     match tag::find_tag_and_commit(tag_name).await {
         Ok(Some((object, commit))) => {
             if object.get_type() == ObjectType::Tag {
@@ -131,8 +165,7 @@ async fn show_tag(tag_name: &str) {
                     println!("Tagger: {}", tag_object.tagger.to_string().trim());
                     println!("\n{}", tag_object.message);
                 } else {
-                    eprintln!("fatal: object is not a Tag variant");
-                    return;
+                    return Err(CliError::fatal("object is not a Tag variant"));
                 }
             }
 
@@ -143,9 +176,10 @@ async fn show_tag(tag_name: &str) {
                     .unwrap_or(chrono::DateTime::UNIX_EPOCH);
             println!("Date:   {}", commit_date.to_rfc2822());
             println!("\n    {}", commit.message.trim());
+            Ok(())
         }
-        Ok(None) => eprintln!("fatal: tag '{}' not found", tag_name),
-        Err(e) => eprintln!("fatal: {}", e),
+        Ok(None) => Err(CliError::fatal(format!("tag '{}' not found", tag_name))),
+        Err(e) => Err(CliError::fatal(e.to_string())),
     }
 }
 
@@ -158,12 +192,23 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::{cli::parse_async, internal::tag};
+    use crate::{cli::parse_async, internal::tag, utils::test::ChangeDirGuard};
 
-    async fn setup_repo_with_commit() -> tempfile::TempDir {
+    async fn setup_repo_with_commit() -> (tempfile::TempDir, ChangeDirGuard) {
         let temp_dir = tempdir().unwrap();
-        std::env::set_current_dir(temp_dir.path()).unwrap();
+        let guard = ChangeDirGuard::new(temp_dir.path());
         parse_async(Some(&["libra", "init"])).await.unwrap();
+        parse_async(Some(&["libra", "config", "user.name", "Tag Test User"]))
+            .await
+            .unwrap();
+        parse_async(Some(&[
+            "libra",
+            "config",
+            "user.email",
+            "tag-test@example.com",
+        ]))
+        .await
+        .unwrap();
         fs::write("test.txt", "hello").unwrap();
         parse_async(Some(&["libra", "add", "test.txt"]))
             .await
@@ -171,13 +216,13 @@ mod tests {
         parse_async(Some(&["libra", "commit", "-m", "Initial commit"]))
             .await
             .unwrap();
-        temp_dir
+        (temp_dir, guard)
     }
 
     #[tokio::test]
     #[serial]
     async fn test_create_and_list_lightweight_tag() {
-        let _temp_dir = setup_repo_with_commit().await;
+        let (_temp_dir, _guard) = setup_repo_with_commit().await;
         create_tag("v1.0-light", None, false).await;
         let tags = tag::list().await.unwrap();
         assert_eq!(tags.len(), 1);
@@ -188,7 +233,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_create_and_list_lightweight_tag_force() {
-        let _temp_dir = setup_repo_with_commit().await;
+        let (_temp_dir, _guard) = setup_repo_with_commit().await;
         create_tag("v1.0-light", None, false).await;
         create_tag("v1.0-light", None, true).await;
         let tags = tag::list().await.unwrap();
@@ -200,7 +245,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_create_and_list_annotated_tag() {
-        let _temp_dir = setup_repo_with_commit().await;
+        let (_temp_dir, _guard) = setup_repo_with_commit().await;
         create_tag("v1.0-annotated", Some("Release v1.0".to_string()), false).await;
         let tags = tag::list().await.unwrap();
         assert_eq!(tags.len(), 1);
@@ -211,7 +256,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_create_and_list_annotated_tag_force() {
-        let _temp_dir = setup_repo_with_commit().await;
+        let (_temp_dir, _guard) = setup_repo_with_commit().await;
         create_tag("v1.0-annotated", Some("Release v1.0".to_string()), false).await;
         create_tag("v1.0-annotated", Some("Release v2.0".to_string()), true).await;
         let tags = tag::list().await.unwrap();
@@ -231,7 +276,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_show_lightweight_tag() {
-        let _temp_dir = setup_repo_with_commit().await;
+        let (_temp_dir, _guard) = setup_repo_with_commit().await;
         create_tag("v1.0-light", None, false).await;
         let result = tag::find_tag_and_commit("v1.0-light").await;
         assert!(result.is_ok());
@@ -243,7 +288,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_show_annotated_tag() {
-        let _temp_dir = setup_repo_with_commit().await;
+        let (_temp_dir, _guard) = setup_repo_with_commit().await;
         create_tag("v1.0-annotated", Some("Test message".to_string()), false).await;
         let result = tag::find_tag_and_commit("v1.0-annotated").await;
         assert!(result.is_ok());
@@ -262,7 +307,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_delete_tag() {
-        let _temp_dir = setup_repo_with_commit().await;
+        let (_temp_dir, _guard) = setup_repo_with_commit().await;
         create_tag("v1.0", None, false).await;
         delete_tag("v1.0").await;
         let tags = tag::list().await.unwrap();

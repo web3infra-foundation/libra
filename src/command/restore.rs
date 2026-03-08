@@ -19,6 +19,7 @@ use crate::{
     command::calc_file_blob_hash,
     internal::{branch::Branch, head::Head, protocol::lfs_client::LFSClient},
     utils::{
+        error::{CliError, CliResult},
         lfs,
         object_ext::{BlobExt, CommitExt, TreeExt},
         path,
@@ -44,15 +45,30 @@ pub struct RestoreArgs {
 }
 
 pub async fn execute(args: RestoreArgs) {
-    if let Err(e) = execute_checked(args).await {
-        eprintln!("fatal: {e}");
+    if let Err(e) = execute_safe(args).await {
+        eprintln!("{}", e.render());
     }
 }
 
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Resets files or entire trees from a commit or the
+/// index, respecting pathspecs and staged-vs-worktree targets.
+pub async fn execute_safe(args: RestoreArgs) -> CliResult<()> {
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
+    execute_checked(args)
+        .await
+        .map_err(|e| CliError::fatal(e.to_string()))
+}
+
+/// Low-level restore that skips the repository-existence check.
+///
+/// # Preconditions
+///
+/// The caller **must** ensure a valid libra repository is reachable from the
+/// current working directory (e.g. by calling `util::require_repo()` or
+/// `execute_safe()` first).  This function is `pub` because it is used by
+/// `worktree.rs`, which performs its own repository validation.
 pub async fn execute_checked(args: RestoreArgs) -> io::Result<()> {
-    if !util::check_repo_exist() {
-        return Ok(());
-    }
     let staged = args.staged;
     let mut worktree = args.worktree;
     // If neither option is specified, by default the `working tree` is restored.

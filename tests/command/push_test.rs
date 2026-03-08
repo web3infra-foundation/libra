@@ -12,6 +12,8 @@ use serial_test::serial;
 use tempfile::TempDir;
 use tokio::{process::Command as TokioCommand, time::timeout};
 
+use super::{create_committed_repo_via_cli, run_libra_command};
+
 /// Helper function: Initialize a temporary Libra repository
 fn init_temp_repo() -> TempDir {
     let temp_dir = tempfile::tempdir().expect("Failed to create temporary directory");
@@ -38,6 +40,19 @@ fn init_temp_repo() -> TempDir {
 
     eprintln!("Initialized libra repo at: {temp_path:?}");
     temp_dir
+}
+
+#[test]
+#[serial]
+fn test_push_cli_without_remote_returns_fatal_128() {
+    let repo = create_committed_repo_via_cli();
+
+    let output = run_libra_command(&["push"], repo.path());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(128));
+    assert!(stderr.contains("fatal: no configured push destination"));
+    assert!(stderr.contains("Hint:"));
 }
 
 #[tokio::test]
@@ -75,6 +90,26 @@ async fn test_push_file_remote_fails_without_reflog() {
     assert!(
         out.status.success(),
         "init failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(local_path)
+        .args(["config", "user.name", "Push Test User"])
+        .output()
+        .expect("set user.name");
+    assert!(
+        out.status.success(),
+        "set user.name failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(local_path)
+        .args(["config", "user.email", "push-test@example.com"])
+        .output()
+        .expect("set user.email");
+    assert!(
+        out.status.success(),
+        "set user.email failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
 

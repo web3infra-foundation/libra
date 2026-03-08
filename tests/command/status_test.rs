@@ -14,6 +14,21 @@ use libra::{
 };
 
 use super::*;
+
+#[test]
+#[serial]
+fn test_status_cli_outside_repository_returns_fatal_128() {
+    let temp = tempdir().unwrap();
+
+    let output = run_libra_command(&["status"], temp.path());
+    assert_eq!(output.status.code(), Some(128));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("fatal: not a libra repository"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
 #[tokio::test]
 #[serial]
 /// Tests --ignored flag: ignored files appear in outputs
@@ -150,7 +165,7 @@ async fn test_changes_to_be_staged() {
     fs::create_dir("not_ignore_dir").unwrap();
     let mut not_ignore_file_1 = fs::File::create("not_ignore_dir/not_ignore.1").unwrap();
 
-    let change = changes_to_be_staged();
+    let change = changes_to_be_staged().unwrap();
     assert!(
         !change
             .new
@@ -193,7 +208,7 @@ async fn test_changes_to_be_staged() {
     not_ignore_file_0.write_all(b"foo").unwrap();
     not_ignore_file_1.write_all(b"foo").unwrap();
 
-    let change = changes_to_be_staged();
+    let change = changes_to_be_staged().unwrap();
     assert!(
         !change
             .modified
@@ -226,7 +241,7 @@ async fn test_changes_to_be_staged() {
 
     not_ignore_file_1.write_all(b"foo").unwrap();
 
-    let change = changes_to_be_staged();
+    let change = changes_to_be_staged().unwrap();
     assert!(
         !change
             .deleted

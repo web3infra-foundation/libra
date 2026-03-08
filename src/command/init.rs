@@ -11,13 +11,13 @@ use git_internal::hash::{HashKind, set_hash_kind};
 use sea_orm::{ActiveModelTrait, DbConn, DbErr, Set, TransactionTrait};
 
 use crate::{
-    cli_error,
     internal::{
         db,
         model::{config, reference},
     },
     utils::{
         convert,
+        error::{CliError, CliResult},
         util::{DATABASE, ROOT_DIR, cur_dir},
     },
 };
@@ -191,6 +191,14 @@ pub struct InitArgs {
 
 /// Execute the init function
 pub async fn execute(args: InitArgs) {
+    if let Err(e) = execute_safe(args).await {
+        eprintln!("{}", e.render());
+    }
+}
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Creates `.libra` storage, seeds HEAD and default
+/// refs/config, and initialises the backing SQLite database.
+pub async fn execute_safe(args: InitArgs) -> CliResult<()> {
     let from_git = args.from_git_repository.clone();
     let is_bare = args.bare;
 
@@ -212,35 +220,33 @@ pub async fn execute(args: InitArgs) {
         } else {
             current_dir.join(path)
         };
-        match joined.canonicalize() {
-            Ok(canonical) => Some(canonical),
-            Err(e) => {
-                cli_error!(
-                    e,
-                    "fatal: failed to resolve from-git-repository path '{}'",
-                    p
-                );
-                std::process::exit(1);
-            }
-        }
+        let canonical = joined.canonicalize().map_err(|e| {
+            CliError::fatal(format!(
+                "failed to resolve from-git-repository path '{}': {}",
+                p, e
+            ))
+        })?;
+        Some(canonical)
     } else {
         None
     };
 
-    if let Err(e) = init(args)
+    init(args)
         .await
         .and_then(|_| Ok(env::set_current_dir(&target_path)?))
-    {
-        cli_error!("fatal" => e);
-        return;
-    }
+        .map_err(|e| CliError::fatal(e.to_string()))?;
 
     if let Some(source_git) = from_git_abs
         && let Err(e) = convert::convert_from_git_repository(&source_git, is_bare).await
     {
-        cli_error!("fatal" => e);
-        std::process::exit(1);
+        // Best-effort cwd restore before surfacing the error so in-process
+        // callers (tests, MCP, multi-command sessions) don't continue in the
+        // wrong directory.
+        let _ = env::set_current_dir(&current_dir);
+        return Err(CliError::fatal(e.to_string()));
     }
+
+    Ok(())
 }
 
 /// Check if the repository has already been initialized based on the presence of the .libra directory.
@@ -604,14 +610,28 @@ pub async fn init(args: InitArgs) -> Result<(), InitError> {
     #[cfg(target_os = "windows")]
     {
         // On Windows, we need to convert the path to a UNC path
-        let database = database.to_str().unwrap().replace("\\", "/");
+        let database = database
+            .to_str()
+            .ok_or_else(|| {
+                InitError::ConversionFailed(format!(
+                    "database path contains invalid UTF-8: {}",
+                    database.display()
+                ))
+            })?
+            .replace("\\", "/");
         conn = db::create_database(database.as_str()).await?;
     }
 
     #[cfg(not(target_os = "windows"))]
     {
         // On Unix-like systems, we do no more
-        conn = db::create_database(database.to_str().unwrap()).await?;
+        let db_str = database.to_str().ok_or_else(|| {
+            InitError::ConversionFailed(format!(
+                "database path contains invalid UTF-8: {}",
+                database.display()
+            ))
+        })?;
+        conn = db::create_database(db_str).await?;
     }
 
     // Create config table with bare parameter consideration and store ref format

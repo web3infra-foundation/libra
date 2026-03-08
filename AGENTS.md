@@ -58,6 +58,7 @@ Treat the following as P0/P1 when applicable:
 - missing README, migration, configuration, or API documentation for externally visible changes
 - unsafe logging of secrets, tokens, PII, or sensitive internal details
 - resource lifecycle issues: leaked handles, unreleased locks, missing timeouts, unbounded retries, or unbounded memory growth
+- use of `unwrap()` or `expect()` in production code (library/command modules, including startup/initialization) — must be replaced with proper error handling (`?`, `anyhow::Context`, `thiserror`) that produces user-friendly error messages. Acceptable only in tests and obviously infallible logic with a `// INVARIANT:` comment; flag all other occurrences
 
 ## Trigger rules
 
@@ -68,6 +69,7 @@ When deciding whether to raise a finding, err toward reporting if:
 - a query, loop, or network call is added in a potentially hot path
 - defaults changed in a way that could affect security or production behavior
 - a fix depends on assumptions not enforced in code
+- any new or modified code introduces `unwrap()`, `expect()`, or `panic!()` outside of tests or obviously infallible logic — flag the instance and suggest a `Result`-based alternative with a contextual, user-friendly error message
 
 Do not dismiss an issue only because:
 - the diff is small
@@ -98,6 +100,8 @@ Do not dismiss an issue only because:
 - Rust 2024; 4-space indent; snake_case for modules/functions, PascalCase for types, SCREAMING_SNAKE for consts.
 - Imports are grouped Std/External/Crate per `rustfmt.toml`; avoid wildcard imports except in tests.
 - Prefer `anyhow::Result` for CLI flows and `thiserror` for library errors; keep args parsed via `clap` in `src/command/*`.
+- **Avoid `unwrap()` / `expect()`** in production code (including startup/initialization). They are acceptable only in tests and obviously infallible logic (with a `// INVARIANT:` comment). All other code must return `Result` and propagate errors with `?` plus contextual, user-friendly messages.
+- **User-friendly errors**: All errors surfaced to the user must be human-readable and actionable — wrap internal errors with context explaining what went wrong, which resource was affected, and how to fix it.
 - Add short comments only when control flow is non-obvious (e.g., async handling, SQLite migrations).
 
 ## Testing Guidelines
@@ -127,3 +131,4 @@ raise as a finding when the issue could plausibly reach production.
 Treat undocumented assumptions as risk.
 Treat untested fixes as incomplete.
 Treat externally visible behavior changes without docs as P1 by default.
+Flag `unwrap()` / `expect()` in production code (outside tests and obviously infallible logic) as a P1 finding — startup/initialization is a production path and is NOT exempt. Suggest replacing with `?` + contextual, user-friendly error message via `anyhow::Context` or a domain-specific `thiserror` variant. If used in an obviously infallible scope, ensure a brief `// INVARIANT:` comment explains why the value can never be `None`/`Err`.

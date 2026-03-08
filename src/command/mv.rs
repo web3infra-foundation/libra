@@ -9,7 +9,10 @@ use git_internal::internal::index::{Index, IndexEntry};
 
 use crate::{
     command::calc_file_blob_hash,
-    utils::{path, util},
+    utils::{
+        error::{CliError, CliResult},
+        path, util,
+    },
 };
 
 #[derive(Parser, Debug)]
@@ -45,10 +48,23 @@ impl MovePlan {
     }
 }
 
-pub async fn execute(args: MvArgs) -> Result<(), String> {
-    if !util::check_repo_exist() {
-        return Err("fatal: not a libra repository".to_string());
+pub async fn execute(args: MvArgs) {
+    if let Err(e) = execute_safe(args).await {
+        eprintln!("{}", e.render());
     }
+}
+
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Moves or renames files in the working directory and
+/// updates the index accordingly.
+pub async fn execute_safe(args: MvArgs) -> CliResult<()> {
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
+    execute_inner(args)
+        .await
+        .map_err(CliError::from_legacy_string)
+}
+
+async fn execute_inner(args: MvArgs) -> Result<(), String> {
     // If the user just types `git mv` without enough arguments, print usage information instead of an error message.
     if args.paths.len() < 2 {
         return Err(

@@ -11,8 +11,8 @@
 //! - `-e <object>`: check if the object exists (exit status only)
 //!
 //! ## AI object modes
-//! - `--ai <uuid>`:          pretty-print an AI object by UUID
-//! - `--ai-type <uuid>`:     print the AI object type (intent/task/run/…)
+//! - `--ai <id>`:            pretty-print an AI object by object ID
+//! - `--ai-type <id>`:       print the AI object type (intent/task/run/…)
 //! - `--ai-list <type>`:     list all AI objects of the given type
 //! - `--ai-list-types`:      list all AI object types present in history
 
@@ -28,11 +28,41 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use crate::{
     command::load_object,
     internal::{ai::history::HistoryManager, db, model::reference},
-    utils::{client_storage::ClientStorage, path, storage::local::LocalStorage, util},
+    utils::{
+        client_storage::ClientStorage,
+        error::{CliError, CliResult},
+        path,
+        storage::local::LocalStorage,
+        util,
+    },
 };
+
+const CAT_FILE_LONG_ABOUT: &str = "Inspect Git objects or Libra AI history objects.
+
+Modes:
+  - Git modes: use exactly one of -t/-s/-p/-e and provide OBJECT.
+  - AI lookup modes: use exactly one of --ai/--ai-type with an AI object ID.
+  - AI listing modes: use --ai-list <TYPE> or --ai-list-types.
+
+Notes:
+  - OBJECT is ignored for all --ai* modes.
+  - --ai and --ai-type search the AI history branch by object ID and can resolve custom stored types such as claude_session.
+  - --ai-list only accepts the built-in TYPE names shown in --help.";
+
+const CAT_FILE_AFTER_HELP: &str = "Examples:
+  libra cat-file -p HEAD
+  libra cat-file -t 40d352ee7190f92dcf7883b8a81f2c730fd8a860
+  libra cat-file --ai-list intent
+  libra cat-file --ai 5b878637-f852-4bff-adee-3354c42ae69f
+  libra cat-file --ai-type debug-local-1772707227";
 
 /// Provide content, type, or size information for repository objects (Git and AI).
 #[derive(Parser, Debug)]
+#[command(
+    about = "Inspect Git objects or Libra AI history objects",
+    long_about = CAT_FILE_LONG_ABOUT,
+    after_help = CAT_FILE_AFTER_HELP,
+)]
 pub struct CatFileArgs {
     // ── Git object modes ────────────────────────────────────────────────
     /// Print the object type
@@ -52,12 +82,12 @@ pub struct CatFileArgs {
     pub check_exist: bool,
 
     // ── AI object modes ─────────────────────────────────────────────────
-    /// Pretty-print an AI object by UUID (intent, task, run, plan, …)
-    #[clap(long = "ai", value_name = "UUID", group = "mode")]
+    /// Pretty-print an AI object by ID across all stored AI types.
+    #[clap(long = "ai", value_name = "ID", group = "mode")]
     pub ai_object: Option<String>,
 
-    /// Print the type of an AI object by UUID
-    #[clap(long = "ai-type", value_name = "UUID", group = "mode")]
+    /// Print the type of an AI object by ID across all stored AI types.
+    #[clap(long = "ai-type", value_name = "ID", group = "mode")]
     pub ai_type: Option<String>,
 
     /// List all AI objects of the given type (intent|task|run|plan|patchset|evidence|invocation|provenance|decision|snapshot)
@@ -68,7 +98,7 @@ pub struct CatFileArgs {
     #[clap(long = "ai-list-types", group = "mode")]
     pub ai_list_types: bool,
 
-    /// The object hash, ref, or UUID (required for Git modes, ignored for --ai-list/--ai-list-types)
+    /// Git object hash or ref. Required only for -t/-s/-p/-e and ignored for all --ai* modes.
     #[clap(value_name = "OBJECT")]
     pub object: Option<String>,
 }
@@ -142,6 +172,20 @@ pub async fn execute(args: CatFileArgs) {
         eprintln!("fatal: one of '-t', '-s', '-p', '-e' or an --ai* flag is required");
         std::process::exit(129);
     }
+}
+
+/// Thin wrapper for CLI dispatch. Internal errors are still handled via
+/// `eprintln!` + `process::exit`.
+///
+/// # Known limitations
+///
+/// `execute()` handles errors internally and never propagates them, so this
+/// wrapper always returns `Ok(())` even when cat-file fails.
+// TODO: refactor execute() to return CliResult so errors propagate to callers.
+pub async fn execute_safe(args: CatFileArgs) -> CliResult<()> {
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
+    execute(args).await;
+    Ok(())
 }
 
 /// Resolve a user-supplied object reference to an `ObjectHash`.
@@ -575,6 +619,20 @@ mod tests {
         // --ai and -t should be mutually exclusive
         let result = CatFileArgs::try_parse_from(["cat-file", "--ai", "some-uuid", "-t", "abc123"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_help_mentions_mode_relationships() {
+        use clap::CommandFactory;
+
+        let mut command = CatFileArgs::command();
+        let mut help = Vec::new();
+        command.write_long_help(&mut help).unwrap();
+        let help = String::from_utf8(help).unwrap();
+
+        assert!(help.contains("OBJECT is ignored for all --ai* modes"));
+        assert!(help.contains("custom stored types such as claude_session"));
+        assert!(help.contains("--ai-type <ID>"));
     }
 
     #[test]

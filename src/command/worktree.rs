@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
     command::restore::{self, RestoreArgs},
     internal::head::Head,
-    utils::util,
+    utils::{
+        error::{CliError, CliResult},
+        util,
+    },
 };
 
 /// CLI arguments for the `worktree` subcommand.
@@ -115,11 +118,18 @@ impl Drop for DirGuard {
 /// to the concrete handler for the requested worktree operation. Any `io::Error`
 /// returned from handlers is formatted as a `fatal:` message on stderr.
 pub async fn execute(args: WorktreeArgs) {
-    if !util::check_repo_exist() {
-        return;
+    if let Err(e) = execute_safe(args).await {
+        eprintln!("{}", e.render());
     }
+}
 
-    let result = match args.command {
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. Dispatches to the appropriate worktree sub-command
+/// (add, list, lock, unlock, move, prune, remove, repair).
+pub async fn execute_safe(args: WorktreeArgs) -> CliResult<()> {
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
+
+    match args.command {
         WorktreeSubcommand::Add { path } => add_worktree(path).await,
         WorktreeSubcommand::List => list_worktrees(),
         WorktreeSubcommand::Lock { path, reason } => lock_worktree(path, reason),
@@ -128,11 +138,8 @@ pub async fn execute(args: WorktreeArgs) {
         WorktreeSubcommand::Prune => prune_worktrees(),
         WorktreeSubcommand::Remove { path } => remove_worktree(path),
         WorktreeSubcommand::Repair => repair_worktrees(),
-    };
-
-    if let Err(e) = result {
-        eprintln!("fatal: {}", e);
     }
+    .map_err(|e| CliError::fatal(e.to_string()))
 }
 
 /// Returns the path to the on-disk worktree state file.
