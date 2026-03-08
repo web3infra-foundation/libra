@@ -49,7 +49,7 @@ fn gate_report_for_stage(
         .tasks
         .iter()
         .find(|task| task.gate_stage == Some(stage.clone()))
-        .map(|task| task.id)?;
+        .map(|task| task.id())?;
 
     run_state
         .result_for(task_id)
@@ -61,7 +61,7 @@ fn review_report(plan: &ExecutionPlanSpec, run_state: &RunStateSnapshot) -> (boo
         .tasks
         .iter()
         .filter(|task| task.kind == TaskKind::Implementation)
-        .map(|task| task.id)
+        .map(|task| task.id())
         .collect::<BTreeSet<_>>();
 
     let findings = run_state
@@ -110,7 +110,7 @@ fn produced_artifacts(plan: &ExecutionPlanSpec, run_state: &RunStateSnapshot) ->
     let mut produced = BTreeSet::new();
 
     for task in &plan.tasks {
-        let Some(result) = run_state.result_for(task.id) else {
+        let Some(result) = run_state.result_for(task.id()) else {
             continue;
         };
 
@@ -203,9 +203,9 @@ fn artifact_stage_label(stage: &ArtifactStage) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use uuid::Uuid;
-
     use super::*;
+    use git_internal::internal::object::{task::Task as GitTask, types::ActorRef};
+
     use crate::internal::ai::{
         intentspec::types::{
             Acceptance, Artifacts, ChangeLogEntry, ChangeType, Check, CheckKind, ConcurrencyPolicy,
@@ -377,8 +377,18 @@ mod tests {
     }
 
     fn plan_with_gates() -> ExecutionPlanSpec {
-        let impl_id = Uuid::new_v4();
-        let release_id = Uuid::new_v4();
+        let impl_task = {
+            let actor = ActorRef::agent("test-verifier").unwrap();
+            GitTask::new(actor, "Implementation", None).unwrap()
+        };
+        let impl_id = impl_task.header().object_id();
+        let release_task = {
+            let actor = ActorRef::agent("test-verifier").unwrap();
+            let mut task = GitTask::new(actor, "Release", None).unwrap();
+            task.add_dependency(impl_id);
+            task
+        };
+        let release_id = release_task.header().object_id();
         ExecutionPlanSpec {
             intent_spec_id: "test".into(),
             summary: "summary".into(),
@@ -387,32 +397,22 @@ mod tests {
             replan_reason: None,
             tasks: vec![
                 TaskSpec {
-                    id: impl_id,
-                    title: "Implementation".into(),
+                    task: impl_task,
                     objective: "implementation".into(),
-                    description: None,
                     kind: TaskKind::Implementation,
                     gate_stage: None,
                     owner_role: Some("coder".into()),
-                    dependencies: vec![],
-                    constraints: vec![],
-                    acceptance_criteria: vec![],
                     scope_in: vec![],
                     scope_out: vec![],
                     checks: vec![],
                     contract: TaskContract::default(),
                 },
                 TaskSpec {
-                    id: release_id,
-                    title: "Release".into(),
+                    task: release_task,
                     objective: "release".into(),
-                    description: None,
                     kind: TaskKind::Gate,
                     gate_stage: Some(GateStage::Release),
                     owner_role: Some("verifier".into()),
-                    dependencies: vec![],
-                    constraints: vec![],
-                    acceptance_criteria: vec![],
                     scope_in: vec![],
                     scope_out: vec![],
                     checks: vec![Check {
@@ -443,7 +443,7 @@ mod tests {
         let plan = plan_with_gates();
         let results = vec![
             TaskResult {
-                task_id: plan.tasks[0].id,
+                task_id: plan.tasks[0].id(),
                 status: TaskNodeStatus::Completed,
                 gate_report: None,
                 agent_output: Some("done".into()),
@@ -466,7 +466,7 @@ mod tests {
                 }),
             },
             TaskResult {
-                task_id: plan.tasks[1].id,
+                task_id: plan.tasks[1].id(),
                 status: TaskNodeStatus::Completed,
                 gate_report: Some(GateReport {
                     results: vec![GateResult {

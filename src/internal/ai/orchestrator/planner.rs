@@ -1,5 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
 
+use git_internal::internal::object::task::{GoalType, Task as GitTask};
 use uuid::Uuid;
 
 use super::types::{
@@ -10,6 +11,18 @@ use crate::internal::ai::intentspec::types::{
     ChangeType, ConflictResolution, DecompositionMode, DependencyPolicy, IntentSpec, LibraBinding,
     NetworkPolicy, PlanGenerationConfig, RiskLevel, TouchHints,
 };
+use crate::internal::ai::workflow_objects::planner_actor;
+
+struct TaskSpecMeta {
+    objective: String,
+    kind: TaskKind,
+    gate_stage: Option<GateStage>,
+    owner_role: Option<String>,
+    scope_in: Vec<String>,
+    scope_out: Vec<String>,
+    checks: Vec<crate::internal::ai::intentspec::types::Check>,
+    contract: TaskContract,
+}
 
 /// Compile an IntentSpec into a static execution plan specification.
 pub fn compile_execution_plan_spec(
@@ -33,7 +46,7 @@ pub fn compile_execution_plan_spec(
         make_sequential(&mut tasks);
     }
 
-    let implementation_ids: Vec<Uuid> = tasks.iter().map(|task| task.id).collect();
+    let implementation_ids: Vec<Uuid> = tasks.iter().map(TaskSpec::id).collect();
     let mut checkpoints = Vec::new();
 
     if plan_config.gate_task_per_stage {
@@ -65,27 +78,32 @@ pub fn compile_execution_plan_spec(
             let dependencies = previous_gate
                 .map(|id| vec![id])
                 .unwrap_or_else(|| implementation_ids.clone());
-            let gate_id = Uuid::new_v4();
             let label = format!("after-{}", stage_label(&stage));
-            tasks.push(TaskSpec {
-                id: gate_id,
-                title: title.to_string(),
-                objective: format!("Run {} verification checks", stage_label(&stage)),
-                description: Some(format!(
-                    "Advance to the {} stage only if all required checks pass.",
-                    stage_label(&stage)
-                )),
-                kind: TaskKind::Gate,
-                gate_stage: Some(stage.clone()),
-                owner_role: Some("verifier".to_string()),
-                dependencies,
-                constraints: common_constraints.clone(),
-                acceptance_criteria: spec.acceptance.success_criteria.clone(),
-                scope_in: spec.intent.in_scope.clone(),
-                scope_out: spec.intent.out_of_scope.clone(),
-                checks,
-                contract: common_contract.clone(),
-            });
+            let task = task_spec(
+                git_task(
+                    title.to_string(),
+                    Some(format!(
+                        "Advance to the {} stage only if all required checks pass.",
+                        stage_label(&stage)
+                    )),
+                    Some(GoalType::Test),
+                    common_constraints.clone(),
+                    spec.acceptance.success_criteria.clone(),
+                    dependencies,
+                )?,
+                TaskSpecMeta {
+                    objective: format!("Run {} verification checks", stage_label(&stage)),
+                    kind: TaskKind::Gate,
+                    gate_stage: Some(stage.clone()),
+                    owner_role: Some("verifier".to_string()),
+                    scope_in: spec.intent.in_scope.clone(),
+                    scope_out: spec.intent.out_of_scope.clone(),
+                    checks,
+                    contract: common_contract.clone(),
+                },
+            );
+            let gate_id = task.id();
+            tasks.push(task);
             checkpoints.push(ExecutionCheckpoint {
                 label,
                 after_tasks: vec![gate_id],
@@ -187,36 +205,40 @@ fn build_implementation_tasks(
             Some(spec.intent.problem_statement.clone()),
             common_constraints.to_vec(),
             common_contract.clone(),
-        )]),
+        )?]),
         DecompositionMode::PerObjective => {
             let sequential = should_force_serial(plan_config, max_parallel);
             let mut tasks = Vec::with_capacity(spec.intent.objectives.len());
             let mut previous: Option<Uuid> = None;
 
             for objective in &spec.intent.objectives {
-                let id = Uuid::new_v4();
                 let dependencies = if sequential {
                     previous.into_iter().collect()
                 } else {
                     Vec::new()
                 };
-                tasks.push(TaskSpec {
-                    id,
-                    title: objective.clone(),
-                    objective: objective.clone(),
-                    description: Some(spec.intent.problem_statement.clone()),
-                    kind: TaskKind::Implementation,
-                    gate_stage: None,
-                    owner_role: Some("coder".to_string()),
-                    dependencies,
-                    constraints: common_constraints.to_vec(),
-                    acceptance_criteria: spec.acceptance.success_criteria.clone(),
-                    scope_in: spec.intent.in_scope.clone(),
-                    scope_out: spec.intent.out_of_scope.clone(),
-                    checks: Vec::new(),
-                    contract: common_contract.clone(),
-                });
-                previous = Some(id);
+                let task = task_spec(
+                    git_task(
+                        objective.clone(),
+                        Some(spec.intent.problem_statement.clone()),
+                        Some(goal_type(&spec.intent.change_type)),
+                        common_constraints.to_vec(),
+                        spec.acceptance.success_criteria.clone(),
+                        dependencies,
+                    )?,
+                    TaskSpecMeta {
+                        objective: objective.clone(),
+                        kind: TaskKind::Implementation,
+                        gate_stage: None,
+                        owner_role: Some("coder".to_string()),
+                        scope_in: spec.intent.in_scope.clone(),
+                        scope_out: spec.intent.out_of_scope.clone(),
+                        checks: Vec::new(),
+                        contract: common_contract.clone(),
+                    },
+                );
+                previous = Some(task.id());
+                tasks.push(task);
             }
             Ok(tasks)
         }
@@ -245,7 +267,6 @@ fn build_implementation_tasks(
             let mut previous: Option<Uuid> = None;
 
             for file_hint in hints.files {
-                let id = Uuid::new_v4();
                 let dependencies = if sequential {
                     previous.into_iter().collect()
                 } else {
@@ -254,26 +275,31 @@ fn build_implementation_tasks(
                 let mut contract = common_contract.clone();
                 contract.touch_files = vec![file_hint.clone()];
 
-                tasks.push(TaskSpec {
-                    id,
-                    title: format!("Modify {file_hint}"),
-                    objective: format!("Implement changes touching {file_hint}"),
-                    description: Some(format!(
-                        "{}\nFocus change analysis on file cluster rooted at {}.",
-                        spec.intent.problem_statement, file_hint
-                    )),
-                    kind: TaskKind::Implementation,
-                    gate_stage: None,
-                    owner_role: Some("coder".to_string()),
-                    dependencies,
-                    constraints: common_constraints.to_vec(),
-                    acceptance_criteria: spec.acceptance.success_criteria.clone(),
-                    scope_in: spec.intent.in_scope.clone(),
-                    scope_out: spec.intent.out_of_scope.clone(),
-                    checks: Vec::new(),
-                    contract,
-                });
-                previous = Some(id);
+                let task = task_spec(
+                    git_task(
+                        format!("Modify {file_hint}"),
+                        Some(format!(
+                            "{}\nFocus change analysis on file cluster rooted at {}.",
+                            spec.intent.problem_statement, file_hint
+                        )),
+                        Some(goal_type(&spec.intent.change_type)),
+                        common_constraints.to_vec(),
+                        spec.acceptance.success_criteria.clone(),
+                        dependencies,
+                    )?,
+                    TaskSpecMeta {
+                        objective: format!("Implement changes touching {file_hint}"),
+                        kind: TaskKind::Implementation,
+                        gate_stage: None,
+                        owner_role: Some("coder".to_string()),
+                        scope_in: spec.intent.in_scope.clone(),
+                        scope_out: spec.intent.out_of_scope.clone(),
+                        checks: Vec::new(),
+                        contract,
+                    },
+                );
+                previous = Some(task.id());
+                tasks.push(task);
             }
 
             Ok(tasks)
@@ -287,23 +313,27 @@ fn implementation_task(
     description: Option<String>,
     constraints: Vec<String>,
     contract: TaskContract,
-) -> TaskSpec {
-    TaskSpec {
-        id: Uuid::new_v4(),
-        title,
-        objective,
-        description,
-        kind: TaskKind::Implementation,
-        gate_stage: None,
-        owner_role: Some("coder".to_string()),
-        dependencies: Vec::new(),
-        constraints,
-        acceptance_criteria: contract.expected_outputs.clone(),
-        scope_in: contract.write_scope.clone(),
-        scope_out: contract.forbidden_scope.clone(),
-        checks: Vec::new(),
-        contract,
-    }
+) -> Result<TaskSpec, OrchestratorError> {
+    Ok(task_spec(
+        git_task(
+            title,
+            description,
+            Some(GoalType::Other("implementation".to_string())),
+            constraints,
+            contract.expected_outputs.clone(),
+            Vec::new(),
+        )?,
+        TaskSpecMeta {
+            objective,
+            kind: TaskKind::Implementation,
+            gate_stage: None,
+            owner_role: Some("coder".to_string()),
+            scope_in: contract.write_scope.clone(),
+            scope_out: contract.forbidden_scope.clone(),
+            checks: Vec::new(),
+            contract,
+        },
+    ))
 }
 
 fn apply_conflict_resolution(
@@ -328,12 +358,12 @@ fn apply_conflict_resolution(
                 .join("\n");
             let merged_title = tasks
                 .iter()
-                .map(|n| n.title.clone())
+                .map(|n| n.title().to_string())
                 .collect::<Vec<_>>()
                 .join(" + ");
             let merged_description = tasks
                 .iter()
-                .filter_map(|n| n.description.clone())
+                .filter_map(|n| n.description().map(ToString::to_string))
                 .collect::<Vec<_>>()
                 .join("\n");
 
@@ -344,8 +374,8 @@ fn apply_conflict_resolution(
             let mut scope_out = BTreeSet::new();
 
             for node in tasks {
-                constraints.extend(node.constraints);
-                acceptance.extend(node.acceptance_criteria);
+                constraints.extend(node.constraints().iter().cloned());
+                acceptance.extend(node.acceptance_criteria().iter().cloned());
                 scope_in.extend(node.scope_in);
                 scope_out.extend(node.scope_out);
                 contract.write_scope.extend(node.contract.write_scope);
@@ -373,22 +403,26 @@ fn apply_conflict_resolution(
             contract.expected_outputs.sort();
             contract.expected_outputs.dedup();
 
-            Ok(vec![TaskSpec {
-                id: Uuid::new_v4(),
-                title: merged_title,
-                objective: merged_objective,
-                description: Some(merged_description),
-                kind: TaskKind::Implementation,
-                gate_stage: None,
-                owner_role: Some("coder".into()),
-                dependencies: Vec::new(),
-                constraints: constraints.into_iter().collect(),
-                acceptance_criteria: acceptance.into_iter().collect(),
-                scope_in: scope_in.into_iter().collect(),
-                scope_out: scope_out.into_iter().collect(),
-                checks: Vec::new(),
-                contract,
-            }])
+            Ok(vec![task_spec(
+                git_task(
+                    merged_title,
+                    Some(merged_description),
+                    Some(GoalType::Other("implementation".to_string())),
+                    constraints.into_iter().collect(),
+                    acceptance.into_iter().collect(),
+                    Vec::new(),
+                )?,
+                TaskSpecMeta {
+                    objective: merged_objective,
+                    kind: TaskKind::Implementation,
+                    gate_stage: None,
+                    owner_role: Some("coder".into()),
+                    scope_in: scope_in.into_iter().collect(),
+                    scope_out: scope_out.into_iter().collect(),
+                    checks: Vec::new(),
+                    contract,
+                },
+            )])
         }
         ConflictResolution::FailFast => Err(OrchestratorError::PlanningFailed(format!(
             "task decomposition produced overlapping write clusters: {}",
@@ -418,11 +452,11 @@ fn make_sequential(nodes: &mut [TaskSpec]) {
     let mut previous: Option<Uuid> = None;
     for node in nodes {
         if let Some(prev) = previous
-            && !node.dependencies.contains(&prev)
+            && !node.dependencies().contains(&prev)
         {
-            node.dependencies.push(prev);
+            node.task.add_dependency(prev);
         }
-        previous = Some(node.id);
+        previous = Some(node.id());
     }
 }
 
@@ -438,8 +472,8 @@ fn compute_parallel_groups(tasks: &[TaskSpec]) -> Vec<Vec<Uuid>> {
     while !remaining.is_empty() {
         let ready: Vec<Uuid> = remaining
             .iter()
-            .filter(|node| node.dependencies.iter().all(|dep| completed.contains(dep)))
-            .map(|node| node.id)
+            .filter(|node| node.dependencies().iter().all(|dep| completed.contains(dep)))
+            .map(TaskSpec::id)
             .collect();
         if ready.is_empty() {
             break;
@@ -447,11 +481,63 @@ fn compute_parallel_groups(tasks: &[TaskSpec]) -> Vec<Vec<Uuid>> {
         for id in &ready {
             completed.insert(*id);
         }
-        remaining.retain(|node| !ready.contains(&node.id));
+        remaining.retain(|node| !ready.contains(&node.id()));
         groups.push(ready);
     }
 
     groups
+}
+
+fn git_task(
+    title: String,
+    description: Option<String>,
+    goal: Option<GoalType>,
+    constraints: Vec<String>,
+    acceptance_criteria: Vec<String>,
+    dependencies: Vec<Uuid>,
+) -> Result<GitTask, OrchestratorError> {
+    let actor = planner_actor()
+        .map_err(|e| OrchestratorError::PlanningFailed(format!("invalid planner actor: {e}")))?;
+    let mut task = GitTask::new(actor, title, goal)
+        .map_err(|e| OrchestratorError::PlanningFailed(format!("failed to create task: {e}")))?;
+    task.set_description(description);
+    for constraint in constraints {
+        task.add_constraint(constraint);
+    }
+    for criterion in acceptance_criteria {
+        task.add_acceptance_criterion(criterion);
+    }
+    for dependency in dependencies {
+        task.add_dependency(dependency);
+    }
+    Ok(task)
+}
+
+fn task_spec(task: GitTask, meta: TaskSpecMeta) -> TaskSpec {
+    TaskSpec {
+        task,
+        objective: meta.objective,
+        kind: meta.kind,
+        gate_stage: meta.gate_stage,
+        owner_role: meta.owner_role,
+        scope_in: meta.scope_in,
+        scope_out: meta.scope_out,
+        checks: meta.checks,
+        contract: meta.contract,
+    }
+}
+
+fn goal_type(change_type: &ChangeType) -> GoalType {
+    match change_type {
+        ChangeType::Bugfix => GoalType::Bugfix,
+        ChangeType::Feature => GoalType::Feature,
+        ChangeType::Refactor => GoalType::Refactor,
+        ChangeType::Performance => GoalType::Perf,
+        ChangeType::Security => GoalType::Other("security".to_string()),
+        ChangeType::Docs => GoalType::Docs,
+        ChangeType::Chore => GoalType::Chore,
+        ChangeType::Unknown => GoalType::Other("unknown".to_string()),
+    }
 }
 
 fn stage_label(stage: &GateStage) -> &'static str {

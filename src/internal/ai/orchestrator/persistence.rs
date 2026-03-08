@@ -179,7 +179,7 @@ pub async fn persist_execution(
         .execution_plan_spec
         .tasks
         .iter()
-        .map(|task| (task.id, task))
+        .map(|task| (task.id(), task))
         .collect();
 
     let mut persisted_tasks = Vec::with_capacity(task_results.len());
@@ -200,7 +200,7 @@ pub async fn persist_execution(
 
         for call in &result.tool_calls {
             let tool_invocation_id =
-                create_tool_invocation(request.mcp_server, &run_id, task.title.as_str(), call)
+                create_tool_invocation(request.mcp_server, &run_id, task.title(), call)
                     .await?;
             persisted.tool_invocation_ids.push(tool_invocation_id);
         }
@@ -211,7 +211,7 @@ pub async fn persist_execution(
                 run_id: &run_id,
                 base_commit_sha: &base_commit_sha,
                 generation,
-                task_title: task.title.as_str(),
+                task_title: task.title(),
                 task_objective: task.objective.as_str(),
                 tool_calls: &result.tool_calls,
             })
@@ -1132,10 +1132,9 @@ fn checkpoint_before_replan(spec: &IntentSpec) -> bool {
 mod tests {
     use std::{collections::BTreeMap, path::Path, sync::Arc};
 
+    use git_internal::internal::object::{task::Task as GitTask, types::ActorRef};
     use sea_orm::{ConnectionTrait, Database, Schema};
     use tempfile::tempdir;
-    use uuid::Uuid;
-
     use super::*;
     use crate::{
         internal::{
@@ -1324,14 +1323,24 @@ mod tests {
     #[tokio::test]
     async fn test_persist_execution_creates_object_chain() {
         let server = setup_server().await;
-        let impl_task_id = Uuid::new_v4();
-        let gate_task_id = Uuid::new_v4();
         let spec = test_spec(vec![ChangeLogEntry {
             at: "2025-01-01T00:01:00Z".into(),
             by: "libra-orchestrator".into(),
             reason: "security gate failed".into(),
             diff_summary: "revision 2: replan in serial mode".into(),
         }]);
+        let impl_task = {
+            let actor = ActorRef::agent("test-persistence").unwrap();
+            GitTask::new(actor, "Edit source", None).unwrap()
+        };
+        let impl_task_id = impl_task.header().object_id();
+        let gate_task = {
+            let actor = ActorRef::agent("test-persistence").unwrap();
+            let mut task = GitTask::new(actor, "Run fast checks", None).unwrap();
+            task.add_dependency(impl_task_id);
+            task
+        };
+        let gate_task_id = gate_task.header().object_id();
         let plan_spec = ExecutionPlanSpec {
             intent_spec_id: "intent-1".to_string(),
             summary: "Implement feature and verify it".to_string(),
@@ -1340,32 +1349,22 @@ mod tests {
             replan_reason: None,
             tasks: vec![
                 TaskSpec {
-                    id: impl_task_id,
-                    title: "Edit source".to_string(),
+                    task: impl_task,
                     objective: "Update src/lib.rs".to_string(),
-                    description: None,
                     kind: TaskKind::Implementation,
                     gate_stage: None,
                     owner_role: Some("coder".to_string()),
-                    dependencies: vec![],
-                    constraints: vec![],
-                    acceptance_criteria: vec![],
                     scope_in: vec!["src/".to_string()],
                     scope_out: vec![],
                     checks: vec![],
                     contract: TaskContract::default(),
                 },
                 TaskSpec {
-                    id: gate_task_id,
-                    title: "Run fast checks".to_string(),
+                    task: gate_task,
                     objective: "Verify".to_string(),
-                    description: None,
                     kind: TaskKind::Gate,
                     gate_stage: Some(GateStage::Fast),
                     owner_role: Some("verifier".to_string()),
-                    dependencies: vec![impl_task_id],
-                    constraints: vec![],
-                    acceptance_criteria: vec![],
                     scope_in: vec![],
                     scope_out: vec![],
                     checks: vec![],

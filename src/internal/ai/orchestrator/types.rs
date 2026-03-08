@@ -1,5 +1,6 @@
 use std::{path::PathBuf, sync::Arc};
 
+use git_internal::internal::object::task::Task as GitTask;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -78,22 +79,13 @@ pub struct TaskContract {
 /// A static task specification produced by planning.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskSpec {
-    pub id: Uuid,
-    pub title: String,
+    pub task: GitTask,
     pub objective: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
     pub kind: TaskKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate_stage: Option<GateStage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_role: Option<String>,
-    #[serde(default)]
-    pub dependencies: Vec<Uuid>,
-    #[serde(default)]
-    pub constraints: Vec<String>,
-    #[serde(default)]
-    pub acceptance_criteria: Vec<String>,
     #[serde(default)]
     pub scope_in: Vec<String>,
     #[serde(default)]
@@ -102,6 +94,32 @@ pub struct TaskSpec {
     pub checks: Vec<Check>,
     #[serde(default)]
     pub contract: TaskContract,
+}
+
+impl TaskSpec {
+    pub fn id(&self) -> Uuid {
+        self.task.header().object_id()
+    }
+
+    pub fn title(&self) -> &str {
+        self.task.title()
+    }
+
+    pub fn description(&self) -> Option<&str> {
+        self.task.description()
+    }
+
+    pub fn dependencies(&self) -> &[Uuid] {
+        self.task.dependencies()
+    }
+
+    pub fn constraints(&self) -> &[String] {
+        self.task.constraints()
+    }
+
+    pub fn acceptance_criteria(&self) -> &[String] {
+        self.task.acceptance_criteria()
+    }
 }
 
 /// A checkpoint in the compiled execution plan.
@@ -391,20 +409,19 @@ pub struct OrchestratorConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use git_internal::internal::object::{task::Task as GitTask, types::ActorRef};
     use crate::internal::ai::orchestrator::run_state::RunStateSnapshot;
 
-    fn implementation_task(id: Uuid) -> TaskSpec {
+    fn implementation_task() -> TaskSpec {
+        let actor = ActorRef::agent("test-planner").unwrap();
+        let mut task = GitTask::new(actor, "Do thing", None).unwrap();
+        task.set_description(None);
         TaskSpec {
-            id,
-            title: "Do thing".into(),
+            task,
             objective: "do thing".into(),
-            description: None,
             kind: TaskKind::Implementation,
             gate_stage: None,
             owner_role: Some("coder".into()),
-            dependencies: vec![],
-            constraints: vec![],
-            acceptance_criteria: vec![],
             scope_in: vec![],
             scope_out: vec![],
             checks: vec![],
@@ -414,78 +431,62 @@ mod tests {
 
     #[test]
     fn test_task_spec_serde_roundtrip() {
-        let id = Uuid::new_v4();
-        let task = implementation_task(id);
+        let task = implementation_task();
         let json = serde_json::to_string(&task).unwrap();
         let back: TaskSpec = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.id, id);
+        assert_eq!(back.id(), task.id());
         assert_eq!(back.kind, TaskKind::Implementation);
     }
 
     #[test]
     fn test_execution_plan_spec_preserves_dependencies() {
-        let a = Uuid::new_v4();
-        let b = Uuid::new_v4();
+        let first = implementation_task();
+        let a = first.id();
+        let second = {
+            let actor = ActorRef::agent("test-planner").unwrap();
+            let mut task = GitTask::new(actor, "b", None).unwrap();
+            task.add_dependency(a);
+            TaskSpec {
+                task,
+                objective: "b".into(),
+                kind: TaskKind::Implementation,
+                gate_stage: None,
+                owner_role: Some("coder".into()),
+                scope_in: vec![],
+                scope_out: vec![],
+                checks: vec![],
+                contract: TaskContract::default(),
+            }
+        };
+        let b = second.id();
         let spec = ExecutionPlanSpec {
             intent_spec_id: "spec-123".into(),
             summary: "summary".into(),
             revision: 1,
             parent_revision: None,
             replan_reason: None,
-            tasks: vec![
-                implementation_task(a),
-                TaskSpec {
-                    id: b,
-                    title: "b".into(),
-                    objective: "b".into(),
-                    description: None,
-                    kind: TaskKind::Implementation,
-                    gate_stage: None,
-                    owner_role: Some("coder".into()),
-                    dependencies: vec![a],
-                    constraints: vec![],
-                    acceptance_criteria: vec![],
-                    scope_in: vec![],
-                    scope_out: vec![],
-                    checks: vec![],
-                    contract: TaskContract::default(),
-                },
-            ],
+            tasks: vec![first, second],
             max_parallel: 2,
             parallel_groups: vec![vec![a], vec![b]],
             checkpoints: vec![],
         };
 
         assert_eq!(spec.tasks.len(), 2);
-        assert_eq!(spec.tasks[1].dependencies, vec![a]);
+        assert_eq!(spec.tasks[1].dependencies(), &[a]);
         assert_eq!(spec.parallel_groups, vec![vec![a], vec![b]]);
     }
 
     #[test]
     fn test_serde_roundtrip_execution_plan_spec() {
-        let id = Uuid::new_v4();
+        let task = implementation_task();
+        let id = task.id();
         let spec = ExecutionPlanSpec {
             intent_spec_id: "spec-123".into(),
             summary: "summary".into(),
             revision: 2,
             parent_revision: Some(1),
             replan_reason: Some("replan".into()),
-            tasks: vec![TaskSpec {
-                id,
-                title: "Do thing".into(),
-                objective: "do thing".into(),
-                description: None,
-                kind: TaskKind::Implementation,
-                gate_stage: None,
-                owner_role: Some("coder".into()),
-                dependencies: vec![],
-                constraints: vec![],
-                acceptance_criteria: vec![],
-                scope_in: vec![],
-                scope_out: vec![],
-                checks: vec![],
-                contract: TaskContract::default(),
-            }],
+            tasks: vec![task],
             max_parallel: 2,
             parallel_groups: vec![vec![id]],
             checkpoints: vec![ExecutionCheckpoint {
@@ -497,13 +498,14 @@ mod tests {
         let json = serde_json::to_string(&spec).unwrap();
         let back: ExecutionPlanSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(back.tasks.len(), 1);
-        assert_eq!(back.tasks[0].id, id);
+        assert_eq!(back.tasks[0].id(), spec.tasks[0].id());
         assert_eq!(back.max_parallel, 2);
     }
 
     #[test]
     fn test_serde_roundtrip_orchestrator_result() {
-        let id = Uuid::new_v4();
+        let task = implementation_task();
+        let id = task.id();
         let result = OrchestratorResult {
             decision: DecisionOutcome::Commit,
             execution_plan_spec: ExecutionPlanSpec {
@@ -512,7 +514,7 @@ mod tests {
                 revision: 2,
                 parent_revision: Some(1),
                 replan_reason: Some("security gate failed".into()),
-                tasks: vec![implementation_task(id)],
+                tasks: vec![task],
                 max_parallel: 1,
                 parallel_groups: vec![vec![id]],
                 checkpoints: vec![],

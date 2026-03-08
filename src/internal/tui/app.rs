@@ -1494,7 +1494,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 }
 
                 fn scoped_call_id(task: &TaskSpec, call_id: &str) -> String {
-                    format!("{}:{call_id}", task.id)
+                    format!("{}:{call_id}", task.id())
                 }
             }
 
@@ -1518,7 +1518,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     let _ = self.tx.send(AppEvent::AgentStatusUpdate {
                         status: AgentStatus::Thinking,
                     });
-                    self.send_note(format!("Starting [{kind}] {}", task.title));
+                    self.send_note(format!("Starting [{kind}] {}", task.title()));
                 }
 
                 fn on_task_completed(
@@ -1528,7 +1528,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 ) {
                     self.send_note(format!(
                         "Finished {}  \nStatus: {:?} | Retries: {} | Tools: {} | Policy violations: {}",
-                        task.title,
+                        task.title(),
                         result.status,
                         result.retry_count,
                         result.tool_calls.len(),
@@ -1541,7 +1541,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     if text.is_empty() {
                         return;
                     }
-                    self.send_note(format!("{}  \n{}", task.title, text));
+                    self.send_note(format!("{}  \n{}", task.title(), text));
                 }
 
                 fn on_tool_call_begin(
@@ -1573,7 +1573,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 }
 
                 fn on_reviewer_started(&self, task: &TaskSpec) {
-                    self.send_note(format!("Reviewer pass started for {}", task.title));
+                    self.send_note(format!("Reviewer pass started for {}", task.title()));
                 }
 
                 fn on_reviewer_completed(
@@ -1592,7 +1592,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         .unwrap_or_else(|| "no reviewer output".to_string());
                     self.send_note(format!(
                         "Reviewer pass finished for {}  \n{}",
-                        task.title, summary
+                        task.title(), summary
                     ));
                 }
 
@@ -2230,7 +2230,7 @@ fn format_orchestrator_result(
         .execution_plan_spec
         .tasks
         .iter()
-        .map(|task| (task.id, task.title.as_str()))
+        .map(|task| (task.id(), task.title()))
         .collect();
 
     for tr in &result.task_results {
@@ -2333,12 +2333,12 @@ fn render_execution_plan_summary(plan: &ExecutionPlanSpec, plan_id: Option<&str>
             Some(stage) => format!("gate:{stage:?}"),
             None => "implementation".to_string(),
         };
-        lines.push(format!("- [{}] {}", kind.to_lowercase(), task.title));
+        lines.push(format!("- [{}] {}", kind.to_lowercase(), task.title()));
         if !task.contract.touch_files.is_empty() {
             lines.push(format!("  files: {}", task.contract.touch_files.join(", ")));
         }
-        if !task.dependencies.is_empty() {
-            lines.push(format!("  depends on: {}", task.dependencies.len()));
+        if !task.dependencies().is_empty() {
+            lines.push(format!("  depends on: {}", task.dependencies().len()));
         }
         if !task.checks.is_empty() {
             lines.push(format!("  checks: {}", task.checks.len()));

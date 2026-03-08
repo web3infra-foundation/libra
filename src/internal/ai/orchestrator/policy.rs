@@ -298,6 +298,8 @@ fn extract_first_diff_path(metadata: &Value) -> Option<String> {
 mod tests {
     use std::collections::BTreeMap;
 
+    use git_internal::internal::object::{task::Task as GitTask, types::ActorRef};
+
     use super::*;
     use crate::internal::ai::{
         intentspec::types::{
@@ -468,17 +470,14 @@ mod tests {
     }
 
     fn task() -> TaskSpec {
+        let actor = ActorRef::agent("test-policy").unwrap();
+        let task = GitTask::new(actor, "edit", None).unwrap();
         TaskSpec {
-            id: uuid::Uuid::new_v4(),
-            title: "edit".into(),
+            task,
             objective: "edit file".into(),
-            description: None,
             kind: TaskKind::Implementation,
             gate_stage: None,
             owner_role: Some("coder".into()),
-            dependencies: vec![],
-            constraints: vec![],
-            acceptance_criteria: vec![],
             scope_in: vec!["src/".into()],
             scope_out: vec!["vendor/".into()],
             checks: vec![],

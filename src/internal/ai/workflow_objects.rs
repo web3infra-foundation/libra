@@ -57,18 +57,18 @@ pub fn build_git_task(intent_id: Option<Uuid>, task: &TaskSpec) -> Result<GitTas
         TaskKind::Implementation => GoalType::Other("implementation".to_string()),
     });
 
-    let mut git_task = GitTask::new(actor, task.title.clone(), goal)
+    let mut git_task = GitTask::new(actor, task.title().to_string(), goal)
         .map_err(anyhow::Error::msg)
         .context("Failed to construct git-internal Task")?;
-    git_task.set_description(task.description.clone().or(Some(task.objective.clone())));
-    for constraint in &task.constraints {
+    git_task.set_description(task.description().map(ToString::to_string).or(Some(task.objective.clone())));
+    for constraint in task.constraints() {
         git_task.add_constraint(constraint.clone());
     }
-    for criterion in &task.acceptance_criteria {
+    for criterion in task.acceptance_criteria() {
         git_task.add_acceptance_criterion(criterion.clone());
     }
     git_task.set_intent(intent_id);
-    for dependency in &task.dependencies {
+    for dependency in task.dependencies() {
         git_task.add_dependency(*dependency);
     }
 
@@ -81,9 +81,9 @@ pub fn parse_object_id(value: &str) -> Result<Uuid> {
 }
 
 fn task_to_plan_step(task: &TaskSpec) -> PlanStep {
-    let mut step = PlanStep::new(task.title.clone());
+    let mut step = PlanStep::new(task.title().to_string());
     step.set_inputs(Some(json!({
-        "taskId": task.id,
+        "taskId": task.id(),
         "objective": task.objective,
         "kind": format!("{:?}", task.kind),
         "gateStage": task.gate_stage.as_ref().map(|stage| format!("{:?}", stage)),
@@ -92,9 +92,9 @@ fn task_to_plan_step(task: &TaskSpec) -> PlanStep {
         "touchFiles": task.contract.touch_files,
         "touchSymbols": task.contract.touch_symbols,
         "touchApis": task.contract.touch_apis,
-        "constraints": task.constraints,
+        "constraints": task.constraints(),
         "expectedOutputs": task.contract.expected_outputs,
-        "acceptanceCriteria": task.acceptance_criteria,
+        "acceptanceCriteria": task.acceptance_criteria(),
         "ownerRole": task.owner_role,
     })));
     let checks = if task.checks.is_empty() {
@@ -108,6 +108,8 @@ fn task_to_plan_step(task: &TaskSpec) -> PlanStep {
 
 #[cfg(test)]
 mod tests {
+    use git_internal::internal::object::{task::Task as GitTask, types::ActorRef};
+
     use super::*;
     use crate::internal::ai::{
         intentspec::types::Check,
@@ -115,17 +117,19 @@ mod tests {
     };
 
     fn task() -> TaskSpec {
+        let actor = ActorRef::agent("test-workflow").unwrap();
+        let dependency = Uuid::new_v4();
+        let mut git_task = GitTask::new(actor, "Implement auth", Some(GoalType::Feature)).unwrap();
+        git_task.set_description(Some("Adjust login".into()));
+        git_task.add_dependency(dependency);
+        git_task.add_constraint("network:deny");
+        git_task.add_acceptance_criterion("tests pass");
         TaskSpec {
-            id: Uuid::new_v4(),
-            title: "Implement auth".into(),
+            task: git_task,
             objective: "Update auth flow".into(),
-            description: Some("Adjust login".into()),
             kind: TaskKind::Implementation,
             gate_stage: Some(GateStage::Fast),
             owner_role: Some("coder".into()),
-            dependencies: vec![Uuid::new_v4()],
-            constraints: vec!["network:deny".into()],
-            acceptance_criteria: vec!["tests pass".into()],
             scope_in: vec!["src".into()],
             scope_out: vec!["vendor".into()],
             checks: vec![Check {
@@ -171,10 +175,10 @@ mod tests {
                 replan_reason: None,
                 tasks: vec![t.clone()],
                 max_parallel: 1,
-                parallel_groups: vec![vec![t.id]],
+                parallel_groups: vec![vec![t.id()]],
                 checkpoints: vec![ExecutionCheckpoint {
                     label: "after-fast".into(),
-                    after_tasks: vec![t.id],
+                    after_tasks: vec![t.id()],
                     reason: "checkpoint".into(),
                 }],
             },

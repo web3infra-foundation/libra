@@ -205,14 +205,14 @@ mod tests {
             self.events
                 .lock()
                 .unwrap()
-                .push(format!("start:{}", task.title));
+                .push(format!("start:{}", task.title()));
         }
 
         fn on_task_completed(&self, task: &types::TaskSpec, _result: &types::TaskResult) {
             self.events
                 .lock()
                 .unwrap()
-                .push(format!("done:{}", task.title));
+                .push(format!("done:{}", task.title()));
         }
 
         fn on_graph_progress(&self, completed: usize, total: usize) {

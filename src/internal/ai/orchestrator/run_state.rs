@@ -134,9 +134,9 @@ impl RunStateStore {
             .tasks
             .iter()
             .map(|task| TaskStatusSnapshot {
-                task_id: task.id,
+                task_id: task.id(),
                 status: results
-                    .get(&task.id)
+                    .get(&task.id())
                     .map(|result| result.status.clone())
                     .unwrap_or(TaskNodeStatus::Pending),
             })
@@ -144,7 +144,7 @@ impl RunStateStore {
         let task_results = plan
             .tasks
             .iter()
-            .filter_map(|task| results.get(&task.id).cloned())
+            .filter_map(|task| results.get(&task.id()).cloned())
             .collect();
 
         RunStateSnapshot {
@@ -159,12 +159,15 @@ impl RunStateStore {
 
 #[cfg(test)]
 mod tests {
-    use uuid::Uuid;
+    use git_internal::internal::object::{task::Task as GitTask, types::ActorRef};
 
     use super::*;
     use crate::internal::ai::orchestrator::types::{TaskContract, TaskKind, TaskSpec};
 
-    fn test_plan(task_id: Uuid) -> ExecutionPlanSpec {
+    fn test_plan() -> ExecutionPlanSpec {
+        let actor = ActorRef::agent("test-run-state").unwrap();
+        let git_task = GitTask::new(actor, "task", None).unwrap();
+        let task_id = git_task.header().object_id();
         ExecutionPlanSpec {
             intent_spec_id: "spec-1".into(),
             summary: "summary".into(),
@@ -172,16 +175,11 @@ mod tests {
             parent_revision: Some(2),
             replan_reason: Some("test".into()),
             tasks: vec![TaskSpec {
-                id: task_id,
-                title: "task".into(),
+                task: git_task,
                 objective: "task".into(),
-                description: None,
                 kind: TaskKind::Implementation,
                 gate_stage: None,
                 owner_role: Some("coder".into()),
-                dependencies: vec![],
-                constraints: vec![],
-                acceptance_criteria: vec![],
                 scope_in: vec![],
                 scope_out: vec![],
                 checks: vec![],
@@ -195,8 +193,8 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_preserves_plan_identity_and_order() {
-        let task_id = Uuid::new_v4();
-        let plan = test_plan(task_id);
+        let plan = test_plan();
+        let task_id = plan.tasks[0].id();
         let store = RunStateStore::new();
         store
             .record_result(TaskResult {

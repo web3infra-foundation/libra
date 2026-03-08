@@ -208,7 +208,7 @@ pub async fn execute_task<M: CompletionModel>(
                             observer.on_reviewer_completed(task, None);
                         }
                         return TaskResult {
-                            task_id: task.id,
+                            task_id: task.id(),
                             status: TaskNodeStatus::Failed,
                             gate_report: None,
                             agent_output: Some(message),
@@ -232,7 +232,7 @@ pub async fn execute_task<M: CompletionModel>(
                     )
                 } else {
                     return TaskResult {
-                        task_id: task.id,
+                        task_id: task.id(),
                         status: TaskNodeStatus::Completed,
                         gate_report: None,
                         agent_output: Some(turn.final_text),
@@ -262,7 +262,7 @@ pub async fn execute_task<M: CompletionModel>(
             }
             Err(e) => {
                 return TaskResult {
-                    task_id: task.id,
+                    task_id: task.id(),
                     status: TaskNodeStatus::Failed,
                     gate_report: None,
                     agent_output: Some(e.to_string()),
@@ -281,7 +281,7 @@ pub async fn execute_task<M: CompletionModel>(
         }
         if retry_count > config.max_retries {
             return TaskResult {
-                task_id: task.id,
+                task_id: task.id(),
                 status: TaskNodeStatus::Failed,
                 gate_report: None,
                 agent_output,
@@ -292,7 +292,7 @@ pub async fn execute_task<M: CompletionModel>(
             };
         }
 
-        tracing::warn!(task_id = %task.id, "retrying task after failure: {}", failure_reason);
+        tracing::warn!(task_id = %task.id(), "retrying task after failure: {}", failure_reason);
         if config.backoff_seconds > 0 {
             tokio::time::sleep(std::time::Duration::from_secs(
                 config.backoff_seconds as u64,
@@ -310,7 +310,7 @@ async fn execute_gate_task(task: &TaskSpec, working_dir: &Path) -> TaskResult {
     };
 
     TaskResult {
-        task_id: task.id,
+        task_id: task.id(),
         status: if gate_report.all_required_passed {
             TaskNodeStatus::Completed
         } else {
@@ -459,7 +459,7 @@ impl<M: CompletionModel + 'static> Action for TaskDagrsAction<M> {
                     result
                         .agent_output
                         .clone()
-                        .unwrap_or_else(|| format!("task {} failed", self.task.title)),
+                        .unwrap_or_else(|| format!("task {} failed", self.task.title())),
                 )
             }
             TaskNodeStatus::Skipped => {
@@ -478,7 +478,7 @@ impl<M: CompletionModel + 'static> Action for TaskDagrsAction<M> {
                     .await;
                 Output::error(format!(
                     "task {} returned invalid terminal state",
-                    self.task.title
+                    self.task.title()
                 ))
             }
         }
@@ -496,10 +496,10 @@ fn execution_batches(plan: &ExecutionPlanSpec) -> Result<Vec<Vec<Uuid>>, Orchest
             .tasks
             .iter()
             .filter(|task| {
-                !scheduled.contains(&task.id)
-                    && task.dependencies.iter().all(|dep| completed.contains(dep))
+                !scheduled.contains(&task.id())
+                    && task.dependencies().iter().all(|dep| completed.contains(dep))
             })
-            .map(|task| task.id)
+            .map(TaskSpec::id)
             .collect();
 
         if ready.is_empty() {
@@ -521,7 +521,7 @@ fn task_index(tasks: &[TaskSpec]) -> HashMap<Uuid, usize> {
     tasks
         .iter()
         .enumerate()
-        .map(|(idx, task)| (task.id, idx))
+        .map(|(idx, task)| (task.id(), idx))
         .collect()
 }
 
@@ -566,16 +566,16 @@ fn build_dagrs_graph<M: CompletionModel + 'static>(
             run_state: run_state.clone(),
         };
         let dagrs_node =
-            DefaultNode::with_action(task_spec.id.to_string(), action, &mut node_table);
+            DefaultNode::with_action(task_spec.id().to_string(), action, &mut node_table);
         let dagrs_id = dagrs_node.id();
         graph.add_node(dagrs_node);
-        dagrs_ids.insert(task_spec.id, dagrs_id);
+        dagrs_ids.insert(task_spec.id(), dagrs_id);
     }
 
     let mut dependencies: HashMap<Uuid, HashSet<Uuid>> = plan
         .tasks
         .iter()
-        .map(|task| (task.id, task.dependencies.iter().copied().collect()))
+        .map(|task| (task.id(), task.dependencies().iter().copied().collect()))
         .collect();
     let batches = execution_batches(plan)?;
     add_batch_barriers(&mut dependencies, &batches, &index);
@@ -756,10 +756,10 @@ pub async fn execute_dag<M: CompletionModel + 'static>(
 
 fn build_task_prompt(task: &TaskSpec, working_dir: &Path, allowed_tools: &[String]) -> String {
     let mut parts = Vec::new();
-    parts.push(format!("## Task\n{}", task.title));
+    parts.push(format!("## Task\n{}", task.title()));
     parts.push(format!("## Objective\n{}", task.objective));
 
-    if let Some(desc) = &task.description {
+    if let Some(desc) = task.description() {
         parts.push(format!("## Background\n{}", desc));
     }
 
@@ -794,10 +794,10 @@ fn build_task_prompt(task: &TaskSpec, working_dir: &Path, allowed_tools: &[Strin
         parts.push(format!("APIs: {}", task.contract.touch_apis.join(", ")));
     }
 
-    if !task.acceptance_criteria.is_empty() {
+    if !task.acceptance_criteria().is_empty() {
         parts.push(format!(
             "## Acceptance Criteria\n{}",
-            task.acceptance_criteria
+            task.acceptance_criteria()
                 .iter()
                 .map(|criterion| format!("- {}", criterion))
                 .collect::<Vec<_>>()
@@ -825,10 +825,10 @@ fn build_task_prompt(task: &TaskSpec, working_dir: &Path, allowed_tools: &[Strin
         ));
     }
 
-    if !task.constraints.is_empty() {
+    if !task.constraints().is_empty() {
         parts.push(format!(
             "## Constraints\n{}",
-            task.constraints
+            task.constraints()
                 .iter()
                 .map(|constraint| format!("- {}", constraint))
                 .collect::<Vec<_>>()
@@ -854,7 +854,7 @@ fn build_reviewer_prompt(
         .collect::<Vec<_>>();
 
     let mut parts = vec![
-        format!("## Review Task\n{}", task.title),
+        format!("## Review Task\n{}", task.title()),
         format!("## Objective\n{}", task.objective),
         format!(
             "## Runtime Workspace\nWorking directory: {}\nAll file access must stay inside this directory.",
@@ -869,10 +869,10 @@ fn build_reviewer_prompt(
         parts.push(format!("## Touched Files\n{}", touched_files.join(", ")));
     }
 
-    if !task.acceptance_criteria.is_empty() {
+    if !task.acceptance_criteria().is_empty() {
         parts.push(format!(
             "## Acceptance Criteria\n{}",
-            task.acceptance_criteria.join("\n")
+            task.acceptance_criteria().join("\n")
         ));
     }
 
@@ -946,6 +946,8 @@ mod tests {
         collections::BTreeMap,
         sync::{Arc, Mutex},
     };
+
+    use git_internal::internal::object::{task::Task as GitTask, types::ActorRef};
 
     use super::*;
     use crate::internal::ai::{
@@ -1024,7 +1026,7 @@ mod tests {
 
     impl OrchestratorObserver for RecordingObserver {
         fn on_task_started(&self, task: &TaskSpec) {
-            self.starts.lock().unwrap().push(task.title.clone());
+            self.starts.lock().unwrap().push(task.title().to_string());
         }
     }
 
@@ -1169,17 +1171,17 @@ mod tests {
     }
 
     fn implementation_task() -> TaskSpec {
+        let actor = ActorRef::agent("test-executor").unwrap();
+        let mut task = GitTask::new(actor, "Do thing", None).unwrap();
+        task.set_description(Some("Implement change".into()));
+        task.add_constraint("network:allow");
+        task.add_acceptance_criterion("tests pass");
         TaskSpec {
-            id: uuid::Uuid::new_v4(),
-            title: "Do thing".into(),
+            task,
             objective: "Do thing".into(),
-            description: Some("Implement change".into()),
             kind: TaskKind::Implementation,
             gate_stage: None,
             owner_role: Some("coder".into()),
-            dependencies: vec![],
-            constraints: vec!["network:allow".into()],
-            acceptance_criteria: vec!["tests pass".into()],
             scope_in: vec!["src/".into()],
             scope_out: vec![],
             checks: vec![],
@@ -1295,16 +1297,37 @@ mod tests {
         };
 
         let mut a = implementation_task();
-        a.title = "A".into();
+        a.task = {
+            let actor = ActorRef::agent("test-executor").unwrap();
+            let mut task = GitTask::new(actor, "A", None).unwrap();
+            task.set_description(Some("Implement change".into()));
+            task.add_constraint("network:allow");
+            task.add_acceptance_criterion("tests pass");
+            task
+        };
         a.objective = "A".into();
 
         let mut c = implementation_task();
-        c.title = "C".into();
+        c.task = {
+            let actor = ActorRef::agent("test-executor").unwrap();
+            let mut task = GitTask::new(actor, "C", None).unwrap();
+            task.set_description(Some("Implement change".into()));
+            task.add_constraint("network:allow");
+            task.add_acceptance_criterion("tests pass");
+            task
+        };
         c.objective = "C".into();
-        c.dependencies = vec![a.id];
+        c.task.add_dependency(a.id());
 
         let mut b = implementation_task();
-        b.title = "B".into();
+        b.task = {
+            let actor = ActorRef::agent("test-executor").unwrap();
+            let mut task = GitTask::new(actor, "B", None).unwrap();
+            task.set_description(Some("Implement change".into()));
+            task.add_constraint("network:allow");
+            task.add_acceptance_criterion("tests pass");
+            task
+        };
         b.objective = "B".into();
 
         let plan = plan_for_tasks(vec![a, c, b], 1);
@@ -1346,11 +1369,25 @@ mod tests {
         };
 
         let mut failing = implementation_task();
-        failing.title = "Fail first".into();
+        failing.task = {
+            let actor = ActorRef::agent("test-executor").unwrap();
+            let mut task = GitTask::new(actor, "Fail first", None).unwrap();
+            task.set_description(Some("Implement change".into()));
+            task.add_constraint("network:allow");
+            task.add_acceptance_criterion("tests pass");
+            task
+        };
         failing.objective = "Fail first".into();
 
         let mut later = implementation_task();
-        later.title = "Later".into();
+        later.task = {
+            let actor = ActorRef::agent("test-executor").unwrap();
+            let mut task = GitTask::new(actor, "Later", None).unwrap();
+            task.set_description(Some("Implement change".into()));
+            task.add_constraint("network:allow");
+            task.add_acceptance_criterion("tests pass");
+            task
+        };
         later.objective = "Later".into();
 
         let plan = plan_for_tasks(vec![failing.clone(), later.clone()], 1);
@@ -1362,11 +1399,11 @@ mod tests {
         let start_order = starts.lock().unwrap().clone();
         assert_eq!(start_order, vec!["Fail first"]);
         assert_eq!(run_state.task_results.len(), 1);
-        assert_eq!(run_state.task_results[0].task_id, failing.id);
+        assert_eq!(run_state.task_results[0].task_id, failing.id());
         assert_eq!(run_state.task_results[0].status, TaskNodeStatus::Failed);
         assert_eq!(run_state.dagrs_runtime.total_nodes, 2);
         assert_eq!(run_state.dagrs_runtime.completed_nodes, 2);
-        assert_eq!(run_state.status_for(later.id), TaskNodeStatus::Pending);
+        assert_eq!(run_state.status_for(later.id()), TaskNodeStatus::Pending);
     }
 
     #[tokio::test]
