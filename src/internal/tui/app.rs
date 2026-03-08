@@ -37,7 +37,8 @@ use crate::{
         },
         mcp::{
             resource::{
-                CreateContextSnapshotParams, CreateDecisionParams, CreateRunParams,
+                CreateContextSnapshotParams, CreateDecisionParams, CreateEvidenceParams,
+                CreatePlanParams, CreateProvenanceParams, CreateRunParams, CreateTaskParams,
                 CreateToolInvocationParams,
             },
             server::LibraMcpServer,
@@ -358,6 +359,52 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         return;
                     }
                 };
+
+                // Create Evidence via MCP (validation results)
+                let evidence_params = CreateEvidenceParams {
+                    run_id: mcp_ids_clone
+                        .run_id
+                        .clone()
+                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                    patchset_id: None,
+                    kind: "session_complete".to_string(),
+                    tool: "libra-code".to_string(),
+                    command: None,
+                    exit_code: Some(0),
+                    summary: Some("Session completed successfully".to_string()),
+                    report_artifacts: None,
+                    tags: None,
+                    external_ids: None,
+                    actor_kind: Some("system".to_string()),
+                    actor_id: Some("libra-code".to_string()),
+                };
+
+                // Resolve actor for evidence
+                let evidence_actor = match mcp_server_clone.resolve_actor_from_params(
+                    evidence_params.actor_kind.as_deref(),
+                    evidence_params.actor_id.as_deref(),
+                ) {
+                    Ok(actor) => actor,
+                    Err(e) => {
+                        cli_error!(e, "error: failed to resolve actor for evidence");
+                        return;
+                    }
+                };
+
+                // Call MCP interface to create evidence
+                match mcp_server_clone
+                    .create_evidence_impl(evidence_params, evidence_actor)
+                    .await
+                {
+                    Ok(result) => {
+                        if result.is_error.unwrap_or(false) {
+                            render_mcp_error("failed to create evidence", result.content);
+                        }
+                    }
+                    Err(e) => {
+                        cli_error!(e, "error: failed to create evidence");
+                    }
+                }
 
                 // Call MCP interface to create decision
                 match mcp_server_clone
@@ -838,7 +885,85 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     let mcp_server_clone = mcp_server.clone();
 
                     tokio::spawn(async move {
-                        // Create run
+                        // Create Plan via MCP (first, per docs: Intent → Plan)
+                        let plan_params = CreatePlanParams {
+                            plan_version: Some(1),
+                            pipeline_id: None,
+                            fwindow: None,
+                            steps: None,
+                            tags: None,
+                            external_ids: None,
+                            actor_kind: Some("system".to_string()),
+                            actor_id: Some("libra-code".to_string()),
+                        };
+
+                        // Resolve actor for plan
+                        let plan_actor = match mcp_server_clone.resolve_actor_from_params(
+                            plan_params.actor_kind.as_deref(),
+                            plan_params.actor_id.as_deref(),
+                        ) {
+                            Ok(actor) => actor,
+                            Err(e) => {
+                                cli_error!(e, "error: failed to resolve actor for plan");
+                                return;
+                            }
+                        };
+
+                        // Call MCP interface to create plan
+                        match mcp_server_clone.create_plan_impl(plan_params, plan_actor).await {
+                            Ok(result) => {
+                                if result.is_error.unwrap_or(false) {
+                                    render_mcp_error("failed to create plan", result.content);
+                                }
+                            }
+                            Err(e) => {
+                                cli_error!(e, "error: failed to create plan");
+                            }
+                        }
+
+                        // Create Task via MCP (second, per docs: Plan → Task)
+                        let task_params = CreateTaskParams {
+                            title: format!("Task for: {}", text_clone.chars().take(50).collect::<String>()),
+                            description: Some(format!("Task created from user input: {}", text_clone)),
+                            goal_type: Some("feature".to_string()),
+                            constraints: None,
+                            acceptance_criteria: None,
+                            requested_by_kind: Some("human".to_string()),
+                            requested_by_id: Some("user".to_string()),
+                            dependencies: None,
+                            intent_id: mcp_ids_clone._intent_id.clone(),
+                            status: Some("running".to_string()),
+                            tags: None,
+                            external_ids: None,
+                            actor_kind: Some("human".to_string()),
+                            actor_id: Some("user".to_string()),
+                        };
+
+                        // Resolve actor for task
+                        let task_actor = match mcp_server_clone.resolve_actor_from_params(
+                            task_params.actor_kind.as_deref(),
+                            task_params.actor_id.as_deref(),
+                        ) {
+                            Ok(actor) => actor,
+                            Err(e) => {
+                                cli_error!(e, "error: failed to resolve actor for task");
+                                return;
+                            }
+                        };
+
+                        // Call MCP interface to create task
+                        match mcp_server_clone.create_task_impl(task_params, task_actor).await {
+                            Ok(result) => {
+                                if result.is_error.unwrap_or(false) {
+                                    render_mcp_error("failed to create task", result.content);
+                                }
+                            }
+                            Err(e) => {
+                                cli_error!(e, "error: failed to create task");
+                            }
+                        }
+
+                        // Create run (third, per docs: Task → Run)
                         let run_params = CreateRunParams {
                             task_id: mcp_ids_clone
                                 .task_id
@@ -878,6 +1003,49 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                             }
                             Err(e) => {
                                 cli_error!(e, "error: failed to create run");
+                            }
+                        }
+
+                        // Create Provenance via MCP (LLM metadata)
+                        let provenance_params = CreateProvenanceParams {
+                            run_id: mcp_ids_clone
+                                .run_id
+                                .clone()
+                                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                            provider: "openai".to_string(),
+                            model: "gpt-4o".to_string(),
+                            parameters_json: None,
+                            token_usage_json: None,
+                            tags: None,
+                            external_ids: None,
+                            actor_kind: Some("system".to_string()),
+                            actor_id: Some("libra-code".to_string()),
+                        };
+
+                        // Resolve actor for provenance
+                        let provenance_actor = match mcp_server_clone.resolve_actor_from_params(
+                            provenance_params.actor_kind.as_deref(),
+                            provenance_params.actor_id.as_deref(),
+                        ) {
+                            Ok(actor) => actor,
+                            Err(e) => {
+                                cli_error!(e, "error: failed to resolve actor for provenance");
+                                return;
+                            }
+                        };
+
+                        // Call MCP interface to create provenance
+                        match mcp_server_clone
+                            .create_provenance_impl(provenance_params, provenance_actor)
+                            .await
+                        {
+                            Ok(result) => {
+                                if result.is_error.unwrap_or(false) {
+                                    render_mcp_error("failed to create provenance", result.content);
+                                }
+                            }
+                            Err(e) => {
+                                cli_error!(e, "error: failed to create provenance");
                             }
                         }
 
