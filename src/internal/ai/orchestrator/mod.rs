@@ -99,7 +99,7 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
                 &self.registry,
                 &executor_config,
             )
-            .await;
+            .await?;
 
             // Phase 3: System verification
             let system_report =

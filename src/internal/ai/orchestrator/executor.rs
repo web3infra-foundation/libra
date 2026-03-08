@@ -1,17 +1,22 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
 };
 
+use async_trait::async_trait;
+use dagrs::{Action, DefaultNode, EnvVar, Graph, InChannels, Node, NodeTable, OutChannels, Output};
 use serde::Deserialize;
 use serde_json::Value;
+use tokio::sync::Mutex;
+use uuid::Uuid;
 
 use super::{
     acl::{AclVerdict, check_tool_acl},
     gate, policy,
     types::{
-        GateReport, OrchestratorObserver, ReviewOutcome, TaskDAG, TaskKind, TaskNode,
+        GateReport, OrchestratorError, OrchestratorObserver, ReviewOutcome, TaskDAG, TaskKind,
+        TaskNode,
         TaskNodeStatus, TaskResult, ToolCallRecord,
     },
 };
@@ -376,89 +381,253 @@ async fn run_reviewer_pass<M: CompletionModel>(
     Ok(Some(outcome))
 }
 
+struct TaskDagrsAction<M: CompletionModel + 'static> {
+    task: TaskNode,
+    model: M,
+    registry: Arc<ToolRegistry>,
+    config: ExecutorConfig,
+    results: Arc<Mutex<HashMap<Uuid, TaskResult>>>,
+}
+
+#[derive(Clone)]
+struct DagrsDependencySignal {
+    success: bool,
+}
+
+#[async_trait]
+impl<M: CompletionModel + 'static> Action for TaskDagrsAction<M> {
+    async fn run(
+        &self,
+        in_channels: &mut InChannels,
+        out_channels: &mut OutChannels,
+        _env: Arc<EnvVar>,
+    ) -> Output {
+        let sender_ids = in_channels.get_sender_ids();
+        let mut dependencies_ok = true;
+        for sender_id in sender_ids {
+            match in_channels.recv_from(&sender_id).await {
+                Ok(content) => {
+                    let signal = content.into_inner::<DagrsDependencySignal>();
+                    if signal.as_deref().is_none_or(|signal| !signal.success) {
+                        dependencies_ok = false;
+                    }
+                }
+                Err(_) => {
+                    dependencies_ok = false;
+                }
+            }
+        }
+
+        if !dependencies_ok {
+            let _ = out_channels
+                .broadcast(dagrs::Content::new(DagrsDependencySignal { success: false }))
+                .await;
+            return Output::empty();
+        }
+
+        if let Some(observer) = &self.config.observer {
+            observer.on_task_started(&self.task);
+        }
+
+        let result = execute_task(&self.task, &self.model, &self.registry, &self.config).await;
+
+        if let Some(observer) = &self.config.observer {
+            observer.on_task_completed(&self.task, &result);
+        }
+
+        self.results.lock().await.insert(result.task_id, result.clone());
+
+        match result.status {
+            TaskNodeStatus::Completed => {
+                let _ = out_channels
+                    .broadcast(dagrs::Content::new(DagrsDependencySignal { success: true }))
+                    .await;
+                Output::empty()
+            }
+            TaskNodeStatus::Failed => {
+                let _ = out_channels
+                    .broadcast(dagrs::Content::new(DagrsDependencySignal { success: false }))
+                    .await;
+                Output::error(
+                    result
+                        .agent_output
+                        .clone()
+                        .unwrap_or_else(|| format!("task {} failed", self.task.title)),
+                )
+            }
+            TaskNodeStatus::Skipped => {
+                let _ = out_channels
+                    .broadcast(dagrs::Content::new(DagrsDependencySignal { success: false }))
+                    .await;
+                Output::empty()
+            }
+            TaskNodeStatus::Pending | TaskNodeStatus::Running => {
+                let _ = out_channels
+                    .broadcast(dagrs::Content::new(DagrsDependencySignal { success: false }))
+                    .await;
+                Output::error(format!("task {} returned invalid terminal state", self.task.title))
+            }
+        }
+    }
+}
+
+fn execution_batches(dag: &TaskDAG) -> Result<Vec<Vec<Uuid>>, OrchestratorError> {
+    let mut completed = HashSet::new();
+    let mut scheduled = HashSet::new();
+    let mut batches = Vec::new();
+    let max_parallel = dag.max_parallel.max(1) as usize;
+
+    while scheduled.len() < dag.nodes.len() {
+        let ready: Vec<Uuid> = dag
+            .nodes
+            .iter()
+            .filter(|node| {
+                !scheduled.contains(&node.id)
+                    && node.dependencies.iter().all(|dep| completed.contains(dep))
+            })
+            .map(|node| node.id)
+            .collect();
+
+        if ready.is_empty() {
+            return Err(OrchestratorError::PlanningFailed(
+                "task graph contains unresolved dependencies or a cycle".to_string(),
+            ));
+        }
+
+        let batch: Vec<Uuid> = ready.into_iter().take(max_parallel).collect();
+        completed.extend(batch.iter().copied());
+        scheduled.extend(batch.iter().copied());
+        batches.push(batch);
+    }
+
+    Ok(batches)
+}
+
+fn task_index(dag: &TaskDAG) -> HashMap<Uuid, usize> {
+    dag.nodes
+        .iter()
+        .enumerate()
+        .map(|(idx, node)| (node.id, idx))
+        .collect()
+}
+
+fn add_batch_barriers(
+    dependencies: &mut HashMap<Uuid, HashSet<Uuid>>,
+    batches: &[Vec<Uuid>],
+    index: &HashMap<Uuid, usize>,
+) {
+    for window in batches.windows(2) {
+        let current = &window[0];
+        let next = &window[1];
+        for &to in next {
+            let entry = dependencies.entry(to).or_default();
+            for &from in current {
+                if index.get(&from) != index.get(&to) {
+                    entry.insert(from);
+                }
+            }
+        }
+    }
+}
+
+fn build_dagrs_graph<M: CompletionModel + 'static>(
+    dag: &TaskDAG,
+    model: &M,
+    registry: &Arc<ToolRegistry>,
+    config: &ExecutorConfig,
+    results: Arc<Mutex<HashMap<Uuid, TaskResult>>>,
+) -> Result<Graph, OrchestratorError> {
+    let mut graph = Graph::new();
+    let mut node_table = NodeTable::new();
+    let mut dagrs_ids = HashMap::new();
+    let index = task_index(dag);
+
+    for node in &dag.nodes {
+        let action = TaskDagrsAction {
+            task: node.clone(),
+            model: model.clone(),
+            registry: Arc::clone(registry),
+            config: config.clone(),
+            results: Arc::clone(&results),
+        };
+        let dagrs_node =
+            DefaultNode::with_action(node.id.to_string(), action, &mut node_table);
+        let dagrs_id = dagrs_node.id();
+        graph.add_node(dagrs_node);
+        dagrs_ids.insert(node.id, dagrs_id);
+    }
+
+    let mut dependencies: HashMap<Uuid, HashSet<Uuid>> = dag
+        .nodes
+        .iter()
+        .map(|node| (node.id, node.dependencies.iter().copied().collect()))
+        .collect();
+    let batches = execution_batches(dag)?;
+    add_batch_barriers(&mut dependencies, &batches, &index);
+
+    for (task_id, deps) in dependencies {
+        let to_id = dagrs_ids
+            .get(&task_id)
+            .copied()
+            .ok_or_else(|| OrchestratorError::PlanningFailed(format!("missing dagrs node for task {task_id}")))?;
+        for dep in deps {
+            let from_id = dagrs_ids.get(&dep).copied().ok_or_else(|| {
+                OrchestratorError::PlanningFailed(format!("missing dagrs node for dependency {dep}"))
+            })?;
+            graph.add_edge(from_id, vec![to_id]);
+        }
+    }
+
+    Ok(graph)
+}
+
 /// Execute all tasks in the DAG in topological order.
 pub async fn execute_dag<M: CompletionModel + 'static>(
     dag: &mut TaskDAG,
     model: &M,
     registry: &Arc<ToolRegistry>,
     config: &ExecutorConfig,
-) -> Vec<TaskResult> {
-    let max_parallel = dag.max_parallel.max(1) as usize;
-    let mut results = Vec::with_capacity(dag.nodes.len());
-    let mut failed = false;
+) -> Result<Vec<TaskResult>, OrchestratorError> {
+    let results_store = Arc::new(Mutex::new(HashMap::new()));
+    let dag_snapshot = dag.clone();
+    let model_snapshot = model.clone();
+    let registry_snapshot = Arc::clone(registry);
+    let config_snapshot = config.clone();
+    let results_snapshot = Arc::clone(&results_store);
+    let mut graph = tokio::task::spawn_blocking(move || {
+        build_dagrs_graph(
+            &dag_snapshot,
+            &model_snapshot,
+            &registry_snapshot,
+            &config_snapshot,
+            results_snapshot,
+        )
+    })
+    .await
+    .map_err(|err| OrchestratorError::ConfigError(format!("failed to build dagrs graph: {err}")))??;
 
-    loop {
-        if failed {
-            break;
-        }
-
-        let ready = dag.ready_tasks();
-        if ready.is_empty() {
-            break;
-        }
-
-        let batch: Vec<_> = ready.into_iter().take(max_parallel).collect();
-        let tasks: Vec<_> = batch
-            .iter()
-            .filter_map(|&id| dag.get(id).cloned())
-            .collect();
-
-        for &id in &batch {
-            if let Some(node) = dag.get_mut(id) {
-                node.status = TaskNodeStatus::Running;
-                if let Some(observer) = &config.observer {
-                    observer.on_task_started(node);
-                }
-            }
-        }
-
-        if tasks.len() == 1 {
-            let result = execute_task(&tasks[0], model, registry, config).await;
-            if let Some(node) = dag.get_mut(result.task_id) {
-                node.status = result.status.clone();
-                if let Some(observer) = &config.observer {
-                    observer.on_task_completed(node, &result);
-                }
-            }
-            if result.status == TaskNodeStatus::Failed {
-                failed = true;
-            }
-            results.push(result);
-        } else {
-            let mut handles = Vec::with_capacity(tasks.len());
-            for task in tasks {
-                let model = model.clone();
-                let task_registry = Arc::clone(registry);
-                let config = config.clone();
-                handles.push(tokio::spawn(async move {
-                    execute_task(&task, &model, &task_registry, &config).await
-                }));
-            }
-
-            for handle in handles {
-                match handle.await {
-                    Ok(result) => {
-                        if let Some(node) = dag.get_mut(result.task_id) {
-                            node.status = result.status.clone();
-                            if let Some(observer) = &config.observer {
-                                observer.on_task_completed(node, &result);
-                            }
-                        }
-                        if result.status == TaskNodeStatus::Failed {
-                            failed = true;
-                        }
-                        results.push(result);
-                    }
-                    Err(e) => {
-                        tracing::warn!("task join error: {}", e);
-                        failed = true;
-                    }
-                }
-            }
+    if let Err(err) = graph.async_start().await {
+        tracing::warn!("dagrs execution terminated with error: {}", err);
+        let results = results_store.lock().await;
+        if results.is_empty() {
+            return Err(OrchestratorError::AgentError(format!(
+                "dagrs execution failed before any task completed: {err}"
+            )));
         }
     }
 
-    results
+    let results = results_store.lock().await;
+    for node in &mut dag.nodes {
+        if let Some(result) = results.get(&node.id) {
+            node.status = result.status.clone();
+        }
+    }
+
+    Ok(dag
+        .nodes
+        .iter()
+        .filter_map(|node| results.get(&node.id).cloned())
+        .collect())
 }
 
 fn build_task_prompt(task: &TaskNode, working_dir: &Path, allowed_tools: &[String]) -> String {
@@ -649,13 +818,16 @@ fn parse_reviewer_decision(raw: &str) -> Result<ReviewerDecision, String> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, sync::Arc};
+    use std::{
+        collections::BTreeMap,
+        sync::{Arc, Mutex},
+    };
 
     use super::*;
     use crate::internal::ai::{
         completion::{
             CompletionError, CompletionRequest, CompletionResponse,
-            message::{AssistantContent, Text},
+            message::{AssistantContent, Message, Text, UserContent},
         },
         intentspec::{profiles, types::*},
         orchestrator::types::{TaskContract, TaskKind},
@@ -683,6 +855,52 @@ mod tests {
                     raw_response: (),
                 })
             }
+        }
+    }
+
+    #[derive(Clone)]
+    struct ConditionalModel;
+
+    impl CompletionModel for ConditionalModel {
+        type Response = ();
+
+        async fn completion(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+            let prompt = request
+                .chat_history
+                .iter()
+                .rev()
+                .find_map(|message| match message {
+                    Message::User { content } => content.iter().find_map(|item| match item {
+                        UserContent::Text(text) => Some(text.text.clone()),
+                        _ => None,
+                    }),
+                    _ => None,
+                })
+                .unwrap_or_default();
+
+            if prompt.contains("Fail first") {
+                Err(CompletionError::ResponseError("intentional failure".into()))
+            } else {
+                Ok(CompletionResponse {
+                    content: vec![AssistantContent::Text(Text {
+                        text: "done".into(),
+                    })],
+                    raw_response: (),
+                })
+            }
+        }
+    }
+
+    struct RecordingObserver {
+        starts: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl OrchestratorObserver for RecordingObserver {
+        fn on_task_started(&self, task: &TaskNode) {
+            self.starts.lock().unwrap().push(task.title.clone());
         }
     }
 
@@ -916,5 +1134,96 @@ mod tests {
         assert!(tools.contains(&"read_file".to_string()));
         assert!(tools.contains(&"apply_patch".to_string()));
         assert!(!tools.contains(&"shell".to_string()));
+    }
+
+    #[tokio::test]
+    async fn execute_dag_uses_dagrs_and_preserves_batch_order() {
+        let model = ConditionalModel;
+        let registry = Arc::new(ToolRegistry::new());
+        let dir = tempfile::tempdir().unwrap();
+        let starts = Arc::new(Mutex::new(Vec::new()));
+        let config = ExecutorConfig {
+            tool_loop_config: ToolLoopConfig::default(),
+            max_retries: 0,
+            backoff_seconds: 0,
+            working_dir: dir.path().to_path_buf(),
+            spec: spec(),
+            reviewer_preamble: None,
+            observer: Some(Arc::new(RecordingObserver {
+                starts: Arc::clone(&starts),
+            })),
+        };
+
+        let mut a = implementation_task();
+        a.title = "A".into();
+        a.objective = "A".into();
+
+        let mut c = implementation_task();
+        c.title = "C".into();
+        c.objective = "C".into();
+        c.dependencies = vec![a.id];
+
+        let mut b = implementation_task();
+        b.title = "B".into();
+        b.objective = "B".into();
+
+        let mut dag = TaskDAG {
+            nodes: vec![a.clone(), c.clone(), b.clone()],
+            intent_spec_id: "test".into(),
+            max_parallel: 1,
+        };
+
+        let results = execute_dag(&mut dag, &model, &registry, &config)
+            .await
+            .unwrap();
+
+        let start_order = starts.lock().unwrap().clone();
+        assert_eq!(start_order, vec!["A", "C", "B"]);
+        assert_eq!(results.len(), 3);
+        assert!(results.iter().all(|result| result.status == TaskNodeStatus::Completed));
+    }
+
+    #[tokio::test]
+    async fn execute_dag_stops_future_batches_after_failure() {
+        let model = ConditionalModel;
+        let registry = Arc::new(ToolRegistry::new());
+        let dir = tempfile::tempdir().unwrap();
+        let starts = Arc::new(Mutex::new(Vec::new()));
+        let config = ExecutorConfig {
+            tool_loop_config: ToolLoopConfig::default(),
+            max_retries: 0,
+            backoff_seconds: 0,
+            working_dir: dir.path().to_path_buf(),
+            spec: spec(),
+            reviewer_preamble: None,
+            observer: Some(Arc::new(RecordingObserver {
+                starts: Arc::clone(&starts),
+            })),
+        };
+
+        let mut failing = implementation_task();
+        failing.title = "Fail first".into();
+        failing.objective = "Fail first".into();
+
+        let mut later = implementation_task();
+        later.title = "Later".into();
+        later.objective = "Later".into();
+
+        let mut dag = TaskDAG {
+            nodes: vec![failing.clone(), later.clone()],
+            intent_spec_id: "test".into(),
+            max_parallel: 1,
+        };
+
+        let results = execute_dag(&mut dag, &model, &registry, &config)
+            .await
+            .unwrap();
+
+        let start_order = starts.lock().unwrap().clone();
+        assert_eq!(start_order, vec!["Fail first"]);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].task_id, failing.id);
+        assert_eq!(results[0].status, TaskNodeStatus::Failed);
+        assert_eq!(dag.get(later.id).unwrap().status, TaskNodeStatus::Pending);
     }
 }
