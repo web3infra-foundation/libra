@@ -35,8 +35,10 @@ impl CodexProvider {
 }
 
 impl Provider for CodexProvider {
-    fn on_request(&self, _request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        unimplemented!("WebSocket client does not use reqwest")
+    fn on_request(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        // Codex uses WebSocket, but this hook is called for shared HTTP paths.
+        // Return unchanged to avoid panicking.
+        request
     }
 }
 

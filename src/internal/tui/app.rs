@@ -989,11 +989,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
                         // Create run (third, per docs: Task → Run)
                         // Use the task_id from create_task_impl result, or fall back to mcp_ids
-                        let run_task_id = created_task_id.or_else(|| {
-                            mcp_ids_clone
-                                .task_id
-                                .clone()
-                        }).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                        let run_task_id = created_task_id
+                            .or_else(|| mcp_ids_clone.task_id.clone())
+                            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
                         let run_params = CreateRunParams {
                             task_id: run_task_id,
@@ -1023,23 +1021,36 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         };
 
                         // Call MCP interface to create run
-                        match mcp_server_clone.create_run_impl(run_params, actor).await {
-                            Ok(result) => {
-                                if result.is_error.unwrap_or(false) {
-                                    render_mcp_error("failed to create run", result.content);
+                        let created_run_id =
+                            match mcp_server_clone.create_run_impl(run_params, actor).await {
+                                Ok(result) => {
+                                    // Extract run_id from result: "Run created with ID: {uuid}"
+                                    let run_id = result.content.iter().find_map(|c| {
+                                        c.as_text().and_then(|t| {
+                                            t.text
+                                                .strip_prefix("Run created with ID: ")
+                                                .map(|s| s.to_string())
+                                        })
+                                    });
+                                    if result.is_error.unwrap_or(false) {
+                                        render_mcp_error("failed to create run", result.content);
+                                    }
+                                    run_id
                                 }
-                            }
-                            Err(e) => {
-                                cli_error!(e, "error: failed to create run");
-                            }
-                        }
+                                Err(e) => {
+                                    cli_error!(e, "error: failed to create run");
+                                    None
+                                }
+                            };
+
+                        // Use the created run_id for provenance, or fall back to mcp_ids
+                        let provenance_run_id = created_run_id
+                            .or_else(|| mcp_ids_clone.run_id.clone())
+                            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
                         // Create Provenance via MCP (LLM metadata)
                         let provenance_params = CreateProvenanceParams {
-                            run_id: mcp_ids_clone
-                                .run_id
-                                .clone()
-                                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                            run_id: provenance_run_id,
                             provider: provider_name,
                             model: model_name,
                             parameters_json: None,
@@ -1239,7 +1250,17 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         }
                     }
 
-                    let mut observer = UiObserver { tx, mcp_server, mcp_ids };
+                    let mut observer = UiObserver {
+                        tx,
+                        mcp_server,
+                        mcp_ids: mcp_ids.clone(),
+                    };
+
+                    // Set run_id on the model if available (for Codex to link patchsets)
+                    if let Some(run_id) = mcp_ids.run_id.clone() {
+                        model.set_run_id(run_id);
+                    }
+
                     let result = run_tool_loop_with_history_and_observer(
                         &model,
                         history,

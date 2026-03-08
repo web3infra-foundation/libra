@@ -1,6 +1,8 @@
 //! Codex completion model implementation using WebSocket.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
+
+use walkdir::WalkDir;
 
 use crate::internal::ai::{
     client::CompletionClient,
@@ -20,6 +22,7 @@ pub struct Model {
     client: CodexWebSocket,
     model: String,
     mcp_server: Option<Arc<LibraMcpServer>>,
+    run_id: Arc<RwLock<Option<String>>>,
 }
 
 impl std::fmt::Debug for Model {
@@ -42,11 +45,19 @@ impl Model {
             client,
             model: model.into(),
             mcp_server,
+            run_id: Arc::new(RwLock::new(None)),
         }
     }
 
     pub fn model_name(&self) -> &str {
         &self.model
+    }
+
+    /// Set the run ID for linking patchsets to the current run.
+    pub fn set_run_id(&self, run_id: String) {
+        if let Ok(mut guard) = self.run_id.write() {
+            *guard = Some(run_id);
+        }
     }
 
     pub async fn connect(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -142,15 +153,20 @@ impl CompletionModelTrait for Model {
         }
 
         // Apply file changes to working directory
+        let mut apply_error: Option<String> = None;
         if !file_changes.is_empty() {
             for change in &file_changes {
-                if let Err(_e) = apply_file_change(change) {
-                    // Silently ignore apply errors
+                if let Err(e) = apply_file_change(change) {
+                    // Collect apply errors
+                    apply_error = Some(format!("{}: {}", change.path, e));
                 }
             }
 
             // Auto-add and commit changes to Libra via MCP
-            if let Err(e) = self.commit_to_libra(&file_changes).await {
+            if let Err(e) = self
+                .commit_to_libra(&file_changes, apply_error.as_deref())
+                .await
+            {
                 tracing::warn!("Failed to commit to Libra via MCP: {}", e);
             }
         }
@@ -203,40 +219,38 @@ fn detect_file_changes(
     // Get current files in working directory
     let mut current_files = std::collections::HashSet::new();
 
-    // Walk through all files in the working directory
-    if let Ok(entries) = std::fs::read_dir(working_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() {
-                // Get relative path
-                if let Ok(rel_path) = path.strip_prefix(working_dir) {
-                    let rel_str = rel_path.to_string_lossy().replace("\\", "/");
-                    // Skip .git and .libra directories
-                    if rel_str.starts_with(".git") || rel_str.starts_with(".libra") {
-                        continue;
+    // Walk through all files in the working directory recursively
+    for entry in WalkDir::new(working_dir).into_iter().filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.is_file() {
+            // Get relative path
+            if let Ok(rel_path) = path.strip_prefix(working_dir) {
+                let rel_str = rel_path.to_string_lossy().replace("\\", "/");
+                // Skip .git and .libra directories
+                if rel_str.starts_with(".git") || rel_str.starts_with(".libra") {
+                    continue;
+                }
+
+                current_files.insert(rel_str.clone());
+
+                // Check if this is a new file (not in previous)
+                if !previous_files.contains(&rel_str) {
+                    // New file - read the content
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        file_changes.push(FileChange {
+                            path: rel_str,
+                            diff: String::new(),
+                            operation: "add".to_string(),
+                            content: Some(content),
+                        });
                     }
-
-                    current_files.insert(rel_str.clone());
-
-                    // Check if this is a new file (not in previous)
-                    if !previous_files.contains(&rel_str) {
-                        // New file - read the content
-                        if let Ok(content) = std::fs::read_to_string(&path) {
-                            file_changes.push(FileChange {
-                                path: rel_str,
-                                diff: String::new(),
-                                operation: "add".to_string(),
-                                content: Some(content),
-                            });
-                        }
-                    } else {
-                        // Existing file - check if content changed
-                        // Note: For simplicity, we treat all existing files as potentially modified
-                        // In production, you'd want to compare actual content hashes
-                        if let Ok(_content) = std::fs::read_to_string(&path) {
-                            // For now, we don't mark as modified since we can't easily compare
-                            // The main detection is for new files from Codex
-                        }
+                } else {
+                    // Existing file - check if content changed
+                    // Note: For simplicity, we treat all existing files as potentially modified
+                    // In production, you'd want to compare actual content hashes
+                    if let Ok(_content) = std::fs::read_to_string(&path) {
+                        // For now, we don't mark as modified since we can't easily compare
+                        // The main detection is for new files from Codex
                     }
                 }
             }
@@ -486,10 +500,18 @@ pub type CodexModel = Model;
 
 impl Model {
     /// Commit file changes to Libra via MCP tools
+    /// `apply_error` contains error message if any file changes failed to apply
     async fn commit_to_libra(
         &self,
         file_changes: &[FileChange],
+        apply_error: Option<&str>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Determine apply status based on error
+        let apply_status = if apply_error.is_some() {
+            "failed"
+        } else {
+            "applied"
+        };
         use git_internal::internal::object::types::ActorRef;
 
         use crate::internal::ai::mcp::resource::{
@@ -557,13 +579,19 @@ impl Model {
 
         // Create PatchSet via MCP
         if let Some(mcp_server) = &self.mcp_server {
+            let run_id = self
+                .run_id
+                .read()
+                .ok()
+                .and_then(|guard| guard.clone())
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             let params = CreatePatchSetParams {
-                run_id: uuid::Uuid::new_v4().to_string(),
+                run_id,
                 generation: 1,
                 base_commit_sha: base_commit,
                 touched_files: Some(touched_files),
                 rationale: Some(format!("Codex generated files: {}", files.join(", "))),
-                apply_status: Some("applied".to_string()),
+                apply_status: Some(apply_status.to_string()),
                 diff_format: Some("unified_diff".to_string()),
                 diff_artifact,
                 tags: None,
