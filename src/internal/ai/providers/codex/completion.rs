@@ -236,7 +236,7 @@ fn detect_file_changes(
                 // Check if this is a new file (not in previous)
                 if !previous_files.contains(&rel_str) {
                     // New file - read the content
-                    if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(content) = std::fs::read_to_string(path) {
                         file_changes.push(FileChange {
                             path: rel_str,
                             diff: String::new(),
@@ -248,7 +248,7 @@ fn detect_file_changes(
                     // Existing file - check if content changed
                     // Note: For simplicity, we treat all existing files as potentially modified
                     // In production, you'd want to compare actual content hashes
-                    if let Ok(_content) = std::fs::read_to_string(&path) {
+                    if let Ok(_content) = std::fs::read_to_string(path) {
                         // For now, we don't mark as modified since we can't easily compare
                         // The main detection is for new files from Codex
                     }
