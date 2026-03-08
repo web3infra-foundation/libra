@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use super::run_state::RunStateSnapshot;
 use crate::internal::ai::{
     intentspec::types::{ChangeLogEntry, Check},
     mcp::server::LibraMcpServer,
@@ -347,6 +348,8 @@ pub struct OrchestratorResult {
     pub execution_plan: ExecutionPlan,
     #[serde(default)]
     pub plan_revisions: Vec<ExecutionPlan>,
+    #[serde(default)]
+    pub run_state: RunStateSnapshot,
     pub task_results: Vec<TaskResult>,
     pub system_report: SystemReport,
     pub intent_spec_id: String,
@@ -465,6 +468,7 @@ pub struct OrchestratorConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::internal::ai::orchestrator::run_state::RunStateSnapshot;
 
     fn implementation_task(id: Uuid) -> TaskNode {
         TaskNode {
@@ -603,6 +607,12 @@ mod tests {
                 checkpoints: vec![],
             },
             plan_revisions: vec![],
+            run_state: RunStateSnapshot {
+                intent_spec_id: "test".into(),
+                revision: 2,
+                task_statuses: vec![],
+                task_results: vec![],
+            },
             task_results: vec![],
             system_report: SystemReport {
                 integration: GateReport::empty(),

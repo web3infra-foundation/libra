@@ -1,6 +1,9 @@
 use chrono::Utc;
 
-use super::types::{ExecutionPlan, SystemReport, TaskNodeStatus, TaskResult};
+use super::{
+    run_state::RunStateSnapshot,
+    types::{ExecutionPlan, SystemReport, TaskNodeStatus},
+};
 use crate::internal::ai::intentspec::types::{
     ChangeLogEntry, ConflictResolution, DecompositionMode, IntentSpec, LibraBinding,
     PlanGenerationConfig, ReplanTrigger,
@@ -24,11 +27,11 @@ pub fn max_replans(spec: &IntentSpec) -> u32 {
 pub fn detect_replan(
     spec: &IntentSpec,
     _plan: &ExecutionPlan,
-    task_results: &[TaskResult],
+    run_state: &RunStateSnapshot,
     system_report: &SystemReport,
 ) -> Option<ReplanDirective> {
     if trigger_enabled(spec, ReplanTrigger::ScopeCreep)
-        && task_results.iter().any(|result| {
+        && run_state.ordered_task_results().iter().any(|result| {
             result
                 .policy_violations
                 .iter()
@@ -56,7 +59,7 @@ pub fn detect_replan(
     }
 
     if trigger_enabled(spec, ReplanTrigger::RepeatedTestFail)
-        && task_results.iter().any(|result| {
+        && run_state.ordered_task_results().iter().any(|result| {
             result.status == TaskNodeStatus::Failed
                 && result.retry_count >= spec.execution.retry.max_retries
         })
@@ -80,7 +83,7 @@ pub fn detect_replan(
     }
 
     if trigger_enabled(spec, ReplanTrigger::UnknownApi)
-        && task_results.iter().any(|result| {
+        && run_state.ordered_task_results().iter().any(|result| {
             result
                 .policy_violations
                 .iter()
@@ -148,7 +151,10 @@ mod tests {
     use super::*;
     use crate::internal::ai::{
         intentspec::types::*,
-        orchestrator::types::{GateReport, TaskResult},
+        orchestrator::{
+            run_state::{RunStateSnapshot, TaskStatusSnapshot},
+            types::{GateReport, TaskResult},
+        },
     };
 
     fn spec_with_triggers() -> IntentSpec {
@@ -289,6 +295,21 @@ mod tests {
         }
     }
 
+    fn run_state(results: Vec<TaskResult>) -> RunStateSnapshot {
+        RunStateSnapshot {
+            intent_spec_id: "test".into(),
+            revision: 1,
+            task_statuses: results
+                .iter()
+                .map(|result| TaskStatusSnapshot {
+                    task_id: result.task_id,
+                    status: result.status.clone(),
+                })
+                .collect(),
+            task_results: results,
+        }
+    }
+
     #[test]
     fn test_apply_replan_reduces_parallelism_and_logs_change() {
         let mut spec = spec_with_triggers();
@@ -332,7 +353,7 @@ mod tests {
         let directive = detect_replan(
             &spec,
             &plan,
-            &[TaskResult {
+            &run_state(vec![TaskResult {
                 task_id: Uuid::new_v4(),
                 status: TaskNodeStatus::Completed,
                 gate_report: Some(GateReport::empty()),
@@ -341,7 +362,7 @@ mod tests {
                 tool_calls: vec![],
                 policy_violations: vec![],
                 review: None,
-            }],
+            }]),
             &SystemReport {
                 integration: GateReport::empty(),
                 security: GateReport {

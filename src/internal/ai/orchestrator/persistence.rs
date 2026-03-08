@@ -11,9 +11,13 @@ use rmcp::model::CallToolResult;
 use serde_json::json;
 use uuid::Uuid;
 
-use super::types::{
-    DecisionOutcome, ExecutionPlan, GateStage, OrchestratorError, PersistedCheckpoint,
-    PersistedExecution, PersistedTaskArtifacts, SystemReport, TaskKind, TaskResult, ToolCallRecord,
+use super::{
+    run_state::RunStateSnapshot,
+    types::{
+        DecisionOutcome, ExecutionPlan, GateStage, OrchestratorError, PersistedCheckpoint,
+        PersistedExecution, PersistedTaskArtifacts, SystemReport, TaskKind, TaskResult,
+        ToolCallRecord,
+    },
 };
 use crate::internal::ai::{
     intentspec::types::IntentSpec,
@@ -35,7 +39,7 @@ pub struct ExecutionPersistenceRequest<'a> {
     pub spec: &'a IntentSpec,
     pub execution_plan: &'a ExecutionPlan,
     pub plan_revisions: &'a [ExecutionPlan],
-    pub task_results: &'a [TaskResult],
+    pub run_state: &'a RunStateSnapshot,
     pub system_report: &'a SystemReport,
     pub decision: &'a DecisionOutcome,
     pub working_dir: &'a Path,
@@ -79,6 +83,7 @@ struct FinalDecisionRequest<'a> {
 pub async fn persist_execution(
     request: ExecutionPersistenceRequest<'_>,
 ) -> Result<PersistedExecution, OrchestratorError> {
+    let task_results = request.run_state.ordered_task_results();
     let base_commit_sha = resolve_base_commit(request.base_commit, request.working_dir);
     let initial_snapshot_id = if snapshot_on_run_start(request.spec) {
         Some(
@@ -94,7 +99,7 @@ pub async fn persist_execution(
                     request.spec,
                     request.plan_revisions.first(),
                     request.working_dir,
-                    request.task_results,
+                    task_results,
                 ),
             )
             .await?,
@@ -106,7 +111,7 @@ pub async fn persist_execution(
         request.mcp_server,
         &base_commit_sha,
         initial_snapshot_id.as_deref(),
-        request.task_results,
+        task_results,
         request.decision,
         request.model_name,
     )
@@ -117,7 +122,7 @@ pub async fn persist_execution(
             request.mcp_server,
             &run_id,
             request.execution_plan,
-            request.task_results,
+            task_results,
             request.system_report,
             request.decision,
             request.model_name,
@@ -135,7 +140,7 @@ pub async fn persist_execution(
         &base_commit_sha,
         request.plan_revisions,
         request.working_dir,
-        request.task_results,
+        task_results,
     )
     .await?;
 
@@ -147,10 +152,10 @@ pub async fn persist_execution(
         .map(|node| (node.id, node))
         .collect();
 
-    let mut persisted_tasks = Vec::with_capacity(request.task_results.len());
+    let mut persisted_tasks = Vec::with_capacity(task_results.len());
     let mut generation: u32 = 1;
 
-    for result in request.task_results {
+    for result in task_results {
         let task = task_index.get(&result.task_id).ok_or_else(|| {
             OrchestratorError::PlanningFailed(format!(
                 "missing compiled task for result {} during persistence",
@@ -276,7 +281,7 @@ pub async fn persist_execution(
                     request.spec,
                     Some(request.execution_plan),
                     request.working_dir,
-                    request.task_results,
+                    task_results,
                 ),
             )
             .await?,
@@ -292,7 +297,7 @@ pub async fn persist_execution(
             chosen_patchset_id: chosen_patchset_id.as_deref(),
             checkpoint_id: final_checkpoint_id.as_deref(),
             execution_plan: request.execution_plan,
-            task_results: request.task_results,
+            task_results,
             system_report: request.system_report,
             decision: request.decision,
         })
@@ -1066,9 +1071,12 @@ mod tests {
             ai::{
                 history::HistoryManager,
                 intentspec::types::*,
-                orchestrator::types::{
-                    ExecutionCheckpoint, GateReport, GateResult, TaskContract, TaskDAG, TaskNode,
-                    TaskNodeStatus, ToolDiffRecord,
+                orchestrator::{
+                    run_state::{RunStateSnapshot, TaskStatusSnapshot},
+                    types::{
+                        ExecutionCheckpoint, GateReport, GateResult, TaskContract, TaskDAG,
+                        TaskNode, TaskNodeStatus, ToolDiffRecord,
+                    },
                 },
             },
             model::reference,
@@ -1363,13 +1371,25 @@ mod tests {
             missing_artifacts: vec![],
             overall_passed: true,
         };
+        let run_state = RunStateSnapshot {
+            intent_spec_id: plan.intent_spec_id.clone(),
+            revision: plan.revision,
+            task_statuses: results
+                .iter()
+                .map(|result| TaskStatusSnapshot {
+                    task_id: result.task_id,
+                    status: result.status.clone(),
+                })
+                .collect(),
+            task_results: results.clone(),
+        };
 
         let persisted = persist_execution(ExecutionPersistenceRequest {
             mcp_server: &server,
             spec: &spec,
             execution_plan: &plan,
             plan_revisions: std::slice::from_ref(&plan),
-            task_results: &results,
+            run_state: &run_state,
             system_report: &system_report,
             decision: &DecisionOutcome::Commit,
             working_dir: Path::new("."),

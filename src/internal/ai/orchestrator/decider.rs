@@ -1,4 +1,7 @@
-use super::types::{DecisionOutcome, SystemReport, TaskNodeStatus, TaskResult};
+use super::{
+    run_state::RunStateSnapshot,
+    types::{DecisionOutcome, SystemReport, TaskNodeStatus},
+};
 use crate::internal::ai::intentspec::types::RiskLevel;
 
 /// Make a decision based on task results, system verification, and risk level.
@@ -10,13 +13,14 @@ use crate::internal::ai::intentspec::types::RiskLevel;
 /// - All pass + low/medium risk → Commit
 /// - High risk always → HumanReviewRequired
 pub fn make_decision(
-    task_results: &[TaskResult],
+    run_state: &RunStateSnapshot,
     system_report: &SystemReport,
     risk: &RiskLevel,
     human_in_loop_required: bool,
 ) -> DecisionOutcome {
     // Any failed task → abandon
-    let has_failed = task_results
+    let has_failed = run_state
+        .ordered_task_results()
         .iter()
         .any(|r| r.status == TaskNodeStatus::Failed);
     if has_failed {
@@ -46,7 +50,10 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::internal::ai::orchestrator::types::{GateReport, TaskNodeStatus};
+    use crate::internal::ai::orchestrator::{
+        run_state::RunStateSnapshot,
+        types::{GateReport, TaskResult},
+    };
 
     fn passing_system_report() -> SystemReport {
         SystemReport {
@@ -87,9 +94,24 @@ mod tests {
         }
     }
 
+    fn run_state(results: Vec<TaskResult>) -> RunStateSnapshot {
+        RunStateSnapshot {
+            intent_spec_id: "spec-1".into(),
+            revision: 1,
+            task_statuses: results
+                .iter()
+                .map(|result| super::super::run_state::TaskStatusSnapshot {
+                    task_id: result.task_id,
+                    status: result.status.clone(),
+                })
+                .collect(),
+            task_results: results,
+        }
+    }
+
     #[test]
     fn test_all_pass_low_risk() {
-        let results = vec![task_result(TaskNodeStatus::Completed)];
+        let results = run_state(vec![task_result(TaskNodeStatus::Completed)]);
         let report = passing_system_report();
         let decision = make_decision(&results, &report, &RiskLevel::Low, false);
         assert_eq!(decision, DecisionOutcome::Commit);
@@ -97,7 +119,7 @@ mod tests {
 
     #[test]
     fn test_all_pass_medium_risk() {
-        let results = vec![task_result(TaskNodeStatus::Completed)];
+        let results = run_state(vec![task_result(TaskNodeStatus::Completed)]);
         let report = passing_system_report();
         let decision = make_decision(&results, &report, &RiskLevel::Medium, false);
         assert_eq!(decision, DecisionOutcome::Commit);
@@ -105,7 +127,7 @@ mod tests {
 
     #[test]
     fn test_high_risk_requires_human_review() {
-        let results = vec![task_result(TaskNodeStatus::Completed)];
+        let results = run_state(vec![task_result(TaskNodeStatus::Completed)]);
         let report = passing_system_report();
         let decision = make_decision(&results, &report, &RiskLevel::High, false);
         assert_eq!(decision, DecisionOutcome::HumanReviewRequired);
@@ -113,7 +135,7 @@ mod tests {
 
     #[test]
     fn test_human_in_loop_required() {
-        let results = vec![task_result(TaskNodeStatus::Completed)];
+        let results = run_state(vec![task_result(TaskNodeStatus::Completed)]);
         let report = passing_system_report();
         let decision = make_decision(&results, &report, &RiskLevel::Low, true);
         assert_eq!(decision, DecisionOutcome::HumanReviewRequired);
@@ -121,10 +143,10 @@ mod tests {
 
     #[test]
     fn test_task_failed() {
-        let results = vec![
+        let results = run_state(vec![
             task_result(TaskNodeStatus::Completed),
             task_result(TaskNodeStatus::Failed),
-        ];
+        ]);
         let report = passing_system_report();
         let decision = make_decision(&results, &report, &RiskLevel::Low, false);
         assert_eq!(decision, DecisionOutcome::Abandon);
@@ -132,7 +154,7 @@ mod tests {
 
     #[test]
     fn test_verification_failed() {
-        let results = vec![task_result(TaskNodeStatus::Completed)];
+        let results = run_state(vec![task_result(TaskNodeStatus::Completed)]);
         let report = failing_system_report();
         let decision = make_decision(&results, &report, &RiskLevel::Low, false);
         assert_eq!(decision, DecisionOutcome::Abandon);
@@ -140,7 +162,7 @@ mod tests {
 
     #[test]
     fn test_empty_results_commit() {
-        let results: Vec<TaskResult> = vec![];
+        let results = run_state(vec![]);
         let report = passing_system_report();
         let decision = make_decision(&results, &report, &RiskLevel::Low, false);
         assert_eq!(decision, DecisionOutcome::Commit);
@@ -148,7 +170,7 @@ mod tests {
 
     #[test]
     fn test_task_failed_takes_priority_over_human_review() {
-        let results = vec![task_result(TaskNodeStatus::Failed)];
+        let results = run_state(vec![task_result(TaskNodeStatus::Failed)]);
         let report = passing_system_report();
         let decision = make_decision(&results, &report, &RiskLevel::High, true);
         assert_eq!(decision, DecisionOutcome::Abandon);
@@ -156,7 +178,7 @@ mod tests {
 
     #[test]
     fn test_verification_failed_takes_priority_over_human_review() {
-        let results = vec![task_result(TaskNodeStatus::Completed)];
+        let results = run_state(vec![task_result(TaskNodeStatus::Completed)]);
         let report = failing_system_report();
         let decision = make_decision(&results, &report, &RiskLevel::High, true);
         assert_eq!(decision, DecisionOutcome::Abandon);

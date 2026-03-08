@@ -6,6 +6,7 @@ pub mod persistence;
 pub mod planner;
 pub mod policy;
 pub mod replan;
+pub mod run_state;
 pub mod types;
 pub mod verifier;
 
@@ -68,7 +69,7 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
         let mut replan_count = 0_u32;
         let mut plan_revisions = Vec::new();
         let observer = self.config.observer.clone();
-        let (execution_plan, task_results, system_report, decision) = loop {
+        let (execution_plan, run_state, system_report, decision) = loop {
             // Phase 1: Compile execution plan
             let mut execution_plan = planner::compile_execution_plan(&spec)?;
             execution_plan.revision = replan_count + 1;
@@ -93,8 +94,8 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
                 observer: observer.clone(),
             };
 
-            let task_results = executor::execute_dag(
-                &mut execution_plan.dag,
+            let run_state = executor::execute_dag(
+                &mut execution_plan,
                 &self.model,
                 &self.registry,
                 &executor_config,
@@ -102,12 +103,11 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
             .await?;
 
             // Phase 3: System verification
-            let system_report =
-                verifier::build_system_report(&spec, &execution_plan, &task_results);
+            let system_report = verifier::build_system_report(&spec, &execution_plan, &run_state);
 
             if replan_count < max_replans
                 && let Some(directive) =
-                    replan::detect_replan(&spec, &execution_plan, &task_results, &system_report)
+                    replan::detect_replan(&spec, &execution_plan, &run_state, &system_report)
             {
                 plan_revisions.push(execution_plan.clone());
                 replan_count += 1;
@@ -125,14 +125,16 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
 
             // Phase 4: Decision
             let decision = decider::make_decision(
-                &task_results,
+                &run_state,
                 &system_report,
                 &spec.risk.level,
                 spec.risk.human_in_loop.required,
             );
             plan_revisions.push(execution_plan.clone());
-            break (execution_plan, task_results, system_report, decision);
+            break (execution_plan, run_state, system_report, decision);
         };
+
+        let task_results = run_state.task_results.clone();
 
         let persistence = if let Some(ref mcp_server) = self.config.mcp_server {
             let persisted =
@@ -141,7 +143,7 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
                     spec: &spec,
                     execution_plan: &execution_plan,
                     plan_revisions: &plan_revisions,
-                    task_results: &task_results,
+                    run_state: &run_state,
                     system_report: &system_report,
                     decision: &decision,
                     working_dir: &self.config.working_dir,
@@ -161,6 +163,7 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
             decision,
             execution_plan,
             plan_revisions,
+            run_state,
             task_results,
             system_report,
             intent_spec_id: spec.metadata.id.clone(),

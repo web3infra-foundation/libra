@@ -1,6 +1,9 @@
 use std::collections::BTreeSet;
 
-use super::types::{ExecutionPlan, GateReport, GateStage, SystemReport, TaskKind, TaskResult};
+use super::{
+    run_state::RunStateSnapshot,
+    types::{ExecutionPlan, GateReport, GateStage, SystemReport, TaskKind},
+};
 use crate::internal::ai::intentspec::types::{ArtifactName, ArtifactStage, IntentSpec};
 
 /// Build the system verification report from executed gate tasks, review results,
@@ -8,16 +11,16 @@ use crate::internal::ai::intentspec::types::{ArtifactName, ArtifactStage, Intent
 pub fn build_system_report(
     spec: &IntentSpec,
     plan: &ExecutionPlan,
-    task_results: &[TaskResult],
+    run_state: &RunStateSnapshot,
 ) -> SystemReport {
-    let integration = gate_report_for_stage(plan, task_results, GateStage::Integration)
+    let integration = gate_report_for_stage(plan, run_state, GateStage::Integration)
         .unwrap_or_else(GateReport::empty);
-    let security = gate_report_for_stage(plan, task_results, GateStage::Security)
+    let security = gate_report_for_stage(plan, run_state, GateStage::Security)
         .unwrap_or_else(GateReport::empty);
-    let release = gate_report_for_stage(plan, task_results, GateStage::Release)
+    let release = gate_report_for_stage(plan, run_state, GateStage::Release)
         .unwrap_or_else(GateReport::empty);
-    let (review_passed, review_findings) = review_report(plan, task_results);
-    let (artifacts_complete, missing_artifacts) = artifact_report(spec, plan, task_results);
+    let (review_passed, review_findings) = review_report(plan, run_state);
+    let (artifacts_complete, missing_artifacts) = artifact_report(spec, plan, run_state);
 
     let overall_passed = integration.all_required_passed
         && security.all_required_passed
@@ -39,7 +42,7 @@ pub fn build_system_report(
 
 fn gate_report_for_stage(
     plan: &ExecutionPlan,
-    task_results: &[TaskResult],
+    run_state: &RunStateSnapshot,
     stage: GateStage,
 ) -> Option<GateReport> {
     let task_id = plan
@@ -49,13 +52,12 @@ fn gate_report_for_stage(
         .find(|node| node.gate_stage == Some(stage.clone()))
         .map(|node| node.id)?;
 
-    task_results
-        .iter()
-        .find(|result| result.task_id == task_id)
+    run_state
+        .result_for(task_id)
         .and_then(|result| result.gate_report.clone())
 }
 
-fn review_report(plan: &ExecutionPlan, task_results: &[TaskResult]) -> (bool, Vec<String>) {
+fn review_report(plan: &ExecutionPlan, run_state: &RunStateSnapshot) -> (bool, Vec<String>) {
     let implementation_ids = plan
         .dag
         .nodes
@@ -64,7 +66,8 @@ fn review_report(plan: &ExecutionPlan, task_results: &[TaskResult]) -> (bool, Ve
         .map(|node| node.id)
         .collect::<BTreeSet<_>>();
 
-    let findings = task_results
+    let findings = run_state
+        .ordered_task_results()
         .iter()
         .filter(|result| implementation_ids.contains(&result.task_id))
         .filter_map(|result| result.review.as_ref())
@@ -84,9 +87,9 @@ fn review_report(plan: &ExecutionPlan, task_results: &[TaskResult]) -> (bool, Ve
 fn artifact_report(
     spec: &IntentSpec,
     plan: &ExecutionPlan,
-    task_results: &[TaskResult],
+    run_state: &RunStateSnapshot,
 ) -> (bool, Vec<String>) {
-    let produced = produced_artifacts(plan, task_results);
+    let produced = produced_artifacts(plan, run_state);
     let missing = spec
         .artifacts
         .required
@@ -105,11 +108,11 @@ fn artifact_report(
     (missing.is_empty(), missing)
 }
 
-fn produced_artifacts(plan: &ExecutionPlan, task_results: &[TaskResult]) -> BTreeSet<String> {
+fn produced_artifacts(plan: &ExecutionPlan, run_state: &RunStateSnapshot) -> BTreeSet<String> {
     let mut produced = BTreeSet::new();
 
     for node in &plan.dag.nodes {
-        let Some(result) = task_results.iter().find(|result| result.task_id == node.id) else {
+        let Some(result) = run_state.result_for(node.id) else {
             continue;
         };
 
@@ -217,9 +220,12 @@ mod tests {
             SecurityPolicy, Target, ToolAcl, TransparencyLogPolicy, TransparencyMode, TrustTier,
             VerificationPlan,
         },
-        orchestrator::types::{
-            ExecutionCheckpoint, GateResult, ReviewOutcome, TaskContract, TaskDAG, TaskKind,
-            TaskNode, TaskNodeStatus,
+        orchestrator::{
+            run_state::{RunStateSnapshot, TaskStatusSnapshot},
+            types::{
+                ExecutionCheckpoint, GateResult, ReviewOutcome, TaskContract, TaskDAG, TaskKind,
+                TaskNode, TaskNodeStatus, TaskResult,
+            },
         },
     };
 
@@ -489,8 +495,20 @@ mod tests {
                 review: None,
             },
         ];
+        let run_state = RunStateSnapshot {
+            intent_spec_id: plan.intent_spec_id.clone(),
+            revision: plan.revision,
+            task_statuses: results
+                .iter()
+                .map(|result| TaskStatusSnapshot {
+                    task_id: result.task_id,
+                    status: result.status.clone(),
+                })
+                .collect(),
+            task_results: results,
+        };
 
-        let report = build_system_report(&spec, &plan, &results);
+        let report = build_system_report(&spec, &plan, &run_state);
         assert!(report.review_passed);
         assert!(report.artifacts_complete);
         assert!(report.overall_passed);

@@ -8,15 +8,15 @@ use async_trait::async_trait;
 use dagrs::{Action, DefaultNode, EnvVar, Graph, InChannels, Node, NodeTable, OutChannels, Output};
 use serde::Deserialize;
 use serde_json::Value;
-use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use super::{
     acl::{AclVerdict, check_tool_acl},
     gate, policy,
+    run_state::{RunStateSnapshot, RunStateStore},
     types::{
-        GateReport, OrchestratorError, OrchestratorObserver, ReviewOutcome, TaskDAG, TaskKind,
-        TaskNode,
+        ExecutionPlan, GateReport, OrchestratorError, OrchestratorObserver, ReviewOutcome,
+        TaskDAG, TaskKind, TaskNode,
         TaskNodeStatus, TaskResult, ToolCallRecord,
     },
 };
@@ -386,7 +386,7 @@ struct TaskDagrsAction<M: CompletionModel + 'static> {
     model: M,
     registry: Arc<ToolRegistry>,
     config: ExecutorConfig,
-    results: Arc<Mutex<HashMap<Uuid, TaskResult>>>,
+    run_state: RunStateStore,
 }
 
 #[derive(Clone)]
@@ -435,7 +435,7 @@ impl<M: CompletionModel + 'static> Action for TaskDagrsAction<M> {
             observer.on_task_completed(&self.task, &result);
         }
 
-        self.results.lock().await.insert(result.task_id, result.clone());
+        self.run_state.record_result(result.clone()).await;
 
         match result.status {
             TaskNodeStatus::Completed => {
@@ -535,7 +535,7 @@ fn build_dagrs_graph<M: CompletionModel + 'static>(
     model: &M,
     registry: &Arc<ToolRegistry>,
     config: &ExecutorConfig,
-    results: Arc<Mutex<HashMap<Uuid, TaskResult>>>,
+    run_state: RunStateStore,
 ) -> Result<Graph, OrchestratorError> {
     let mut graph = Graph::new();
     let mut node_table = NodeTable::new();
@@ -548,7 +548,7 @@ fn build_dagrs_graph<M: CompletionModel + 'static>(
             model: model.clone(),
             registry: Arc::clone(registry),
             config: config.clone(),
-            results: Arc::clone(&results),
+            run_state: run_state.clone(),
         };
         let dagrs_node =
             DefaultNode::with_action(node.id.to_string(), action, &mut node_table);
@@ -583,24 +583,24 @@ fn build_dagrs_graph<M: CompletionModel + 'static>(
 
 /// Execute all tasks in the DAG in topological order.
 pub async fn execute_dag<M: CompletionModel + 'static>(
-    dag: &mut TaskDAG,
+    plan: &mut ExecutionPlan,
     model: &M,
     registry: &Arc<ToolRegistry>,
     config: &ExecutorConfig,
-) -> Result<Vec<TaskResult>, OrchestratorError> {
-    let results_store = Arc::new(Mutex::new(HashMap::new()));
-    let dag_snapshot = dag.clone();
+) -> Result<RunStateSnapshot, OrchestratorError> {
+    let run_state = RunStateStore::new();
+    let plan_snapshot = plan.clone();
     let model_snapshot = model.clone();
     let registry_snapshot = Arc::clone(registry);
     let config_snapshot = config.clone();
-    let results_snapshot = Arc::clone(&results_store);
+    let run_state_snapshot = run_state.clone();
     let mut graph = tokio::task::spawn_blocking(move || {
         build_dagrs_graph(
-            &dag_snapshot,
+            &plan_snapshot.dag,
             &model_snapshot,
             &registry_snapshot,
             &config_snapshot,
-            results_snapshot,
+            run_state_snapshot,
         )
     })
     .await
@@ -608,26 +608,19 @@ pub async fn execute_dag<M: CompletionModel + 'static>(
 
     if let Err(err) = graph.async_start().await {
         tracing::warn!("dagrs execution terminated with error: {}", err);
-        let results = results_store.lock().await;
-        if results.is_empty() {
+        if !run_state.has_results().await {
             return Err(OrchestratorError::AgentError(format!(
                 "dagrs execution failed before any task completed: {err}"
             )));
         }
     }
 
-    let results = results_store.lock().await;
-    for node in &mut dag.nodes {
-        if let Some(result) = results.get(&node.id) {
-            node.status = result.status.clone();
-        }
+    let snapshot = run_state.snapshot(plan).await;
+    for node in &mut plan.dag.nodes {
+        node.status = snapshot.status_for(node.id);
     }
 
-    Ok(dag
-        .nodes
-        .iter()
-        .filter_map(|node| results.get(&node.id).cloned())
-        .collect())
+    Ok(snapshot)
 }
 
 fn build_task_prompt(task: &TaskNode, working_dir: &Path, allowed_tools: &[String]) -> String {
@@ -830,7 +823,7 @@ mod tests {
             message::{AssistantContent, Message, Text, UserContent},
         },
         intentspec::{profiles, types::*},
-        orchestrator::types::{TaskContract, TaskKind},
+        orchestrator::types::{ExecutionPlan, TaskContract, TaskKind},
         tools::registry::ToolRegistry,
     };
 
@@ -1071,6 +1064,19 @@ mod tests {
         }
     }
 
+    fn plan_for_dag(dag: TaskDAG) -> ExecutionPlan {
+        ExecutionPlan {
+            intent_spec_id: dag.intent_spec_id.clone(),
+            summary: "test plan".into(),
+            revision: 1,
+            parent_revision: None,
+            replan_reason: None,
+            dag,
+            parallel_groups: vec![],
+            checkpoints: vec![],
+        }
+    }
+
     #[tokio::test]
     async fn test_execute_gate_task() {
         let task = TaskNode {
@@ -1167,20 +1173,23 @@ mod tests {
         b.title = "B".into();
         b.objective = "B".into();
 
-        let mut dag = TaskDAG {
+        let mut plan = plan_for_dag(TaskDAG {
             nodes: vec![a.clone(), c.clone(), b.clone()],
             intent_spec_id: "test".into(),
             max_parallel: 1,
-        };
+        });
 
-        let results = execute_dag(&mut dag, &model, &registry, &config)
+        let run_state = execute_dag(&mut plan, &model, &registry, &config)
             .await
             .unwrap();
 
         let start_order = starts.lock().unwrap().clone();
         assert_eq!(start_order, vec!["A", "C", "B"]);
-        assert_eq!(results.len(), 3);
-        assert!(results.iter().all(|result| result.status == TaskNodeStatus::Completed));
+        assert_eq!(run_state.task_results.len(), 3);
+        assert!(run_state
+            .ordered_task_results()
+            .iter()
+            .all(|result| result.status == TaskNodeStatus::Completed));
     }
 
     #[tokio::test]
@@ -1209,21 +1218,22 @@ mod tests {
         later.title = "Later".into();
         later.objective = "Later".into();
 
-        let mut dag = TaskDAG {
+        let mut plan = plan_for_dag(TaskDAG {
             nodes: vec![failing.clone(), later.clone()],
             intent_spec_id: "test".into(),
             max_parallel: 1,
-        };
+        });
 
-        let results = execute_dag(&mut dag, &model, &registry, &config)
+        let run_state = execute_dag(&mut plan, &model, &registry, &config)
             .await
             .unwrap();
 
         let start_order = starts.lock().unwrap().clone();
         assert_eq!(start_order, vec!["Fail first"]);
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].task_id, failing.id);
-        assert_eq!(results[0].status, TaskNodeStatus::Failed);
-        assert_eq!(dag.get(later.id).unwrap().status, TaskNodeStatus::Pending);
+        assert_eq!(run_state.task_results.len(), 1);
+        assert_eq!(run_state.task_results[0].task_id, failing.id);
+        assert_eq!(run_state.task_results[0].status, TaskNodeStatus::Failed);
+        assert_eq!(run_state.status_for(later.id), TaskNodeStatus::Pending);
+        assert_eq!(plan.dag.get(later.id).unwrap().status, TaskNodeStatus::Pending);
     }
 }
