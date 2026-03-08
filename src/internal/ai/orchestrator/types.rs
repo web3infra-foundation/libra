@@ -399,6 +399,50 @@ pub struct PersistedExecution {
     pub tasks: Vec<PersistedTaskArtifacts>,
 }
 
+/// Best-effort observer for surfacing orchestrator runtime progress.
+pub trait OrchestratorObserver: Send + Sync {
+    fn on_plan_compiled(&self, _plan: &ExecutionPlan) {}
+
+    fn on_task_started(&self, _task: &TaskNode) {}
+
+    fn on_task_completed(&self, _task: &TaskNode, _result: &TaskResult) {}
+
+    fn on_task_assistant_message(&self, _task: &TaskNode, _text: &str) {}
+
+    fn on_tool_call_begin(
+        &self,
+        _task: &TaskNode,
+        _call_id: &str,
+        _tool_name: &str,
+        _arguments: &Value,
+    ) {
+    }
+
+    fn on_tool_call_end(
+        &self,
+        _task: &TaskNode,
+        _call_id: &str,
+        _tool_name: &str,
+        _result: &Result<crate::internal::ai::tools::ToolOutput, String>,
+    ) {
+    }
+
+    fn on_reviewer_started(&self, _task: &TaskNode) {}
+
+    fn on_reviewer_completed(&self, _task: &TaskNode, _review: Option<&ReviewOutcome>) {}
+
+    fn on_replan(
+        &self,
+        _current_revision: u32,
+        _next_revision: u32,
+        _reason: &str,
+        _diff_summary: &str,
+    ) {
+    }
+
+    fn on_persistence_complete(&self, _execution: &PersistedExecution) {}
+}
+
 fn default_execution_revision() -> u32 {
     1
 }
@@ -414,6 +458,8 @@ pub struct OrchestratorConfig {
     pub reviewer_preamble: Option<String>,
     /// Optional MCP server used to persist workflow objects.
     pub mcp_server: Option<Arc<LibraMcpServer>>,
+    /// Optional observer used to surface runtime progress.
+    pub observer: Option<Arc<dyn OrchestratorObserver>>,
 }
 
 #[cfg(test)]

@@ -230,9 +230,13 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             .map(|s| s.function.name)
             .filter(|name| name != "submit_intent_draft")
             .collect();
+        let mut widget = ChatWidget::new();
+        widget
+            .bottom_pane
+            .set_cwd(registry.working_dir().to_path_buf());
         Self {
             tui,
-            widget: ChatWidget::new(),
+            widget,
             model,
             registry,
             config,
@@ -1402,7 +1406,10 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
     async fn start_execute_workflow(&mut self, spec_json: &str) {
         use crate::internal::ai::{
             intentspec::types::IntentSpec,
-            orchestrator::{Orchestrator, types::OrchestratorConfig},
+            orchestrator::{
+                Orchestrator,
+                types::{OrchestratorConfig, OrchestratorObserver, PersistedExecution, TaskNode},
+            },
         };
 
         let spec: IntentSpec = match serde_json::from_str(spec_json) {
@@ -1439,12 +1446,152 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         let history = self.history.clone();
 
         let handle = tokio::spawn(async move {
+            struct UiOrchestratorObserver {
+                tx: UnboundedSender<AppEvent>,
+            }
+
+            impl UiOrchestratorObserver {
+                fn send_note(&self, text: String) {
+                    let _ = self.tx.send(AppEvent::InsertHistoryCell(Box::new(
+                        AssistantHistoryCell::new(text),
+                    )));
+                }
+
+                fn scoped_call_id(task: &TaskNode, call_id: &str) -> String {
+                    format!("{}:{call_id}", task.id)
+                }
+            }
+
+            impl OrchestratorObserver for UiOrchestratorObserver {
+                fn on_plan_compiled(&self, plan: &ExecutionPlan) {
+                    self.send_note(format!(
+                        "Compiled execution plan rev {}: {}  \nTasks: {} | Parallel groups: {} | Checkpoints: {}",
+                        plan.revision,
+                        plan.summary,
+                        plan.dag.nodes.len(),
+                        plan.parallel_groups.len(),
+                        plan.checkpoints.len()
+                    ));
+                }
+
+                fn on_task_started(&self, task: &TaskNode) {
+                    let kind = match task.gate_stage {
+                        Some(ref stage) => format!("gate:{stage:?}"),
+                        None => "implementation".to_string(),
+                    };
+                    let _ = self.tx.send(AppEvent::AgentStatusUpdate {
+                        status: AgentStatus::Thinking,
+                    });
+                    self.send_note(format!("Starting [{kind}] {}", task.title));
+                }
+
+                fn on_task_completed(
+                    &self,
+                    task: &TaskNode,
+                    result: &crate::internal::ai::orchestrator::types::TaskResult,
+                ) {
+                    self.send_note(format!(
+                        "Finished {}  \nStatus: {:?} | Retries: {} | Tools: {} | Policy violations: {}",
+                        task.title,
+                        result.status,
+                        result.retry_count,
+                        result.tool_calls.len(),
+                        result.policy_violations.len()
+                    ));
+                }
+
+                fn on_task_assistant_message(&self, task: &TaskNode, text: &str) {
+                    let text = text.trim();
+                    if text.is_empty() {
+                        return;
+                    }
+                    self.send_note(format!("{}  \n{}", task.title, text));
+                }
+
+                fn on_tool_call_begin(
+                    &self,
+                    task: &TaskNode,
+                    call_id: &str,
+                    tool_name: &str,
+                    arguments: &serde_json::Value,
+                ) {
+                    let _ = self.tx.send(AppEvent::ToolCallBegin {
+                        call_id: Self::scoped_call_id(task, call_id),
+                        tool_name: tool_name.to_string(),
+                        arguments: arguments.clone(),
+                    });
+                }
+
+                fn on_tool_call_end(
+                    &self,
+                    task: &TaskNode,
+                    call_id: &str,
+                    tool_name: &str,
+                    result: &Result<ToolOutput, String>,
+                ) {
+                    let _ = self.tx.send(AppEvent::ToolCallEnd {
+                        call_id: Self::scoped_call_id(task, call_id),
+                        tool_name: tool_name.to_string(),
+                        result: result.clone(),
+                    });
+                }
+
+                fn on_reviewer_started(&self, task: &TaskNode) {
+                    self.send_note(format!("Reviewer pass started for {}", task.title));
+                }
+
+                fn on_reviewer_completed(
+                    &self,
+                    task: &TaskNode,
+                    review: Option<&crate::internal::ai::orchestrator::types::ReviewOutcome>,
+                ) {
+                    let summary = review
+                        .map(|r| {
+                            format!(
+                                "{} | approved: {}",
+                                r.summary,
+                                if r.approved { "yes" } else { "no" }
+                            )
+                        })
+                        .unwrap_or_else(|| "no reviewer output".to_string());
+                    self.send_note(format!(
+                        "Reviewer pass finished for {}  \n{}",
+                        task.title, summary
+                    ));
+                }
+
+                fn on_replan(
+                    &self,
+                    current_revision: u32,
+                    next_revision: u32,
+                    reason: &str,
+                    diff_summary: &str,
+                ) {
+                    self.send_note(format!(
+                        "Replan triggered  \nRevision {} -> {}  \nReason: {}  \n{}",
+                        current_revision, next_revision, reason, diff_summary
+                    ));
+                }
+
+                fn on_persistence_complete(&self, execution: &PersistedExecution) {
+                    self.send_note(format!(
+                        "Persisted execution  \nRun: {} | Plans: {} | Checkpoints: {}",
+                        execution.run_id,
+                        execution.plan_ids.len(),
+                        execution.checkpoints.len()
+                    ));
+                }
+            }
+
+            let observer: Arc<dyn OrchestratorObserver> =
+                Arc::new(UiOrchestratorObserver { tx: tx.clone() });
             let config = OrchestratorConfig {
                 working_dir,
                 base_commit: None,
                 coder_preamble,
                 reviewer_preamble,
                 mcp_server,
+                observer: Some(observer),
             };
             let orchestrator = Orchestrator::new(model, registry, config);
 

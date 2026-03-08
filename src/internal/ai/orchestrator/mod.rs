@@ -67,6 +67,7 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
         let max_replans = replan::max_replans(&spec);
         let mut replan_count = 0_u32;
         let mut plan_revisions = Vec::new();
+        let observer = self.config.observer.clone();
         let (execution_plan, task_results, system_report, decision) = loop {
             // Phase 1: Compile execution plan
             let mut execution_plan = planner::compile_execution_plan(&spec)?;
@@ -77,6 +78,9 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
                 .change_log
                 .last()
                 .map(|entry| entry.reason.clone());
+            if let Some(observer) = &observer {
+                observer.on_plan_compiled(&execution_plan);
+            }
 
             // Phase 2: Execute tasks
             let executor_config = executor::ExecutorConfig {
@@ -86,6 +90,7 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
                 working_dir: self.config.working_dir.clone(),
                 spec: Arc::new(spec.clone()),
                 reviewer_preamble: self.config.reviewer_preamble.clone(),
+                observer: observer.clone(),
             };
 
             let task_results = executor::execute_dag(
@@ -106,6 +111,14 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
             {
                 plan_revisions.push(execution_plan.clone());
                 replan_count += 1;
+                if let Some(observer) = &observer {
+                    observer.on_replan(
+                        execution_plan.revision,
+                        replan_count + 1,
+                        &directive.reason,
+                        &directive.diff_summary,
+                    );
+                }
                 replan::apply_replan(&mut spec, replan_count + 1, &directive);
                 continue;
             }
@@ -122,7 +135,7 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
         };
 
         let persistence = if let Some(ref mcp_server) = self.config.mcp_server {
-            Some(
+            let persisted =
                 persistence::persist_execution(persistence::ExecutionPersistenceRequest {
                     mcp_server,
                     spec: &spec,
@@ -135,8 +148,11 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
                     base_commit: self.config.base_commit.as_deref(),
                     model_name: std::any::type_name::<M>(),
                 })
-                .await?,
-            )
+                .await?;
+            if let Some(observer) = &observer {
+                observer.on_persistence_complete(&persisted);
+            }
+            Some(persisted)
         } else {
             None
         };
@@ -157,7 +173,10 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, sync::Arc};
+    use std::{
+        collections::BTreeMap,
+        sync::{Arc, Mutex},
+    };
 
     use super::*;
     use crate::internal::ai::{
@@ -170,6 +189,33 @@ mod tests {
 
     #[derive(Clone)]
     struct MockOrchestratorModel;
+
+    struct RecordingObserver {
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl types::OrchestratorObserver for RecordingObserver {
+        fn on_plan_compiled(&self, plan: &types::ExecutionPlan) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("plan:{}", plan.revision));
+        }
+
+        fn on_task_started(&self, task: &types::TaskNode) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("start:{}", task.title));
+        }
+
+        fn on_task_completed(&self, task: &types::TaskNode, _result: &types::TaskResult) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("done:{}", task.title));
+        }
+    }
 
     impl CompletionModel for MockOrchestratorModel {
         type Response = ();
@@ -343,6 +389,7 @@ mod tests {
             coder_preamble: None,
             reviewer_preamble: None,
             mcp_server: None,
+            observer: None,
         };
         let orchestrator = Orchestrator::new(model, registry, config);
         let spec = test_spec();
@@ -351,6 +398,33 @@ mod tests {
         assert_eq!(result.task_results.len(), 5);
         assert_eq!(result.execution_plan.dag.nodes.len(), 5);
         assert!(result.system_report.overall_passed);
+    }
+
+    #[tokio::test]
+    async fn test_orchestrator_emits_progress_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = MockOrchestratorModel;
+        let registry = Arc::new(ToolRegistry::new());
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let observer: Arc<dyn types::OrchestratorObserver> = Arc::new(RecordingObserver {
+            events: Arc::clone(&events),
+        });
+        let config = OrchestratorConfig {
+            working_dir: dir.path().to_path_buf(),
+            base_commit: None,
+            coder_preamble: None,
+            reviewer_preamble: None,
+            mcp_server: None,
+            observer: Some(observer),
+        };
+        let orchestrator = Orchestrator::new(model, registry, config);
+        let result = orchestrator.run(test_spec()).await.unwrap();
+        let events = events.lock().unwrap().clone();
+        assert!(!events.is_empty());
+        assert!(events.iter().any(|event| event.starts_with("plan:")));
+        assert!(events.iter().any(|event| event.starts_with("start:")));
+        assert!(events.iter().any(|event| event.starts_with("done:")));
+        assert_eq!(result.decision, types::DecisionOutcome::Commit);
     }
 
     #[tokio::test]
@@ -364,6 +438,7 @@ mod tests {
             coder_preamble: None,
             reviewer_preamble: None,
             mcp_server: None,
+            observer: None,
         };
         let orchestrator = Orchestrator::new(model, registry, config);
         let mut spec = test_spec();
@@ -385,6 +460,7 @@ mod tests {
             coder_preamble: None,
             reviewer_preamble: None,
             mcp_server: None,
+            observer: None,
         };
         let orchestrator = Orchestrator::new(model, registry, config);
         let mut spec = test_spec();
@@ -406,6 +482,7 @@ mod tests {
             coder_preamble: None,
             reviewer_preamble: None,
             mcp_server: None,
+            observer: None,
         };
         let orchestrator = Orchestrator::new(model, registry, config);
         let mut spec = test_spec();

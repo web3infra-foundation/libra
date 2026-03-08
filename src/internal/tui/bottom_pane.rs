@@ -2,7 +2,10 @@
 //!
 //! Provides the user input area and status display at the bottom of the TUI.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use ratatui::{
     prelude::*,
@@ -64,6 +67,8 @@ pub struct BottomPane {
     command_popup: CommandPopupState,
     /// Currently selected option in the post-plan dialog (0=Execute, 1=Modify, 2=Cancel).
     pub post_plan_selected: usize,
+    /// Current working directory shown in the input border.
+    cwd: Option<PathBuf>,
 }
 
 impl BottomPane {
@@ -86,6 +91,7 @@ impl BottomPane {
                 scroll_offset: 0,
             },
             post_plan_selected: 0,
+            cwd: None,
         }
     }
 
@@ -183,6 +189,11 @@ impl BottomPane {
     /// Set the agent status.
     pub fn set_status(&mut self, status: AgentStatus) {
         self.status = status;
+    }
+
+    /// Set the current working directory badge shown on the input border.
+    pub fn set_cwd(&mut self, cwd: PathBuf) {
+        self.cwd = Some(cwd);
     }
 
     // ── Slash-command autocomplete popup ────────────────────────────
@@ -769,6 +780,7 @@ impl BottomPane {
         };
 
         Paragraph::new(display_text).block(block).render(area, buf);
+        self.render_cwd_badge(area, buf, border_style);
 
         if !self.focused || inner.width == 0 || inner.height == 0 {
             return None;
@@ -778,6 +790,43 @@ impl BottomPane {
             x: inner.x.saturating_add(cursor_x),
             y: inner.y.saturating_add(cursor_y),
         })
+    }
+
+    fn render_cwd_badge(&self, area: Rect, buf: &mut Buffer, border_style: Style) {
+        if area.width < 12 || area.height == 0 {
+            return;
+        }
+
+        let Some(cwd) = &self.cwd else {
+            return;
+        };
+
+        let badge = format_cwd_badge(cwd, area.width.saturating_sub(6) as usize);
+        if badge.is_empty() {
+            return;
+        }
+
+        let badge_width = badge.width() as u16;
+        if badge_width + 3 >= area.width {
+            return;
+        }
+
+        let y = area.y.saturating_add(area.height.saturating_sub(1));
+        let x = area
+            .x
+            .saturating_add(area.width.saturating_sub(badge_width + 3));
+
+        let spans = vec![
+            Span::styled("┤", border_style),
+            Span::styled(
+                badge,
+                Style::default()
+                    .fg(Color::Rgb(188, 208, 255))
+                    .add_modifier(Modifier::DIM),
+            ),
+            Span::styled("╯", border_style),
+        ];
+        buf.set_line(x, y, &Line::from(spans), area.width.saturating_sub(x));
     }
 
     fn render_help_text(&self, area: Rect, buf: &mut Buffer) {
@@ -926,6 +975,58 @@ fn gradient_line(text: &str, colors: &[Color], phase: usize, bold: bool) -> Line
     Line::from(spans)
 }
 
+fn format_cwd_badge(path: &Path, max_width: usize) -> String {
+    if max_width <= 2 {
+        return String::new();
+    }
+
+    let display = if let Some(home) = dirs::home_dir() {
+        if let Ok(stripped) = path.strip_prefix(&home) {
+            if stripped.as_os_str().is_empty() {
+                "~".to_string()
+            } else {
+                format!("~/{}", stripped.display())
+            }
+        } else {
+            path.display().to_string()
+        }
+    } else {
+        path.display().to_string()
+    };
+
+    format!(
+        " {} ",
+        truncate_from_left(&display, max_width.saturating_sub(2))
+    )
+}
+
+fn truncate_from_left(text: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+
+    if text.width() <= max_width {
+        return text.to_string();
+    }
+
+    if max_width == 1 {
+        return "…".to_string();
+    }
+
+    let mut width = 1usize;
+    let mut kept = Vec::new();
+    for ch in text.chars().rev() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
+        if width + ch_width > max_width {
+            break;
+        }
+        kept.push(ch);
+        width += ch_width;
+    }
+    kept.reverse();
+    format!("…{}", kept.into_iter().collect::<String>())
+}
+
 impl Default for BottomPane {
     fn default() -> Self {
         Self::new()
@@ -934,6 +1035,8 @@ impl Default for BottomPane {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use ratatui::{buffer::Buffer, layout::Rect};
 
     use super::BottomPane;
@@ -970,6 +1073,20 @@ mod tests {
         assert!(bottom_of_box.contains("╰"));
         assert!(status.contains("Ready"));
         assert!(!status.contains("Enter: Send"));
+    }
+
+    #[test]
+    fn input_box_renders_cwd_badge_on_bottom_border() {
+        let mut pane = BottomPane::new();
+        pane.set_cwd(PathBuf::from("/Users/neon/Documents/Projects/libra"));
+
+        let area = Rect::new(0, 0, 48, 6);
+        let mut buf = Buffer::empty(area);
+        let _ = pane.render(area, &mut buf);
+
+        let bottom_of_box = row_text(&buf, 4, area.width);
+        assert!(bottom_of_box.contains("libra"));
+        assert!(bottom_of_box.contains("┤"));
     }
 
     #[test]

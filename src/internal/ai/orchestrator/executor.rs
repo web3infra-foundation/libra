@@ -10,8 +10,8 @@ use serde_json::Value;
 use super::{
     gate, policy,
     types::{
-        GateReport, ReviewOutcome, TaskDAG, TaskKind, TaskNode, TaskNodeStatus, TaskResult,
-        ToolCallRecord,
+        GateReport, OrchestratorObserver, ReviewOutcome, TaskDAG, TaskKind, TaskNode,
+        TaskNodeStatus, TaskResult, ToolCallRecord,
     },
 };
 use crate::internal::ai::{
@@ -30,6 +30,7 @@ pub struct ExecutorConfig {
     pub working_dir: PathBuf,
     pub spec: Arc<IntentSpec>,
     pub reviewer_preamble: Option<String>,
+    pub observer: Option<Arc<dyn OrchestratorObserver>>,
 }
 
 struct TaskExecutionObserver {
@@ -39,10 +40,16 @@ struct TaskExecutionObserver {
     in_flight: HashMap<String, ToolCallRecord>,
     tool_calls: Vec<ToolCallRecord>,
     violations: Vec<super::types::PolicyViolation>,
+    observer: Option<Arc<dyn OrchestratorObserver>>,
 }
 
 impl TaskExecutionObserver {
-    fn new(spec: Arc<IntentSpec>, task: TaskNode, working_dir: PathBuf) -> Self {
+    fn new(
+        spec: Arc<IntentSpec>,
+        task: TaskNode,
+        working_dir: PathBuf,
+        observer: Option<Arc<dyn OrchestratorObserver>>,
+    ) -> Self {
         Self {
             spec,
             task,
@@ -50,6 +57,7 @@ impl TaskExecutionObserver {
             in_flight: HashMap::new(),
             tool_calls: Vec::new(),
             violations: Vec::new(),
+            observer,
         }
     }
 
@@ -59,6 +67,18 @@ impl TaskExecutionObserver {
 }
 
 impl ToolLoopObserver for TaskExecutionObserver {
+    fn on_assistant_step_text(&mut self, text: &str) {
+        if let Some(observer) = &self.observer {
+            observer.on_task_assistant_message(&self.task, text);
+        }
+    }
+
+    fn on_tool_call_begin(&mut self, call_id: &str, tool_name: &str, arguments: &Value) {
+        if let Some(observer) = &self.observer {
+            observer.on_tool_call_begin(&self.task, call_id, tool_name, arguments);
+        }
+    }
+
     fn on_tool_call_preflight(
         &mut self,
         call_id: &str,
@@ -89,6 +109,9 @@ impl ToolLoopObserver for TaskExecutionObserver {
         tool_name: &str,
         result: &Result<ToolOutput, String>,
     ) {
+        if let Some(observer) = &self.observer {
+            observer.on_tool_call_end(&self.task, call_id, tool_name, result);
+        }
         if let Some(mut record) = self.in_flight.remove(call_id) {
             match result {
                 Ok(output) => {
@@ -138,6 +161,7 @@ pub async fn execute_task<M: CompletionModel>(
             Arc::clone(&config.spec),
             task.clone(),
             config.working_dir.clone(),
+            config.observer.clone(),
         );
         let agent_result = run_tool_loop_with_history_and_observer(
             model,
@@ -166,6 +190,9 @@ pub async fn execute_task<M: CompletionModel>(
                 {
                     Ok(review) => review,
                     Err(message) => {
+                        if let Some(observer) = &config.observer {
+                            observer.on_reviewer_completed(task, None);
+                        }
                         return TaskResult {
                             task_id: task.id,
                             status: TaskNodeStatus::Failed,
@@ -308,10 +335,14 @@ async fn run_reviewer_pass<M: CompletionModel>(
         ..config.tool_loop_config.clone()
     };
 
+    if let Some(observer) = &config.observer {
+        observer.on_reviewer_started(task);
+    }
     let mut observer = TaskExecutionObserver::new(
         Arc::clone(&config.spec),
         task.clone(),
         config.working_dir.clone(),
+        config.observer.clone(),
     );
     let turn = run_tool_loop_with_history_and_observer(
         model,
@@ -325,11 +356,15 @@ async fn run_reviewer_pass<M: CompletionModel>(
     .map_err(|err| format!("reviewer pass failed: {err}"))?;
 
     let review = parse_reviewer_decision(&turn.final_text)?;
-    Ok(Some(ReviewOutcome {
+    let outcome = ReviewOutcome {
         approved: review.approved,
         summary: review.summary,
         issues: review.issues,
-    }))
+    };
+    if let Some(observer) = &config.observer {
+        observer.on_reviewer_completed(task, Some(&outcome));
+    }
+    Ok(Some(outcome))
 }
 
 /// Execute all tasks in the DAG in topological order.
@@ -362,6 +397,9 @@ pub async fn execute_dag<M: CompletionModel + 'static>(
         for &id in &batch {
             if let Some(node) = dag.get_mut(id) {
                 node.status = TaskNodeStatus::Running;
+                if let Some(observer) = &config.observer {
+                    observer.on_task_started(node);
+                }
             }
         }
 
@@ -369,6 +407,9 @@ pub async fn execute_dag<M: CompletionModel + 'static>(
             let result = execute_task(&tasks[0], model, registry, config).await;
             if let Some(node) = dag.get_mut(result.task_id) {
                 node.status = result.status.clone();
+                if let Some(observer) = &config.observer {
+                    observer.on_task_completed(node, &result);
+                }
             }
             if result.status == TaskNodeStatus::Failed {
                 failed = true;
@@ -390,6 +431,9 @@ pub async fn execute_dag<M: CompletionModel + 'static>(
                     Ok(result) => {
                         if let Some(node) = dag.get_mut(result.task_id) {
                             node.status = result.status.clone();
+                            if let Some(observer) = &config.observer {
+                                observer.on_task_completed(node, &result);
+                            }
                         }
                         if result.status == TaskNodeStatus::Failed {
                             failed = true;
@@ -770,6 +814,7 @@ mod tests {
             working_dir: dir.path().to_path_buf(),
             spec: spec(),
             reviewer_preamble: None,
+            observer: None,
         };
         let result = execute_task(&implementation_task(), &model, &registry, &config).await;
         assert_eq!(result.status, TaskNodeStatus::Completed);
