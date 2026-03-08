@@ -36,6 +36,35 @@ async fn test_remote_add_creates_entry() {
 
 #[tokio::test]
 #[serial]
+async fn test_remote_add_duplicate_name_returns_error() {
+    let repo_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(repo_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(repo_dir.path());
+
+    remote::execute_safe(RemoteCmds::Add {
+        name: "origin".into(),
+        url: "https://example.com/repo.git".into(),
+    })
+    .await
+    .expect("first add should succeed");
+
+    let result = remote::execute_safe(RemoteCmds::Add {
+        name: "origin".into(),
+        url: "https://example.com/another.git".into(),
+    })
+    .await;
+
+    assert!(result.is_err(), "adding existing remote should fail");
+    let err = result.unwrap_err();
+    assert!(
+        err.render().contains("fatal: remote origin already exists"),
+        "unexpected error: {}",
+        err.render()
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_remote_remove_deletes_entry() {
     let repo_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(repo_dir.path()).await;

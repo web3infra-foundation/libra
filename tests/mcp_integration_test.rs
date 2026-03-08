@@ -4,9 +4,12 @@ use git_internal::internal::object::{
     context::{ContextSnapshot, SelectionStrategy},
     decision::{Decision, DecisionType},
     evidence::{Evidence, EvidenceKind},
+    intent::Intent,
     patchset::{ChangeType, PatchSet, TouchedFile},
-    plan::{Plan, PlanStep, StepStatus},
+    plan::{Plan, PlanStep},
     provenance::Provenance,
+    run::Run,
+    task::Task,
     tool::{ToolInvocation, ToolStatus},
     types::ActorRef,
 };
@@ -15,7 +18,11 @@ use libra::{
         ai::{
             history::HistoryManager,
             mcp::{
-                resource::{CreateTaskParams, ListTasksParams},
+                resource::{
+                    CreateDecisionParams, CreateEvidenceParams, CreatePatchSetParams,
+                    CreatePlanParams, CreateProvenanceParams, CreateRunParams, CreateTaskParams,
+                    CreateToolInvocationParams, ListTasksParams, UpdateIntentParams,
+                },
                 server::LibraMcpServer,
             },
         },
@@ -94,7 +101,10 @@ async fn test_mcp_integration_create_and_read_task() {
         requested_by_kind: None,
         requested_by_id: None,
         dependencies: None,
+        parent_task_id: None,
+        origin_step_id: None,
         status: None,
+        reason: None,
         tags: None,
         external_ids: None,
         actor_kind: None,
@@ -150,6 +160,505 @@ async fn test_mcp_integration_create_and_read_task() {
 
     assert!(list_text.contains(id_str));
     assert!(list_text.contains("Integration Test Task"));
+}
+
+#[tokio::test]
+async fn test_create_run_requires_existing_task() {
+    let (server, _storage, _history_manager, _temp_dir) = setup_server().await;
+    let actor = server.default_actor().unwrap();
+
+    let result = server
+        .create_run_impl(
+            CreateRunParams {
+                task_id: Uuid::new_v4().to_string(),
+                base_commit_sha: "a".repeat(64),
+                plan_id: None,
+                status: None,
+                context_snapshot_id: None,
+                error: None,
+                agent_instances: None,
+                metrics_json: None,
+                reason: None,
+                orchestrator_version: None,
+                tags: None,
+                external_ids: None,
+                actor_kind: None,
+                actor_id: None,
+            },
+            actor,
+        )
+        .await;
+
+    assert!(result.is_err(), "run should fail when task does not exist");
+    let err = result.unwrap_err();
+    assert!(
+        err.message.contains("task_id not found"),
+        "unexpected error: {}",
+        err.message
+    );
+}
+
+#[tokio::test]
+async fn test_create_patchset_requires_existing_run() {
+    let (server, _storage, _history_manager, _temp_dir) = setup_server().await;
+    let actor = server.default_actor().unwrap();
+
+    let result = server
+        .create_patchset_impl(
+            CreatePatchSetParams {
+                run_id: Uuid::new_v4().to_string(),
+                generation: 1,
+                sequence: None,
+                base_commit_sha: "a".repeat(64),
+                touched_files: None,
+                rationale: None,
+                diff_format: None,
+                diff_artifact: None,
+                tags: None,
+                external_ids: None,
+                actor_kind: None,
+                actor_id: None,
+            },
+            actor,
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "patchset creation should fail when run does not exist"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.message.contains("run_id not found"),
+        "unexpected error: {}",
+        err.message
+    );
+}
+
+#[tokio::test]
+async fn test_create_tool_invocation_requires_existing_run() {
+    let (server, _storage, _history_manager, _temp_dir) = setup_server().await;
+    let actor = server.default_actor().unwrap();
+
+    let result = server
+        .create_tool_invocation_impl(
+            CreateToolInvocationParams {
+                run_id: Uuid::new_v4().to_string(),
+                tool_name: "read_file".to_string(),
+                status: None,
+                args_json: None,
+                io_footprint: None,
+                result_summary: None,
+                artifacts: None,
+                tags: None,
+                external_ids: None,
+                actor_kind: None,
+                actor_id: None,
+            },
+            actor,
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "tool invocation creation should fail when run does not exist"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.message.contains("run_id not found"),
+        "unexpected error: {}",
+        err.message
+    );
+}
+
+#[tokio::test]
+async fn test_create_provenance_requires_existing_run() {
+    let (server, _storage, _history_manager, _temp_dir) = setup_server().await;
+    let actor = server.default_actor().unwrap();
+
+    let result = server
+        .create_provenance_impl(
+            CreateProvenanceParams {
+                run_id: Uuid::new_v4().to_string(),
+                provider: "openai".to_string(),
+                model: "gpt-4o".to_string(),
+                parameters_json: None,
+                temperature: None,
+                max_tokens: None,
+                tags: None,
+                external_ids: None,
+                actor_kind: None,
+                actor_id: None,
+            },
+            actor,
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "provenance creation should fail when run does not exist"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.message.contains("run_id not found"),
+        "unexpected error: {}",
+        err.message
+    );
+}
+
+#[tokio::test]
+async fn test_create_task_rejects_missing_intent_reference() {
+    let (server, _storage, _history_manager, _temp_dir) = setup_server().await;
+    let actor = server.default_actor().unwrap();
+
+    let result = server
+        .create_task_impl(
+            CreateTaskParams {
+                title: "Task with missing intent".to_string(),
+                intent_id: Some(Uuid::new_v4().to_string()),
+                description: None,
+                goal_type: None,
+                constraints: None,
+                acceptance_criteria: None,
+                requested_by_kind: None,
+                requested_by_id: None,
+                dependencies: None,
+                parent_task_id: None,
+                origin_step_id: None,
+                status: None,
+                reason: None,
+                tags: None,
+                external_ids: None,
+                actor_kind: None,
+                actor_id: None,
+            },
+            actor,
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "task creation should fail on missing intent reference"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.message.contains("intent_id not found"),
+        "unexpected error: {}",
+        err.message
+    );
+}
+
+#[tokio::test]
+async fn test_update_intent_accepts_discarded_alias() {
+    let (server, storage, history_manager, _temp_dir) = setup_server().await;
+    let actor = ActorRef::human("tester").unwrap();
+
+    let intent = Intent::new(actor, "Alias test intent").unwrap();
+    let intent_id = intent.header().object_id();
+    storage
+        .put_tracked(&intent, &history_manager)
+        .await
+        .unwrap();
+
+    let result = server
+        .update_intent_impl(UpdateIntentParams {
+            intent_id: intent_id.to_string(),
+            status: Some("discarded".to_string()),
+            commit_sha: None,
+            reason: Some("no longer needed".to_string()),
+            next_intent_id: None,
+        })
+        .await;
+
+    assert!(
+        result.is_ok(),
+        "discarded alias should map to cancelled lifecycle event"
+    );
+}
+
+#[tokio::test]
+async fn test_create_decision_accepts_uuid_prefixed_ids() {
+    let (server, storage, history_manager, _temp_dir) = setup_server().await;
+    let actor = ActorRef::human("tester").unwrap();
+
+    let task = Task::new(actor.clone(), "decision task", None).unwrap();
+    storage.put_tracked(&task, &history_manager).await.unwrap();
+
+    let base = "b".repeat(64);
+    let run = Run::new(actor.clone(), task.header().object_id(), &base).unwrap();
+    storage.put_tracked(&run, &history_manager).await.unwrap();
+
+    let patchset = PatchSet::new(actor.clone(), run.header().object_id(), &base).unwrap();
+    storage
+        .put_tracked(&patchset, &history_manager)
+        .await
+        .unwrap();
+
+    let result = server
+        .create_decision_impl(
+            CreateDecisionParams {
+                run_id: format!("uuid:{}", run.header().object_id()),
+                decision_type: "commit".to_string(),
+                chosen_patchset_id: Some(format!("uuid:{}", patchset.header().object_id())),
+                result_commit_sha: Some(base),
+                checkpoint_id: None,
+                rationale: Some("apply selected patch".to_string()),
+                tags: None,
+                external_ids: None,
+                actor_kind: None,
+                actor_id: None,
+            },
+            actor,
+        )
+        .await;
+
+    assert!(result.is_ok(), "uuid: prefixed ids should be accepted");
+}
+
+#[tokio::test]
+async fn test_update_intent_accepts_uuid_prefixed_intent_id() {
+    let (server, storage, history_manager, _temp_dir) = setup_server().await;
+    let actor = ActorRef::human("tester").unwrap();
+
+    let intent = Intent::new(actor, "prefix intent").unwrap();
+    let intent_id = intent.header().object_id();
+    storage
+        .put_tracked(&intent, &history_manager)
+        .await
+        .unwrap();
+
+    let result = server
+        .update_intent_impl(UpdateIntentParams {
+            intent_id: format!("uuid:{intent_id}"),
+            status: Some("active".to_string()),
+            commit_sha: None,
+            reason: Some("prefix accepted".to_string()),
+            next_intent_id: None,
+        })
+        .await;
+
+    assert!(
+        result.is_ok(),
+        "uuid: prefixed intent id should be accepted"
+    );
+}
+
+#[tokio::test]
+async fn test_create_plan_rejects_parent_from_other_intent() {
+    let (server, storage, history_manager, _temp_dir) = setup_server().await;
+    let actor = ActorRef::human("tester").unwrap();
+
+    let intent_a = Intent::new(actor.clone(), "intent-a").unwrap();
+    let intent_b = Intent::new(actor.clone(), "intent-b").unwrap();
+    storage
+        .put_tracked(&intent_a, &history_manager)
+        .await
+        .unwrap();
+    storage
+        .put_tracked(&intent_b, &history_manager)
+        .await
+        .unwrap();
+
+    let parent_plan = Plan::new(actor.clone(), intent_a.header().object_id()).unwrap();
+    storage
+        .put_tracked(&parent_plan, &history_manager)
+        .await
+        .unwrap();
+
+    let result = server
+        .create_plan_impl(
+            CreatePlanParams {
+                intent_id: intent_b.header().object_id().to_string(),
+                parent_plan_ids: Some(vec![parent_plan.header().object_id().to_string()]),
+                context_frame_ids: None,
+                steps: None,
+                tags: None,
+                external_ids: None,
+                actor_kind: None,
+                actor_id: None,
+            },
+            actor,
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "cross-intent parent plan should be rejected"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.message
+            .contains("parent_plan_ids must belong to intent"),
+        "unexpected error: {}",
+        err.message
+    );
+}
+
+#[tokio::test]
+async fn test_create_run_rejects_plan_with_mismatched_task_intent() {
+    let (server, storage, history_manager, _temp_dir) = setup_server().await;
+    let actor = ActorRef::human("tester").unwrap();
+
+    let intent_task = Intent::new(actor.clone(), "task-intent").unwrap();
+    let intent_plan = Intent::new(actor.clone(), "plan-intent").unwrap();
+    storage
+        .put_tracked(&intent_task, &history_manager)
+        .await
+        .unwrap();
+    storage
+        .put_tracked(&intent_plan, &history_manager)
+        .await
+        .unwrap();
+
+    let mut task = Task::new(actor.clone(), "task with intent", None).unwrap();
+    task.set_intent(Some(intent_task.header().object_id()));
+    storage.put_tracked(&task, &history_manager).await.unwrap();
+
+    let plan = Plan::new(actor.clone(), intent_plan.header().object_id()).unwrap();
+    storage.put_tracked(&plan, &history_manager).await.unwrap();
+
+    let result = server
+        .create_run_impl(
+            CreateRunParams {
+                task_id: task.header().object_id().to_string(),
+                base_commit_sha: "c".repeat(64),
+                plan_id: Some(plan.header().object_id().to_string()),
+                status: None,
+                context_snapshot_id: None,
+                error: None,
+                agent_instances: None,
+                metrics_json: None,
+                reason: None,
+                orchestrator_version: None,
+                tags: None,
+                external_ids: None,
+                actor_kind: None,
+                actor_id: None,
+            },
+            actor,
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "mismatched task/plan intent should be rejected"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.message.contains("plan_id intent"),
+        "unexpected error: {}",
+        err.message
+    );
+}
+
+#[tokio::test]
+async fn test_create_evidence_rejects_patchset_from_different_run() {
+    let (server, storage, history_manager, _temp_dir) = setup_server().await;
+    let actor = ActorRef::human("tester").unwrap();
+
+    let task = Task::new(actor.clone(), "evidence task", None).unwrap();
+    storage.put_tracked(&task, &history_manager).await.unwrap();
+
+    let base = "d".repeat(64);
+    let run_a = Run::new(actor.clone(), task.header().object_id(), &base).unwrap();
+    let run_b = Run::new(actor.clone(), task.header().object_id(), &base).unwrap();
+    storage.put_tracked(&run_a, &history_manager).await.unwrap();
+    storage.put_tracked(&run_b, &history_manager).await.unwrap();
+
+    let patchset_on_b = PatchSet::new(actor.clone(), run_b.header().object_id(), &base).unwrap();
+    storage
+        .put_tracked(&patchset_on_b, &history_manager)
+        .await
+        .unwrap();
+
+    let result = server
+        .create_evidence_impl(
+            CreateEvidenceParams {
+                run_id: run_a.header().object_id().to_string(),
+                patchset_id: Some(patchset_on_b.header().object_id().to_string()),
+                kind: "test".to_string(),
+                tool: "cargo".to_string(),
+                command: Some("cargo test".to_string()),
+                exit_code: Some(1),
+                summary: Some("failed".to_string()),
+                report_artifacts: None,
+                tags: None,
+                external_ids: None,
+                actor_kind: None,
+                actor_id: None,
+            },
+            actor.clone(),
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "evidence patchset from another run should be rejected"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.message.contains("patchset_id")
+            && err.message.contains("belongs to run")
+            && err
+                .message
+                .contains(&run_a.header().object_id().to_string()),
+        "unexpected error: {}",
+        err.message
+    );
+}
+
+#[tokio::test]
+async fn test_create_decision_rejects_patchset_from_different_run() {
+    let (server, storage, history_manager, _temp_dir) = setup_server().await;
+    let actor = ActorRef::human("tester").unwrap();
+
+    let task = Task::new(actor.clone(), "decision relation task", None).unwrap();
+    storage.put_tracked(&task, &history_manager).await.unwrap();
+
+    let base = "e".repeat(64);
+    let run_a = Run::new(actor.clone(), task.header().object_id(), &base).unwrap();
+    let run_b = Run::new(actor.clone(), task.header().object_id(), &base).unwrap();
+    storage.put_tracked(&run_a, &history_manager).await.unwrap();
+    storage.put_tracked(&run_b, &history_manager).await.unwrap();
+
+    let patchset_on_b = PatchSet::new(actor.clone(), run_b.header().object_id(), &base).unwrap();
+    storage
+        .put_tracked(&patchset_on_b, &history_manager)
+        .await
+        .unwrap();
+
+    let result = server
+        .create_decision_impl(
+            CreateDecisionParams {
+                run_id: run_a.header().object_id().to_string(),
+                decision_type: "commit".to_string(),
+                chosen_patchset_id: Some(patchset_on_b.header().object_id().to_string()),
+                result_commit_sha: Some(base),
+                checkpoint_id: None,
+                rationale: Some("wrong patchset".to_string()),
+                tags: None,
+                external_ids: None,
+                actor_kind: None,
+                actor_id: None,
+            },
+            actor,
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "decision patchset from another run should be rejected"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.message.contains("chosen_patchset_id")
+            && err.message.contains("belongs to run")
+            && err
+                .message
+                .contains(&run_a.header().object_id().to_string()),
+        "unexpected error: {}",
+        err.message
+    );
 }
 
 /// Helper: create a server with storage and history, returning all components.
@@ -249,9 +758,8 @@ async fn test_list_plans_with_summary() {
     let actor = ActorRef::human("tester").unwrap();
     let _run_id = Uuid::new_v4();
 
-    let mut plan = Plan::new(actor).unwrap();
-    let mut step = PlanStep::new("step 1");
-    step.set_status(StepStatus::Pending);
+    let mut plan = Plan::new(actor, Uuid::new_v4()).unwrap();
+    let step = PlanStep::new("step 1");
     plan.add_step(step);
     storage.put_tracked(&plan, &history_manager).await.unwrap();
 
@@ -287,7 +795,7 @@ async fn test_list_patchsets_with_summary() {
     let text = val.get("text").unwrap().as_str().unwrap();
 
     assert!(text.contains("Files: 1"));
-    assert!(text.contains("Status:"));
+    assert!(text.contains("Format:"));
 }
 
 #[tokio::test]
@@ -397,7 +905,10 @@ async fn test_create_task_with_explicit_human_actor() {
         requested_by_kind: None,
         requested_by_id: None,
         dependencies: None,
+        parent_task_id: None,
+        origin_step_id: None,
         status: None,
+        reason: None,
         tags: None,
         external_ids: None,
         actor_kind: Some("human".to_string()),
@@ -448,7 +959,10 @@ async fn test_create_task_with_agent_actor() {
         requested_by_kind: None,
         requested_by_id: None,
         dependencies: None,
+        parent_task_id: None,
+        origin_step_id: None,
         status: None,
+        reason: None,
         tags: None,
         external_ids: None,
         actor_kind: Some("agent".to_string()),
@@ -477,7 +991,10 @@ async fn test_create_task_default_actor_is_mcp() {
         requested_by_kind: None,
         requested_by_id: None,
         dependencies: None,
+        parent_task_id: None,
+        origin_step_id: None,
         status: None,
+        reason: None,
         tags: None,
         external_ids: None,
         actor_kind: None,

@@ -1,860 +1,147 @@
-# AI Object Model Reference
+# AI Object Model Reference (git-internal 0.7)
 
-This document describes the AI object model in git-internal: the types,
-lifecycle, relationships, and usage patterns for AI-assisted code generation
-workflows. All types live under `src/internal/object/`.
+This document is the current reference for Libra's AI workflow model after upgrading to `git-internal = 0.7.0`.
 
-## Overview
+## Scope
 
-The AI object model extends Git's native object types (Blob, Tree, Commit, Tag)
-with a set of workflow objects that capture the full lifecycle of an AI-assisted
-code change — from the initial user request to the final committed patch.
+- Source of truth objects are under `git_internal::internal::object::*`.
+- Libra MCP persists these objects on a single AI history branch (`refs/libra/intent`).
+- Lifecycle status is event-sourced in 0.7.0.
 
-```
-User input
-    │
-    ▼
- Intent ──▶ Plan ──▶ Task ──▶ Run ──▶ PatchSet ──▶ Decision
-                                  │
-                                  ├──▶ ToolInvocation (action log)
-                                  ├──▶ Evidence (validation results)
-                                  └──▶ Provenance (LLM metadata)
-```
+## Core Model
 
-Context is tracked by two complementary mechanisms:
-
-- **ContextSnapshot** — static capture of files/URLs/snippets at Run start
-- **ContextPipeline** — dynamic accumulation of incremental context frames
-  throughout execution
-
-## End-to-End Flow
-
-```
- ①  User input
-      │
-      ▼
- ②  Intent (Draft → Active)
-      │
-      ├──▶ ContextPipeline  ← seeded with IntentAnalysis frame
-      │
-      ▼
- ③  Plan (pipeline, fwindow, steps)
-      │
-      ├─ PlanStep₀ (inline)
-      ├─ PlanStep₁ ──task──▶ sub-Task (recursive)
-      └─ PlanStep₂ (inline)
-      │
-      ▼
- ④  Task (Draft → Running)
-      │
-      ▼
- ⑤  Run (Created → Patching → Validating → Completed/Failed)
-      │
-      ├──▶ Provenance (1:1, LLM config + token usage)
-      ├──▶ ContextSnapshot (optional, static context at start)
-      │
-      │  ┌─── agent execution loop ───┐
-      │  │                            │
-      │  │  ⑥ ToolInvocation (1:N)    │  ← action log
-      │  │       │                    │
-      │  │       ▼                    │
-      │  │  ⑦ PatchSet (Proposed)     │  ← candidate diff
-      │  │       │                    │
-      │  │       ▼                    │
-      │  │  ⑧ Evidence (1:N)          │  ← test/lint/build
-      │  │       │                    │
-      │  │       ├─ pass ─────────────┘
-      │  │       └─ fail → new PatchSet (retry within Run)
-      │  └────────────────────────────┘
-      │
-      ▼
- ⑨  Decision (terminal verdict)
-      │
-      ├─ Commit    → apply PatchSet, record result_commit
-      ├─ Retry     → create new Run ⑤ for same Task
-      ├─ Abandon   → mark Task as Failed
-      ├─ Checkpoint → save state, resume later
-      └─ Rollback  → revert applied PatchSet
-      │
-      ▼
- ⑩  Intent (Completed) ← commit recorded
+```text
+Intent ──▶ Plan ──▶ Task ──▶ Run ──▶ PatchSet ──▶ Decision
+  │          │         │        │
+  │          │         │        ├──▶ ToolInvocation
+  │          │         │        ├──▶ Evidence
+  │          │         │        └──▶ Provenance
+  │          │         └────────────▶ TaskEvent
+  │          └──────────────────────▶ PlanStepEvent
+  ├──────────────────────────────────▶ IntentEvent
+  └──────────────────────────────────▶ ContextSnapshot / ContextFrame
 ```
 
-### Steps
+## Event-Sourced Lifecycle (Important)
 
-1. **User input** — the user provides a natural-language request.
+In 0.7.0, mutable status is not stored on `Intent` / `Task` / `Run` objects.
 
-2. **Intent** — captures the raw prompt and the AI's structured interpretation.
-   Status transitions from `Draft` (prompt only) to `Active` (analysis
-   complete). Supports conversational refinement via `parent` chain.
+- `Intent` lifecycle is tracked by `IntentEvent`.
+- `Task` lifecycle is tracked by `TaskEvent`.
+- `Run` lifecycle is tracked by `RunEvent`.
+- Step execution lifecycle is tracked by `PlanStepEvent`.
 
-3. **Plan** — a sequence of `PlanStep`s derived from the Intent. References a
-   `ContextPipeline` and records the visible frame range (`fwindow`). Steps
-   track consumed/produced frames by stable ID (`iframes`/`oframes`). A step may spawn a
-   sub-Task for recursive decomposition. Plans form a revision chain via
-   `previous`.
+Libra MCP `list_intents`, `list_tasks`, and `list_runs` rebuild status from the latest event per object.
 
-4. **Task** — a unit of work with title, constraints, and acceptance criteria.
-   May link back to its originating Intent. Accumulates Runs in `runs`
-   (chronological execution history).
+## Object Notes
 
-5. **Run** — a single execution attempt of a Task. Records the baseline
-   `commit`, the Plan version being executed (snapshot reference), and the host
-   `environment`. A `Provenance` (1:1) captures the LLM configuration and
-   token usage.
+1. `Intent`
+- Immutable revision of user prompt.
+- Fields include `prompt`, `spec`, `parents`, `analysis_context_frames`.
+- No `status` or `commit` field on the object itself.
 
-6. **ToolInvocation** — the finest-grained record: one per tool call (read
-   file, run command, etc.). Forms a chronological action log for the Run.
-   Tracks file I/O via `io_footprint`.
+2. `Plan`
+- Belongs to one `Intent` (`Plan::new(actor, intent_id)`).
+- Supports revision DAG via `parents`.
+- Uses `context_frames` for planning-time context.
+- Legacy `pipeline/fwindow` are not part of 0.7 object schema.
 
-7. **PatchSet** — a candidate diff generated by the agent. Contains the diff
-   `artifact`, file-level `touched` summary, and `rationale`. Starts as
-   `Proposed`; transitions to `Applied` or `Rejected`. Ordering is by
-   position in `Run.patchsets`.
+3. `Task`
+- Stable work definition.
+- Supports provenance links: `parent`, `intent`, `origin_step_id`, `dependencies`.
+- No in-object lifecycle status.
 
-8. **Evidence** — output of a validation tool (test, lint, build) run against a
-   PatchSet. One per tool invocation. Carries `exit_code`, `summary`, and
-   `report_artifacts`. Feeds into the Decision.
+4. `Run`
+- Immutable execution envelope: `task`, optional `plan`, `commit`, optional `snapshot`, `environment`.
+- No in-object runtime status/error/metrics.
 
-9. **Decision** — the terminal verdict of a Run. Selects a PatchSet to apply
-   (`Commit`), retries the Task (`Retry`), gives up (`Abandon`), saves
-   progress (`Checkpoint`), or reverts (`Rollback`). Records `rationale`
-   and `result_commit_sha`.
+5. `PatchSet`
+- Candidate diff metadata: `run`, `sequence`, `commit`, `format`, `artifact`, `touched`, `rationale`.
+- No `apply_status` field in 0.7. Acceptance/rejection is represented by events and `Decision`.
 
-10. **Intent completed** — the orchestrator records the final git commit in
-    `Intent.commit` and transitions status to `Completed`.
+6. `Provenance`
+- Stores provider/model config for a run.
+- Uses `parameters` plus convenience fields `temperature` and `max_tokens`.
 
-## Object Relationship Summary
+## MCP Mapping (Libra)
 
-| From | Field | To | Cardinality |
-|------|-------|----|-------------|
-| Intent | `parent` | Intent | 0..1 |
-| Intent | `plan` | Plan | 0..1 |
-| Plan | `previous` | Plan | 0..1 |
-| Plan | `pipeline` | ContextPipeline | 0..1 |
-| PlanStep | `task` | Task | 0..1 |
-| Task | `parent` | Task | 0..1 |
-| Task | `intent` | Intent | 0..1 |
-| Task | `runs` | Run | 0..N |
-| Task | `dependencies` | Task | 0..N |
-| Run | `task` | Task | 1 |
-| Run | `plan` | Plan | 0..1 |
-| Run | `snapshot` | ContextSnapshot | 0..1 |
-| Run | `patchsets` | PatchSet | 0..N |
-| PatchSet | `run` | Run | 1 |
-| Evidence | `run_id` | Run | 1 |
-| Evidence | `patchset_id` | PatchSet | 0..1 |
-| Decision | `run_id` | Run | 1 |
-| Decision | `chosen_patchset_id` | PatchSet | 0..1 |
-| Provenance | `run_id` | Run | 1 |
-| ToolInvocation | `run_id` | Run | 1 |
+### Object creation tools
 
-## Object Details
+- `create_intent`: writes `Intent`; if lifecycle inputs are provided, also writes `IntentEvent`.
+- `update_intent`: appends `IntentEvent` (no in-place intent mutation).
+- `create_task`: writes `Task` + initial `TaskEvent`.
+- `create_run`: writes `Run` + initial `RunEvent` (with optional reason/error/metrics).
+- `create_plan`: writes `Plan` bound to `intent_id`.
+- `create_patchset`: writes `PatchSet` with `sequence` + touched files.
+- `create_evidence`, `create_tool_invocation`, `create_provenance`, `create_decision`: write corresponding immutable objects.
 
-### Intent (`intent.rs`)
+### List tools
 
-The **entry point** of every AI-assisted workflow. Captures the verbatim user
-request (`prompt`) and the AI's structured interpretation (`content`).
+- `list_intents`: event-derived status + prompt/spec summary.
+- `list_tasks`: latest `TaskEvent`-derived status.
+- `list_runs`: latest `RunEvent`-derived status.
+- Other list tools summarize immutable object fields directly.
 
-#### Status Transitions
+## MCP Input Policy (Current)
 
-```
-Draft ──▶ Active ──▶ Completed
-  │          │
-  └──────────┴──▶ Cancelled
-```
+MCP parameter schemas now only expose fields that map to current `git-internal 0.7` object model semantics.
 
-- **Draft**: Prompt recorded, AI has not analyzed it yet. `content = None`.
-- **Active**: AI interpretation available in `content`. Plan, Tasks, and Runs
-  may be in progress.
-- **Completed**: All downstream work finished. `commit` contains the result
-  git commit hash.
-- **Cancelled**: Abandoned before completion (user interrupt, timeout, budget).
+- Removed pre-0.7 compatibility inputs (pipeline/fwindow/apply-status/token-usage shim).
+- Removed stale Intent task-link input (`CreateIntentParams.task_id`), because task provenance belongs on `Task.intent`.
+- Removed `CreateContextSnapshotParams.base_commit_sha` because `ContextSnapshot` has no commit anchor field in 0.7.
+- MCP create APIs now validate referenced object IDs (`task_id`, `run_id`, `plan_id`, etc.) when AI history is enabled, preventing dangling links.
+- MCP also validates key cross-object relationships:
+  - `Evidence.patchset_id` and `Decision.chosen_patchset_id` must belong to the same `run_id`.
+  - `Run.plan_id` must match `Task.intent` when the task is intent-bound.
+  - `Plan.parent_plan_ids` must belong to the same owning `intent_id`.
+- UUID parameters consistently accept both plain UUID and `uuid:<id>` forms.
 
-#### Fields
+## Active Context Resource
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `header` | `Header` | Common metadata (ID, type, timestamps, creator) |
-| `prompt` | `String` | Verbatim user input, immutable after creation |
-| `content` | `Option<String>` | AI-analyzed interpretation; `None` in Draft |
-| `parent` | `Option<Uuid>` | Predecessor Intent for conversational refinement |
-| `commit` | `Option<IntegrityHash>` | Result git commit, set at step ⑩ |
-| `plan` | `Option<Uuid>` | Latest Plan revision derived from this Intent |
-| `statuses` | `Vec<StatusEntry>` | Append-only status transition history |
+`libra://context/active` resolves:
 
-#### Conversational Refinement
+1. latest non-terminal run (terminal defined by latest `RunEvent` being `completed`/`failed`),
+2. its parent task (status from latest `TaskEvent`),
+3. linked `ContextSnapshot` when present.
 
-```
-Intent₀ ("Add pagination")
-   ▲
-   │ parent
-Intent₁ ("Also add cursor-based pagination")
-   ▲
-   │ parent
-Intent₂ ("Use opaque cursors, not offsets")
-```
+If no active run exists, it falls back to latest non-terminal task.
 
-Each follow-up Intent links to its predecessor via `parent`, forming a
-singly-linked list from newest to oldest.
-
-#### Usage
+## Minimal Usage Snippets
 
 ```rust
-use git_internal::internal::object::intent::{Intent, IntentStatus};
-use git_internal::internal::object::types::ActorRef;
+use git_internal::internal::object::{
+    intent::Intent,
+    intent_event::{IntentEvent, IntentEventKind},
+    types::ActorRef,
+};
 
-// 1. Create from user input
-let actor = ActorRef::human("alice")?;
-let mut intent = Intent::new(actor, "Add pagination to the user list API")?;
-assert_eq!(intent.status(), &IntentStatus::Draft);
-
-// 2. AI analyzes the prompt
-intent.set_content(Some("Add offset/limit pagination to GET /users".into()));
-intent.set_status(IntentStatus::Active);
-
-// 3. After execution completes
-intent.set_status_with_reason(IntentStatus::Completed, "All tasks finished");
+let actor = ActorRef::human("jackie")?;
+let intent = Intent::new(actor.clone(), "refactor MCP")?;
+let mut event = IntentEvent::new(actor, intent.header().object_id(), IntentEventKind::Analyzed)?;
+event.set_reason(Some("intent analyzed".into()));
 ```
-
----
-
-### Plan (`plan.rs`)
-
-A sequence of `PlanStep`s derived from an Intent's analyzed content. Defines
-*what* to do (strategy and decomposition); `Run` handles *how* to execute.
-
-#### Revision Chain
-
-When the agent encounters obstacles, it creates a revised Plan via
-`Plan::new_revision`. Each revision links back via `previous`:
-
-```
-Intent.plan ──▶ Plan_v3 (latest)
-                  │ previous
-                  ▼
-                Plan_v2
-                  │ previous
-                  ▼
-                Plan_v1 (original, previous = None)
-```
-
-`Intent.plan` always points to the latest revision. Each `Run.plan` is a
-**snapshot reference** that never changes.
-
-#### Context Range
-
-A Plan references a `ContextPipeline` via `pipeline` and records the visible
-frame range `fwindow = (start, end)` — the half-open range `[start..end)` of
-frames that were visible at creation time.
-
-```
-ContextPipeline.frames:  [F₀, F₁, F₂, F₃, F₄, F₅, ...]
-                          ^^^^^^^^^^^^^^^^
-                          fwindow = (0, 4)
-```
-
-#### Fields
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `header` | `Header` | Common metadata |
-| `previous` | `Option<Uuid>` | Predecessor Plan in revision chain |
-| `pipeline` | `Option<Uuid>` | ContextPipeline used as context basis |
-| `fwindow` | `Option<(u32, u32)>` | Visible frame range `[start..end)` |
-| `steps` | `Vec<PlanStep>` | Ordered sequence of steps |
-
-#### PlanStep
-
-Each step describes one unit of work within a Plan.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `description` | `String` | What this step should accomplish |
-| `inputs` | `Option<Value>` | Expected inputs (JSON) |
-| `outputs` | `Option<Value>` | Outputs after execution (JSON) |
-| `checks` | `Option<Value>` | Validation criteria (JSON) |
-| `iframes` | `Vec<u64>` | Stable pipeline frame IDs consumed (survives eviction) |
-| `oframes` | `Vec<u64>` | Stable pipeline frame IDs produced (survives eviction) |
-| `task` | `Option<Uuid>` | Sub-Task for recursive decomposition |
-| `statuses` | `Vec<StepStatusEntry>` | Append-only status history |
-
-Step status transitions:
-
-```
-Pending ──▶ Progressing ──▶ Completed
-  │             │
-  ├─────────────┴──▶ Failed
-  └──────────────────▶ Skipped
-```
-
-#### Recursive Decomposition
-
-A step can spawn a sub-Task via its `task` field:
-
-```
-Plan
- ├─ Step₀  (inline — executed by current Run)
- ├─ Step₁  ──task──▶ Task₁
- │                     └─ Run → Plan
- │                          ├─ Step₁₋₀
- │                          └─ Step₁₋₁
- └─ Step₂  (inline)
-```
-
-#### Usage
 
 ```rust
-use git_internal::internal::object::plan::{Plan, PlanStep};
-use git_internal::internal::object::types::ActorRef;
+use git_internal::internal::object::{
+    task::Task,
+    task_event::{TaskEvent, TaskEventKind},
+    types::ActorRef,
+};
 
 let actor = ActorRef::agent("planner")?;
-
-// Create initial plan
-let mut plan = Plan::new(actor.clone())?;
-plan.set_pipeline(Some(pipeline_id));
-plan.set_fwindow(Some((0, 3)));
-
-// Add steps
-let mut step = PlanStep::new("Refactor auth module");
-step.set_iframes(vec![0, 1]);  // consumed frames 0 and 1
-plan.add_step(step);
-
-// Create a revision
-let plan_v2 = plan.new_revision(actor)?;
-assert_eq!(plan_v2.previous(), Some(plan.header().object_id()));
+let task = Task::new(actor.clone(), "upgrade mcp", None)?;
+let event = TaskEvent::new(actor, task.header().object_id(), TaskEventKind::Created)?;
 ```
-
----
-
-### Task (`task.rs`)
-
-A unit of work with constraints and acceptance criteria. The **stable
-identity** for a piece of work — persists across retries and replanning.
-
-#### Status Transitions
-
-```
-Draft ──▶ Running ──▶ Done
-  │          │
-  ├──────────┴──▶ Failed
-  └──────────────▶ Cancelled
-```
-
-#### Fields
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `header` | `Header` | Common metadata |
-| `title` | `String` | Short summary (< 100 chars) |
-| `description` | `Option<String>` | Extended context |
-| `goal` | `Option<GoalType>` | Work classification (Feature, Bugfix, etc.) |
-| `constraints` | `Vec<String>` | Hard rules the solution must satisfy |
-| `acceptance_criteria` | `Vec<String>` | Testable success conditions |
-| `requester` | `Option<ActorRef>` | Who requested the work |
-| `parent` | `Option<Uuid>` | Parent Task (for sub-Tasks) |
-| `intent` | `Option<Uuid>` | Originating Intent |
-| `runs` | `Vec<Uuid>` | Chronological execution history |
-| `dependencies` | `Vec<Uuid>` | Tasks that must complete first |
-| `status` | `TaskStatus` | Current lifecycle status |
-
-#### GoalType
-
-`Feature`, `Bugfix`, `Refactor`, `Docs`, `Perf`, `Test`, `Chore`, `Build`,
-`Ci`, `Style`, `Other(String)`.
-
-#### Replanning
-
-The Task stays the same across Plan revisions. Each Run records which Plan
-version it executed:
-
-```
-Task (constant)                Intent (constant, plan updated)
-  │                              └─ plan ──▶ Plan_v2 (latest)
-  └─ runs:
-       Run₀ ──plan──▶ Plan_v1   (snapshot: original plan)
-       Run₁ ──plan──▶ Plan_v2   (snapshot: revised plan)
-```
-
-#### Usage
 
 ```rust
-use git_internal::internal::object::task::{Task, GoalType};
-use git_internal::internal::object::types::ActorRef;
+use git_internal::internal::object::{
+    run::Run,
+    run_event::{RunEvent, RunEventKind},
+    types::ActorRef,
+};
 
-let actor = ActorRef::human("user")?;
-let mut task = Task::new(actor, "Refactor Login", Some(GoalType::Refactor))?;
-
-task.add_constraint("Must use JWT");
-task.add_acceptance_criterion("All tests pass");
-task.set_intent(Some(intent_id));
-
-// After Run completes
-task.add_run(run_id);
-task.set_status(TaskStatus::Done);
+let actor = ActorRef::agent("executor")?;
+let run = Run::new(actor.clone(), task_id, base_commit_sha)?;
+let mut event = RunEvent::new(actor, run.header().object_id(), RunEventKind::Patching)?;
+event.set_reason(Some("generating patchset".into()));
 ```
-
----
-
-### Run (`run.rs`)
-
-A single execution attempt of a Task. Captures the execution context
-(baseline commit, environment, Plan version) and accumulates artifacts
-(PatchSets, Evidence, ToolInvocations) during execution.
-
-#### Status Transitions
-
-```
-Created ──▶ Patching ──▶ Validating ──▶ Completed
-               │              │
-               └──────────────┴──▶ Failed
-```
-
-- **Created**: Run initialized, environment captured.
-- **Patching**: Agent is generating code changes / tool calls.
-- **Validating**: Agent has produced a PatchSet and is running tests/lint.
-- **Completed**: Decision has been created.
-- **Failed**: Unrecoverable error. `Run.error` has details.
-
-#### Fields
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `header` | `Header` | Common metadata |
-| `task` | `Uuid` | Owning Task (mandatory) |
-| `plan` | `Option<Uuid>` | Plan version being executed (snapshot) |
-| `commit` | `IntegrityHash` | Baseline git commit |
-| `status` | `RunStatus` | Current lifecycle status |
-| `snapshot` | `Option<Uuid>` | ContextSnapshot at Run start |
-| `patchsets` | `Vec<Uuid>` | Candidate diffs (chronological) |
-| `metrics` | `Option<Value>` | Execution metrics (JSON) |
-| `error` | `Option<String>` | Error message if Failed |
-| `environment` | `Option<Environment>` | Host OS/arch/cwd |
-
-#### Associated Objects (by `run_id`)
-
-| Object | Cardinality | Purpose |
-|--------|-------------|---------|
-| Provenance | 1:1 | LLM config + token usage |
-| ToolInvocation | 1:N | Chronological action log |
-| Evidence | 1:N | Validation results (test/lint/build) |
-| Decision | 1:1 | Terminal verdict |
-
-#### Usage
-
-```rust
-use git_internal::internal::object::run::Run;
-use git_internal::internal::object::types::ActorRef;
-
-let actor = ActorRef::agent("orchestrator")?;
-let mut run = Run::new(actor, task_id, "abc123def...")?;
-run.set_plan(Some(plan_id));
-
-// Agent generates patches
-run.set_status(RunStatus::Patching);
-run.add_patchset(patchset_id);
-
-// Validation phase
-run.set_status(RunStatus::Validating);
-
-// Completed
-run.set_status(RunStatus::Completed);
-```
-
----
-
-### PatchSet (`patchset.rs`)
-
-A candidate diff generated by the agent during a Run. The atomic unit of
-code modification — every change the agent wants to make is packaged as a
-PatchSet.
-
-#### Lifecycle
-
-```
-  (created) ──▶ Proposed
-                    │
-     ┌──────────────┼──────────────┐
-     │              │              │
-     ▼              ▼              │
-  Applied       Rejected           │
-                    │              │
-                    ▼              │
-       agent generates new PatchSet
-       appended to Run.patchsets
-```
-
-#### Fields
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `header` | `Header` | Common metadata |
-| `run` | `Uuid` | Owning Run |
-| `commit` | `IntegrityHash` | Baseline commit this diff applies to |
-| `format` | `DiffFormat` | `Unified` or `GitDiff` |
-| `artifact` | `Option<ArtifactRef>` | Reference to stored diff content |
-| `touched` | `Vec<TouchedFile>` | File-level change summary |
-| `rationale` | `Option<String>` | Agent's explanation of what/why changed |
-| `apply_status` | `ApplyStatus` | `Proposed`, `Applied`, or `Rejected` |
-
-#### Rationale
-
-The `rationale` field bridges the gap between the Task/Plan (high-level intent)
-and the raw diff (low-level changes). It is primarily written by the agent and
-may be overridden by a human reviewer via `set_rationale()`.
-
----
-
-### Evidence (`evidence.rs`)
-
-Output of a single validation step (test, lint, build) run against a PatchSet.
-One Evidence per tool invocation.
-
-#### Fields
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `header` | `Header` | Common metadata |
-| `run_id` | `Uuid` | Owning Run |
-| `patchset_id` | `Option<Uuid>` | PatchSet being validated (`None` for run-level checks) |
-| `kind` | `EvidenceKind` | `Test`, `Lint`, `Build`, or `Other(String)` |
-| `tool` | `String` | Tool name (e.g. "cargo", "eslint", "pytest") |
-| `command` | `Option<String>` | Full command line for reproducibility |
-| `exit_code` | `Option<i32>` | Process exit code (0 = success) |
-| `summary` | `Option<String>` | Short result summary |
-| `report_artifacts` | `Vec<ArtifactRef>` | Full report files (logs, coverage, JUnit XML) |
-
----
-
-### Decision (`decision.rs`)
-
-The **terminal verdict** of a Run. Created once per Run at the end of
-execution.
-
-#### Decision Types
-
-| Type | Action | `chosen_patchset_id` | `result_commit_sha` |
-|------|--------|---------------------|---------------------|
-| `Commit` | Apply the chosen PatchSet | Set | Set after commit |
-| `Checkpoint` | Save intermediate progress | — | — |
-| `Abandon` | Give up on the Task | — | — |
-| `Retry` | Create new Run for same Task | — | — |
-| `Rollback` | Revert applied PatchSet | — | — |
-
-#### Fields
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `header` | `Header` | Common metadata |
-| `run_id` | `Uuid` | The Run this Decision concludes |
-| `decision_type` | `DecisionType` | Verdict (Commit/Retry/Abandon/etc.) |
-| `chosen_patchset_id` | `Option<Uuid>` | Selected PatchSet (for Commit) |
-| `result_commit_sha` | `Option<IntegrityHash>` | Git commit hash after applying |
-| `checkpoint_id` | `Option<String>` | Saved state ID (for Checkpoint) |
-| `rationale` | `Option<String>` | Explanation of why this decision was made |
-
----
-
-### Provenance (`provenance.rs`)
-
-Records **how** a Run was executed: which LLM provider, model, and parameters
-were used, and how many tokens were consumed. Created once per Run (1:1).
-
-#### Fields
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `header` | `Header` | Common metadata |
-| `run_id` | `Uuid` | The Run this Provenance describes |
-| `provider` | `String` | LLM provider ("openai", "anthropic", "local") |
-| `model` | `String` | Model ID ("gpt-4", "claude-opus-4-20250514") |
-| `parameters` | `Option<Value>` | Provider-specific raw parameters (JSON) |
-| `temperature` | `Option<f64>` | Sampling temperature (0.0 = deterministic) |
-| `max_tokens` | `Option<u64>` | Maximum generation length |
-| `token_usage` | `Option<TokenUsage>` | Token consumption and cost |
-
-#### TokenUsage
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `input_tokens` | `u64` | Tokens in the prompt/input |
-| `output_tokens` | `u64` | Tokens in the completion/output |
-| `total_tokens` | `u64` | `input_tokens + output_tokens` |
-| `cost_usd` | `Option<f64>` | Estimated cost in USD |
-
----
-
-### ToolInvocation (`tool.rs`)
-
-The finest-grained record: one per tool call made by the agent during a Run.
-
-#### Fields
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `header` | `Header` | Common metadata |
-| `run_id` | `Uuid` | Owning Run |
-| `tool_name` | `String` | Registered tool name ("read_file", "bash", etc.) |
-| `io_footprint` | `Option<IoFootprint>` | Files read/written |
-| `args` | `Value` | Arguments (JSON, tool-dependent schema) |
-| `status` | `ToolStatus` | `Ok` or `Error` |
-| `result_summary` | `Option<String>` | Short output summary |
-| `artifacts` | `Vec<ArtifactRef>` | Full output files |
-
-#### IoFootprint
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `paths_read` | `Vec<String>` | Files read (repo-relative) |
-| `paths_written` | `Vec<String>` | Files written (repo-relative) |
-
----
-
-### ContextSnapshot (`context.rs`)
-
-A **static** capture of the codebase and external resources the agent observed
-when a Run began. Point-in-time — does not change after creation.
-
-#### Fields
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `header` | `Header` | Common metadata |
-| `selection_strategy` | `SelectionStrategy` | `Explicit` (user-chosen) or `Heuristic` (auto-selected) |
-| `items` | `Vec<ContextItem>` | Context items (files, URLs, snippets, etc.) |
-| `summary` | `Option<String>` | Aggregated summary |
-
-#### ContextItem
-
-Each item has three layers:
-
-- **`path`** — human-readable locator (repo path, URL, command, label)
-- **`blob`** — Git blob hash pointing to full content at capture time
-- **`preview`** — truncated text for quick display
-
-| Kind | `path` example | `blob` content |
-|------|----------------|----------------|
-| `File` | `src/main.rs` | Same blob in git tree (zero extra storage) |
-| `Url` | `https://docs.rs/...` | Fetched page content |
-| `Snippet` | `"design notes"` | Snippet text |
-| `Command` | `cargo test` | Command output |
-| `Image` | `screenshot.png` | Image binary |
-
-#### Blob Retention
-
-Blobs referenced only by AI objects are not reachable in git's DAG and will be
-pruned by `git gc`. For non-File items, applications must choose a retention
-strategy:
-
-| Strategy | Approach |
-|----------|----------|
-| Ref anchoring | `refs/ai/blobs/<hex>` |
-| Orphan commit | `refs/ai/uploads` tree |
-| Keep pack | `.keep` marker on pack file |
-| Custom GC mark | Scan AI objects during GC |
-
----
-
-### ContextPipeline (`pipeline.rs`)
-
-A **dynamic** context container that accumulates incremental `ContextFrame`s
-throughout the workflow. Solves the context-forgetting problem in long-running
-tasks.
-
-#### Lifecycle
-
-```
-Intent (Active)           ← content analyzed
-    │
-    ▼
-ContextPipeline created   ← seeded with IntentAnalysis frame
-    │
-    ▼
-Plan created              ← Plan.pipeline → Pipeline, Plan.fwindow = range
-    │  steps execute
-    ▼
-Frames accumulate         ← StepSummary, CodeChange, ToolCall, ...
-    │
-    ▼
-Replan?                   → new Plan with updated fwindow
-```
-
-#### Fields
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `header` | `Header` | Common metadata |
-| `frames` | `Vec<ContextFrame>` | Chronologically ordered frames |
-| `next_frame_id` | `u64` | Monotonic counter for stable frame IDs |
-| `max_frames` | `u32` | Max frames before eviction (0 = unlimited) |
-| `global_summary` | `Option<String>` | Aggregated summary |
-
-#### ContextFrame
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `frame_id` | `u64` | Stable monotonic ID (survives eviction) |
-| `kind` | `FrameKind` | IntentAnalysis, StepSummary, CodeChange, etc. |
-| `summary` | `String` | Compact human-readable summary |
-| `data` | `Option<Value>` | Structured payload (JSON) |
-| `created_at` | `DateTime<Utc>` | When this frame was created |
-| `token_estimate` | `Option<u64>` | Estimated tokens for budgeting |
-
-#### FrameKind
-
-| Kind | Protected | Description |
-|------|-----------|-------------|
-| `IntentAnalysis` | Yes | Seed frame from Intent analysis |
-| `StepSummary` | No | Summary after a PlanStep completes |
-| `CodeChange` | No | Code change digest (files, diff stats) |
-| `SystemState` | No | System/environment state snapshot |
-| `ErrorRecovery` | No | Error recovery context |
-| `Checkpoint` | Yes | Explicit save-point |
-| `ToolCall` | No | External tool invocation result |
-| `Other(String)` | No | Application-defined |
-
-Protected frames survive eviction when `max_frames` is exceeded.
-
-#### Eviction
-
-When `max_frames > 0` and the limit is exceeded, `push_frame` removes the
-oldest non-protected frame. `IntentAnalysis` and `Checkpoint` frames are
-never evicted.
-
-#### Step-Frame Association
-
-Steps track their relationship to frames via stable frame IDs:
-
-```
-ContextPipeline.frames:  [F₀, F₁, F₂, F₃, F₄, F₅]
-                           │    │         ▲
-                           ╰────╯         │
-                        iframes=[0,1]  oframes=[4]
-                             ╰── Step₀ ──╯
-```
-
-- `iframes` — stable `frame_id`s of frames the step consumed as context
-- `oframes` — stable `frame_id`s of frames the step produced
-
-Frame IDs are monotonic integers assigned by `push_frame`. Unlike Vec
-indices, IDs survive eviction — a step's `iframes` remain valid even
-after older frames are removed. Look up frames via `frame_by_id`.
-
-All association is owned by the step; `ContextFrame` has no back-references.
-
-#### Usage
-
-```rust
-use git_internal::internal::object::pipeline::{ContextPipeline, FrameKind};
-use git_internal::internal::object::types::ActorRef;
-
-let actor = ActorRef::agent("orchestrator")?;
-
-// 1. Create pipeline after Intent content is analyzed
-let mut pipeline = ContextPipeline::new(actor)?;
-
-// 2. Seed with the Intent's analyzed content — returns stable frame_id
-let seed_id = pipeline.push_frame(
-    FrameKind::IntentAnalysis,
-    "Add offset/limit pagination to GET /users with default page size 20",
-);
-
-// 3. Create a Plan referencing this pipeline
-//    plan.set_pipeline(Some(pipeline.header().object_id()));
-//    plan.set_fwindow(Some((0, pipeline.frames().len() as u32)));
-
-// 4. As steps complete, push incremental frames
-let step_id = pipeline.push_frame(FrameKind::StepSummary, "Refactored auth module");
-
-// 5. Track on PlanStep side using stable frame IDs:
-//    step.set_iframes(vec![seed_id]);
-//    step.set_oframes(vec![step_id]);
-
-// 6. Look up frame by ID (survives eviction)
-//    pipeline.frame_by_id(seed_id);
-```
-
-## Common Header
-
-All AI objects share a common `Header` (flattened into the JSON via `#[serde(flatten)]`):
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `object_id` | `Uuid` | Globally unique ID (UUID v7, time-ordered) |
-| `object_type` | `ObjectType` | Discriminator (Intent, Plan, Task, etc.) |
-| `header_version` | `u32` | Format version of the Header struct |
-| `schema_version` | `u32` | Per-object-type schema version |
-| `created_at` | `DateTime<Utc>` | Creation timestamp |
-| `updated_at` | `DateTime<Utc>` | Last modification timestamp |
-| `created_by` | `ActorRef` | Who created this object |
-| `visibility` | `Visibility` | `Private` or `Public` |
-| `tags` | `HashMap<String, String>` | Free-form search tags |
-| `external_ids` | `HashMap<String, String>` | External ID mapping |
-| `checksum` | `Option<IntegrityHash>` | Content checksum (set by `seal()`) |
-
-### ActorRef
-
-Identifies who created or triggered an action:
-
-| Kind | Factory | Example |
-|------|---------|---------|
-| `Human` | `ActorRef::human("alice")` | A user |
-| `Agent` | `ActorRef::agent("coder")` | An AI agent |
-| `System` | `ActorRef::system("scheduler")` | Infrastructure |
-| `McpClient` | `ActorRef::mcp_client("vscode")` | MCP client |
-
-### ArtifactRef
-
-Reference to external content stored outside the AI object:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `store` | `String` | Storage backend ("local", "s3") |
-| `key` | `String` | Storage key or path |
-| `content_type` | `Option<String>` | MIME type |
-| `size_bytes` | `Option<u64>` | Size in bytes |
-| `hash` | `Option<IntegrityHash>` | Content hash (SHA-256) |
-| `expires_at` | `Option<DateTime<Utc>>` | Expiration time |
-
-Supports integrity verification via `verify_integrity(content)` and
-content deduplication via `content_eq(other)`.
-
-## Serialization
-
-All AI objects implement `ObjectTrait` with JSON serialization:
-
-- **`from_bytes(data, hash)`** — deserialize from JSON bytes
-- **`to_data()`** — serialize to JSON bytes
-- **`get_type()`** — returns the `ObjectType` discriminator
-- **`get_size()`** — returns the serialized size
-- **`object_hash()`** — computes the content-addressable hash
-
-AI object types are registered in `ObjectType` with numeric IDs 8–18 and
-string identifiers for serialization (e.g. `"intent"`, `"plan"`, `"task"`).
-
-> **Pack encoding**: AI objects cannot be encoded in standard Git pack headers
-> (which only support 3-bit type values 1–7). They must use the AI-specific
-> storage layer. `ObjectType::to_pack_type_u8()` returns an error for AI types.
-
-## Design Principles
-
-1. **Append-only history**: Status changes (Intent, PlanStep) and execution
-   records (Task.runs, Run.patchsets) are append-only — entries are never
-   removed or mutated.
-
-2. **Snapshot references**: Run.plan records the Plan version at execution
-   time. Intent.plan always points to the latest revision. This allows
-   replanning without invalidating in-progress Runs.
-
-3. **Bidirectional references**: Key relationships are bidirectional for
-   efficient traversal (Task ↔ Run, Run ↔ PatchSet). Other relationships
-   are unidirectional with reverse lookup by scanning (Evidence → Run,
-   Decision → Run).
-
-4. **Serde conventions**: Optional fields use `#[serde(default, skip_serializing_if)]`.
-   Empty Vecs use `skip_serializing_if = "Vec::is_empty"`. Field renames use
-   `#[serde(alias = "old_name")]` for backward compatibility.
-
-5. **Context separation**: Static context (ContextSnapshot) vs. dynamic
-   context (ContextPipeline) serve complementary needs — reproducibility
-   vs. continuity.

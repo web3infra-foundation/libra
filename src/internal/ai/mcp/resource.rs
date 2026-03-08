@@ -14,25 +14,34 @@
 //!   All `create_*` tools accept optional `actor_kind` (`"human"`, `"agent"`, `"system"`,
 //!   `"mcp_client"`) and `actor_id` parameters to identify the creator. When omitted, the
 //!   actor is derived from the MCP client handshake or defaults to `mcp_client("mcp-user")`.
-//! - `list_*` returns summaries with key fields (ID, status, title, etc.) for quick browsing.
+//! - Status is event-sourced in git-internal 0.7.0 (`intent_event`, `task_event`, `run_event`).
+//!   `list_intents`/`list_tasks`/`list_runs` reconstruct status from latest events.
 //! - To fetch the full JSON payload, read the resource: `libra://object/{object_id}`.
 //!
 //! # object_type (history directory name)
 //!
 //! List tools call `HistoryManager::list_objects(object_type)` using the following types:
-//! `task`, `run`, `snapshot`, `plan`, `patchset`, `evidence`, `invocation`, `provenance`, `decision`, `intent`.
+//! `task`, `task_event`, `run`, `run_event`, `snapshot`, `plan`, `patchset`, `evidence`,
+//! `invocation`, `provenance`, `decision`, `intent`, `intent_event`, `context_frame`,
+//! `plan_step_event`, `run_usage`.
 use std::collections::HashMap;
 
 use git_internal::internal::object::{
     context::{ContextItem, ContextItemKind, ContextSnapshot, SelectionStrategy},
+    context_frame::{ContextFrame, FrameKind},
     decision::{Decision, DecisionType},
     evidence::{Evidence, EvidenceKind},
-    intent::{Intent, IntentStatus},
-    patchset::{ApplyStatus, ChangeType, PatchSet, TouchedFile},
-    plan::{Plan, PlanStep, StepStatus},
+    intent::{Intent, IntentSpec},
+    intent_event::{IntentEvent, IntentEventKind},
+    patchset::{ChangeType, DiffFormat, PatchSet, TouchedFile},
+    plan::{Plan, PlanStep},
+    plan_step_event::{PlanStepEvent, PlanStepStatus},
     provenance::Provenance,
-    run::{Run, RunStatus},
-    task::{GoalType, Task, TaskStatus},
+    run::Run,
+    run_event::{RunEvent, RunEventKind},
+    run_usage::RunUsage,
+    task::{GoalType, Task},
+    task_event::{TaskEvent, TaskEventKind},
     tool::{IoFootprint, ToolInvocation, ToolStatus},
     types::{ActorKind, ActorRef, ArtifactRef},
 };
@@ -44,6 +53,7 @@ use rmcp::{
     service::RequestContext,
     tool, tool_router,
 };
+use serde::{Serialize, de::DeserializeOwned};
 use uuid::Uuid;
 
 use crate::{
@@ -101,23 +111,298 @@ impl LibraMcpServer {
         }
         self.default_actor()
     }
+
+    async fn store_object<T>(&self, object: &T) -> Result<(), ErrorData>
+    where
+        T: Serialize + Send + Sync + Identifiable,
+    {
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
+
+        if let Some(history) = &self.intent_history_manager {
+            storage
+                .put_tracked(object, history)
+                .await
+                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        } else {
+            storage
+                .put_json(object)
+                .await
+                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        }
+        Ok(())
+    }
+
+    /// Validate object references when history is available.
+    ///
+    /// In memory-only tests the server may be constructed without a history
+    /// manager; in that case we skip foreign-key style checks.
+    async fn ensure_object_exists(
+        &self,
+        object_type: &str,
+        object_id: Uuid,
+        field: &str,
+    ) -> Result<(), ErrorData> {
+        let Some(history) = &self.intent_history_manager else {
+            return Ok(());
+        };
+
+        let exists = history
+            .get_object_hash(object_type, &object_id.to_string())
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?
+            .is_some();
+
+        if exists {
+            Ok(())
+        } else {
+            Err(ErrorData::invalid_params(
+                format!("{field} not found: {object_id}"),
+                None,
+            ))
+        }
+    }
+
+    /// Load one tracked object by type/id when history is enabled.
+    ///
+    /// Returns `Ok(None)` if history is disabled on this server instance.
+    async fn load_tracked_object<T>(
+        &self,
+        object_type: &str,
+        object_id: Uuid,
+        field: &str,
+    ) -> Result<Option<T>, ErrorData>
+    where
+        T: DeserializeOwned + Send + Sync,
+    {
+        let Some(history) = &self.intent_history_manager else {
+            return Ok(None);
+        };
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
+
+        let hash = history
+            .get_object_hash(object_type, &object_id.to_string())
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?
+            .ok_or_else(|| {
+                ErrorData::invalid_params(format!("{field} not found: {object_id}"), None)
+            })?;
+
+        let object = storage
+            .get_json::<T>(&hash)
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        Ok(Some(object))
+    }
+
+    pub(super) async fn latest_task_events(
+        &self,
+    ) -> Result<HashMap<Uuid, TaskEventKind>, ErrorData> {
+        let history = self
+            .intent_history_manager
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
+
+        let objects = history
+            .list_objects("task_event")
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        let mut latest = HashMap::<Uuid, TaskEvent>::new();
+        for (_id, hash) in objects {
+            if let Ok(event) = storage.get_json::<TaskEvent>(&hash).await {
+                latest
+                    .entry(event.task_id())
+                    .and_modify(|current| {
+                        if event.header().created_at() > current.header().created_at() {
+                            *current = event.clone();
+                        }
+                    })
+                    .or_insert(event);
+            }
+        }
+
+        Ok(latest
+            .into_iter()
+            .map(|(task_id, event)| (task_id, event.kind().clone()))
+            .collect())
+    }
+
+    pub(super) async fn latest_run_events(&self) -> Result<HashMap<Uuid, RunEventKind>, ErrorData> {
+        let history = self
+            .intent_history_manager
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
+
+        let objects = history
+            .list_objects("run_event")
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        let mut latest = HashMap::<Uuid, RunEvent>::new();
+        for (_id, hash) in objects {
+            if let Ok(event) = storage.get_json::<RunEvent>(&hash).await {
+                latest
+                    .entry(event.run_id())
+                    .and_modify(|current| {
+                        if event.header().created_at() > current.header().created_at() {
+                            *current = event.clone();
+                        }
+                    })
+                    .or_insert(event);
+            }
+        }
+
+        Ok(latest
+            .into_iter()
+            .map(|(run_id, event)| (run_id, event.kind().clone()))
+            .collect())
+    }
 }
 
 /// Helper to convert local ArtifactParams to git_internal::ArtifactRef
 fn convert_artifact(p: ArtifactParams) -> Result<ArtifactRef, ErrorData> {
-    let mut artifact =
-        ArtifactRef::new(p.store, p.key).map_err(|e| ErrorData::invalid_params(e, None))?;
+    ArtifactRef::new(p.store, p.key).map_err(|e| ErrorData::invalid_params(e, None))
+}
 
-    artifact.set_content_type(p.content_type);
-    artifact.set_size_bytes(p.size_bytes);
+fn parse_uuid(value: &str, field: &str) -> Result<Uuid, ErrorData> {
+    let normalized = value.trim().trim_start_matches("uuid:");
+    normalized
+        .parse::<Uuid>()
+        .map_err(|e| ErrorData::invalid_params(format!("invalid {field}: {e}"), None))
+}
 
-    if let Some(hash_hex) = p.hash {
-        artifact = artifact
-            .with_hash_hex(hash_hex)
-            .map_err(|e| ErrorData::invalid_params(e, None))?;
+fn parse_optional_uuid(value: Option<String>, field: &str) -> Result<Option<Uuid>, ErrorData> {
+    value.map(|v| parse_uuid(&v, field)).transpose()
+}
+
+fn parse_uuid_vec(values: Option<Vec<String>>, field: &str) -> Result<Vec<Uuid>, ErrorData> {
+    values
+        .unwrap_or_default()
+        .into_iter()
+        .map(|v| parse_uuid(&v, field))
+        .collect()
+}
+
+fn parse_intent_spec(spec: String) -> IntentSpec {
+    match serde_json::from_str::<serde_json::Value>(&spec) {
+        Ok(value) => IntentSpec(value),
+        Err(_) => IntentSpec::from(spec),
     }
+}
 
-    Ok(artifact)
+fn parse_intent_event_kind(status: &str) -> Result<Option<IntentEventKind>, ErrorData> {
+    match status {
+        "draft" => Ok(None),
+        "active" | "analyzed" => Ok(Some(IntentEventKind::Analyzed)),
+        "completed" => Ok(Some(IntentEventKind::Completed)),
+        "cancelled" | "discarded" => Ok(Some(IntentEventKind::Cancelled)),
+        _ => Err(ErrorData::invalid_params("invalid intent status", None)),
+    }
+}
+
+fn intent_status_label(kind: Option<&IntentEventKind>) -> &'static str {
+    match kind {
+        Some(IntentEventKind::Analyzed) => "active",
+        Some(IntentEventKind::Completed) => "completed",
+        Some(IntentEventKind::Cancelled) => "cancelled",
+        Some(IntentEventKind::Other(_)) => "other",
+        None => "draft",
+    }
+}
+
+fn parse_task_event_kind(status: &str) -> Result<TaskEventKind, ErrorData> {
+    match status {
+        "draft" | "created" => Ok(TaskEventKind::Created),
+        "running" => Ok(TaskEventKind::Running),
+        "blocked" => Ok(TaskEventKind::Blocked),
+        "done" | "completed" => Ok(TaskEventKind::Done),
+        "failed" => Ok(TaskEventKind::Failed),
+        "cancelled" => Ok(TaskEventKind::Cancelled),
+        _ => Err(ErrorData::invalid_params("invalid task status", None)),
+    }
+}
+
+fn parse_run_event_kind(status: &str) -> Result<RunEventKind, ErrorData> {
+    match status {
+        "created" => Ok(RunEventKind::Created),
+        "patching" => Ok(RunEventKind::Patching),
+        "validating" => Ok(RunEventKind::Validating),
+        "completed" => Ok(RunEventKind::Completed),
+        "failed" => Ok(RunEventKind::Failed),
+        "checkpointed" => Ok(RunEventKind::Checkpointed),
+        _ => Err(ErrorData::invalid_params("invalid run status", None)),
+    }
+}
+
+pub(super) fn task_status_label(kind: &TaskEventKind) -> &'static str {
+    match kind {
+        TaskEventKind::Created => "draft",
+        TaskEventKind::Running => "running",
+        TaskEventKind::Blocked => "blocked",
+        TaskEventKind::Done => "done",
+        TaskEventKind::Failed => "failed",
+        TaskEventKind::Cancelled => "cancelled",
+    }
+}
+
+pub(super) fn run_status_label(kind: &RunEventKind) -> &'static str {
+    match kind {
+        RunEventKind::Created => "created",
+        RunEventKind::Patching => "patching",
+        RunEventKind::Validating => "validating",
+        RunEventKind::Completed => "completed",
+        RunEventKind::Failed => "failed",
+        RunEventKind::Checkpointed => "checkpointed",
+    }
+}
+
+fn parse_frame_kind(kind: &str) -> FrameKind {
+    match kind.trim() {
+        "intent_analysis" => FrameKind::IntentAnalysis,
+        "step_summary" => FrameKind::StepSummary,
+        "code_change" => FrameKind::CodeChange,
+        "system_state" => FrameKind::SystemState,
+        "error_recovery" => FrameKind::ErrorRecovery,
+        "checkpoint" => FrameKind::Checkpoint,
+        "tool_call" => FrameKind::ToolCall,
+        other => FrameKind::Other(other.to_string()),
+    }
+}
+
+fn parse_plan_step_status(status: &str) -> Result<PlanStepStatus, ErrorData> {
+    match status {
+        "pending" => Ok(PlanStepStatus::Pending),
+        "progressing" => Ok(PlanStepStatus::Progressing),
+        "completed" => Ok(PlanStepStatus::Completed),
+        "failed" => Ok(PlanStepStatus::Failed),
+        "skipped" => Ok(PlanStepStatus::Skipped),
+        _ => Err(ErrorData::invalid_params("invalid plan step status", None)),
+    }
+}
+
+fn parse_context_item_kind(kind: Option<&str>) -> ContextItemKind {
+    match kind.unwrap_or("file").trim() {
+        "file" => ContextItemKind::File,
+        "url" => ContextItemKind::Url,
+        "snippet" => ContextItemKind::Snippet,
+        "command" => ContextItemKind::Command,
+        "image" => ContextItemKind::Image,
+        other => ContextItemKind::Other(other.to_string()),
+    }
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -134,18 +419,24 @@ pub struct CreateIntentParams {
     /// The prompt or goal content (raw user input / natural language description).
     pub content: String,
     /// AI-analyzed structured content (e.g. canonical IntentSpec JSON).
-    /// Stored in the Intent object's `content` field. When `None`, the Intent
+    /// Stored in the Intent object's `spec` field. When `None`, the Intent
     /// is created without structured content (Draft state).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub structured_content: Option<String>,
     /// ID of the parent intent, forming the history chain.
     pub parent_id: Option<String>,
-    /// Status: "draft", "active", "completed", "discarded".
+    /// IDs of parent intents (merge-style intent revision).
+    pub parent_ids: Option<Vec<String>>,
+    /// Context frames used while deriving the structured intent spec.
+    pub analysis_context_frame_ids: Option<Vec<String>>,
+    /// Initial lifecycle status: "draft", "active"/"analyzed", "completed", "cancelled"/"discarded".
     pub status: Option<String>,
-    /// Optional ID of the task derived from this intent.
-    pub task_id: Option<String>,
     /// SHA of the code commit this intent resulted in (cross-reference to the code branch).
     pub commit_sha: Option<String>,
+    /// Optional human-readable lifecycle reason for emitted intent event.
+    pub reason: Option<String>,
+    /// Optional follow-up intent id for completed lifecycle transitions.
+    pub next_intent_id: Option<String>,
     /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
     pub actor_kind: Option<String>,
     /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
@@ -156,10 +447,14 @@ pub struct CreateIntentParams {
 pub struct UpdateIntentParams {
     /// ID of the intent to update.
     pub intent_id: String,
-    /// New status: "draft", "active", "completed", "discarded".
+    /// Lifecycle status transition ("active"/"analyzed", "completed", "cancelled").
     pub status: Option<String>,
-    /// SHA of the code commit this intent resulted in (cross-reference to the code branch).
+    /// Resulting commit SHA for lifecycle events that produced a commit.
     pub commit_sha: Option<String>,
+    /// Optional human-readable lifecycle reason.
+    pub reason: Option<String>,
+    /// Optional follow-up intent id.
+    pub next_intent_id: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -182,8 +477,14 @@ pub struct CreateTaskParams {
     pub dependencies: Option<Vec<String>>,
     /// ID of the intent this task belongs to.
     pub intent_id: Option<String>,
+    /// Optional parent task id when decomposing larger work.
+    pub parent_task_id: Option<String>,
+    /// Optional originating plan step id that spawned this task.
+    pub origin_step_id: Option<String>,
     /// Task status: "draft", "running", "done", "failed", "cancelled". Defaults to "draft".
     pub status: Option<String>,
+    /// Optional reason for the initial task lifecycle event.
+    pub reason: Option<String>,
     /// Search tags (key-value pairs)
     pub tags: Option<HashMap<String, String>>,
     /// External ID mapping
@@ -204,14 +505,20 @@ pub struct ListTasksParams {
 pub struct CreateRunParams {
     pub task_id: String,
     pub base_commit_sha: String,
+    /// Optional selected plan revision.
+    pub plan_id: Option<String>,
     pub status: Option<String>,
     pub context_snapshot_id: Option<String>,
     pub error: Option<String>,
     /// Agent instances participating in this run.
+    /// Accepted for forward compatibility; not yet persisted by the Run object model.
     pub agent_instances: Option<Vec<AgentInstanceParams>>,
     /// Arbitrary metrics JSON (e.g. token counts, timings).
     pub metrics_json: Option<String>,
-    /// Orchestrator version (default: libra-builtin)
+    /// Optional lifecycle reason for the initial run event.
+    pub reason: Option<String>,
+    /// Orchestrator version (default: libra-builtin).
+    /// Accepted for forward compatibility; not yet persisted by the Run object model.
     pub orchestrator_version: Option<String>,
     /// Search tags (key-value pairs)
     pub tags: Option<HashMap<String, String>>,
@@ -237,7 +544,6 @@ pub struct ListRunsParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct CreateContextSnapshotParams {
-    pub base_commit_sha: String,
     pub selection_strategy: String,
     pub items: Option<Vec<ContextItemParams>>,
     pub summary: Option<String>,
@@ -253,8 +559,11 @@ pub struct CreateContextSnapshotParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ContextItemParams {
+    pub kind: Option<String>,
     pub path: String,
-    pub content_hash: String,
+    pub preview: Option<String>,
+    pub content_hash: Option<String>,
+    pub blob_hash: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -264,11 +573,12 @@ pub struct ListContextSnapshotsParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct CreatePlanParams {
-    pub plan_version: Option<u32>,
-    /// ID of the ContextPipeline used as basis for this plan.
-    pub pipeline_id: Option<String>,
-    /// Visible frame window (start, end) into the pipeline.
-    pub fwindow: Option<(u32, u32)>,
+    /// Owning intent id for this plan revision.
+    pub intent_id: String,
+    /// Parent plan revisions for replanning/merge workflows.
+    pub parent_plan_ids: Option<Vec<String>>,
+    /// Planning-time context frame ids.
+    pub context_frame_ids: Option<Vec<String>>,
     pub steps: Option<Vec<PlanStepParams>>,
     /// Search tags (key-value pairs)
     pub tags: Option<HashMap<String, String>>,
@@ -284,10 +594,7 @@ pub struct CreatePlanParams {
 pub struct PlanStepParams {
     pub description: String,
     pub inputs: Option<serde_json::Value>,
-    pub outputs: Option<serde_json::Value>,
     pub checks: Option<serde_json::Value>,
-    pub status: Option<String>,
-    pub owner_role: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -299,10 +606,10 @@ pub struct ListPlansParams {
 pub struct CreatePatchSetParams {
     pub run_id: String,
     pub generation: u32,
+    pub sequence: Option<u32>,
     pub base_commit_sha: String,
     pub touched_files: Option<Vec<TouchedFileParams>>,
     pub rationale: Option<String>,
-    pub apply_status: Option<String>,
     pub diff_format: Option<String>,
     pub diff_artifact: Option<ArtifactParams>,
     /// Search tags (key-value pairs)
@@ -389,7 +696,8 @@ pub struct CreateProvenanceParams {
     pub provider: String,
     pub model: String,
     pub parameters_json: Option<String>,
-    pub token_usage_json: Option<String>,
+    pub temperature: Option<f64>,
+    pub max_tokens: Option<u64>,
     /// Search tags (key-value pairs)
     pub tags: Option<HashMap<String, String>>,
     /// External ID mapping
@@ -429,6 +737,88 @@ pub struct ListDecisionsParams {
     pub limit: Option<usize>,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CreateContextFrameParams {
+    /// Semantic frame kind: "intent_analysis", "step_summary", "code_change",
+    /// "system_state", "error_recovery", "checkpoint", "tool_call", or custom string.
+    pub kind: String,
+    /// Short human-readable description of the context increment.
+    pub summary: String,
+    /// Optional associated intent id.
+    pub intent_id: Option<String>,
+    /// Optional associated run id.
+    pub run_id: Option<String>,
+    /// Optional associated plan id.
+    pub plan_id: Option<String>,
+    /// Optional associated plan-step id.
+    pub step_id: Option<String>,
+    /// Optional structured payload (arbitrary JSON).
+    pub data: Option<serde_json::Value>,
+    /// Optional approximate token footprint for budgeting.
+    pub token_estimate: Option<u64>,
+    /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
+    pub actor_kind: Option<String>,
+    /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
+    pub actor_id: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ListContextFramesParams {
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CreatePlanStepEventParams {
+    /// Plan revision that owns the step.
+    pub plan_id: String,
+    /// Stable logical step id inside the plan.
+    pub step_id: String,
+    /// Run attempt that produced this step event.
+    pub run_id: String,
+    /// Step execution status: "pending", "progressing", "completed", "failed", "skipped".
+    pub status: String,
+    /// Optional human-readable reason for this status transition.
+    pub reason: Option<String>,
+    /// Context frame ids consumed while executing the step.
+    pub consumed_frames: Option<Vec<String>>,
+    /// Context frame ids produced while executing the step.
+    pub produced_frames: Option<Vec<String>>,
+    /// Optional durable task spawned from this step.
+    pub spawned_task_id: Option<String>,
+    /// Optional structured runtime outputs.
+    pub outputs: Option<serde_json::Value>,
+    /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
+    pub actor_kind: Option<String>,
+    /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
+    pub actor_id: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ListPlanStepEventsParams {
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CreateRunUsageParams {
+    /// Run that produced this usage summary.
+    pub run_id: String,
+    /// Input tokens consumed.
+    pub input_tokens: u64,
+    /// Output tokens produced.
+    pub output_tokens: u64,
+    /// Optional billing estimate in USD.
+    pub cost_usd: Option<f64>,
+    /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
+    pub actor_kind: Option<String>,
+    /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
+    pub actor_id: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ListRunUsagesParams {
+    pub limit: Option<usize>,
+}
+
 #[tool_router]
 impl LibraMcpServer {
     #[tool(description = "Create a new Intent (Prompt/Goal)")]
@@ -450,70 +840,67 @@ impl LibraMcpServer {
         params: CreateIntentParams,
         actor: ActorRef,
     ) -> Result<CallToolResult, ErrorData> {
-        let storage = self
-            .storage
-            .as_ref()
-            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
+        let mut parent_ids = parse_uuid_vec(params.parent_ids, "parent_ids")?;
+        if let Some(parent_id) = parse_optional_uuid(params.parent_id, "parent_id")? {
+            parent_ids.push(parent_id);
+        }
+        parent_ids.sort_unstable();
+        parent_ids.dedup();
+        for parent_id in &parent_ids {
+            self.ensure_object_exists("intent", *parent_id, "parent_id")
+                .await?;
+        }
 
-        let parent_id = if let Some(pid) = params.parent_id {
-            Some(
-                pid.parse::<Uuid>()
-                    .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?,
-            )
+        let mut intent = if parent_ids.is_empty() {
+            Intent::new(actor.clone(), params.content)
+                .map_err(|e| ErrorData::internal_error(e, None))?
         } else {
-            None
+            Intent::new_revision_chain(actor.clone(), params.content, &parent_ids)
+                .map_err(|e| ErrorData::invalid_params(e, None))?
         };
 
-        // Note: git-internal 0.6.0 Intent does not support direct task_id link (it uses Plan).
-        // We ignore params.task_id for the Intent object itself.
-
-        let mut intent =
-            Intent::new(actor, params.content).map_err(|e| ErrorData::internal_error(e, None))?;
-
-        // Store the AI-analyzed structured content (e.g. canonical IntentSpec JSON)
-        if params.structured_content.is_some() {
-            intent.set_content(params.structured_content);
+        if let Some(spec) = params.structured_content {
+            intent.set_spec(Some(parse_intent_spec(spec)));
         }
 
-        if let Some(pid) = parent_id {
-            intent.set_parent(Some(pid));
+        let analysis_context_frames = parse_uuid_vec(
+            params.analysis_context_frame_ids,
+            "analysis_context_frame_ids",
+        )?;
+        if !analysis_context_frames.is_empty() {
+            intent.set_analysis_context_frames(analysis_context_frames);
         }
 
-        if let Some(status) = params.status {
-            intent.set_status(match status.as_str() {
-                "draft" => IntentStatus::Draft,
-                "active" => IntentStatus::Active,
-                "completed" => IntentStatus::Completed,
-                "cancelled" => IntentStatus::Cancelled,
-                _ => return Err(ErrorData::invalid_params("invalid intent status", None)),
-            });
-        }
-        if let Some(sha) = params.commit_sha {
-            let normalized = crate::internal::ai::util::normalize_commit_anchor(&sha)
-                .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
-
-            use git_internal::internal::object::integrity::IntegrityHash;
-            let ih = normalized
-                .parse::<IntegrityHash>()
-                .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
-            intent.set_commit(Some(ih));
+        // 0.7 stores intent lifecycle/commit state in IntentEvent.
+        let mut lifecycle_kind = match params.status.as_deref() {
+            Some(status) => parse_intent_event_kind(status)?,
+            None => None,
+        };
+        if lifecycle_kind.is_none() && params.commit_sha.is_some() {
+            lifecycle_kind = Some(IntentEventKind::Completed);
         }
 
-        let hash = storage
-            .put_json(&intent)
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        self.store_object(&intent).await?;
 
-        // Track in the unified AI history branch
-        let history = self
-            .intent_history_manager
-            .as_ref()
-            .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
-
-        history
-            .append(&intent.object_type(), &intent.object_id(), hash)
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        if let Some(kind) = lifecycle_kind {
+            let mut event = IntentEvent::new(actor, intent.header().object_id(), kind)
+                .map_err(|e| ErrorData::internal_error(e, None))?;
+            if let Some(sha) = params.commit_sha {
+                let normalized = crate::internal::ai::util::normalize_commit_anchor(&sha)
+                    .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+                let ih = normalized
+                    .parse()
+                    .map_err(|e: String| ErrorData::invalid_params(e, None))?;
+                event.set_result_commit(Some(ih));
+            }
+            event.set_reason(params.reason);
+            if let Some(next_intent_id) =
+                parse_optional_uuid(params.next_intent_id, "next_intent_id")?
+            {
+                event.set_next_intent_id(Some(next_intent_id));
+            }
+            self.store_object(&event).await?;
+        }
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Intent created with ID: {}",
@@ -554,6 +941,24 @@ impl LibraMcpServer {
             }
         }
 
+        let mut latest_events = HashMap::<Uuid, IntentEvent>::new();
+        let event_objects = history
+            .list_objects("intent_event")
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        for (_id, hash) in event_objects {
+            if let Ok(event) = storage.get_json::<IntentEvent>(&hash).await {
+                latest_events
+                    .entry(event.intent_id())
+                    .and_modify(|current| {
+                        if event.header().created_at() > current.header().created_at() {
+                            *current = event.clone();
+                        }
+                    })
+                    .or_insert(event);
+            }
+        }
+
         // Sort by created_at descending
         intents.sort_by_key(|b| std::cmp::Reverse(b.header().created_at()));
 
@@ -562,11 +967,20 @@ impl LibraMcpServer {
             .into_iter()
             .take(limit)
             .map(|i| {
+                let lifecycle = latest_events
+                    .get(&i.header().object_id())
+                    .map(|event| event.kind());
+                let spec_preview = i
+                    .spec()
+                    .map(|spec| spec.0.to_string().replace('\n', " "))
+                    .unwrap_or_else(|| "-".to_string());
                 format!(
-                    "ID: {} | Status: {} | Content: {:.50}",
+                    "ID: {} | Status: {} | Prompt: {:.50} | Parents: {} | Spec: {:.50}",
                     i.header().object_id(),
-                    i.status().unwrap_or(&IntentStatus::Draft),
-                    i.content().unwrap_or("-").replace('\n', " ")
+                    intent_status_label(lifecycle),
+                    i.prompt().replace('\n', " "),
+                    i.parents().len(),
+                    spec_preview
                 )
             })
             .collect();
@@ -592,76 +1006,59 @@ impl LibraMcpServer {
         &self,
         params: UpdateIntentParams,
     ) -> Result<CallToolResult, ErrorData> {
+        let intent_id = parse_uuid(&params.intent_id, "intent_id")?;
         let history = self
             .intent_history_manager
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
-        let storage = self
-            .storage
-            .as_ref()
-            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
-        // 1. Find the intent blob hash via history
-        let blob_hash = history
-            .get_object_hash("intent", &params.intent_id)
+        // Ensure the target intent exists.
+        history
+            .get_object_hash("intent", &intent_id.to_string())
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?
             .ok_or_else(|| {
-                ErrorData::invalid_params(format!("Intent not found: {}", params.intent_id), None)
+                ErrorData::invalid_params(format!("Intent not found: {intent_id}"), None)
             })?;
 
-        // 2. Load the existing intent
-        let mut intent: Intent = storage
-            .get_json(&blob_hash)
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-
-        // 3. Apply updates
-        let mut changed = false;
-
-        if let Some(status) = params.status {
-            intent.set_status(match status.as_str() {
-                "draft" => IntentStatus::Draft,
-                "active" => IntentStatus::Active,
-                "completed" => IntentStatus::Completed,
-                "cancelled" => IntentStatus::Cancelled,
-                _ => return Err(ErrorData::invalid_params("invalid intent status", None)),
-            });
-            changed = true;
+        let mut event_kind = match params.status.as_deref() {
+            Some(status) => parse_intent_event_kind(status)?,
+            None => None,
+        };
+        if event_kind.is_none() && params.commit_sha.is_some() {
+            event_kind = Some(IntentEventKind::Completed);
         }
 
+        let Some(event_kind) = event_kind else {
+            return Err(ErrorData::invalid_params(
+                "No lifecycle transition to record. Provide 'status' and/or 'commit_sha'.",
+                None,
+            ));
+        };
+
+        let actor = self.default_actor()?;
+        let mut event = IntentEvent::new(actor, intent_id, event_kind)
+            .map_err(|e| ErrorData::internal_error(e, None))?;
+
         if let Some(sha) = params.commit_sha {
-            use git_internal::internal::object::integrity::IntegrityHash;
             let normalized = crate::internal::ai::util::normalize_commit_anchor(&sha)
                 .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
             let ih = normalized
-                .parse::<IntegrityHash>()
-                .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
-            intent.set_commit(Some(ih));
-            changed = true;
+                .parse()
+                .map_err(|e: String| ErrorData::invalid_params(e, None))?;
+            event.set_result_commit(Some(ih));
+        }
+        event.set_reason(params.reason);
+        if let Some(next_intent_id) = parse_optional_uuid(params.next_intent_id, "next_intent_id")?
+        {
+            event.set_next_intent_id(Some(next_intent_id));
         }
 
-        if !changed {
-            return Err(ErrorData::invalid_params(
-                "No fields to update. Provide at least 'status' or 'commit_sha'.",
-                None,
-            ));
-        }
-
-        // 4. Write updated intent blob and update history
-        let new_hash = storage
-            .put_json(&intent)
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-
-        history
-            .append(&intent.object_type(), &intent.object_id(), new_hash)
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        self.store_object(&event).await?;
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Intent {} updated successfully",
-            intent.header().object_id()
+            params.intent_id
         ))]))
     }
 
@@ -685,11 +1082,6 @@ impl LibraMcpServer {
         params: CreateTaskParams,
         actor: ActorRef,
     ) -> Result<CallToolResult, ErrorData> {
-        let storage = self
-            .storage
-            .as_ref()
-            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
-
         let goal_type = if let Some(gt) = params.goal_type {
             use std::str::FromStr;
             Some(GoalType::from_str(&gt).map_err(|e| ErrorData::invalid_params(e, None))?)
@@ -697,7 +1089,7 @@ impl LibraMcpServer {
             None
         };
 
-        let mut task = Task::new(actor, params.title, goal_type)
+        let mut task = Task::new(actor.clone(), params.title, goal_type)
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
         if let Some(desc) = params.description {
@@ -728,62 +1120,44 @@ impl LibraMcpServer {
         // Add task dependencies
         if let Some(deps) = params.dependencies {
             for dep in deps {
-                let dep_id = dep
-                    .parse::<Uuid>()
-                    .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+                let dep_id = parse_uuid(&dep, "dependencies")?;
+                self.ensure_object_exists("task", dep_id, "dependencies")
+                    .await?;
                 task.add_dependency(dep_id);
             }
         }
 
         // Set intent if provided
         if let Some(intent_id_str) = params.intent_id {
-            // Normalize ID (handle uuid: prefix if any)
-            let intent_uuid = if let Some(stripped) = intent_id_str.trim().strip_prefix("uuid:") {
-                stripped.parse::<Uuid>()
-            } else {
-                intent_id_str.trim().parse::<Uuid>()
-            }
-            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
-
-            task.set_intent(Some(intent_uuid));
+            let intent_id = parse_uuid(&intent_id_str, "intent_id")?;
+            self.ensure_object_exists("intent", intent_id, "intent_id")
+                .await?;
+            task.set_intent(Some(intent_id));
         }
 
-        // Set task status if explicitly provided
-        if let Some(s) = params.status {
-            task.set_status(match s.as_str() {
-                "draft" => TaskStatus::Draft,
-                "running" => TaskStatus::Running,
-                "done" => TaskStatus::Done,
-                "failed" => TaskStatus::Failed,
-                "cancelled" => TaskStatus::Cancelled,
-                _ => return Err(ErrorData::invalid_params("invalid task status", None)),
-            });
+        if let Some(parent_task_id) = params.parent_task_id {
+            let parent_task_id = parse_uuid(&parent_task_id, "parent_task_id")?;
+            self.ensure_object_exists("task", parent_task_id, "parent_task_id")
+                .await?;
+            task.set_parent(Some(parent_task_id));
         }
 
-        // Set tags and external_ids
-        // TODO: Enable these when git-internal is updated to expose header_mut/tags
-        // if let Some(tags) = params.tags {
-        //     task.header_mut().tags_mut().extend(tags);
-        // }
-        // if let Some(eids) = params.external_ids {
-        //     task.header_mut().external_ids_mut().extend(eids);
-        // }
-
-        let hash = storage
-            .put_json(&task)
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-
-        if let Some(history) = &self.intent_history_manager {
-            history
-                .append(
-                    &task.header().object_type().to_string(),
-                    &task.header().object_id().to_string(),
-                    hash,
-                )
-                .await
-                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        if let Some(origin_step_id) = params.origin_step_id {
+            task.set_origin_step_id(Some(parse_uuid(&origin_step_id, "origin_step_id")?));
         }
+
+        self.store_object(&task).await?;
+
+        let initial_status = params
+            .status
+            .as_deref()
+            .map(parse_task_event_kind)
+            .transpose()?
+            .unwrap_or(TaskEventKind::Created);
+        let mut task_event = TaskEvent::new(actor, task.header().object_id(), initial_status)
+            .map_err(|e| ErrorData::internal_error(e, None))?;
+        task_event.set_reason(params.reason);
+        self.store_object(&task_event).await?;
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Task created with ID: {}",
@@ -817,6 +1191,7 @@ impl LibraMcpServer {
             .list_objects("task")
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let latest_status = self.latest_task_events().await?;
 
         let mut tasks_info = Vec::new();
         let limit = params.limit.unwrap_or(10);
@@ -827,9 +1202,14 @@ impl LibraMcpServer {
             }
             // Read task from storage to get title/status
             if let Ok(task) = storage.get_json::<Task>(&hash).await {
+                let status_kind = latest_status
+                    .get(&task.header().object_id())
+                    .cloned()
+                    .unwrap_or(TaskEventKind::Created);
+                let status = task_status_label(&status_kind);
                 // Filter by status if requested
                 if let Some(status_filter) = &params.status
-                    && task.status().as_str() != status_filter
+                    && status != status_filter
                 {
                     continue;
                 }
@@ -838,7 +1218,7 @@ impl LibraMcpServer {
                     "ID: {} | Title: {} | Status: {}",
                     task.header().object_id(),
                     task.title(),
-                    task.status()
+                    status
                 ));
             }
         }
@@ -874,98 +1254,63 @@ impl LibraMcpServer {
         params: CreateRunParams,
         actor: ActorRef,
     ) -> Result<CallToolResult, ErrorData> {
-        let storage = self
-            .storage
-            .as_ref()
-            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
-
-        // Handle both regular UUID and uuid:... format
-        let task_id_str = params.task_id.trim();
-        let task_id = if let Some(stripped) = task_id_str.strip_prefix("uuid:") {
-            stripped.parse::<Uuid>()
-        } else {
-            task_id_str.parse::<Uuid>()
-        }
-        .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+        let task_id = parse_uuid(&params.task_id, "task_id")?;
+        let task_for_checks = self
+            .load_tracked_object::<Task>("task", task_id, "task_id")
+            .await?;
 
         let base_commit_sha =
             crate::internal::ai::util::normalize_commit_anchor(&params.base_commit_sha)
                 .map_err(|e| ErrorData::invalid_params(e, None))?;
 
-        let mut run = Run::new(actor, task_id, &base_commit_sha)
+        let mut run = Run::new(actor.clone(), task_id, &base_commit_sha)
             .map_err(|e| ErrorData::invalid_params(e, None))?;
 
-        if let Some(s) = params.status {
-            run.set_status(match s.as_str() {
-                "created" => RunStatus::Created,
-                "patching" => RunStatus::Patching,
-                "validating" => RunStatus::Validating,
-                "completed" => RunStatus::Completed,
-                "failed" => RunStatus::Failed,
-                _ => return Err(ErrorData::invalid_params("invalid run status", None)),
-            });
+        if let Some(plan_id) = params.plan_id {
+            let plan_id = parse_uuid(&plan_id, "plan_id")?;
+            let plan_for_checks = self
+                .load_tracked_object::<Plan>("plan", plan_id, "plan_id")
+                .await?;
+            if let (Some(task), Some(plan)) = (task_for_checks.as_ref(), plan_for_checks.as_ref())
+                && let Some(task_intent) = task.intent()
+                && plan.intent() != task_intent
+            {
+                return Err(ErrorData::invalid_params(
+                    format!(
+                        "plan_id intent {} does not match task intent {}",
+                        plan.intent(),
+                        task_intent
+                    ),
+                    None,
+                ));
+            }
+            run.set_plan(Some(plan_id));
         }
         if let Some(id) = params.context_snapshot_id {
-            // Handle both regular UUID and uuid:... format
-            let id_str = id.trim();
-            let parsed = if let Some(stripped) = id_str.strip_prefix("uuid:") {
-                stripped.parse::<Uuid>()
-            } else {
-                id_str.parse::<Uuid>()
-            }
-            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
-            run.set_snapshot(Some(parsed));
+            let snapshot_id = parse_uuid(&id, "context_snapshot_id")?;
+            self.ensure_object_exists("snapshot", snapshot_id, "context_snapshot_id")
+                .await?;
+            run.set_snapshot(Some(snapshot_id));
         }
-        if let Some(err) = params.error {
-            run.set_error(Some(err));
-        }
+        self.store_object(&run).await?;
 
-        // Add agent instances - Note: git-internal 0.6.0 Run does not support agent instances
-        // We ignore params.agent_instances for now
-        /*
-        if let Some(instances) = params.agent_instances {
-            for ai in instances {
-                run.add_agent_instance(AgentInstance {
-                    role: ai.role,
-                    provider_route: ai.provider_route,
-                });
-            }
-        }
-        */
-
-        // Set metrics
+        // 0.7 moved run lifecycle/error/metrics into RunEvent.
+        let initial_status = params
+            .status
+            .as_deref()
+            .map(parse_run_event_kind)
+            .transpose()?
+            .unwrap_or(RunEventKind::Created);
+        let mut run_event = RunEvent::new(actor, run.header().object_id(), initial_status)
+            .map_err(|e| ErrorData::internal_error(e, None))?;
+        run_event.set_reason(params.reason);
+        run_event.set_error(params.error);
         if let Some(metrics_json) = params.metrics_json {
-            let v = serde_json::from_str(&metrics_json)
+            let metrics = serde_json::from_str(&metrics_json)
                 .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
-            run.set_metrics(Some(v));
+            run_event.set_metrics(Some(metrics));
         }
-
-        // Set tags, external_ids, orchestrator_version
-        // orchestrator_version is currently hardcoded in Run::new but we can't change it easily without a setter
-        // However, we can set tags/external_ids
-        // TODO: Enable these when git-internal is updated to expose header_mut/tags
-        // if let Some(tags) = params.tags {
-        //     run.header_mut().tags_mut().extend(tags);
-        // }
-        // if let Some(eids) = params.external_ids {
-        //     run.header_mut().external_ids_mut().extend(eids);
-        // }
-
-        let hash = storage
-            .put_json(&run)
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-
-        if let Some(history) = &self.intent_history_manager {
-            history
-                .append(
-                    &run.header().object_type().to_string(),
-                    &run.header().object_id().to_string(),
-                    hash,
-                )
-                .await
-                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-        }
+        self.store_object(&run_event).await?;
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Run created with ID: {}",
@@ -999,6 +1344,7 @@ impl LibraMcpServer {
             .list_objects("run")
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let latest_status = self.latest_run_events().await?;
 
         let mut out = Vec::new();
         let limit = params.limit.unwrap_or(10);
@@ -1007,8 +1353,13 @@ impl LibraMcpServer {
                 break;
             }
             if let Ok(run) = storage.get_json::<Run>(&hash).await {
+                let status_kind = latest_status
+                    .get(&run.header().object_id())
+                    .cloned()
+                    .unwrap_or(RunEventKind::Created);
+                let status = run_status_label(&status_kind);
                 if let Some(status_filter) = &params.status
-                    && run.status().as_str() != status_filter
+                    && status != status_filter
                 {
                     continue;
                 }
@@ -1016,7 +1367,7 @@ impl LibraMcpServer {
                     "ID: {} | Task: {} | Status: {}",
                     run.header().object_id(),
                     run.task(),
-                    run.status()
+                    status
                 ));
             }
         }
@@ -1050,11 +1401,6 @@ impl LibraMcpServer {
         params: CreateContextSnapshotParams,
         actor: ActorRef,
     ) -> Result<CallToolResult, ErrorData> {
-        let storage = self
-            .storage
-            .as_ref()
-            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
-
         let strategy = match params.selection_strategy.as_str() {
             "explicit" => SelectionStrategy::Explicit,
             "heuristic" => SelectionStrategy::Heuristic,
@@ -1066,24 +1412,23 @@ impl LibraMcpServer {
             }
         };
 
-        // base_commit_sha is unused in 0.6.0 ContextSnapshot::new
-        let _ = crate::internal::ai::util::normalize_commit_anchor(&params.base_commit_sha)
-            .map_err(|e| ErrorData::invalid_params(e, None))?;
-
         let mut snapshot = ContextSnapshot::new(actor, strategy)
             .map_err(|e| ErrorData::invalid_params(e, None))?;
 
         if let Some(items) = params.items {
             for item in items {
                 use git_internal::hash::ObjectHash;
-                let mut ctx_item = ContextItem::new(ContextItemKind::File, item.path)
-                    .map_err(|e| ErrorData::invalid_params(e, None))?;
+                let mut ctx_item =
+                    ContextItem::new(parse_context_item_kind(item.kind.as_deref()), item.path)
+                        .map_err(|e| ErrorData::invalid_params(e, None))?;
+                ctx_item.preview = item.preview;
 
-                let blob_hash = item
-                    .content_hash
-                    .parse::<ObjectHash>()
-                    .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
-                ctx_item.set_blob(Some(blob_hash));
+                if let Some(blob_hash) = item.blob_hash.or(item.content_hash) {
+                    let blob_hash = blob_hash
+                        .parse::<ObjectHash>()
+                        .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+                    ctx_item.set_blob(Some(blob_hash));
+                }
 
                 snapshot.add_item(ctx_item);
             }
@@ -1092,29 +1437,7 @@ impl LibraMcpServer {
             snapshot.set_summary(Some(summary));
         }
 
-        // TODO: Enable these when git-internal is updated to expose header_mut/tags
-        // if let Some(tags) = params.tags {
-        //     snapshot.header_mut().tags_mut().extend(tags);
-        // }
-        // if let Some(eids) = params.external_ids {
-        //     snapshot.header_mut().external_ids_mut().extend(eids);
-        // }
-
-        let hash = storage
-            .put_json(&snapshot)
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-
-        if let Some(history) = &self.intent_history_manager {
-            history
-                .append(
-                    &snapshot.header().object_type().to_string(),
-                    &snapshot.header().object_id().to_string(),
-                    hash,
-                )
-                .await
-                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-        }
+        self.store_object(&snapshot).await?;
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "ContextSnapshot created with ID: {}",
@@ -1195,67 +1518,48 @@ impl LibraMcpServer {
         params: CreatePlanParams,
         actor: ActorRef,
     ) -> Result<CallToolResult, ErrorData> {
-        let storage = self
-            .storage
-            .as_ref()
-            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
+        let intent_id = parse_uuid(&params.intent_id, "intent_id")?;
+        self.ensure_object_exists("intent", intent_id, "intent_id")
+            .await?;
+        let mut plan =
+            Plan::new(actor, intent_id).map_err(|e| ErrorData::internal_error(e, None))?;
 
-        let mut plan = Plan::new(actor).map_err(|e| ErrorData::internal_error(e, None))?;
-
-        if let Some(pid) = params.pipeline_id {
-            let parsed = pid
-                .parse::<Uuid>()
-                .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
-            plan.set_pipeline(Some(parsed));
+        let parent_plan_ids = parse_uuid_vec(params.parent_plan_ids, "parent_plan_ids")?;
+        if !parent_plan_ids.is_empty() {
+            for parent_plan_id in &parent_plan_ids {
+                let parent_plan = self
+                    .load_tracked_object::<Plan>("plan", *parent_plan_id, "parent_plan_ids")
+                    .await?;
+                if let Some(parent_plan) = parent_plan
+                    && parent_plan.intent() != intent_id
+                {
+                    return Err(ErrorData::invalid_params(
+                        format!(
+                            "parent_plan_ids must belong to intent {}: {} belongs to {}",
+                            intent_id,
+                            parent_plan.header().object_id(),
+                            parent_plan.intent()
+                        ),
+                        None,
+                    ));
+                }
+            }
+            plan.set_parents(parent_plan_ids);
         }
-        if let Some((start, end)) = params.fwindow {
-            plan.set_fwindow(Some((start, end)));
+        let context_frame_ids = parse_uuid_vec(params.context_frame_ids, "context_frame_ids")?;
+        if !context_frame_ids.is_empty() {
+            plan.set_context_frames(context_frame_ids);
         }
 
         if let Some(steps) = params.steps {
             for step in steps {
-                let status = match step.status.as_deref().unwrap_or("pending") {
-                    "pending" => StepStatus::Pending,
-                    "in_progress" => StepStatus::Progressing,
-                    "completed" => StepStatus::Completed,
-                    "failed" => StepStatus::Failed,
-                    "skipped" => StepStatus::Skipped,
-                    _ => return Err(ErrorData::invalid_params("invalid plan step status", None)),
-                };
-
                 let mut ps = PlanStep::new(step.description);
                 ps.set_inputs(step.inputs);
-                ps.set_outputs(step.outputs);
                 ps.set_checks(step.checks);
-                ps.set_status(status);
-
                 plan.add_step(ps);
             }
         }
-
-        // TODO: Enable these when git-internal is updated to expose header_mut/tags
-        // if let Some(tags) = params.tags {
-        //     plan.header_mut().tags_mut().extend(tags);
-        // }
-        // if let Some(eids) = params.external_ids {
-        //     plan.header_mut().external_ids_mut().extend(eids);
-        // }
-
-        let hash = storage
-            .put_json(&plan)
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-
-        if let Some(history) = &self.intent_history_manager {
-            history
-                .append(
-                    &plan.header().object_type().to_string(),
-                    &plan.header().object_id().to_string(),
-                    hash,
-                )
-                .await
-                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-        }
+        self.store_object(&plan).await?;
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Plan created with ID: {}",
@@ -1334,15 +1638,8 @@ impl LibraMcpServer {
         params: CreatePatchSetParams,
         actor: ActorRef,
     ) -> Result<CallToolResult, ErrorData> {
-        let storage = self
-            .storage
-            .as_ref()
-            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
-
-        let run_id = params
-            .run_id
-            .parse::<Uuid>()
-            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+        let run_id = parse_uuid(&params.run_id, "run_id")?;
+        self.ensure_object_exists("run", run_id, "run_id").await?;
 
         let base_commit_sha =
             crate::internal::ai::util::normalize_commit_anchor(&params.base_commit_sha)
@@ -1350,6 +1647,7 @@ impl LibraMcpServer {
 
         let mut patchset = PatchSet::new(actor, run_id, &base_commit_sha)
             .map_err(|e| ErrorData::invalid_params(e, None))?;
+        patchset.set_sequence(params.sequence.unwrap_or(params.generation));
 
         if let Some(files) = params.touched_files {
             for f in files {
@@ -1367,44 +1665,27 @@ impl LibraMcpServer {
             }
         }
         patchset.set_rationale(params.rationale);
-        if let Some(s) = params.apply_status {
-            patchset.set_apply_status(match s.as_str() {
-                "proposed" => ApplyStatus::Proposed,
-                "applied" => ApplyStatus::Applied,
-                "rejected" => ApplyStatus::Rejected,
-                _ => return Err(ErrorData::invalid_params("invalid apply_status", None)),
-            });
-        }
         if let Some(artifact_params) = params.diff_artifact {
             let artifact = convert_artifact(artifact_params)?;
             patchset.set_artifact(Some(artifact));
         }
 
-        // TODO: Set diff_format when git-internal supports it
-
-        // TODO: Enable these when git-internal is updated to expose header_mut/tags
-        // if let Some(tags) = params.tags {
-        //     patchset.header_mut().tags_mut().extend(tags);
-        // }
-        // if let Some(eids) = params.external_ids {
-        //     patchset.header_mut().external_ids_mut().extend(eids);
-        // }
-
-        let hash = storage
-            .put_json(&patchset)
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-
-        if let Some(history) = &self.intent_history_manager {
-            history
-                .append(
-                    &patchset.header().object_type().to_string(),
-                    &patchset.header().object_id().to_string(),
-                    hash,
-                )
-                .await
-                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        if let Some(format) = params.diff_format {
+            match format.as_str() {
+                "unified_diff" => {}
+                "git_diff" => {
+                    if patchset.format() != &DiffFormat::GitDiff {
+                        return Err(ErrorData::invalid_params(
+                            "git_diff format is not writable in git-internal 0.7.0 yet",
+                            None,
+                        ));
+                    }
+                }
+                _ => return Err(ErrorData::invalid_params("invalid diff_format", None)),
+            }
         }
+
+        self.store_object(&patchset).await?;
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "PatchSet created with ID: {}",
@@ -1447,11 +1728,12 @@ impl LibraMcpServer {
             }
             if let Ok(ps) = storage.get_json::<PatchSet>(&hash).await {
                 out.push(format!(
-                    "ID: {} | Run: {} | Files: {} | Status: {:?}",
+                    "ID: {} | Run: {} | Seq: {} | Files: {} | Format: {:?}",
                     ps.header().object_id(),
                     ps.run(),
+                    ps.sequence(),
                     ps.touched().len(),
-                    ps.apply_status(),
+                    ps.format(),
                 ));
             }
         }
@@ -1485,15 +1767,8 @@ impl LibraMcpServer {
         params: CreateEvidenceParams,
         actor: ActorRef,
     ) -> Result<CallToolResult, ErrorData> {
-        let storage = self
-            .storage
-            .as_ref()
-            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
-
-        let run_id = params
-            .run_id
-            .parse::<Uuid>()
-            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+        let run_id = parse_uuid(&params.run_id, "run_id")?;
+        self.ensure_object_exists("run", run_id, "run_id").await?;
 
         let kind = match params.kind.as_str() {
             "test" => EvidenceKind::Test,
@@ -1506,9 +1781,23 @@ impl LibraMcpServer {
             .map_err(|e| ErrorData::internal_error(e, None))?;
 
         if let Some(id) = params.patchset_id {
-            let parsed = id
-                .parse::<Uuid>()
-                .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+            let parsed = parse_uuid(&id, "patchset_id")?;
+            let patchset = self
+                .load_tracked_object::<PatchSet>("patchset", parsed, "patchset_id")
+                .await?;
+            if let Some(patchset) = patchset
+                && patchset.run() != run_id
+            {
+                return Err(ErrorData::invalid_params(
+                    format!(
+                        "patchset_id {} belongs to run {}, not {}",
+                        parsed,
+                        patchset.run(),
+                        run_id
+                    ),
+                    None,
+                ));
+            }
             evidence.set_patchset_id(Some(parsed));
         }
         evidence.set_command(params.command);
@@ -1521,29 +1810,7 @@ impl LibraMcpServer {
             }
         }
 
-        // TODO: Enable these when git-internal is updated to expose header_mut/tags
-        // if let Some(tags) = params.tags {
-        //     evidence.header_mut().tags_mut().extend(tags);
-        // }
-        // if let Some(eids) = params.external_ids {
-        //     evidence.header_mut().external_ids_mut().extend(eids);
-        // }
-
-        let hash = storage
-            .put_json(&evidence)
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-
-        if let Some(history) = &self.intent_history_manager {
-            history
-                .append(
-                    &evidence.header().object_type().to_string(),
-                    &evidence.header().object_id().to_string(),
-                    hash,
-                )
-                .await
-                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-        }
+        self.store_object(&evidence).await?;
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Evidence created with ID: {}",
@@ -1625,15 +1892,8 @@ impl LibraMcpServer {
         params: CreateToolInvocationParams,
         actor: ActorRef,
     ) -> Result<CallToolResult, ErrorData> {
-        let storage = self
-            .storage
-            .as_ref()
-            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
-
-        let run_id = params
-            .run_id
-            .parse::<Uuid>()
-            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+        let run_id = parse_uuid(&params.run_id, "run_id")?;
+        self.ensure_object_exists("run", run_id, "run_id").await?;
 
         let mut inv = ToolInvocation::new(actor, run_id, params.tool_name)
             .map_err(|e| ErrorData::internal_error(e, None))?;
@@ -1661,29 +1921,7 @@ impl LibraMcpServer {
             }
         }
 
-        // TODO: Enable these when git-internal is updated to expose header_mut/tags
-        // if let Some(tags) = params.tags {
-        //     inv.header_mut().tags_mut().extend(tags);
-        // }
-        // if let Some(eids) = params.external_ids {
-        //     inv.header_mut().external_ids_mut().extend(eids);
-        // }
-
-        let hash = storage
-            .put_json(&inv)
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-
-        if let Some(history) = &self.intent_history_manager {
-            history
-                .append(
-                    &inv.header().object_type().to_string(),
-                    &inv.header().object_id().to_string(),
-                    hash,
-                )
-                .await
-                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-        }
+        self.store_object(&inv).await?;
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "ToolInvocation created with ID: {}",
@@ -1764,52 +2002,24 @@ impl LibraMcpServer {
         params: CreateProvenanceParams,
         actor: ActorRef,
     ) -> Result<CallToolResult, ErrorData> {
-        let storage = self
-            .storage
-            .as_ref()
-            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
-
-        let run_id = params
-            .run_id
-            .parse::<Uuid>()
-            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+        let run_id = parse_uuid(&params.run_id, "run_id")?;
+        self.ensure_object_exists("run", run_id, "run_id").await?;
 
         let mut prov = Provenance::new(actor, run_id, params.provider, params.model)
             .map_err(|e| ErrorData::internal_error(e, None))?;
-        if let Some(parameters_json) = params.parameters_json {
-            let v = serde_json::from_str(&parameters_json)
-                .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
-            prov.set_parameters(Some(v));
-        }
-        if let Some(token_usage_json) = params.token_usage_json {
-            let v = serde_json::from_str(&token_usage_json)
-                .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
-            prov.set_token_usage(Some(v));
-        }
+        let parameters = if let Some(parameters_json) = params.parameters_json {
+            Some(
+                serde_json::from_str(&parameters_json)
+                    .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?,
+            )
+        } else {
+            None
+        };
+        prov.set_parameters(parameters);
+        prov.set_temperature(params.temperature);
+        prov.set_max_tokens(params.max_tokens);
 
-        // TODO: Enable these when git-internal is updated to expose header_mut/tags
-        // if let Some(tags) = params.tags {
-        //     prov.header_mut().tags_mut().extend(tags);
-        // }
-        // if let Some(eids) = params.external_ids {
-        //     prov.header_mut().external_ids_mut().extend(eids);
-        // }
-
-        let hash = storage
-            .put_json(&prov)
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-
-        if let Some(history) = &self.intent_history_manager {
-            history
-                .append(
-                    &prov.header().object_type().to_string(),
-                    &prov.header().object_id().to_string(),
-                    hash,
-                )
-                .await
-                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-        }
+        self.store_object(&prov).await?;
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Provenance created with ID: {}",
@@ -1889,19 +2099,8 @@ impl LibraMcpServer {
         params: CreateDecisionParams,
         actor: ActorRef,
     ) -> Result<CallToolResult, ErrorData> {
-        let storage = self
-            .storage
-            .as_ref()
-            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
-
-        // Handle both regular UUID and uuid:... format
-        let run_id_str = params.run_id.trim();
-        let run_id = if let Some(stripped) = run_id_str.strip_prefix("uuid:") {
-            stripped.parse::<Uuid>()
-        } else {
-            run_id_str.parse::<Uuid>()
-        }
-        .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+        let run_id = parse_uuid(&params.run_id, "run_id")?;
+        self.ensure_object_exists("run", run_id, "run_id").await?;
 
         let decision_type = match params.decision_type.as_str() {
             "commit" => DecisionType::Commit,
@@ -1916,9 +2115,23 @@ impl LibraMcpServer {
             .map_err(|e| ErrorData::internal_error(e, None))?;
 
         if let Some(id) = params.chosen_patchset_id {
-            let parsed = id
-                .parse::<Uuid>()
-                .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+            let parsed = parse_uuid(&id, "chosen_patchset_id")?;
+            let patchset = self
+                .load_tracked_object::<PatchSet>("patchset", parsed, "chosen_patchset_id")
+                .await?;
+            if let Some(patchset) = patchset
+                && patchset.run() != run_id
+            {
+                return Err(ErrorData::invalid_params(
+                    format!(
+                        "chosen_patchset_id {} belongs to run {}, not {}",
+                        parsed,
+                        patchset.run(),
+                        run_id
+                    ),
+                    None,
+                ));
+            }
             decision.set_chosen_patchset_id(Some(parsed));
         }
         decision.set_checkpoint_id(params.checkpoint_id);
@@ -1934,29 +2147,7 @@ impl LibraMcpServer {
             decision.set_result_commit_sha(Some(hash_val));
         }
 
-        // TODO: Enable these when git-internal is updated to expose header_mut/tags
-        // if let Some(tags) = params.tags {
-        //     decision.header_mut().tags_mut().extend(tags);
-        // }
-        // if let Some(eids) = params.external_ids {
-        //     decision.header_mut().external_ids_mut().extend(eids);
-        // }
-
-        let hash = storage
-            .put_json(&decision)
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-
-        if let Some(history) = &self.intent_history_manager {
-            history
-                .append(
-                    &decision.header().object_type().to_string(),
-                    &decision.header().object_id().to_string(),
-                    hash,
-                )
-                .await
-                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-        }
+        self.store_object(&decision).await?;
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Decision created with ID: {}",
@@ -2010,6 +2201,346 @@ impl LibraMcpServer {
         if out.is_empty() {
             Ok(CallToolResult::success(vec![Content::text(
                 "No decisions found.",
+            )]))
+        } else {
+            Ok(CallToolResult::success(vec![Content::text(out.join("\n"))]))
+        }
+    }
+
+    // ── ContextFrame tools ──────────────────────────────────────────
+
+    #[tool(description = "Create a new ContextFrame (incremental context window entry)")]
+    pub async fn create_context_frame(
+        &self,
+        ctx: RequestContext<RoleServer>,
+        Parameters(params): Parameters<CreateContextFrameParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let actor = self.resolve_actor(
+            &ctx,
+            params.actor_kind.as_deref(),
+            params.actor_id.as_deref(),
+        )?;
+        self.create_context_frame_impl(params, actor).await
+    }
+
+    /// Core implementation of create_context_frame, callable without RequestContext.
+    pub async fn create_context_frame_impl(
+        &self,
+        params: CreateContextFrameParams,
+        actor: ActorRef,
+    ) -> Result<CallToolResult, ErrorData> {
+        let kind = parse_frame_kind(&params.kind);
+
+        let mut frame = ContextFrame::new(actor, kind, params.summary)
+            .map_err(|e| ErrorData::internal_error(e, None))?;
+
+        if let Some(id) = params.intent_id {
+            let parsed = parse_uuid(&id, "intent_id")?;
+            self.ensure_object_exists("intent", parsed, "intent_id")
+                .await?;
+            frame.set_intent_id(Some(parsed));
+        }
+        if let Some(id) = params.run_id {
+            let parsed = parse_uuid(&id, "run_id")?;
+            self.ensure_object_exists("run", parsed, "run_id").await?;
+            frame.set_run_id(Some(parsed));
+        }
+        if let Some(id) = params.plan_id {
+            let parsed = parse_uuid(&id, "plan_id")?;
+            self.ensure_object_exists("plan", parsed, "plan_id").await?;
+            frame.set_plan_id(Some(parsed));
+        }
+        if let Some(id) = params.step_id {
+            let parsed = parse_uuid(&id, "step_id")?;
+            frame.set_step_id(Some(parsed));
+        }
+        if let Some(data) = params.data {
+            frame.set_data(Some(data));
+        }
+        if let Some(est) = params.token_estimate {
+            frame.set_token_estimate(Some(est));
+        }
+
+        self.store_object(&frame).await?;
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "ContextFrame created with ID: {}",
+            frame.header().object_id()
+        ))]))
+    }
+
+    #[tool(description = "List recent context frames")]
+    pub async fn list_context_frames(
+        &self,
+        Parameters(params): Parameters<ListContextFramesParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.list_context_frames_impl(params).await
+    }
+
+    /// Core implementation of list_context_frames, callable without rmcp Parameters wrapper.
+    pub async fn list_context_frames_impl(
+        &self,
+        params: ListContextFramesParams,
+    ) -> Result<CallToolResult, ErrorData> {
+        let history = self
+            .intent_history_manager
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
+
+        let objects = history
+            .list_objects("context_frame")
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        let limit = params.limit.unwrap_or(10);
+        let mut out = Vec::new();
+        for (_id, hash) in objects.into_iter() {
+            if out.len() >= limit {
+                break;
+            }
+            if let Ok(frame) = storage.get_json::<ContextFrame>(&hash).await {
+                out.push(format!(
+                    "ID: {} | Kind: {:?} | Summary: {} | Tokens: {}",
+                    frame.header().object_id(),
+                    frame.kind(),
+                    frame.summary(),
+                    frame
+                        .token_estimate()
+                        .map_or("-".to_string(), |t| t.to_string()),
+                ));
+            }
+        }
+
+        if out.is_empty() {
+            Ok(CallToolResult::success(vec![Content::text(
+                "No context frames found.",
+            )]))
+        } else {
+            Ok(CallToolResult::success(vec![Content::text(out.join("\n"))]))
+        }
+    }
+
+    // ── PlanStepEvent tools ─────────────────────────────────────────
+
+    #[tool(description = "Create a new PlanStepEvent (step execution lifecycle event)")]
+    pub async fn create_plan_step_event(
+        &self,
+        ctx: RequestContext<RoleServer>,
+        Parameters(params): Parameters<CreatePlanStepEventParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let actor = self.resolve_actor(
+            &ctx,
+            params.actor_kind.as_deref(),
+            params.actor_id.as_deref(),
+        )?;
+        self.create_plan_step_event_impl(params, actor).await
+    }
+
+    /// Core implementation of create_plan_step_event, callable without RequestContext.
+    pub async fn create_plan_step_event_impl(
+        &self,
+        params: CreatePlanStepEventParams,
+        actor: ActorRef,
+    ) -> Result<CallToolResult, ErrorData> {
+        let plan_id = parse_uuid(&params.plan_id, "plan_id")?;
+        let step_id = parse_uuid(&params.step_id, "step_id")?;
+        let run_id = parse_uuid(&params.run_id, "run_id")?;
+        let status = parse_plan_step_status(&params.status)?;
+
+        self.ensure_object_exists("plan", plan_id, "plan_id")
+            .await?;
+        self.ensure_object_exists("run", run_id, "run_id").await?;
+
+        let mut event = PlanStepEvent::new(actor, plan_id, step_id, run_id, status)
+            .map_err(|e| ErrorData::internal_error(e, None))?;
+
+        if let Some(reason) = params.reason {
+            event.set_reason(Some(reason));
+        }
+        if let Some(ids) = params.consumed_frames {
+            let uuids: Vec<Uuid> = ids
+                .iter()
+                .map(|s| parse_uuid(s, "consumed_frames"))
+                .collect::<Result<_, _>>()?;
+            event.set_consumed_frames(uuids);
+        }
+        if let Some(ids) = params.produced_frames {
+            let uuids: Vec<Uuid> = ids
+                .iter()
+                .map(|s| parse_uuid(s, "produced_frames"))
+                .collect::<Result<_, _>>()?;
+            event.set_produced_frames(uuids);
+        }
+        if let Some(id) = params.spawned_task_id {
+            let parsed = parse_uuid(&id, "spawned_task_id")?;
+            event.set_spawned_task_id(Some(parsed));
+        }
+        if let Some(outputs) = params.outputs {
+            event.set_outputs(Some(outputs));
+        }
+
+        self.store_object(&event).await?;
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "PlanStepEvent created with ID: {}",
+            event.header().object_id()
+        ))]))
+    }
+
+    #[tool(description = "List recent plan step events")]
+    pub async fn list_plan_step_events(
+        &self,
+        Parameters(params): Parameters<ListPlanStepEventsParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.list_plan_step_events_impl(params).await
+    }
+
+    /// Core implementation of list_plan_step_events, callable without rmcp Parameters wrapper.
+    pub async fn list_plan_step_events_impl(
+        &self,
+        params: ListPlanStepEventsParams,
+    ) -> Result<CallToolResult, ErrorData> {
+        let history = self
+            .intent_history_manager
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
+
+        let objects = history
+            .list_objects("plan_step_event")
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        let limit = params.limit.unwrap_or(10);
+        let mut out = Vec::new();
+        for (_id, hash) in objects.into_iter() {
+            if out.len() >= limit {
+                break;
+            }
+            if let Ok(evt) = storage.get_json::<PlanStepEvent>(&hash).await {
+                out.push(format!(
+                    "ID: {} | Plan: {} | Step: {} | Status: {:?} | Reason: {}",
+                    evt.header().object_id(),
+                    evt.plan_id(),
+                    evt.step_id(),
+                    evt.status(),
+                    evt.reason().unwrap_or("-"),
+                ));
+            }
+        }
+
+        if out.is_empty() {
+            Ok(CallToolResult::success(vec![Content::text(
+                "No plan step events found.",
+            )]))
+        } else {
+            Ok(CallToolResult::success(vec![Content::text(out.join("\n"))]))
+        }
+    }
+
+    // ── RunUsage tools ──────────────────────────────────────────────
+
+    #[tool(description = "Record token/cost usage for a run")]
+    pub async fn create_run_usage(
+        &self,
+        ctx: RequestContext<RoleServer>,
+        Parameters(params): Parameters<CreateRunUsageParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let actor = self.resolve_actor(
+            &ctx,
+            params.actor_kind.as_deref(),
+            params.actor_id.as_deref(),
+        )?;
+        self.create_run_usage_impl(params, actor).await
+    }
+
+    /// Core implementation of create_run_usage, callable without RequestContext.
+    pub async fn create_run_usage_impl(
+        &self,
+        params: CreateRunUsageParams,
+        actor: ActorRef,
+    ) -> Result<CallToolResult, ErrorData> {
+        let run_id = parse_uuid(&params.run_id, "run_id")?;
+        self.ensure_object_exists("run", run_id, "run_id").await?;
+
+        let usage = RunUsage::new(
+            actor,
+            run_id,
+            params.input_tokens,
+            params.output_tokens,
+            params.cost_usd,
+        )
+        .map_err(|e| ErrorData::internal_error(e, None))?;
+
+        self.store_object(&usage).await?;
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "RunUsage created with ID: {} | Input: {} | Output: {} | Cost: {}",
+            usage.header().object_id(),
+            usage.input_tokens(),
+            usage.output_tokens(),
+            usage
+                .cost_usd()
+                .map_or("-".to_string(), |c| format!("${:.4}", c)),
+        ))]))
+    }
+
+    #[tool(description = "List recent run usage records")]
+    pub async fn list_run_usages(
+        &self,
+        Parameters(params): Parameters<ListRunUsagesParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.list_run_usages_impl(params).await
+    }
+
+    /// Core implementation of list_run_usages, callable without rmcp Parameters wrapper.
+    pub async fn list_run_usages_impl(
+        &self,
+        params: ListRunUsagesParams,
+    ) -> Result<CallToolResult, ErrorData> {
+        let history = self
+            .intent_history_manager
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
+
+        let objects = history
+            .list_objects("run_usage")
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        let limit = params.limit.unwrap_or(10);
+        let mut out = Vec::new();
+        for (_id, hash) in objects.into_iter() {
+            if out.len() >= limit {
+                break;
+            }
+            if let Ok(u) = storage.get_json::<RunUsage>(&hash).await {
+                out.push(format!(
+                    "ID: {} | Run: {} | In: {} | Out: {} | Cost: {}",
+                    u.header().object_id(),
+                    u.run_id(),
+                    u.input_tokens(),
+                    u.output_tokens(),
+                    u.cost_usd()
+                        .map_or("-".to_string(), |c| format!("${:.4}", c)),
+                ));
+            }
+        }
+
+        if out.is_empty() {
+            Ok(CallToolResult::success(vec![Content::text(
+                "No run usage records found.",
             )]))
         } else {
             Ok(CallToolResult::success(vec![Content::text(out.join("\n"))]))
