@@ -319,9 +319,11 @@ async fn print_commit_summary(commit: &Commit, message: &str, staged_changes: &s
     let file_count =
         staged_changes.new.len() + staged_changes.modified.len() + staged_changes.deleted.len();
     if file_count > 0 {
+        let files_word = if file_count == 1 { "file" } else { "files" };
         println!(
-            " {} files changed (new: {}, modified: {}, deleted: {})",
+            " {} {} changed (new: {}, modified: {}, deleted: {})",
             file_count,
+            files_word,
             staged_changes.new.len(),
             staged_changes.modified.len(),
             staged_changes.deleted.len()
