@@ -20,6 +20,7 @@ use super::{
     },
 };
 use crate::internal::ai::{
+    intentspec::persistence::persist_intentspec,
     intentspec::types::IntentSpec,
     mcp::{
         resource::{
@@ -55,7 +56,6 @@ struct PatchSetRequest<'a> {
     task_title: &'a str,
     task_objective: &'a str,
     tool_calls: &'a [ToolCallRecord],
-    task_status: &'a super::types::TaskNodeStatus,
 }
 
 struct EvidenceRequest<'a> {
@@ -85,11 +85,13 @@ pub async fn persist_execution(
 ) -> Result<PersistedExecution, OrchestratorError> {
     let task_results = request.run_state.ordered_task_results();
     let base_commit_sha = resolve_base_commit(request.base_commit, request.working_dir);
+    let intent_id = persist_intentspec(request.spec, request.mcp_server)
+        .await
+        .map_err(|e| OrchestratorError::ConfigError(format!("MCP create_intent failed: {e}")))?;
     let initial_snapshot_id = if snapshot_on_run_start(request.spec) {
         Some(
             create_context_snapshot(
                 request.mcp_server,
-                &base_commit_sha,
                 build_snapshot_summary(
                     request.spec,
                     request.plan_revision_specs.first(),
@@ -107,9 +109,23 @@ pub async fn persist_execution(
     } else {
         None
     };
+    let mut plan_ids = Vec::with_capacity(request.plan_revision_specs.len());
+    let mut parent_plan_id = None;
+    for plan_spec in request.plan_revision_specs {
+        let plan_id = create_plan_revision(
+            request.mcp_server,
+            &intent_id,
+            parent_plan_id.as_deref(),
+            plan_spec,
+        )
+        .await?;
+        parent_plan_id = Some(plan_id.clone());
+        plan_ids.push(plan_id);
+    }
     let run_id = create_run(
         request.mcp_server,
         &base_commit_sha,
+        plan_ids.last().map(String::as_str),
         initial_snapshot_id.as_deref(),
         task_results,
         request.decision,
@@ -129,15 +145,10 @@ pub async fn persist_execution(
         )
         .await?,
     );
-    let mut plan_ids = Vec::with_capacity(request.plan_revision_specs.len());
-    for plan_spec in request.plan_revision_specs {
-        plan_ids.push(create_plan_revision(request.mcp_server, plan_spec).await?);
-    }
     let mut checkpoints = create_replan_checkpoints(
         request.mcp_server,
         request.spec,
         &run_id,
-        &base_commit_sha,
         request.plan_revision_specs,
         request.working_dir,
         task_results,
@@ -183,7 +194,6 @@ pub async fn persist_execution(
                 task_title: task.title.as_str(),
                 task_objective: task.objective.as_str(),
                 tool_calls: &result.tool_calls,
-                task_status: &result.status,
             })
             .await?
         {
@@ -270,7 +280,6 @@ pub async fn persist_execution(
         Some(
             create_context_snapshot(
                 request.mcp_server,
-                &base_commit_sha,
                 build_snapshot_summary(
                     request.spec,
                     Some(request.execution_plan_spec),
@@ -349,6 +358,7 @@ pub async fn persist_execution(
 async fn create_run(
     mcp_server: &Arc<LibraMcpServer>,
     base_commit_sha: &str,
+    plan_id: Option<&str>,
     context_snapshot_id: Option<&str>,
     task_results: &[TaskResult],
     decision: &DecisionOutcome,
@@ -370,6 +380,7 @@ async fn create_run(
     let params = CreateRunParams {
         task_id: Uuid::new_v4().to_string(),
         base_commit_sha: base_commit_sha.to_string(),
+        plan_id: plan_id.map(ToString::to_string),
         status: Some(status.to_string()),
         context_snapshot_id: context_snapshot_id.map(ToString::to_string),
         error: task_results.iter().find_map(|result| {
@@ -385,6 +396,7 @@ async fn create_run(
             provider_route: Some(model_name.to_string()),
         }]),
         metrics_json: Some(metrics_json),
+        reason: Some(format!("orchestrator finished with decision {decision:?}")),
         orchestrator_version: Some("libra-intentspec".to_string()),
         tags: None,
         external_ids: None,
@@ -406,6 +418,8 @@ async fn create_run(
 
 async fn create_plan_revision(
     mcp_server: &Arc<LibraMcpServer>,
+    intent_id: &str,
+    parent_plan_id: Option<&str>,
     plan: &ExecutionPlanSpec,
 ) -> Result<String, OrchestratorError> {
     let steps = plan
@@ -425,23 +439,20 @@ async fn create_plan_revision(
                     "scopeIn": task.scope_in,
                     "scopeOut": task.scope_out,
                     "touchFiles": task.contract.touch_files,
-                })),
-                outputs: Some(serde_json::json!({
                     "expectedOutputs": task.contract.expected_outputs,
                     "acceptanceCriteria": task.acceptance_criteria,
+                    "ownerRole": task.owner_role,
                     "replanReason": plan.replan_reason,
                 })),
                 checks: Some(checks),
-                status: Some("pending".to_string()),
-                owner_role: task.owner_role.clone(),
             })
         })
         .collect::<Result<Vec<_>, OrchestratorError>>()?;
 
     let params = CreatePlanParams {
-        plan_version: Some(plan.revision),
-        pipeline_id: None,
-        fwindow: None,
+        intent_id: intent_id.to_string(),
+        parent_plan_ids: parent_plan_id.map(|id| vec![id.to_string()]),
+        context_frame_ids: None,
         steps: Some(steps),
         tags: None,
         external_ids: None,
@@ -494,7 +505,8 @@ async fn create_provenance(
         provider: "internal".to_string(),
         model: model_name.to_string(),
         parameters_json: Some(parameters_json),
-        token_usage_json: None,
+        temperature: None,
+        max_tokens: None,
         tags: None,
         external_ids: None,
         actor_kind: Some("agent".to_string()),
@@ -574,20 +586,13 @@ async fn create_patchset(
     let params = CreatePatchSetParams {
         run_id: request.run_id.to_string(),
         generation: request.generation,
+        sequence: Some(request.generation),
         base_commit_sha: request.base_commit_sha.to_string(),
         touched_files: Some(touched_files),
         rationale: Some(format!(
             "{}: {}",
             request.task_title, request.task_objective
         )),
-        apply_status: Some(
-            match request.task_status {
-                super::types::TaskNodeStatus::Completed => "applied",
-                super::types::TaskNodeStatus::Failed => "rejected",
-                _ => "proposed",
-            }
-            .to_string(),
-        ),
         diff_format: diff_text.as_ref().map(|_| "unified".to_string()),
         diff_artifact: None,
         tags: None,
@@ -831,7 +836,6 @@ async fn create_replan_checkpoints(
     mcp_server: &Arc<LibraMcpServer>,
     spec: &IntentSpec,
     run_id: &str,
-    base_commit_sha: &str,
     plan_revisions: &[ExecutionPlanSpec],
     working_dir: &Path,
     task_results: &[TaskResult],
@@ -850,7 +854,6 @@ async fn create_replan_checkpoints(
             Some(
                 create_context_snapshot(
                     mcp_server,
-                    base_commit_sha,
                     build_checkpoint_summary(plan, entry.reason.as_str()),
                     collect_snapshot_items(spec, Some(plan), working_dir, task_results),
                 )
@@ -887,12 +890,10 @@ async fn create_replan_checkpoints(
 
 async fn create_context_snapshot(
     mcp_server: &Arc<LibraMcpServer>,
-    base_commit_sha: &str,
     summary: String,
     items: Vec<ContextItemParams>,
 ) -> Result<String, OrchestratorError> {
     let params = CreateContextSnapshotParams {
-        base_commit_sha: base_commit_sha.to_string(),
         selection_strategy: if items.is_empty() {
             "heuristic".to_string()
         } else {
@@ -992,7 +993,13 @@ fn build_context_item(working_dir: &Path, path: String) -> Option<ContextItemPar
 
     let resolved = resolve_workspace_file(working_dir, &path)?;
     let content_hash = hash_file_blob(working_dir, &resolved)?;
-    Some(ContextItemParams { path, content_hash })
+    Some(ContextItemParams {
+        kind: Some("file".to_string()),
+        path,
+        preview: None,
+        content_hash: Some(content_hash.clone()),
+        blob_hash: Some(content_hash),
+    })
 }
 
 fn resolve_workspace_file(working_dir: &Path, path: &str) -> Option<PathBuf> {
