@@ -265,13 +265,20 @@ impl CodexWebSocket {
 
         for _ in 0..600 {
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-            let responses = self.responses.lock().await;
-            if let Some(response) = responses.get(&id) {
-                return Ok(response.clone());
+            let mut responses = self.responses.lock().await;
+            // Use remove() instead of get() to prevent memory leaks
+            // Each request's response is consumed after reading
+            if let Some(response) = responses.remove(&id) {
+                // Check if response contains an error
+                if let Some(error_obj) = response.get("error") {
+                    return Err(format!("WebSocket error: {}", error_obj).into());
+                }
+                return Ok(response);
             }
         }
 
-        Ok(serde_json::json!({"error": "timeout"}))
+        // Return error on timeout instead of Ok with error payload
+        Err("Request timeout: no response received after 60 seconds".into())
     }
 
     pub async fn send_request_with_thread(

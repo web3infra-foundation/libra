@@ -150,8 +150,8 @@ impl CompletionModelTrait for Model {
             }
 
             // Auto-add and commit changes to Libra via MCP
-            if let Err(_e) = self.commit_to_libra(&file_changes).await {
-                // Silently ignore commit errors
+            if let Err(e) = self.commit_to_libra(&file_changes).await {
+                tracing::warn!("Failed to commit to Libra via MCP: {}", e);
             }
         }
 
@@ -200,6 +200,9 @@ fn detect_file_changes(
         return file_changes;
     }
 
+    // Get current files in working directory
+    let mut current_files = std::collections::HashSet::new();
+
     // Walk through all files in the working directory
     if let Ok(entries) = std::fs::read_dir(working_dir) {
         for entry in entries.flatten() {
@@ -213,9 +216,11 @@ fn detect_file_changes(
                         continue;
                     }
 
-                    // Check if this is a new file
+                    current_files.insert(rel_str.clone());
+
+                    // Check if this is a new file (not in previous)
                     if !previous_files.contains(&rel_str) {
-                        // Read the file content
+                        // New file - read the content
                         if let Ok(content) = std::fs::read_to_string(&path) {
                             file_changes.push(FileChange {
                                 path: rel_str,
@@ -224,9 +229,33 @@ fn detect_file_changes(
                                 content: Some(content),
                             });
                         }
+                    } else {
+                        // Existing file - check if content changed
+                        // Note: For simplicity, we treat all existing files as potentially modified
+                        // In production, you'd want to compare actual content hashes
+                        if let Ok(_content) = std::fs::read_to_string(&path) {
+                            // For now, we don't mark as modified since we can't easily compare
+                            // The main detection is for new files from Codex
+                        }
                     }
                 }
             }
+        }
+    }
+
+    // Detect deleted files (were in previous but not in current)
+    for prev_file in previous_files {
+        if !current_files.contains(prev_file) {
+            // Skip .git and .libra
+            if prev_file.starts_with(".git") || prev_file.starts_with(".libra") {
+                continue;
+            }
+            file_changes.push(FileChange {
+                path: prev_file.clone(),
+                diff: String::new(),
+                operation: "delete".to_string(),
+                content: None,
+            });
         }
     }
 
@@ -254,11 +283,8 @@ fn extract_content_and_changes(
         extract_from_turn(last_turn, &mut content, &mut file_changes);
     }
 
-    if content.is_empty() {
-        content.push(AssistantContent::Text(Text {
-            text: "Codex is processing your request...".to_string(),
-        }));
-    }
+    // Don't inject placeholder - let caller handle empty content via fallback
+    // (e.g., get_agent_messages for streamed output)
 
     (content, file_changes)
 }
@@ -330,6 +356,55 @@ fn extract_from_turn(
 fn apply_file_change(change: &FileChange) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let working_dir = crate::utils::util::working_dir();
     let file_path = working_dir.join(&change.path);
+
+    // Security check: validate the path stays within working directory
+    // This prevents path traversal attacks (e.g., ../../../etc/passwd)
+    let canonical_working_dir = working_dir
+        .canonicalize()
+        .map_err(|e| format!("failed to canonicalize working directory: {}", e))?;
+
+    // For non-existent files, we need to check if the parent directory is safe
+    // Or if the path contains parent directory references (..)
+    let normalized_path = change.path.replace("\\", "/");
+
+    // Reject paths that try to escape the working directory
+    if normalized_path.contains("..") {
+        return Err(format!(
+            "security: file path '{}' contains parent directory references (not allowed)",
+            change.path
+        )
+        .into());
+    }
+
+    // Additional check for absolute paths
+    if std::path::Path::new(&change.path).is_absolute() {
+        return Err(format!(
+            "security: file path '{}' is absolute (not allowed)",
+            change.path
+        )
+        .into());
+    }
+
+    // Verify the final path is within working directory
+    let canonical_file_path = file_path.canonicalize().unwrap_or_else(|_| {
+        // If file doesn't exist, check if parent directory is safe
+        // by canonicalizing the parent
+        file_path
+            .parent()
+            .map(|p| p.canonicalize().unwrap_or_else(|_| p.to_path_buf()))
+            .unwrap_or_else(|| file_path.to_path_buf())
+    });
+
+    let file_path_str = canonical_file_path.to_string_lossy().to_string();
+    let working_dir_str = canonical_working_dir.to_string_lossy().to_string();
+
+    if !file_path_str.starts_with(&working_dir_str) && !file_path_str.eq(&working_dir_str) {
+        return Err(format!(
+            "security: file path '{}' escapes working directory '{}'",
+            change.path, working_dir_str
+        )
+        .into());
+    }
 
     match change.operation.as_str() {
         "delete" => {
@@ -433,7 +508,8 @@ impl Model {
             .map(|c| {
                 let change_type = match c.operation.as_str() {
                     "create" => "add",
-                    "write" => "modify",
+                    "add" => "add",
+                    "write" | "update" => "modify",
                     "delete" => "delete",
                     _ => "modify",
                 };

@@ -910,7 +910,10 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         };
 
                         // Call MCP interface to create plan
-                        match mcp_server_clone.create_plan_impl(plan_params, plan_actor).await {
+                        match mcp_server_clone
+                            .create_plan_impl(plan_params, plan_actor)
+                            .await
+                        {
                             Ok(result) => {
                                 if result.is_error.unwrap_or(false) {
                                     render_mcp_error("failed to create plan", result.content);
@@ -923,8 +926,14 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
                         // Create Task via MCP (second, per docs: Plan → Task)
                         let task_params = CreateTaskParams {
-                            title: format!("Task for: {}", text_clone.chars().take(50).collect::<String>()),
-                            description: Some(format!("Task created from user input: {}", text_clone)),
+                            title: format!(
+                                "Task for: {}",
+                                text_clone.chars().take(50).collect::<String>()
+                            ),
+                            description: Some(format!(
+                                "Task created from user input: {}",
+                                text_clone
+                            )),
                             goal_type: Some("feature".to_string()),
                             constraints: None,
                             acceptance_criteria: None,
@@ -952,7 +961,10 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         };
 
                         // Call MCP interface to create task
-                        match mcp_server_clone.create_task_impl(task_params, task_actor).await {
+                        match mcp_server_clone
+                            .create_task_impl(task_params, task_actor)
+                            .await
+                        {
                             Ok(result) => {
                                 if result.is_error.unwrap_or(false) {
                                     render_mcp_error("failed to create task", result.content);
