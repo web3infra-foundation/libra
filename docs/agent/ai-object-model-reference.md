@@ -89,6 +89,12 @@ MCP parameter schemas now only expose fields that map to current `git-internal 0
 - Removed pre-0.7 compatibility inputs (pipeline/fwindow/apply-status/token-usage shim).
 - Removed stale Intent task-link input (`CreateIntentParams.task_id`), because task provenance belongs on `Task.intent`.
 - Removed `CreateContextSnapshotParams.base_commit_sha` because `ContextSnapshot` has no commit anchor field in 0.7.
+- MCP create APIs now validate referenced object IDs (`task_id`, `run_id`, `plan_id`, etc.) when AI history is enabled, preventing dangling links.
+- MCP also validates key cross-object relationships:
+  - `Evidence.patchset_id` and `Decision.chosen_patchset_id` must belong to the same `run_id`.
+  - `Run.plan_id` must match `Task.intent` when the task is intent-bound.
+  - `Plan.parent_plan_ids` must belong to the same owning `intent_id`.
+- UUID parameters consistently accept both plain UUID and `uuid:<id>` forms.
 
 ## Active Context Resource
 

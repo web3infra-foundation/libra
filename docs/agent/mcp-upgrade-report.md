@@ -52,7 +52,24 @@ Updated MCP callsites to match the new strict schema:
 - `src/internal/ai/intentspec/persistence.rs`
 - `src/internal/tui/app.rs`
 
-### 3.4 Docs and comments sync
+### 3.4 Reference integrity guardrails
+
+To avoid dangling workflow graphs, MCP create flows now validate referenced IDs (when history manager is present), including:
+
+- `task_id` / `plan_id` / `context_snapshot_id` on run creation
+- `run_id` on patchset/evidence/tool-invocation/provenance/decision creation
+- `intent_id` / `parent_task_id` / `dependencies` on task creation
+- `parent_ids` on intent revision creation
+- `chosen_patchset_id` on decision creation
+
+Additional relational integrity checks were added:
+
+- `Evidence.patchset_id` and `Decision.chosen_patchset_id` must reference a patchset owned by the same `run_id`.
+- `Run.plan_id` is rejected when the selected plan intent does not match the task's bound intent.
+- `Plan.parent_plan_ids` are rejected when parent plans belong to a different intent than the new plan.
+- `update_intent` now normalizes `intent_id` before lookup, so both `uuid:<id>` and plain UUID are accepted consistently.
+
+### 3.5 Docs and comments sync
 
 Updated documentation to match current behavior:
 
@@ -85,4 +102,3 @@ Relevant commits in this task chain:
 - `660255b` `refactor mcp core for git-internal 0.7`
 - `cc47eba` `update mcp docs and tests for event model`
 - `bff564d` `align mcp params with git-internal 0.7`
-

@@ -49,7 +49,7 @@ use rmcp::{
     service::RequestContext,
     tool, tool_router,
 };
-use serde::Serialize;
+use serde::{Serialize, de::DeserializeOwned};
 use uuid::Uuid;
 
 use crate::{
@@ -129,6 +129,71 @@ impl LibraMcpServer {
                 .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
         }
         Ok(())
+    }
+
+    /// Validate object references when history is available.
+    ///
+    /// In memory-only tests the server may be constructed without a history
+    /// manager; in that case we skip foreign-key style checks.
+    async fn ensure_object_exists(
+        &self,
+        object_type: &str,
+        object_id: Uuid,
+        field: &str,
+    ) -> Result<(), ErrorData> {
+        let Some(history) = &self.intent_history_manager else {
+            return Ok(());
+        };
+
+        let exists = history
+            .get_object_hash(object_type, &object_id.to_string())
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?
+            .is_some();
+
+        if exists {
+            Ok(())
+        } else {
+            Err(ErrorData::invalid_params(
+                format!("{field} not found: {object_id}"),
+                None,
+            ))
+        }
+    }
+
+    /// Load one tracked object by type/id when history is enabled.
+    ///
+    /// Returns `Ok(None)` if history is disabled on this server instance.
+    async fn load_tracked_object<T>(
+        &self,
+        object_type: &str,
+        object_id: Uuid,
+        field: &str,
+    ) -> Result<Option<T>, ErrorData>
+    where
+        T: DeserializeOwned + Send + Sync,
+    {
+        let Some(history) = &self.intent_history_manager else {
+            return Ok(None);
+        };
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
+
+        let hash = history
+            .get_object_hash(object_type, &object_id.to_string())
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?
+            .ok_or_else(|| {
+                ErrorData::invalid_params(format!("{field} not found: {object_id}"), None)
+            })?;
+
+        let object = storage
+            .get_json::<T>(&hash)
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        Ok(Some(object))
     }
 
     async fn latest_task_events(&self) -> Result<HashMap<Uuid, TaskEventKind>, ErrorData> {
@@ -238,7 +303,7 @@ fn parse_intent_event_kind(status: &str) -> Result<Option<IntentEventKind>, Erro
         "draft" => Ok(None),
         "active" | "analyzed" => Ok(Some(IntentEventKind::Analyzed)),
         "completed" => Ok(Some(IntentEventKind::Completed)),
-        "cancelled" => Ok(Some(IntentEventKind::Cancelled)),
+        "cancelled" | "discarded" => Ok(Some(IntentEventKind::Cancelled)),
         _ => Err(ErrorData::invalid_params("invalid intent status", None)),
     }
 }
@@ -667,6 +732,10 @@ impl LibraMcpServer {
         }
         parent_ids.sort_unstable();
         parent_ids.dedup();
+        for parent_id in &parent_ids {
+            self.ensure_object_exists("intent", *parent_id, "parent_id")
+                .await?;
+        }
 
         let mut intent = if parent_ids.is_empty() {
             Intent::new(actor.clone(), params.content)
@@ -823,6 +892,7 @@ impl LibraMcpServer {
         &self,
         params: UpdateIntentParams,
     ) -> Result<CallToolResult, ErrorData> {
+        let intent_id = parse_uuid(&params.intent_id, "intent_id")?;
         let history = self
             .intent_history_manager
             .as_ref()
@@ -830,11 +900,11 @@ impl LibraMcpServer {
 
         // Ensure the target intent exists.
         history
-            .get_object_hash("intent", &params.intent_id)
+            .get_object_hash("intent", &intent_id.to_string())
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?
             .ok_or_else(|| {
-                ErrorData::invalid_params(format!("Intent not found: {}", params.intent_id), None)
+                ErrorData::invalid_params(format!("Intent not found: {intent_id}"), None)
             })?;
 
         let mut event_kind = match params.status.as_deref() {
@@ -852,7 +922,6 @@ impl LibraMcpServer {
             ));
         };
 
-        let intent_id = parse_uuid(&params.intent_id, "intent_id")?;
         let actor = self.default_actor()?;
         let mut event = IntentEvent::new(actor, intent_id, event_kind)
             .map_err(|e| ErrorData::internal_error(e, None))?;
@@ -937,20 +1006,26 @@ impl LibraMcpServer {
         // Add task dependencies
         if let Some(deps) = params.dependencies {
             for dep in deps {
-                let dep_id = dep
-                    .parse::<Uuid>()
-                    .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+                let dep_id = parse_uuid(&dep, "dependencies")?;
+                self.ensure_object_exists("task", dep_id, "dependencies")
+                    .await?;
                 task.add_dependency(dep_id);
             }
         }
 
         // Set intent if provided
         if let Some(intent_id_str) = params.intent_id {
-            task.set_intent(Some(parse_uuid(&intent_id_str, "intent_id")?));
+            let intent_id = parse_uuid(&intent_id_str, "intent_id")?;
+            self.ensure_object_exists("intent", intent_id, "intent_id")
+                .await?;
+            task.set_intent(Some(intent_id));
         }
 
         if let Some(parent_task_id) = params.parent_task_id {
-            task.set_parent(Some(parse_uuid(&parent_task_id, "parent_task_id")?));
+            let parent_task_id = parse_uuid(&parent_task_id, "parent_task_id")?;
+            self.ensure_object_exists("task", parent_task_id, "parent_task_id")
+                .await?;
+            task.set_parent(Some(parent_task_id));
         }
 
         if let Some(origin_step_id) = params.origin_step_id {
@@ -1066,6 +1141,9 @@ impl LibraMcpServer {
         actor: ActorRef,
     ) -> Result<CallToolResult, ErrorData> {
         let task_id = parse_uuid(&params.task_id, "task_id")?;
+        let task_for_checks = self
+            .load_tracked_object::<Task>("task", task_id, "task_id")
+            .await?;
 
         let base_commit_sha =
             crate::internal::ai::util::normalize_commit_anchor(&params.base_commit_sha)
@@ -1075,10 +1153,30 @@ impl LibraMcpServer {
             .map_err(|e| ErrorData::invalid_params(e, None))?;
 
         if let Some(plan_id) = params.plan_id {
-            run.set_plan(Some(parse_uuid(&plan_id, "plan_id")?));
+            let plan_id = parse_uuid(&plan_id, "plan_id")?;
+            let plan_for_checks = self
+                .load_tracked_object::<Plan>("plan", plan_id, "plan_id")
+                .await?;
+            if let (Some(task), Some(plan)) = (task_for_checks.as_ref(), plan_for_checks.as_ref())
+                && let Some(task_intent) = task.intent()
+                && plan.intent() != task_intent
+            {
+                return Err(ErrorData::invalid_params(
+                    format!(
+                        "plan_id intent {} does not match task intent {}",
+                        plan.intent(),
+                        task_intent
+                    ),
+                    None,
+                ));
+            }
+            run.set_plan(Some(plan_id));
         }
         if let Some(id) = params.context_snapshot_id {
-            run.set_snapshot(Some(parse_uuid(&id, "context_snapshot_id")?));
+            let snapshot_id = parse_uuid(&id, "context_snapshot_id")?;
+            self.ensure_object_exists("snapshot", snapshot_id, "context_snapshot_id")
+                .await?;
+            run.set_snapshot(Some(snapshot_id));
         }
         self.store_object(&run).await?;
 
@@ -1334,11 +1432,31 @@ impl LibraMcpServer {
         actor: ActorRef,
     ) -> Result<CallToolResult, ErrorData> {
         let intent_id = parse_uuid(&params.intent_id, "intent_id")?;
+        self.ensure_object_exists("intent", intent_id, "intent_id")
+            .await?;
         let mut plan =
             Plan::new(actor, intent_id).map_err(|e| ErrorData::internal_error(e, None))?;
 
         let parent_plan_ids = parse_uuid_vec(params.parent_plan_ids, "parent_plan_ids")?;
         if !parent_plan_ids.is_empty() {
+            for parent_plan_id in &parent_plan_ids {
+                let parent_plan = self
+                    .load_tracked_object::<Plan>("plan", *parent_plan_id, "parent_plan_ids")
+                    .await?;
+                if let Some(parent_plan) = parent_plan
+                    && parent_plan.intent() != intent_id
+                {
+                    return Err(ErrorData::invalid_params(
+                        format!(
+                            "parent_plan_ids must belong to intent {}: {} belongs to {}",
+                            intent_id,
+                            parent_plan.header().object_id(),
+                            parent_plan.intent()
+                        ),
+                        None,
+                    ));
+                }
+            }
             plan.set_parents(parent_plan_ids);
         }
         let context_frame_ids = parse_uuid_vec(params.context_frame_ids, "context_frame_ids")?;
@@ -1434,6 +1552,7 @@ impl LibraMcpServer {
         actor: ActorRef,
     ) -> Result<CallToolResult, ErrorData> {
         let run_id = parse_uuid(&params.run_id, "run_id")?;
+        self.ensure_object_exists("run", run_id, "run_id").await?;
 
         let base_commit_sha =
             crate::internal::ai::util::normalize_commit_anchor(&params.base_commit_sha)
@@ -1566,10 +1685,8 @@ impl LibraMcpServer {
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
-        let run_id = params
-            .run_id
-            .parse::<Uuid>()
-            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+        let run_id = parse_uuid(&params.run_id, "run_id")?;
+        self.ensure_object_exists("run", run_id, "run_id").await?;
 
         let kind = match params.kind.as_str() {
             "test" => EvidenceKind::Test,
@@ -1582,9 +1699,23 @@ impl LibraMcpServer {
             .map_err(|e| ErrorData::internal_error(e, None))?;
 
         if let Some(id) = params.patchset_id {
-            let parsed = id
-                .parse::<Uuid>()
-                .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+            let parsed = parse_uuid(&id, "patchset_id")?;
+            let patchset = self
+                .load_tracked_object::<PatchSet>("patchset", parsed, "patchset_id")
+                .await?;
+            if let Some(patchset) = patchset
+                && patchset.run() != run_id
+            {
+                return Err(ErrorData::invalid_params(
+                    format!(
+                        "patchset_id {} belongs to run {}, not {}",
+                        parsed,
+                        patchset.run(),
+                        run_id
+                    ),
+                    None,
+                ));
+            }
             evidence.set_patchset_id(Some(parsed));
         }
         evidence.set_command(params.command);
@@ -1706,10 +1837,8 @@ impl LibraMcpServer {
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
-        let run_id = params
-            .run_id
-            .parse::<Uuid>()
-            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+        let run_id = parse_uuid(&params.run_id, "run_id")?;
+        self.ensure_object_exists("run", run_id, "run_id").await?;
 
         let mut inv = ToolInvocation::new(actor, run_id, params.tool_name)
             .map_err(|e| ErrorData::internal_error(e, None))?;
@@ -1841,6 +1970,7 @@ impl LibraMcpServer {
         actor: ActorRef,
     ) -> Result<CallToolResult, ErrorData> {
         let run_id = parse_uuid(&params.run_id, "run_id")?;
+        self.ensure_object_exists("run", run_id, "run_id").await?;
 
         let mut prov = Provenance::new(actor, run_id, params.provider, params.model)
             .map_err(|e| ErrorData::internal_error(e, None))?;
@@ -1941,14 +2071,8 @@ impl LibraMcpServer {
             .as_ref()
             .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
 
-        // Handle both regular UUID and uuid:... format
-        let run_id_str = params.run_id.trim();
-        let run_id = if let Some(stripped) = run_id_str.strip_prefix("uuid:") {
-            stripped.parse::<Uuid>()
-        } else {
-            run_id_str.parse::<Uuid>()
-        }
-        .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+        let run_id = parse_uuid(&params.run_id, "run_id")?;
+        self.ensure_object_exists("run", run_id, "run_id").await?;
 
         let decision_type = match params.decision_type.as_str() {
             "commit" => DecisionType::Commit,
@@ -1963,9 +2087,23 @@ impl LibraMcpServer {
             .map_err(|e| ErrorData::internal_error(e, None))?;
 
         if let Some(id) = params.chosen_patchset_id {
-            let parsed = id
-                .parse::<Uuid>()
-                .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+            let parsed = parse_uuid(&id, "chosen_patchset_id")?;
+            let patchset = self
+                .load_tracked_object::<PatchSet>("patchset", parsed, "chosen_patchset_id")
+                .await?;
+            if let Some(patchset) = patchset
+                && patchset.run() != run_id
+            {
+                return Err(ErrorData::invalid_params(
+                    format!(
+                        "chosen_patchset_id {} belongs to run {}, not {}",
+                        parsed,
+                        patchset.run(),
+                        run_id
+                    ),
+                    None,
+                ));
+            }
             decision.set_chosen_patchset_id(Some(parsed));
         }
         decision.set_checkpoint_id(params.checkpoint_id);
