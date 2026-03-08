@@ -883,6 +883,8 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     let text_clone = text.clone();
                     let mcp_ids_clone = self.mcp_ids.clone();
                     let mcp_server_clone = mcp_server.clone();
+                    let provider_name = self.provider_name.clone();
+                    let model_name = self.model_name.clone();
 
                     tokio::spawn(async move {
                         // Create Plan via MCP (first, per docs: Intent → Plan)
@@ -961,26 +963,40 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         };
 
                         // Call MCP interface to create task
-                        match mcp_server_clone
+                        let created_task_id = match mcp_server_clone
                             .create_task_impl(task_params, task_actor)
                             .await
                         {
                             Ok(result) => {
+                                // Extract task_id from result: "Task created with ID: {uuid}"
+                                let task_id = result.content.iter().find_map(|c| {
+                                    c.as_text().and_then(|t| {
+                                        t.text
+                                            .strip_prefix("Task created with ID: ")
+                                            .map(|s| s.to_string())
+                                    })
+                                });
                                 if result.is_error.unwrap_or(false) {
                                     render_mcp_error("failed to create task", result.content);
                                 }
+                                task_id
                             }
                             Err(e) => {
                                 cli_error!(e, "error: failed to create task");
+                                None
                             }
-                        }
+                        };
 
                         // Create run (third, per docs: Task → Run)
-                        let run_params = CreateRunParams {
-                            task_id: mcp_ids_clone
+                        // Use the task_id from create_task_impl result, or fall back to mcp_ids
+                        let run_task_id = created_task_id.or_else(|| {
+                            mcp_ids_clone
                                 .task_id
                                 .clone()
-                                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                        }).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+                        let run_params = CreateRunParams {
+                            task_id: run_task_id,
                             base_commit_sha: "0000000000000000000000000000000000000000".to_string(),
                             status: Some("created".to_string()),
                             context_snapshot_id: None,
@@ -1024,8 +1040,8 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                                 .run_id
                                 .clone()
                                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-                            provider: "openai".to_string(),
-                            model: "gpt-4o".to_string(),
+                            provider: provider_name,
+                            model: model_name,
                             parameters_json: None,
                             token_usage_json: None,
                             tags: None,
@@ -1115,12 +1131,14 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 let tx = self.app_event_tx.clone();
                 let user_text = text;
                 let mcp_server = self.mcp_server.clone();
+                let mcp_ids = self.mcp_ids.clone();
 
                 // Execute agent call in background task
                 let handle = tokio::spawn(async move {
                     struct UiObserver {
                         tx: UnboundedSender<AppEvent>,
                         mcp_server: Option<Arc<LibraMcpServer>>,
+                        mcp_ids: McpIds,
                     }
 
                     impl crate::internal::ai::agent::ToolLoopObserver for UiObserver {
@@ -1147,11 +1165,15 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                                 let tool_name = tool_name.to_string();
                                 let arguments = arguments.clone();
                                 let mcp_server_clone = mcp_server.clone();
+                                let mcp_ids = self.mcp_ids.clone();
 
                                 tokio::spawn(async move {
                                     // Create tool invocation
                                     let invocation_params = CreateToolInvocationParams {
-                                        run_id: uuid::Uuid::new_v4().to_string(),
+                                        run_id: mcp_ids
+                                            .run_id
+                                            .clone()
+                                            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
                                         tool_name: tool_name.clone(),
                                         args_json: Some(arguments.to_string()),
                                         status: Some("ok".to_string()),
@@ -1217,7 +1239,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         }
                     }
 
-                    let mut observer = UiObserver { tx, mcp_server };
+                    let mut observer = UiObserver { tx, mcp_server, mcp_ids };
                     let result = run_tool_loop_with_history_and_observer(
                         &model,
                         history,
