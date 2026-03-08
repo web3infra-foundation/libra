@@ -4,14 +4,17 @@ use git_internal::{
     hash::ObjectHash,
     internal::object::{
         context::ContextSnapshot,
+        context_frame::ContextFrame,
         decision::Decision,
         evidence::Evidence,
         intent_event::IntentEvent,
         patchset::PatchSet,
         plan::Plan,
+        plan_step_event::PlanStepEvent,
         provenance::Provenance,
         run::Run,
         run_event::RunEvent,
+        run_usage::RunUsage,
         task::Task,
         task_event::TaskEvent,
         tool::ToolInvocation,
@@ -128,6 +131,33 @@ impl Identifiable for Provenance {
 }
 
 impl Identifiable for Decision {
+    fn object_id(&self) -> String {
+        self.header().object_id().to_string()
+    }
+    fn object_type(&self) -> String {
+        self.header().object_type().to_string()
+    }
+}
+
+impl Identifiable for ContextFrame {
+    fn object_id(&self) -> String {
+        self.header().object_id().to_string()
+    }
+    fn object_type(&self) -> String {
+        self.header().object_type().to_string()
+    }
+}
+
+impl Identifiable for PlanStepEvent {
+    fn object_id(&self) -> String {
+        self.header().object_id().to_string()
+    }
+    fn object_type(&self) -> String {
+        self.header().object_type().to_string()
+    }
+}
+
+impl Identifiable for RunUsage {
     fn object_id(&self) -> String {
         self.header().object_id().to_string()
     }

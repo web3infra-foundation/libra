@@ -22,20 +22,24 @@
 //!
 //! List tools call `HistoryManager::list_objects(object_type)` using the following types:
 //! `task`, `task_event`, `run`, `run_event`, `snapshot`, `plan`, `patchset`, `evidence`,
-//! `invocation`, `provenance`, `decision`, `intent`, `intent_event`.
+//! `invocation`, `provenance`, `decision`, `intent`, `intent_event`, `context_frame`,
+//! `plan_step_event`, `run_usage`.
 use std::collections::HashMap;
 
 use git_internal::internal::object::{
     context::{ContextItem, ContextItemKind, ContextSnapshot, SelectionStrategy},
+    context_frame::{ContextFrame, FrameKind},
     decision::{Decision, DecisionType},
     evidence::{Evidence, EvidenceKind},
     intent::{Intent, IntentSpec},
     intent_event::{IntentEvent, IntentEventKind},
     patchset::{ChangeType, DiffFormat, PatchSet, TouchedFile},
     plan::{Plan, PlanStep},
+    plan_step_event::{PlanStepEvent, PlanStepStatus},
     provenance::Provenance,
     run::Run,
     run_event::{RunEvent, RunEventKind},
+    run_usage::RunUsage,
     task::{GoalType, Task},
     task_event::{TaskEvent, TaskEventKind},
     tool::{IoFootprint, ToolInvocation, ToolStatus},
@@ -366,6 +370,30 @@ pub(super) fn run_status_label(kind: &RunEventKind) -> &'static str {
     }
 }
 
+fn parse_frame_kind(kind: &str) -> FrameKind {
+    match kind.trim() {
+        "intent_analysis" => FrameKind::IntentAnalysis,
+        "step_summary" => FrameKind::StepSummary,
+        "code_change" => FrameKind::CodeChange,
+        "system_state" => FrameKind::SystemState,
+        "error_recovery" => FrameKind::ErrorRecovery,
+        "checkpoint" => FrameKind::Checkpoint,
+        "tool_call" => FrameKind::ToolCall,
+        other => FrameKind::Other(other.to_string()),
+    }
+}
+
+fn parse_plan_step_status(status: &str) -> Result<PlanStepStatus, ErrorData> {
+    match status {
+        "pending" => Ok(PlanStepStatus::Pending),
+        "progressing" => Ok(PlanStepStatus::Progressing),
+        "completed" => Ok(PlanStepStatus::Completed),
+        "failed" => Ok(PlanStepStatus::Failed),
+        "skipped" => Ok(PlanStepStatus::Skipped),
+        _ => Err(ErrorData::invalid_params("invalid plan step status", None)),
+    }
+}
+
 fn parse_context_item_kind(kind: Option<&str>) -> ContextItemKind {
     match kind.unwrap_or("file").trim() {
         "file" => ContextItemKind::File,
@@ -483,12 +511,14 @@ pub struct CreateRunParams {
     pub context_snapshot_id: Option<String>,
     pub error: Option<String>,
     /// Agent instances participating in this run.
+    /// Accepted for forward compatibility; not yet persisted by the Run object model.
     pub agent_instances: Option<Vec<AgentInstanceParams>>,
     /// Arbitrary metrics JSON (e.g. token counts, timings).
     pub metrics_json: Option<String>,
     /// Optional lifecycle reason for the initial run event.
     pub reason: Option<String>,
-    /// Orchestrator version (default: libra-builtin)
+    /// Orchestrator version (default: libra-builtin).
+    /// Accepted for forward compatibility; not yet persisted by the Run object model.
     pub orchestrator_version: Option<String>,
     /// Search tags (key-value pairs)
     pub tags: Option<HashMap<String, String>>,
@@ -704,6 +734,88 @@ pub struct CreateDecisionParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ListDecisionsParams {
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CreateContextFrameParams {
+    /// Semantic frame kind: "intent_analysis", "step_summary", "code_change",
+    /// "system_state", "error_recovery", "checkpoint", "tool_call", or custom string.
+    pub kind: String,
+    /// Short human-readable description of the context increment.
+    pub summary: String,
+    /// Optional associated intent id.
+    pub intent_id: Option<String>,
+    /// Optional associated run id.
+    pub run_id: Option<String>,
+    /// Optional associated plan id.
+    pub plan_id: Option<String>,
+    /// Optional associated plan-step id.
+    pub step_id: Option<String>,
+    /// Optional structured payload (arbitrary JSON).
+    pub data: Option<serde_json::Value>,
+    /// Optional approximate token footprint for budgeting.
+    pub token_estimate: Option<u64>,
+    /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
+    pub actor_kind: Option<String>,
+    /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
+    pub actor_id: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ListContextFramesParams {
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CreatePlanStepEventParams {
+    /// Plan revision that owns the step.
+    pub plan_id: String,
+    /// Stable logical step id inside the plan.
+    pub step_id: String,
+    /// Run attempt that produced this step event.
+    pub run_id: String,
+    /// Step execution status: "pending", "progressing", "completed", "failed", "skipped".
+    pub status: String,
+    /// Optional human-readable reason for this status transition.
+    pub reason: Option<String>,
+    /// Context frame ids consumed while executing the step.
+    pub consumed_frames: Option<Vec<String>>,
+    /// Context frame ids produced while executing the step.
+    pub produced_frames: Option<Vec<String>>,
+    /// Optional durable task spawned from this step.
+    pub spawned_task_id: Option<String>,
+    /// Optional structured runtime outputs.
+    pub outputs: Option<serde_json::Value>,
+    /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
+    pub actor_kind: Option<String>,
+    /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
+    pub actor_id: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ListPlanStepEventsParams {
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CreateRunUsageParams {
+    /// Run that produced this usage summary.
+    pub run_id: String,
+    /// Input tokens consumed.
+    pub input_tokens: u64,
+    /// Output tokens produced.
+    pub output_tokens: u64,
+    /// Optional billing estimate in USD.
+    pub cost_usd: Option<f64>,
+    /// Actor kind: "human", "agent", "system", "mcp_client". Omit to auto-detect.
+    pub actor_kind: Option<String>,
+    /// Actor identifier (e.g. username, agent name). Required when `actor_kind` is set.
+    pub actor_id: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ListRunUsagesParams {
     pub limit: Option<usize>,
 }
 
@@ -1289,11 +1401,6 @@ impl LibraMcpServer {
         params: CreateContextSnapshotParams,
         actor: ActorRef,
     ) -> Result<CallToolResult, ErrorData> {
-        let storage = self
-            .storage
-            .as_ref()
-            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
-
         let strategy = match params.selection_strategy.as_str() {
             "explicit" => SelectionStrategy::Explicit,
             "heuristic" => SelectionStrategy::Heuristic,
@@ -1330,29 +1437,7 @@ impl LibraMcpServer {
             snapshot.set_summary(Some(summary));
         }
 
-        // TODO: Enable these when git-internal is updated to expose header_mut/tags
-        // if let Some(tags) = params.tags {
-        //     snapshot.header_mut().tags_mut().extend(tags);
-        // }
-        // if let Some(eids) = params.external_ids {
-        //     snapshot.header_mut().external_ids_mut().extend(eids);
-        // }
-
-        let hash = storage
-            .put_json(&snapshot)
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-
-        if let Some(history) = &self.intent_history_manager {
-            history
-                .append(
-                    &snapshot.header().object_type().to_string(),
-                    &snapshot.header().object_id().to_string(),
-                    hash,
-                )
-                .await
-                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-        }
+        self.store_object(&snapshot).await?;
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "ContextSnapshot created with ID: {}",
@@ -1682,11 +1767,6 @@ impl LibraMcpServer {
         params: CreateEvidenceParams,
         actor: ActorRef,
     ) -> Result<CallToolResult, ErrorData> {
-        let storage = self
-            .storage
-            .as_ref()
-            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
-
         let run_id = parse_uuid(&params.run_id, "run_id")?;
         self.ensure_object_exists("run", run_id, "run_id").await?;
 
@@ -1730,29 +1810,7 @@ impl LibraMcpServer {
             }
         }
 
-        // TODO: Enable these when git-internal is updated to expose header_mut/tags
-        // if let Some(tags) = params.tags {
-        //     evidence.header_mut().tags_mut().extend(tags);
-        // }
-        // if let Some(eids) = params.external_ids {
-        //     evidence.header_mut().external_ids_mut().extend(eids);
-        // }
-
-        let hash = storage
-            .put_json(&evidence)
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-
-        if let Some(history) = &self.intent_history_manager {
-            history
-                .append(
-                    &evidence.header().object_type().to_string(),
-                    &evidence.header().object_id().to_string(),
-                    hash,
-                )
-                .await
-                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-        }
+        self.store_object(&evidence).await?;
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Evidence created with ID: {}",
@@ -1834,11 +1892,6 @@ impl LibraMcpServer {
         params: CreateToolInvocationParams,
         actor: ActorRef,
     ) -> Result<CallToolResult, ErrorData> {
-        let storage = self
-            .storage
-            .as_ref()
-            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
-
         let run_id = parse_uuid(&params.run_id, "run_id")?;
         self.ensure_object_exists("run", run_id, "run_id").await?;
 
@@ -1868,29 +1921,7 @@ impl LibraMcpServer {
             }
         }
 
-        // TODO: Enable these when git-internal is updated to expose header_mut/tags
-        // if let Some(tags) = params.tags {
-        //     inv.header_mut().tags_mut().extend(tags);
-        // }
-        // if let Some(eids) = params.external_ids {
-        //     inv.header_mut().external_ids_mut().extend(eids);
-        // }
-
-        let hash = storage
-            .put_json(&inv)
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-
-        if let Some(history) = &self.intent_history_manager {
-            history
-                .append(
-                    &inv.header().object_type().to_string(),
-                    &inv.header().object_id().to_string(),
-                    hash,
-                )
-                .await
-                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-        }
+        self.store_object(&inv).await?;
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "ToolInvocation created with ID: {}",
@@ -2068,11 +2099,6 @@ impl LibraMcpServer {
         params: CreateDecisionParams,
         actor: ActorRef,
     ) -> Result<CallToolResult, ErrorData> {
-        let storage = self
-            .storage
-            .as_ref()
-            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
-
         let run_id = parse_uuid(&params.run_id, "run_id")?;
         self.ensure_object_exists("run", run_id, "run_id").await?;
 
@@ -2121,29 +2147,7 @@ impl LibraMcpServer {
             decision.set_result_commit_sha(Some(hash_val));
         }
 
-        // TODO: Enable these when git-internal is updated to expose header_mut/tags
-        // if let Some(tags) = params.tags {
-        //     decision.header_mut().tags_mut().extend(tags);
-        // }
-        // if let Some(eids) = params.external_ids {
-        //     decision.header_mut().external_ids_mut().extend(eids);
-        // }
-
-        let hash = storage
-            .put_json(&decision)
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-
-        if let Some(history) = &self.intent_history_manager {
-            history
-                .append(
-                    &decision.header().object_type().to_string(),
-                    &decision.header().object_id().to_string(),
-                    hash,
-                )
-                .await
-                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-        }
+        self.store_object(&decision).await?;
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Decision created with ID: {}",
@@ -2197,6 +2201,346 @@ impl LibraMcpServer {
         if out.is_empty() {
             Ok(CallToolResult::success(vec![Content::text(
                 "No decisions found.",
+            )]))
+        } else {
+            Ok(CallToolResult::success(vec![Content::text(out.join("\n"))]))
+        }
+    }
+
+    // ── ContextFrame tools ──────────────────────────────────────────
+
+    #[tool(description = "Create a new ContextFrame (incremental context window entry)")]
+    pub async fn create_context_frame(
+        &self,
+        ctx: RequestContext<RoleServer>,
+        Parameters(params): Parameters<CreateContextFrameParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let actor = self.resolve_actor(
+            &ctx,
+            params.actor_kind.as_deref(),
+            params.actor_id.as_deref(),
+        )?;
+        self.create_context_frame_impl(params, actor).await
+    }
+
+    /// Core implementation of create_context_frame, callable without RequestContext.
+    pub async fn create_context_frame_impl(
+        &self,
+        params: CreateContextFrameParams,
+        actor: ActorRef,
+    ) -> Result<CallToolResult, ErrorData> {
+        let kind = parse_frame_kind(&params.kind);
+
+        let mut frame = ContextFrame::new(actor, kind, params.summary)
+            .map_err(|e| ErrorData::internal_error(e, None))?;
+
+        if let Some(id) = params.intent_id {
+            let parsed = parse_uuid(&id, "intent_id")?;
+            self.ensure_object_exists("intent", parsed, "intent_id")
+                .await?;
+            frame.set_intent_id(Some(parsed));
+        }
+        if let Some(id) = params.run_id {
+            let parsed = parse_uuid(&id, "run_id")?;
+            self.ensure_object_exists("run", parsed, "run_id").await?;
+            frame.set_run_id(Some(parsed));
+        }
+        if let Some(id) = params.plan_id {
+            let parsed = parse_uuid(&id, "plan_id")?;
+            self.ensure_object_exists("plan", parsed, "plan_id").await?;
+            frame.set_plan_id(Some(parsed));
+        }
+        if let Some(id) = params.step_id {
+            let parsed = parse_uuid(&id, "step_id")?;
+            frame.set_step_id(Some(parsed));
+        }
+        if let Some(data) = params.data {
+            frame.set_data(Some(data));
+        }
+        if let Some(est) = params.token_estimate {
+            frame.set_token_estimate(Some(est));
+        }
+
+        self.store_object(&frame).await?;
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "ContextFrame created with ID: {}",
+            frame.header().object_id()
+        ))]))
+    }
+
+    #[tool(description = "List recent context frames")]
+    pub async fn list_context_frames(
+        &self,
+        Parameters(params): Parameters<ListContextFramesParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.list_context_frames_impl(params).await
+    }
+
+    /// Core implementation of list_context_frames, callable without rmcp Parameters wrapper.
+    pub async fn list_context_frames_impl(
+        &self,
+        params: ListContextFramesParams,
+    ) -> Result<CallToolResult, ErrorData> {
+        let history = self
+            .intent_history_manager
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
+
+        let objects = history
+            .list_objects("context_frame")
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        let limit = params.limit.unwrap_or(10);
+        let mut out = Vec::new();
+        for (_id, hash) in objects.into_iter() {
+            if out.len() >= limit {
+                break;
+            }
+            if let Ok(frame) = storage.get_json::<ContextFrame>(&hash).await {
+                out.push(format!(
+                    "ID: {} | Kind: {:?} | Summary: {} | Tokens: {}",
+                    frame.header().object_id(),
+                    frame.kind(),
+                    frame.summary(),
+                    frame
+                        .token_estimate()
+                        .map_or("-".to_string(), |t| t.to_string()),
+                ));
+            }
+        }
+
+        if out.is_empty() {
+            Ok(CallToolResult::success(vec![Content::text(
+                "No context frames found.",
+            )]))
+        } else {
+            Ok(CallToolResult::success(vec![Content::text(out.join("\n"))]))
+        }
+    }
+
+    // ── PlanStepEvent tools ─────────────────────────────────────────
+
+    #[tool(description = "Create a new PlanStepEvent (step execution lifecycle event)")]
+    pub async fn create_plan_step_event(
+        &self,
+        ctx: RequestContext<RoleServer>,
+        Parameters(params): Parameters<CreatePlanStepEventParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let actor = self.resolve_actor(
+            &ctx,
+            params.actor_kind.as_deref(),
+            params.actor_id.as_deref(),
+        )?;
+        self.create_plan_step_event_impl(params, actor).await
+    }
+
+    /// Core implementation of create_plan_step_event, callable without RequestContext.
+    pub async fn create_plan_step_event_impl(
+        &self,
+        params: CreatePlanStepEventParams,
+        actor: ActorRef,
+    ) -> Result<CallToolResult, ErrorData> {
+        let plan_id = parse_uuid(&params.plan_id, "plan_id")?;
+        let step_id = parse_uuid(&params.step_id, "step_id")?;
+        let run_id = parse_uuid(&params.run_id, "run_id")?;
+        let status = parse_plan_step_status(&params.status)?;
+
+        self.ensure_object_exists("plan", plan_id, "plan_id")
+            .await?;
+        self.ensure_object_exists("run", run_id, "run_id").await?;
+
+        let mut event = PlanStepEvent::new(actor, plan_id, step_id, run_id, status)
+            .map_err(|e| ErrorData::internal_error(e, None))?;
+
+        if let Some(reason) = params.reason {
+            event.set_reason(Some(reason));
+        }
+        if let Some(ids) = params.consumed_frames {
+            let uuids: Vec<Uuid> = ids
+                .iter()
+                .map(|s| parse_uuid(s, "consumed_frames"))
+                .collect::<Result<_, _>>()?;
+            event.set_consumed_frames(uuids);
+        }
+        if let Some(ids) = params.produced_frames {
+            let uuids: Vec<Uuid> = ids
+                .iter()
+                .map(|s| parse_uuid(s, "produced_frames"))
+                .collect::<Result<_, _>>()?;
+            event.set_produced_frames(uuids);
+        }
+        if let Some(id) = params.spawned_task_id {
+            let parsed = parse_uuid(&id, "spawned_task_id")?;
+            event.set_spawned_task_id(Some(parsed));
+        }
+        if let Some(outputs) = params.outputs {
+            event.set_outputs(Some(outputs));
+        }
+
+        self.store_object(&event).await?;
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "PlanStepEvent created with ID: {}",
+            event.header().object_id()
+        ))]))
+    }
+
+    #[tool(description = "List recent plan step events")]
+    pub async fn list_plan_step_events(
+        &self,
+        Parameters(params): Parameters<ListPlanStepEventsParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.list_plan_step_events_impl(params).await
+    }
+
+    /// Core implementation of list_plan_step_events, callable without rmcp Parameters wrapper.
+    pub async fn list_plan_step_events_impl(
+        &self,
+        params: ListPlanStepEventsParams,
+    ) -> Result<CallToolResult, ErrorData> {
+        let history = self
+            .intent_history_manager
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
+
+        let objects = history
+            .list_objects("plan_step_event")
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        let limit = params.limit.unwrap_or(10);
+        let mut out = Vec::new();
+        for (_id, hash) in objects.into_iter() {
+            if out.len() >= limit {
+                break;
+            }
+            if let Ok(evt) = storage.get_json::<PlanStepEvent>(&hash).await {
+                out.push(format!(
+                    "ID: {} | Plan: {} | Step: {} | Status: {:?} | Reason: {}",
+                    evt.header().object_id(),
+                    evt.plan_id(),
+                    evt.step_id(),
+                    evt.status(),
+                    evt.reason().unwrap_or("-"),
+                ));
+            }
+        }
+
+        if out.is_empty() {
+            Ok(CallToolResult::success(vec![Content::text(
+                "No plan step events found.",
+            )]))
+        } else {
+            Ok(CallToolResult::success(vec![Content::text(out.join("\n"))]))
+        }
+    }
+
+    // ── RunUsage tools ──────────────────────────────────────────────
+
+    #[tool(description = "Record token/cost usage for a run")]
+    pub async fn create_run_usage(
+        &self,
+        ctx: RequestContext<RoleServer>,
+        Parameters(params): Parameters<CreateRunUsageParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let actor = self.resolve_actor(
+            &ctx,
+            params.actor_kind.as_deref(),
+            params.actor_id.as_deref(),
+        )?;
+        self.create_run_usage_impl(params, actor).await
+    }
+
+    /// Core implementation of create_run_usage, callable without RequestContext.
+    pub async fn create_run_usage_impl(
+        &self,
+        params: CreateRunUsageParams,
+        actor: ActorRef,
+    ) -> Result<CallToolResult, ErrorData> {
+        let run_id = parse_uuid(&params.run_id, "run_id")?;
+        self.ensure_object_exists("run", run_id, "run_id").await?;
+
+        let usage = RunUsage::new(
+            actor,
+            run_id,
+            params.input_tokens,
+            params.output_tokens,
+            params.cost_usd,
+        )
+        .map_err(|e| ErrorData::internal_error(e, None))?;
+
+        self.store_object(&usage).await?;
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "RunUsage created with ID: {} | Input: {} | Output: {} | Cost: {}",
+            usage.header().object_id(),
+            usage.input_tokens(),
+            usage.output_tokens(),
+            usage
+                .cost_usd()
+                .map_or("-".to_string(), |c| format!("${:.4}", c)),
+        ))]))
+    }
+
+    #[tool(description = "List recent run usage records")]
+    pub async fn list_run_usages(
+        &self,
+        Parameters(params): Parameters<ListRunUsagesParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.list_run_usages_impl(params).await
+    }
+
+    /// Core implementation of list_run_usages, callable without rmcp Parameters wrapper.
+    pub async fn list_run_usages_impl(
+        &self,
+        params: ListRunUsagesParams,
+    ) -> Result<CallToolResult, ErrorData> {
+        let history = self
+            .intent_history_manager
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("History not available", None))?;
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| ErrorData::internal_error("Storage not available", None))?;
+
+        let objects = history
+            .list_objects("run_usage")
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        let limit = params.limit.unwrap_or(10);
+        let mut out = Vec::new();
+        for (_id, hash) in objects.into_iter() {
+            if out.len() >= limit {
+                break;
+            }
+            if let Ok(u) = storage.get_json::<RunUsage>(&hash).await {
+                out.push(format!(
+                    "ID: {} | Run: {} | In: {} | Out: {} | Cost: {}",
+                    u.header().object_id(),
+                    u.run_id(),
+                    u.input_tokens(),
+                    u.output_tokens(),
+                    u.cost_usd()
+                        .map_or("-".to_string(), |c| format!("${:.4}", c)),
+                ));
+            }
+        }
+
+        if out.is_empty() {
+            Ok(CallToolResult::success(vec![Content::text(
+                "No run usage records found.",
             )]))
         } else {
             Ok(CallToolResult::success(vec![Content::text(out.join("\n"))]))

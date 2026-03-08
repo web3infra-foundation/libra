@@ -25,6 +25,12 @@
 //! | `list_provenances` | List recent Provenance records. Input: `ListProvenancesParams`. Output: List of summaries. |
 //! | `create_decision` | Record a Decision (Commit/Checkpoint). Input: `CreateDecisionParams`. Output: Decision ID. |
 //! | `list_decisions` | List recent Decisions. Input: `ListDecisionsParams`. Output: List of summaries. |
+//! | `create_context_frame` | Create a ContextFrame (incremental context window entry). Input: `CreateContextFrameParams`. Output: Frame ID. |
+//! | `list_context_frames` | List recent ContextFrames. Input: `ListContextFramesParams`. Output: List of summaries. |
+//! | `create_plan_step_event` | Create a PlanStepEvent (step execution lifecycle event). Input: `CreatePlanStepEventParams`. Output: Event ID. |
+//! | `list_plan_step_events` | List recent PlanStepEvents. Input: `ListPlanStepEventsParams`. Output: List of summaries. |
+//! | `create_run_usage` | Record token/cost usage for a run. Input: `CreateRunUsageParams`. Output: Usage ID. |
+//! | `list_run_usages` | List recent RunUsage records. Input: `ListRunUsagesParams`. Output: List of summaries. |
 //!
 //! See `resource.rs` for detailed parameter structures.
 
