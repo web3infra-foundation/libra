@@ -29,8 +29,10 @@
 //! | `gemini`    | Google Gemini    | `x-goog-api-key` header  | `https://generativelanguage.googleapis.com` |
 //! | `zhipu`     | Zhipu GLM        | Bearer token             | `https://open.bigmodel.cn/api/paas/v4` |
 //! | `ollama`    | Ollama (local)   | None                     | `http://localhost:11434/v1` |
+//! | `codex`     | OpenAI Codex     | Bearer token             | `http://localhost:8080` |
 
 pub mod anthropic;
+pub mod codex;
 pub mod deepseek;
 pub mod gemini;
 pub mod ollama;

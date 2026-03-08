@@ -43,10 +43,10 @@ rust_library(
         "//third-party/rust/crates/httparse/1.10.1:httparse",
         "//third-party/rust/crates/httpdate/1.0.3:httpdate",
         "//third-party/rust/crates/itoa/1.0.17:itoa",
-        "//third-party/rust/crates/pin-project-lite/0.2.16:pin-project-lite",
+        "//third-party/rust/crates/pin-project-lite/0.2.17:pin-project-lite",
         "//third-party/rust/crates/pin-utils/0.1.0:pin-utils",
         "//third-party/rust/crates/smallvec/1.15.1:smallvec",
-        "//third-party/rust/crates/tokio/1.49.0:tokio",
+        "//third-party/rust/crates/tokio/1.50.0:tokio",
         "//third-party/rust/crates/want/0.3.1:want",
     ],
 )

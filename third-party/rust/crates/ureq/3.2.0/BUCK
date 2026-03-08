@@ -38,7 +38,7 @@ rust_library(
         "//third-party/rust/crates/log/0.4.29:log",
         "//third-party/rust/crates/percent-encoding/2.3.2:percent-encoding",
         "//third-party/rust/crates/rustls-pki-types/1.14.0:rustls-pki-types",
-        "//third-party/rust/crates/rustls/0.23.36:rustls",
+        "//third-party/rust/crates/rustls/0.23.37:rustls",
         "//third-party/rust/crates/ureq-proto/0.5.3:ureq-proto",
     ],
 )
