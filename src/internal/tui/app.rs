@@ -1596,7 +1596,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
                 fn on_graph_progress(&self, completed: usize, total: usize) {
                     if completed == total && total > 0 {
-                        self.send_note(format!("dagrs graph finished: {completed}/{total} tasks reached terminal state"));
+                        self.send_note(format!(
+                            "dagrs graph finished: {completed}/{total} tasks reached terminal state"
+                        ));
                     }
                 }
 

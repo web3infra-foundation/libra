@@ -49,7 +49,9 @@ pub struct RunStateSnapshot {
 
 impl RunStateSnapshot {
     pub fn result_for(&self, task_id: Uuid) -> Option<&TaskResult> {
-        self.task_results.iter().find(|result| result.task_id == task_id)
+        self.task_results
+            .iter()
+            .find(|result| result.task_id == task_id)
     }
 
     pub fn status_for(&self, task_id: Uuid) -> TaskNodeStatus {

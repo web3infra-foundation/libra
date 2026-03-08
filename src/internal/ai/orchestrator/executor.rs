@@ -7,9 +7,8 @@ use std::{
 use async_trait::async_trait;
 use dagrs::{
     Action, CheckpointConfig, DefaultNode, EnvVar, FileCheckpointStore, Graph, InChannels, Node,
-    NodeTable, OutChannels, Output,
+    NodeTable, OutChannels, Output, event::GraphEvent,
 };
-use dagrs::event::GraphEvent;
 use serde::Deserialize;
 use serde_json::Value;
 use uuid::Uuid;
@@ -424,7 +423,9 @@ impl<M: CompletionModel + 'static> Action for TaskDagrsAction<M> {
 
         if !dependencies_ok {
             let _ = out_channels
-                .broadcast(dagrs::Content::new(DagrsDependencySignal { success: false }))
+                .broadcast(dagrs::Content::new(DagrsDependencySignal {
+                    success: false,
+                }))
                 .await;
             return Output::empty();
         }
@@ -450,7 +451,9 @@ impl<M: CompletionModel + 'static> Action for TaskDagrsAction<M> {
             }
             TaskNodeStatus::Failed => {
                 let _ = out_channels
-                    .broadcast(dagrs::Content::new(DagrsDependencySignal { success: false }))
+                    .broadcast(dagrs::Content::new(DagrsDependencySignal {
+                        success: false,
+                    }))
                     .await;
                 Output::error(
                     result
@@ -461,15 +464,22 @@ impl<M: CompletionModel + 'static> Action for TaskDagrsAction<M> {
             }
             TaskNodeStatus::Skipped => {
                 let _ = out_channels
-                    .broadcast(dagrs::Content::new(DagrsDependencySignal { success: false }))
+                    .broadcast(dagrs::Content::new(DagrsDependencySignal {
+                        success: false,
+                    }))
                     .await;
                 Output::empty()
             }
             TaskNodeStatus::Pending | TaskNodeStatus::Running => {
                 let _ = out_channels
-                    .broadcast(dagrs::Content::new(DagrsDependencySignal { success: false }))
+                    .broadcast(dagrs::Content::new(DagrsDependencySignal {
+                        success: false,
+                    }))
                     .await;
-                Output::error(format!("task {} returned invalid terminal state", self.task.title))
+                Output::error(format!(
+                    "task {} returned invalid terminal state",
+                    self.task.title
+                ))
             }
         }
     }
@@ -571,13 +581,14 @@ fn build_dagrs_graph<M: CompletionModel + 'static>(
     add_batch_barriers(&mut dependencies, &batches, &index);
 
     for (task_id, deps) in dependencies {
-        let to_id = dagrs_ids
-            .get(&task_id)
-            .copied()
-            .ok_or_else(|| OrchestratorError::PlanningFailed(format!("missing dagrs node for task {task_id}")))?;
+        let to_id = dagrs_ids.get(&task_id).copied().ok_or_else(|| {
+            OrchestratorError::PlanningFailed(format!("missing dagrs node for task {task_id}"))
+        })?;
         for dep in deps {
             let from_id = dagrs_ids.get(&dep).copied().ok_or_else(|| {
-                OrchestratorError::PlanningFailed(format!("missing dagrs node for dependency {dep}"))
+                OrchestratorError::PlanningFailed(format!(
+                    "missing dagrs node for dependency {dep}"
+                ))
             })?;
             graph.add_edge(from_id, vec![to_id]);
         }
@@ -713,7 +724,9 @@ pub async fn execute_dag<M: CompletionModel + 'static>(
         )
     })
     .await
-    .map_err(|err| OrchestratorError::ConfigError(format!("failed to build dagrs graph: {err}")))??;
+    .map_err(|err| {
+        OrchestratorError::ConfigError(format!("failed to build dagrs graph: {err}"))
+    })??;
 
     let event_monitor = tokio::spawn(monitor_graph_events(
         graph.subscribe(),
@@ -1294,10 +1307,7 @@ mod tests {
         b.title = "B".into();
         b.objective = "B".into();
 
-        let plan = plan_for_tasks(
-            vec![a, c, b],
-            1,
-        );
+        let plan = plan_for_tasks(vec![a, c, b], 1);
 
         let run_state = execute_dag(&plan, &model, &registry, &config)
             .await
@@ -1308,10 +1318,12 @@ mod tests {
         assert_eq!(run_state.task_results.len(), 3);
         assert_eq!(run_state.dagrs_runtime.total_nodes, 3);
         assert_eq!(run_state.dagrs_runtime.completed_nodes, 3);
-        assert!(run_state
-            .ordered_task_results()
-            .iter()
-            .all(|result| result.status == TaskNodeStatus::Completed));
+        assert!(
+            run_state
+                .ordered_task_results()
+                .iter()
+                .all(|result| result.status == TaskNodeStatus::Completed)
+        );
     }
 
     #[tokio::test]

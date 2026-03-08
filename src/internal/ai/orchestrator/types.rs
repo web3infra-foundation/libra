@@ -349,12 +349,7 @@ pub trait OrchestratorObserver: Send + Sync {
 
     fn on_graph_progress(&self, _completed: usize, _total: usize) {}
 
-    fn on_graph_checkpoint_saved(
-        &self,
-        _checkpoint_id: &str,
-        _pc: usize,
-        _completed_nodes: usize,
-    ) {
+    fn on_graph_checkpoint_saved(&self, _checkpoint_id: &str, _pc: usize, _completed_nodes: usize) {
     }
 
     fn on_graph_checkpoint_restored(&self, _checkpoint_id: &str, _pc: usize) {}

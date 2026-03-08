@@ -95,13 +95,9 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
                 observer: observer.clone(),
             };
 
-            let run_state = executor::execute_dag(
-                &plan_spec,
-                &self.model,
-                &self.registry,
-                &executor_config,
-            )
-            .await?;
+            let run_state =
+                executor::execute_dag(&plan_spec, &self.model, &self.registry, &executor_config)
+                    .await?;
 
             // Phase 3: System verification
             let system_report = verifier::build_system_report(&spec, &plan_spec, &run_state);

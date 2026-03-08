@@ -48,6 +48,19 @@ pub enum CodeProvider {
     Ollama,
 }
 
+impl CodeProvider {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Gemini => "gemini",
+            Self::Openai => "openai",
+            Self::Anthropic => "anthropic",
+            Self::Deepseek => "deepseek",
+            Self::Zhipu => "zhipu",
+            Self::Ollama => "ollama",
+        }
+    }
+}
+
 #[derive(Parser, Debug)]
 pub struct CodeArgs {
     /// Run the web server only (no TUI). Alias: `--web`.
@@ -106,19 +119,17 @@ pub async fn execute(args: CodeArgs) {
 }
 
 async fn root() -> Html<&'static str> {
-    Html(
-        r#"<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Libra Code</title>
-  </head>
-  <body>
-    <h1>Hello, Libra Code!</h1>
-  </body>
-</html>"#,
-    )
+    Html(browse_page_html())
+}
+
+fn browse_page_html() -> &'static str {
+    include_str!("code/browse_page.html")
+}
+
+fn browse_router() -> Router {
+    Router::new()
+        .route("/", get(root))
+        .route("/browse-page.html", get(root))
 }
 
 struct WebHandle {
@@ -137,12 +148,10 @@ impl WebHandle {
 async fn start_web_server(host: &str, port: u16) -> anyhow::Result<WebHandle> {
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
-
-    let app = Router::new().route("/", get(root));
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
     let join = tokio::spawn(async move {
-        axum::serve(listener, app)
+        axum::serve(listener, browse_router())
             .with_graceful_shutdown(async move {
                 let _ = shutdown_rx.await;
             })
@@ -197,24 +206,14 @@ async fn create_initial_intent(mcp_server: &Arc<LibraMcpServer>) {
 }
 
 async fn execute_web_only(args: CodeArgs) {
-    let addr: SocketAddr = match format!("{}:{}", args.host, args.port).parse() {
-        Ok(addr) => addr,
-        Err(e) => {
-            cli_error!(e, "error: invalid address '{}:{}'", args.host, args.port);
+    let web_handle = match start_web_server(&args.host, args.port).await {
+        Ok(handle) => handle,
+        Err(err) => {
+            cli_error!(err, "fatal: failed to start web server");
             return;
         }
     };
-
-    let listener = match tokio::net::TcpListener::bind(addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            cli_error!(e, "fatal: failed to bind to {}", addr);
-            return;
-        }
-    };
-
-    let app = Router::new().route("/", get(root));
-    println!("Libra Code server running at http://{}", addr);
+    println!("Libra Code server running at http://{}", web_handle.addr);
 
     // Prepare MCP server instance shared between the HTTP transport and TUI bridge
     // Use repository working directory to ensure correct initialization of .libra resources.
@@ -237,15 +236,9 @@ async fn execute_web_only(args: CodeArgs) {
 
     println!("{}", mcp_line);
 
-    if let Err(e) = axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await
-    {
-        eprintln!("Server error: {}", e);
-    }
+    let _ = tokio::signal::ctrl_c().await;
 
+    web_handle.shutdown().await;
     if let Some(handle) = mcp_handle {
         handle.shutdown().await;
     }
@@ -254,15 +247,28 @@ async fn execute_web_only(args: CodeArgs) {
 async fn execute_tui(args: CodeArgs) {
     // Use repository working directory to ensure correct initialization of .libra resources.
     let working_dir = crate::utils::util::working_dir();
+    let CodeArgs {
+        web_only: _,
+        port,
+        host,
+        provider,
+        model,
+        temperature,
+        context,
+        resume,
+        mcp_port,
+        stdio: _,
+        api_base,
+    } = args;
 
     // Validate --api-base: only honored for Ollama via CLI flag. Other providers
     // accept custom base URLs through their respective environment variables.
-    if args.api_base.is_some() && args.provider != CodeProvider::Ollama {
+    if api_base.is_some() && provider != CodeProvider::Ollama {
         eprintln!(
             "warning: --api-base is only honored for the ollama provider; \
              use provider-specific env vars (e.g. OPENAI_BASE_URL) for others; ignoring"
         );
-    } else if let Some(ref base_url) = args.api_base {
+    } else if let Some(ref base_url) = api_base {
         match Url::parse(base_url) {
             Ok(u) if u.scheme() == "http" || u.scheme() == "https" => {}
             Ok(u) => {
@@ -279,9 +285,7 @@ async fn execute_tui(args: CodeArgs) {
         }
     }
 
-    let preamble = system_preamble(&working_dir, args.context.as_deref());
-    let temperature = args.temperature;
-    let resume = args.resume;
+    let preamble = system_preamble(&working_dir, context.as_deref());
 
     // Prepare MCP server instance shared between the HTTP transport and TUI bridge
     let mcp_server = init_mcp_server(&working_dir).await;
@@ -310,12 +314,20 @@ async fn execute_tui(args: CodeArgs) {
     }
 
     let registry = Arc::new(builder.build());
-
-    // Resolve model name before entering the provider match
-    let provider_name = format!("{:?}", args.provider).to_lowercase();
+    let bootstrap = TuiBootstrap {
+        host,
+        port,
+        mcp_port,
+        registry,
+        preamble,
+        temperature,
+        resume,
+        user_input_rx,
+        mcp_server,
+    };
 
     // Create agent based on provider
-    match args.provider {
+    match provider {
         CodeProvider::Gemini => {
             let client = match GeminiClient::from_env() {
                 Ok(client) => client,
@@ -324,25 +336,9 @@ async fn execute_tui(args: CodeArgs) {
                     return;
                 }
             };
-            let model_name = args.model.unwrap_or_else(|| GEMINI_2_5_FLASH.to_string());
+            let model_name = resolve_model_name(model, GEMINI_2_5_FLASH);
             let model = client.completion_model(&model_name);
-            run_tui_with_model(
-                model,
-                TuiParams {
-                    host: args.host,
-                    port: args.port,
-                    mcp_port: args.mcp_port,
-                    registry: registry.clone(),
-                    preamble,
-                    temperature,
-                    resume,
-                    user_input_rx,
-                    mcp_server,
-                    model_name,
-                    provider_name,
-                },
-            )
-            .await;
+            launch_tui_model(model, bootstrap, CodeProvider::Gemini, model_name).await;
         }
         CodeProvider::Openai => {
             let client = match OpenAIClient::from_env() {
@@ -352,25 +348,9 @@ async fn execute_tui(args: CodeArgs) {
                     return;
                 }
             };
-            let model_name = args.model.unwrap_or_else(|| GPT_4O_MINI.to_string());
+            let model_name = resolve_model_name(model, GPT_4O_MINI);
             let model = client.completion_model(&model_name);
-            run_tui_with_model(
-                model,
-                TuiParams {
-                    host: args.host,
-                    port: args.port,
-                    mcp_port: args.mcp_port,
-                    registry: registry.clone(),
-                    preamble,
-                    temperature,
-                    resume,
-                    user_input_rx,
-                    mcp_server,
-                    model_name,
-                    provider_name,
-                },
-            )
-            .await;
+            launch_tui_model(model, bootstrap, CodeProvider::Openai, model_name).await;
         }
         CodeProvider::Anthropic => {
             let client = match AnthropicClient::from_env() {
@@ -380,25 +360,9 @@ async fn execute_tui(args: CodeArgs) {
                     return;
                 }
             };
-            let model_name = args.model.unwrap_or_else(|| CLAUDE_3_5_SONNET.to_string());
+            let model_name = resolve_model_name(model, CLAUDE_3_5_SONNET);
             let model = client.completion_model(&model_name);
-            run_tui_with_model(
-                model,
-                TuiParams {
-                    host: args.host,
-                    port: args.port,
-                    mcp_port: args.mcp_port,
-                    registry: registry.clone(),
-                    preamble,
-                    temperature,
-                    resume,
-                    user_input_rx,
-                    mcp_server,
-                    model_name,
-                    provider_name,
-                },
-            )
-            .await;
+            launch_tui_model(model, bootstrap, CodeProvider::Anthropic, model_name).await;
         }
         CodeProvider::Deepseek => {
             let client = match DeepSeekClient::from_env() {
@@ -408,25 +372,9 @@ async fn execute_tui(args: CodeArgs) {
                     return;
                 }
             };
-            let model_name = "deepseek-chat".to_string();
+            let model_name = resolve_model_name(model, "deepseek-chat");
             let model = client.completion_model(&model_name);
-            run_tui_with_model(
-                model,
-                TuiParams {
-                    host: args.host,
-                    port: args.port,
-                    mcp_port: args.mcp_port,
-                    registry: registry.clone(),
-                    preamble,
-                    temperature,
-                    resume,
-                    user_input_rx,
-                    mcp_server,
-                    model_name,
-                    provider_name,
-                },
-            )
-            .await;
+            launch_tui_model(model, bootstrap, CodeProvider::Deepseek, model_name).await;
         }
         CodeProvider::Zhipu => {
             let client = match ZhipuClient::from_env() {
@@ -436,33 +384,17 @@ async fn execute_tui(args: CodeArgs) {
                     return;
                 }
             };
-            let model_name = args.model.unwrap_or_else(|| GLM_5.to_string());
+            let model_name = resolve_model_name(model, GLM_5);
             let model = client.completion_model(&model_name);
-            run_tui_with_model(
-                model,
-                TuiParams {
-                    host: args.host,
-                    port: args.port,
-                    mcp_port: args.mcp_port,
-                    registry: registry.clone(),
-                    preamble,
-                    temperature,
-                    resume,
-                    user_input_rx,
-                    mcp_server,
-                    model_name,
-                    provider_name,
-                },
-            )
-            .await;
+            launch_tui_model(model, bootstrap, CodeProvider::Zhipu, model_name).await;
         }
         CodeProvider::Ollama => {
-            let client = if let Some(base_url) = &args.api_base {
+            let client = if let Some(base_url) = &api_base {
                 OllamaClient::with_base_url(base_url)
             } else {
                 OllamaClient::from_env()
             };
-            let model_name = match args.model {
+            let model_name = match model {
                 Some(m) => m,
                 None => {
                     eprintln!(
@@ -472,23 +404,38 @@ async fn execute_tui(args: CodeArgs) {
                 }
             };
             let model = client.completion_model(&model_name);
-            run_tui_with_model(
-                model,
-                TuiParams {
-                    host: args.host,
-                    port: args.port,
-                    mcp_port: args.mcp_port,
-                    registry: registry.clone(),
-                    preamble,
-                    temperature,
-                    resume,
-                    user_input_rx,
-                    mcp_server,
-                    model_name,
-                    provider_name,
-                },
-            )
-            .await;
+            launch_tui_model(model, bootstrap, CodeProvider::Ollama, model_name).await;
+        }
+    }
+}
+
+struct TuiBootstrap {
+    host: String,
+    port: u16,
+    mcp_port: u16,
+    registry: Arc<ToolRegistry>,
+    preamble: String,
+    temperature: Option<f64>,
+    resume: bool,
+    user_input_rx:
+        tokio::sync::mpsc::UnboundedReceiver<crate::internal::ai::tools::context::UserInputRequest>,
+    mcp_server: Arc<LibraMcpServer>,
+}
+
+impl TuiBootstrap {
+    fn into_params(self, provider: CodeProvider, model_name: String) -> TuiParams {
+        TuiParams {
+            host: self.host,
+            port: self.port,
+            mcp_port: self.mcp_port,
+            registry: self.registry,
+            preamble: self.preamble,
+            temperature: self.temperature,
+            resume: self.resume,
+            user_input_rx: self.user_input_rx,
+            mcp_server: self.mcp_server,
+            model_name,
+            provider_name: provider.as_str().to_string(),
         }
     }
 }
@@ -506,6 +453,21 @@ struct TuiParams {
     mcp_server: Arc<LibraMcpServer>,
     model_name: String,
     provider_name: String,
+}
+
+fn resolve_model_name(model: Option<String>, default_model: &str) -> String {
+    model.unwrap_or_else(|| default_model.to_string())
+}
+
+async fn launch_tui_model<M>(
+    model: M,
+    bootstrap: TuiBootstrap,
+    provider: CodeProvider,
+    model_name: String,
+) where
+    M: crate::internal::ai::completion::CompletionModel + 'static,
+{
+    run_tui_with_model(model, bootstrap.into_params(provider, model_name)).await;
 }
 
 async fn run_tui_with_model<M>(model: M, params: TuiParams)
@@ -723,11 +685,13 @@ async fn init_mcp_server(working_dir: &std::path::Path) -> Arc<LibraMcpServer> {
 
     // Connect to DB
     let db_path = dot_libra.join("libra.db");
-    let db_path_str = db_path.to_str().unwrap_or_default();
+    let db_path_string = db_path.to_string_lossy().into_owned();
 
     #[cfg(target_os = "windows")]
-    let db_path_string = db_path_str.replace("\\", "/");
+    let db_path_string = db_path_string.replace("\\", "/");
     #[cfg(target_os = "windows")]
+    let db_path_str = &db_path_string;
+    #[cfg(not(target_os = "windows"))]
     let db_path_str = &db_path_string;
 
     let db_conn = match crate::internal::db::establish_connection(db_path_str).await {
@@ -773,5 +737,36 @@ async fn execute_stdio(_args: CodeArgs) {
         Err(e) => {
             cli_error!(e, "fatal: failed to start MCP Stdio server");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CodeProvider, browse_page_html, resolve_model_name};
+
+    #[test]
+    fn provider_names_match_cli_contract() {
+        assert_eq!(CodeProvider::Gemini.as_str(), "gemini");
+        assert_eq!(CodeProvider::Openai.as_str(), "openai");
+        assert_eq!(CodeProvider::Anthropic.as_str(), "anthropic");
+        assert_eq!(CodeProvider::Deepseek.as_str(), "deepseek");
+        assert_eq!(CodeProvider::Zhipu.as_str(), "zhipu");
+        assert_eq!(CodeProvider::Ollama.as_str(), "ollama");
+    }
+
+    #[test]
+    fn resolve_model_name_prefers_user_override() {
+        assert_eq!(
+            resolve_model_name(Some("deepseek-reasoner".into()), "deepseek-chat"),
+            "deepseek-reasoner"
+        );
+        assert_eq!(resolve_model_name(None, "deepseek-chat"), "deepseek-chat");
+    }
+
+    #[test]
+    fn browse_page_is_embedded() {
+        let page = browse_page_html();
+        assert!(page.contains("Libra Browse"));
+        assert!(page.contains("Ctrl + K to focus the AI bar"));
     }
 }

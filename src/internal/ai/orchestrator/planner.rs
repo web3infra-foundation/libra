@@ -656,8 +656,7 @@ mod tests {
         assert_eq!(plan.tasks.len(), 6);
         assert_eq!(plan.parallel_groups.len(), 6);
         assert!(
-            plan
-                .tasks
+            plan.tasks
                 .iter()
                 .any(|task| task.gate_stage == Some(GateStage::Fast))
         );
@@ -689,8 +688,7 @@ mod tests {
             .decomposition_mode = DecompositionMode::PerFileCluster;
         let plan = compile_execution_plan_spec(&spec).unwrap();
         assert!(
-            plan
-                .tasks
+            plan.tasks
                 .iter()
                 .any(|task| task.contract.touch_files == vec!["src/auth/login.rs".to_string()])
         );
