@@ -3,18 +3,13 @@ use std::collections::{BTreeSet, HashMap};
 use uuid::Uuid;
 
 use super::types::{
-    ExecutionCheckpoint, ExecutionPlan, ExecutionPlanSpec, GateStage, OrchestratorError,
-    TaskContract, TaskDAG, TaskKind, TaskNode, TaskNodeStatus, TaskSpec,
+    ExecutionCheckpoint, ExecutionPlanSpec, GateStage, OrchestratorError, TaskContract, TaskKind,
+    TaskSpec,
 };
 use crate::internal::ai::intentspec::types::{
     ChangeType, ConflictResolution, DecompositionMode, DependencyPolicy, IntentSpec, LibraBinding,
     NetworkPolicy, PlanGenerationConfig, RiskLevel, TouchHints,
 };
-
-/// Compile an IntentSpec into a structured execution plan.
-pub fn compile_execution_plan(spec: &IntentSpec) -> Result<ExecutionPlan, OrchestratorError> {
-    Ok(compile_execution_plan_spec(spec)?.materialize())
-}
 
 /// Compile an IntentSpec into a static execution plan specification.
 pub fn compile_execution_plan_spec(
@@ -25,20 +20,20 @@ pub fn compile_execution_plan_spec(
     let common_constraints = build_common_constraints(spec);
     let common_contract = build_common_contract(spec);
 
-    let implementation_nodes = build_implementation_nodes(
+    let implementation_tasks = build_implementation_tasks(
         spec,
         &plan_config,
         max_parallel,
         &common_constraints,
         &common_contract,
     )?;
-    let mut nodes = apply_conflict_resolution(implementation_nodes, &plan_config)?;
+    let mut tasks = apply_conflict_resolution(implementation_tasks, &plan_config)?;
 
     if should_force_serial(&plan_config, max_parallel) {
-        make_sequential(&mut nodes);
+        make_sequential(&mut tasks);
     }
 
-    let implementation_ids: Vec<Uuid> = nodes.iter().map(|n| n.id).collect();
+    let implementation_ids: Vec<Uuid> = tasks.iter().map(|task| task.id).collect();
     let mut checkpoints = Vec::new();
 
     if plan_config.gate_task_per_stage {
@@ -72,7 +67,7 @@ pub fn compile_execution_plan_spec(
                 .unwrap_or_else(|| implementation_ids.clone());
             let gate_id = Uuid::new_v4();
             let label = format!("after-{}", stage_label(&stage));
-            nodes.push(TaskNode {
+            tasks.push(TaskSpec {
                 id: gate_id,
                 title: title.to_string(),
                 objective: format!("Run {} verification checks", stage_label(&stage)),
@@ -90,7 +85,6 @@ pub fn compile_execution_plan_spec(
                 scope_out: spec.intent.out_of_scope.clone(),
                 checks,
                 contract: common_contract.clone(),
-                status: TaskNodeStatus::Pending,
             });
             checkpoints.push(ExecutionCheckpoint {
                 label,
@@ -101,28 +95,21 @@ pub fn compile_execution_plan_spec(
         }
     }
 
-    let task_specs = nodes.iter().map(TaskSpec::from).collect::<Vec<_>>();
-    let dag = TaskDAG {
-        nodes,
-        intent_spec_id: spec.metadata.id.clone(),
-        max_parallel,
-    };
-
     Ok(ExecutionPlanSpec {
         intent_spec_id: spec.metadata.id.clone(),
         summary: format!(
             "{} change: {} ({} tasks, parallelism {})",
             change_type_label(&spec.intent.change_type),
             spec.intent.summary,
-            task_specs.len(),
+            tasks.len(),
             max_parallel
         ),
         revision: 1,
         parent_revision: None,
         replan_reason: None,
-        tasks: task_specs,
+        tasks: tasks.clone(),
         max_parallel,
-        parallel_groups: compute_parallel_groups(&dag),
+        parallel_groups: compute_parallel_groups(&tasks),
         checkpoints,
     })
 }
@@ -186,13 +173,13 @@ fn build_common_contract(spec: &IntentSpec) -> TaskContract {
     }
 }
 
-fn build_implementation_nodes(
+fn build_implementation_tasks(
     spec: &IntentSpec,
     plan_config: &PlanGenerationConfig,
     max_parallel: u8,
     common_constraints: &[String],
     common_contract: &TaskContract,
-) -> Result<Vec<TaskNode>, OrchestratorError> {
+) -> Result<Vec<TaskSpec>, OrchestratorError> {
     match plan_config.decomposition_mode {
         DecompositionMode::SingleTask => Ok(vec![implementation_task(
             "Implement requested change".to_string(),
@@ -203,7 +190,7 @@ fn build_implementation_nodes(
         )]),
         DecompositionMode::PerObjective => {
             let sequential = should_force_serial(plan_config, max_parallel);
-            let mut nodes = Vec::with_capacity(spec.intent.objectives.len());
+            let mut tasks = Vec::with_capacity(spec.intent.objectives.len());
             let mut previous: Option<Uuid> = None;
 
             for objective in &spec.intent.objectives {
@@ -213,7 +200,7 @@ fn build_implementation_nodes(
                 } else {
                     Vec::new()
                 };
-                nodes.push(TaskNode {
+                tasks.push(TaskSpec {
                     id,
                     title: objective.clone(),
                     objective: objective.clone(),
@@ -228,11 +215,10 @@ fn build_implementation_nodes(
                     scope_out: spec.intent.out_of_scope.clone(),
                     checks: Vec::new(),
                     contract: common_contract.clone(),
-                    status: TaskNodeStatus::Pending,
                 });
                 previous = Some(id);
             }
-            Ok(nodes)
+            Ok(tasks)
         }
         DecompositionMode::PerFileCluster => {
             let hints = spec.intent.touch_hints.clone().unwrap_or(TouchHints {
@@ -242,7 +228,7 @@ fn build_implementation_nodes(
             });
 
             if hints.files.is_empty() {
-                return build_implementation_nodes(
+                return build_implementation_tasks(
                     spec,
                     &PlanGenerationConfig {
                         decomposition_mode: DecompositionMode::PerObjective,
@@ -255,7 +241,7 @@ fn build_implementation_nodes(
             }
 
             let sequential = should_force_serial(plan_config, max_parallel);
-            let mut nodes = Vec::with_capacity(hints.files.len());
+            let mut tasks = Vec::with_capacity(hints.files.len());
             let mut previous: Option<Uuid> = None;
 
             for file_hint in hints.files {
@@ -268,7 +254,7 @@ fn build_implementation_nodes(
                 let mut contract = common_contract.clone();
                 contract.touch_files = vec![file_hint.clone()];
 
-                nodes.push(TaskNode {
+                tasks.push(TaskSpec {
                     id,
                     title: format!("Modify {file_hint}"),
                     objective: format!("Implement changes touching {file_hint}"),
@@ -286,12 +272,11 @@ fn build_implementation_nodes(
                     scope_out: spec.intent.out_of_scope.clone(),
                     checks: Vec::new(),
                     contract,
-                    status: TaskNodeStatus::Pending,
                 });
                 previous = Some(id);
             }
 
-            Ok(nodes)
+            Ok(tasks)
         }
     }
 }
@@ -302,8 +287,8 @@ fn implementation_task(
     description: Option<String>,
     constraints: Vec<String>,
     contract: TaskContract,
-) -> TaskNode {
-    TaskNode {
+) -> TaskSpec {
+    TaskSpec {
         id: Uuid::new_v4(),
         title,
         objective,
@@ -318,36 +303,35 @@ fn implementation_task(
         scope_out: contract.forbidden_scope.clone(),
         checks: Vec::new(),
         contract,
-        status: TaskNodeStatus::Pending,
     }
 }
 
 fn apply_conflict_resolution(
-    mut nodes: Vec<TaskNode>,
+    mut tasks: Vec<TaskSpec>,
     plan_config: &PlanGenerationConfig,
-) -> Result<Vec<TaskNode>, OrchestratorError> {
-    let overlaps = find_overlaps(&nodes);
+) -> Result<Vec<TaskSpec>, OrchestratorError> {
+    let overlaps = find_overlaps(&tasks);
     if overlaps.is_empty() {
-        return Ok(nodes);
+        return Ok(tasks);
     }
 
     match plan_config.conflict_resolution {
         ConflictResolution::ForceSerial => {
-            make_sequential(&mut nodes);
-            Ok(nodes)
+            make_sequential(&mut tasks);
+            Ok(tasks)
         }
         ConflictResolution::MergeTasks => {
-            let merged_objective = nodes
+            let merged_objective = tasks
                 .iter()
                 .map(|n| n.objective.clone())
                 .collect::<Vec<_>>()
                 .join("\n");
-            let merged_title = nodes
+            let merged_title = tasks
                 .iter()
                 .map(|n| n.title.clone())
                 .collect::<Vec<_>>()
                 .join(" + ");
-            let merged_description = nodes
+            let merged_description = tasks
                 .iter()
                 .filter_map(|n| n.description.clone())
                 .collect::<Vec<_>>()
@@ -359,7 +343,7 @@ fn apply_conflict_resolution(
             let mut scope_in = BTreeSet::new();
             let mut scope_out = BTreeSet::new();
 
-            for node in nodes {
+            for node in tasks {
                 constraints.extend(node.constraints);
                 acceptance.extend(node.acceptance_criteria);
                 scope_in.extend(node.scope_in);
@@ -389,7 +373,7 @@ fn apply_conflict_resolution(
             contract.expected_outputs.sort();
             contract.expected_outputs.dedup();
 
-            Ok(vec![TaskNode {
+            Ok(vec![TaskSpec {
                 id: Uuid::new_v4(),
                 title: merged_title,
                 objective: merged_objective,
@@ -404,7 +388,6 @@ fn apply_conflict_resolution(
                 scope_out: scope_out.into_iter().collect(),
                 checks: Vec::new(),
                 contract,
-                status: TaskNodeStatus::Pending,
             }])
         }
         ConflictResolution::FailFast => Err(OrchestratorError::PlanningFailed(format!(
@@ -414,7 +397,7 @@ fn apply_conflict_resolution(
     }
 }
 
-fn find_overlaps(nodes: &[TaskNode]) -> Vec<String> {
+fn find_overlaps(nodes: &[TaskSpec]) -> Vec<String> {
     let mut seen: HashMap<&str, usize> = HashMap::new();
     let mut overlaps = Vec::new();
 
@@ -431,7 +414,7 @@ fn find_overlaps(nodes: &[TaskNode]) -> Vec<String> {
     overlaps
 }
 
-fn make_sequential(nodes: &mut [TaskNode]) {
+fn make_sequential(nodes: &mut [TaskSpec]) {
     let mut previous: Option<Uuid> = None;
     for node in nodes {
         if let Some(prev) = previous
@@ -447,8 +430,8 @@ fn should_force_serial(plan_config: &PlanGenerationConfig, max_parallel: u8) -> 
     max_parallel <= 1 || plan_config.conflict_resolution == ConflictResolution::ForceSerial
 }
 
-fn compute_parallel_groups(dag: &TaskDAG) -> Vec<Vec<Uuid>> {
-    let mut remaining = dag.nodes.clone();
+fn compute_parallel_groups(tasks: &[TaskSpec]) -> Vec<Vec<Uuid>> {
+    let mut remaining = tasks.to_vec();
     let mut completed = BTreeSet::new();
     let mut groups = Vec::new();
 
@@ -669,19 +652,19 @@ mod tests {
 
     #[test]
     fn test_compile_execution_plan_builds_gate_tasks() {
-        let plan = compile_execution_plan(&minimal_spec()).unwrap();
-        assert_eq!(plan.dag.nodes.len(), 6);
+        let plan = compile_execution_plan_spec(&minimal_spec()).unwrap();
+        assert_eq!(plan.tasks.len(), 6);
         assert_eq!(plan.parallel_groups.len(), 6);
         assert!(
-            plan.dag
-                .nodes
+            plan
+                .tasks
                 .iter()
-                .any(|node| node.gate_stage == Some(GateStage::Fast))
+                .any(|task| task.gate_stage == Some(GateStage::Fast))
         );
     }
 
     #[test]
-    fn test_compile_execution_plan_spec_materializes_runtime_plan() {
+    fn test_compile_execution_plan_spec_tracks_dependencies_without_runtime_plan() {
         let plan_spec = compile_execution_plan_spec(&minimal_spec()).unwrap();
         assert_eq!(plan_spec.tasks.len(), 6);
         assert_eq!(plan_spec.max_parallel, 2);
@@ -691,14 +674,7 @@ mod tests {
                 .iter()
                 .any(|task| task.gate_stage == Some(GateStage::Fast))
         );
-
-        let plan = plan_spec.materialize();
-        assert_eq!(plan.dag.nodes.len(), plan_spec.tasks.len());
-        assert!(plan
-            .dag
-            .nodes
-            .iter()
-            .all(|node| node.status == TaskNodeStatus::Pending));
+        assert_eq!(plan_spec.parallel_groups.len(), 6);
     }
 
     #[test]
@@ -711,12 +687,12 @@ mod tests {
             .as_mut()
             .unwrap()
             .decomposition_mode = DecompositionMode::PerFileCluster;
-        let plan = compile_execution_plan(&spec).unwrap();
+        let plan = compile_execution_plan_spec(&spec).unwrap();
         assert!(
-            plan.dag
-                .nodes
+            plan
+                .tasks
                 .iter()
-                .any(|node| node.contract.touch_files == vec!["src/auth/login.rs".to_string()])
+                .any(|task| task.contract.touch_files == vec!["src/auth/login.rs".to_string()])
         );
     }
 
@@ -743,7 +719,7 @@ mod tests {
             .unwrap()
             .conflict_resolution = ConflictResolution::FailFast;
 
-        let err = compile_execution_plan(&spec).unwrap_err();
+        let err = compile_execution_plan_spec(&spec).unwrap_err();
         assert!(matches!(err, OrchestratorError::PlanningFailed(_)));
     }
 }

@@ -14,7 +14,7 @@ use uuid::Uuid;
 use super::{
     run_state::RunStateSnapshot,
     types::{
-        DecisionOutcome, ExecutionPlan, GateStage, OrchestratorError, PersistedCheckpoint,
+        DecisionOutcome, ExecutionPlanSpec, GateStage, OrchestratorError, PersistedCheckpoint,
         PersistedExecution, PersistedTaskArtifacts, SystemReport, TaskKind, TaskResult,
         ToolCallRecord,
     },
@@ -37,8 +37,8 @@ const ZERO_COMMIT_SHA: &str = "0000000000000000000000000000000000000000";
 pub struct ExecutionPersistenceRequest<'a> {
     pub mcp_server: &'a Arc<LibraMcpServer>,
     pub spec: &'a IntentSpec,
-    pub execution_plan: &'a ExecutionPlan,
-    pub plan_revisions: &'a [ExecutionPlan],
+    pub execution_plan_spec: &'a ExecutionPlanSpec,
+    pub plan_revision_specs: &'a [ExecutionPlanSpec],
     pub run_state: &'a RunStateSnapshot,
     pub system_report: &'a SystemReport,
     pub decision: &'a DecisionOutcome,
@@ -74,7 +74,7 @@ struct FinalDecisionRequest<'a> {
     run_id: &'a str,
     chosen_patchset_id: Option<&'a str>,
     checkpoint_id: Option<&'a str>,
-    execution_plan: &'a ExecutionPlan,
+    execution_plan: &'a ExecutionPlanSpec,
     task_results: &'a [TaskResult],
     system_report: &'a SystemReport,
     decision: &'a DecisionOutcome,
@@ -92,12 +92,12 @@ pub async fn persist_execution(
                 &base_commit_sha,
                 build_snapshot_summary(
                     request.spec,
-                    request.plan_revisions.first(),
+                    request.plan_revision_specs.first(),
                     "Run start context snapshot",
                 ),
                 collect_snapshot_items(
                     request.spec,
-                    request.plan_revisions.first(),
+                    request.plan_revision_specs.first(),
                     request.working_dir,
                     task_results,
                 ),
@@ -121,7 +121,7 @@ pub async fn persist_execution(
         create_provenance(
             request.mcp_server,
             &run_id,
-            request.execution_plan,
+            request.execution_plan_spec,
             task_results,
             request.system_report,
             request.decision,
@@ -129,27 +129,26 @@ pub async fn persist_execution(
         )
         .await?,
     );
-    let mut plan_ids = Vec::with_capacity(request.plan_revisions.len());
-    for plan in request.plan_revisions {
-        plan_ids.push(create_plan_revision(request.mcp_server, plan).await?);
+    let mut plan_ids = Vec::with_capacity(request.plan_revision_specs.len());
+    for plan_spec in request.plan_revision_specs {
+        plan_ids.push(create_plan_revision(request.mcp_server, plan_spec).await?);
     }
     let mut checkpoints = create_replan_checkpoints(
         request.mcp_server,
         request.spec,
         &run_id,
         &base_commit_sha,
-        request.plan_revisions,
+        request.plan_revision_specs,
         request.working_dir,
         task_results,
     )
     .await?;
 
     let task_index: HashMap<Uuid, _> = request
-        .execution_plan
-        .dag
-        .nodes
+        .execution_plan_spec
+        .tasks
         .iter()
-        .map(|node| (node.id, node))
+        .map(|task| (task.id, task))
         .collect();
 
     let mut persisted_tasks = Vec::with_capacity(task_results.len());
@@ -274,12 +273,12 @@ pub async fn persist_execution(
                 &base_commit_sha,
                 build_snapshot_summary(
                     request.spec,
-                    Some(request.execution_plan),
+                    Some(request.execution_plan_spec),
                     "Human review checkpoint",
                 ),
                 collect_snapshot_items(
                     request.spec,
-                    Some(request.execution_plan),
+                    Some(request.execution_plan_spec),
                     request.working_dir,
                     task_results,
                 ),
@@ -296,7 +295,7 @@ pub async fn persist_execution(
             run_id: &run_id,
             chosen_patchset_id: chosen_patchset_id.as_deref(),
             checkpoint_id: final_checkpoint_id.as_deref(),
-            execution_plan: request.execution_plan,
+            execution_plan: request.execution_plan_spec,
             task_results,
             system_report: request.system_report,
             decision: request.decision,
@@ -305,7 +304,7 @@ pub async fn persist_execution(
     );
     if let Some(snapshot_id) = final_checkpoint_id {
         checkpoints.push(PersistedCheckpoint {
-            revision: request.execution_plan.revision,
+            revision: request.execution_plan_spec.revision,
             reason: "human review required".to_string(),
             snapshot_id: Some(snapshot_id),
             decision_id: decision_id.clone(),
@@ -383,44 +382,34 @@ async fn create_run(
 
 async fn create_plan_revision(
     mcp_server: &Arc<LibraMcpServer>,
-    plan: &ExecutionPlan,
+    plan: &ExecutionPlanSpec,
 ) -> Result<String, OrchestratorError> {
     let steps = plan
-        .dag
-        .nodes
+        .tasks
         .iter()
-        .map(|node| {
-            let checks = serde_json::to_value(&node.checks).map_err(|e| {
+        .map(|task| {
+            let checks = serde_json::to_value(&task.checks).map_err(|e| {
                 OrchestratorError::ConfigError(format!("failed to encode plan checks: {e}"))
             })?;
             Ok(PlanStepParams {
-                description: node.title.clone(),
+                description: task.title.clone(),
                 inputs: Some(serde_json::json!({
-                    "objective": node.objective,
-                    "kind": format!("{:?}", node.kind),
-                    "gateStage": node.gate_stage.as_ref().map(|stage| format!("{:?}", stage)),
+                    "objective": task.objective,
+                    "kind": format!("{:?}", task.kind),
+                    "gateStage": task.gate_stage.as_ref().map(|stage| format!("{:?}", stage)),
                     "revision": plan.revision,
-                    "scopeIn": node.scope_in,
-                    "scopeOut": node.scope_out,
-                    "touchFiles": node.contract.touch_files,
+                    "scopeIn": task.scope_in,
+                    "scopeOut": task.scope_out,
+                    "touchFiles": task.contract.touch_files,
                 })),
                 outputs: Some(serde_json::json!({
-                    "expectedOutputs": node.contract.expected_outputs,
-                    "acceptanceCriteria": node.acceptance_criteria,
+                    "expectedOutputs": task.contract.expected_outputs,
+                    "acceptanceCriteria": task.acceptance_criteria,
                     "replanReason": plan.replan_reason,
                 })),
                 checks: Some(checks),
-                status: Some(
-                    match node.status {
-                        super::types::TaskNodeStatus::Pending => "pending",
-                        super::types::TaskNodeStatus::Running => "in_progress",
-                        super::types::TaskNodeStatus::Completed => "completed",
-                        super::types::TaskNodeStatus::Failed => "failed",
-                        super::types::TaskNodeStatus::Skipped => "skipped",
-                    }
-                    .to_string(),
-                ),
-                owner_role: node.owner_role.clone(),
+                status: Some("pending".to_string()),
+                owner_role: task.owner_role.clone(),
             })
         })
         .collect::<Result<Vec<_>, OrchestratorError>>()?;
@@ -451,7 +440,7 @@ async fn create_plan_revision(
 async fn create_provenance(
     mcp_server: &Arc<LibraMcpServer>,
     run_id: &str,
-    execution_plan: &ExecutionPlan,
+    execution_plan: &ExecutionPlanSpec,
     task_results: &[TaskResult],
     system_report: &SystemReport,
     decision: &DecisionOutcome,
@@ -819,7 +808,7 @@ async fn create_replan_checkpoints(
     spec: &IntentSpec,
     run_id: &str,
     base_commit_sha: &str,
-    plan_revisions: &[ExecutionPlan],
+    plan_revisions: &[ExecutionPlanSpec],
     working_dir: &Path,
     task_results: &[TaskResult],
 ) -> Result<Vec<PersistedCheckpoint>, OrchestratorError> {
@@ -910,7 +899,7 @@ async fn create_checkpoint_decision(
     mcp_server: &Arc<LibraMcpServer>,
     run_id: &str,
     checkpoint_id: Option<&str>,
-    plan: &ExecutionPlan,
+    plan: &ExecutionPlanSpec,
     reason: &str,
 ) -> Result<String, OrchestratorError> {
     let params = CreateDecisionParams {
@@ -945,7 +934,7 @@ async fn create_checkpoint_decision(
 
 fn collect_snapshot_items(
     spec: &IntentSpec,
-    plan: Option<&ExecutionPlan>,
+    plan: Option<&ExecutionPlanSpec>,
     working_dir: &Path,
     task_results: &[TaskResult],
 ) -> Vec<ContextItemParams> {
@@ -954,8 +943,8 @@ fn collect_snapshot_items(
         candidates.extend(touch_hints.files.iter().cloned());
     }
     if let Some(plan) = plan {
-        for node in &plan.dag.nodes {
-            candidates.extend(node.contract.touch_files.iter().cloned());
+        for task in &plan.tasks {
+            candidates.extend(task.contract.touch_files.iter().cloned());
         }
     }
     for result in task_results {
@@ -1016,7 +1005,11 @@ fn hash_file_blob(working_dir: &Path, path: &Path) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-fn build_snapshot_summary(spec: &IntentSpec, plan: Option<&ExecutionPlan>, prefix: &str) -> String {
+fn build_snapshot_summary(
+    spec: &IntentSpec,
+    plan: Option<&ExecutionPlanSpec>,
+    prefix: &str,
+) -> String {
     match plan {
         Some(plan) => format!(
             "{prefix}: {} (intent {}, plan revision {})",
@@ -1029,7 +1022,7 @@ fn build_snapshot_summary(spec: &IntentSpec, plan: Option<&ExecutionPlan>, prefi
     }
 }
 
-fn build_checkpoint_summary(plan: &ExecutionPlan, reason: &str) -> String {
+fn build_checkpoint_summary(plan: &ExecutionPlanSpec, reason: &str) -> String {
     format!(
         "Checkpoint before replan after revision {}: {}",
         plan.revision, reason
@@ -1074,8 +1067,8 @@ mod tests {
                 orchestrator::{
                     run_state::{RunStateSnapshot, TaskStatusSnapshot},
                     types::{
-                        ExecutionCheckpoint, GateReport, GateResult, TaskContract, TaskDAG,
-                        TaskNode, TaskNodeStatus, ToolDiffRecord,
+                        ExecutionCheckpoint, ExecutionPlanSpec, GateReport, GateResult,
+                        TaskContract, TaskKind, TaskNodeStatus, TaskSpec, ToolDiffRecord,
                     },
                 },
             },
@@ -1261,52 +1254,47 @@ mod tests {
             reason: "security gate failed".into(),
             diff_summary: "revision 2: replan in serial mode".into(),
         }]);
-        let plan = ExecutionPlan {
+        let plan_spec = ExecutionPlanSpec {
             intent_spec_id: "intent-1".to_string(),
             summary: "Implement feature and verify it".to_string(),
             revision: 1,
             parent_revision: None,
             replan_reason: None,
-            dag: TaskDAG {
-                nodes: vec![
-                    TaskNode {
-                        id: impl_task_id,
-                        title: "Edit source".to_string(),
-                        objective: "Update src/lib.rs".to_string(),
-                        description: None,
-                        kind: TaskKind::Implementation,
-                        gate_stage: None,
-                        owner_role: Some("coder".to_string()),
-                        dependencies: vec![],
-                        constraints: vec![],
-                        acceptance_criteria: vec![],
-                        scope_in: vec!["src/".to_string()],
-                        scope_out: vec![],
-                        checks: vec![],
-                        contract: TaskContract::default(),
-                        status: TaskNodeStatus::Completed,
-                    },
-                    TaskNode {
-                        id: gate_task_id,
-                        title: "Run fast checks".to_string(),
-                        objective: "Verify".to_string(),
-                        description: None,
-                        kind: TaskKind::Gate,
-                        gate_stage: Some(GateStage::Fast),
-                        owner_role: Some("verifier".to_string()),
-                        dependencies: vec![impl_task_id],
-                        constraints: vec![],
-                        acceptance_criteria: vec![],
-                        scope_in: vec![],
-                        scope_out: vec![],
-                        checks: vec![],
-                        contract: TaskContract::default(),
-                        status: TaskNodeStatus::Completed,
-                    },
-                ],
-                intent_spec_id: "intent-1".to_string(),
-                max_parallel: 1,
-            },
+            tasks: vec![
+                TaskSpec {
+                    id: impl_task_id,
+                    title: "Edit source".to_string(),
+                    objective: "Update src/lib.rs".to_string(),
+                    description: None,
+                    kind: TaskKind::Implementation,
+                    gate_stage: None,
+                    owner_role: Some("coder".to_string()),
+                    dependencies: vec![],
+                    constraints: vec![],
+                    acceptance_criteria: vec![],
+                    scope_in: vec!["src/".to_string()],
+                    scope_out: vec![],
+                    checks: vec![],
+                    contract: TaskContract::default(),
+                },
+                TaskSpec {
+                    id: gate_task_id,
+                    title: "Run fast checks".to_string(),
+                    objective: "Verify".to_string(),
+                    description: None,
+                    kind: TaskKind::Gate,
+                    gate_stage: Some(GateStage::Fast),
+                    owner_role: Some("verifier".to_string()),
+                    dependencies: vec![impl_task_id],
+                    constraints: vec![],
+                    acceptance_criteria: vec![],
+                    scope_in: vec![],
+                    scope_out: vec![],
+                    checks: vec![],
+                    contract: TaskContract::default(),
+                },
+            ],
+            max_parallel: 1,
             parallel_groups: vec![vec![impl_task_id], vec![gate_task_id]],
             checkpoints: vec![ExecutionCheckpoint {
                 label: "after-fast".to_string(),
@@ -1372,8 +1360,8 @@ mod tests {
             overall_passed: true,
         };
         let run_state = RunStateSnapshot {
-            intent_spec_id: plan.intent_spec_id.clone(),
-            revision: plan.revision,
+            intent_spec_id: plan_spec.intent_spec_id.clone(),
+            revision: plan_spec.revision,
             task_statuses: results
                 .iter()
                 .map(|result| TaskStatusSnapshot {
@@ -1387,8 +1375,8 @@ mod tests {
         let persisted = persist_execution(ExecutionPersistenceRequest {
             mcp_server: &server,
             spec: &spec,
-            execution_plan: &plan,
-            plan_revisions: std::slice::from_ref(&plan),
+            execution_plan_spec: &plan_spec,
+            plan_revision_specs: std::slice::from_ref(&plan_spec),
             run_state: &run_state,
             system_report: &system_report,
             decision: &DecisionOutcome::Commit,

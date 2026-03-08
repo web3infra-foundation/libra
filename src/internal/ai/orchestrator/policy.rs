@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use super::{
     acl::{AclVerdict, ScopeVerdict, check_scope, check_tool_acl},
-    types::{PolicyViolation, TaskNode, ToolCallRecord, ToolDiffRecord},
+    types::{PolicyViolation, TaskSpec, ToolCallRecord, ToolDiffRecord},
 };
 use crate::internal::ai::{
     intentspec::types::{IntentSpec, NetworkPolicy},
@@ -21,7 +21,7 @@ pub struct ToolPreflight {
 
 pub fn evaluate_tool_call(
     spec: &IntentSpec,
-    task: &TaskNode,
+    task: &TaskSpec,
     tool_name: &str,
     arguments: &Value,
     working_dir: &Path,
@@ -308,7 +308,7 @@ mod tests {
             QualityGates, RepoTarget, RepoType, Risk, RiskLevel, SecretAccessPolicy, SecretPolicy,
             SecurityPolicy, Target, ToolAcl, ToolRule, TouchHints, TrustTier,
         },
-        orchestrator::types::{TaskContract, TaskKind, TaskNode, TaskNodeStatus},
+        orchestrator::types::{TaskContract, TaskKind, TaskSpec},
     };
 
     fn spec() -> IntentSpec {
@@ -467,8 +467,8 @@ mod tests {
         }
     }
 
-    fn task() -> TaskNode {
-        TaskNode {
+    fn task() -> TaskSpec {
+        TaskSpec {
             id: uuid::Uuid::new_v4(),
             title: "edit".into(),
             objective: "edit file".into(),
@@ -483,7 +483,6 @@ mod tests {
             scope_out: vec!["vendor/".into()],
             checks: vec![],
             contract: TaskContract::default(),
-            status: TaskNodeStatus::Pending,
         }
     }
 

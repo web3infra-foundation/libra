@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use super::types::{ExecutionPlan, TaskNodeStatus, TaskResult};
+use super::types::{ExecutionPlanSpec, TaskNodeStatus, TaskResult};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskStatusSnapshot {
@@ -64,25 +64,23 @@ impl RunStateStore {
         !self.results.lock().await.is_empty()
     }
 
-    pub async fn snapshot(&self, plan: &ExecutionPlan) -> RunStateSnapshot {
+    pub async fn snapshot(&self, plan: &ExecutionPlanSpec) -> RunStateSnapshot {
         let results = self.results.lock().await;
         let task_statuses = plan
-            .dag
-            .nodes
+            .tasks
             .iter()
-            .map(|node| TaskStatusSnapshot {
-                task_id: node.id,
+            .map(|task| TaskStatusSnapshot {
+                task_id: task.id,
                 status: results
-                    .get(&node.id)
+                    .get(&task.id)
                     .map(|result| result.status.clone())
-                    .unwrap_or_else(|| node.status.clone()),
+                    .unwrap_or(TaskNodeStatus::Pending),
             })
             .collect();
         let task_results = plan
-            .dag
-            .nodes
+            .tasks
             .iter()
-            .filter_map(|node| results.get(&node.id).cloned())
+            .filter_map(|task| results.get(&task.id).cloned())
             .collect();
 
         RunStateSnapshot {
@@ -99,38 +97,32 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::internal::ai::orchestrator::types::{
-        ExecutionPlan, TaskContract, TaskDAG, TaskKind, TaskNode,
-    };
+    use crate::internal::ai::orchestrator::types::{TaskContract, TaskKind, TaskSpec};
 
-    fn test_plan(task_id: Uuid) -> ExecutionPlan {
-        ExecutionPlan {
+    fn test_plan(task_id: Uuid) -> ExecutionPlanSpec {
+        ExecutionPlanSpec {
             intent_spec_id: "spec-1".into(),
             summary: "summary".into(),
             revision: 3,
             parent_revision: Some(2),
             replan_reason: Some("test".into()),
-            dag: TaskDAG {
-                nodes: vec![TaskNode {
-                    id: task_id,
-                    title: "task".into(),
-                    objective: "task".into(),
-                    description: None,
-                    kind: TaskKind::Implementation,
-                    gate_stage: None,
-                    owner_role: Some("coder".into()),
-                    dependencies: vec![],
-                    constraints: vec![],
-                    acceptance_criteria: vec![],
-                    scope_in: vec![],
-                    scope_out: vec![],
-                    checks: vec![],
-                    contract: TaskContract::default(),
-                    status: TaskNodeStatus::Pending,
-                }],
-                intent_spec_id: "spec-1".into(),
-                max_parallel: 1,
-            },
+            tasks: vec![TaskSpec {
+                id: task_id,
+                title: "task".into(),
+                objective: "task".into(),
+                description: None,
+                kind: TaskKind::Implementation,
+                gate_stage: None,
+                owner_role: Some("coder".into()),
+                dependencies: vec![],
+                constraints: vec![],
+                acceptance_criteria: vec![],
+                scope_in: vec![],
+                scope_out: vec![],
+                checks: vec![],
+                contract: TaskContract::default(),
+            }],
+            max_parallel: 1,
             parallel_groups: vec![vec![task_id]],
             checkpoints: vec![],
         }

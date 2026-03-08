@@ -15,9 +15,8 @@ use super::{
     gate, policy,
     run_state::{RunStateSnapshot, RunStateStore},
     types::{
-        ExecutionPlan, GateReport, OrchestratorError, OrchestratorObserver, ReviewOutcome,
-        TaskDAG, TaskKind, TaskNode,
-        TaskNodeStatus, TaskResult, ToolCallRecord,
+        ExecutionPlanSpec, GateReport, OrchestratorError, OrchestratorObserver, ReviewOutcome,
+        TaskKind, TaskNodeStatus, TaskResult, TaskSpec, ToolCallRecord,
     },
 };
 use crate::internal::ai::{
@@ -41,7 +40,7 @@ pub struct ExecutorConfig {
 
 struct TaskExecutionObserver {
     spec: Arc<IntentSpec>,
-    task: TaskNode,
+    task: TaskSpec,
     working_dir: PathBuf,
     in_flight: HashMap<String, ToolCallRecord>,
     tool_calls: Vec<ToolCallRecord>,
@@ -52,7 +51,7 @@ struct TaskExecutionObserver {
 impl TaskExecutionObserver {
     fn new(
         spec: Arc<IntentSpec>,
-        task: TaskNode,
+        task: TaskSpec,
         working_dir: PathBuf,
         observer: Option<Arc<dyn OrchestratorObserver>>,
     ) -> Self {
@@ -147,7 +146,7 @@ struct ReviewerDecision {
 
 /// Execute a single task with retry logic.
 pub async fn execute_task<M: CompletionModel>(
-    task: &TaskNode,
+    task: &TaskSpec,
     model: &M,
     registry: &ToolRegistry,
     config: &ExecutorConfig,
@@ -299,7 +298,7 @@ pub async fn execute_task<M: CompletionModel>(
     }
 }
 
-async fn execute_gate_task(task: &TaskNode, working_dir: &Path) -> TaskResult {
+async fn execute_gate_task(task: &TaskSpec, working_dir: &Path) -> TaskResult {
     let gate_report = if task.checks.is_empty() {
         GateReport::empty()
     } else {
@@ -323,7 +322,7 @@ async fn execute_gate_task(task: &TaskNode, working_dir: &Path) -> TaskResult {
 }
 
 async fn run_reviewer_pass<M: CompletionModel>(
-    task: &TaskNode,
+    task: &TaskSpec,
     agent_output: &str,
     tool_calls: &[ToolCallRecord],
     model: &M,
@@ -382,7 +381,7 @@ async fn run_reviewer_pass<M: CompletionModel>(
 }
 
 struct TaskDagrsAction<M: CompletionModel + 'static> {
-    task: TaskNode,
+    task: TaskSpec,
     model: M,
     registry: Arc<ToolRegistry>,
     config: ExecutorConfig,
@@ -471,21 +470,21 @@ impl<M: CompletionModel + 'static> Action for TaskDagrsAction<M> {
     }
 }
 
-fn execution_batches(dag: &TaskDAG) -> Result<Vec<Vec<Uuid>>, OrchestratorError> {
+fn execution_batches(plan: &ExecutionPlanSpec) -> Result<Vec<Vec<Uuid>>, OrchestratorError> {
     let mut completed = HashSet::new();
     let mut scheduled = HashSet::new();
     let mut batches = Vec::new();
-    let max_parallel = dag.max_parallel.max(1) as usize;
+    let max_parallel = plan.max_parallel.max(1) as usize;
 
-    while scheduled.len() < dag.nodes.len() {
-        let ready: Vec<Uuid> = dag
-            .nodes
+    while scheduled.len() < plan.tasks.len() {
+        let ready: Vec<Uuid> = plan
+            .tasks
             .iter()
-            .filter(|node| {
-                !scheduled.contains(&node.id)
-                    && node.dependencies.iter().all(|dep| completed.contains(dep))
+            .filter(|task| {
+                !scheduled.contains(&task.id)
+                    && task.dependencies.iter().all(|dep| completed.contains(dep))
             })
-            .map(|node| node.id)
+            .map(|task| task.id)
             .collect();
 
         if ready.is_empty() {
@@ -503,11 +502,11 @@ fn execution_batches(dag: &TaskDAG) -> Result<Vec<Vec<Uuid>>, OrchestratorError>
     Ok(batches)
 }
 
-fn task_index(dag: &TaskDAG) -> HashMap<Uuid, usize> {
-    dag.nodes
+fn task_index(tasks: &[TaskSpec]) -> HashMap<Uuid, usize> {
+    tasks
         .iter()
         .enumerate()
-        .map(|(idx, node)| (node.id, idx))
+        .map(|(idx, task)| (task.id, idx))
         .collect()
 }
 
@@ -531,7 +530,7 @@ fn add_batch_barriers(
 }
 
 fn build_dagrs_graph<M: CompletionModel + 'static>(
-    dag: &TaskDAG,
+    plan: &ExecutionPlanSpec,
     model: &M,
     registry: &Arc<ToolRegistry>,
     config: &ExecutorConfig,
@@ -540,29 +539,29 @@ fn build_dagrs_graph<M: CompletionModel + 'static>(
     let mut graph = Graph::new();
     let mut node_table = NodeTable::new();
     let mut dagrs_ids = HashMap::new();
-    let index = task_index(dag);
+    let index = task_index(&plan.tasks);
 
-    for node in &dag.nodes {
+    for task_spec in &plan.tasks {
         let action = TaskDagrsAction {
-            task: node.clone(),
+            task: task_spec.clone(),
             model: model.clone(),
             registry: Arc::clone(registry),
             config: config.clone(),
             run_state: run_state.clone(),
         };
         let dagrs_node =
-            DefaultNode::with_action(node.id.to_string(), action, &mut node_table);
+            DefaultNode::with_action(task_spec.id.to_string(), action, &mut node_table);
         let dagrs_id = dagrs_node.id();
         graph.add_node(dagrs_node);
-        dagrs_ids.insert(node.id, dagrs_id);
+        dagrs_ids.insert(task_spec.id, dagrs_id);
     }
 
-    let mut dependencies: HashMap<Uuid, HashSet<Uuid>> = dag
-        .nodes
+    let mut dependencies: HashMap<Uuid, HashSet<Uuid>> = plan
+        .tasks
         .iter()
-        .map(|node| (node.id, node.dependencies.iter().copied().collect()))
+        .map(|task| (task.id, task.dependencies.iter().copied().collect()))
         .collect();
-    let batches = execution_batches(dag)?;
+    let batches = execution_batches(plan)?;
     add_batch_barriers(&mut dependencies, &batches, &index);
 
     for (task_id, deps) in dependencies {
@@ -583,20 +582,20 @@ fn build_dagrs_graph<M: CompletionModel + 'static>(
 
 /// Execute all tasks in the DAG in topological order.
 pub async fn execute_dag<M: CompletionModel + 'static>(
-    plan: &mut ExecutionPlan,
+    plan_spec: &ExecutionPlanSpec,
     model: &M,
     registry: &Arc<ToolRegistry>,
     config: &ExecutorConfig,
 ) -> Result<RunStateSnapshot, OrchestratorError> {
     let run_state = RunStateStore::new();
-    let plan_snapshot = plan.clone();
+    let plan_snapshot = plan_spec.clone();
     let model_snapshot = model.clone();
     let registry_snapshot = Arc::clone(registry);
     let config_snapshot = config.clone();
     let run_state_snapshot = run_state.clone();
     let mut graph = tokio::task::spawn_blocking(move || {
         build_dagrs_graph(
-            &plan_snapshot.dag,
+            &plan_snapshot,
             &model_snapshot,
             &registry_snapshot,
             &config_snapshot,
@@ -615,15 +614,11 @@ pub async fn execute_dag<M: CompletionModel + 'static>(
         }
     }
 
-    let snapshot = run_state.snapshot(plan).await;
-    for node in &mut plan.dag.nodes {
-        node.status = snapshot.status_for(node.id);
-    }
-
+    let snapshot = run_state.snapshot(plan_spec).await;
     Ok(snapshot)
 }
 
-fn build_task_prompt(task: &TaskNode, working_dir: &Path, allowed_tools: &[String]) -> String {
+fn build_task_prompt(task: &TaskSpec, working_dir: &Path, allowed_tools: &[String]) -> String {
     let mut parts = Vec::new();
     parts.push(format!("## Task\n{}", task.title));
     parts.push(format!("## Objective\n{}", task.objective));
@@ -709,7 +704,7 @@ fn build_task_prompt(task: &TaskNode, working_dir: &Path, allowed_tools: &[Strin
 }
 
 fn build_reviewer_prompt(
-    task: &TaskNode,
+    task: &TaskSpec,
     agent_output: &str,
     tool_calls: &[ToolCallRecord],
     working_dir: &Path,
@@ -748,7 +743,7 @@ fn build_reviewer_prompt(
     parts.join("\n\n")
 }
 
-fn allowed_tools_for_task(spec: &IntentSpec, task: &TaskNode) -> Vec<String> {
+fn allowed_tools_for_task(spec: &IntentSpec, task: &TaskSpec) -> Vec<String> {
     let mut tools = Vec::new();
 
     if acl_allows(&spec.security.tool_acl, "workspace.fs", "read") {
@@ -823,7 +818,7 @@ mod tests {
             message::{AssistantContent, Message, Text, UserContent},
         },
         intentspec::{profiles, types::*},
-        orchestrator::types::{ExecutionPlan, TaskContract, TaskKind},
+        orchestrator::types::{ExecutionPlanSpec, TaskContract, TaskKind, TaskSpec},
         tools::registry::ToolRegistry,
     };
 
@@ -892,7 +887,7 @@ mod tests {
     }
 
     impl OrchestratorObserver for RecordingObserver {
-        fn on_task_started(&self, task: &TaskNode) {
+        fn on_task_started(&self, task: &TaskSpec) {
             self.starts.lock().unwrap().push(task.title.clone());
         }
     }
@@ -1037,8 +1032,8 @@ mod tests {
         })
     }
 
-    fn implementation_task() -> TaskNode {
-        TaskNode {
+    fn implementation_task() -> TaskSpec {
+        TaskSpec {
             id: uuid::Uuid::new_v4(),
             title: "Do thing".into(),
             objective: "Do thing".into(),
@@ -1060,18 +1055,18 @@ mod tests {
                 touch_apis: vec![],
                 expected_outputs: vec!["tests pass".into()],
             },
-            status: TaskNodeStatus::Pending,
         }
     }
 
-    fn plan_for_dag(dag: TaskDAG) -> ExecutionPlan {
-        ExecutionPlan {
-            intent_spec_id: dag.intent_spec_id.clone(),
+    fn plan_for_tasks(tasks: Vec<TaskSpec>, max_parallel: u8) -> ExecutionPlanSpec {
+        ExecutionPlanSpec {
+            intent_spec_id: "test".into(),
             summary: "test plan".into(),
             revision: 1,
             parent_revision: None,
             replan_reason: None,
-            dag,
+            tasks,
+            max_parallel,
             parallel_groups: vec![],
             checkpoints: vec![],
         }
@@ -1079,7 +1074,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_gate_task() {
-        let task = TaskNode {
+        let task = TaskSpec {
             kind: TaskKind::Gate,
             gate_stage: Some(super::super::types::GateStage::Fast),
             checks: vec![Check {
@@ -1115,7 +1110,8 @@ mod tests {
             reviewer_preamble: None,
             observer: None,
         };
-        let result = execute_task(&implementation_task(), &model, &registry, &config).await;
+        let task = implementation_task();
+        let result = execute_task(&task, &model, &registry, &config).await;
         assert_eq!(result.status, TaskNodeStatus::Completed);
         assert_eq!(result.retry_count, 0);
     }
@@ -1173,13 +1169,12 @@ mod tests {
         b.title = "B".into();
         b.objective = "B".into();
 
-        let mut plan = plan_for_dag(TaskDAG {
-            nodes: vec![a.clone(), c.clone(), b.clone()],
-            intent_spec_id: "test".into(),
-            max_parallel: 1,
-        });
+        let plan = plan_for_tasks(
+            vec![a, c, b],
+            1,
+        );
 
-        let run_state = execute_dag(&mut plan, &model, &registry, &config)
+        let run_state = execute_dag(&plan, &model, &registry, &config)
             .await
             .unwrap();
 
@@ -1218,13 +1213,9 @@ mod tests {
         later.title = "Later".into();
         later.objective = "Later".into();
 
-        let mut plan = plan_for_dag(TaskDAG {
-            nodes: vec![failing.clone(), later.clone()],
-            intent_spec_id: "test".into(),
-            max_parallel: 1,
-        });
+        let plan = plan_for_tasks(vec![failing.clone(), later.clone()], 1);
 
-        let run_state = execute_dag(&mut plan, &model, &registry, &config)
+        let run_state = execute_dag(&plan, &model, &registry, &config)
             .await
             .unwrap();
 
@@ -1234,6 +1225,5 @@ mod tests {
         assert_eq!(run_state.task_results[0].task_id, failing.id);
         assert_eq!(run_state.task_results[0].status, TaskNodeStatus::Failed);
         assert_eq!(run_state.status_for(later.id), TaskNodeStatus::Pending);
-        assert_eq!(plan.dag.get(later.id).unwrap().status, TaskNodeStatus::Pending);
     }
 }

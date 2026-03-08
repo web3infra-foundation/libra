@@ -50,7 +50,7 @@ use crate::{
             },
             server::LibraMcpServer,
         },
-        orchestrator::{planner::compile_execution_plan, types::ExecutionPlan},
+        orchestrator::{planner::compile_execution_plan_spec, types::ExecutionPlanSpec},
         session::{SessionState, SessionStore},
         tools::{
             ToolOutput, ToolRegistry,
@@ -1442,7 +1442,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             intentspec::types::IntentSpec,
             orchestrator::{
                 Orchestrator,
-                types::{OrchestratorConfig, OrchestratorObserver, PersistedExecution, TaskNode},
+                types::{OrchestratorConfig, OrchestratorObserver, PersistedExecution, TaskSpec},
             },
         };
 
@@ -1491,24 +1491,24 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     )));
                 }
 
-                fn scoped_call_id(task: &TaskNode, call_id: &str) -> String {
+                fn scoped_call_id(task: &TaskSpec, call_id: &str) -> String {
                     format!("{}:{call_id}", task.id)
                 }
             }
 
             impl OrchestratorObserver for UiOrchestratorObserver {
-                fn on_plan_compiled(&self, plan: &ExecutionPlan) {
+                fn on_plan_compiled(&self, plan: &ExecutionPlanSpec) {
                     self.send_note(format!(
                         "Compiled execution plan rev {}: {}  \nTasks: {} | Parallel groups: {} | Checkpoints: {}",
                         plan.revision,
                         plan.summary,
-                        plan.dag.nodes.len(),
+                        plan.tasks.len(),
                         plan.parallel_groups.len(),
                         plan.checkpoints.len()
                     ));
                 }
 
-                fn on_task_started(&self, task: &TaskNode) {
+                fn on_task_started(&self, task: &TaskSpec) {
                     let kind = match task.gate_stage {
                         Some(ref stage) => format!("gate:{stage:?}"),
                         None => "implementation".to_string(),
@@ -1521,7 +1521,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
                 fn on_task_completed(
                     &self,
-                    task: &TaskNode,
+                    task: &TaskSpec,
                     result: &crate::internal::ai::orchestrator::types::TaskResult,
                 ) {
                     self.send_note(format!(
@@ -1534,7 +1534,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     ));
                 }
 
-                fn on_task_assistant_message(&self, task: &TaskNode, text: &str) {
+                fn on_task_assistant_message(&self, task: &TaskSpec, text: &str) {
                     let text = text.trim();
                     if text.is_empty() {
                         return;
@@ -1544,7 +1544,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
                 fn on_tool_call_begin(
                     &self,
-                    task: &TaskNode,
+                    task: &TaskSpec,
                     call_id: &str,
                     tool_name: &str,
                     arguments: &serde_json::Value,
@@ -1558,7 +1558,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
                 fn on_tool_call_end(
                     &self,
-                    task: &TaskNode,
+                    task: &TaskSpec,
                     call_id: &str,
                     tool_name: &str,
                     result: &Result<ToolOutput, String>,
@@ -1570,13 +1570,13 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     });
                 }
 
-                fn on_reviewer_started(&self, task: &TaskNode) {
+                fn on_reviewer_started(&self, task: &TaskSpec) {
                     self.send_note(format!("Reviewer pass started for {}", task.title));
                 }
 
                 fn on_reviewer_completed(
                     &self,
-                    task: &TaskNode,
+                    task: &TaskSpec,
                     review: Option<&crate::internal::ai::orchestrator::types::ReviewOutcome>,
                 ) {
                     let summary = review
@@ -1911,7 +1911,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
             let pretty_json =
                 serde_json::to_string_pretty(&spec).unwrap_or_else(|_| "{}".to_string());
-            let execution_plan = match compile_execution_plan(&spec) {
+            let execution_plan = match compile_execution_plan_spec(&spec) {
                 Ok(plan) => plan,
                 Err(e) => {
                     let _ = tx.send(AppEvent::AgentEvent(AgentEvent::Error {
@@ -2169,8 +2169,8 @@ fn format_orchestrator_result(
     lines.push(String::new());
     lines.push(format!(
         "Plan: {} | Parallel groups: {} | Replans: {}",
-        result.execution_plan.summary,
-        result.execution_plan.parallel_groups.len(),
+        result.execution_plan_spec.summary,
+        result.execution_plan_spec.parallel_groups.len(),
         result.replan_count
     ));
     if let Some(persistence) = &result.persistence {
@@ -2187,16 +2187,25 @@ fn format_orchestrator_result(
     }
     lines.push(String::new());
 
+    let task_titles: HashMap<_, _> = result
+        .execution_plan_spec
+        .tasks
+        .iter()
+        .map(|task| (task.id, task.title.as_str()))
+        .collect();
+
     for tr in &result.task_results {
         let status_icon = match tr.status {
             TaskNodeStatus::Completed => "✓",
             TaskNodeStatus::Failed => "✗",
             _ => "○",
         };
+        let task_label = task_titles.get(&tr.task_id).copied().unwrap_or("unknown");
         lines.push(format!(
-            "{} Task {} - {:?} (retries: {}, tools: {}, policy violations: {})",
+            "{} Task {} ({}) - {:?} (retries: {}, tools: {}, policy violations: {})",
             status_icon,
             tr.task_id,
+            task_label,
             tr.status,
             tr.retry_count,
             tr.tool_calls.len(),
@@ -2265,7 +2274,7 @@ fn summarize_retry_error(error: &str) -> String {
     }
 }
 
-fn render_execution_plan_summary(plan: &ExecutionPlan, plan_id: Option<&str>) -> String {
+fn render_execution_plan_summary(plan: &ExecutionPlanSpec, plan_id: Option<&str>) -> String {
     let mut lines = Vec::new();
     lines.push("## Execution Plan".to_string());
     if let Some(id) = plan_id {
@@ -2279,20 +2288,20 @@ fn render_execution_plan_summary(plan: &ExecutionPlan, plan_id: Option<&str>) ->
     ));
     lines.push(String::new());
 
-    for node in &plan.dag.nodes {
-        let kind = match &node.gate_stage {
+    for task in &plan.tasks {
+        let kind = match &task.gate_stage {
             Some(stage) => format!("gate:{stage:?}"),
             None => "implementation".to_string(),
         };
-        lines.push(format!("- [{}] {}", kind.to_lowercase(), node.title));
-        if !node.contract.touch_files.is_empty() {
-            lines.push(format!("  files: {}", node.contract.touch_files.join(", ")));
+        lines.push(format!("- [{}] {}", kind.to_lowercase(), task.title));
+        if !task.contract.touch_files.is_empty() {
+            lines.push(format!("  files: {}", task.contract.touch_files.join(", ")));
         }
-        if !node.dependencies.is_empty() {
-            lines.push(format!("  depends on: {}", node.dependencies.len()));
+        if !task.dependencies.is_empty() {
+            lines.push(format!("  depends on: {}", task.dependencies.len()));
         }
-        if !node.checks.is_empty() {
-            lines.push(format!("  checks: {}", node.checks.len()));
+        if !task.checks.is_empty() {
+            lines.push(format!("  checks: {}", task.checks.len()));
         }
     }
 
@@ -2300,42 +2309,41 @@ fn render_execution_plan_summary(plan: &ExecutionPlan, plan_id: Option<&str>) ->
 }
 
 async fn persist_execution_plan(
-    plan: &ExecutionPlan,
+    plan: &ExecutionPlanSpec,
     mcp_server: &Arc<LibraMcpServer>,
 ) -> Result<String, String> {
     let steps = plan
-        .dag
-        .nodes
+        .tasks
         .iter()
-        .map(|node| {
-            let checks = serde_json::to_value(&node.checks)
+        .map(|task| {
+            let checks = serde_json::to_value(&task.checks)
                 .map_err(|e| format!("failed to encode plan checks: {e}"))?;
             Ok(crate::internal::ai::mcp::resource::PlanStepParams {
-                description: node.title.clone(),
+                description: task.title.clone(),
                 inputs: Some(serde_json::json!({
-                    "objective": node.objective,
-                    "kind": format!("{:?}", node.kind),
-                    "gateStage": node.gate_stage.as_ref().map(|stage| format!("{:?}", stage)),
-                    "scopeIn": node.scope_in,
-                    "scopeOut": node.scope_out,
-                    "touchFiles": node.contract.touch_files,
-                    "touchSymbols": node.contract.touch_symbols,
-                    "touchApis": node.contract.touch_apis,
-                    "constraints": node.constraints,
+                    "objective": task.objective,
+                    "kind": format!("{:?}", task.kind),
+                    "gateStage": task.gate_stage.as_ref().map(|stage| format!("{:?}", stage)),
+                    "scopeIn": task.scope_in,
+                    "scopeOut": task.scope_out,
+                    "touchFiles": task.contract.touch_files,
+                    "touchSymbols": task.contract.touch_symbols,
+                    "touchApis": task.contract.touch_apis,
+                    "constraints": task.constraints,
                 })),
                 outputs: Some(serde_json::json!({
-                    "expectedOutputs": node.contract.expected_outputs,
-                    "acceptanceCriteria": node.acceptance_criteria,
+                    "expectedOutputs": task.contract.expected_outputs,
+                    "acceptanceCriteria": task.acceptance_criteria,
                 })),
                 checks: Some(checks),
                 status: Some("pending".to_string()),
-                owner_role: node.owner_role.clone(),
+                owner_role: task.owner_role.clone(),
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
 
     let params = CreatePlanParams {
-        plan_version: Some(1),
+        plan_version: Some(plan.revision),
         pipeline_id: None,
         fwindow: None,
         steps: Some(steps),

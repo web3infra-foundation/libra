@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use super::{
     run_state::RunStateSnapshot,
-    types::{ExecutionPlan, GateReport, GateStage, SystemReport, TaskKind},
+    types::{ExecutionPlanSpec, GateReport, GateStage, SystemReport, TaskKind},
 };
 use crate::internal::ai::intentspec::types::{ArtifactName, ArtifactStage, IntentSpec};
 
@@ -10,7 +10,7 @@ use crate::internal::ai::intentspec::types::{ArtifactName, ArtifactStage, Intent
 /// and required artifact contracts.
 pub fn build_system_report(
     spec: &IntentSpec,
-    plan: &ExecutionPlan,
+    plan: &ExecutionPlanSpec,
     run_state: &RunStateSnapshot,
 ) -> SystemReport {
     let integration = gate_report_for_stage(plan, run_state, GateStage::Integration)
@@ -41,29 +41,27 @@ pub fn build_system_report(
 }
 
 fn gate_report_for_stage(
-    plan: &ExecutionPlan,
+    plan: &ExecutionPlanSpec,
     run_state: &RunStateSnapshot,
     stage: GateStage,
 ) -> Option<GateReport> {
     let task_id = plan
-        .dag
-        .nodes
+        .tasks
         .iter()
-        .find(|node| node.gate_stage == Some(stage.clone()))
-        .map(|node| node.id)?;
+        .find(|task| task.gate_stage == Some(stage.clone()))
+        .map(|task| task.id)?;
 
     run_state
         .result_for(task_id)
         .and_then(|result| result.gate_report.clone())
 }
 
-fn review_report(plan: &ExecutionPlan, run_state: &RunStateSnapshot) -> (bool, Vec<String>) {
+fn review_report(plan: &ExecutionPlanSpec, run_state: &RunStateSnapshot) -> (bool, Vec<String>) {
     let implementation_ids = plan
-        .dag
-        .nodes
+        .tasks
         .iter()
-        .filter(|node| node.kind == TaskKind::Implementation)
-        .map(|node| node.id)
+        .filter(|task| task.kind == TaskKind::Implementation)
+        .map(|task| task.id)
         .collect::<BTreeSet<_>>();
 
     let findings = run_state
@@ -86,7 +84,7 @@ fn review_report(plan: &ExecutionPlan, run_state: &RunStateSnapshot) -> (bool, V
 
 fn artifact_report(
     spec: &IntentSpec,
-    plan: &ExecutionPlan,
+    plan: &ExecutionPlanSpec,
     run_state: &RunStateSnapshot,
 ) -> (bool, Vec<String>) {
     let produced = produced_artifacts(plan, run_state);
@@ -108,15 +106,15 @@ fn artifact_report(
     (missing.is_empty(), missing)
 }
 
-fn produced_artifacts(plan: &ExecutionPlan, run_state: &RunStateSnapshot) -> BTreeSet<String> {
+fn produced_artifacts(plan: &ExecutionPlanSpec, run_state: &RunStateSnapshot) -> BTreeSet<String> {
     let mut produced = BTreeSet::new();
 
-    for node in &plan.dag.nodes {
-        let Some(result) = run_state.result_for(node.id) else {
+    for task in &plan.tasks {
+        let Some(result) = run_state.result_for(task.id) else {
             continue;
         };
 
-        if node.kind == TaskKind::Implementation
+        if task.kind == TaskKind::Implementation
             && result.status == super::types::TaskNodeStatus::Completed
             && result
                 .tool_calls
@@ -130,13 +128,13 @@ fn produced_artifacts(plan: &ExecutionPlan, run_state: &RunStateSnapshot) -> BTr
         }
 
         if let Some(report) = &result.gate_report {
-            for check in &node.checks {
+            for check in &task.checks {
                 if report.results.iter().any(|gate| gate.check_id == check.id) {
                     for artifact in &check.artifacts_produced {
                         if let Some(name) = parse_artifact_name(artifact) {
                             produced.insert(artifact_key(
                                 &name,
-                                &stage_for_gate(node.gate_stage.as_ref()),
+                                &stage_for_gate(task.gate_stage.as_ref()),
                             ));
                         }
                     }
@@ -223,8 +221,8 @@ mod tests {
         orchestrator::{
             run_state::{RunStateSnapshot, TaskStatusSnapshot},
             types::{
-                ExecutionCheckpoint, GateResult, ReviewOutcome, TaskContract, TaskDAG, TaskKind,
-                TaskNode, TaskNodeStatus, TaskResult,
+                ExecutionCheckpoint, ExecutionPlanSpec, GateResult, ReviewOutcome, TaskContract,
+                TaskKind, TaskNodeStatus, TaskResult, TaskSpec,
             },
         },
     };
@@ -378,63 +376,58 @@ mod tests {
         }
     }
 
-    fn plan_with_gates() -> ExecutionPlan {
+    fn plan_with_gates() -> ExecutionPlanSpec {
         let impl_id = Uuid::new_v4();
         let release_id = Uuid::new_v4();
-        ExecutionPlan {
+        ExecutionPlanSpec {
             intent_spec_id: "test".into(),
             summary: "summary".into(),
             revision: 1,
             parent_revision: None,
             replan_reason: None,
-            dag: TaskDAG {
-                nodes: vec![
-                    TaskNode {
-                        id: impl_id,
-                        title: "Implementation".into(),
-                        objective: "implementation".into(),
-                        description: None,
-                        kind: TaskKind::Implementation,
-                        gate_stage: None,
-                        owner_role: Some("coder".into()),
-                        dependencies: vec![],
-                        constraints: vec![],
-                        acceptance_criteria: vec![],
-                        scope_in: vec![],
-                        scope_out: vec![],
-                        checks: vec![],
-                        contract: TaskContract::default(),
-                        status: TaskNodeStatus::Pending,
-                    },
-                    TaskNode {
-                        id: release_id,
-                        title: "Release".into(),
-                        objective: "release".into(),
-                        description: None,
-                        kind: TaskKind::Gate,
-                        gate_stage: Some(GateStage::Release),
-                        owner_role: Some("verifier".into()),
-                        dependencies: vec![],
-                        constraints: vec![],
-                        acceptance_criteria: vec![],
-                        scope_in: vec![],
-                        scope_out: vec![],
-                        checks: vec![Check {
-                            id: "release-test".into(),
-                            kind: CheckKind::Command,
-                            command: Some("cargo test".into()),
-                            timeout_seconds: None,
-                            expected_exit_code: None,
-                            required: true,
-                            artifacts_produced: vec!["test-log".into()],
-                        }],
-                        contract: TaskContract::default(),
-                        status: TaskNodeStatus::Pending,
-                    },
-                ],
-                intent_spec_id: "test".into(),
-                max_parallel: 1,
-            },
+            tasks: vec![
+                TaskSpec {
+                    id: impl_id,
+                    title: "Implementation".into(),
+                    objective: "implementation".into(),
+                    description: None,
+                    kind: TaskKind::Implementation,
+                    gate_stage: None,
+                    owner_role: Some("coder".into()),
+                    dependencies: vec![],
+                    constraints: vec![],
+                    acceptance_criteria: vec![],
+                    scope_in: vec![],
+                    scope_out: vec![],
+                    checks: vec![],
+                    contract: TaskContract::default(),
+                },
+                TaskSpec {
+                    id: release_id,
+                    title: "Release".into(),
+                    objective: "release".into(),
+                    description: None,
+                    kind: TaskKind::Gate,
+                    gate_stage: Some(GateStage::Release),
+                    owner_role: Some("verifier".into()),
+                    dependencies: vec![],
+                    constraints: vec![],
+                    acceptance_criteria: vec![],
+                    scope_in: vec![],
+                    scope_out: vec![],
+                    checks: vec![Check {
+                        id: "release-test".into(),
+                        kind: CheckKind::Command,
+                        command: Some("cargo test".into()),
+                        timeout_seconds: None,
+                        expected_exit_code: None,
+                        required: true,
+                        artifacts_produced: vec!["test-log".into()],
+                    }],
+                    contract: TaskContract::default(),
+                },
+            ],
+            max_parallel: 1,
             parallel_groups: vec![],
             checkpoints: vec![ExecutionCheckpoint {
                 label: "after-release".into(),
@@ -450,7 +443,7 @@ mod tests {
         let plan = plan_with_gates();
         let results = vec![
             TaskResult {
-                task_id: plan.dag.nodes[0].id,
+                task_id: plan.tasks[0].id,
                 status: TaskNodeStatus::Completed,
                 gate_report: None,
                 agent_output: Some("done".into()),
@@ -473,7 +466,7 @@ mod tests {
                 }),
             },
             TaskResult {
-                task_id: plan.dag.nodes[1].id,
+                task_id: plan.tasks[1].id,
                 status: TaskNodeStatus::Completed,
                 gate_report: Some(GateReport {
                     results: vec![GateResult {

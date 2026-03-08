@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -104,169 +104,6 @@ pub struct TaskSpec {
     pub contract: TaskContract,
 }
 
-impl TaskSpec {
-    pub fn materialize(&self, status: TaskNodeStatus) -> TaskNode {
-        TaskNode {
-            id: self.id,
-            title: self.title.clone(),
-            objective: self.objective.clone(),
-            description: self.description.clone(),
-            kind: self.kind.clone(),
-            gate_stage: self.gate_stage.clone(),
-            owner_role: self.owner_role.clone(),
-            dependencies: self.dependencies.clone(),
-            constraints: self.constraints.clone(),
-            acceptance_criteria: self.acceptance_criteria.clone(),
-            scope_in: self.scope_in.clone(),
-            scope_out: self.scope_out.clone(),
-            checks: self.checks.clone(),
-            contract: self.contract.clone(),
-            status,
-        }
-    }
-}
-
-/// A single task within the execution DAG.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TaskNode {
-    pub id: Uuid,
-    pub title: String,
-    pub objective: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    pub kind: TaskKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gate_stage: Option<GateStage>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner_role: Option<String>,
-    #[serde(default)]
-    pub dependencies: Vec<Uuid>,
-    #[serde(default)]
-    pub constraints: Vec<String>,
-    #[serde(default)]
-    pub acceptance_criteria: Vec<String>,
-    #[serde(default)]
-    pub scope_in: Vec<String>,
-    #[serde(default)]
-    pub scope_out: Vec<String>,
-    #[serde(default)]
-    pub checks: Vec<Check>,
-    #[serde(default)]
-    pub contract: TaskContract,
-    pub status: TaskNodeStatus,
-}
-
-impl TaskNode {
-    pub fn is_gate(&self) -> bool {
-        self.kind == TaskKind::Gate
-    }
-}
-
-impl From<&TaskNode> for TaskSpec {
-    fn from(node: &TaskNode) -> Self {
-        Self {
-            id: node.id,
-            title: node.title.clone(),
-            objective: node.objective.clone(),
-            description: node.description.clone(),
-            kind: node.kind.clone(),
-            gate_stage: node.gate_stage.clone(),
-            owner_role: node.owner_role.clone(),
-            dependencies: node.dependencies.clone(),
-            constraints: node.constraints.clone(),
-            acceptance_criteria: node.acceptance_criteria.clone(),
-            scope_in: node.scope_in.clone(),
-            scope_out: node.scope_out.clone(),
-            checks: node.checks.clone(),
-            contract: node.contract.clone(),
-        }
-    }
-}
-
-/// Directed acyclic graph of tasks to execute.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TaskDAG {
-    pub nodes: Vec<TaskNode>,
-    pub intent_spec_id: String,
-    pub max_parallel: u8,
-}
-
-impl TaskDAG {
-    /// Return task IDs in topological order (dependencies before dependents).
-    pub fn topological_order(&self) -> Vec<Uuid> {
-        let index: HashMap<Uuid, usize> = self
-            .nodes
-            .iter()
-            .enumerate()
-            .map(|(i, n)| (n.id, i))
-            .collect();
-
-        let mut in_degree: HashMap<Uuid, usize> = self.nodes.iter().map(|n| (n.id, 0)).collect();
-        let mut adj: HashMap<Uuid, Vec<Uuid>> =
-            self.nodes.iter().map(|n| (n.id, Vec::new())).collect();
-
-        for node in &self.nodes {
-            for dep in &node.dependencies {
-                if index.contains_key(dep) {
-                    adj.get_mut(dep).unwrap().push(node.id);
-                    *in_degree.get_mut(&node.id).unwrap() += 1;
-                }
-            }
-        }
-
-        let mut queue: Vec<Uuid> = in_degree
-            .iter()
-            .filter(|(_, deg)| **deg == 0)
-            .map(|(&id, _)| id)
-            .collect();
-        queue.sort();
-
-        let mut order = Vec::with_capacity(self.nodes.len());
-        while let Some(id) = queue.pop() {
-            order.push(id);
-            if let Some(dependents) = adj.get(&id) {
-                for &dep_id in dependents {
-                    let deg = in_degree.get_mut(&dep_id).unwrap();
-                    *deg -= 1;
-                    if *deg == 0 {
-                        queue.push(dep_id);
-                        queue.sort();
-                    }
-                }
-            }
-        }
-
-        order
-    }
-
-    /// Return IDs of tasks that are ready to execute (pending, all deps completed).
-    pub fn ready_tasks(&self) -> Vec<Uuid> {
-        let status_map: HashMap<Uuid, &TaskNodeStatus> =
-            self.nodes.iter().map(|n| (n.id, &n.status)).collect();
-
-        self.nodes
-            .iter()
-            .filter(|n| {
-                n.status == TaskNodeStatus::Pending
-                    && n.dependencies
-                        .iter()
-                        .all(|dep| matches!(status_map.get(dep), Some(TaskNodeStatus::Completed)))
-            })
-            .map(|n| n.id)
-            .collect()
-    }
-
-    /// Get an immutable reference to a task by ID.
-    pub fn get(&self, id: Uuid) -> Option<&TaskNode> {
-        self.nodes.iter().find(|n| n.id == id)
-    }
-
-    /// Get a mutable reference to a task by ID.
-    pub fn get_mut(&mut self, id: Uuid) -> Option<&mut TaskNode> {
-        self.nodes.iter_mut().find(|n| n.id == id)
-    }
-}
-
 /// A checkpoint in the compiled execution plan.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ExecutionCheckpoint {
@@ -294,63 +131,6 @@ pub struct ExecutionPlanSpec {
     pub parallel_groups: Vec<Vec<Uuid>>,
     #[serde(default)]
     pub checkpoints: Vec<ExecutionCheckpoint>,
-}
-
-impl ExecutionPlanSpec {
-    pub fn materialize(&self) -> ExecutionPlan {
-        ExecutionPlan {
-            intent_spec_id: self.intent_spec_id.clone(),
-            summary: self.summary.clone(),
-            revision: self.revision,
-            parent_revision: self.parent_revision,
-            replan_reason: self.replan_reason.clone(),
-            dag: TaskDAG {
-                nodes: self
-                    .tasks
-                    .iter()
-                    .map(|task| task.materialize(TaskNodeStatus::Pending))
-                    .collect(),
-                intent_spec_id: self.intent_spec_id.clone(),
-                max_parallel: self.max_parallel,
-            },
-            parallel_groups: self.parallel_groups.clone(),
-            checkpoints: self.checkpoints.clone(),
-        }
-    }
-}
-
-/// The compiled execution plan derived from an IntentSpec.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ExecutionPlan {
-    pub intent_spec_id: String,
-    pub summary: String,
-    #[serde(default = "default_execution_revision")]
-    pub revision: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_revision: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub replan_reason: Option<String>,
-    pub dag: TaskDAG,
-    #[serde(default)]
-    pub parallel_groups: Vec<Vec<Uuid>>,
-    #[serde(default)]
-    pub checkpoints: Vec<ExecutionCheckpoint>,
-}
-
-impl ExecutionPlan {
-    pub fn to_spec(&self) -> ExecutionPlanSpec {
-        ExecutionPlanSpec {
-            intent_spec_id: self.intent_spec_id.clone(),
-            summary: self.summary.clone(),
-            revision: self.revision,
-            parent_revision: self.parent_revision,
-            replan_reason: self.replan_reason.clone(),
-            tasks: self.dag.nodes.iter().map(TaskSpec::from).collect(),
-            max_parallel: self.dag.max_parallel,
-            parallel_groups: self.parallel_groups.clone(),
-            checkpoints: self.checkpoints.clone(),
-        }
-    }
 }
 
 /// A policy violation detected before or after a tool call.
@@ -476,9 +256,9 @@ pub struct SystemReport {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OrchestratorResult {
     pub decision: DecisionOutcome,
-    pub execution_plan: ExecutionPlan,
+    pub execution_plan_spec: ExecutionPlanSpec,
     #[serde(default)]
-    pub plan_revisions: Vec<ExecutionPlan>,
+    pub plan_revision_specs: Vec<ExecutionPlanSpec>,
     #[serde(default)]
     pub run_state: RunStateSnapshot,
     pub task_results: Vec<TaskResult>,
@@ -535,17 +315,17 @@ pub struct PersistedExecution {
 
 /// Best-effort observer for surfacing orchestrator runtime progress.
 pub trait OrchestratorObserver: Send + Sync {
-    fn on_plan_compiled(&self, _plan: &ExecutionPlan) {}
+    fn on_plan_compiled(&self, _plan: &ExecutionPlanSpec) {}
 
-    fn on_task_started(&self, _task: &TaskNode) {}
+    fn on_task_started(&self, _task: &TaskSpec) {}
 
-    fn on_task_completed(&self, _task: &TaskNode, _result: &TaskResult) {}
+    fn on_task_completed(&self, _task: &TaskSpec, _result: &TaskResult) {}
 
-    fn on_task_assistant_message(&self, _task: &TaskNode, _text: &str) {}
+    fn on_task_assistant_message(&self, _task: &TaskSpec, _text: &str) {}
 
     fn on_tool_call_begin(
         &self,
-        _task: &TaskNode,
+        _task: &TaskSpec,
         _call_id: &str,
         _tool_name: &str,
         _arguments: &Value,
@@ -554,16 +334,16 @@ pub trait OrchestratorObserver: Send + Sync {
 
     fn on_tool_call_end(
         &self,
-        _task: &TaskNode,
+        _task: &TaskSpec,
         _call_id: &str,
         _tool_name: &str,
         _result: &Result<crate::internal::ai::tools::ToolOutput, String>,
     ) {
     }
 
-    fn on_reviewer_started(&self, _task: &TaskNode) {}
+    fn on_reviewer_started(&self, _task: &TaskSpec) {}
 
-    fn on_reviewer_completed(&self, _task: &TaskNode, _review: Option<&ReviewOutcome>) {}
+    fn on_reviewer_completed(&self, _task: &TaskSpec, _review: Option<&ReviewOutcome>) {}
 
     fn on_replan(
         &self,
@@ -601,8 +381,8 @@ mod tests {
     use super::*;
     use crate::internal::ai::orchestrator::run_state::RunStateSnapshot;
 
-    fn implementation_task(id: Uuid) -> TaskNode {
-        TaskNode {
+    fn implementation_task(id: Uuid) -> TaskSpec {
+        TaskSpec {
             id,
             title: "Do thing".into(),
             objective: "do thing".into(),
@@ -617,105 +397,56 @@ mod tests {
             scope_out: vec![],
             checks: vec![],
             contract: TaskContract::default(),
-            status: TaskNodeStatus::Pending,
         }
     }
 
     #[test]
-    fn test_task_dag_topological_order_single() {
+    fn test_task_spec_serde_roundtrip() {
         let id = Uuid::new_v4();
-        let dag = TaskDAG {
-            nodes: vec![implementation_task(id)],
-            intent_spec_id: "test".into(),
-            max_parallel: 1,
-        };
-        assert_eq!(dag.topological_order(), vec![id]);
+        let task = implementation_task(id);
+        let json = serde_json::to_string(&task).unwrap();
+        let back: TaskSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.id, id);
+        assert_eq!(back.kind, TaskKind::Implementation);
     }
 
     #[test]
-    fn test_task_dag_topological_order_chain() {
+    fn test_execution_plan_spec_preserves_dependencies() {
         let a = Uuid::new_v4();
         let b = Uuid::new_v4();
-        let c = Uuid::new_v4();
-        let dag = TaskDAG {
-            nodes: vec![
-                TaskNode {
-                    dependencies: vec![b],
-                    objective: "c".into(),
-                    title: "c".into(),
-                    ..implementation_task(c)
-                },
-                implementation_task(a),
-                TaskNode {
-                    dependencies: vec![a],
-                    objective: "b".into(),
-                    title: "b".into(),
-                    ..implementation_task(b)
-                },
-            ],
-            intent_spec_id: "test".into(),
-            max_parallel: 1,
-        };
-        let order = dag.topological_order();
-        let pos_a = order.iter().position(|&x| x == a).unwrap();
-        let pos_b = order.iter().position(|&x| x == b).unwrap();
-        let pos_c = order.iter().position(|&x| x == c).unwrap();
-        assert!(pos_a < pos_b);
-        assert!(pos_b < pos_c);
-    }
-
-    #[test]
-    fn test_ready_tasks_after_dependency_completion() {
-        let a = Uuid::new_v4();
-        let b = Uuid::new_v4();
-        let mut dag = TaskDAG {
-            nodes: vec![
-                TaskNode {
-                    status: TaskNodeStatus::Completed,
-                    ..implementation_task(a)
-                },
-                TaskNode {
-                    dependencies: vec![a],
-                    objective: "b".into(),
-                    title: "b".into(),
-                    ..implementation_task(b)
-                },
-            ],
-            intent_spec_id: "test".into(),
-            max_parallel: 2,
-        };
-        let ready = dag.ready_tasks();
-        assert_eq!(ready, vec![b]);
-
-        dag.get_mut(b).unwrap().status = TaskNodeStatus::Running;
-        assert!(dag.ready_tasks().is_empty());
-    }
-
-    #[test]
-    fn test_serde_roundtrip_execution_plan() {
-        let id = Uuid::new_v4();
-        let plan = ExecutionPlan {
+        let spec = ExecutionPlanSpec {
             intent_spec_id: "spec-123".into(),
             summary: "summary".into(),
             revision: 1,
             parent_revision: None,
             replan_reason: None,
-            dag: TaskDAG {
-                nodes: vec![implementation_task(id)],
-                intent_spec_id: "spec-123".into(),
-                max_parallel: 2,
-            },
-            parallel_groups: vec![vec![id]],
-            checkpoints: vec![ExecutionCheckpoint {
-                label: "after-fast".into(),
-                after_tasks: vec![id],
-                reason: "gate boundary".into(),
-            }],
+            tasks: vec![
+                implementation_task(a),
+                TaskSpec {
+                    id: b,
+                    title: "b".into(),
+                    objective: "b".into(),
+                    description: None,
+                    kind: TaskKind::Implementation,
+                    gate_stage: None,
+                    owner_role: Some("coder".into()),
+                    dependencies: vec![a],
+                    constraints: vec![],
+                    acceptance_criteria: vec![],
+                    scope_in: vec![],
+                    scope_out: vec![],
+                    checks: vec![],
+                    contract: TaskContract::default(),
+                },
+            ],
+            max_parallel: 2,
+            parallel_groups: vec![vec![a], vec![b]],
+            checkpoints: vec![],
         };
-        let json = serde_json::to_string(&plan).unwrap();
-        let back: ExecutionPlan = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.parallel_groups.len(), 1);
-        assert_eq!(back.dag.nodes[0].id, id);
+
+        assert_eq!(spec.tasks.len(), 2);
+        assert_eq!(spec.tasks[1].dependencies, vec![a]);
+        assert_eq!(spec.parallel_groups, vec![vec![a], vec![b]]);
     }
 
     #[test]
@@ -763,21 +494,18 @@ mod tests {
         let id = Uuid::new_v4();
         let result = OrchestratorResult {
             decision: DecisionOutcome::Commit,
-            execution_plan: ExecutionPlan {
+            execution_plan_spec: ExecutionPlanSpec {
                 intent_spec_id: "test".into(),
                 summary: "summary".into(),
                 revision: 2,
                 parent_revision: Some(1),
                 replan_reason: Some("security gate failed".into()),
-                dag: TaskDAG {
-                    nodes: vec![implementation_task(id)],
-                    intent_spec_id: "test".into(),
-                    max_parallel: 1,
-                },
+                tasks: vec![implementation_task(id)],
+                max_parallel: 1,
                 parallel_groups: vec![vec![id]],
                 checkpoints: vec![],
             },
-            plan_revisions: vec![],
+            plan_revision_specs: vec![],
             run_state: RunStateSnapshot {
                 intent_spec_id: "test".into(),
                 revision: 2,
@@ -821,7 +549,7 @@ mod tests {
         let json = serde_json::to_string(&result).unwrap();
         let back: OrchestratorResult = serde_json::from_str(&json).unwrap();
         assert_eq!(back.decision, DecisionOutcome::Commit);
-        assert_eq!(back.execution_plan.dag.nodes.len(), 1);
+        assert_eq!(back.execution_plan_spec.tasks.len(), 1);
         assert_eq!(back.persistence.unwrap().tasks.len(), 1);
     }
 }

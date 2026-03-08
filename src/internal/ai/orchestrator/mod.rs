@@ -67,9 +67,9 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
         };
         let max_replans = replan::max_replans(&spec);
         let mut replan_count = 0_u32;
-        let mut plan_revisions = Vec::new();
+        let mut plan_revision_specs = Vec::new();
         let observer = self.config.observer.clone();
-        let (execution_plan, run_state, system_report, decision) = loop {
+        let (execution_plan_spec, run_state, system_report, decision) = loop {
             // Phase 1: Compile execution plan
             let mut plan_spec = planner::compile_execution_plan_spec(&spec)?;
             plan_spec.revision = replan_count + 1;
@@ -79,9 +79,8 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
                 .change_log
                 .last()
                 .map(|entry| entry.reason.clone());
-            let mut execution_plan = plan_spec.materialize();
             if let Some(observer) = &observer {
-                observer.on_plan_compiled(&execution_plan);
+                observer.on_plan_compiled(&plan_spec);
             }
 
             // Phase 2: Execute tasks
@@ -96,7 +95,7 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
             };
 
             let run_state = executor::execute_dag(
-                &mut execution_plan,
+                &plan_spec,
                 &self.model,
                 &self.registry,
                 &executor_config,
@@ -104,17 +103,17 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
             .await?;
 
             // Phase 3: System verification
-            let system_report = verifier::build_system_report(&spec, &execution_plan, &run_state);
+            let system_report = verifier::build_system_report(&spec, &plan_spec, &run_state);
 
             if replan_count < max_replans
                 && let Some(directive) =
-                    replan::detect_replan(&spec, &execution_plan, &run_state, &system_report)
+                    replan::detect_replan(&spec, &plan_spec, &run_state, &system_report)
             {
-                plan_revisions.push(execution_plan.clone());
+                plan_revision_specs.push(plan_spec.clone());
                 replan_count += 1;
                 if let Some(observer) = &observer {
                     observer.on_replan(
-                        execution_plan.revision,
+                        plan_spec.revision,
                         replan_count + 1,
                         &directive.reason,
                         &directive.diff_summary,
@@ -131,10 +130,9 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
                 &spec.risk.level,
                 spec.risk.human_in_loop.required,
             );
-            plan_revisions.push(execution_plan.clone());
-            break (execution_plan, run_state, system_report, decision);
+            plan_revision_specs.push(plan_spec.clone());
+            break (plan_spec, run_state, system_report, decision);
         };
-
         let task_results = run_state.task_results.clone();
 
         let persistence = if let Some(ref mcp_server) = self.config.mcp_server {
@@ -142,8 +140,8 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
                 persistence::persist_execution(persistence::ExecutionPersistenceRequest {
                     mcp_server,
                     spec: &spec,
-                    execution_plan: &execution_plan,
-                    plan_revisions: &plan_revisions,
+                    execution_plan_spec: &execution_plan_spec,
+                    plan_revision_specs: &plan_revision_specs,
                     run_state: &run_state,
                     system_report: &system_report,
                     decision: &decision,
@@ -162,8 +160,8 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
 
         Ok(OrchestratorResult {
             decision,
-            execution_plan,
-            plan_revisions,
+            execution_plan_spec,
+            plan_revision_specs,
             run_state,
             task_results,
             system_report,
@@ -199,21 +197,21 @@ mod tests {
     }
 
     impl types::OrchestratorObserver for RecordingObserver {
-        fn on_plan_compiled(&self, plan: &types::ExecutionPlan) {
+        fn on_plan_compiled(&self, plan: &types::ExecutionPlanSpec) {
             self.events
                 .lock()
                 .unwrap()
                 .push(format!("plan:{}", plan.revision));
         }
 
-        fn on_task_started(&self, task: &types::TaskNode) {
+        fn on_task_started(&self, task: &types::TaskSpec) {
             self.events
                 .lock()
                 .unwrap()
                 .push(format!("start:{}", task.title));
         }
 
-        fn on_task_completed(&self, task: &types::TaskNode, _result: &types::TaskResult) {
+        fn on_task_completed(&self, task: &types::TaskSpec, _result: &types::TaskResult) {
             self.events
                 .lock()
                 .unwrap()
@@ -400,7 +398,7 @@ mod tests {
         let result = orchestrator.run(spec).await.unwrap();
         assert_eq!(result.decision, types::DecisionOutcome::Commit);
         assert_eq!(result.task_results.len(), 5);
-        assert_eq!(result.execution_plan.dag.nodes.len(), 5);
+        assert_eq!(result.execution_plan_spec.tasks.len(), 5);
         assert!(result.system_report.overall_passed);
     }
 
@@ -504,8 +502,8 @@ mod tests {
         let result = orchestrator.run(spec).await.unwrap();
         assert_eq!(result.replan_count, 1);
         assert_eq!(result.lifecycle_change_log.len(), 1);
-        assert_eq!(result.plan_revisions.len(), 2);
-        assert_eq!(result.execution_plan.revision, 2);
+        assert_eq!(result.plan_revision_specs.len(), 2);
+        assert_eq!(result.execution_plan_spec.revision, 2);
         assert_eq!(result.decision, types::DecisionOutcome::Abandon);
     }
 }

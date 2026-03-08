@@ -2,7 +2,7 @@ use chrono::Utc;
 
 use super::{
     run_state::RunStateSnapshot,
-    types::{ExecutionPlan, SystemReport, TaskNodeStatus},
+    types::{ExecutionPlanSpec, SystemReport, TaskNodeStatus},
 };
 use crate::internal::ai::intentspec::types::{
     ChangeLogEntry, ConflictResolution, DecompositionMode, IntentSpec, LibraBinding,
@@ -26,7 +26,7 @@ pub fn max_replans(spec: &IntentSpec) -> u32 {
 
 pub fn detect_replan(
     spec: &IntentSpec,
-    _plan: &ExecutionPlan,
+    _plan: &ExecutionPlanSpec,
     run_state: &RunStateSnapshot,
     system_report: &SystemReport,
 ) -> Option<ReplanDirective> {
@@ -153,7 +153,7 @@ mod tests {
         intentspec::types::*,
         orchestrator::{
             run_state::{RunStateSnapshot, TaskStatusSnapshot},
-            types::{GateReport, TaskResult},
+            types::{ExecutionPlanSpec, GateReport, TaskResult},
         },
     };
 
@@ -336,17 +336,14 @@ mod tests {
     #[test]
     fn test_detect_replan_from_security_failure() {
         let spec = spec_with_triggers();
-        let plan = ExecutionPlan {
+        let plan = ExecutionPlanSpec {
             intent_spec_id: "test".into(),
             summary: "summary".into(),
             revision: 1,
             parent_revision: None,
             replan_reason: None,
-            dag: crate::internal::ai::orchestrator::types::TaskDAG {
-                nodes: vec![],
-                intent_spec_id: "test".into(),
-                max_parallel: 1,
-            },
+            tasks: vec![],
+            max_parallel: 1,
             parallel_groups: vec![],
             checkpoints: vec![],
         };
