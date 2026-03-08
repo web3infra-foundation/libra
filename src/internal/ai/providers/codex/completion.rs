@@ -107,12 +107,13 @@ impl CompletionModelTrait for Model {
         let working_dir = crate::utils::util::working_dir();
         let working_dir_str = working_dir.to_string_lossy().to_string();
 
-        // Snapshot current files before Codex runs
+        // Snapshot current files before Codex runs (recursive to match fallback detection)
         let mut previous_files = std::collections::HashSet::new();
-        if working_dir.exists()
-            && let Ok(entries) = std::fs::read_dir(&working_dir)
-        {
-            for entry in entries.flatten() {
+        if working_dir.exists() {
+            for entry in WalkDir::new(&working_dir)
+                .into_iter()
+                .filter_map(|e| e.ok())
+            {
                 let path = entry.path();
                 if path.is_file()
                     && let Ok(rel_path) = path.strip_prefix(&working_dir)
@@ -409,13 +410,15 @@ fn apply_file_change(change: &FileChange) -> Result<(), Box<dyn std::error::Erro
             .unwrap_or_else(|| file_path.to_path_buf())
     });
 
-    let file_path_str = canonical_file_path.to_string_lossy().to_string();
-    let working_dir_str = canonical_working_dir.to_string_lossy().to_string();
-
-    if !file_path_str.starts_with(&working_dir_str) && !file_path_str.eq(&working_dir_str) {
+    // Use Path::starts_with for component-aware path validation (not string prefix)
+    // This prevents bypasses like /workspace/libra2/ vs /workspace/libra/
+    if !canonical_file_path.starts_with(&canonical_working_dir)
+        && canonical_file_path != canonical_working_dir
+    {
         return Err(format!(
             "security: file path '{}' escapes working directory '{}'",
-            change.path, working_dir_str
+            change.path,
+            canonical_working_dir.display()
         )
         .into());
     }
@@ -459,14 +462,21 @@ fn apply_file_change(change: &FileChange) -> Result<(), Box<dyn std::error::Erro
                             std::fs::write(&file_path, &new_content)?;
                             // eprintln!("[Codex] Applied diff to: {}", change.path);
                         }
-                        Err(_e) => {
+                        Err(e) => {
                             // If diff application fails, write the entire content if it's a new file
+                            // For existing files, propagate the error to avoid silent failures
                             if !file_path.exists() {
                                 if let Some(parent) = file_path.parent() {
                                     std::fs::create_dir_all(parent)?;
                                 }
                                 // For add operation, the diff might contain the full content
                                 std::fs::write(&file_path, &change.diff)?;
+                            } else {
+                                return Err(format!(
+                                    "failed to apply diff to existing file '{}': {}",
+                                    change.path, e
+                                )
+                                .into());
                             }
                         }
                     }
