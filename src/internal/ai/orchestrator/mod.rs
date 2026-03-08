@@ -71,14 +71,15 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
         let observer = self.config.observer.clone();
         let (execution_plan, run_state, system_report, decision) = loop {
             // Phase 1: Compile execution plan
-            let mut execution_plan = planner::compile_execution_plan(&spec)?;
-            execution_plan.revision = replan_count + 1;
-            execution_plan.parent_revision = (replan_count > 0).then_some(replan_count);
-            execution_plan.replan_reason = spec
+            let mut plan_spec = planner::compile_execution_plan_spec(&spec)?;
+            plan_spec.revision = replan_count + 1;
+            plan_spec.parent_revision = (replan_count > 0).then_some(replan_count);
+            plan_spec.replan_reason = spec
                 .lifecycle
                 .change_log
                 .last()
                 .map(|entry| entry.reason.clone());
+            let mut execution_plan = plan_spec.materialize();
             if let Some(observer) = &observer {
                 observer.on_plan_compiled(&execution_plan);
             }

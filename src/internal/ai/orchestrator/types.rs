@@ -75,6 +75,57 @@ pub struct TaskContract {
     pub expected_outputs: Vec<String>,
 }
 
+/// A static task specification produced by planning.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TaskSpec {
+    pub id: Uuid,
+    pub title: String,
+    pub objective: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub kind: TaskKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_stage: Option<GateStage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_role: Option<String>,
+    #[serde(default)]
+    pub dependencies: Vec<Uuid>,
+    #[serde(default)]
+    pub constraints: Vec<String>,
+    #[serde(default)]
+    pub acceptance_criteria: Vec<String>,
+    #[serde(default)]
+    pub scope_in: Vec<String>,
+    #[serde(default)]
+    pub scope_out: Vec<String>,
+    #[serde(default)]
+    pub checks: Vec<Check>,
+    #[serde(default)]
+    pub contract: TaskContract,
+}
+
+impl TaskSpec {
+    pub fn materialize(&self, status: TaskNodeStatus) -> TaskNode {
+        TaskNode {
+            id: self.id,
+            title: self.title.clone(),
+            objective: self.objective.clone(),
+            description: self.description.clone(),
+            kind: self.kind.clone(),
+            gate_stage: self.gate_stage.clone(),
+            owner_role: self.owner_role.clone(),
+            dependencies: self.dependencies.clone(),
+            constraints: self.constraints.clone(),
+            acceptance_criteria: self.acceptance_criteria.clone(),
+            scope_in: self.scope_in.clone(),
+            scope_out: self.scope_out.clone(),
+            checks: self.checks.clone(),
+            contract: self.contract.clone(),
+            status,
+        }
+    }
+}
+
 /// A single task within the execution DAG.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskNode {
@@ -108,6 +159,27 @@ pub struct TaskNode {
 impl TaskNode {
     pub fn is_gate(&self) -> bool {
         self.kind == TaskKind::Gate
+    }
+}
+
+impl From<&TaskNode> for TaskSpec {
+    fn from(node: &TaskNode) -> Self {
+        Self {
+            id: node.id,
+            title: node.title.clone(),
+            objective: node.objective.clone(),
+            description: node.description.clone(),
+            kind: node.kind.clone(),
+            gate_stage: node.gate_stage.clone(),
+            owner_role: node.owner_role.clone(),
+            dependencies: node.dependencies.clone(),
+            constraints: node.constraints.clone(),
+            acceptance_criteria: node.acceptance_criteria.clone(),
+            scope_in: node.scope_in.clone(),
+            scope_out: node.scope_out.clone(),
+            checks: node.checks.clone(),
+            contract: node.contract.clone(),
+        }
     }
 }
 
@@ -204,6 +276,49 @@ pub struct ExecutionCheckpoint {
     pub reason: String,
 }
 
+/// A static execution plan specification derived from an IntentSpec.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExecutionPlanSpec {
+    pub intent_spec_id: String,
+    pub summary: String,
+    #[serde(default = "default_execution_revision")]
+    pub revision: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_revision: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replan_reason: Option<String>,
+    #[serde(default)]
+    pub tasks: Vec<TaskSpec>,
+    pub max_parallel: u8,
+    #[serde(default)]
+    pub parallel_groups: Vec<Vec<Uuid>>,
+    #[serde(default)]
+    pub checkpoints: Vec<ExecutionCheckpoint>,
+}
+
+impl ExecutionPlanSpec {
+    pub fn materialize(&self) -> ExecutionPlan {
+        ExecutionPlan {
+            intent_spec_id: self.intent_spec_id.clone(),
+            summary: self.summary.clone(),
+            revision: self.revision,
+            parent_revision: self.parent_revision,
+            replan_reason: self.replan_reason.clone(),
+            dag: TaskDAG {
+                nodes: self
+                    .tasks
+                    .iter()
+                    .map(|task| task.materialize(TaskNodeStatus::Pending))
+                    .collect(),
+                intent_spec_id: self.intent_spec_id.clone(),
+                max_parallel: self.max_parallel,
+            },
+            parallel_groups: self.parallel_groups.clone(),
+            checkpoints: self.checkpoints.clone(),
+        }
+    }
+}
+
 /// The compiled execution plan derived from an IntentSpec.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ExecutionPlan {
@@ -220,6 +335,22 @@ pub struct ExecutionPlan {
     pub parallel_groups: Vec<Vec<Uuid>>,
     #[serde(default)]
     pub checkpoints: Vec<ExecutionCheckpoint>,
+}
+
+impl ExecutionPlan {
+    pub fn to_spec(&self) -> ExecutionPlanSpec {
+        ExecutionPlanSpec {
+            intent_spec_id: self.intent_spec_id.clone(),
+            summary: self.summary.clone(),
+            revision: self.revision,
+            parent_revision: self.parent_revision,
+            replan_reason: self.replan_reason.clone(),
+            tasks: self.dag.nodes.iter().map(TaskSpec::from).collect(),
+            max_parallel: self.dag.max_parallel,
+            parallel_groups: self.parallel_groups.clone(),
+            checkpoints: self.checkpoints.clone(),
+        }
+    }
 }
 
 /// A policy violation detected before or after a tool call.
@@ -585,6 +716,46 @@ mod tests {
         let back: ExecutionPlan = serde_json::from_str(&json).unwrap();
         assert_eq!(back.parallel_groups.len(), 1);
         assert_eq!(back.dag.nodes[0].id, id);
+    }
+
+    #[test]
+    fn test_serde_roundtrip_execution_plan_spec() {
+        let id = Uuid::new_v4();
+        let spec = ExecutionPlanSpec {
+            intent_spec_id: "spec-123".into(),
+            summary: "summary".into(),
+            revision: 2,
+            parent_revision: Some(1),
+            replan_reason: Some("replan".into()),
+            tasks: vec![TaskSpec {
+                id,
+                title: "Do thing".into(),
+                objective: "do thing".into(),
+                description: None,
+                kind: TaskKind::Implementation,
+                gate_stage: None,
+                owner_role: Some("coder".into()),
+                dependencies: vec![],
+                constraints: vec![],
+                acceptance_criteria: vec![],
+                scope_in: vec![],
+                scope_out: vec![],
+                checks: vec![],
+                contract: TaskContract::default(),
+            }],
+            max_parallel: 2,
+            parallel_groups: vec![vec![id]],
+            checkpoints: vec![ExecutionCheckpoint {
+                label: "after-fast".into(),
+                after_tasks: vec![id],
+                reason: "gate boundary".into(),
+            }],
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        let back: ExecutionPlanSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.tasks.len(), 1);
+        assert_eq!(back.tasks[0].id, id);
+        assert_eq!(back.max_parallel, 2);
     }
 
     #[test]

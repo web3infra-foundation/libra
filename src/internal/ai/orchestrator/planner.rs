@@ -3,8 +3,8 @@ use std::collections::{BTreeSet, HashMap};
 use uuid::Uuid;
 
 use super::types::{
-    ExecutionCheckpoint, ExecutionPlan, GateStage, OrchestratorError, TaskContract, TaskDAG,
-    TaskKind, TaskNode, TaskNodeStatus,
+    ExecutionCheckpoint, ExecutionPlan, ExecutionPlanSpec, GateStage, OrchestratorError,
+    TaskContract, TaskDAG, TaskKind, TaskNode, TaskNodeStatus, TaskSpec,
 };
 use crate::internal::ai::intentspec::types::{
     ChangeType, ConflictResolution, DecompositionMode, DependencyPolicy, IntentSpec, LibraBinding,
@@ -13,6 +13,13 @@ use crate::internal::ai::intentspec::types::{
 
 /// Compile an IntentSpec into a structured execution plan.
 pub fn compile_execution_plan(spec: &IntentSpec) -> Result<ExecutionPlan, OrchestratorError> {
+    Ok(compile_execution_plan_spec(spec)?.materialize())
+}
+
+/// Compile an IntentSpec into a static execution plan specification.
+pub fn compile_execution_plan_spec(
+    spec: &IntentSpec,
+) -> Result<ExecutionPlanSpec, OrchestratorError> {
     let plan_config = effective_plan_generation(spec.libra.as_ref());
     let max_parallel = effective_max_parallel(spec);
     let common_constraints = build_common_constraints(spec);
@@ -94,27 +101,29 @@ pub fn compile_execution_plan(spec: &IntentSpec) -> Result<ExecutionPlan, Orches
         }
     }
 
+    let task_specs = nodes.iter().map(TaskSpec::from).collect::<Vec<_>>();
     let dag = TaskDAG {
         nodes,
         intent_spec_id: spec.metadata.id.clone(),
         max_parallel,
     };
 
-    Ok(ExecutionPlan {
+    Ok(ExecutionPlanSpec {
         intent_spec_id: spec.metadata.id.clone(),
         summary: format!(
             "{} change: {} ({} tasks, parallelism {})",
             change_type_label(&spec.intent.change_type),
             spec.intent.summary,
-            dag.nodes.len(),
+            task_specs.len(),
             max_parallel
         ),
         revision: 1,
         parent_revision: None,
         replan_reason: None,
+        tasks: task_specs,
+        max_parallel,
         parallel_groups: compute_parallel_groups(&dag),
         checkpoints,
-        dag,
     })
 }
 
@@ -669,6 +678,27 @@ mod tests {
                 .iter()
                 .any(|node| node.gate_stage == Some(GateStage::Fast))
         );
+    }
+
+    #[test]
+    fn test_compile_execution_plan_spec_materializes_runtime_plan() {
+        let plan_spec = compile_execution_plan_spec(&minimal_spec()).unwrap();
+        assert_eq!(plan_spec.tasks.len(), 6);
+        assert_eq!(plan_spec.max_parallel, 2);
+        assert!(
+            plan_spec
+                .tasks
+                .iter()
+                .any(|task| task.gate_stage == Some(GateStage::Fast))
+        );
+
+        let plan = plan_spec.materialize();
+        assert_eq!(plan.dag.nodes.len(), plan_spec.tasks.len());
+        assert!(plan
+            .dag
+            .nodes
+            .iter()
+            .all(|node| node.status == TaskNodeStatus::Pending));
     }
 
     #[test]
