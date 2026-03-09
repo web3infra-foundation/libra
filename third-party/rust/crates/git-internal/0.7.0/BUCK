@@ -5,10 +5,10 @@ load("@buckal//:wrapper.bzl", "rust_library")
 
 http_archive(
     name = "git-internal-vendor",
-    urls = ["https://static.crates.io/crates/git-internal/git-internal-0.6.1.crate"],
-    sha256 = "6c30536b450e5366a7e6af39aa3957a46e166cc5a71457f693a9fcd12cb39719",
+    urls = ["https://static.crates.io/crates/git-internal/git-internal-0.7.0.crate"],
+    sha256 = "4410585d908b004aeee564b048aa21891554af0dcca5d891bfe050d8eb334f00",
     type = "tar.gz",
-    strip_prefix = "git-internal-0.6.1",
+    strip_prefix = "git-internal-0.7.0",
     out = "vendor",
 )
 

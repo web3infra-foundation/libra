@@ -3,7 +3,7 @@
 version = 2
 
 [fingerprints]
-"path+file:///D:/projects/libra#0.1.0" = "438736aa3ee683003d169ad9f961802f026f029160cdf20f0f730a0e5b9bbc6f"
+"path+file://($WORKSPACE)#0.1.0" = "487bb697661aafe95d4060ec7c3f34dbef8694ff7846b5666d1e772a5e3b32da"
 "registry+https://github.com/rust-lang/crates.io-index#adler2@2.0.1" = "7081ce7693ca45bff0e855374e6b7f386805bba1de9f7c288b1c706b99abef7f"
 "registry+https://github.com/rust-lang/crates.io-index#ahash@0.7.8" = "e5e469cb7ec933f1b4b23f0a631b7030494bbb3c9560dccdfce054fc7031ed33"
 "registry+https://github.com/rust-lang/crates.io-index#ahash@0.8.12" = "f556a573d08cdc9c6bf8813815918ee7e93f4b98961f54cccf0ede84932cf5df"
@@ -146,10 +146,10 @@ version = 2
 "registry+https://github.com/rust-lang/crates.io-index#futures@0.3.32" = "acf7b74ce682e30836e0e40ca8e94285035169da1083578c0abe3b1d0eb6dc21"
 "registry+https://github.com/rust-lang/crates.io-index#generic-array@0.14.7" = "fda989f4c8ee1455f983d4015a69307138f8a32f3ad2134cb48cf2e190db4d85"
 "registry+https://github.com/rust-lang/crates.io-index#getopts@0.2.24" = "facf053113a9bfee4e064942455c3ebacb9e7ce555eb187f84e33c31669422cd"
-"registry+https://github.com/rust-lang/crates.io-index#getrandom@0.2.17" = "804b2054fd49e436b02e7717416ccc9cfb65f341e8ad6c1922d760ac32d34305"
-"registry+https://github.com/rust-lang/crates.io-index#getrandom@0.3.4" = "a79fc73d6c22c3a5f7be39dca74137698064664c0896a426ca966b115268b1df"
-"registry+https://github.com/rust-lang/crates.io-index#getrandom@0.4.2" = "9ad1438ba002b383a967fec1dc241a40968bddb48873519349a346a4ebf7c88c"
-"registry+https://github.com/rust-lang/crates.io-index#git-internal@0.6.1" = "7f7aafdd2530992909e1cd195a24dcaa15fcdf3c50b3e77f566c345d23f200bb"
+"registry+https://github.com/rust-lang/crates.io-index#getrandom@0.2.17" = "fe36f41f446ea60eac1a62761ba5f0445a4fc03cd461599664fdfeca2ea63577"
+"registry+https://github.com/rust-lang/crates.io-index#getrandom@0.3.4" = "97ab04ed4b033090a6340be9f26ca9b453346d868bf26de145531e94bcace7bf"
+"registry+https://github.com/rust-lang/crates.io-index#getrandom@0.4.1" = "cccd876f88d3d684331f82534c34d5b3df69e8b848c9b74fdc5ac29712134adb"
+"registry+https://github.com/rust-lang/crates.io-index#git-internal@0.7.0" = "92edb4fcc56c05b3feb7a9d5b4dc318cd269fab6c7711eaf98c7e0a30b10e93c"
 "registry+https://github.com/rust-lang/crates.io-index#glob@0.3.3" = "eb79d7bc94e6f5355badd5a8d40f9f3ed1883ee9e8a811419c949d9e142b9054"
 "registry+https://github.com/rust-lang/crates.io-index#globset@0.4.18" = "97026a689182ba8fbb7d2eef82564a9deaae662004e9a92dd8e63d06acde8c97"
 "registry+https://github.com/rust-lang/crates.io-index#h2@0.4.13" = "428a9b9d0d16779771171a5b38d3f03351f73adb84cc0b8d84bdf9cddf1a186f"
