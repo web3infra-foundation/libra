@@ -1378,7 +1378,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         };
 
         self.widget.add_cell(Box::new(AssistantHistoryCell::new(format!(
-            "IntentSpec validated successfully!\n\n**Summary:** {}\n\n**Note:** Orchestrator execution is not yet implemented. This feature will be available in a future update.",
+            "IntentSpec validated successfully!\n\n**Summary:** {}\n\n**Note:** Scheduler execution is not yet implemented. This feature will be available in a future update.",
             spec.intent.summary
         ))));
         self.widget.bottom_pane.set_status(AgentStatus::Idle);

@@ -56,7 +56,7 @@ graph TD
  ══════════════════════════════════════════════════════════════════
  Intent[S] + runtime context[Libra]
  ↓
- [Orchestrator Agent]
+ [Scheduler]
  ├─ Create Plan snapshot(s)
  │    - Plan.parents expresses replan / merge history
  │    - Plan.steps captures immutable step structure
@@ -126,12 +126,15 @@ execution view over immutable objects.
 | `thread_id` | `Uuid` | Libra-side primary key. |
 | `title` | `Option<String>` | Human-readable thread title. |
 | `owner` | `ActorRef` | Conversation creator. |
-| `participants` | `Vec<ActorRef>` | Agent + human members. |
-| `intent_ids` | `Vec<Uuid>` | Ordered projection of Intents in the thread. |
-| `head_intent_ids` | `Vec<Uuid>` | Current branch heads in the Intent DAG. |
-| `latest_intent_id` | `Option<Uuid>` | Default resume target. |
+| `participants` | `Vec<ThreadParticipant>` | Agent + human members with thread-local role and join time metadata. |
+| `current_intent_id` | `Option<Uuid>` | Intent currently focused by the UI / scheduler. |
+| `latest_intent_id` | `Option<Uuid>` | Most recently linked Intent revision; default resume fallback when no explicit current intent is selected. |
+| `intents` | `Vec<ThreadIntentRef>` | Ordered Intent membership list; each entry carries `intent_id`, `ordinal`, `is_head`, `linked_at`, and `link_reason`. |
 | `metadata` | `Option<serde_json::Value>` | Routing and UI hints. |
 | `archived` | `bool` | Read-only marker for closed threads. |
+
+- `ThreadParticipant` extends `ActorRef` with `role` and `joined_at`.
+- `ThreadIntentRef.is_head` marks current branch heads in the projected Intent DAG; the projection does not keep a separate `head_intent_ids` array.
 
 ### Scheduler state
 
@@ -146,9 +149,10 @@ execution view over immutable objects.
 ### Projection relation graph
 
 ```text
-Thread[L] --------intent_ids--------> Intent[S]
-Thread[L] --------head_intent_ids---> Intent[S]
+Thread[L] --------current_intent_id-> Intent[S]
 Thread[L] --------latest_intent_id--> Intent[S]
+Thread[L] --------intents[].intent_id> Intent[S]
+Thread[L] --------intents[].is_head--> marks current branch heads
 
 Scheduler[L] ----selected_plan_id---> Plan[S]
 Scheduler[L] ----current_plan_heads-> Plan[S]
@@ -197,7 +201,7 @@ initial runtime context.
 
 ## Phase 1: Planning
 
-The Orchestrator translates the current `Intent` revision into immutable
+The Scheduler translates the current `Intent` revision into immutable
 plan and task definitions, while Libra derives the mutable scheduling
 view.
 

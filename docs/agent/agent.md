@@ -70,7 +70,7 @@ Conversation-level projection over related `Intent` snapshots.
 
 ### Scheduler
 
-Runtime orchestrator that turns immutable history into executable work.
+Runtime scheduler that turns immutable history into executable work.
 
 - selects the active `Plan` head and computes current ready work
 - tracks active `Task` / `Run`, retry routing, and replanning decisions
@@ -138,13 +138,20 @@ ContextFrame[E]   --run_id? / plan_id? / step_id? --> Run[S] / Plan[S] / Plan[S]
 Libra layer
 ===========
 
-Thread[L] / Scheduler[L]
-   -> current_intent_id
-   -> selected_plan_id
-   -> current_plan_heads[]
-   -> active_task_id / active_run_id
-   -> live_context_window
-   -> reverse indexes over all [S] and [E]
+Thread[L] --------current_intent_id-------> Intent[S]
+Thread[L] --------latest_intent_id--------> Intent[S]
+Thread[L] --------intents[].intent_id-----> Intent[S]
+Thread[L] --------intents[].is_head-------> marks current branch heads
+
+Scheduler[L] -----selected_plan_id--------> Plan[S]
+Scheduler[L] -----current_plan_heads------> Plan[S]
+Scheduler[L] -----active_task_id----------> Task[S]
+Scheduler[L] -----active_run_id-----------> Run[S]
+Scheduler[L] -----live_context_window-----> ContextFrame[E]
+
+QueryIndex[L] ----task_latest_run_id------> Run[S]
+QueryIndex[L] ----run_latest_patchset_id--> PatchSet[S]
+QueryIndex[L] ----reverse indexes---------> all [S] / [E]
 ```
 
 ## Placement Rules

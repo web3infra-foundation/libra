@@ -76,29 +76,59 @@ fn leak_conn(conn: DbConn) -> &'static DbConn {
     (Box::leak(boxed)) as _
 }
 
-/// In the test environment, each working directory should have its own database connection.
-/// A global `HashMap` is used to store and manage these connections separately.
-// #[cfg(test)]
-pub async fn get_db_conn_instance() -> &'static DbConn {
-    let current_dir = std::env::current_dir().unwrap();
-
+async fn get_or_init_db_conn_instance(db_path: PathBuf) -> io::Result<&'static DbConn> {
     let mut connections = TEST_DB_CONNECTIONS.lock().await;
 
-    if !connections.contains_key(&current_dir) {
-        let conn = get_db_conn().await.unwrap();
-        let boxed_conn = Box::new(conn);
-        //connections.insert(current_dir.clone(), boxed_conn);
-        connections.insert(current_dir.clone(), Box::leak(boxed_conn));
+    if !db_path.exists() {
+        connections.remove(&db_path);
+        return Err(IOError::new(
+            ErrorKind::NotFound,
+            format!("Database file does not exist: {}", db_path.display()),
+        ));
     }
 
-    (connections.get(&current_dir).unwrap()) as _
-    // leak_conn(boxed_conn.deref().clone())
+    if let Some(conn) = connections.get(&db_path) {
+        return Ok(*conn);
+    }
+    drop(connections);
+
+    let conn = get_db_conn_for_path(&db_path).await?;
+    let leaked = Box::leak(Box::new(conn));
+
+    let mut connections = TEST_DB_CONNECTIONS.lock().await;
+    if let Some(existing) = connections.get(&db_path) {
+        return Ok(*existing);
+    }
+    connections.insert(db_path, leaked);
+    Ok(leaked)
 }
 
-/// Create a connection to the database of current repo: `.libra/libra.db`
-async fn get_db_conn() -> io::Result<DatabaseConnection> {
-    let db_path = path::database(); // for longer lifetime
-    let db_path = db_path.to_str().unwrap();
+/// Get global database connection instance (singleton per SQLite file).
+pub async fn get_db_conn_instance() -> &'static DbConn {
+    let db_path = path::database();
+    get_db_conn_instance_for_path(&db_path)
+        .await
+        .unwrap_or_else(|err| panic!("Failed to open database {}: {}", db_path.display(), err))
+}
+
+/// Get a shared database connection instance for an explicit SQLite file path.
+pub async fn get_db_conn_instance_for_path(db_path: &Path) -> io::Result<&'static DbConn> {
+    get_or_init_db_conn_instance(db_path.to_path_buf()).await
+}
+
+/// Drop a cached shared connection for an explicit SQLite file path.
+pub async fn reset_db_conn_instance_for_path(db_path: &Path) {
+    let mut connections = TEST_DB_CONNECTIONS.lock().await;
+    connections.remove(db_path);
+}
+
+async fn get_db_conn_for_path(db_path: &Path) -> io::Result<DatabaseConnection> {
+    let db_path = db_path.to_str().ok_or_else(|| {
+        IOError::new(
+            ErrorKind::InvalidData,
+            format!("Database path is not valid UTF-8: {}", db_path.display()),
+        )
+    })?;
     establish_connection(db_path).await
 }
 
