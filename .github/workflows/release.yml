@@ -61,7 +61,9 @@ jobs:
           path: target
           key: ${{ runner.os }}-cargo-build-target-${{ matrix.target.rust }}-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Build Binary
+      - name: Build Binary (Unix)
+        if: matrix.target.os != 'windows'
+        shell: bash
         run: |
           VERSION=${GITHUB_REF_NAME}
           BINARY_NAME="${{ matrix.component }}-${{ matrix.target.os }}-${{ matrix.target.arch }}"
@@ -72,11 +74,34 @@ jobs:
 
           # Create build directory and copy binary
           mkdir -p build
-          cp target/${{ matrix.target.rust }}/release/${{ matrix.component }}${{ matrix.target.os == 'windows' && '.exe' || '' }} build/$BINARY_NAME${{ matrix.target.os == 'windows' && '.exe' || '' }}
+          cp target/${{ matrix.target.rust }}/release/${{ matrix.component }} build/$BINARY_NAME
+
+          # Make binary executable
+          chmod +x build/$BINARY_NAME
 
           echo "Built binary: $BINARY_NAME"
 
-      - name: Upload to Cloudflare R2
+      - name: Build Binary (Windows)
+        if: matrix.target.os == 'windows'
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME
+          $binaryName = "${{ matrix.component }}-${{ matrix.target.os }}-${{ matrix.target.arch }}"
+
+          Write-Output "Building $binaryName for target ${{ matrix.target.rust }}..."
+
+          $env:RUSTFLAGS = "-C strip=symbols"
+          cargo build --locked --release --target ${{ matrix.target.rust }}
+
+          # Create build directory and copy binary
+          New-Item -ItemType Directory -Force -Path "build" | Out-Null
+          Copy-Item "target\${{ matrix.target.rust }}\release\${{ matrix.component }}.exe" "build\$binaryName.exe"
+
+          Write-Output "Built binary: $binaryName"
+
+      - name: Upload to Cloudflare R2 (Unix)
+        if: matrix.target.os != 'windows'
+        shell: bash
         env:
           RCLONE_CONFIG_R2_TYPE: s3
           RCLONE_CONFIG_R2_PROVIDER: Cloudflare
@@ -88,8 +113,6 @@ jobs:
           # Install rclone
           if [[ "${{ matrix.target.os }}" == "darwin" ]]; then
             brew install rclone
-          elif [[ "${{ matrix.target.os }}" == "windows" ]]; then
-            choco install rclone -y
           else
             curl https://rclone.org/install.sh | sudo bash
           fi
@@ -98,3 +121,22 @@ jobs:
           rclone copy ./build/ r2:${{ secrets.R2_BUCKET_NAME }}/libra/releases/${{ github.ref_name }}/ -v
 
           echo "Upload completed for ${{ matrix.component }}-${{ matrix.target.os }}-${{ matrix.target.arch }}"
+
+      - name: Upload to Cloudflare R2 (Windows)
+        if: matrix.target.os == 'windows'
+        shell: pwsh
+        env:
+          RCLONE_CONFIG_R2_TYPE: s3
+          RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+          RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          RCLONE_CONFIG_R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          RCLONE_CONFIG_R2_ACL: private
+        run: |
+          # Install rclone via choco
+          choco install rclone -y
+
+          # Upload binaries to R2
+          rclone copy ./build/ r2:${{ secrets.R2_BUCKET_NAME }}/libra/releases/${{ github.ref_name }}/ -v
+
+          Write-Output "Upload completed for ${{ matrix.component }}-${{ matrix.target.os }}-${{ matrix.target.arch }}"
