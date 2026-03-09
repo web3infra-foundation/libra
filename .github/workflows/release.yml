@@ -4,16 +4,12 @@ on:
   push:
     tags:
       - 'v*' # Trigger when pushing tags starting with v, e.g., v1.0.0
-  pull_request:
-    branches:
-      - main 
-    
 
 jobs:
   build-and-upload:
     runs-on: ${{ matrix.target.runner }}
     strategy:
-      fail-fast: false # if it is set to true, then one job failed the other jobs will be cancelled  together.
+      fail-fast: true # if it is set to true, then one job failed the other jobs will be cancelled  together.
       matrix:
         component: [libra]
         target:
