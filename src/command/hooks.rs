@@ -47,10 +47,9 @@ pub struct HookEventArgs {}
 pub struct InstallHookArgs {
     #[arg(
         long,
-        default_value = "libra",
-        help = "Command prefix used when generating provider hook command entries"
+        help = "Absolute or relative path to the Libra binary that provider hooks should execute"
     )]
-    pub command_prefix: String,
+    pub binary_path: Option<String>,
     #[arg(
         long,
         help = "Optional timeout in seconds for providers that support command-level hook timeouts"
@@ -89,7 +88,7 @@ pub async fn execute(cmd: HooksCommand) -> Result<()> {
             execute_event_command(provider, ProviderHookCommand::SessionEnd).await
         }
         HookSubcommand::Install(args) => provider.install_hooks(&ProviderInstallOptions {
-            command_prefix: args.command_prefix,
+            binary_path: args.binary_path,
             timeout_secs: args.timeout,
         }),
         HookSubcommand::Uninstall => provider.uninstall_hooks(),

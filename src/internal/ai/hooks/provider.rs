@@ -60,7 +60,7 @@ impl fmt::Display for ProviderHookCommand {
 /// Generic install options passed from the command layer into a provider installer.
 #[derive(Debug, Clone, Default)]
 pub struct ProviderInstallOptions {
-    pub command_prefix: String,
+    pub binary_path: Option<String>,
     pub timeout_secs: Option<u64>,
 }
 

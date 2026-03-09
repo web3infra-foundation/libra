@@ -9,7 +9,9 @@ use serde_json::Value;
 
 use super::super::super::{
     provider::ProviderInstallOptions,
-    setup::{load_json_settings, resolve_project_root, write_json_settings},
+    setup::{
+        load_json_settings, resolve_hook_binary_path, resolve_project_root, write_json_settings,
+    },
 };
 
 const GEMINI_SETTINGS_DIR: &str = ".gemini";
@@ -106,17 +108,14 @@ struct GeminiHookEntry {
 }
 
 pub(super) fn install_gemini_hooks(options: &ProviderInstallOptions) -> Result<()> {
-    let command_prefix = options.command_prefix.trim();
-    if command_prefix.is_empty() {
-        bail!("invalid --command-prefix: value cannot be empty");
-    }
+    let binary_path = resolve_hook_binary_path(options.binary_path.as_deref())?;
     if options.timeout_secs.is_some() {
         bail!("Gemini hooks do not support --timeout");
     }
 
     let settings_path = gemini_settings_path()?;
     let mut settings = load_gemini_settings(&settings_path)?;
-    let changed = upsert_gemini_hooks(&mut settings, command_prefix)?;
+    let changed = upsert_gemini_hooks(&mut settings, &binary_path)?;
 
     if changed {
         write_json_settings(&settings_path, &settings, "Gemini")?;
@@ -167,7 +166,8 @@ pub(super) fn gemini_hooks_are_installed() -> Result<bool> {
         return Ok(false);
     }
     let settings = load_gemini_settings(&settings_path)?;
-    all_gemini_specs_installed(&settings)
+    let binary_path = resolve_hook_binary_path(None)?;
+    all_gemini_specs_installed(&settings, &binary_path)
 }
 
 fn gemini_settings_path() -> Result<PathBuf> {
@@ -180,7 +180,7 @@ fn load_gemini_settings(path: &Path) -> Result<GeminiSettings> {
     load_json_settings(path, "Gemini")
 }
 
-fn upsert_gemini_hooks(settings: &mut GeminiSettings, command_prefix: &str) -> Result<bool> {
+fn upsert_gemini_hooks(settings: &mut GeminiSettings, binary_path: &str) -> Result<bool> {
     let mut changed = false;
     if !settings.hooks_config.enabled {
         settings.hooks_config.enabled = true;
@@ -193,9 +193,20 @@ fn upsert_gemini_hooks(settings: &mut GeminiSettings, command_prefix: &str) -> R
             .remove(spec.event_name)
             .unwrap_or(Value::Array(Vec::new()));
         let mut matchers = parse_gemini_hook_matchers(&value, spec.event_name)?;
-        let expected_command = format!("{command_prefix} hooks gemini {}", spec.subcommand);
+        let expected_command = format!("{binary_path} hooks gemini {}", spec.subcommand);
+        let original_matchers = matchers.clone();
 
-        if !contains_gemini_command(&matchers, &expected_command) {
+        for matcher in &mut matchers {
+            matcher
+                .hooks
+                .retain(|hook| !is_managed_gemini_hook(hook, spec.subcommand));
+        }
+        matchers.retain(|matcher| !matcher.hooks.is_empty());
+        if matchers != original_matchers {
+            changed = true;
+        }
+
+        if !contains_gemini_command(&matchers, spec.matcher, spec.hook_name, &expected_command) {
             matchers.push(GeminiHookMatcher {
                 matcher: spec.matcher.map(ToString::to_string),
                 hooks: vec![GeminiHookEntry {
@@ -253,7 +264,11 @@ fn remove_libra_gemini_hooks(settings: &mut GeminiSettings) -> Result<bool> {
     Ok(changed)
 }
 
-fn all_gemini_specs_installed(settings: &GeminiSettings) -> Result<bool> {
+fn all_gemini_specs_installed(settings: &GeminiSettings, binary_path: &str) -> Result<bool> {
+    if !settings.hooks_config.enabled {
+        return Ok(false);
+    }
+
     for spec in GEMINI_HOOK_SPECS {
         let value = settings
             .hooks
@@ -261,11 +276,8 @@ fn all_gemini_specs_installed(settings: &GeminiSettings) -> Result<bool> {
             .cloned()
             .unwrap_or(Value::Array(Vec::new()));
         let matchers = parse_gemini_hook_matchers(&value, spec.event_name)?;
-        let has_named_hook = matchers
-            .iter()
-            .flat_map(|matcher| matcher.hooks.iter())
-            .any(|hook| hook.name == spec.hook_name);
-        if !has_named_hook {
+        let expected_command = format!("{binary_path} hooks gemini {}", spec.subcommand);
+        if !contains_gemini_command(&matchers, spec.matcher, spec.hook_name, &expected_command) {
             return Ok(false);
         }
     }
@@ -284,11 +296,27 @@ fn parse_gemini_hook_matchers(value: &Value, event_name: &str) -> Result<Vec<Gem
     }
 }
 
-fn contains_gemini_command(matchers: &[GeminiHookMatcher], command: &str) -> bool {
-    matchers
-        .iter()
-        .flat_map(|matcher| matcher.hooks.iter())
-        .any(|hook| hook.command == command)
+fn contains_gemini_command(
+    matchers: &[GeminiHookMatcher],
+    expected_matcher: Option<&str>,
+    expected_name: &str,
+    expected_command: &str,
+) -> bool {
+    matchers.iter().any(|matcher| {
+        matcher.matcher.as_deref() == expected_matcher
+            && matcher.hooks.iter().any(|hook| {
+                hook.name == expected_name
+                    && hook.entry_type == "command"
+                    && hook.command == expected_command
+            })
+    })
+}
+
+fn is_managed_gemini_hook(hook: &GeminiHookEntry, subcommand: &str) -> bool {
+    hook.name.starts_with("libra-")
+        || hook
+            .command
+            .ends_with(&format!(" hooks gemini {subcommand}"))
 }
 
 #[cfg(test)]
@@ -300,12 +328,12 @@ mod tests {
     #[test]
     fn upsert_gemini_hooks_is_idempotent() {
         let mut settings = GeminiSettings::default();
-        let changed_first = upsert_gemini_hooks(&mut settings, "libra").expect("upsert");
-        let changed_second = upsert_gemini_hooks(&mut settings, "libra").expect("upsert");
+        let changed_first = upsert_gemini_hooks(&mut settings, "/tmp/libra").expect("upsert");
+        let changed_second = upsert_gemini_hooks(&mut settings, "/tmp/libra").expect("upsert");
 
         assert!(changed_first);
         assert!(!changed_second);
-        assert!(all_gemini_specs_installed(&settings).expect("installed"));
+        assert!(all_gemini_specs_installed(&settings, "/tmp/libra").expect("installed"));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use std::{fs, process::Command};
+use std::{fs, path::Path, process::Command};
 
 use libra::utils::test;
 use serde_json::json;
@@ -15,11 +15,45 @@ fn run_hooks(temp: &tempfile::TempDir, provider: &str, args: &[&str]) -> std::pr
         .expect("failed to run hooks command")
 }
 
-fn claude_settings_file(repo_root: &std::path::Path) -> std::path::PathBuf {
+fn installed_libra_binary() -> String {
+    let path = std::fs::canonicalize(env!("CARGO_BIN_EXE_libra"))
+        .expect("failed to canonicalize test libra binary");
+    quote_command_path(&path)
+}
+
+fn installed_libra_binary_for(path: &Path) -> String {
+    let path = std::fs::canonicalize(path).expect("failed to canonicalize hook binary");
+    quote_command_path(&path)
+}
+
+fn quote_command_path(path: &Path) -> String {
+    let rendered = path.to_string_lossy();
+
+    #[cfg(windows)]
+    {
+        if rendered.contains([' ', '\t', '"']) {
+            return format!("\"{}\"", rendered.replace('"', "\\\""));
+        }
+        rendered.into_owned()
+    }
+
+    #[cfg(not(windows))]
+    {
+        if rendered
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ':'))
+        {
+            return rendered.into_owned();
+        }
+        format!("'{}'", rendered.replace('\'', r#"'\''"#))
+    }
+}
+
+fn claude_settings_file(repo_root: &Path) -> std::path::PathBuf {
     repo_root.join(".claude").join("settings.json")
 }
 
-fn gemini_settings_file(repo_root: &std::path::Path) -> std::path::PathBuf {
+fn gemini_settings_file(repo_root: &Path) -> std::path::PathBuf {
     repo_root.join(".gemini").join("settings.json")
 }
 
@@ -70,6 +104,7 @@ async fn test_hooks_claude_install_preserves_existing_and_is_idempotent() {
 
     let settings_json = fs::read_to_string(&settings_path).unwrap();
     let settings: serde_json::Value = serde_json::from_str(&settings_json).unwrap();
+    let expected_command = format!("{} hooks claude session-start", installed_libra_binary());
     assert_eq!(settings["enabledPlugins"]["example"], json!(true));
 
     let session_start_entries = settings["hooks"]["SessionStart"].as_array().unwrap();
@@ -80,8 +115,7 @@ async fn test_hooks_claude_install_preserves_existing_and_is_idempotent() {
     let managed_count = session_start_entries
         .iter()
         .filter(|item| {
-            item.get("matcher").is_none()
-                && item["hooks"][0]["command"] == json!("libra hooks claude session-start")
+            item.get("matcher").is_none() && item["hooks"][0]["command"] == json!(expected_command)
         })
         .count();
     assert_eq!(startup_count, 1);
@@ -93,6 +127,10 @@ async fn test_hooks_claude_install_preserves_existing_and_is_idempotent() {
 async fn test_hooks_claude_install_rewrites_legacy_entries_and_uninstall_roundtrip() {
     let temp = tempdir().unwrap();
     test::setup_with_new_libra_in(temp.path()).await;
+    let old_binary = temp.path().join("old-libra");
+    let new_binary = temp.path().join("new-libra");
+    fs::write(&old_binary, "").unwrap();
+    fs::write(&new_binary, "").unwrap();
 
     let settings_path = claude_settings_file(temp.path());
     fs::create_dir_all(settings_path.parent().expect("parent should exist")).unwrap();
@@ -106,7 +144,10 @@ async fn test_hooks_claude_install_rewrites_legacy_entries_and_uninstall_roundtr
                         "hooks": [
                             {
                                 "type": "command",
-                                "command": "libra hooks claude session-start",
+                                "command": format!(
+                                    "{} hooks claude session-start",
+                                    installed_libra_binary_for(&old_binary)
+                                ),
                                 "timeout": 10
                             },
                             {
@@ -127,8 +168,8 @@ async fn test_hooks_claude_install_rewrites_legacy_entries_and_uninstall_roundtr
         "claude",
         &[
             "install",
-            "--command-prefix",
-            "go run ./cmd/libra",
+            "--binary-path",
+            new_binary.to_str().unwrap(),
             "--timeout",
             "15",
         ],
@@ -141,11 +182,16 @@ async fn test_hooks_claude_install_rewrites_legacy_entries_and_uninstall_roundtr
 
     let installed = run_hooks(&temp, "claude", &["is-installed"]);
     assert!(installed.status.success());
-    assert_eq!(String::from_utf8_lossy(&installed.stdout).trim(), "true");
+    assert_eq!(String::from_utf8_lossy(&installed.stdout).trim(), "false");
 
     let settings_json = fs::read_to_string(&settings_path).unwrap();
     let settings: serde_json::Value = serde_json::from_str(&settings_json).unwrap();
     let session_start_entries = settings["hooks"]["SessionStart"].as_array().unwrap();
+    let expected_new_command = format!(
+        "{} hooks claude session-start",
+        installed_libra_binary_for(&new_binary)
+    );
+
     assert_eq!(
         session_start_entries
             .iter()
@@ -161,7 +207,7 @@ async fn test_hooks_claude_install_rewrites_legacy_entries_and_uninstall_roundtr
     }));
     assert!(session_start_entries.iter().any(|item| {
         item.get("matcher").is_none()
-            && item["hooks"][0]["command"] == json!("go run ./cmd/libra hooks claude session-start")
+            && item["hooks"][0]["command"] == json!(expected_new_command)
             && item["hooks"][0]["timeout"] == json!(15)
     }));
 
@@ -196,10 +242,11 @@ async fn test_hooks_gemini_install_is_installed_and_uninstall() {
     let settings_path = gemini_settings_file(temp.path());
     let content = fs::read_to_string(&settings_path).expect("settings file should be created");
     let settings: serde_json::Value = serde_json::from_str(&content).expect("settings json");
+    let expected_command = format!("{} hooks gemini session-start", installed_libra_binary());
     assert_eq!(settings["hooksConfig"]["enabled"], json!(true));
     assert_eq!(
         settings["hooks"]["SessionStart"][0]["hooks"][0]["command"],
-        json!("libra hooks gemini session-start")
+        json!(expected_command)
     );
 
     let installed = run_hooks(&temp, "gemini", &["is-installed"]);
@@ -223,6 +270,127 @@ async fn test_hooks_gemini_install_is_installed_and_uninstall() {
 
 #[tokio::test]
 #[serial]
+async fn test_hooks_gemini_install_replaces_previous_managed_binary_path() {
+    let temp = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+    let old_binary = temp.path().join("old-libra");
+    let new_binary = temp.path().join("new-libra");
+    fs::write(&old_binary, "").unwrap();
+    fs::write(&new_binary, "").unwrap();
+
+    let settings_path = gemini_settings_file(temp.path());
+    fs::create_dir_all(settings_path.parent().expect("parent should exist")).unwrap();
+    fs::write(
+        &settings_path,
+        json!({
+            "hooksConfig": { "enabled": true },
+            "hooks": {
+                "SessionStart": [
+                    {
+                        "hooks": [
+                            {
+                                "name": "libra-session-start",
+                                "type": "command",
+                                "command": format!(
+                                    "{} hooks gemini session-start",
+                                    installed_libra_binary_for(&old_binary)
+                                )
+                            }
+                        ]
+                    },
+                    {
+                        "matcher": "startup",
+                        "hooks": [
+                            {
+                                "name": "user-hook",
+                                "type": "command",
+                                "command": "echo keep"
+                            }
+                        ]
+                    }
+                ]
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let install = run_hooks(
+        &temp,
+        "gemini",
+        &["install", "--binary-path", new_binary.to_str().unwrap()],
+    );
+    assert!(
+        install.status.success(),
+        "hooks gemini install failed: {}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+
+    let content = fs::read_to_string(&settings_path).unwrap();
+    let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
+    let expected_command = format!(
+        "{} hooks gemini session-start",
+        installed_libra_binary_for(&new_binary)
+    );
+    let session_start_entries = settings["hooks"]["SessionStart"].as_array().unwrap();
+
+    assert_eq!(
+        session_start_entries
+            .iter()
+            .filter(|item| {
+                item.get("matcher").is_none()
+                    && item["hooks"][0]["name"] == json!("libra-session-start")
+            })
+            .count(),
+        1
+    );
+    assert!(session_start_entries.iter().any(|item| {
+        item.get("matcher").is_none() && item["hooks"][0]["command"] == json!(expected_command)
+    }));
+    assert!(
+        session_start_entries
+            .iter()
+            .any(|item| item["matcher"] == json!("startup"))
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_hooks_gemini_is_installed_rejects_disabled_or_stale_command() {
+    let temp = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp.path()).await;
+
+    let settings_path = gemini_settings_file(temp.path());
+    fs::create_dir_all(settings_path.parent().expect("parent should exist")).unwrap();
+    fs::write(
+        &settings_path,
+        json!({
+            "hooksConfig": { "enabled": false },
+            "hooks": {
+                "SessionStart": [
+                    {
+                        "hooks": [
+                            {
+                                "name": "libra-session-start",
+                                "type": "command",
+                                "command": "stale-libra hooks gemini session-start"
+                            }
+                        ]
+                    }
+                ]
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let installed = run_hooks(&temp, "gemini", &["is-installed"]);
+    assert!(installed.status.success());
+    assert_eq!(String::from_utf8_lossy(&installed.stdout).trim(), "false");
+}
+
+#[tokio::test]
+#[serial]
 async fn test_hooks_gemini_install_rejects_timeout() {
     let temp = tempdir().unwrap();
     test::setup_with_new_libra_in(temp.path()).await;
@@ -235,6 +403,20 @@ async fn test_hooks_gemini_install_rejects_timeout() {
     assert!(
         String::from_utf8_lossy(&install.stderr).contains("Gemini hooks do not support --timeout")
     );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_hooks_install_commands_require_libra_repo() {
+    let temp = tempdir().unwrap();
+
+    let install = run_hooks(&temp, "claude", &["install"]);
+    assert!(!install.status.success());
+    assert!(String::from_utf8_lossy(&install.stderr).contains("inside a Libra repository"));
+
+    let is_installed = run_hooks(&temp, "gemini", &["is-installed"]);
+    assert!(!is_installed.status.success());
+    assert!(String::from_utf8_lossy(&is_installed.stderr).contains("inside a Libra repository"));
 }
 
 #[test]

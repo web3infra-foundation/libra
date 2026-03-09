@@ -5,16 +5,63 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::utils::util;
 
 pub(super) fn resolve_project_root() -> Result<PathBuf> {
-    if let Ok(repo_root) = util::try_working_dir() {
-        return Ok(repo_root);
+    util::try_working_dir()
+        .context("hook installation commands must be run inside a Libra repository")
+}
+
+pub(super) fn resolve_hook_binary_path(input: Option<&str>) -> Result<String> {
+    let path = match input {
+        Some(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                bail!("invalid --binary-path: value cannot be empty");
+            }
+            let path = PathBuf::from(trimmed);
+            if path.is_absolute() {
+                path
+            } else {
+                std::env::current_dir()
+                    .context("failed to read current directory while resolving --binary-path")?
+                    .join(path)
+            }
+        }
+        None => std::env::current_exe()
+            .context("failed to resolve current Libra binary path for hook installation")?,
+    };
+
+    let canonical = fs::canonicalize(&path)
+        .with_context(|| format!("failed to resolve Libra binary path '{}'", path.display()))?;
+
+    Ok(quote_command_path(&canonical))
+}
+
+fn quote_command_path(path: &Path) -> String {
+    let rendered = path.to_string_lossy();
+
+    #[cfg(windows)]
+    {
+        if rendered.contains([' ', '\t', '"']) {
+            return format!("\"{}\"", rendered.replace('"', "\\\""));
+        }
+        rendered.into_owned()
     }
-    std::env::current_dir().context("failed to read current directory")
+
+    #[cfg(not(windows))]
+    {
+        if rendered
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ':'))
+        {
+            return rendered.into_owned();
+        }
+        format!("'{}'", rendered.replace('\'', r#"'\''"#))
+    }
 }
 
 pub(super) fn load_json_settings<T>(path: &Path, provider_name: &str) -> Result<T>

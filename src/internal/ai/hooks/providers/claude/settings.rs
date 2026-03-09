@@ -9,7 +9,9 @@ use serde_json::Value;
 
 use super::super::super::{
     provider::ProviderInstallOptions,
-    setup::{load_json_settings, resolve_project_root, write_json_settings},
+    setup::{
+        load_json_settings, resolve_hook_binary_path, resolve_project_root, write_json_settings,
+    },
 };
 
 const DEFAULT_HOOK_TIMEOUT_SECS: u64 = 10;
@@ -52,11 +54,7 @@ struct ClaudeHookEntry {
 }
 
 pub(super) fn install_claude_hooks(options: &ProviderInstallOptions) -> Result<()> {
-    let command_prefix = options.command_prefix.trim();
-    if command_prefix.is_empty() {
-        bail!("invalid --command-prefix: value cannot be empty");
-    }
-
+    let binary_path = resolve_hook_binary_path(options.binary_path.as_deref())?;
     let timeout = options.timeout_secs.unwrap_or(DEFAULT_HOOK_TIMEOUT_SECS);
     if timeout == 0 {
         bail!("invalid --timeout: value must be greater than 0");
@@ -64,7 +62,7 @@ pub(super) fn install_claude_hooks(options: &ProviderInstallOptions) -> Result<(
 
     let settings_path = claude_settings_path()?;
     let mut settings = load_claude_settings(&settings_path)?;
-    let changed = upsert_claude_hooks(&mut settings, command_prefix, timeout);
+    let changed = upsert_claude_hooks(&mut settings, &binary_path, timeout);
 
     if changed {
         write_json_settings(&settings_path, &settings, "Claude")?;
@@ -115,7 +113,8 @@ pub(super) fn claude_hooks_are_installed() -> Result<bool> {
         return Ok(false);
     }
     let settings = load_claude_settings(&settings_path)?;
-    Ok(all_claude_specs_installed(&settings))
+    let binary_path = resolve_hook_binary_path(None)?;
+    Ok(all_claude_specs_installed(&settings, &binary_path))
 }
 
 fn claude_settings_path() -> Result<PathBuf> {
@@ -128,13 +127,13 @@ fn load_claude_settings(path: &Path) -> Result<ClaudeSettings> {
     load_json_settings(path, "Claude")
 }
 
-fn upsert_claude_hooks(settings: &mut ClaudeSettings, command_prefix: &str, timeout: u64) -> bool {
+fn upsert_claude_hooks(settings: &mut ClaudeSettings, binary_path: &str, timeout: u64) -> bool {
     let mut changed = false;
 
     for (event_name, subcommand) in CLAUDE_HOOK_FORWARD_MAP {
         let desired_entry = ClaudeHookEntry {
             entry_type: "command".to_string(),
-            command: format!("{command_prefix} hooks claude {subcommand}"),
+            command: format!("{binary_path} hooks claude {subcommand}"),
             timeout: Some(timeout),
             extra: BTreeMap::new(),
         };
@@ -150,15 +149,9 @@ fn upsert_claude_hooks(settings: &mut ClaudeSettings, command_prefix: &str, time
                 continue;
             }
 
-            let matcher_name = matcher.matcher.as_deref();
             let original_hook_count = matcher.hooks.len();
             matcher.hooks.retain(|hook| {
-                !is_replaced_managed_claude_hook(
-                    matcher_name,
-                    hook,
-                    &desired_entry.command,
-                    subcommand,
-                )
+                !is_replaced_managed_claude_hook(hook, &desired_entry.command, subcommand)
             });
             if matcher.hooks.len() != original_hook_count {
                 changed = true;
@@ -197,11 +190,9 @@ fn remove_libra_claude_hooks(settings: &mut ClaudeSettings) -> bool {
         let original = matchers.clone();
 
         for matcher in &mut matchers {
-            let matcher_name = matcher.matcher.as_deref();
-            matcher.hooks.retain(|hook| {
-                !(is_managed_claude_command(&hook.command)
-                    || (matcher_name == Some("libra") && hook.command.contains(" hooks claude ")))
-            });
+            matcher
+                .hooks
+                .retain(|hook| !is_managed_claude_command(&hook.command));
         }
         matchers.retain(|matcher| !matcher.hooks.is_empty());
 
@@ -216,16 +207,18 @@ fn remove_libra_claude_hooks(settings: &mut ClaudeSettings) -> bool {
     changed
 }
 
-fn all_claude_specs_installed(settings: &ClaudeSettings) -> bool {
+fn all_claude_specs_installed(settings: &ClaudeSettings, binary_path: &str) -> bool {
     CLAUDE_HOOK_FORWARD_MAP
         .iter()
         .all(|(event_name, subcommand)| {
+            let expected_command = format!("{binary_path} hooks claude {subcommand}");
             settings.hooks.get(*event_name).is_some_and(|matchers| {
                 matchers.iter().any(|matcher| {
                     matcher.matcher.is_none()
                         && matcher.hooks.iter().any(|hook| {
-                            hook.command
-                                .ends_with(&format!(" hooks claude {subcommand}"))
+                            hook.entry_type == "command"
+                                && hook.command == expected_command
+                                && hook.timeout.is_some()
                         })
                 })
             })
@@ -239,16 +232,14 @@ fn is_managed_claude_command(command: &str) -> bool {
 }
 
 fn is_replaced_managed_claude_hook(
-    matcher: Option<&str>,
     hook: &ClaudeHookEntry,
     desired_command: &str,
     subcommand: &str,
 ) -> bool {
     hook.command == desired_command
-        || (matcher == Some("libra")
-            && hook
-                .command
-                .ends_with(&format!(" hooks claude {subcommand}")))
+        || hook
+            .command
+            .ends_with(&format!(" hooks claude {subcommand}"))
 }
 
 #[cfg(test)]
@@ -258,9 +249,9 @@ mod tests {
     #[test]
     fn upsert_claude_hooks_is_idempotent() {
         let mut settings = ClaudeSettings::default();
-        assert!(upsert_claude_hooks(&mut settings, "libra", 10));
-        assert!(!upsert_claude_hooks(&mut settings, "libra", 10));
-        assert!(all_claude_specs_installed(&settings));
+        assert!(upsert_claude_hooks(&mut settings, "/tmp/libra", 10));
+        assert!(!upsert_claude_hooks(&mut settings, "/tmp/libra", 10));
+        assert!(all_claude_specs_installed(&settings, "/tmp/libra"));
     }
 
     #[test]

@@ -139,10 +139,8 @@ config:
 - Claude Code: `.claude/settings.json`
 - Gemini CLI: `.gemini/settings.json`
 
-Those generated entries forward provider lifecycle events into:
-
-- `libra hooks claude <event>`
-- `libra hooks gemini <event>`
+Those generated entries call the resolved Libra binary with provider lifecycle
+subcommands such as `hooks claude <event>` and `hooks gemini <event>`.
 
 Useful follow-up commands:
 
@@ -156,12 +154,13 @@ libra hooks claude uninstall
 libra hooks gemini uninstall
 ```
 
-If `libra` is not on your `PATH`, or you want hooks to call a specific local
-binary, pass an explicit command prefix:
+By default, install writes the absolute path of the current `libra` binary into
+provider hook settings. If you want hooks to call a different local binary, pass
+an explicit binary path:
 
 ```bash
-libra hooks claude install --command-prefix "/absolute/path/to/libra"
-libra hooks gemini install --command-prefix "/absolute/path/to/libra"
+libra hooks claude install --binary-path "/absolute/path/to/libra"
+libra hooks gemini install --binary-path "/absolute/path/to/libra"
 ```
 
 Provider-specific notes:
@@ -169,6 +168,7 @@ Provider-specific notes:
 - Claude Code supports `--timeout`, for example:
   `libra hooks claude install --timeout 15`
 - Gemini CLI does **not** support `--timeout`
+- Install / uninstall / is-installed must be run inside a Libra repository
 
 Once installed, use Claude Code or Gemini CLI as usual. When a session ends,
 Libra persists it as an `ai_session` object that you can inspect later with:
