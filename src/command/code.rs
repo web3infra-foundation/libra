@@ -200,24 +200,14 @@ async fn create_initial_intent(mcp_server: &Arc<LibraMcpServer>) {
 }
 
 async fn execute_web_only(args: CodeArgs) {
-    let addr: SocketAddr = match format!("{}:{}", args.host, args.port).parse() {
-        Ok(addr) => addr,
-        Err(e) => {
-            cli_error!(e, "error: invalid address '{}:{}'", args.host, args.port);
+    let web_handle = match start_web_server(&args.host, args.port).await {
+        Ok(handle) => handle,
+        Err(err) => {
+            cli_error!(err, "fatal: failed to start web server");
             return;
         }
     };
-
-    let listener = match tokio::net::TcpListener::bind(addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            cli_error!(e, "fatal: failed to bind to {}", addr);
-            return;
-        }
-    };
-
-    let app = Router::new().route("/", get(root));
-    println!("Libra Code server running at http://{}", addr);
+    println!("Libra Code server running at http://{}", web_handle.addr);
 
     // Prepare MCP server instance shared between the HTTP transport and TUI bridge
     // Use repository working directory to ensure correct initialization of .libra resources.
@@ -240,15 +230,8 @@ async fn execute_web_only(args: CodeArgs) {
 
     println!("{}", mcp_line);
 
-    if let Err(e) = axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await
-    {
-        eprintln!("Server error: {}", e);
-    }
-
+    let _ = tokio::signal::ctrl_c().await;
+    web_handle.shutdown().await;
     if let Some(handle) = mcp_handle {
         handle.shutdown().await;
     }
@@ -314,8 +297,18 @@ async fn execute_tui(args: CodeArgs) {
 
     let registry = Arc::new(builder.build());
 
-    // Resolve model name before entering the provider match
     let provider_name = format!("{:?}", args.provider).to_lowercase();
+    let launch_config = TuiLaunchConfig {
+        host: args.host,
+        port: args.port,
+        mcp_port: args.mcp_port,
+        registry,
+        preamble,
+        temperature,
+        resume,
+        user_input_rx,
+        mcp_server,
+    };
 
     // Create agent based on provider
     match args.provider {
@@ -329,23 +322,7 @@ async fn execute_tui(args: CodeArgs) {
             };
             let model_name = args.model.unwrap_or_else(|| GEMINI_2_5_FLASH.to_string());
             let model = client.completion_model(&model_name);
-            run_tui_with_model(
-                model,
-                TuiParams {
-                    host: args.host,
-                    port: args.port,
-                    mcp_port: args.mcp_port,
-                    registry: registry.clone(),
-                    preamble,
-                    temperature,
-                    resume,
-                    user_input_rx,
-                    mcp_server,
-                    model_name,
-                    provider_name,
-                },
-            )
-            .await;
+            run_tui_with_model(model, launch_config.into_params(model_name, provider_name)).await;
         }
         CodeProvider::Openai => {
             let client = match OpenAIClient::from_env() {
@@ -357,23 +334,7 @@ async fn execute_tui(args: CodeArgs) {
             };
             let model_name = args.model.unwrap_or_else(|| GPT_4O_MINI.to_string());
             let model = client.completion_model(&model_name);
-            run_tui_with_model(
-                model,
-                TuiParams {
-                    host: args.host,
-                    port: args.port,
-                    mcp_port: args.mcp_port,
-                    registry: registry.clone(),
-                    preamble,
-                    temperature,
-                    resume,
-                    user_input_rx,
-                    mcp_server,
-                    model_name,
-                    provider_name,
-                },
-            )
-            .await;
+            run_tui_with_model(model, launch_config.into_params(model_name, provider_name)).await;
         }
         CodeProvider::Anthropic => {
             let client = match AnthropicClient::from_env() {
@@ -385,23 +346,7 @@ async fn execute_tui(args: CodeArgs) {
             };
             let model_name = args.model.unwrap_or_else(|| CLAUDE_3_5_SONNET.to_string());
             let model = client.completion_model(&model_name);
-            run_tui_with_model(
-                model,
-                TuiParams {
-                    host: args.host,
-                    port: args.port,
-                    mcp_port: args.mcp_port,
-                    registry: registry.clone(),
-                    preamble,
-                    temperature,
-                    resume,
-                    user_input_rx,
-                    mcp_server,
-                    model_name,
-                    provider_name,
-                },
-            )
-            .await;
+            run_tui_with_model(model, launch_config.into_params(model_name, provider_name)).await;
         }
         CodeProvider::Deepseek => {
             let client = match DeepSeekClient::from_env() {
@@ -411,25 +356,9 @@ async fn execute_tui(args: CodeArgs) {
                     return;
                 }
             };
-            let model_name = "deepseek-chat".to_string();
+            let model_name = args.model.unwrap_or_else(|| "deepseek-chat".to_string());
             let model = client.completion_model(&model_name);
-            run_tui_with_model(
-                model,
-                TuiParams {
-                    host: args.host,
-                    port: args.port,
-                    mcp_port: args.mcp_port,
-                    registry: registry.clone(),
-                    preamble,
-                    temperature,
-                    resume,
-                    user_input_rx,
-                    mcp_server,
-                    model_name,
-                    provider_name,
-                },
-            )
-            .await;
+            run_tui_with_model(model, launch_config.into_params(model_name, provider_name)).await;
         }
         CodeProvider::Zhipu => {
             let client = match ZhipuClient::from_env() {
@@ -441,23 +370,7 @@ async fn execute_tui(args: CodeArgs) {
             };
             let model_name = args.model.unwrap_or_else(|| GLM_5.to_string());
             let model = client.completion_model(&model_name);
-            run_tui_with_model(
-                model,
-                TuiParams {
-                    host: args.host,
-                    port: args.port,
-                    mcp_port: args.mcp_port,
-                    registry: registry.clone(),
-                    preamble,
-                    temperature,
-                    resume,
-                    user_input_rx,
-                    mcp_server,
-                    model_name,
-                    provider_name,
-                },
-            )
-            .await;
+            run_tui_with_model(model, launch_config.into_params(model_name, provider_name)).await;
         }
         CodeProvider::Ollama => {
             let client = if let Some(base_url) = &args.api_base {
@@ -475,23 +388,38 @@ async fn execute_tui(args: CodeArgs) {
                 }
             };
             let model = client.completion_model(&model_name);
-            run_tui_with_model(
-                model,
-                TuiParams {
-                    host: args.host,
-                    port: args.port,
-                    mcp_port: args.mcp_port,
-                    registry: registry.clone(),
-                    preamble,
-                    temperature,
-                    resume,
-                    user_input_rx,
-                    mcp_server,
-                    model_name,
-                    provider_name,
-                },
-            )
-            .await;
+            run_tui_with_model(model, launch_config.into_params(model_name, provider_name)).await;
+        }
+    }
+}
+
+struct TuiLaunchConfig {
+    host: String,
+    port: u16,
+    mcp_port: u16,
+    registry: Arc<ToolRegistry>,
+    preamble: String,
+    temperature: Option<f64>,
+    resume: bool,
+    user_input_rx:
+        tokio::sync::mpsc::UnboundedReceiver<crate::internal::ai::tools::context::UserInputRequest>,
+    mcp_server: Arc<LibraMcpServer>,
+}
+
+impl TuiLaunchConfig {
+    fn into_params(self, model_name: String, provider_name: String) -> TuiParams {
+        TuiParams {
+            host: self.host,
+            port: self.port,
+            mcp_port: self.mcp_port,
+            registry: self.registry,
+            preamble: self.preamble,
+            temperature: self.temperature,
+            resume: self.resume,
+            user_input_rx: self.user_input_rx,
+            mcp_server: self.mcp_server,
+            model_name,
+            provider_name,
         }
     }
 }
@@ -585,7 +513,8 @@ where
 
     // Set up session persistence
     let working_dir_str = registry.working_dir().to_string_lossy().to_string();
-    let session_store = crate::internal::ai::session::SessionStore::new(registry.working_dir());
+    let storage_root = resolve_storage_root(registry.working_dir());
+    let session_store = crate::internal::ai::session::SessionStore::from_storage_path(&storage_root);
     let session = if params.resume {
         match session_store.load_latest() {
             Ok(Some(s)) => s,
@@ -708,11 +637,9 @@ fn system_preamble(working_dir: &std::path::Path, context: Option<&str>) -> Stri
 }
 
 async fn init_mcp_server(working_dir: &std::path::Path) -> Arc<LibraMcpServer> {
-    // Use the resolved .libra storage directory for isolation, supporting
-    // linked worktrees via try_get_storage_path.
-    let storage_dir = crate::utils::util::try_get_storage_path(Some(working_dir.to_path_buf()))
-        .unwrap_or_else(|_| working_dir.join(".libra"));
-    let (objects_dir, dot_libra) = (storage_dir.join("objects"), storage_dir);
+    let storage_dir = resolve_storage_root(working_dir);
+    let objects_dir = storage_dir.join("objects");
+    let dot_libra = storage_dir;
 
     // Try to create the directory. If it fails, we assume read-only or permission issues.
     if let Err(e) = std::fs::create_dir_all(&objects_dir) {
@@ -750,6 +677,13 @@ async fn init_mcp_server(working_dir: &std::path::Path) -> Arc<LibraMcpServer> {
         Some(intent_history_manager),
         Some(storage),
     ))
+}
+
+fn resolve_storage_root(working_dir: &std::path::Path) -> std::path::PathBuf {
+    // Use the resolved .libra storage directory for isolation, supporting
+    // linked worktrees via try_get_storage_path.
+    crate::utils::util::try_get_storage_path(Some(working_dir.to_path_buf()))
+        .unwrap_or_else(|_| working_dir.join(".libra"))
 }
 
 async fn execute_stdio(_args: CodeArgs) {

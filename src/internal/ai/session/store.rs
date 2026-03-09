@@ -1,6 +1,10 @@
 //! Session storage: save and load sessions from disk.
 
-use std::path::{Path, PathBuf};
+use std::{
+    io::Write,
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use super::state::SessionState;
 
@@ -35,9 +39,35 @@ impl SessionStore {
     pub fn save(&self, session: &SessionState) -> std::io::Result<()> {
         self.ensure_dir()?;
         let path = self.session_path(&session.id);
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let tmp_path = self
+            .sessions_dir
+            .join(format!("{}.{}.tmp", session.id, ts));
         let json = serde_json::to_string_pretty(session)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        std::fs::write(path, json)
+
+        let write_result = (|| -> std::io::Result<()> {
+            let mut file = std::fs::File::create(&tmp_path)?;
+            file.write_all(json.as_bytes())?;
+            file.sync_all()?;
+
+            #[cfg(target_os = "windows")]
+            if path.exists() {
+                std::fs::remove_file(&path)?;
+            }
+
+            std::fs::rename(&tmp_path, &path)?;
+            Ok(())
+        })();
+
+        if write_result.is_err() {
+            let _ = std::fs::remove_file(&tmp_path);
+        }
+
+        write_result
     }
 
     /// Load a session by ID.
