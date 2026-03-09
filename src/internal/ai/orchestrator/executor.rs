@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -11,7 +11,7 @@ use dagrs::{
 };
 use serde::Deserialize;
 use serde_json::Value;
-use uuid::Uuid;
+use tokio::sync::Semaphore;
 
 use super::{
     acl::{AclVerdict, check_tool_acl},
@@ -390,6 +390,7 @@ struct TaskDagrsAction<M: CompletionModel + 'static> {
     registry: Arc<ToolRegistry>,
     config: ExecutorConfig,
     run_state: RunStateStore,
+    parallelism: Arc<Semaphore>,
 }
 
 #[derive(Clone)]
@@ -429,6 +430,22 @@ impl<M: CompletionModel + 'static> Action for TaskDagrsAction<M> {
                 .await;
             return Output::empty();
         }
+
+        let _parallel_permit = match Arc::clone(&self.parallelism).acquire_owned().await {
+            Ok(permit) => permit,
+            Err(err) => {
+                let _ = out_channels
+                    .broadcast(dagrs::Content::new(DagrsDependencySignal {
+                        success: false,
+                    }))
+                    .await;
+                return Output::error(format!(
+                    "failed to acquire execution permit for task {}: {}",
+                    self.task.title(),
+                    err
+                ));
+            }
+        };
 
         if let Some(observer) = &self.config.observer {
             observer.on_task_started(&self.task);
@@ -485,77 +502,18 @@ impl<M: CompletionModel + 'static> Action for TaskDagrsAction<M> {
     }
 }
 
-fn execution_batches(plan: &ExecutionPlanSpec) -> Result<Vec<Vec<Uuid>>, OrchestratorError> {
-    let mut completed = HashSet::new();
-    let mut scheduled = HashSet::new();
-    let mut batches = Vec::new();
-    let max_parallel = plan.max_parallel.max(1) as usize;
-
-    while scheduled.len() < plan.tasks.len() {
-        let ready: Vec<Uuid> = plan
-            .tasks
-            .iter()
-            .filter(|task| {
-                !scheduled.contains(&task.id())
-                    && task.dependencies().iter().all(|dep| completed.contains(dep))
-            })
-            .map(TaskSpec::id)
-            .collect();
-
-        if ready.is_empty() {
-            return Err(OrchestratorError::PlanningFailed(
-                "task graph contains unresolved dependencies or a cycle".to_string(),
-            ));
-        }
-
-        let batch: Vec<Uuid> = ready.into_iter().take(max_parallel).collect();
-        completed.extend(batch.iter().copied());
-        scheduled.extend(batch.iter().copied());
-        batches.push(batch);
-    }
-
-    Ok(batches)
-}
-
-fn task_index(tasks: &[TaskSpec]) -> HashMap<Uuid, usize> {
-    tasks
-        .iter()
-        .enumerate()
-        .map(|(idx, task)| (task.id(), idx))
-        .collect()
-}
-
-fn add_batch_barriers(
-    dependencies: &mut HashMap<Uuid, HashSet<Uuid>>,
-    batches: &[Vec<Uuid>],
-    index: &HashMap<Uuid, usize>,
-) {
-    for window in batches.windows(2) {
-        let current = &window[0];
-        let next = &window[1];
-        for &to in next {
-            let entry = dependencies.entry(to).or_default();
-            for &from in current {
-                if index.get(&from) != index.get(&to) {
-                    entry.insert(from);
-                }
-            }
-        }
-    }
-}
-
 fn build_dagrs_graph<M: CompletionModel + 'static>(
     plan: &ExecutionPlanSpec,
     model: &M,
     registry: &Arc<ToolRegistry>,
     config: &ExecutorConfig,
     run_state: RunStateStore,
+    parallelism: Arc<Semaphore>,
 ) -> Result<Graph, OrchestratorError> {
     let mut graph = Graph::new();
     configure_graph_runtime(&mut graph, plan, config);
     let mut node_table = NodeTable::new();
     let mut dagrs_ids = HashMap::new();
-    let index = task_index(&plan.tasks);
 
     for task_spec in &plan.tasks {
         let action = TaskDagrsAction {
@@ -564,6 +522,7 @@ fn build_dagrs_graph<M: CompletionModel + 'static>(
             registry: Arc::clone(registry),
             config: config.clone(),
             run_state: run_state.clone(),
+            parallelism: Arc::clone(&parallelism),
         };
         let dagrs_node =
             DefaultNode::with_action(task_spec.id().to_string(), action, &mut node_table);
@@ -572,20 +531,15 @@ fn build_dagrs_graph<M: CompletionModel + 'static>(
         dagrs_ids.insert(task_spec.id(), dagrs_id);
     }
 
-    let mut dependencies: HashMap<Uuid, HashSet<Uuid>> = plan
-        .tasks
-        .iter()
-        .map(|task| (task.id(), task.dependencies().iter().copied().collect()))
-        .collect();
-    let batches = execution_batches(plan)?;
-    add_batch_barriers(&mut dependencies, &batches, &index);
-
-    for (task_id, deps) in dependencies {
-        let to_id = dagrs_ids.get(&task_id).copied().ok_or_else(|| {
-            OrchestratorError::PlanningFailed(format!("missing dagrs node for task {task_id}"))
+    for task_spec in &plan.tasks {
+        let to_id = dagrs_ids.get(&task_spec.id()).copied().ok_or_else(|| {
+            OrchestratorError::PlanningFailed(format!(
+                "missing dagrs node for task {}",
+                task_spec.id()
+            ))
         })?;
-        for dep in deps {
-            let from_id = dagrs_ids.get(&dep).copied().ok_or_else(|| {
+        for dep in task_spec.dependencies() {
+            let from_id = dagrs_ids.get(dep).copied().ok_or_else(|| {
                 OrchestratorError::PlanningFailed(format!(
                     "missing dagrs node for dependency {dep}"
                 ))
@@ -714,6 +668,8 @@ pub async fn execute_dag<M: CompletionModel + 'static>(
     let registry_snapshot = Arc::clone(registry);
     let config_snapshot = config.clone();
     let run_state_snapshot = run_state.clone();
+    let parallelism = Arc::new(Semaphore::new(plan_spec.max_parallel.max(1) as usize));
+    let parallelism_snapshot = Arc::clone(&parallelism);
     let mut graph = tokio::task::spawn_blocking(move || {
         build_dagrs_graph(
             &plan_snapshot,
@@ -721,6 +677,7 @@ pub async fn execute_dag<M: CompletionModel + 'static>(
             &registry_snapshot,
             &config_snapshot,
             run_state_snapshot,
+            parallelism_snapshot,
         )
     })
     .await
@@ -945,6 +902,7 @@ mod tests {
     use std::{
         collections::BTreeMap,
         sync::{Arc, Mutex},
+        time::Duration,
     };
 
     use git_internal::internal::object::{task::Task as GitTask, types::ActorRef};
@@ -1007,6 +965,10 @@ mod tests {
                 })
                 .unwrap_or_default();
 
+            if prompt.contains("## Task\nB") {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+
             if prompt.contains("Fail first") {
                 Err(CompletionError::ResponseError("intentional failure".into()))
             } else {
@@ -1021,12 +983,22 @@ mod tests {
     }
 
     struct RecordingObserver {
-        starts: Arc<Mutex<Vec<String>>>,
+        events: Arc<Mutex<Vec<String>>>,
     }
 
     impl OrchestratorObserver for RecordingObserver {
         fn on_task_started(&self, task: &TaskSpec) {
-            self.starts.lock().unwrap().push(task.title().to_string());
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("start:{}", task.title()));
+        }
+
+        fn on_task_completed(&self, task: &TaskSpec, _result: &TaskResult) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("done:{}", task.title()));
         }
     }
 
@@ -1277,11 +1249,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_dag_uses_dagrs_and_preserves_batch_order() {
+    async fn execute_dag_uses_real_dependencies_without_batch_barriers() {
         let model = ConditionalModel;
         let registry = Arc::new(ToolRegistry::new());
         let dir = tempfile::tempdir().unwrap();
-        let starts = Arc::new(Mutex::new(Vec::new()));
+        let events = Arc::new(Mutex::new(Vec::new()));
         let config = ExecutorConfig {
             tool_loop_config: ToolLoopConfig::default(),
             max_retries: 0,
@@ -1291,7 +1263,7 @@ mod tests {
             reviewer_preamble: None,
             dagrs_resume_checkpoint_id: None,
             observer: Some(Arc::new(RecordingObserver {
-                starts: Arc::clone(&starts),
+                events: Arc::clone(&events),
             })),
         };
 
@@ -1329,14 +1301,25 @@ mod tests {
         };
         b.objective = "B".into();
 
-        let plan = plan_for_tasks(vec![a, c, b], 1);
+        let plan = plan_for_tasks(vec![a, c, b], 2);
 
         let run_state = execute_dag(&plan, &model, &registry, &config)
             .await
             .unwrap();
 
-        let start_order = starts.lock().unwrap().clone();
-        assert_eq!(start_order, vec!["A", "C", "B"]);
+        let timeline = events.lock().unwrap().clone();
+        let c_started_at = timeline
+            .iter()
+            .position(|event| event == "start:C")
+            .expect("C should start");
+        let b_completed_at = timeline
+            .iter()
+            .position(|event| event == "done:B")
+            .expect("B should complete");
+        assert!(
+            c_started_at < b_completed_at,
+            "C should start before B completes when only real dependencies are wired"
+        );
         assert_eq!(run_state.task_results.len(), 3);
         assert_eq!(run_state.dagrs_runtime.total_nodes, 3);
         assert_eq!(run_state.dagrs_runtime.completed_nodes, 3);
@@ -1349,11 +1332,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_dag_stops_future_batches_after_failure() {
+    async fn execute_dag_skips_dependent_tasks_after_failure() {
         let model = ConditionalModel;
         let registry = Arc::new(ToolRegistry::new());
         let dir = tempfile::tempdir().unwrap();
-        let starts = Arc::new(Mutex::new(Vec::new()));
+        let events = Arc::new(Mutex::new(Vec::new()));
         let config = ExecutorConfig {
             tool_loop_config: ToolLoopConfig::default(),
             max_retries: 0,
@@ -1363,7 +1346,7 @@ mod tests {
             reviewer_preamble: None,
             dagrs_resume_checkpoint_id: None,
             observer: Some(Arc::new(RecordingObserver {
-                starts: Arc::clone(&starts),
+                events: Arc::clone(&events),
             })),
         };
 
@@ -1388,6 +1371,7 @@ mod tests {
             task
         };
         later.objective = "Later".into();
+        later.task.add_dependency(failing.id());
 
         let plan = plan_for_tasks(vec![failing.clone(), later.clone()], 1);
 
@@ -1395,7 +1379,11 @@ mod tests {
             .await
             .unwrap();
 
-        let start_order = starts.lock().unwrap().clone();
+        let timeline = events.lock().unwrap().clone();
+        let start_order: Vec<String> = timeline
+            .iter()
+            .filter_map(|event| event.strip_prefix("start:").map(ToString::to_string))
+            .collect();
         assert_eq!(start_order, vec!["Fail first"]);
         assert_eq!(run_state.task_results.len(), 1);
         assert_eq!(run_state.task_results[0].task_id, failing.id());

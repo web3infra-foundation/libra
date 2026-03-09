@@ -935,6 +935,8 @@ git commit + SBOM + attestation + Rekor proof
 
 **`execution.replan.triggers`** specifies the conditions under which the orchestrator calls `Plan.new_revision()`. Before doing so, the orchestrator (when `libra.decisionPolicy.checkpointBeforeReplan=true`) creates `Decision.Checkpoint` to preserve intermediate progress. The old Plan version remains immutable in the revision chain, enabling complete replan history reconstruction.
 
+Implementation note (current as of 2026-03-09): runtime checkpoint objects are persisted and linked to replan decisions, but automatic DAG resume from a checkpoint ID is intentionally disabled until the userspace-fs change-tracking design is integrated.
+
 ---
 
 ### 3.9 Artifacts
