@@ -28,8 +28,8 @@ rust_library(
     visibility = ["PUBLIC"],
     deps = [
         "//third-party/rust/crates/proc-macro2/1.0.106:proc-macro2",
-        "//third-party/rust/crates/quote/1.0.44:quote",
-        "//third-party/rust/crates/regex-syntax/0.8.9:regex-syntax",
+        "//third-party/rust/crates/quote/1.0.45:quote",
+        "//third-party/rust/crates/regex-syntax/0.8.10:regex-syntax",
         "//third-party/rust/crates/regex/1.12.3:regex",
         "//third-party/rust/crates/structmeta/0.3.0:structmeta",
         "//third-party/rust/crates/syn/2.0.117:syn",

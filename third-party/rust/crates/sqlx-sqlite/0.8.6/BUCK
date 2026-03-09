@@ -37,7 +37,7 @@ rust_library(
     visibility = ["PUBLIC"],
     deps = [
         "//third-party/rust/crates/atoi/2.0.0:atoi",
-        "//third-party/rust/crates/chrono/0.4.43:chrono",
+        "//third-party/rust/crates/chrono/0.4.44:chrono",
         "//third-party/rust/crates/flume/0.11.1:flume",
         "//third-party/rust/crates/futures-channel/0.3.32:futures-channel",
         "//third-party/rust/crates/futures-core/0.3.32:futures-core",
@@ -54,6 +54,6 @@ rust_library(
         "//third-party/rust/crates/time/0.3.47:time",
         "//third-party/rust/crates/tracing/0.1.44:tracing",
         "//third-party/rust/crates/url/2.5.8:url",
-        "//third-party/rust/crates/uuid/1.21.0:uuid",
+        "//third-party/rust/crates/uuid/1.22.0:uuid",
     ],
 )

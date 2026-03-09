@@ -49,7 +49,7 @@ rust_library(
         "//third-party/rust/crates/futures-sink/0.3.32:futures-sink",
         "//third-party/rust/crates/futures-task/0.3.32:futures-task",
         "//third-party/rust/crates/memchr/2.8.0:memchr",
-        "//third-party/rust/crates/pin-project-lite/0.2.16:pin-project-lite",
+        "//third-party/rust/crates/pin-project-lite/0.2.17:pin-project-lite",
         "//third-party/rust/crates/slab/0.4.12:slab",
     ],
 )

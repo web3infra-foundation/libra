@@ -45,6 +45,6 @@ rust_library(
         "//third-party/rust/crates/portable-atomic/1.13.1:portable-atomic",
         "//third-party/rust/crates/rustc-hash/2.1.1:rustc-hash",
         "//third-party/rust/crates/tokio-stream/0.1.18:tokio-stream",
-        "//third-party/rust/crates/tokio/1.49.0:tokio",
+        "//third-party/rust/crates/tokio/1.50.0:tokio",
     ],
 )

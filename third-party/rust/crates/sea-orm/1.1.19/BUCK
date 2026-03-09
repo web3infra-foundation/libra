@@ -51,7 +51,7 @@ rust_library(
         "//third-party/rust/crates/async-stream/0.3.6:async-stream",
         "//third-party/rust/crates/async-trait/0.1.89:async-trait",
         "//third-party/rust/crates/bigdecimal/0.4.10:bigdecimal",
-        "//third-party/rust/crates/chrono/0.4.43:chrono",
+        "//third-party/rust/crates/chrono/0.4.44:chrono",
         "//third-party/rust/crates/derive_more/2.1.1:derive_more",
         "//third-party/rust/crates/futures-util/0.3.32:futures-util",
         "//third-party/rust/crates/log/0.4.29:log",
@@ -69,6 +69,6 @@ rust_library(
         "//third-party/rust/crates/time/0.3.47:time",
         "//third-party/rust/crates/tracing/0.1.44:tracing",
         "//third-party/rust/crates/url/2.5.8:url",
-        "//third-party/rust/crates/uuid/1.21.0:uuid",
+        "//third-party/rust/crates/uuid/1.22.0:uuid",
     ],
 )

@@ -38,6 +38,10 @@ pub trait CompletionModel: Clone + Send + Sync {
         &self,
         request: CompletionRequest,
     ) -> impl Future<Output = Result<CompletionResponse<Self::Response>, CompletionError>> + Send;
+
+    /// Optional method to set run ID for linking to workflow objects.
+    /// Default implementation does nothing.
+    fn set_run_id(&self, _run_id: String) {}
 }
 
 pub trait Prompt: Send + Sync {
