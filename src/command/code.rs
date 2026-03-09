@@ -5,7 +5,10 @@
 //! - Web Mode (`--web`): Web server only, suitable for browser access or remote hosting.
 //! - Stdio Mode (`--stdio`): MCP server over standard input/output, designed for integration with AI clients like Claude Desktop.
 
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+};
 
 use axum::{Router, response::Html, routing::get};
 use clap::{Parser, ValueEnum};
@@ -125,12 +128,23 @@ struct WebHandle {
     addr: SocketAddr,
     shutdown_tx: oneshot::Sender<()>,
     join: tokio::task::JoinHandle<anyhow::Result<()>>,
+    connection_tasks: Option<Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>>,
 }
 
 impl WebHandle {
     async fn shutdown(self) {
         let _ = self.shutdown_tx.send(());
         let _ = self.join.await;
+        if let Some(tasks) = self.connection_tasks {
+            let pending = match tasks.lock() {
+                Ok(mut handles) => std::mem::take(&mut *handles),
+                Err(_) => Vec::new(),
+            };
+            for handle in pending {
+                handle.abort();
+                let _ = handle.await;
+            }
+        }
     }
 }
 
@@ -154,6 +168,7 @@ async fn start_web_server(host: &str, port: u16) -> anyhow::Result<WebHandle> {
         addr,
         shutdown_tx,
         join,
+        connection_tasks: None,
     })
 }
 
@@ -514,7 +529,8 @@ where
     // Set up session persistence
     let working_dir_str = registry.working_dir().to_string_lossy().to_string();
     let storage_root = resolve_storage_root(registry.working_dir());
-    let session_store = crate::internal::ai::session::SessionStore::from_storage_path(&storage_root);
+    let session_store =
+        crate::internal::ai::session::SessionStore::from_storage_path(&storage_root);
     let session = if params.resume {
         match session_store.load_latest() {
             Ok(Some(s)) => s,
@@ -586,6 +602,9 @@ async fn start_mcp_server(
     ));
 
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
+    let connection_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>> =
+        Arc::new(Mutex::new(Vec::new()));
+    let tracked_connections = connection_tasks.clone();
 
     let join = tokio::spawn(async move {
         loop {
@@ -598,7 +617,7 @@ async fn start_mcp_server(
                         Ok((stream, _)) => {
                             let io = TokioIo::new(stream);
                             let service = service.clone();
-                            tokio::spawn(async move {
+                            let conn_task = tokio::spawn(async move {
                                 if let Err(e) = hyper_util::server::conn::auto::Builder::new(TokioExecutor::default())
                                     .serve_connection(io, service)
                                     .await
@@ -606,6 +625,10 @@ async fn start_mcp_server(
                                     cli_error!(e, "warning: MCP connection error");
                                 }
                             });
+                            match tracked_connections.lock() {
+                                Ok(mut tasks) => tasks.push(conn_task),
+                                Err(_) => conn_task.abort(),
+                            }
                         }
                         Err(e) => {
                             cli_error!(e, "warning: MCP accept error");
@@ -621,6 +644,7 @@ async fn start_mcp_server(
         addr,
         shutdown_tx,
         join,
+        connection_tasks: Some(connection_tasks),
     })
 }
 

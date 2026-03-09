@@ -19,21 +19,22 @@ use super::{
         ToolCallRecord,
     },
 };
-use crate::internal::ai::{
-    intentspec::persistence::persist_intentspec,
-    intentspec::types::IntentSpec,
-    mcp::{
-        resource::{
-            AgentInstanceParams, ContextItemParams, CreateContextSnapshotParams,
-            CreateDecisionParams, CreateEvidenceParams, CreatePatchSetParams, CreatePlanParams,
-            CreateProvenanceParams, CreateRunParams, CreateTaskParams,
-            CreateToolInvocationParams, IoFootprintParams, PlanStepParams, TouchedFileParams,
+use crate::{
+    internal::ai::{
+        intentspec::{persistence::persist_intentspec, types::IntentSpec},
+        mcp::{
+            resource::{
+                AgentInstanceParams, ContextItemParams, CreateContextSnapshotParams,
+                CreateDecisionParams, CreateEvidenceParams, CreatePatchSetParams, CreatePlanParams,
+                CreateProvenanceParams, CreateRunParams, CreateTaskParams,
+                CreateToolInvocationParams, IoFootprintParams, PlanStepParams, TouchedFileParams,
+            },
+            server::LibraMcpServer,
         },
-        server::LibraMcpServer,
+        workflow_objects::{build_git_plan, parse_object_id},
     },
-    workflow_objects::{build_git_plan, parse_object_id},
+    utils::storage_ext::StorageExt,
 };
-use crate::utils::storage_ext::StorageExt;
 
 const ZERO_COMMIT_SHA: &str = "0000000000000000000000000000000000000000";
 
@@ -229,8 +230,7 @@ pub async fn persist_execution(
 
         for call in &result.tool_calls {
             let tool_invocation_id =
-                create_tool_invocation(request.mcp_server, &run_id, task.title(), call)
-                    .await?;
+                create_tool_invocation(request.mcp_server, &run_id, task.title(), call).await?;
             persisted.tool_invocation_ids.push(tool_invocation_id);
         }
 
@@ -496,9 +496,7 @@ async fn create_execution_task(
     let result = mcp_server
         .create_task_impl(params, actor)
         .await
-        .map_err(|e| {
-            OrchestratorError::ConfigError(format!("MCP create_task failed: {e:?}"))
-        })?;
+        .map_err(|e| OrchestratorError::ConfigError(format!("MCP create_task failed: {e:?}")))?;
     parse_created_id("task", &result)
 }
 
@@ -607,9 +605,7 @@ async fn create_compiled_task(
             .then_some(request.dependency_task_ids),
         intent_id: Some(request.intent_id.to_string()),
         parent_task_id: Some(request.parent_task_id.to_string()),
-        origin_step_id: request
-            .persisted_step_id
-            .map(|step_id| step_id.to_string()),
+        origin_step_id: request.persisted_step_id.map(|step_id| step_id.to_string()),
         status: Some(request.status.to_string()),
         reason: Some("compiled execution task".to_string()),
         tags: None,
@@ -627,9 +623,7 @@ async fn create_compiled_task(
         .mcp_server
         .create_task_impl(params, actor)
         .await
-        .map_err(|e| {
-            OrchestratorError::ConfigError(format!("MCP create_task failed: {e:?}"))
-        })?;
+        .map_err(|e| OrchestratorError::ConfigError(format!("MCP create_task failed: {e:?}")))?;
     parse_created_id("task", &result)
 }
 
@@ -720,9 +714,10 @@ async fn load_persisted_plan(
             OrchestratorError::ConfigError(format!("persisted plan not found: {plan_id}"))
         })?;
 
-    storage.get_json::<GitPlan>(&hash).await.map_err(|e| {
-        OrchestratorError::ConfigError(format!("failed to load persisted plan: {e}"))
-    })
+    storage
+        .get_json::<GitPlan>(&hash)
+        .await
+        .map_err(|e| OrchestratorError::ConfigError(format!("failed to load persisted plan: {e}")))
 }
 
 async fn create_provenance(
@@ -1339,9 +1334,12 @@ fn checkpoint_before_replan(spec: &IntentSpec) -> bool {
 mod tests {
     use std::{collections::BTreeMap, path::Path, sync::Arc};
 
-    use git_internal::internal::object::{plan::Plan as GitPlan, task::Task as GitTask, types::ActorRef};
+    use git_internal::internal::object::{
+        plan::Plan as GitPlan, task::Task as GitTask, types::ActorRef,
+    };
     use sea_orm::{ConnectionTrait, Database, Schema};
     use tempfile::tempdir;
+
     use super::*;
     use crate::{
         internal::{
@@ -1679,7 +1677,12 @@ mod tests {
         assert_eq!(persisted.plan_ids.len(), 1);
         assert_eq!(persisted.checkpoints.len(), 1);
         assert_eq!(persisted.tasks.len(), 2);
-        assert!(persisted.tasks.iter().all(|task| task.persisted_task_id.is_some()));
+        assert!(
+            persisted
+                .tasks
+                .iter()
+                .all(|task| task.persisted_task_id.is_some())
+        );
         assert_eq!(persisted.tasks[0].tool_invocation_ids.len(), 1);
         assert!(persisted.tasks[0].patchset_id.is_some());
         assert_eq!(persisted.tasks[1].evidence_ids.len(), 1);
@@ -1696,7 +1699,10 @@ mod tests {
 
         let storage = server.storage.as_ref().unwrap();
         let plan_hash = history
-            .get_object_hash("plan", &parse_object_id(&persisted.plan_ids[0]).unwrap().to_string())
+            .get_object_hash(
+                "plan",
+                &parse_object_id(&persisted.plan_ids[0]).unwrap().to_string(),
+            )
             .await
             .unwrap()
             .unwrap();
@@ -1710,7 +1716,10 @@ mod tests {
         for task_artifacts in &persisted.tasks {
             let persisted_task_id = task_artifacts.persisted_task_id.as_ref().unwrap();
             let task_hash = history
-                .get_object_hash("task", &parse_object_id(persisted_task_id).unwrap().to_string())
+                .get_object_hash(
+                    "task",
+                    &parse_object_id(persisted_task_id).unwrap().to_string(),
+                )
                 .await
                 .unwrap()
                 .unwrap();

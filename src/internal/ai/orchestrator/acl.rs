@@ -86,10 +86,7 @@ fn check_deny_constraints(
             .collect::<Vec<_>>();
 
         if !matched.is_empty() {
-            return Some(format!(
-                "denied substrings matched: {}",
-                matched.join(", ")
-            ));
+            return Some(format!("denied substrings matched: {}", matched.join(", ")));
         }
     }
     None

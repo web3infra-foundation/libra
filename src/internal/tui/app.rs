@@ -5,8 +5,9 @@
 
 use std::{
     collections::HashMap,
+    future::Future,
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -46,7 +47,7 @@ use crate::{
         mcp::{
             resource::{
                 CreateContextSnapshotParams, CreateDecisionParams, CreateIntentParams,
-                CreatePlanParams, CreateRunParams, CreateToolInvocationParams,
+                CreatePlanParams, CreateRunParams, CreateTaskParams, CreateToolInvocationParams,
             },
             server::LibraMcpServer,
         },
@@ -71,6 +72,34 @@ pub struct McpIds {
     pub task_id: Option<String>,
     pub run_id: Option<String>,
     pub _context_snapshot_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct McpWriteTracker {
+    tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
+}
+
+impl McpWriteTracker {
+    fn spawn<F>(&self, fut: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let handle = tokio::spawn(fut);
+        match self.tasks.lock() {
+            Ok(mut tasks) => tasks.push(handle),
+            Err(_) => handle.abort(),
+        }
+    }
+
+    async fn drain(&self) {
+        let pending = match self.tasks.lock() {
+            Ok(mut tasks) => std::mem::take(&mut *tasks),
+            Err(_) => return,
+        };
+        for handle in pending {
+            let _ = handle.await;
+        }
+    }
 }
 
 const LATEST_INTENTSPEC_INTENT_ID: &str = "latest_intentspec_intent_id";
@@ -215,6 +244,8 @@ pub struct App<M: CompletionModel> {
     mcp_server: Option<Arc<LibraMcpServer>>,
     /// MCP resource IDs for tracking the workflow
     mcp_ids: McpIds,
+    /// Pending detached MCP write operations that must finish before shutdown.
+    mcp_write_tracker: McpWriteTracker,
 }
 
 impl<M: CompletionModel + Clone + 'static> App<M> {
@@ -252,6 +283,23 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         widget
             .bottom_pane
             .set_cwd(registry.working_dir().to_path_buf());
+        let mut mcp_ids = McpIds::default();
+        if let Some(intent_id) = app_config
+            .session
+            .metadata
+            .get(LATEST_INTENTSPEC_INTENT_ID)
+            .and_then(|value| value.as_str())
+        {
+            mcp_ids._intent_id = Some(intent_id.to_string());
+        }
+        if let Some(plan_id) = app_config
+            .session
+            .metadata
+            .get(LATEST_EXECUTION_PLAN_ID)
+            .and_then(|value| value.as_str())
+        {
+            mcp_ids.plan_id = Some(plan_id.to_string());
+        }
         Self {
             tui,
             widget,
@@ -282,7 +330,8 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             model_name: app_config.model_name,
             provider_name: app_config.provider_name,
             mcp_server: app_config.mcp_server,
-            mcp_ids: McpIds::default(),
+            mcp_ids,
+            mcp_write_tracker: McpWriteTracker::default(),
         }
     }
 
@@ -369,59 +418,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             }
         }
 
-        // Create decision via MCP when exiting
-        if let Some(ref mcp_server) = self.mcp_server {
-            let mcp_ids_clone = self.mcp_ids.clone();
-            let mcp_server_clone = mcp_server.clone();
-
-            tokio::spawn(async move {
-                // Create decision
-                let decision_params = CreateDecisionParams {
-                    run_id: mcp_ids_clone
-                        .run_id
-                        .clone()
-                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-                    decision_type: "complete".to_string(),
-                    chosen_patchset_id: None,
-                    result_commit_sha: None,
-                    rationale: Some("Session completed successfully".to_string()),
-                    checkpoint_id: None,
-                    tags: None,
-                    external_ids: None,
-                    actor_kind: Some("system".to_string()),
-                    actor_id: Some("libra-code".to_string()),
-                };
-
-                // Resolve actor
-                let actor = match mcp_server_clone.resolve_actor_from_params(
-                    decision_params.actor_kind.as_deref(),
-                    decision_params.actor_id.as_deref(),
-                ) {
-                    Ok(actor) => actor,
-                    Err(e) => {
-                        cli_error!(e, "error: failed to resolve actor for decision");
-                        return;
-                    }
-                };
-
-                // Call MCP interface to create decision
-                match mcp_server_clone
-                    .create_decision_impl(decision_params, actor)
-                    .await
-                {
-                    Ok(result) => {
-                        if !result.is_error.unwrap_or(false) {
-                            println!("Decision created successfully");
-                        } else {
-                            render_mcp_error("failed to create decision", result.content);
-                        }
-                    }
-                    Err(e) => {
-                        cli_error!(e, "error: failed to create decision");
-                    }
-                }
-            });
-        }
+        self.interrupt_agent_task();
+        self.mcp_write_tracker.drain().await;
+        self.create_mcp_exit_decision().await;
 
         Ok(self.exit_info.clone().unwrap_or(AppExitInfo {
             reason: ExitReason::UserRequested,
@@ -876,100 +875,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 self.widget.bottom_pane.set_status(AgentStatus::Thinking);
                 self.schedule_draw();
 
-                // Create run and context snapshot via MCP if available
-                if let Some(ref mcp_server) = self.mcp_server {
-                    let text_clone = text.clone();
-                    let mcp_ids_clone = self.mcp_ids.clone();
-                    let mcp_server_clone = mcp_server.clone();
-
-                    tokio::spawn(async move {
-                        // Create run
-                        let run_params = CreateRunParams {
-                            task_id: mcp_ids_clone
-                                .task_id
-                                .clone()
-                                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-                            base_commit_sha: "0000000000000000000000000000000000000000".to_string(),
-                            plan_id: None,
-                            status: Some("created".to_string()),
-                            context_snapshot_id: None,
-                            error: None,
-                            agent_instances: None,
-                            metrics_json: None,
-                            reason: None,
-                            orchestrator_version: None,
-                            tags: None,
-                            external_ids: None,
-                            actor_kind: Some("human".to_string()),
-                            actor_id: Some("user".to_string()),
-                        };
-
-                        // Resolve actor
-                        let actor = match mcp_server_clone.resolve_actor_from_params(
-                            run_params.actor_kind.as_deref(),
-                            run_params.actor_id.as_deref(),
-                        ) {
-                            Ok(actor) => actor,
-                            Err(e) => {
-                                cli_error!(e, "error: failed to resolve actor for run");
-                                return;
-                            }
-                        };
-
-                        // Call MCP interface to create run
-                        match mcp_server_clone.create_run_impl(run_params, actor).await {
-                            Ok(result) => {
-                                if result.is_error.unwrap_or(false) {
-                                    render_mcp_error("failed to create run", result.content);
-                                }
-                            }
-                            Err(e) => {
-                                cli_error!(e, "error: failed to create run");
-                            }
-                        }
-
-                        // Create context snapshot
-                        let snapshot_params = CreateContextSnapshotParams {
-                            selection_strategy: "heuristic".to_string(),
-                            items: None,
-                            summary: Some(format!("Context for: {}", text_clone)),
-                            tags: None,
-                            external_ids: None,
-                            actor_kind: Some("system".to_string()),
-                            actor_id: Some("libra-code".to_string()),
-                        };
-
-                        // Resolve actor for snapshot
-                        let snapshot_actor = match mcp_server_clone.resolve_actor_from_params(
-                            snapshot_params.actor_kind.as_deref(),
-                            snapshot_params.actor_id.as_deref(),
-                        ) {
-                            Ok(actor) => actor,
-                            Err(e) => {
-                                cli_error!(e, "error: failed to resolve actor for snapshot");
-                                return;
-                            }
-                        };
-
-                        // Call MCP interface to create context snapshot
-                        match mcp_server_clone
-                            .create_context_snapshot_impl(snapshot_params, snapshot_actor)
-                            .await
-                        {
-                            Ok(result) => {
-                                if result.is_error.unwrap_or(false) {
-                                    render_mcp_error(
-                                        "failed to create context snapshot",
-                                        result.content,
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                cli_error!(e, "error: failed to create context snapshot");
-                            }
-                        }
-                    });
-                }
+                self.start_mcp_turn_tracking(&text).await;
 
                 // Prepare components for background task
                 let model = self.model.clone();
@@ -981,12 +887,16 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 let tx = self.app_event_tx.clone();
                 let user_text = text;
                 let mcp_server = self.mcp_server.clone();
+                let run_id = self.mcp_ids.run_id.clone();
+                let mcp_write_tracker = self.mcp_write_tracker.clone();
 
                 // Execute agent call in background task
                 let handle = tokio::spawn(async move {
                     struct UiObserver {
                         tx: UnboundedSender<AppEvent>,
                         mcp_server: Option<Arc<LibraMcpServer>>,
+                        run_id: Option<String>,
+                        mcp_write_tracker: McpWriteTracker,
                     }
 
                     impl crate::internal::ai::agent::ToolLoopObserver for UiObserver {
@@ -1008,16 +918,15 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                             });
 
                             // Record tool invocation via MCP if available
-                            if let Some(ref mcp_server) = self.mcp_server {
-                                let _call_id = call_id.to_string();
+                            if let (Some(mcp_server), Some(run_id)) =
+                                (self.mcp_server.clone(), self.run_id.clone())
+                            {
                                 let tool_name = tool_name.to_string();
                                 let arguments = arguments.clone();
-                                let mcp_server_clone = mcp_server.clone();
-
-                                tokio::spawn(async move {
+                                self.mcp_write_tracker.spawn(async move {
                                     // Create tool invocation
                                     let invocation_params = CreateToolInvocationParams {
-                                        run_id: uuid::Uuid::new_v4().to_string(),
+                                        run_id,
                                         tool_name: tool_name.clone(),
                                         args_json: Some(arguments.to_string()),
                                         status: Some("ok".to_string()),
@@ -1031,7 +940,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                                     };
 
                                     // Resolve actor
-                                    let actor = match mcp_server_clone.resolve_actor_from_params(
+                                    let actor = match mcp_server.resolve_actor_from_params(
                                         invocation_params.actor_kind.as_deref(),
                                         invocation_params.actor_id.as_deref(),
                                     ) {
@@ -1046,7 +955,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                                     };
 
                                     // Call MCP interface to create tool invocation
-                                    match mcp_server_clone
+                                    match mcp_server
                                         .create_tool_invocation_impl(invocation_params, actor)
                                         .await
                                     {
@@ -1083,7 +992,12 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         }
                     }
 
-                    let mut observer = UiObserver { tx, mcp_server };
+                    let mut observer = UiObserver {
+                        tx,
+                        mcp_server,
+                        run_id,
+                        mcp_write_tracker,
+                    };
                     let result = run_tool_loop_with_history_and_observer(
                         &model,
                         history,
@@ -1187,12 +1101,14 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     serde_json::Value::String(spec_json.clone()),
                 );
                 if let Some(id) = intent_id {
+                    self.mcp_ids._intent_id = Some(id.clone());
                     self.session.metadata.insert(
                         LATEST_INTENTSPEC_INTENT_ID.to_string(),
                         serde_json::Value::String(id),
                     );
                 } else {
                     self.session.metadata.remove(LATEST_INTENTSPEC_INTENT_ID);
+                    self.mcp_ids._intent_id = None;
                 }
                 if let Some(id) = plan_id.clone() {
                     self.session.metadata.insert(
@@ -1368,6 +1284,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 self.widget.clear();
                 self.history.clear();
                 self.session = SessionState::new(&self.registry.working_dir().to_string_lossy());
+                self.mcp_ids = McpIds::default();
             }
             BuiltinCommand::Model => {
                 let info = format!(
@@ -1398,6 +1315,190 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 self.exit_info = Some(AppExitInfo {
                     reason: ExitReason::UserRequested,
                 });
+            }
+        }
+    }
+
+    async fn start_mcp_turn_tracking(&mut self, text: &str) {
+        self.mcp_ids.task_id = None;
+        self.mcp_ids.run_id = None;
+        self.mcp_ids._context_snapshot_id = None;
+
+        let Some(mcp_server) = self.mcp_server.clone() else {
+            return;
+        };
+
+        let snapshot_params = CreateContextSnapshotParams {
+            selection_strategy: "heuristic".to_string(),
+            items: None,
+            summary: Some(format!("Context for: {text}")),
+            tags: None,
+            external_ids: None,
+            actor_kind: Some("system".to_string()),
+            actor_id: Some("libra-code".to_string()),
+        };
+        let snapshot_actor = match mcp_server.resolve_actor_from_params(
+            snapshot_params.actor_kind.as_deref(),
+            snapshot_params.actor_id.as_deref(),
+        ) {
+            Ok(actor) => actor,
+            Err(e) => {
+                cli_error!(e, "error: failed to resolve actor for snapshot");
+                return;
+            }
+        };
+        let context_snapshot_id = match mcp_server
+            .create_context_snapshot_impl(snapshot_params, snapshot_actor)
+            .await
+        {
+            Ok(result) => {
+                if result.is_error.unwrap_or(false) {
+                    render_mcp_error("failed to create context snapshot", result.content);
+                    None
+                } else {
+                    parse_created_id(&result)
+                }
+            }
+            Err(e) => {
+                cli_error!(e, "error: failed to create context snapshot");
+                None
+            }
+        };
+        self.mcp_ids._context_snapshot_id = context_snapshot_id.clone();
+
+        let task_params = CreateTaskParams {
+            title: summarize_turn_task_title(text),
+            description: Some("Interactive TUI user request".to_string()),
+            goal_type: None,
+            constraints: None,
+            acceptance_criteria: None,
+            requested_by_kind: Some("human".to_string()),
+            requested_by_id: Some("user".to_string()),
+            dependencies: None,
+            intent_id: None,
+            parent_task_id: None,
+            origin_step_id: None,
+            status: Some("created".to_string()),
+            reason: Some("start user turn".to_string()),
+            tags: None,
+            external_ids: None,
+            actor_kind: Some("human".to_string()),
+            actor_id: Some("user".to_string()),
+        };
+        let task_actor = match mcp_server.resolve_actor_from_params(
+            task_params.actor_kind.as_deref(),
+            task_params.actor_id.as_deref(),
+        ) {
+            Ok(actor) => actor,
+            Err(e) => {
+                cli_error!(e, "error: failed to resolve actor for task");
+                return;
+            }
+        };
+
+        let task_id = match mcp_server.create_task_impl(task_params, task_actor).await {
+            Ok(result) => {
+                if result.is_error.unwrap_or(false) {
+                    render_mcp_error("failed to create task", result.content);
+                    None
+                } else {
+                    parse_created_id(&result)
+                }
+            }
+            Err(e) => {
+                cli_error!(e, "error: failed to create task");
+                None
+            }
+        };
+        let Some(task_id) = task_id else {
+            return;
+        };
+        self.mcp_ids.task_id = Some(task_id.clone());
+
+        let run_params = CreateRunParams {
+            task_id,
+            base_commit_sha: current_head_sha(self.registry.working_dir()),
+            plan_id: self.mcp_ids.plan_id.clone(),
+            status: Some("created".to_string()),
+            context_snapshot_id,
+            error: None,
+            agent_instances: None,
+            metrics_json: None,
+            reason: Some("start user turn".to_string()),
+            orchestrator_version: None,
+            tags: None,
+            external_ids: None,
+            actor_kind: Some("human".to_string()),
+            actor_id: Some("user".to_string()),
+        };
+        let run_actor = match mcp_server.resolve_actor_from_params(
+            run_params.actor_kind.as_deref(),
+            run_params.actor_id.as_deref(),
+        ) {
+            Ok(actor) => actor,
+            Err(e) => {
+                cli_error!(e, "error: failed to resolve actor for run");
+                return;
+            }
+        };
+
+        self.mcp_ids.run_id = match mcp_server.create_run_impl(run_params, run_actor).await {
+            Ok(result) => {
+                if result.is_error.unwrap_or(false) {
+                    render_mcp_error("failed to create run", result.content);
+                    None
+                } else {
+                    parse_created_id(&result)
+                }
+            }
+            Err(e) => {
+                cli_error!(e, "error: failed to create run");
+                None
+            }
+        };
+    }
+
+    async fn create_mcp_exit_decision(&self) {
+        let (Some(mcp_server), Some(run_id)) =
+            (self.mcp_server.clone(), self.mcp_ids.run_id.clone())
+        else {
+            return;
+        };
+
+        let decision_params = CreateDecisionParams {
+            run_id,
+            decision_type: "complete".to_string(),
+            chosen_patchset_id: None,
+            result_commit_sha: None,
+            rationale: Some("Session completed successfully".to_string()),
+            checkpoint_id: None,
+            tags: None,
+            external_ids: None,
+            actor_kind: Some("system".to_string()),
+            actor_id: Some("libra-code".to_string()),
+        };
+        let actor = match mcp_server.resolve_actor_from_params(
+            decision_params.actor_kind.as_deref(),
+            decision_params.actor_id.as_deref(),
+        ) {
+            Ok(actor) => actor,
+            Err(e) => {
+                cli_error!(e, "error: failed to resolve actor for decision");
+                return;
+            }
+        };
+
+        match mcp_server
+            .create_decision_impl(decision_params, actor)
+            .await
+        {
+            Ok(result) => {
+                if result.is_error.unwrap_or(false) {
+                    render_mcp_error("failed to create decision", result.content);
+                }
+            }
+            Err(e) => {
+                cli_error!(e, "error: failed to create decision");
             }
         }
     }
@@ -1592,7 +1693,8 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         .unwrap_or_else(|| "no reviewer output".to_string());
                     self.send_note(format!(
                         "Reviewer pass finished for {}  \n{}",
-                        task.title(), summary
+                        task.title(),
+                        summary
                     ));
                 }
 
@@ -1967,8 +2069,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     }
                 }
             } else if mcp_server.is_some() {
-                plan_warning =
-                    Some("intent persistence unavailable; execution plan not persisted.".to_string());
+                plan_warning = Some(
+                    "intent persistence unavailable; execution plan not persisted.".to_string(),
+                );
                 None
             } else {
                 plan_warning =
@@ -2465,6 +2568,19 @@ fn parse_created_id(result: &rmcp::model::CallToolResult) -> Option<String> {
         }
     }
     None
+}
+
+fn summarize_turn_task_title(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return "TUI user request".to_string();
+    }
+
+    let mut title: String = trimmed.chars().take(72).collect();
+    if trimmed.chars().count() > 72 {
+        title.push_str("...");
+    }
+    format!("TUI: {title}")
 }
 
 async fn list_intent_object_ids(mcp: &Arc<LibraMcpServer>) -> Vec<String> {

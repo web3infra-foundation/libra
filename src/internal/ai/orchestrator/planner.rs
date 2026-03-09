@@ -10,11 +10,13 @@ use super::types::{
     ExecutionCheckpoint, ExecutionPlanSpec, GateStage, OrchestratorError, TaskContract, TaskKind,
     TaskSpec,
 };
-use crate::internal::ai::intentspec::types::{
-    ChangeType, ConflictResolution, DecompositionMode, DependencyPolicy, IntentSpec, LibraBinding,
-    NetworkPolicy, PlanGenerationConfig, RiskLevel, TouchHints,
+use crate::internal::ai::{
+    intentspec::types::{
+        ChangeType, ConflictResolution, DecompositionMode, DependencyPolicy, IntentSpec,
+        LibraBinding, NetworkPolicy, PlanGenerationConfig, RiskLevel, TouchHints,
+    },
+    workflow_objects::planner_actor,
 };
-use crate::internal::ai::workflow_objects::planner_actor;
 
 struct TaskSpecMeta {
     objective: String,
@@ -501,7 +503,9 @@ fn task_spec(task: GitTask, meta: TaskSpecMeta) -> TaskSpec {
         "ownerRole": meta.owner_role,
     })));
     if !meta.checks.is_empty() {
-        step.set_checks(Some(serde_json::to_value(&meta.checks).unwrap_or_else(|_| serde_json::json!([]))));
+        step.set_checks(Some(
+            serde_json::to_value(&meta.checks).unwrap_or_else(|_| serde_json::json!([])),
+        ));
     }
     let mut task = task;
     task.set_origin_step_id(Some(step.step_id()));
@@ -548,7 +552,6 @@ fn dependency_policy_label(policy: &DependencyPolicy) -> &'static str {
         DependencyPolicy::Allow => "allow",
     }
 }
-
 
 #[cfg(test)]
 mod tests {

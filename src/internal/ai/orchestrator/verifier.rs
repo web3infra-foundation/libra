@@ -207,9 +207,9 @@ fn artifact_stage_label(stage: &ArtifactStage) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use git_internal::internal::object::{task::Task as GitTask, types::ActorRef};
 
+    use super::*;
     use crate::internal::ai::{
         intentspec::types::{
             Acceptance, Artifacts, ChangeLogEntry, ChangeType, Check, CheckKind, ConcurrencyPolicy,

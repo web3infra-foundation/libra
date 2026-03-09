@@ -60,7 +60,11 @@ pub fn build_git_task(intent_id: Option<Uuid>, task: &TaskSpec) -> Result<GitTas
     let mut git_task = GitTask::new(actor, task.title().to_string(), goal)
         .map_err(anyhow::Error::msg)
         .context("Failed to construct git-internal Task")?;
-    git_task.set_description(task.description().map(ToString::to_string).or(Some(task.objective.clone())));
+    git_task.set_description(
+        task.description()
+            .map(ToString::to_string)
+            .or(Some(task.objective.clone())),
+    );
     for constraint in task.constraints() {
         git_task.add_constraint(constraint.clone());
     }

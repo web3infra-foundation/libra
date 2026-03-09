@@ -43,9 +43,7 @@ impl SessionStore {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let tmp_path = self
-            .sessions_dir
-            .join(format!("{}.{}.tmp", session.id, ts));
+        let tmp_path = self.sessions_dir.join(format!("{}.{}.tmp", session.id, ts));
         let json = serde_json::to_string_pretty(session)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 

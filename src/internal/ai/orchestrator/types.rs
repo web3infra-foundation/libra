@@ -178,7 +178,11 @@ impl ExecutionPlanSpec {
         while !remaining.is_empty() {
             let ready: Vec<Uuid> = remaining
                 .iter()
-                .filter(|task| task.dependencies().iter().all(|dep| completed.contains(dep)))
+                .filter(|task| {
+                    task.dependencies()
+                        .iter()
+                        .all(|dep| completed.contains(dep))
+                })
                 .map(TaskSpec::id)
                 .collect();
             if ready.is_empty() {
@@ -454,8 +458,9 @@ pub struct OrchestratorConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use git_internal::internal::object::{task::Task as GitTask, types::ActorRef};
+
+    use super::*;
     use crate::internal::ai::orchestrator::run_state::RunStateSnapshot;
 
     fn implementation_task() -> TaskSpec {
