@@ -386,7 +386,11 @@ fn test_cli_init_with_vault_fails_when_home_unwritable() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("failed to store vault unseal key"),
+        stderr.contains("failed to persist vault credentials"),
         "expected vault credential storage error, stderr: {stderr}"
+    );
+    assert!(
+        !workdir.join(".libra").join("vault.db").exists(),
+        "vault.db should be rolled back when credential persistence fails"
     );
 }

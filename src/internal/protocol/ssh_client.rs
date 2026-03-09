@@ -319,18 +319,38 @@ pub fn is_ssh_spec(spec: &str) -> bool {
     if spec.starts_with("ssh://") {
         return true;
     }
-    // SCP-style: user@host:path (must have @ before : and no ://)
-    if !spec.contains("://")
-        && let Some(at_pos) = spec.find('@')
-        && let Some(colon_pos) = spec[at_pos..].find(':')
+
+    // SCP-style: [user@]host:path
+    if spec.contains("://")
+        || spec.starts_with('/')
+        || spec.starts_with("./")
+        || spec.starts_with("../")
     {
-        let colon_abs = at_pos + colon_pos;
-        // Ensure there's a host between @ and :
-        if colon_abs > at_pos + 1 {
-            return true;
-        }
+        return false;
     }
-    false
+
+    let Some((user_host, path)) = spec.split_once(':') else {
+        return false;
+    };
+    if user_host.is_empty() || path.is_empty() {
+        return false;
+    }
+
+    // Avoid mistaking Windows local paths (e.g. C:\repo) for SSH remotes.
+    if user_host.len() == 1
+        && user_host
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_alphabetic())
+    {
+        return false;
+    }
+
+    if user_host.contains('/') || user_host.contains('\\') {
+        return false;
+    }
+
+    true
 }
 
 #[cfg(test)]
@@ -340,11 +360,14 @@ mod tests {
     #[test]
     fn test_is_ssh_spec() {
         assert!(is_ssh_spec("git@github.com:user/repo.git"));
+        assert!(is_ssh_spec("github.com:user/repo.git"));
         assert!(is_ssh_spec("ssh://git@github.com/user/repo.git"));
         assert!(is_ssh_spec("ssh://github.com/user/repo.git"));
         assert!(!is_ssh_spec("https://github.com/user/repo.git"));
         assert!(!is_ssh_spec("git://github.com/user/repo.git"));
         assert!(!is_ssh_spec("/local/path/to/repo"));
+        assert!(!is_ssh_spec("C:\\repo\\path"));
+        assert!(!is_ssh_spec("foo/bar:baz"));
     }
 
     #[test]

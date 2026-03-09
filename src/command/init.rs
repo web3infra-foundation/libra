@@ -854,7 +854,10 @@ async fn init_vault_for_repo(root_dir: &Path) -> anyhow::Result<()> {
     let (unseal_key, enc_token) = vault::init_vault(root_dir).await?;
 
     // Persist credentials needed for follow-up signing operations.
-    vault::store_credentials(&unseal_key, &enc_token).await?;
+    if let Err(err) = vault::store_credentials(&unseal_key, &enc_token).await {
+        rollback_failed_vault_init(root_dir).await;
+        return Err(err.context("failed to persist vault credentials"));
+    }
 
     // Generate PGP key for commit signing — only enable signing on success.
     // If key generation fails, roll back the persisted vault credentials so the
@@ -876,4 +879,26 @@ async fn init_vault_for_repo(root_dir: &Path) -> anyhow::Result<()> {
     println!("Public key:\n{public_key}");
 
     Ok(())
+}
+
+/// Best-effort cleanup when vault initialization fails before credentials are persisted.
+///
+/// This avoids leaving an unrecoverable `vault.db` without a stored unseal key.
+async fn rollback_failed_vault_init(root_dir: &Path) {
+    use crate::internal::vault;
+
+    vault::remove_credentials().await;
+
+    for suffix in ["", "-wal", "-shm"] {
+        let path = root_dir.join(format!("vault.db{suffix}"));
+        if let Err(err) = std::fs::remove_file(&path)
+            && err.kind() != io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                "failed to remove partially initialized vault database '{}': {}",
+                path.display(),
+                err
+            );
+        }
+    }
 }

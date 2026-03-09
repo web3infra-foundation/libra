@@ -253,8 +253,9 @@ pub async fn execute_safe(args: PushArgs) -> CliResult<()> {
     {
         // upload lfs files (only for HTTP remotes)
         if !is_ssh {
-            let url = Url::parse(&repo_url)
-                .map_err(|e| CliError::fatal(format!("invalid remote url '{}': {}", repo_url, e)))?;
+            let url = Url::parse(&repo_url).map_err(|e| {
+                CliError::fatal(format!("invalid remote url '{}': {}", repo_url, e))
+            })?;
             let lfs_client = crate::internal::protocol::lfs_client::LFSClient::from_url(&url);
             lfs_client
                 .push_objects(&objs)
