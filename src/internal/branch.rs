@@ -99,7 +99,7 @@ impl Branch {
     /// list all remote branches
     pub async fn list_branches(remote: Option<&str>) -> Vec<Self> {
         let db_conn = get_db_conn_instance().await;
-        Self::list_branches_with_conn(db_conn, remote).await
+        Self::list_branches_with_conn(&db_conn, remote).await
     }
 
     //  `_with_conn` version for `exists`
@@ -114,7 +114,7 @@ impl Branch {
     /// is the branch exists
     pub async fn exists(branch_name: &str) -> bool {
         let db_conn = get_db_conn_instance().await;
-        Self::exists_with_conn(db_conn, branch_name).await
+        Self::exists_with_conn(&db_conn, branch_name).await
     }
 
     //  `_with_conn` version for `find_branch`
@@ -144,7 +144,7 @@ impl Branch {
     /// get the branch by name
     pub async fn find_branch(branch_name: &str, remote: Option<&str>) -> Option<Self> {
         let db_conn = get_db_conn_instance().await;
-        Self::find_branch_with_conn(db_conn, branch_name, remote).await
+        Self::find_branch_with_conn(&db_conn, branch_name, remote).await
     }
 
     //  `_with_conn` version for `search_branch`
@@ -180,7 +180,7 @@ impl Branch {
     /// so we need to search all possible branches
     pub async fn search_branch(branch_name: &str) -> Vec<Self> {
         let db_conn = get_db_conn_instance().await;
-        Self::search_branch_with_conn(db_conn, branch_name).await
+        Self::search_branch_with_conn(&db_conn, branch_name).await
     }
 
     //  `_with_conn` version for `update_branch`
@@ -217,7 +217,7 @@ impl Branch {
 
     pub async fn update_branch(branch_name: &str, commit_hash: &str, remote: Option<&str>) {
         let db_conn = get_db_conn_instance().await;
-        Self::update_branch_with_conn(db_conn, branch_name, commit_hash, remote).await
+        Self::update_branch_with_conn(&db_conn, branch_name, commit_hash, remote).await
     }
 
     // `_with_conn` version for `delete_branch`
@@ -234,7 +234,7 @@ impl Branch {
 
     pub async fn delete_branch(branch_name: &str, remote: Option<&str>) {
         let db_conn = get_db_conn_instance().await;
-        Self::delete_branch_with_conn(db_conn, branch_name, remote).await
+        Self::delete_branch_with_conn(&db_conn, branch_name, remote).await
     }
 }
 

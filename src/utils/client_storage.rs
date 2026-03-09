@@ -46,7 +46,6 @@ static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
 });
 
 // Index update message
-#[derive(Clone)]
 struct IndexUpdateMsg {
     hash: String,
     obj_type: String,
@@ -584,7 +583,7 @@ async fn update_object_index_once(
         }
     };
 
-    let repo_id = match load_repo_id_with_conn(db_conn).await {
+    let repo_id = match load_repo_id_with_conn(&db_conn).await {
         Ok(repo_id) => repo_id,
         Err(_err) if !db_path.exists() => return Ok(()),
         Err(err) => {
@@ -604,7 +603,7 @@ async fn update_object_index_once(
     let existing = object_index::Entity::find()
         .filter(object_index::Column::OId.eq(o_id))
         .filter(object_index::Column::RepoId.eq(&repo_id))
-        .one(db_conn)
+        .one(&db_conn)
         .await;
 
     let existing = match existing {
@@ -632,7 +631,7 @@ async fn update_object_index_once(
         ..Default::default()
     };
 
-    if let Err(err) = entry.insert(db_conn).await {
+    if let Err(err) = entry.insert(&db_conn).await {
         if !db_path.exists() {
             return Ok(());
         }

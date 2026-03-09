@@ -80,7 +80,7 @@ impl Head {
 
     pub async fn current() -> Head {
         let db_conn = get_db_conn_instance().await;
-        Self::current_with_conn(db_conn).await
+        Self::current_with_conn(&db_conn).await
     }
 
     pub async fn remote_current_with_conn<C>(db: &C, remote: &str) -> Option<Head>
@@ -101,7 +101,7 @@ impl Head {
 
     pub async fn remote_current(remote: &str) -> Option<Head> {
         let db_conn = get_db_conn_instance().await;
-        Self::remote_current_with_conn(db_conn, remote).await
+        Self::remote_current_with_conn(&db_conn, remote).await
     }
 
     pub async fn current_commit_with_conn<C>(db: &C) -> Option<ObjectHash>
@@ -120,7 +120,7 @@ impl Head {
     /// get the commit hash of current head, return `None` if no commit
     pub async fn current_commit() -> Option<ObjectHash> {
         let db_conn = get_db_conn_instance().await;
-        Self::current_commit_with_conn(db_conn).await
+        Self::current_commit_with_conn(&db_conn).await
     }
 
     pub async fn update_with_conn<C>(db: &C, new_head: Self, remote: Option<&str>)
@@ -174,6 +174,6 @@ impl Head {
     // HEAD is unique, update if exists, insert if not
     pub async fn update(new_head: Self, remote: Option<&str>) {
         let db_conn = get_db_conn_instance().await;
-        Self::update_with_conn(db_conn, new_head, remote).await;
+        Self::update_with_conn(&db_conn, new_head, remote).await;
     }
 }

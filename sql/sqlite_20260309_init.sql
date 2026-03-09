@@ -1,3 +1,7 @@
+-- SQLite bootstrap schema for Libra repositories.
+-- This file supersedes the historical bootstrap filename
+-- `sql/sqlite_20240331_init.sql`.
+
 CREATE TABLE IF NOT EXISTS `config` (
     `id` INTEGER PRIMARY KEY AUTOINCREMENT,
     `configuration` TEXT NOT NULL,

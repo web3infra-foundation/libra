@@ -57,22 +57,11 @@ use once_cell::sync::Lazy;
 // #[cfg(test)]
 use tokio::sync::Mutex;
 
-// In the test environment, use a `HashMap` to store database connections
-// mapped by their working directories.
-// change the value type from Box<DbConn> to &'static DbConn
-// #[cfg(test)]
-static TEST_DB_CONNECTIONS: Lazy<Mutex<HashMap<PathBuf, &'static DbConn>>> =
+// Shared SQLite connections cached by database path.
+static TEST_DB_CONNECTIONS: Lazy<Mutex<HashMap<PathBuf, DbConn>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-// #[cfg(test)]
-#[allow(dead_code)]
-fn leak_conn(conn: DbConn) -> &'static DbConn {
-    let boxed = Box::new(conn);
-
-    (Box::leak(boxed)) as _
-}
-
-async fn get_or_init_db_conn_instance(db_path: PathBuf) -> io::Result<&'static DbConn> {
+async fn get_or_init_db_conn_instance(db_path: PathBuf) -> io::Result<DbConn> {
     let mut connections = TEST_DB_CONNECTIONS.lock().await;
 
     if !db_path.exists() {
@@ -84,7 +73,7 @@ async fn get_or_init_db_conn_instance(db_path: PathBuf) -> io::Result<&'static D
     }
 
     if let Some(conn) = connections.get(&db_path) {
-        return Ok(*conn);
+        return Ok(conn.clone());
     }
     drop(connections);
 
@@ -92,18 +81,17 @@ async fn get_or_init_db_conn_instance(db_path: PathBuf) -> io::Result<&'static D
 
     let mut connections = TEST_DB_CONNECTIONS.lock().await;
     if let Some(existing) = connections.get(&db_path) {
-        return Ok(*existing);
+        return Ok(existing.clone());
     }
-    let leaked = leak_conn(conn);
-    connections.insert(db_path, leaked);
-    Ok(leaked)
+    connections.insert(db_path, conn.clone());
+    Ok(conn)
 }
 
 /// Get global database connection instance (singleton per SQLite file).
 ///
 /// TODO(error): migrate legacy call sites to `get_db_conn_instance_for_path`
 /// and make this convenience wrapper return `io::Result` instead of panicking.
-pub async fn get_db_conn_instance() -> &'static DbConn {
+pub async fn get_db_conn_instance() -> DbConn {
     let db_path = path::database();
     get_db_conn_instance_for_path(&db_path)
         .await
@@ -111,14 +99,25 @@ pub async fn get_db_conn_instance() -> &'static DbConn {
 }
 
 /// Get a shared database connection instance for an explicit SQLite file path.
-pub async fn get_db_conn_instance_for_path(db_path: &Path) -> io::Result<&'static DbConn> {
+pub async fn get_db_conn_instance_for_path(db_path: &Path) -> io::Result<DbConn> {
     get_or_init_db_conn_instance(db_path.to_path_buf()).await
 }
 
 /// Drop a cached shared connection for an explicit SQLite file path.
 pub async fn reset_db_conn_instance_for_path(db_path: &Path) {
     let mut connections = TEST_DB_CONNECTIONS.lock().await;
-    connections.remove(db_path);
+    let removed = connections.remove(db_path);
+    drop(connections);
+
+    if let Some(conn) = removed
+        && let Err(err) = conn.close().await
+    {
+        tracing::warn!(
+            db_path = %db_path.display(),
+            error = %err,
+            "Failed to close cached database connection during reset"
+        );
+    }
 }
 
 async fn get_db_conn_for_path(db_path: &Path) -> io::Result<DatabaseConnection> {
@@ -686,7 +685,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn test_get_db_conn_instance_for_path_reuses_single_cached_connection_under_race() {
+    async fn test_get_db_conn_instance_for_path_caches_requested_path_under_race() {
         let test_db =
             TestDbPath::new("test_get_db_conn_instance_for_path_reuses_under_race.db").await;
         let db_path = PathBuf::from(&test_db.0);
@@ -704,21 +703,37 @@ mod tests {
             }));
         }
 
-        let mut first: Option<*const DbConn> = None;
         for task in tasks {
             let conn = task.await.unwrap().unwrap();
-            let ptr = conn as *const DbConn;
-            if let Some(existing) = first {
-                assert!(std::ptr::eq(existing, ptr));
-            } else {
-                first = Some(ptr);
-            }
+            let backend = conn.get_database_backend();
+            let stmt = Statement::from_sql_and_values(backend, "SELECT 1", []);
+            let row = conn.query_one(stmt).await.unwrap();
+            assert!(row.is_some());
         }
 
         let connections = TEST_DB_CONNECTIONS.lock().await;
-        let cached = connections.get(&db_path).copied();
-        let first = first.expect("at least one connection result");
+        let cached = connections.get(&db_path);
         assert!(cached.is_some());
-        assert!(std::ptr::eq(cached.unwrap(), first));
+        assert_eq!(
+            connections.keys().filter(|path| *path == &db_path).count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_reset_db_conn_instance_for_path_drops_cached_connection() {
+        let test_db = TestDbPath::new("test_reset_db_conn_instance_for_path.db").await;
+        let db_path = PathBuf::from(&test_db.0);
+
+        let _conn = get_db_conn_instance_for_path(&db_path).await.unwrap();
+        {
+            let connections = TEST_DB_CONNECTIONS.lock().await;
+            assert!(connections.contains_key(&db_path));
+        }
+
+        reset_db_conn_instance_for_path(&db_path).await;
+
+        let connections = TEST_DB_CONNECTIONS.lock().await;
+        assert!(!connections.contains_key(&db_path));
     }
 }
