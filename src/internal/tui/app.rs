@@ -15,7 +15,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use tokio::{
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
     task::JoinHandle,
-    time::{interval, sleep},
+    time::{interval, sleep, timeout},
 };
 use tokio_stream::StreamExt;
 
@@ -84,7 +84,11 @@ impl McpWriteTracker {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let handle = tokio::spawn(fut);
+        let handle = tokio::spawn(async move {
+            if timeout(MCP_WRITE_TIMEOUT, fut).await.is_err() {
+                tracing::warn!("MCP background write timed out");
+            }
+        });
         match self.tasks.lock() {
             Ok(mut tasks) => {
                 tasks.retain(|task| !task.is_finished());
@@ -95,12 +99,17 @@ impl McpWriteTracker {
     }
 
     async fn drain(&self) {
-        let pending = match self.tasks.lock() {
-            Ok(mut tasks) => std::mem::take(&mut *tasks),
-            Err(_) => return,
-        };
-        for handle in pending {
-            let _ = handle.await;
+        loop {
+            let pending = match self.tasks.lock() {
+                Ok(mut tasks) => std::mem::take(&mut *tasks),
+                Err(_) => return,
+            };
+            if pending.is_empty() {
+                return;
+            }
+            for handle in pending {
+                let _ = handle.await;
+            }
         }
     }
 }
@@ -109,6 +118,7 @@ const LATEST_INTENTSPEC_INTENT_ID: &str = "latest_intentspec_intent_id";
 const LATEST_EXECUTION_PLAN_ID: &str = "latest_execution_plan_id";
 const LATEST_INTENTSPEC_JSON: &str = "latest_intentspec_json";
 const MAX_INTENTSPEC_REPAIR_ATTEMPTS: usize = 2;
+const MCP_WRITE_TIMEOUT: Duration = Duration::from_secs(8);
 
 fn summarize_mcp_content(content: &[rmcp::model::Content]) -> Option<String> {
     let mut parts = Vec::new();
@@ -423,11 +433,12 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
         self.interrupt_agent_task();
         self.mcp_write_tracker.drain().await;
-        self.create_mcp_exit_decision().await;
-
-        Ok(self.exit_info.clone().unwrap_or(AppExitInfo {
+        let exit_info = self.exit_info.clone().unwrap_or(AppExitInfo {
             reason: ExitReason::UserRequested,
-        }))
+        });
+        self.create_mcp_exit_decision(&exit_info.reason).await;
+
+        Ok(exit_info)
     }
 
     /// Handle a terminal event.
@@ -1461,19 +1472,27 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         };
     }
 
-    async fn create_mcp_exit_decision(&self) {
+    async fn create_mcp_exit_decision(&self, reason: &ExitReason) {
         let (Some(mcp_server), Some(run_id)) =
             (self.mcp_server.clone(), self.mcp_ids.run_id.clone())
         else {
             return;
         };
 
+        let (decision_type, rationale) = match reason {
+            ExitReason::UserRequested => ("abandon", "Session ended by user request".to_string()),
+            ExitReason::Fatal(message) => (
+                "abandon",
+                format!("Session ended due to fatal error: {message}"),
+            ),
+        };
+
         let decision_params = CreateDecisionParams {
             run_id,
-            decision_type: "complete".to_string(),
+            decision_type: decision_type.to_string(),
             chosen_patchset_id: None,
             result_commit_sha: None,
-            rationale: Some("Session completed successfully".to_string()),
+            rationale: Some(rationale),
             checkpoint_id: None,
             tags: None,
             external_ids: None,

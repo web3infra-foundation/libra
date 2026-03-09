@@ -21,7 +21,7 @@ use crate::internal::{
     ai::{
         client::CompletionClient,
         history::HistoryManager,
-        mcp::{resource::CreateIntentParams, server::LibraMcpServer},
+        mcp::server::LibraMcpServer,
         providers::{
             anthropic::{CLAUDE_3_5_SONNET, Client as AnthropicClient},
             deepseek::client::Client as DeepSeekClient,
@@ -51,6 +51,16 @@ pub enum CodeProvider {
     Ollama,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum CodeContext {
+    #[value(alias = "development")]
+    Dev,
+    #[value(alias = "code-review")]
+    Review,
+    #[value(alias = "explore")]
+    Research,
+}
+
 #[derive(Parser, Debug)]
 pub struct CodeArgs {
     /// Run the web server only (no TUI). Alias: `--web`.
@@ -78,8 +88,8 @@ pub struct CodeArgs {
     pub temperature: Option<f64>,
 
     /// Operating context mode (dev, review, research)
-    #[arg(long)]
-    pub context: Option<String>,
+    #[arg(long, value_enum)]
+    pub context: Option<CodeContext>,
 
     /// Resume the most recent session
     #[arg(long)]
@@ -99,6 +109,10 @@ pub struct CodeArgs {
 }
 
 pub async fn execute(args: CodeArgs) {
+    if let Err(err) = validate_mode_args(&args) {
+        eprintln!("error: {err}");
+        return;
+    }
     if args.stdio {
         execute_stdio(args).await
     } else if args.web_only {
@@ -172,48 +186,6 @@ async fn start_web_server(host: &str, port: u16) -> anyhow::Result<WebHandle> {
     })
 }
 
-/// MCP write helper: create initial intent
-async fn create_initial_intent(mcp_server: &Arc<LibraMcpServer>) {
-    let params = CreateIntentParams {
-        content: "Libra Code session started".to_string(),
-        structured_content: None,
-        parent_id: None,
-        parent_ids: None,
-        analysis_context_frame_ids: None,
-        status: Some("active".to_string()),
-        commit_sha: None,
-        reason: None,
-        next_intent_id: None,
-        actor_kind: Some("system".to_string()),
-        actor_id: Some("libra-code".to_string()),
-    };
-
-    // Resolve actor
-    let actor = match mcp_server
-        .resolve_actor_from_params(params.actor_kind.as_deref(), params.actor_id.as_deref())
-    {
-        Ok(actor) => actor,
-        Err(e) => {
-            cli_error!(e, "error: failed to resolve actor");
-            return;
-        }
-    };
-
-    // Call MCP interface to create intent
-    match mcp_server.create_intent_impl(params, actor).await {
-        Ok(result) => {
-            if !result.is_error.unwrap_or(false) {
-                // Initial intent created successfully
-            } else {
-                eprintln!("error: failed to create initial intent");
-            }
-        }
-        Err(e) => {
-            cli_error!(e, "error: failed to create initial intent");
-        }
-    }
-}
-
 async fn execute_web_only(args: CodeArgs) {
     let web_handle = match start_web_server(&args.host, args.port).await {
         Ok(handle) => handle,
@@ -231,25 +203,21 @@ async fn execute_web_only(args: CodeArgs) {
     let mcp_server = init_mcp_server(&working_dir).await;
 
     // Start MCP Server
-    let (mcp_handle, mcp_line) =
-        match start_mcp_server(&args.host, args.mcp_port, mcp_server.clone()).await {
-            Ok(handle) => {
-                let line = format!("MCP: http://{}", handle.addr);
-                (Some(handle), line)
-            }
-            Err(err) => (None, format!("MCP: failed to start ({err})")),
-        };
-
-    // Create initial intent via MCP
-    create_initial_intent(&mcp_server).await;
-
-    println!("{}", mcp_line);
+    let mcp_handle = match start_mcp_server(&args.host, args.mcp_port, mcp_server.clone()).await {
+        Ok(handle) => {
+            println!("MCP: http://{}", handle.addr);
+            handle
+        }
+        Err(err) => {
+            cli_error!(err, "fatal: failed to start MCP server");
+            web_handle.shutdown().await;
+            return;
+        }
+    };
 
     let _ = tokio::signal::ctrl_c().await;
     web_handle.shutdown().await;
-    if let Some(handle) = mcp_handle {
-        handle.shutdown().await;
-    }
+    mcp_handle.shutdown().await;
 }
 
 async fn execute_tui(args: CodeArgs) {
@@ -280,7 +248,7 @@ async fn execute_tui(args: CodeArgs) {
         }
     }
 
-    let preamble = system_preamble(&working_dir, args.context.as_deref());
+    let preamble = system_preamble(&working_dir, args.context);
     let temperature = args.temperature;
     let resume = args.resume;
 
@@ -510,9 +478,6 @@ where
             Err(err) => (None, format!("MCP: failed to start ({err})")),
         };
 
-    // Create initial intent via MCP
-    create_initial_intent(&params.mcp_server).await;
-
     let welcome = format!(
         "Welcome to Libra Code! Type your message and press Enter to chat with the AI assistant.\n{}\n{}",
         web_line, mcp_line
@@ -651,14 +616,15 @@ async fn start_mcp_server(
     })
 }
 
-fn system_preamble(working_dir: &std::path::Path, context: Option<&str>) -> String {
+fn system_preamble(working_dir: &std::path::Path, context: Option<CodeContext>) -> String {
     let mut builder = crate::internal::ai::prompt::SystemPromptBuilder::new(working_dir);
-    if let Some(ctx_str) = context {
-        if let Ok(mode) = ctx_str.parse::<crate::internal::ai::prompt::ContextMode>() {
-            builder = builder.with_context(mode);
-        } else {
-            tracing::warn!(context = ctx_str, "unknown context mode, ignoring");
-        }
+    if let Some(ctx) = context {
+        let mode = match ctx {
+            CodeContext::Dev => crate::internal::ai::prompt::ContextMode::Dev,
+            CodeContext::Review => crate::internal::ai::prompt::ContextMode::Review,
+            CodeContext::Research => crate::internal::ai::prompt::ContextMode::Research,
+        };
+        builder = builder.with_context(mode);
     }
     builder.build()
 }
@@ -680,7 +646,13 @@ async fn init_mcp_server(working_dir: &std::path::Path) -> Arc<LibraMcpServer> {
 
     // Connect to DB
     let db_path = dot_libra.join("libra.db");
-    let db_path_str = db_path.to_str().unwrap_or_default();
+    let Some(db_path_str) = db_path.to_str() else {
+        eprintln!(
+            "Warning: Database path is not valid UTF-8: {}. History disabled.",
+            db_path.display()
+        );
+        return Arc::new(LibraMcpServer::new(None, None));
+    };
 
     #[cfg(target_os = "windows")]
     let db_path_string = db_path_str.replace("\\", "/");
@@ -737,5 +709,117 @@ async fn execute_stdio(_args: CodeArgs) {
         Err(e) => {
             cli_error!(e, "fatal: failed to start MCP Stdio server");
         }
+    }
+}
+
+fn validate_mode_args(args: &CodeArgs) -> Result<(), String> {
+    if !args.stdio && args.port == args.mcp_port {
+        return Err(format!(
+            "--port ({}) and --mcp-port ({}) must be different",
+            args.port, args.mcp_port
+        ));
+    }
+
+    if args.web_only {
+        if args.provider != CodeProvider::Gemini {
+            return Err("--provider is not supported in --web mode".to_string());
+        }
+        if args.model.is_some() {
+            return Err("--model is not supported in --web mode".to_string());
+        }
+        if args.temperature.is_some() {
+            return Err("--temperature is not supported in --web mode".to_string());
+        }
+        if args.context.is_some() {
+            return Err("--context is not supported in --web mode".to_string());
+        }
+        if args.resume {
+            return Err("--resume is not supported in --web mode".to_string());
+        }
+        if args.api_base.is_some() {
+            return Err("--api-base is not supported in --web mode".to_string());
+        }
+    }
+
+    if args.stdio {
+        if args.provider != CodeProvider::Gemini {
+            return Err("--provider is not supported in --stdio mode".to_string());
+        }
+        if args.model.is_some() {
+            return Err("--model is not supported in --stdio mode".to_string());
+        }
+        if args.temperature.is_some() {
+            return Err("--temperature is not supported in --stdio mode".to_string());
+        }
+        if args.context.is_some() {
+            return Err("--context is not supported in --stdio mode".to_string());
+        }
+        if args.resume {
+            return Err("--resume is not supported in --stdio mode".to_string());
+        }
+        if args.api_base.is_some() {
+            return Err("--api-base is not supported in --stdio mode".to_string());
+        }
+        if args.host != "127.0.0.1" {
+            return Err("--host is not supported in --stdio mode".to_string());
+        }
+        if args.port != 3000 {
+            return Err("--port is not supported in --stdio mode".to_string());
+        }
+        if args.mcp_port != 6789 {
+            return Err("--mcp-port is not supported in --stdio mode".to_string());
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_args() -> CodeArgs {
+        CodeArgs {
+            web_only: false,
+            port: 3000,
+            host: "127.0.0.1".to_string(),
+            provider: CodeProvider::Gemini,
+            model: None,
+            temperature: None,
+            context: None,
+            resume: false,
+            mcp_port: 6789,
+            stdio: false,
+            api_base: None,
+        }
+    }
+
+    #[test]
+    fn rejects_same_web_and_mcp_ports() {
+        let mut args = base_args();
+        args.mcp_port = args.port;
+        assert!(validate_mode_args(&args).is_err());
+    }
+
+    #[test]
+    fn rejects_tui_flags_in_web_mode() {
+        let mut args = base_args();
+        args.web_only = true;
+        args.model = Some("foo".to_string());
+        assert!(validate_mode_args(&args).is_err());
+    }
+
+    #[test]
+    fn rejects_web_flags_in_stdio_mode() {
+        let mut args = base_args();
+        args.stdio = true;
+        args.host = "0.0.0.0".to_string();
+        assert!(validate_mode_args(&args).is_err());
+    }
+
+    #[test]
+    fn accepts_default_tui_mode() {
+        let args = base_args();
+        assert!(validate_mode_args(&args).is_ok());
     }
 }
