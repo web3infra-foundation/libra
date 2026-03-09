@@ -210,7 +210,12 @@ pub fn make_dedup_key(
         if let Some(value) = envelope.extra.get(*key)
             && !value.is_null()
         {
-            return Some(make_event_key(&envelope.hook_event_name, key, value));
+            return Some(make_event_key(
+                &envelope.hook_event_name,
+                key,
+                value,
+                envelope,
+            ));
         }
     }
 
@@ -219,6 +224,7 @@ pub fn make_dedup_key(
             &envelope.hook_event_name,
             "session_id",
             &Value::String(envelope.session_id.clone()),
+            envelope,
         ));
     }
 
@@ -270,11 +276,22 @@ pub(crate) fn build_lifecycle_event(
     }
 }
 
-fn make_event_key(event_name: &str, key_name: &str, value: &Value) -> String {
+fn make_event_key(
+    event_name: &str,
+    key_name: &str,
+    value: &Value,
+    envelope: &SessionHookEnvelope,
+) -> String {
     let mut hasher = DefaultHasher::new();
     event_name.hash(&mut hasher);
     key_name.hash(&mut hasher);
     normalize_json_value(value.clone())
+        .to_string()
+        .hash(&mut hasher);
+    envelope.session_id.hash(&mut hasher);
+    envelope.cwd.hash(&mut hasher);
+    envelope.transcript_path.hash(&mut hasher);
+    normalize_json_value(Value::Object(envelope.extra.clone()))
         .to_string()
         .hash(&mut hasher);
     format!("{event_name}:{key_name}:{:x}", hasher.finish())
@@ -294,6 +311,9 @@ fn validate_session_id(session_id: &str) -> Result<()> {
 }
 
 fn validate_transcript_path(transcript_path: &str, max_transcript_path_bytes: usize) -> Result<()> {
+    if transcript_path.trim().is_empty() {
+        bail!("invalid transcript_path: value cannot be empty");
+    }
     if transcript_path.len() > max_transcript_path_bytes {
         bail!(
             "invalid transcript_path: exceeds {} bytes",
@@ -383,6 +403,37 @@ mod tests {
     }
 
     #[test]
+    fn make_dedup_key_changes_when_payload_changes() {
+        let first = SessionHookEnvelope {
+            hook_event_name: "Compaction".to_string(),
+            session_id: "s1".to_string(),
+            cwd: "/tmp".to_string(),
+            transcript_path: None,
+            extra: {
+                let mut map = Map::new();
+                map.insert("message".to_string(), Value::String("one".to_string()));
+                map
+            },
+        };
+        let second = SessionHookEnvelope {
+            hook_event_name: "Compaction".to_string(),
+            session_id: "s1".to_string(),
+            cwd: "/tmp".to_string(),
+            transcript_path: None,
+            extra: {
+                let mut map = Map::new();
+                map.insert("message".to_string(), Value::String("two".to_string()));
+                map
+            },
+        };
+
+        assert_ne!(
+            make_dedup_key(&["event_id"], &["Compaction"], &first),
+            make_dedup_key(&["event_id"], &["Compaction"], &second)
+        );
+    }
+
+    #[test]
     fn normalize_value_sorts_object_keys() {
         let value = json!({
             "z": 1,
@@ -403,6 +454,18 @@ mod tests {
             session_id: "s1".to_string(),
             cwd: "/tmp".to_string(),
             transcript_path: Some("\0bad".to_string()),
+            extra: Map::new(),
+        };
+        assert!(validate_session_hook_envelope(&envelope, 4096).is_err());
+    }
+
+    #[test]
+    fn validate_envelope_rejects_empty_transcript_path() {
+        let envelope = SessionHookEnvelope {
+            hook_event_name: "SessionStart".to_string(),
+            session_id: "s1".to_string(),
+            cwd: "/tmp".to_string(),
+            transcript_path: Some("   ".to_string()),
             extra: Map::new(),
         };
         assert!(validate_session_hook_envelope(&envelope, 4096).is_err());

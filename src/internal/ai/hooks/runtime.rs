@@ -60,6 +60,16 @@ pub fn build_ai_session_id(provider: &str, provider_session_id: &str) -> String 
     format!("{provider}{SESSION_ID_DELIMITER}{provider_session_id}")
 }
 
+fn redact_session_id(session_id: &str) -> String {
+    let mut chars = session_id.chars();
+    let prefix: String = chars.by_ref().take(8).collect();
+    if chars.next().is_some() {
+        format!("{prefix}***")
+    } else {
+        "***".to_string()
+    }
+}
+
 pub async fn process_hook_event_from_stdin(
     expected_kind: LifecycleEventKind,
     provider: &dyn HookProvider,
@@ -106,7 +116,12 @@ pub async fn process_hook_event_from_stdin(
     let ai_session_id = build_ai_session_id(provider.provider_name(), &envelope.session_id);
     let _session_lock = session_store
         .lock_session(&ai_session_id)
-        .with_context(|| format!("failed to acquire session lock for '{}'", ai_session_id))?;
+        .with_context(|| {
+            format!(
+                "failed to acquire session lock for '{}'",
+                redact_session_id(&ai_session_id)
+            )
+        })?;
 
     let mut session = match session_store.load(&ai_session_id) {
         Ok(session) => session,
@@ -125,14 +140,15 @@ pub async fn process_hook_event_from_stdin(
                 Err(archive_err) => {
                     eprintln!(
                         "warning: failed to archive malformed session '{}': {}",
-                        ai_session_id, archive_err
+                        redact_session_id(&ai_session_id),
+                        archive_err
                     );
                     None
                 }
             };
             eprintln!(
                 "warning: malformed session cache detected for '{}', recovering with a new in-memory session",
-                ai_session_id
+                redact_session_id(&ai_session_id)
             );
 
             let mut recovered = SessionState::new(&process_cwd_str);
@@ -622,6 +638,12 @@ mod tests {
             build_ai_session_id("claude", "session-123"),
             "claude__session-123"
         );
+    }
+
+    #[test]
+    fn session_id_redaction_masks_suffix() {
+        assert_eq!(redact_session_id("gemini__session-123"), "gemini__***");
+        assert_eq!(redact_session_id("short"), "***");
     }
 
     #[test]

@@ -521,23 +521,31 @@ async fn ai_pretty_print(uuid: &str) {
 }
 
 fn print_ai_session_summary(value: &serde_json::Value) {
+    for line in ai_session_summary_lines(value) {
+        println!("{line}");
+    }
+}
+
+fn ai_session_summary_lines(value: &serde_json::Value) -> Vec<String> {
+    let mut lines = Vec::new();
+
     if let Some(schema) = value.get("schema").and_then(serde_json::Value::as_str) {
-        println!("schema: {schema}");
+        lines.push(format!("schema: {schema}"));
     }
     if let Some(provider) = value.get("provider").and_then(serde_json::Value::as_str) {
-        println!("provider: {provider}");
+        lines.push(format!("provider: {provider}"));
     }
     if let Some(ai_session_id) = value
         .get("ai_session_id")
         .and_then(serde_json::Value::as_str)
     {
-        println!("ai_session_id: {ai_session_id}");
+        lines.push(format!("ai_session_id: {ai_session_id}"));
     }
     if let Some(provider_session_id) = value
         .get("provider_session_id")
         .and_then(serde_json::Value::as_str)
     {
-        println!("provider_session_id: {provider_session_id}");
+        lines.push(format!("provider_session_id: {provider_session_id}"));
     }
 
     if let Some(state_machine) = value.get("state_machine") {
@@ -545,48 +553,55 @@ fn print_ai_session_summary(value: &serde_json::Value) {
             .get("phase")
             .and_then(serde_json::Value::as_str)
         {
-            println!("phase: {phase}");
+            lines.push(format!("phase: {phase}"));
         }
         if let Some(status) = state_machine
             .get("status")
             .and_then(serde_json::Value::as_str)
         {
-            println!("status: {status}");
+            lines.push(format!("status: {status}"));
         }
         if let Some(event_count) = state_machine
             .get("event_count")
             .and_then(serde_json::Value::as_u64)
         {
-            println!("event_count: {event_count}");
+            lines.push(format!("event_count: {event_count}"));
+        }
+        if let Some(tool_use_count) = state_machine
+            .get("tool_use_count")
+            .and_then(serde_json::Value::as_u64)
+        {
+            lines.push(format!("tool_event_count: {tool_use_count}"));
+        }
+        if let Some(compaction_count) = state_machine
+            .get("compaction_count")
+            .and_then(serde_json::Value::as_u64)
+        {
+            lines.push(format!("compaction_count: {compaction_count}"));
         }
     }
 
-    if let Some(summary) = value.get("summary") {
-        if let Some(message_count) = summary
+    if let Some(summary) = value.get("summary")
+        && let Some(message_count) = summary
             .get("message_count")
             .and_then(serde_json::Value::as_u64)
-        {
-            println!("message_count: {message_count}");
-        }
-        if let Some(tool_event_count) = summary
-            .get("tool_event_count")
-            .and_then(serde_json::Value::as_u64)
-        {
-            println!("tool_event_count: {tool_event_count}");
-        }
+    {
+        lines.push(format!("message_count: {message_count}"));
     }
 
     if let Some(transcript) = value.get("transcript") {
         if let Some(path) = transcript.get("path").and_then(serde_json::Value::as_str) {
-            println!("transcript_path: {path}");
+            lines.push(format!("transcript_path: {path}"));
         }
         if let Some(raw_event_count) = transcript
             .get("raw_event_count")
             .and_then(serde_json::Value::as_u64)
         {
-            println!("transcript_raw_event_count: {raw_event_count}");
+            lines.push(format!("transcript_raw_event_count: {raw_event_count}"));
         }
     }
+
+    lines
 }
 
 /// Print the AI object type for a UUID.
@@ -720,5 +735,31 @@ mod tests {
             normalize_tag_ref_name("refs/tags/v1.0.0"),
             "refs/tags/v1.0.0"
         );
+    }
+
+    #[test]
+    fn test_ai_session_summary_reads_tool_counts_from_state_machine() {
+        let value = serde_json::json!({
+            "schema": "libra.ai_session.v2",
+            "provider": "gemini",
+            "state_machine": {
+                "phase": "ended",
+                "event_count": 4,
+                "tool_use_count": 2,
+                "compaction_count": 1
+            },
+            "summary": {
+                "message_count": 3
+            },
+            "transcript": {
+                "path": "/tmp/t.jsonl",
+                "raw_event_count": 4
+            }
+        });
+
+        let lines = ai_session_summary_lines(&value);
+        assert!(lines.iter().any(|line| line == "tool_event_count: 2"));
+        assert!(lines.iter().any(|line| line == "compaction_count: 1"));
+        assert!(lines.iter().any(|line| line == "message_count: 3"));
     }
 }

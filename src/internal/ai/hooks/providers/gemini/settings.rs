@@ -192,31 +192,44 @@ fn upsert_gemini_hooks(settings: &mut GeminiSettings, binary_path: &str) -> Resu
             .hooks
             .remove(spec.event_name)
             .unwrap_or(Value::Array(Vec::new()));
-        let mut matchers = parse_gemini_hook_matchers(&value, spec.event_name)?;
+        let original_matchers = parse_gemini_hook_matchers(&value, spec.event_name)?;
         let expected_command = format!("{binary_path} hooks gemini {}", spec.subcommand);
-        let original_matchers = matchers.clone();
-
-        for matcher in &mut matchers {
-            matcher
-                .hooks
-                .retain(|hook| !is_managed_gemini_hook(hook, spec.subcommand));
-        }
-        matchers.retain(|matcher| !matcher.hooks.is_empty());
-        if matchers != original_matchers {
-            changed = true;
-        }
-
-        if !contains_gemini_command(&matchers, spec.matcher, spec.hook_name, &expected_command) {
-            matchers.push(GeminiHookMatcher {
-                matcher: spec.matcher.map(ToString::to_string),
-                hooks: vec![GeminiHookEntry {
-                    name: spec.hook_name.to_string(),
-                    entry_type: "command".to_string(),
-                    command: expected_command,
-                    extra: BTreeMap::new(),
-                }],
+        let desired_matcher = GeminiHookMatcher {
+            matcher: spec.matcher.map(ToString::to_string),
+            hooks: vec![GeminiHookEntry {
+                name: spec.hook_name.to_string(),
+                entry_type: "command".to_string(),
+                command: expected_command.clone(),
                 extra: BTreeMap::new(),
+            }],
+            extra: BTreeMap::new(),
+        };
+        let mut matchers = Vec::with_capacity(original_matchers.len() + 1);
+        let mut has_desired_entry = false;
+
+        for mut matcher in original_matchers {
+            if matcher == desired_matcher {
+                has_desired_entry = true;
+                matchers.push(matcher);
+                continue;
+            }
+
+            let original_hook_count = matcher.hooks.len();
+            let matcher_name = matcher.matcher.as_deref();
+            matcher.hooks.retain(|hook| {
+                !is_replaced_managed_gemini_hook(matcher_name, hook, spec, &expected_command)
             });
+            if matcher.hooks.len() != original_hook_count {
+                changed = true;
+            }
+            if matcher.hooks.is_empty() {
+                continue;
+            }
+            matchers.push(matcher);
+        }
+
+        if !has_desired_entry {
+            matchers.push(desired_matcher);
             changed = true;
         }
 
@@ -312,11 +325,24 @@ fn contains_gemini_command(
     })
 }
 
-fn is_managed_gemini_hook(hook: &GeminiHookEntry, subcommand: &str) -> bool {
-    hook.name.starts_with("libra-")
+fn is_replaced_managed_gemini_hook(
+    matcher: Option<&str>,
+    hook: &GeminiHookEntry,
+    spec: &GeminiHookSpec,
+    desired_command: &str,
+) -> bool {
+    if matcher == spec.matcher
+        && hook.name == spec.hook_name
+        && hook.entry_type == "command"
+        && hook.command == desired_command
+    {
+        return false;
+    }
+
+    hook.name == spec.hook_name
         || hook
             .command
-            .ends_with(&format!(" hooks gemini {subcommand}"))
+            .ends_with(&format!(" hooks gemini {}", spec.subcommand))
 }
 
 #[cfg(test)]

@@ -127,8 +127,10 @@ async fn test_hooks_claude_install_preserves_existing_and_is_idempotent() {
 async fn test_hooks_claude_install_rewrites_legacy_entries_and_uninstall_roundtrip() {
     let temp = tempdir().unwrap();
     test::setup_with_new_libra_in(temp.path()).await;
-    let old_binary = temp.path().join("old-libra");
-    let new_binary = temp.path().join("new-libra");
+    let old_binary = temp.path().join("old").join("libra");
+    let new_binary = temp.path().join("new").join("libra");
+    fs::create_dir_all(old_binary.parent().unwrap()).unwrap();
+    fs::create_dir_all(new_binary.parent().unwrap()).unwrap();
     fs::write(&old_binary, "").unwrap();
     fs::write(&new_binary, "").unwrap();
 

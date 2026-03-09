@@ -228,7 +228,7 @@ fn all_claude_specs_installed(settings: &ClaudeSettings, binary_path: &str) -> b
 fn is_managed_claude_command(command: &str) -> bool {
     CLAUDE_HOOK_FORWARD_MAP
         .iter()
-        .any(|(_, subcommand)| command.ends_with(&format!(" hooks claude {subcommand}")))
+        .any(|(_, subcommand)| is_managed_claude_command_for_subcommand(command, subcommand))
 }
 
 fn is_replaced_managed_claude_hook(
@@ -237,9 +237,35 @@ fn is_replaced_managed_claude_hook(
     subcommand: &str,
 ) -> bool {
     hook.command == desired_command
-        || hook
-            .command
-            .ends_with(&format!(" hooks claude {subcommand}"))
+        || is_managed_claude_command_for_subcommand(&hook.command, subcommand)
+}
+
+fn is_managed_claude_command_for_subcommand(command: &str, subcommand: &str) -> bool {
+    let suffix = format!(" hooks claude {subcommand}");
+    let Some(executable) = command.strip_suffix(&suffix).map(str::trim) else {
+        return false;
+    };
+    if executable.is_empty() {
+        return false;
+    }
+
+    let token = if let Some(quote) = executable.chars().next()
+        && matches!(quote, '\'' | '"')
+        && executable.ends_with(quote)
+        && executable.len() >= 2
+    {
+        &executable[1..executable.len() - 1]
+    } else if executable.contains(char::is_whitespace) {
+        return false;
+    } else {
+        executable
+    };
+
+    let file_name = Path::new(token)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(token);
+    matches!(file_name, "libra" | "libra.exe")
 }
 
 #[cfg(test)]
@@ -287,5 +313,30 @@ mod tests {
         let session_start = settings.hooks.get("SessionStart").expect("SessionStart");
         assert_eq!(session_start.len(), 1);
         assert_eq!(session_start[0].hooks[0].command, "echo keep");
+    }
+
+    #[test]
+    fn remove_claude_hooks_keeps_non_libra_wrapper_commands() {
+        let mut settings = ClaudeSettings::default();
+        settings.hooks.insert(
+            "SessionStart".to_string(),
+            vec![ClaudeHookMatcher {
+                matcher: None,
+                hooks: vec![ClaudeHookEntry {
+                    entry_type: "command".to_string(),
+                    command: "/tmp/custom-wrapper hooks claude session-start".to_string(),
+                    timeout: Some(10),
+                    extra: BTreeMap::new(),
+                }],
+                extra: BTreeMap::new(),
+            }],
+        );
+
+        assert!(!remove_libra_claude_hooks(&mut settings));
+        let session_start = settings.hooks.get("SessionStart").expect("SessionStart");
+        assert_eq!(
+            session_start[0].hooks[0].command,
+            "/tmp/custom-wrapper hooks claude session-start"
+        );
     }
 }
