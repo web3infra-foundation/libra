@@ -269,6 +269,8 @@ pub struct App<M: CompletionModel> {
     next_turn_id: TurnId,
     /// Shared view of active turn for global retry observer callbacks.
     active_turn_signal: Arc<AtomicU64>,
+    /// Number of tool calls currently running in UI.
+    running_tool_calls: usize,
 }
 
 impl<M: CompletionModel + Clone + 'static> App<M> {
@@ -368,6 +370,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             active_turn_id: None,
             next_turn_id: 1,
             active_turn_signal,
+            running_tool_calls: 0,
         }
     }
 
@@ -658,6 +661,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     );
                     self.interrupt_agent_task();
                     self.clear_mcp_turn_ids();
+                    self.running_tool_calls = 0;
                     self.widget.bottom_pane.set_status(AgentStatus::Idle);
                     self.complete_streaming_assistant_cell("Interrupted.".to_string());
                     self.complete_running_tool_cells_with_interrupt();
@@ -929,6 +933,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 allowed_tools,
             } => {
                 // Track in session
+                self.running_tool_calls = 0;
                 self.session.add_user_message(&text);
 
                 // Add user cell immediately
@@ -1136,6 +1141,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     }
                     AgentEvent::ResponseComplete { text, new_history } => {
                         self.agent_task = None;
+                        self.running_tool_calls = 0;
                         self.enqueue_mcp_turn_decision(
                             "checkpoint",
                             "Turn completed successfully".to_string(),
@@ -1164,6 +1170,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     }
                     AgentEvent::Error { message } => {
                         self.agent_task = None;
+                        self.running_tool_calls = 0;
                         self.enqueue_mcp_turn_decision(
                             "abandon",
                             format!("Turn failed: {message}"),
@@ -1199,6 +1206,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 spec_json,
             } => {
                 self.agent_task = None;
+                self.running_tool_calls = 0;
                 self.clear_active_turn();
                 self.clear_mcp_turn_ids();
                 self.history = new_history;
@@ -1268,9 +1276,8 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     let cell = Box::new(ToolCallHistoryCell::new(call_id, tool_name, arguments));
                     self.insert_before_streaming_assistant(cell);
                 }
-                self.widget
-                    .bottom_pane
-                    .set_status(AgentStatus::ExecutingTool);
+                self.running_tool_calls = self.running_tool_calls.saturating_add(1);
+                self.update_status_after_tool_progress();
                 self.schedule_draw();
             }
             AppEvent::ToolCallEnd {
@@ -1311,7 +1318,8 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         }
                     }
                 }
-                self.widget.bottom_pane.set_status(AgentStatus::Thinking);
+                self.running_tool_calls = self.running_tool_calls.saturating_sub(1);
+                self.update_status_after_tool_progress();
                 self.schedule_draw();
             }
             AppEvent::AgentStatusUpdate {
@@ -1330,6 +1338,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 new_history,
             } => {
                 self.agent_task = None;
+                self.running_tool_calls = 0;
                 self.clear_active_turn();
                 self.clear_mcp_turn_ids();
                 self.history = new_history;
@@ -1751,6 +1760,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         self.widget.bottom_pane.set_status(AgentStatus::Thinking);
         self.schedule_draw();
         let turn_id = self.begin_turn();
+        self.running_tool_calls = 0;
 
         let model = self.model.clone();
         let registry = self.registry.clone();
@@ -1985,6 +1995,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
         let user_text = format!("/plan {request}");
         let turn_id = self.begin_turn();
+        self.running_tool_calls = 0;
         self.session.add_user_message(&user_text);
         self.widget
             .add_cell(Box::new(UserHistoryCell::new(user_text.clone())));
@@ -2381,6 +2392,22 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             handle.abort();
         }
         self.clear_active_turn();
+        self.running_tool_calls = 0;
+    }
+
+    fn update_status_after_tool_progress(&mut self) {
+        let next_status = if self.pending_post_plan.is_some() {
+            AgentStatus::AwaitingPostPlanChoice
+        } else if self.pending_user_input.is_some() {
+            AgentStatus::AwaitingUserInput
+        } else if self.running_tool_calls > 0 {
+            AgentStatus::ExecutingTool
+        } else if self.agent_task.is_some() {
+            AgentStatus::Thinking
+        } else {
+            AgentStatus::Idle
+        };
+        self.widget.bottom_pane.set_status(next_status);
     }
 
     fn insert_before_streaming_assistant(
