@@ -46,7 +46,8 @@ Modes:
 
 Notes:
   - OBJECT is ignored for all --ai* modes.
-  - --ai and --ai-type search the AI history branch by object ID and can resolve custom stored types such as claude_session.
+  - --ai and --ai-type search the AI history branch by object ID and can resolve persisted session objects such as ai_session.
+  - --ai on ai_session objects prints a unified session summary before full JSON.
   - --ai-list only accepts the built-in TYPE names shown in --help.";
 
 const CAT_FILE_AFTER_HELP: &str = "Examples:
@@ -115,6 +116,7 @@ const AI_OBJECT_TYPES: &[&str] = &[
     "provenance",
     "decision",
     "snapshot",
+    "ai_session",
 ];
 const TAG_REF_PREFIX: &str = "refs/tags/";
 
@@ -498,6 +500,9 @@ async fn ai_pretty_print(uuid: &str) {
         Ok(value) => {
             println!("type: {}", type_name);
             println!("hash: {}", hash);
+            if type_name == "ai_session" {
+                print_ai_session_summary(&value);
+            }
             println!("---");
             println!(
                 "{}",
@@ -513,6 +518,90 @@ async fn ai_pretty_print(uuid: &str) {
             print!("{}", String::from_utf8_lossy(&data));
         }
     }
+}
+
+fn print_ai_session_summary(value: &serde_json::Value) {
+    for line in ai_session_summary_lines(value) {
+        println!("{line}");
+    }
+}
+
+fn ai_session_summary_lines(value: &serde_json::Value) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    if let Some(schema) = value.get("schema").and_then(serde_json::Value::as_str) {
+        lines.push(format!("schema: {schema}"));
+    }
+    if let Some(provider) = value.get("provider").and_then(serde_json::Value::as_str) {
+        lines.push(format!("provider: {provider}"));
+    }
+    if let Some(ai_session_id) = value
+        .get("ai_session_id")
+        .and_then(serde_json::Value::as_str)
+    {
+        lines.push(format!("ai_session_id: {ai_session_id}"));
+    }
+    if let Some(provider_session_id) = value
+        .get("provider_session_id")
+        .and_then(serde_json::Value::as_str)
+    {
+        lines.push(format!("provider_session_id: {provider_session_id}"));
+    }
+
+    if let Some(state_machine) = value.get("state_machine") {
+        if let Some(phase) = state_machine
+            .get("phase")
+            .and_then(serde_json::Value::as_str)
+        {
+            lines.push(format!("phase: {phase}"));
+        }
+        if let Some(status) = state_machine
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+        {
+            lines.push(format!("status: {status}"));
+        }
+        if let Some(event_count) = state_machine
+            .get("event_count")
+            .and_then(serde_json::Value::as_u64)
+        {
+            lines.push(format!("event_count: {event_count}"));
+        }
+        if let Some(tool_use_count) = state_machine
+            .get("tool_use_count")
+            .and_then(serde_json::Value::as_u64)
+        {
+            lines.push(format!("tool_event_count: {tool_use_count}"));
+        }
+        if let Some(compaction_count) = state_machine
+            .get("compaction_count")
+            .and_then(serde_json::Value::as_u64)
+        {
+            lines.push(format!("compaction_count: {compaction_count}"));
+        }
+    }
+
+    if let Some(summary) = value.get("summary")
+        && let Some(message_count) = summary
+            .get("message_count")
+            .and_then(serde_json::Value::as_u64)
+    {
+        lines.push(format!("message_count: {message_count}"));
+    }
+
+    if let Some(transcript) = value.get("transcript") {
+        if let Some(path) = transcript.get("path").and_then(serde_json::Value::as_str) {
+            lines.push(format!("transcript_path: {path}"));
+        }
+        if let Some(raw_event_count) = transcript
+            .get("raw_event_count")
+            .and_then(serde_json::Value::as_u64)
+        {
+            lines.push(format!("transcript_raw_event_count: {raw_event_count}"));
+        }
+    }
+
+    lines
 }
 
 /// Print the AI object type for a UUID.
@@ -631,7 +720,7 @@ mod tests {
         let help = String::from_utf8(help).unwrap();
 
         assert!(help.contains("OBJECT is ignored for all --ai* modes"));
-        assert!(help.contains("custom stored types such as claude_session"));
+        assert!(help.contains("persisted session objects such as ai_session"));
         assert!(help.contains("--ai-type <ID>"));
     }
 
@@ -646,5 +735,31 @@ mod tests {
             normalize_tag_ref_name("refs/tags/v1.0.0"),
             "refs/tags/v1.0.0"
         );
+    }
+
+    #[test]
+    fn test_ai_session_summary_reads_tool_counts_from_state_machine() {
+        let value = serde_json::json!({
+            "schema": "libra.ai_session.v2",
+            "provider": "gemini",
+            "state_machine": {
+                "phase": "ended",
+                "event_count": 4,
+                "tool_use_count": 2,
+                "compaction_count": 1
+            },
+            "summary": {
+                "message_count": 3
+            },
+            "transcript": {
+                "path": "/tmp/t.jsonl",
+                "raw_event_count": 4
+            }
+        });
+
+        let lines = ai_session_summary_lines(&value);
+        assert!(lines.iter().any(|line| line == "tool_event_count: 2"));
+        assert!(lines.iter().any(|line| line == "compaction_count: 1"));
+        assert!(lines.iter().any(|line| line == "message_count: 3"));
     }
 }
