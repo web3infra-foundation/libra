@@ -473,12 +473,26 @@ async fn execute_impl(args: CommitArgs) -> Result<(), CommitExecError> {
                 .to_string()
                 .into());
         }
+        let amend_gpg_sig = match vault_sign_commit(
+            &tree.id,
+            &grandpa_commit_id,
+            &author,
+            &committer,
+            &final_message,
+        )
+        .await
+        {
+            Ok(sig) => sig,
+            Err(e) => {
+                return Err(e.into());
+            }
+        };
         let commit = Commit::new(
             author,
             committer,
             tree.id,
             grandpa_commit_id,
-            &format_commit_msg(&final_message, None),
+            &format_commit_msg(&final_message, amend_gpg_sig.as_deref()),
         );
 
         storage
@@ -518,12 +532,20 @@ async fn execute_impl(args: CommitArgs) -> Result<(), CommitExecError> {
     }
 
     // There must be a `blank line`(\n) before `message`, or remote unpack failed
+    let gpg_sig =
+        match vault_sign_commit(&tree.id, &parents_commit_ids, &author, &committer, &message).await
+        {
+            Ok(sig) => sig,
+            Err(e) => {
+                return Err(e.into());
+            }
+        };
     let commit = Commit::new(
         author,
         committer,
         tree.id,
         parents_commit_ids,
-        &format_commit_msg(&message, None),
+        &format_commit_msg(&message, gpg_sig.as_deref()),
     );
 
     storage
@@ -553,6 +575,61 @@ pub async fn execute(args: CommitArgs) {
 /// builds tree and commit objects, and updates HEAD.
 pub async fn execute_safe(args: CommitArgs) -> CliResult<()> {
     execute_impl(args).await.map_err(CommitExecError::into_cli)
+}
+
+/// If vault signing is enabled, sign the commit content and return the
+/// formatted `gpgsig` header string. Returns `None` if vault is not configured.
+async fn vault_sign_commit(
+    tree_id: &ObjectHash,
+    parent_ids: &[ObjectHash],
+    author: &Signature,
+    committer: &Signature,
+    message: &str,
+) -> Result<Option<String>, String> {
+    use crate::internal::{config::Config as UserConfig, vault};
+
+    // Check if vault signing is enabled
+    let signing_enabled = UserConfig::get("vault", None, "signing").await;
+    if signing_enabled.as_deref() != Some("true") {
+        return Ok(None);
+    }
+
+    // Load unseal key
+    let unseal_key = vault::load_unseal_key()
+        .await
+        .ok_or_else(|| "vault signing enabled but no unseal key found".to_string())?;
+
+    // Build the commit content to sign (same format Git uses)
+    let mut content: Vec<u8> = Vec::new();
+    content.extend(b"tree ");
+    content.extend(tree_id.to_string().as_bytes());
+    content.extend(b"\n");
+    for parent in parent_ids {
+        content.extend(b"parent ");
+        content.extend(parent.to_string().as_bytes());
+        content.extend(b"\n");
+    }
+    let author_data = author
+        .to_data()
+        .map_err(|e| format!("failed to serialize author signature for vault signing: {e}"))?;
+    content.extend(author_data);
+    content.extend(b"\n");
+    let committer_data = committer
+        .to_data()
+        .map_err(|e| format!("failed to serialize committer signature for vault signing: {e}"))?;
+    content.extend(committer_data);
+    content.extend(b"\n\n");
+    content.extend(message.as_bytes());
+
+    let root_dir = util::storage_path();
+
+    let sig_hex = vault::pgp_sign(&root_dir, &unseal_key, &content)
+        .await
+        .map_err(|e| format!("vault PGP signing failed: {e}"))?;
+    let gpgsig = vault::signature_to_gpgsig(&sig_hex)
+        .map_err(|e| format!("failed to format PGP signature: {e}"))?;
+
+    Ok(Some(gpgsig))
 }
 
 /// recursively create tree from index's tracked entries

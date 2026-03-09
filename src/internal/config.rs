@@ -437,6 +437,11 @@ impl Config {
         Self::remove_config_with_conn(db, configuration, name, key, valuepattern, delete_all).await;
     }
 
+    /// Remove all entries matching the given configuration/name/key triple.
+    pub async fn remove(configuration: &str, name: Option<&str>, key: &str) {
+        Self::remove_config(configuration, name, key, None, true).await;
+    }
+
     /// Delete all the configuration entries using given configuration field (--remove-section)
     // pub async fn remove_by_section(configuration: &str) {
     //     unimplemented!();

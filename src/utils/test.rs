@@ -117,6 +117,7 @@ pub async fn setup_with_new_libra_in(temp_path: impl AsRef<Path>) {
         ref_format: None,
         separate_libra_dir: None,
         from_git_repository: None,
+        vault: false,
     };
     command::init::init(args).await.unwrap();
 

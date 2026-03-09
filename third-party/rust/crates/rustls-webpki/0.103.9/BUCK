@@ -25,6 +25,8 @@ rust_library(
     edition = "2021",
     features = [
         "alloc",
+        "aws-lc-rs",
+        "default",
         "ring",
         "std",
     ],
@@ -34,6 +36,7 @@ rust_library(
     },
     visibility = ["PUBLIC"],
     deps = [
+        "//third-party/rust/crates/aws-lc-rs/1.16.1:aws-lc-rs",
         "//third-party/rust/crates/ring/0.17.14:ring",
         "//third-party/rust/crates/untrusted/0.9.0:untrusted",
     ],

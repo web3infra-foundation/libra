@@ -152,6 +152,8 @@ enum Commands {
     Open(command::open::OpenArgs),
     #[command(about = "Manage repository configurations", alias = "cfg")]
     Config(command::config::ConfigArgs),
+    #[command(about = "Manage vault-backed signing and SSH keys")]
+    Vault(command::vault::VaultArgs),
     #[command(about = "Manage the log of reference changes (e.g., HEAD, branches)")]
     Reflog(command::reflog::ReflogArgs),
     #[command(
@@ -490,6 +492,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Open(args) => command::open::execute_safe(args).await?,
         Commands::Pull(args) => command::pull::execute_safe(args).await?,
         Commands::Config(args) => command::config::execute_safe(args).await?,
+        Commands::Vault(args) => command::vault::execute(args).await,
         Commands::Checkout(args) => command::checkout::execute_safe(args).await?,
         Commands::Reflog(args) => command::reflog::execute_safe(args).await?,
         Commands::Worktree(args) => command::worktree::execute_safe(args).await?,

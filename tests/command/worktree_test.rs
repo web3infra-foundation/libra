@@ -1233,6 +1233,7 @@ async fn test_worktree_main_flag_stable_with_separate_libra_dir() {
         ref_format: None,
         from_git_repository: None,
         separate_libra_dir: Some(storage.to_string_lossy().to_string()),
+        vault: false,
     })
     .await
     .expect("init with separate-libra-dir should succeed");
@@ -1283,6 +1284,7 @@ async fn test_worktree_main_flag_stable_across_both_worktrees_in_separate_layout
         ref_format: None,
         from_git_repository: None,
         separate_libra_dir: Some(storage.to_string_lossy().to_string()),
+        vault: false,
     })
     .await
     .expect("init with separate-libra-dir should succeed");
@@ -1353,6 +1355,7 @@ async fn test_worktree_remove_main_is_rejected_with_separate_libra_dir() {
         ref_format: None,
         from_git_repository: None,
         separate_libra_dir: Some(storage.to_string_lossy().to_string()),
+        vault: false,
     })
     .await
     .expect("init with separate-libra-dir should succeed");
@@ -1408,6 +1411,7 @@ async fn test_worktree_recovers_invalid_main_storage_parent_in_separate_layout()
         ref_format: None,
         from_git_repository: None,
         separate_libra_dir: Some(storage.to_string_lossy().to_string()),
+        vault: false,
     })
     .await
     .expect("init with separate-libra-dir should succeed");

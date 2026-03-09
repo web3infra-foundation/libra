@@ -36,6 +36,7 @@ pub mod shortlog;
 pub mod show;
 pub mod show_ref;
 pub mod tag;
+pub mod vault;
 pub mod worktree;
 
 pub mod stash;

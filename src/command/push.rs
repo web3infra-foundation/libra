@@ -27,7 +27,7 @@ use tokio::sync::mpsc;
 use url::Url;
 
 use crate::{
-    command::branch,
+    command::{branch, fetch::RemoteClient},
     git_protocol::{ServiceType::ReceivePack, add_pkt_line_string, read_pkt_line},
     internal::{
         branch::Branch,
@@ -35,8 +35,7 @@ use crate::{
         db::get_db_conn_instance,
         head::Head,
         protocol::{
-            ProtocolClient, get_wire_hash_kind, https_client::HttpsClient, lfs_client::LFSClient,
-            set_wire_hash_kind,
+            ProtocolClient, get_wire_hash_kind, set_wire_hash_kind, ssh_client::is_ssh_spec,
         },
         reflog::{Reflog, ReflogAction, ReflogContext, ReflogError},
     },
@@ -122,32 +121,27 @@ pub async fn execute_safe(args: PushArgs) -> CliResult<()> {
 
     println!("pushing {branch}({commit_hash}) to {repository}({repo_url})");
 
-    let url = match Url::parse(&repo_url).or_else(|e| {
-        if e == url::ParseError::RelativeUrlWithoutBase && Path::new(&repo_url).exists() {
-            Url::from_file_path(Path::new(&repo_url))
-                .map_err(|_| url::ParseError::RelativeUrlWithoutBase)
-        } else {
-            Err(e)
-        }
-    }) {
-        Ok(u) => u,
-        Err(e) => {
-            return Err(CliError::fatal(format!(
-                "invalid remote url '{}': {}",
-                repo_url, e
-            )));
-        }
-    };
-
-    // Local file path remote is not supported for push; avoid pretending success.
-    if url.scheme() == "file" {
+    // Local file path remotes are not supported for push; avoid pretending success.
+    if is_local_file_remote(&repo_url) {
         return Err(CliError::fatal(
             "pushing to local file repositories is not yet supported",
         ));
     }
 
-    let client = HttpsClient::from_url(&url);
-    let discovery = match client.discovery_reference(ReceivePack).await {
+    // Determine transport: SSH or HTTPS
+    let is_ssh = is_ssh_spec(&repo_url);
+
+    let remote_client = match RemoteClient::from_spec(&repo_url) {
+        Ok(client) => client,
+        Err(e) => {
+            return Err(CliError::fatal(format!(
+                "failed to create remote client for '{}': {}",
+                repo_url, e
+            )));
+        }
+    };
+
+    let discovery = match remote_client.discovery_reference(ReceivePack).await {
         Ok(result) => result,
         Err(e) => {
             return Err(CliError::fatal(e.to_string()));
@@ -257,11 +251,15 @@ pub async fn execute_safe(args: PushArgs) -> CliResult<()> {
     );
 
     {
-        // upload lfs files
-        let client = LFSClient::from_url(&url);
-        let res = client.push_objects(&objs).await;
-        if res.is_err() {
-            return Err(CliError::fatal("LFS files upload failed, stop pushing"));
+        // upload lfs files (only for HTTP remotes)
+        if !is_ssh {
+            let url = Url::parse(&repo_url)
+                .map_err(|e| CliError::fatal(format!("invalid remote url '{}': {}", repo_url, e)))?;
+            let lfs_client = crate::internal::protocol::lfs_client::LFSClient::from_url(&url);
+            lfs_client
+                .push_objects(&objs)
+                .await
+                .map_err(|_| CliError::fatal("LFS files upload failed, stop pushing"))?;
         }
     }
 
@@ -295,35 +293,60 @@ pub async fn execute_safe(args: PushArgs) -> CliResult<()> {
     data.extend_from_slice(&pack_data);
     println!("Delta compression done.");
 
-    let res = client
-        .send_pack(data.freeze())
-        .await
-        .map_err(|e| CliError::fatal(format!("failed to send pack data: {e}")))?;
-
-    if res.status() != 200 {
-        return Err(CliError::fatal(format!(
-            "unexpected server response (status {})",
-            res.status()
-        )));
-    }
-    let mut data = res
-        .bytes()
-        .await
-        .map_err(|e| CliError::fatal(format!("failed to read server response: {e}")))?;
-    let (_, pkt_line) = read_pkt_line(&mut data);
-    if pkt_line != "unpack ok\n" {
-        return Err(CliError::fatal("unpack failed"));
-    }
-    let (_, pkt_line) = read_pkt_line(&mut data);
-    if !pkt_line.starts_with("ok".as_ref()) {
-        let detail = String::from_utf8_lossy(&pkt_line).trim().to_string();
-        return Err(CliError::fatal(format!("ref update failed: {}", detail)));
-    }
-    let (len, _) = read_pkt_line(&mut data);
-    if len != 0 {
-        return Err(CliError::fatal(
-            "unexpected trailing data in server response",
-        ));
+    // Send pack via the appropriate transport
+    match &remote_client {
+        RemoteClient::Ssh(ssh_client) => {
+            let response_bytes = ssh_client
+                .send_pack(data.freeze())
+                .await
+                .map_err(|e| CliError::fatal(format!("SSH send_pack failed: {e}")))?;
+            let mut response_data = response_bytes;
+            let (_, pkt_line) = read_pkt_line(&mut response_data);
+            if pkt_line != "unpack ok\n" {
+                return Err(CliError::fatal("unpack failed"));
+            }
+            let (_, pkt_line) = read_pkt_line(&mut response_data);
+            if !pkt_line.starts_with("ok".as_ref()) {
+                let detail = String::from_utf8_lossy(&pkt_line).trim().to_string();
+                return Err(CliError::fatal(format!("ref update failed: {}", detail)));
+            }
+        }
+        RemoteClient::Http(http_client) => {
+            let res = http_client
+                .send_pack(data.freeze())
+                .await
+                .map_err(|e| CliError::fatal(format!("failed to send pack data: {e}")))?;
+            if res.status() != 200 {
+                return Err(CliError::fatal(format!(
+                    "unexpected server response (status {})",
+                    res.status()
+                )));
+            }
+            let mut data = res
+                .bytes()
+                .await
+                .map_err(|e| CliError::fatal(format!("failed to read server response: {e}")))?;
+            let (_, pkt_line) = read_pkt_line(&mut data);
+            if pkt_line != "unpack ok\n" {
+                return Err(CliError::fatal("unpack failed"));
+            }
+            let (_, pkt_line) = read_pkt_line(&mut data);
+            if !pkt_line.starts_with("ok".as_ref()) {
+                let detail = String::from_utf8_lossy(&pkt_line).trim().to_string();
+                return Err(CliError::fatal(format!("ref update failed: {}", detail)));
+            }
+            let (len, _) = read_pkt_line(&mut data);
+            if len != 0 {
+                return Err(CliError::fatal(
+                    "unexpected trailing data in server response",
+                ));
+            }
+        }
+        _ => {
+            return Err(CliError::fatal(
+                "push is not supported for this remote type",
+            ));
+        }
     }
 
     println!("{}", "Push success".green());
@@ -399,6 +422,18 @@ async fn update_remote_tracking(
         )));
     }
     Ok(())
+}
+
+fn is_local_file_remote(spec: &str) -> bool {
+    if let Ok(url) = Url::parse(spec) {
+        // file:// URL or parsed Windows drive path (e.g. D:\repo) should both
+        // be treated as local-path push targets.
+        if url.scheme() == "file" || url.scheme().len() == 1 {
+            return true;
+        }
+        return false;
+    }
+    Path::new(spec).exists()
 }
 
 /// collect all commits from `commit_id` to root commit

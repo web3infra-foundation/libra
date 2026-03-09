@@ -242,6 +242,7 @@ async fn clone_into_destination(
         ref_format: None,
         from_git_repository: None,
         separate_libra_dir: None,
+        vault: false,
     })
     .await
     .map_err(|error| CloneError::InitializeRepository {

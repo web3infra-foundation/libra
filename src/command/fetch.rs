@@ -30,8 +30,12 @@ use crate::{
         db::get_db_conn_instance,
         head::Head,
         protocol::{
-            DiscRef, DiscoveryResult, FetchStream, ProtocolClient, git_client::GitClient,
-            https_client::HttpsClient, local_client::LocalClient, set_wire_hash_kind,
+            DiscRef, DiscoveryResult, FetchStream, ProtocolClient,
+            git_client::GitClient,
+            https_client::HttpsClient,
+            local_client::LocalClient,
+            set_wire_hash_kind,
+            ssh_client::{SshClient, is_ssh_spec},
         },
         reflog::{HEAD, Reflog, ReflogAction, ReflogContext, ReflogError},
     },
@@ -45,10 +49,17 @@ pub(crate) enum RemoteClient {
     Http(HttpsClient),
     Local(LocalClient),
     Git(GitClient),
+    Ssh(SshClient),
 }
 
 impl RemoteClient {
     pub(crate) fn from_spec(spec: &str) -> Result<Self, String> {
+        // Check for SSH-style URLs first (before Url::parse which doesn't handle SCP-style)
+        if is_ssh_spec(spec) {
+            let client = configure_ssh_client(SshClient::from_ssh_spec(spec)?)?;
+            return Ok(Self::Ssh(client));
+        }
+
         if let Ok(mut url) = Url::parse(spec) {
             // Convert Windows path like "D:\test\1" to "file:///d:/test/1"
             if url.scheme().len() == 1 {
@@ -71,14 +82,13 @@ impl RemoteClient {
                     }
                     Ok(Self::Git(GitClient::from_url(&url)))
                 }
+                "ssh" => {
+                    let client = configure_ssh_client(SshClient::from_ssh_spec(spec)?)?;
+                    Ok(Self::Ssh(client))
+                }
                 other => Err(format!("unsupported remote scheme '{other}'")),
             }
         } else {
-            if spec.contains("://") || spec.contains('@') {
-                return Err(format!(
-                    "unsupported remote specification '{spec}': protocol not implemented"
-                ));
-            }
             let normalized = spec.trim_end_matches('/');
             let normalized = if normalized.is_empty() && spec.starts_with('/') {
                 "/"
@@ -99,6 +109,7 @@ impl RemoteClient {
             RemoteClient::Http(client) => client.discovery_reference(service).await,
             RemoteClient::Local(client) => client.discovery_reference(service).await,
             RemoteClient::Git(client) => client.discovery_reference(service).await,
+            RemoteClient::Ssh(client) => client.discovery_reference(service).await,
         }
     }
 
@@ -112,6 +123,90 @@ impl RemoteClient {
             RemoteClient::Http(client) => client.fetch_objects(have, want, depth).await,
             RemoteClient::Local(client) => client.fetch_objects(have, want, depth).await,
             RemoteClient::Git(client) => client.fetch_objects(have, want, depth).await,
+            RemoteClient::Ssh(client) => client.fetch_objects(have, want, depth).await,
+        }
+    }
+}
+
+fn configure_ssh_client(mut client: SshClient) -> Result<SshClient, String> {
+    if let Some(mode) = load_ssh_host_key_checking_mode() {
+        client = client.with_strict_host_key_checking(mode)?;
+    }
+    // Try to load vault SSH key for authentication.
+    if let Some(key_path) = try_load_vault_ssh_key_path() {
+        client = client.with_key_path(key_path);
+    }
+    Ok(client)
+}
+
+/// Try to load the vault SSH key path synchronously (for use in from_spec).
+fn try_load_vault_ssh_key_path() -> Option<String> {
+    use crate::utils::util;
+
+    // Only try vault key lookup inside a Libra repository.
+    if util::try_get_storage_path(None).is_err() {
+        return None;
+    }
+
+    let repo_id = load_repo_id_sync()?;
+    let home = dirs::home_dir()?;
+    let key_path = home
+        .join(".libra")
+        .join("ssh-keys")
+        .join(repo_id)
+        .join("id_ed25519");
+
+    if key_path.exists() {
+        Some(key_path.to_string_lossy().to_string())
+    } else {
+        None
+    }
+}
+
+fn load_repo_id_sync() -> Option<String> {
+    load_config_sync("libra", None, "repoid")
+}
+
+/// Load host key checking mode from env/config for SSH transport.
+///
+/// Precedence:
+/// 1) `LIBRA_SSH_STRICT_HOST_KEY_CHECKING`
+/// 2) repo config `ssh.strictHostKeyChecking`
+fn load_ssh_host_key_checking_mode() -> Option<String> {
+    if let Ok(raw) = std::env::var("LIBRA_SSH_STRICT_HOST_KEY_CHECKING") {
+        let mode = raw.trim();
+        if !mode.is_empty() {
+            return Some(mode.to_string());
+        }
+    }
+
+    use crate::utils::util;
+    if util::try_get_storage_path(None).is_err() {
+        return None;
+    }
+    load_config_sync("ssh", None, "stricthostkeychecking")
+}
+
+fn load_config_sync(configuration: &str, name: Option<&str>, key: &str) -> Option<String> {
+    use crate::internal::config::Config;
+
+    let configuration = configuration.to_string();
+    let name = name.map(ToOwned::to_owned);
+    let key = key.to_string();
+
+    match tokio::runtime::Handle::try_current() {
+        Ok(_) => std::thread::scope(|s| {
+            s.spawn(|| {
+                let rt = tokio::runtime::Runtime::new().ok()?;
+                rt.block_on(Config::get(&configuration, name.as_deref(), &key))
+            })
+            .join()
+            .ok()
+            .flatten()
+        }),
+        Err(_) => {
+            let rt = tokio::runtime::Runtime::new().ok()?;
+            rt.block_on(Config::get(&configuration, name.as_deref(), &key))
         }
     }
 }
@@ -268,7 +363,9 @@ pub(crate) fn remote_has_branch(refs: &[DiscRef], branch: &str) -> bool {
 
 pub(crate) fn normalize_remote_url(remote_input: &str, remote_client: &RemoteClient) -> String {
     match remote_client {
-        RemoteClient::Http(_) | RemoteClient::Git(_) => remote_input.to_string(),
+        RemoteClient::Http(_) | RemoteClient::Git(_) | RemoteClient::Ssh(_) => {
+            remote_input.to_string()
+        }
         RemoteClient::Local(client) => client.repo_path().to_string_lossy().to_string(),
     }
 }
