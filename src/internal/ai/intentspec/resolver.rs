@@ -150,8 +150,11 @@ fn normalize_working_dir(raw: &str) -> String {
 }
 
 fn merge_artifacts_from_checks(plan: &VerificationPlan, artifacts: &mut Artifacts) {
-    let mut existing: HashSet<ArtifactName> =
-        artifacts.required.iter().map(|a| a.name.clone()).collect();
+    let mut existing: HashSet<(ArtifactName, ArtifactStage)> = artifacts
+        .required
+        .iter()
+        .map(|a| (a.name.clone(), a.stage.clone()))
+        .collect();
 
     for (stage, checks) in [
         (ArtifactStage::PerTask, &plan.fast_checks),
@@ -161,16 +164,17 @@ fn merge_artifacts_from_checks(plan: &VerificationPlan, artifacts: &mut Artifact
     ] {
         for check in checks {
             for name in &check.artifacts_produced {
-                if let Some(parsed_name) = parse_artifact_name(name)
-                    && !existing.contains(&parsed_name)
-                {
-                    artifacts.required.push(ArtifactReq {
-                        name: parsed_name.clone(),
-                        stage: stage.clone(),
-                        required: true,
-                        format: String::new(),
-                    });
-                    existing.insert(parsed_name);
+                if let Some(parsed_name) = parse_artifact_name(name) {
+                    let key = (parsed_name.clone(), stage.clone());
+                    if !existing.contains(&key) {
+                        artifacts.required.push(ArtifactReq {
+                            name: parsed_name.clone(),
+                            stage: stage.clone(),
+                            required: true,
+                            format: String::new(),
+                        });
+                        existing.insert(key);
+                    }
                 }
             }
         }
@@ -203,7 +207,10 @@ fn harmonize_retention(constraints: &Constraints, artifacts: &mut Artifacts) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::internal::ai::intentspec::draft::{DraftAcceptance, DraftIntent, DraftRisk};
+    use crate::internal::ai::intentspec::{
+        draft::{DraftAcceptance, DraftIntent, DraftRisk},
+        types::CheckKind,
+    };
 
     #[test]
     fn test_resolve_intentspec_low_profile() {
@@ -250,5 +257,44 @@ mod tests {
                 .and_then(|q| q.require_new_tests_when_bugfix)
                 .unwrap_or(false)
         );
+    }
+
+    #[test]
+    fn test_merge_artifacts_preserves_stage_for_same_name() {
+        let plan = VerificationPlan {
+            fast_checks: vec![],
+            integration_checks: vec![Check {
+                id: "integration".into(),
+                kind: CheckKind::Command,
+                command: Some("cargo test".into()),
+                timeout_seconds: None,
+                expected_exit_code: None,
+                required: true,
+                artifacts_produced: vec!["test-log".into()],
+            }],
+            security_checks: vec![],
+            release_checks: vec![Check {
+                id: "release".into(),
+                kind: CheckKind::Command,
+                command: Some("cargo test --release".into()),
+                timeout_seconds: None,
+                expected_exit_code: None,
+                required: true,
+                artifacts_produced: vec!["test-log".into()],
+            }],
+        };
+        let mut artifacts = Artifacts {
+            required: vec![],
+            retention: crate::internal::ai::intentspec::types::ArtifactRetention::default(),
+        };
+
+        merge_artifacts_from_checks(&plan, &mut artifacts);
+
+        assert!(artifacts.required.iter().any(|req| {
+            req.name == ArtifactName::TestLog && req.stage == ArtifactStage::Integration
+        }));
+        assert!(artifacts.required.iter().any(|req| {
+            req.name == ArtifactName::TestLog && req.stage == ArtifactStage::Release
+        }));
     }
 }

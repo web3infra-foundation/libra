@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use super::{
-    acl::{AclVerdict, ScopeVerdict, check_scope, check_tool_acl},
+    acl::{AclVerdict, ScopeVerdict, check_scope, check_tool_acl_with_args},
     types::{PolicyViolation, TaskSpec, ToolCallRecord, ToolDiffRecord},
 };
 use crate::internal::ai::{
@@ -36,7 +36,7 @@ pub fn evaluate_tool_call(
             }
         })?;
 
-    match check_tool_acl(&spec.security.tool_acl, &acl_tool, &action) {
+    match check_tool_acl_with_args(&spec.security.tool_acl, &acl_tool, &action, Some(arguments)) {
         AclVerdict::Allow => {}
         AclVerdict::Deny(reason) => {
             return Err(PolicyViolation {

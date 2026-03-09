@@ -129,7 +129,11 @@ fn produced_artifacts(plan: &ExecutionPlanSpec, run_state: &RunStateSnapshot) ->
 
         if let Some(report) = &result.gate_report {
             for check in &task.checks {
-                if report.results.iter().any(|gate| gate.check_id == check.id) {
+                if report
+                    .results
+                    .iter()
+                    .any(|gate| gate.check_id == check.id && gate.passed)
+                {
                     for artifact in &check.artifacts_produced {
                         if let Some(name) = parse_artifact_name(artifact) {
                             produced.insert(artifact_key(
@@ -506,5 +510,80 @@ mod tests {
         assert!(report.review_passed);
         assert!(report.artifacts_complete);
         assert!(report.overall_passed);
+    }
+
+    #[test]
+    fn test_failed_gate_check_does_not_produce_artifact() {
+        let spec = spec_with_required_artifacts();
+        let plan = plan_with_gates();
+        let results = vec![
+            TaskResult {
+                task_id: plan.tasks[0].id(),
+                status: TaskNodeStatus::Completed,
+                gate_report: None,
+                agent_output: Some("done".into()),
+                retry_count: 0,
+                tool_calls: vec![crate::internal::ai::orchestrator::types::ToolCallRecord {
+                    tool_name: "apply_patch".into(),
+                    action: "write".into(),
+                    arguments_json: None,
+                    paths_read: vec![],
+                    paths_written: vec!["src/lib.rs".into()],
+                    success: true,
+                    summary: None,
+                    diffs: vec![],
+                }],
+                policy_violations: vec![],
+                review: Some(ReviewOutcome {
+                    approved: true,
+                    summary: "looks good".into(),
+                    issues: vec![],
+                }),
+            },
+            TaskResult {
+                task_id: plan.tasks[1].id(),
+                status: TaskNodeStatus::Failed,
+                gate_report: Some(GateReport {
+                    results: vec![GateResult {
+                        check_id: "release-test".into(),
+                        kind: "test".into(),
+                        passed: false,
+                        exit_code: 1,
+                        stdout: String::new(),
+                        stderr: "failed".into(),
+                        duration_ms: 1,
+                        timed_out: false,
+                    }],
+                    all_required_passed: false,
+                }),
+                agent_output: None,
+                retry_count: 0,
+                tool_calls: vec![],
+                policy_violations: vec![],
+                review: None,
+            },
+        ];
+        let run_state = RunStateSnapshot {
+            intent_spec_id: plan.intent_spec_id.clone(),
+            revision: plan.revision,
+            task_statuses: results
+                .iter()
+                .map(|result| TaskStatusSnapshot {
+                    task_id: result.task_id,
+                    status: result.status.clone(),
+                })
+                .collect(),
+            task_results: results,
+            dagrs_runtime: Default::default(),
+        };
+
+        let report = build_system_report(&spec, &plan, &run_state);
+        assert!(!report.artifacts_complete);
+        assert!(
+            report
+                .missing_artifacts
+                .iter()
+                .any(|name| name == "test-log@release")
+        );
     }
 }

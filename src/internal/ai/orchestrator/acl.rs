@@ -16,18 +16,30 @@ pub fn check_tool_acl(
     tool_name: &str,
     action: &str,
 ) -> AclVerdict {
+    check_tool_acl_with_args(acl, tool_name, action, None)
+}
+
+/// Check tool access against the ACL rules with optional invocation arguments.
+pub fn check_tool_acl_with_args(
+    acl: &crate::internal::ai::intentspec::types::ToolAcl,
+    tool_name: &str,
+    action: &str,
+    arguments: Option<&Value>,
+) -> AclVerdict {
     // Check deny rules first
     for rule in &acl.deny {
         if matches_rule(&rule.tool, tool_name)
             && (rule.actions.contains(&"*".to_string()) || rule.actions.iter().any(|a| a == action))
         {
-            if let Some(reason) = check_deny_constraints(&rule.constraints, tool_name, action) {
+            if let Some(reason) = check_deny_constraints(&rule.constraints, arguments) {
                 return AclVerdict::Deny(reason);
             }
-            return AclVerdict::Deny(format!(
-                "tool '{}' action '{}' denied by rule",
-                tool_name, action
-            ));
+            if !rule.constraints.contains_key("denySubstrings") {
+                return AclVerdict::Deny(format!(
+                    "tool '{}' action '{}' denied by rule",
+                    tool_name, action
+                ));
+            }
         }
     }
 
@@ -50,19 +62,54 @@ pub fn check_tool_acl(
 /// Check deny constraints for additional matching.
 fn check_deny_constraints(
     constraints: &std::collections::BTreeMap<String, Value>,
-    _tool_name: &str,
-    _action: &str,
+    arguments: Option<&Value>,
 ) -> Option<String> {
     if let Some(Value::Array(substrings)) = constraints.get("denySubstrings") {
-        let reasons: Vec<String> = substrings
+        let rules: Vec<String> = substrings
             .iter()
-            .filter_map(|v| v.as_str().map(String::from))
+            .filter_map(|v| v.as_str().map(|s| s.to_ascii_lowercase()))
             .collect();
-        if !reasons.is_empty() {
-            return Some(format!("denied substrings: {}", reasons.join(", ")));
+        if rules.is_empty() {
+            return None;
+        }
+
+        let arguments = arguments?;
+
+        let mut string_leaves = Vec::new();
+        collect_string_leaves(arguments, &mut string_leaves);
+        string_leaves.push(arguments.to_string());
+        let haystack = string_leaves.join("\n").to_ascii_lowercase();
+        let matched = rules
+            .iter()
+            .filter(|needle| haystack.contains(needle.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if !matched.is_empty() {
+            return Some(format!(
+                "denied substrings matched: {}",
+                matched.join(", ")
+            ));
         }
     }
     None
+}
+
+fn collect_string_leaves(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::String(s) => out.push(s.clone()),
+        Value::Array(items) => {
+            for item in items {
+                collect_string_leaves(item, out);
+            }
+        }
+        Value::Object(map) => {
+            for item in map.values() {
+                collect_string_leaves(item, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn matches_rule(pattern: &str, tool_name: &str) -> bool {
@@ -228,10 +275,39 @@ mod tests {
                 constraints,
             }],
         };
-        let verdict = check_tool_acl(&acl, "shell", "execute");
-        assert!(
-            matches!(verdict, AclVerdict::Deny(reason) if reason.contains("denied substrings"))
+        let verdict = check_tool_acl_with_args(
+            &acl,
+            "shell",
+            "execute",
+            Some(&serde_json::json!({ "command": "echo ok && rm -rf /tmp/test" })),
         );
+        assert!(
+            matches!(verdict, AclVerdict::Deny(reason) if reason.contains("denied substrings matched"))
+        );
+    }
+
+    #[test]
+    fn test_deny_with_constraints_allows_safe_invocation() {
+        let mut constraints = BTreeMap::new();
+        constraints.insert(
+            "denySubstrings".into(),
+            Value::Array(vec![Value::String("rm -rf".into())]),
+        );
+        let acl = ToolAcl {
+            allow: vec![make_rule("shell", &["*"])],
+            deny: vec![ToolRule {
+                tool: "shell".into(),
+                actions: vec!["execute".into()],
+                constraints,
+            }],
+        };
+        let verdict = check_tool_acl_with_args(
+            &acl,
+            "shell",
+            "execute",
+            Some(&serde_json::json!({ "command": "echo safe" })),
+        );
+        assert_eq!(verdict, AclVerdict::Allow);
     }
 
     // Scope tests

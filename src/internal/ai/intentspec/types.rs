@@ -494,7 +494,7 @@ pub enum ArtifactName {
     ReleaseNotes,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "kebab-case")]
 pub enum ArtifactStage {
     PerTask,
