@@ -74,23 +74,17 @@ pub async fn execute_safe(args: ShowArgs) -> CliResult<()> {
     if let Ok(commit_hash) = util::get_commit_base(object_ref).await {
         // Use find_tag_and_commit to check if it's a tag and get tag info
         match tag::find_tag_and_commit(object_ref).await {
-            Ok(Some((object, _))) => {
-                // It is a tag - show tag first
-                if object.get_type() == ObjectType::Tag {
-                    // For annotated tags, show tag details
-                    let tag_hash = if let tag::TagObject::Tag(tag_obj) = &object {
-                        tag_obj.id
-                    } else {
-                        commit_hash
-                    };
-                    return show_tag_by_hash(&tag_hash, &args).await;
+            Ok(Some((object, _))) if object.get_type() == ObjectType::Tag => {
+                // For annotated tags, show tag details
+                let tag_hash = if let tag::TagObject::Tag(tag_obj) = &object {
+                    tag_obj.id
                 } else {
-                    // Lightweight tag points directly to commit
-                    return show_commit(&commit_hash, &args).await;
-                }
+                    commit_hash
+                };
+                return show_tag_by_hash(&tag_hash, &args).await;
             }
             _ => {
-                // Not a tag or tag doesn't exist, show as commit
+                // Not a tag, lightweight tag, or tag doesn't exist: show as commit.
                 return show_commit(&commit_hash, &args).await;
             }
         }

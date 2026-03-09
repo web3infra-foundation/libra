@@ -62,13 +62,13 @@ impl RebaseState {
     /// Check if a rebase is in progress
     pub async fn is_in_progress() -> Result<bool, String> {
         let db = get_db_conn_instance().await;
-        Self::ensure_rebase_state_table_exists(db).await?;
-        if Self::has_state_in_db(db).await? {
+        Self::ensure_rebase_state_table_exists(&db).await?;
+        if Self::has_state_in_db(&db).await? {
             return Ok(true);
         }
 
         if Self::legacy_rebase_dir().exists() {
-            return Self::migrate_legacy_state(db)
+            return Self::migrate_legacy_state(&db)
                 .await
                 .map(|state| state.is_some());
         }
@@ -78,19 +78,19 @@ impl RebaseState {
     /// Save rebase state to the database
     pub async fn save(&self) -> Result<(), String> {
         let db = get_db_conn_instance().await;
-        Self::ensure_rebase_state_table_exists(db).await?;
-        Self::save_with_conn(db, self).await
+        Self::ensure_rebase_state_table_exists(&db).await?;
+        Self::save_with_conn(&db, self).await
     }
 
     /// Load rebase state from the database (migrates legacy files if present)
     pub async fn load() -> Result<Self, String> {
         let db = get_db_conn_instance().await;
-        Self::ensure_rebase_state_table_exists(db).await?;
-        if let Some(state) = Self::load_from_db(db).await? {
+        Self::ensure_rebase_state_table_exists(&db).await?;
+        if let Some(state) = Self::load_from_db(&db).await? {
             return Ok(state);
         }
 
-        if let Some(state) = Self::migrate_legacy_state(db).await? {
+        if let Some(state) = Self::migrate_legacy_state(&db).await? {
             return Ok(state);
         }
 
@@ -100,8 +100,8 @@ impl RebaseState {
     /// Remove the rebase state from the database (and any legacy state on disk)
     pub async fn cleanup() -> Result<(), String> {
         let db = get_db_conn_instance().await;
-        Self::ensure_rebase_state_table_exists(db).await?;
-        Self::clear_state_in_db(db).await?;
+        Self::ensure_rebase_state_table_exists(&db).await?;
+        Self::clear_state_in_db(&db).await?;
 
         let legacy_dir = Self::legacy_rebase_dir();
         if legacy_dir.exists() {
@@ -751,7 +751,7 @@ async fn start_rebase(upstream: &str) {
     }
 
     // This mimics Git's behavior.
-    Head::update_with_conn(db, Head::Detached(upstream_id), None).await;
+    Head::update_with_conn(&db, Head::Detached(upstream_id), None).await;
 
     // Continue replaying commits
     continue_replay(&mut state, &current_branch_name, upstream).await;
@@ -791,7 +791,7 @@ async fn continue_replay(state: &mut RebaseState, branch_name: &str, upstream_di
                 state.stopped_sha = None;
 
                 // Update HEAD
-                Head::update_with_conn(db, Head::Detached(state.current_head), None).await;
+                Head::update_with_conn(&db, Head::Detached(state.current_head), None).await;
 
                 println!(
                     "Applied: {} {}",
@@ -889,7 +889,7 @@ async fn finalize_rebase(state: &RebaseState) -> anyhow::Result<()> {
     .await
     {
         // Attempt to restore HEAD to a safe state
-        Head::update_with_conn(db, Head::Detached(state.onto), None).await;
+        Head::update_with_conn(&db, Head::Detached(state.onto), None).await;
         return Err(e).context("failed to record reflog for rebase finish");
     }
 
@@ -1029,7 +1029,7 @@ async fn rebase_continue() {
 
     // Update HEAD
     let db = get_db_conn_instance().await;
-    Head::update_with_conn(db, Head::Detached(state.current_head), None).await;
+    Head::update_with_conn(&db, Head::Detached(state.current_head), None).await;
 
     if let Err(e) = state.save().await {
         eprintln!("warning: failed to save state: {}", e);
@@ -1109,10 +1109,10 @@ async fn rebase_abort() {
         Err(e) => {
             eprintln!("warning: failed to record reflog: {e}");
             // Continue anyway; ensure branch ref is corrected.
-            Branch::update_branch_with_conn(db, &state.head_name, &orig_head_str, None).await;
+            Branch::update_branch_with_conn(&db, &state.head_name, &orig_head_str, None).await;
         }
     }
-    Head::update_with_conn(db, Head::Branch(state.head_name.clone()), None).await;
+    Head::update_with_conn(&db, Head::Branch(state.head_name.clone()), None).await;
 
     // Reset working directory to original HEAD
     let orig_commit: Commit = match load_object(&orig_head) {
