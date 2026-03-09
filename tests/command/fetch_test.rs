@@ -1,5 +1,7 @@
 //! Tests fetch command behavior for remote ref updates and pack retrieval flows.
 
+#[cfg(unix)]
+use std::path::{Path, PathBuf};
 use std::{fs, process::Command, time::Duration};
 
 use libra::{
@@ -40,6 +42,47 @@ fn init_temp_repo() -> TempDir {
 
     eprintln!("Initialized libra repo at: {temp_path:?}");
     temp_dir
+}
+
+#[cfg(unix)]
+fn create_fake_ssh_script(root: &Path) -> PathBuf {
+    let script_path = root.join("fake_ssh.sh");
+    let script = r#"#!/bin/sh
+set -eu
+
+if [ -n "${LIBRA_TEST_SSH_LOG:-}" ]; then
+  printf '%s\n' "$@" >> "$LIBRA_TEST_SSH_LOG"
+  printf -- '---\n' >> "$LIBRA_TEST_SSH_LOG"
+fi
+
+if [ "${LIBRA_TEST_SSH_FAIL:-}" = "hostkey" ]; then
+  echo "Host key verification failed." >&2
+  exit 255
+fi
+
+remote_cmd=""
+for arg in "$@"; do
+  remote_cmd="$arg"
+done
+
+if [ -z "$remote_cmd" ]; then
+  echo "missing remote command" >&2
+  exit 2
+fi
+
+exec sh -c "$remote_cmd"
+"#;
+    fs::write(&script_path, script).expect("failed to write fake ssh script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&script_path)
+            .expect("failed to stat fake ssh script")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).expect("failed to chmod fake ssh script");
+    }
+    script_path
 }
 
 #[tokio::test]
@@ -257,4 +300,182 @@ async fn test_fetch_local_repository() {
     .await
     .expect("remote-tracking branch not found");
     assert_eq!(tracked_branch.commit.to_string(), pushed_commit);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn test_fetch_ssh_remote_via_fake_ssh() {
+    let temp_root = tempdir().expect("failed to create temp root");
+    let remote_dir = temp_root.path().join("remote.git");
+    let work_dir = temp_root.path().join("workdir");
+    let repo_dir = temp_root.path().join("libra_repo");
+    let log_path = temp_root.path().join("fake_ssh.log");
+    let ssh_script = create_fake_ssh_script(temp_root.path());
+
+    assert!(
+        Command::new("git")
+            .args(["init", "--bare", remote_dir.to_str().unwrap()])
+            .status()
+            .expect("failed to init bare remote")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args(["init", work_dir.to_str().unwrap()])
+            .status()
+            .expect("failed to init working repo")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&work_dir)
+            .args(["config", "user.name", "Libra Tester"])
+            .status()
+            .expect("failed to set user.name")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&work_dir)
+            .args(["config", "user.email", "tester@example.com"])
+            .status()
+            .expect("failed to set user.email")
+            .success()
+    );
+
+    fs::write(work_dir.join("README.md"), "hello ssh fetch").expect("failed to write README");
+    assert!(
+        Command::new("git")
+            .current_dir(&work_dir)
+            .args(["add", "README.md"])
+            .status()
+            .expect("failed to add README")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&work_dir)
+            .args(["commit", "-m", "initial commit"])
+            .status()
+            .expect("failed to commit")
+            .success()
+    );
+    let current_branch = String::from_utf8(
+        Command::new("git")
+            .current_dir(&work_dir)
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .output()
+            .expect("failed to read current branch")
+            .stdout,
+    )
+    .expect("branch name not utf8")
+    .trim()
+    .to_string();
+    let pushed_commit = String::from_utf8(
+        Command::new("git")
+            .current_dir(&work_dir)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("failed to read HEAD commit")
+            .stdout,
+    )
+    .expect("commit hash not utf8")
+    .trim()
+    .to_string();
+    assert!(
+        Command::new("git")
+            .current_dir(&work_dir)
+            .args(["remote", "add", "origin", remote_dir.to_str().unwrap()])
+            .status()
+            .expect("failed to add origin remote")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&work_dir)
+            .args([
+                "push",
+                "origin",
+                &format!("HEAD:refs/heads/{current_branch}"),
+            ])
+            .status()
+            .expect("failed to push to remote")
+            .success()
+    );
+
+    fs::create_dir_all(&repo_dir).expect("failed to create repo dir");
+    setup_with_new_libra_in(&repo_dir).await;
+    let _guard = ChangeDirGuard::new(&repo_dir);
+
+    let ssh_remote = format!("git@fakehost:{}", remote_dir.to_string_lossy());
+    Config::insert("remote", Some("origin"), "url", &ssh_remote).await;
+
+    let fetch_out = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(&repo_dir)
+        .env("LIBRA_SSH_COMMAND", &ssh_script)
+        .env("LIBRA_TEST_SSH_LOG", &log_path)
+        .args(["fetch", "origin"])
+        .output()
+        .expect("failed to run libra fetch over fake ssh");
+    assert!(
+        fetch_out.status.success(),
+        "fetch over SSH should succeed, stderr: {}",
+        String::from_utf8_lossy(&fetch_out.stderr)
+    );
+
+    let tracked_branch = Branch::find_branch(
+        &format!("refs/remotes/origin/{current_branch}"),
+        Some("origin"),
+    )
+    .await
+    .expect("remote-tracking branch not found");
+    assert_eq!(tracked_branch.commit.to_string(), pushed_commit);
+
+    let ssh_log = fs::read_to_string(&log_path).expect("failed to read fake ssh log");
+    assert!(
+        ssh_log.contains("StrictHostKeyChecking=yes"),
+        "SSH command should enforce strict host key checking, log:\n{ssh_log}"
+    );
+    assert!(
+        !ssh_log.contains("StrictHostKeyChecking=accept-new"),
+        "SSH command must not use accept-new by default, log:\n{ssh_log}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn test_fetch_ssh_host_key_failure_is_reported() {
+    let temp_root = tempdir().expect("failed to create temp root");
+    let remote_dir = temp_root.path().join("remote.git");
+    let repo_dir = temp_root.path().join("libra_repo");
+    let ssh_script = create_fake_ssh_script(temp_root.path());
+
+    assert!(
+        Command::new("git")
+            .args(["init", "--bare", remote_dir.to_str().unwrap()])
+            .status()
+            .expect("failed to init bare remote")
+            .success()
+    );
+    fs::create_dir_all(&repo_dir).expect("failed to create repo dir");
+    setup_with_new_libra_in(&repo_dir).await;
+
+    let ssh_remote = format!("git@fakehost:{}", remote_dir.to_string_lossy());
+    let _guard = ChangeDirGuard::new(&repo_dir);
+    Config::insert("remote", Some("origin"), "url", &ssh_remote).await;
+
+    let fetch_out = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(&repo_dir)
+        .env("LIBRA_SSH_COMMAND", &ssh_script)
+        .env("LIBRA_TEST_SSH_FAIL", "hostkey")
+        .args(["fetch", "origin"])
+        .output()
+        .expect("failed to run libra fetch over fake ssh");
+    let stderr = String::from_utf8_lossy(&fetch_out.stderr);
+    assert!(
+        stderr.contains("Host key verification failed."),
+        "fetch should surface SSH host-key failures, stderr: {stderr}"
+    );
 }

@@ -328,13 +328,16 @@ async fn display_head_state() -> String {
 }
 
 fn format_branch_name(branch: &Branch) -> String {
-    branch
-        .remote
-        .as_ref()
-        .map(|remote| format!("{}/{}", remote, branch.name))
-        .unwrap_or_else(|| branch.name.clone())
-        .red()
-        .to_string()
+    let display_name = if let Some(stripped) = branch.name.strip_prefix("refs/remotes/") {
+        stripped.to_string()
+    } else {
+        branch
+            .remote
+            .as_ref()
+            .map(|remote| format!("{remote}/{}", branch.name))
+            .unwrap_or_else(|| branch.name.clone())
+    };
+    display_name.red().to_string()
 }
 
 fn display_branches(branches: Vec<Branch>, head_name: &str, is_remote: bool) {
@@ -509,4 +512,38 @@ pub fn is_valid_git_branch_name(name: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use std::str::FromStr;
+
+    use git_internal::hash::{ObjectHash, get_hash_kind};
+
+    use super::{Branch, format_branch_name};
+
+    fn any_hash() -> ObjectHash {
+        ObjectHash::from_str(&ObjectHash::zero_str(get_hash_kind())).unwrap()
+    }
+
+    #[test]
+    fn test_format_branch_name_with_full_remote_ref() {
+        colored::control::set_override(false);
+        let branch = Branch {
+            name: "refs/remotes/origin/main".to_string(),
+            commit: any_hash(),
+            remote: Some("origin".to_string()),
+        };
+
+        assert_eq!(format_branch_name(&branch), "origin/main");
+    }
+
+    #[test]
+    fn test_format_branch_name_with_short_remote_ref() {
+        colored::control::set_override(false);
+        let branch = Branch {
+            name: "main".to_string(),
+            commit: any_hash(),
+            remote: Some("origin".to_string()),
+        };
+
+        assert_eq!(format_branch_name(&branch), "origin/main");
+    }
+}

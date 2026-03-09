@@ -356,6 +356,7 @@ async fn test_commit_sha256() {
         ref_format: None,
         from_git_repository: None,
         separate_libra_dir: None,
+        vault: false,
     })
     .await
     .unwrap();

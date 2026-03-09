@@ -61,11 +61,22 @@ impl TreeExt for Tree {
         let mut items = Vec::new();
         for item in self.tree_items.iter() {
             if item.mode != TreeItemMode::Tree {
-                // Not Tree, maybe Blob, link, etc.
+                // `160000` gitlink entries (submodules) reference commits that are
+                // not guaranteed to exist in this repository's object database.
+                // Treat them as unsupported for plain-file expansion to avoid
+                // panicking later when callers assume Blob objects.
                 if item.mode == TreeItemMode::Commit {
-                    // submodule
-                    eprintln!("{}", "Warning: Submodule is not supported yet".red());
+                    eprintln!(
+                        "{}",
+                        format!(
+                            "Warning: Submodule '{}' is not supported yet; skipping checkout entry",
+                            item.name
+                        )
+                        .red()
+                    );
+                    continue;
                 }
+                // Not Tree, maybe Blob, link, etc.
                 items.push((PathBuf::from(item.name.clone()), item.id));
             } else {
                 let sub_tree = Tree::load(&item.id);

@@ -75,6 +75,7 @@ async fn test_checkout_module_functions() {
         ref_format: None,
         from_git_repository: None,
         separate_libra_dir: None,
+        vault: false,
     };
 
     init::init(init_args)
@@ -125,6 +126,7 @@ async fn test_checkout_module_functions_sha256() {
         ref_format: None,
         from_git_repository: None,
         separate_libra_dir: None,
+        vault: false,
     };
 
     init::init(init_args)
@@ -177,6 +179,7 @@ async fn checkout_restore_rejects_sha1_hash_in_sha256_repo() {
         ref_format: None,
         from_git_repository: None,
         separate_libra_dir: None,
+        vault: false,
     })
     .await
     .unwrap();

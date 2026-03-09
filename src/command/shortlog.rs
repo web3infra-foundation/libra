@@ -166,13 +166,9 @@ pub async fn execute_to(args: ShortlogArgs, writer: &mut impl Write) -> std::io:
 
     if args.numbered {
         // Sort by commit count (descending) and then by author name (ascending) to ensure deterministic output
-        authors.sort_by(|a, b| {
-            b.1.count
-                .cmp(&a.1.count)
-                .then_with(|| a.1.name.to_lowercase().cmp(&b.1.name.to_lowercase()))
-        });
+        authors.sort_by_key(|a| (std::cmp::Reverse(a.1.count), a.1.name.to_lowercase()));
     } else {
-        authors.sort_by(|a, b| a.1.name.to_lowercase().cmp(&b.1.name.to_lowercase()));
+        authors.sort_by_key(|a| a.1.name.to_lowercase());
     }
 
     // Determine the width needed for the commit count column.
@@ -252,7 +248,7 @@ async fn get_commits_for_shortlog(
         .filter(|c| passes_filter(c, since_ts, until_ts))
         .collect();
 
-    commits.sort_by(|a, b| b.author.timestamp.cmp(&a.author.timestamp));
+    commits.sort_by_key(|b| std::cmp::Reverse(b.author.timestamp));
 
     commits
 }

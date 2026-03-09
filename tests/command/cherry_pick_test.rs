@@ -531,6 +531,7 @@ async fn test_cherry_pick_sha256_hash_handling() {
         ref_format: None,
         from_git_repository: None,
         separate_libra_dir: None,
+        vault: false,
     })
     .await
     .unwrap();

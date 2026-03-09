@@ -28,7 +28,7 @@ use url::Url;
 
 use crate::{
     cli_error,
-    command::branch,
+    command::{branch, fetch::RemoteClient},
     git_protocol::{ServiceType::ReceivePack, add_pkt_line_string, read_pkt_line},
     internal::{
         branch::Branch,
@@ -36,8 +36,7 @@ use crate::{
         db::get_db_conn_instance,
         head::Head,
         protocol::{
-            ProtocolClient, get_wire_hash_kind, https_client::HttpsClient, lfs_client::LFSClient,
-            set_wire_hash_kind,
+            ProtocolClient, get_wire_hash_kind, set_wire_hash_kind, ssh_client::is_ssh_spec,
         },
         reflog::{Reflog, ReflogAction, ReflogContext, ReflogError},
     },
@@ -107,29 +106,27 @@ pub async fn execute(args: PushArgs) {
 
     println!("pushing {branch}({commit_hash}) to {repository}({repo_url})");
 
-    let url = match Url::parse(&repo_url).or_else(|e| {
-        if e == url::ParseError::RelativeUrlWithoutBase && Path::new(&repo_url).exists() {
-            Url::from_file_path(Path::new(&repo_url))
-                .map_err(|_| url::ParseError::RelativeUrlWithoutBase)
-        } else {
-            Err(e)
-        }
-    }) {
-        Ok(u) => u,
-        Err(e) => {
-            cli_error!(e, "fatal: invalid remote url '{}'", repo_url);
-            return;
-        }
-    };
-
-    // Local file path remote is not supported for push; avoid pretending success.
-    if url.scheme() == "file" {
+    if is_local_file_remote(&repo_url) {
         eprintln!("fatal: pushing to local file repositories is not yet supported");
         return;
     }
 
-    let client = HttpsClient::from_url(&url);
-    let discovery = match client.discovery_reference(ReceivePack).await {
+    // Determine transport: SSH or HTTPS
+    let is_ssh = is_ssh_spec(&repo_url);
+
+    let remote_client = match RemoteClient::from_spec(&repo_url) {
+        Ok(client) => client,
+        Err(e) => {
+            cli_error!(
+                e,
+                "fatal: failed to create remote client for '{}'",
+                repo_url
+            );
+            return;
+        }
+    };
+
+    let discovery = match remote_client.discovery_reference(ReceivePack).await {
         Ok(result) => result,
         Err(e) => {
             cli_error!("fatal" => e);
@@ -242,12 +239,14 @@ pub async fn execute(args: PushArgs) {
     );
 
     {
-        // upload lfs files
-        let client = LFSClient::from_url(&url);
-        let res = client.push_objects(&objs).await;
-        if res.is_err() {
-            eprintln!("fatal: LFS files upload failed, stop pushing");
-            return;
+        // upload lfs files (only for HTTP remotes)
+        if !is_ssh && let Ok(url) = Url::parse(&repo_url) {
+            let lfs_client = crate::internal::protocol::lfs_client::LFSClient::from_url(&url);
+            let res = lfs_client.push_objects(&objs).await;
+            if res.is_err() {
+                eprintln!("fatal: LFS files upload failed, stop pushing");
+                return;
+            }
         }
     }
 
@@ -278,28 +277,56 @@ pub async fn execute(args: PushArgs) {
     data.extend_from_slice(&pack_data);
     println!("Delta compression done.");
 
-    let res = client.send_pack(data.freeze()).await.unwrap(); // TODO: send stream
-
-    if res.status() != 200 {
-        eprintln!(
-            "fatal: unexpected server response (status {})",
-            res.status()
-        );
-        return;
+    // Send pack via the appropriate transport
+    match &remote_client {
+        RemoteClient::Ssh(ssh_client) => {
+            let response_bytes = match ssh_client.send_pack(data.freeze()).await {
+                Ok(b) => b,
+                Err(e) => {
+                    cli_error!(e, "fatal: SSH send_pack failed");
+                    return;
+                }
+            };
+            let mut response_data = response_bytes;
+            let (_, pkt_line) = read_pkt_line(&mut response_data);
+            if pkt_line != "unpack ok\n" {
+                eprintln!("fatal: unpack failed");
+                return;
+            }
+            let (_, pkt_line) = read_pkt_line(&mut response_data);
+            if !pkt_line.starts_with("ok".as_ref()) {
+                cli_error!(pkt_line, "fatal: ref update failed");
+                return;
+            }
+        }
+        RemoteClient::Http(http_client) => {
+            let res = http_client.send_pack(data.freeze()).await.unwrap();
+            if res.status() != 200 {
+                eprintln!(
+                    "fatal: unexpected server response (status {})",
+                    res.status()
+                );
+                return;
+            }
+            let mut data = res.bytes().await.unwrap();
+            let (_, pkt_line) = read_pkt_line(&mut data);
+            if pkt_line != "unpack ok\n" {
+                eprintln!("fatal: unpack failed");
+                return;
+            }
+            let (_, pkt_line) = read_pkt_line(&mut data);
+            if !pkt_line.starts_with("ok".as_ref()) {
+                cli_error!(pkt_line, "fatal: ref update failed");
+                return;
+            }
+            let (len, _) = read_pkt_line(&mut data);
+            assert_eq!(len, 0);
+        }
+        _ => {
+            eprintln!("fatal: push is not supported for this remote type");
+            return;
+        }
     }
-    let mut data = res.bytes().await.unwrap();
-    let (_, pkt_line) = read_pkt_line(&mut data);
-    if pkt_line != "unpack ok\n" {
-        eprintln!("fatal: unpack failed");
-        return;
-    }
-    let (_, pkt_line) = read_pkt_line(&mut data);
-    if !pkt_line.starts_with("ok".as_ref()) {
-        cli_error!(pkt_line, "fatal: ref update failed");
-        return;
-    }
-    let (len, _) = read_pkt_line(&mut data);
-    assert_eq!(len, 0);
 
     println!("{}", "Push success".green());
 
@@ -369,6 +396,18 @@ async fn update_remote_tracking(
     if let Err(e) = transaction_result {
         cli_error!(e, "fatal: failed to update remote tracking branch");
     }
+}
+
+fn is_local_file_remote(spec: &str) -> bool {
+    if let Ok(url) = Url::parse(spec) {
+        // file:// URL or parsed Windows drive path (e.g. D:\repo) should both
+        // be treated as local-path push targets.
+        if url.scheme() == "file" || url.scheme().len() == 1 {
+            return true;
+        }
+        return false;
+    }
+    Path::new(spec).exists()
 }
 
 /// collect all commits from `commit_id` to root commit

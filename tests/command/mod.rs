@@ -62,4 +62,6 @@ mod show_test;
 mod status_test;
 mod switch_test;
 mod tag_test;
+mod vault_cli_test;
+mod vault_test;
 mod worktree_test;

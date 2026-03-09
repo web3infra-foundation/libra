@@ -24,7 +24,9 @@ rust_library(
     crate_root = "vendor/src/lib.rs",
     edition = "2018",
     features = [
+        "compress",
         "default",
+        "oid",
         "std",
     ],
     rustc_flags = ["@$(location :sha1-manifest[env_flags])"],

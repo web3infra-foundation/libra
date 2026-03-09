@@ -163,6 +163,7 @@ pub async fn execute(args: CloneArgs) {
         fetch::RemoteClient::Http(_) => remote_repo,
         fetch::RemoteClient::Local(client) => client.repo_path().to_string_lossy().to_string(),
         fetch::RemoteClient::Git(_) => remote_repo,
+        fetch::RemoteClient::Ssh(_) => remote_repo,
     };
 
     // CAUTION: change [current_dir] to the repo directory
@@ -178,6 +179,7 @@ pub async fn execute(args: CloneArgs) {
         ref_format: None,
         from_git_repository: None,
         separate_libra_dir: None,
+        vault: false,
     };
     command::init::execute(init_args).await;
 

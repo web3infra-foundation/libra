@@ -94,6 +94,8 @@ pulldown-cmark = "0.12"
 
 # Unicode handling
 unicode-width = "0.2"
+libvault = { version = "0.2.2", features = ["storage_sqlite"] }
+base64 = "0.22"
 
 [target.'cfg(unix)'.dependencies] # only on Unix
 pager = "0.16.1"

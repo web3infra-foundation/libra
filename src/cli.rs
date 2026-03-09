@@ -122,6 +122,8 @@ enum Commands {
     Open(command::open::OpenArgs),
     #[command(about = "Manage repository configurations")]
     Config(command::config::ConfigArgs),
+    #[command(about = "Manage vault-backed signing and SSH keys")]
+    Vault(command::vault::VaultArgs),
     #[command(about = "Manage the log of reference changes (e.g., HEAD, branches)")]
     Reflog(command::reflog::ReflogArgs),
     #[command(about = "Manage multiple working trees attached to this repository")]
@@ -327,6 +329,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> Result<(), GitError> {
         Commands::Open(args) => command::open::execute(args).await,
         Commands::Pull(args) => command::pull::execute(args).await,
         Commands::Config(args) => command::config::execute(args).await,
+        Commands::Vault(args) => command::vault::execute(args).await,
         Commands::Checkout(args) => command::checkout::execute(args).await,
         Commands::Reflog(args) => command::reflog::execute(args).await,
         Commands::Worktree(args) => command::worktree::execute(args).await,
