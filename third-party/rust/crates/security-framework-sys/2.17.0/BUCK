@@ -23,6 +23,10 @@ rust_library(
     crate = "security_framework_sys",
     crate_root = "vendor/src/lib.rs",
     edition = "2021",
+    features = [
+        "OSX_10_13",
+        "default",
+    ],
     rustc_flags = ["@$(location :security-framework-sys-manifest[env_flags])"],
     visibility = ["PUBLIC"],
     deps = [

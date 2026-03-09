@@ -32,7 +32,7 @@ rust_library(
     ],
     rustc_flags = ["@$(location :schemars-manifest[env_flags])"],
     named_deps = {
-        "chrono04": "//third-party/rust/crates/chrono/0.4.43:chrono",
+        "chrono04": "//third-party/rust/crates/chrono/0.4.44:chrono",
     },
     visibility = ["PUBLIC"],
     deps = [

@@ -56,6 +56,6 @@ rust_library(
     deps = [
         "//third-party/rust/crates/aho-corasick/1.1.4:aho-corasick",
         "//third-party/rust/crates/memchr/2.8.0:memchr",
-        "//third-party/rust/crates/regex-syntax/0.8.9:regex-syntax",
+        "//third-party/rust/crates/regex-syntax/0.8.10:regex-syntax",
     ],
 )
