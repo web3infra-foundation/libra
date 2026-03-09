@@ -13,7 +13,7 @@ use super::*;
 /// Helper: Get the number of reflog entries for HEAD
 async fn count_reflog_entries() -> usize {
     let db = get_db_conn_instance().await;
-    Reflog::find_all(db, "HEAD")
+    Reflog::find_all(&db, "HEAD")
         .await
         .map(|logs| logs.len())
         .unwrap_or(0)

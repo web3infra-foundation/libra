@@ -240,7 +240,7 @@ async fn resolve_tag_object_ref(object_ref: &str) -> Option<ObjectHash> {
     let tag_ref = reference::Entity::find()
         .filter(reference::Column::Kind.eq(reference::ConfigKind::Tag))
         .filter(reference::Column::Name.eq(full_ref_name))
-        .one(db_conn)
+        .one(&db_conn)
         .await
         .ok()
         .flatten()?;

@@ -494,7 +494,7 @@ impl BottomPane {
 
         // Options
         let options = [
-            ("Execute Spec", "Run the orchestrator"),
+            ("Execute Spec", "Run the Scheduler"),
             ("Modify Spec", "Edit the plan"),
             ("Cancel", "Return to chat"),
         ];

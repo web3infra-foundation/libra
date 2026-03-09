@@ -195,7 +195,7 @@ async fn execute_sync(args: SyncArgs) -> Result<(), String> {
     };
 
     let unsynced_objects = query
-        .all(db_conn)
+        .all(&db_conn)
         .await
         .map_err(|e| format!("Database query failed: {}", e))?;
 
@@ -204,7 +204,7 @@ async fn execute_sync(args: SyncArgs) -> Result<(), String> {
 
     if unsynced_objects.is_empty() {
         println!("No objects to sync.");
-        sync_metadata(db_conn, &r2_storage)
+        sync_metadata(&db_conn, &r2_storage)
             .await
             .map_err(|e| format!("Metadata sync failed: {}", e))?;
         return Ok(());
@@ -229,7 +229,7 @@ async fn execute_sync(args: SyncArgs) -> Result<(), String> {
                     // Update local is_synced flag
                     let mut active: object_index::ActiveModel = obj.clone().into();
                     active.is_synced = Set(1);
-                    if let Err(e) = active.update(db_conn).await {
+                    if let Err(e) = active.update(&db_conn).await {
                         cli_error!(
                             e,
                             "warning: failed to update local sync status for {}",
@@ -260,7 +260,7 @@ async fn execute_sync(args: SyncArgs) -> Result<(), String> {
     if failed_count > 0 {
         Err(format!("{} objects failed to sync", failed_count))
     } else {
-        sync_metadata(db_conn, &r2_storage)
+        sync_metadata(&db_conn, &r2_storage)
             .await
             .map_err(|e| format!("Metadata sync failed: {}", e))?;
         Ok(())
@@ -359,14 +359,14 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
         let existing = object_index::Entity::find()
             .filter(object_index::Column::OId.eq(&idx.o_id))
             .filter(object_index::Column::RepoId.eq(&idx.repo_id))
-            .one(db_conn)
+            .one(&db_conn)
             .await
             .map_err(|e| format!("DB error: {}", e))?;
 
         if let Some(existing_model) = existing {
             let mut active: object_index::ActiveModel = existing_model.into();
             active.is_synced = Set(1);
-            if let Err(e) = active.update(db_conn).await {
+            if let Err(e) = active.update(&db_conn).await {
                 cli_error!(e, "warning: failed to update index for {}", idx.o_id);
             }
         } else {
@@ -380,7 +380,7 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
                 ..Default::default()
             };
 
-            if let Err(e) = entry.insert(db_conn).await {
+            if let Err(e) = entry.insert(&db_conn).await {
                 cli_error!(e, "warning: failed to insert index for {}", idx.o_id);
             }
         }
@@ -468,7 +468,7 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
         Err(format!("{} objects failed to restore", failed))
     } else {
         // Restore metadata
-        if let Err(e) = restore_metadata(db_conn, &r2_storage).await {
+        if let Err(e) = restore_metadata(&db_conn, &r2_storage).await {
             eprintln!("warning: failed to restore metadata: {}", e);
         }
 
@@ -538,7 +538,7 @@ async fn execute_status(args: StatusArgs) -> Result<(), String> {
 
     let all_objects = object_index::Entity::find()
         .filter(object_index::Column::RepoId.eq(&repo_id))
-        .all(db_conn)
+        .all(&db_conn)
         .await
         .map_err(|e| format!("Database query failed: {}", e))?;
 
@@ -663,7 +663,7 @@ async fn ensure_repo_id() -> Result<String, String> {
     let _ = object_index::Entity::update_many()
         .filter(object_index::Column::RepoId.eq("unknown-repo"))
         .col_expr(object_index::Column::RepoId, Expr::value(repo_id.clone()))
-        .exec(db_conn)
+        .exec(&db_conn)
         .await;
 
     Ok(repo_id)

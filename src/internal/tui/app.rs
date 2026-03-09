@@ -497,12 +497,11 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     self.schedule_draw();
                 }
                 // ── Normal idle handlers ─────────────────────────────
-                KeyCode::Enter => {
-                    if !self.widget.bottom_pane.is_empty() {
-                        let text = self.widget.bottom_pane.take_input();
-                        self.submit_message(text).await;
-                    }
+                KeyCode::Enter if !self.widget.bottom_pane.is_empty() => {
+                    let text = self.widget.bottom_pane.take_input();
+                    self.submit_message(text).await;
                 }
+                KeyCode::Enter => {}
                 // Clear screen (Ctrl+K) - must come before generic Char handler
                 KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.widget.clear();
@@ -1609,7 +1608,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         };
 
         self.widget.add_cell(Box::new(AssistantHistoryCell::new(format!(
-            "IntentSpec validated successfully!\n\n**Summary:** {}\n\n**Note:** Orchestrator execution is not yet implemented. This feature will be available in a future update.",
+            "IntentSpec validated successfully!\n\n**Summary:** {}\n\n**Note:** Scheduler execution is not yet implemented. This feature will be available in a future update.",
             spec.intent.summary
         ))));
         self.widget.bottom_pane.set_status(AgentStatus::Idle);
