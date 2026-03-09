@@ -753,26 +753,26 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             return;
         };
 
-        let pending = self.pending_user_input.as_mut().unwrap();
-        let question_id = pending.request.questions[pending.current_question]
-            .id
-            .clone();
-        pending.answers.insert(question_id, answer);
-        pending.current_question += 1;
-        pending.selected_option = 0;
-        pending.notes_focused = false;
-        pending.notes_text.clear();
-        self.widget.bottom_pane.clear();
-
-        // Check if all questions have been answered.
-        let done = {
-            let p = self.pending_user_input.as_ref().unwrap();
-            p.current_question >= p.request.questions.len()
+        let done = if let Some(pending) = self.pending_user_input.as_mut() {
+            let question_id = pending.request.questions[pending.current_question]
+                .id
+                .clone();
+            pending.answers.insert(question_id, answer);
+            pending.current_question += 1;
+            pending.selected_option = 0;
+            pending.notes_focused = false;
+            pending.notes_text.clear();
+            self.widget.bottom_pane.clear();
+            pending.current_question >= pending.request.questions.len()
+        } else {
+            return;
         };
 
         if done {
             // Send the response back to the handler.
-            let pending = self.pending_user_input.take().unwrap();
+            let Some(pending) = self.pending_user_input.take() else {
+                return;
+            };
             let response = UserInputResponse {
                 answers: pending.answers,
             };
