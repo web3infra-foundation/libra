@@ -23,7 +23,7 @@ use tokio::{
 use tokio_stream::StreamExt;
 
 use super::{
-    app_event::{AgentEvent, AgentStatus, AppEvent, ExitMode, TurnId},
+    app_event::{AgentEvent, AgentStatus, AppEvent, TurnId},
     chatwidget::ChatWidget,
     diff::FileChange,
     history_cell::{
@@ -70,11 +70,8 @@ use crate::{
 /// MCP resource IDs for tracking the workflow
 #[derive(Debug, Clone, Default)]
 pub struct McpIds {
-    pub _intent_id: Option<String>,
     pub plan_id: Option<String>,
-    pub task_id: Option<String>,
     pub run_id: Option<String>,
-    pub _context_snapshot_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -320,14 +317,6 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             .bottom_pane
             .set_cwd(registry.working_dir().to_path_buf());
         let mut mcp_ids = McpIds::default();
-        if let Some(intent_id) = app_config
-            .session
-            .metadata
-            .get(LATEST_INTENTSPEC_INTENT_ID)
-            .and_then(|value| value.as_str())
-        {
-            mcp_ids._intent_id = Some(intent_id.to_string());
-        }
         if let Some(plan_id) = app_config
             .session
             .metadata
@@ -915,23 +904,11 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
     /// Handle an app event.
     async fn handle_app_event(&mut self, event: AppEvent) -> anyhow::Result<bool> {
-        if let Some(turn_id) = event.turn_id()
-            && !self.is_active_turn(turn_id)
-        {
+        if !self.is_active_turn(event.turn_id()) {
             return Ok(false);
         }
 
         match event {
-            AppEvent::Exit(mode) => match mode {
-                ExitMode::Immediate => {
-                    self.should_exit = true;
-                    return Ok(true);
-                }
-                ExitMode::ShutdownFirst => {
-                    self.should_exit = true;
-                    return Ok(true);
-                }
-            },
             AppEvent::SubmitUserMessage {
                 turn_id,
                 text,
@@ -971,9 +948,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                             Ok(result) => {
                                 let _ = tx.send(AppEvent::McpTurnTrackingReady {
                                     turn_id,
-                                    task_id: result.task_id,
                                     run_id: result.run_id,
-                                    context_snapshot_id: result.context_snapshot_id,
                                 });
                             }
                             Err(_) => {
@@ -1157,19 +1132,6 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 event: agent_event,
             } => {
                 match agent_event {
-                    AgentEvent::TextDelta { delta } => {
-                        // Find and update the streaming assistant cell
-                        for cell in self.widget.cells.iter_mut().rev() {
-                            if let Some(assistant_cell) =
-                                cell.as_any_mut().downcast_mut::<AssistantHistoryCell>()
-                                && assistant_cell.is_streaming
-                            {
-                                assistant_cell.append(&delta);
-                                break;
-                            }
-                        }
-                        self.schedule_draw();
-                    }
                     AgentEvent::ResponseComplete { text, new_history } => {
                         self.agent_task = None;
                         self.running_tool_calls = 0;
@@ -1247,14 +1209,12 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     serde_json::Value::String(spec_json.clone()),
                 );
                 if let Some(id) = intent_id {
-                    self.mcp_ids._intent_id = Some(id.clone());
                     self.session.metadata.insert(
                         LATEST_INTENTSPEC_INTENT_ID.to_string(),
                         serde_json::Value::String(id),
                     );
                 } else {
                     self.session.metadata.remove(LATEST_INTENTSPEC_INTENT_ID);
-                    self.mcp_ids._intent_id = None;
                 }
                 if let Some(id) = plan_id.clone() {
                     self.session.metadata.insert(
@@ -1362,21 +1322,14 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             }
             AppEvent::McpTurnTrackingReady {
                 turn_id: _turn_id,
-                task_id,
                 run_id,
-                context_snapshot_id,
             } => {
-                self.mcp_ids.task_id = task_id;
                 self.mcp_ids.run_id = run_id.clone();
-                self.mcp_ids._context_snapshot_id = context_snapshot_id;
                 if let Some(run_id_slot) = self.active_turn_run_id.as_ref()
                     && let Ok(mut slot) = run_id_slot.lock()
                 {
                     *slot = run_id;
                 }
-            }
-            AppEvent::RequestUserInput { request } => {
-                self.handle_user_input_request(request);
             }
             AppEvent::ExecuteWorkflowComplete {
                 turn_id: _turn_id,
@@ -1598,8 +1551,6 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
     fn clear_mcp_turn_ids(&mut self) {
         self.mcp_ids.run_id = None;
-        self.mcp_ids.task_id = None;
-        self.mcp_ids._context_snapshot_id = None;
     }
 
     // ── Post-plan dialog ────────────────────────────────────────────
@@ -2734,9 +2685,7 @@ async fn current_head_sha_async(working_dir: std::path::PathBuf) -> String {
 
 #[derive(Debug, Clone, Default)]
 struct McpTurnTrackingResult {
-    task_id: Option<String>,
     run_id: Option<String>,
-    context_snapshot_id: Option<String>,
 }
 
 async fn resolve_mcp_turn_tracking(
@@ -2808,10 +2757,7 @@ async fn resolve_mcp_turn_tracking(
         Ok(actor) => actor,
         Err(e) => {
             cli_error!(e, "error: failed to resolve actor for task");
-            return McpTurnTrackingResult {
-                context_snapshot_id,
-                ..McpTurnTrackingResult::default()
-            };
+            return McpTurnTrackingResult::default();
         }
     };
 
@@ -2830,10 +2776,7 @@ async fn resolve_mcp_turn_tracking(
         }
     };
     let Some(task_id) = task_id else {
-        return McpTurnTrackingResult {
-            context_snapshot_id,
-            ..McpTurnTrackingResult::default()
-        };
+        return McpTurnTrackingResult::default();
     };
 
     let run_params = CreateRunParams {
@@ -2859,11 +2802,7 @@ async fn resolve_mcp_turn_tracking(
         Ok(actor) => actor,
         Err(e) => {
             cli_error!(e, "error: failed to resolve actor for run");
-            return McpTurnTrackingResult {
-                task_id: Some(task_id),
-                context_snapshot_id,
-                ..McpTurnTrackingResult::default()
-            };
+            return McpTurnTrackingResult::default();
         }
     };
 
@@ -2882,11 +2821,7 @@ async fn resolve_mcp_turn_tracking(
         }
     };
 
-    McpTurnTrackingResult {
-        task_id: Some(task_id),
-        run_id,
-        context_snapshot_id,
-    }
+    McpTurnTrackingResult { run_id }
 }
 
 fn parse_created_id(result: &rmcp::model::CallToolResult) -> Option<String> {

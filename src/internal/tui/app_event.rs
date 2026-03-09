@@ -6,10 +6,7 @@
 use serde_json::Value;
 
 use super::history_cell::HistoryCell;
-use crate::internal::ai::{
-    completion::Message,
-    tools::{ToolOutput, context::UserInputRequest},
-};
+use crate::internal::ai::{completion::Message, tools::ToolOutput};
 
 /// Logical turn identifier for isolating async event streams.
 pub type TurnId = u64;
@@ -17,8 +14,6 @@ pub type TurnId = u64;
 /// Events emitted by agent execution to notify the UI.
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
-    /// Streaming text delta from the model.
-    TextDelta { delta: String },
     /// Complete response text from the model.
     ResponseComplete {
         text: String,
@@ -53,23 +48,12 @@ pub enum AgentStatus {
     AwaitingPostPlanChoice,
 }
 
-/// The exit strategy requested by the UI layer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExitMode {
-    /// Shutdown core and exit after completion.
-    ShutdownFirst,
-    /// Exit the UI loop immediately.
-    Immediate,
-}
-
 /// Application-level events.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum AppEvent {
     /// Event from the agent execution.
     AgentEvent { turn_id: TurnId, event: AgentEvent },
-    /// Request to exit the application.
-    Exit(ExitMode),
     /// Submit a user message.
     SubmitUserMessage {
         turn_id: TurnId,
@@ -113,12 +97,8 @@ pub enum AppEvent {
     /// MCP turn-tracking IDs became available for this turn.
     McpTurnTrackingReady {
         turn_id: TurnId,
-        task_id: Option<String>,
         run_id: Option<String>,
-        context_snapshot_id: Option<String>,
     },
-    /// The agent is requesting user input via the `request_user_input` tool.
-    RequestUserInput { request: UserInputRequest },
     /// Orchestrator workflow completed.
     ExecuteWorkflowComplete {
         turn_id: TurnId,
@@ -128,10 +108,8 @@ pub enum AppEvent {
 }
 
 impl AppEvent {
-    pub fn turn_id(&self) -> Option<TurnId> {
+    pub fn turn_id(&self) -> TurnId {
         match self {
-            AppEvent::Exit(_) => None,
-            AppEvent::RequestUserInput { .. } => None,
             AppEvent::AgentEvent { turn_id, .. }
             | AppEvent::SubmitUserMessage { turn_id, .. }
             | AppEvent::PlanWorkflowComplete { turn_id, .. }
@@ -140,7 +118,7 @@ impl AppEvent {
             | AppEvent::ToolCallEnd { turn_id, .. }
             | AppEvent::AgentStatusUpdate { turn_id, .. }
             | AppEvent::McpTurnTrackingReady { turn_id, .. }
-            | AppEvent::ExecuteWorkflowComplete { turn_id, .. } => Some(*turn_id),
+            | AppEvent::ExecuteWorkflowComplete { turn_id, .. } => *turn_id,
         }
     }
 }
@@ -156,12 +134,6 @@ mod tests {
             text: "hello".to_string(),
             allowed_tools: None,
         };
-        assert_eq!(event.turn_id(), Some(42));
-    }
-
-    #[test]
-    fn turn_id_is_none_for_non_turn_events() {
-        let event = AppEvent::Exit(ExitMode::Immediate);
-        assert_eq!(event.turn_id(), None);
+        assert_eq!(event.turn_id(), 42);
     }
 }

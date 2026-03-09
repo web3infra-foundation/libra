@@ -142,22 +142,20 @@ struct WebHandle {
     addr: SocketAddr,
     shutdown_tx: oneshot::Sender<()>,
     join: tokio::task::JoinHandle<anyhow::Result<()>>,
-    connection_tasks: Option<Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>>,
+    connection_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
 impl WebHandle {
     async fn shutdown(self) {
         let _ = self.shutdown_tx.send(());
         let _ = self.join.await;
-        if let Some(tasks) = self.connection_tasks {
-            let pending = match tasks.lock() {
-                Ok(mut handles) => std::mem::take(&mut *handles),
-                Err(_) => Vec::new(),
-            };
-            for handle in pending {
-                handle.abort();
-                let _ = handle.await;
-            }
+        let pending = match self.connection_tasks.lock() {
+            Ok(mut handles) => std::mem::take(&mut *handles),
+            Err(_) => Vec::new(),
+        };
+        for handle in pending {
+            handle.abort();
+            let _ = handle.await;
         }
     }
 }
@@ -182,7 +180,7 @@ async fn start_web_server(host: &str, port: u16) -> anyhow::Result<WebHandle> {
         addr,
         shutdown_tx,
         join,
-        connection_tasks: None,
+        connection_tasks: Arc::new(Mutex::new(Vec::new())),
     })
 }
 
@@ -305,7 +303,7 @@ async fn execute_tui(args: CodeArgs) {
             };
             let model_name = args.model.unwrap_or_else(|| GEMINI_2_5_FLASH.to_string());
             let model = client.completion_model(&model_name);
-            run_tui_with_model(model, launch_config.into_params(model_name, provider_name)).await;
+            run_tui_with_model(model, launch_config, model_name, provider_name).await;
         }
         CodeProvider::Openai => {
             let client = match OpenAIClient::from_env() {
@@ -317,7 +315,7 @@ async fn execute_tui(args: CodeArgs) {
             };
             let model_name = args.model.unwrap_or_else(|| GPT_4O_MINI.to_string());
             let model = client.completion_model(&model_name);
-            run_tui_with_model(model, launch_config.into_params(model_name, provider_name)).await;
+            run_tui_with_model(model, launch_config, model_name, provider_name).await;
         }
         CodeProvider::Anthropic => {
             let client = match AnthropicClient::from_env() {
@@ -329,7 +327,7 @@ async fn execute_tui(args: CodeArgs) {
             };
             let model_name = args.model.unwrap_or_else(|| CLAUDE_3_5_SONNET.to_string());
             let model = client.completion_model(&model_name);
-            run_tui_with_model(model, launch_config.into_params(model_name, provider_name)).await;
+            run_tui_with_model(model, launch_config, model_name, provider_name).await;
         }
         CodeProvider::Deepseek => {
             let client = match DeepSeekClient::from_env() {
@@ -341,7 +339,7 @@ async fn execute_tui(args: CodeArgs) {
             };
             let model_name = args.model.unwrap_or_else(|| "deepseek-chat".to_string());
             let model = client.completion_model(&model_name);
-            run_tui_with_model(model, launch_config.into_params(model_name, provider_name)).await;
+            run_tui_with_model(model, launch_config, model_name, provider_name).await;
         }
         CodeProvider::Zhipu => {
             let client = match ZhipuClient::from_env() {
@@ -353,7 +351,7 @@ async fn execute_tui(args: CodeArgs) {
             };
             let model_name = args.model.unwrap_or_else(|| GLM_5.to_string());
             let model = client.completion_model(&model_name);
-            run_tui_with_model(model, launch_config.into_params(model_name, provider_name)).await;
+            run_tui_with_model(model, launch_config, model_name, provider_name).await;
         }
         CodeProvider::Ollama => {
             let client = if let Some(base_url) = &args.api_base {
@@ -371,7 +369,7 @@ async fn execute_tui(args: CodeArgs) {
                 }
             };
             let model = client.completion_model(&model_name);
-            run_tui_with_model(model, launch_config.into_params(model_name, provider_name)).await;
+            run_tui_with_model(model, launch_config, model_name, provider_name).await;
         }
     }
 }
@@ -389,41 +387,12 @@ struct TuiLaunchConfig {
     mcp_server: Arc<LibraMcpServer>,
 }
 
-impl TuiLaunchConfig {
-    fn into_params(self, model_name: String, provider_name: String) -> TuiParams {
-        TuiParams {
-            host: self.host,
-            port: self.port,
-            mcp_port: self.mcp_port,
-            registry: self.registry,
-            preamble: self.preamble,
-            temperature: self.temperature,
-            resume: self.resume,
-            user_input_rx: self.user_input_rx,
-            mcp_server: self.mcp_server,
-            model_name,
-            provider_name,
-        }
-    }
-}
-
-struct TuiParams {
-    host: String,
-    port: u16,
-    mcp_port: u16,
-    registry: Arc<ToolRegistry>,
-    preamble: String,
-    temperature: Option<f64>,
-    resume: bool,
-    user_input_rx:
-        tokio::sync::mpsc::UnboundedReceiver<crate::internal::ai::tools::context::UserInputRequest>,
-    mcp_server: Arc<LibraMcpServer>,
+async fn run_tui_with_model<M>(
+    model: M,
+    params: TuiLaunchConfig,
     model_name: String,
     provider_name: String,
-}
-
-async fn run_tui_with_model<M>(model: M, params: TuiParams)
-where
+) where
     M: crate::internal::ai::completion::CompletionModel + 'static,
 {
     let registry = params.registry;
@@ -518,8 +487,8 @@ where
             session,
             session_store,
             user_input_rx: params.user_input_rx,
-            model_name: params.model_name,
-            provider_name: params.provider_name,
+            model_name,
+            provider_name,
             mcp_server: Some(params.mcp_server),
         },
     );
@@ -612,7 +581,7 @@ async fn start_mcp_server(
         addr,
         shutdown_tx,
         join,
-        connection_tasks: Some(connection_tasks),
+        connection_tasks,
     })
 }
 
@@ -721,56 +690,37 @@ fn validate_mode_args(args: &CodeArgs) -> Result<(), String> {
     }
 
     if args.web_only {
-        if args.provider != CodeProvider::Gemini {
-            return Err("--provider is not supported in --web mode".to_string());
-        }
-        if args.model.is_some() {
-            return Err("--model is not supported in --web mode".to_string());
-        }
-        if args.temperature.is_some() {
-            return Err("--temperature is not supported in --web mode".to_string());
-        }
-        if args.context.is_some() {
-            return Err("--context is not supported in --web mode".to_string());
-        }
-        if args.resume {
-            return Err("--resume is not supported in --web mode".to_string());
-        }
-        if args.api_base.is_some() {
-            return Err("--api-base is not supported in --web mode".to_string());
-        }
+        reject_mode_flag(args.provider != CodeProvider::Gemini, "--provider", "--web")?;
+        reject_mode_flag(args.model.is_some(), "--model", "--web")?;
+        reject_mode_flag(args.temperature.is_some(), "--temperature", "--web")?;
+        reject_mode_flag(args.context.is_some(), "--context", "--web")?;
+        reject_mode_flag(args.resume, "--resume", "--web")?;
+        reject_mode_flag(args.api_base.is_some(), "--api-base", "--web")?;
     }
 
     if args.stdio {
-        if args.provider != CodeProvider::Gemini {
-            return Err("--provider is not supported in --stdio mode".to_string());
-        }
-        if args.model.is_some() {
-            return Err("--model is not supported in --stdio mode".to_string());
-        }
-        if args.temperature.is_some() {
-            return Err("--temperature is not supported in --stdio mode".to_string());
-        }
-        if args.context.is_some() {
-            return Err("--context is not supported in --stdio mode".to_string());
-        }
-        if args.resume {
-            return Err("--resume is not supported in --stdio mode".to_string());
-        }
-        if args.api_base.is_some() {
-            return Err("--api-base is not supported in --stdio mode".to_string());
-        }
-        if args.host != "127.0.0.1" {
-            return Err("--host is not supported in --stdio mode".to_string());
-        }
-        if args.port != 3000 {
-            return Err("--port is not supported in --stdio mode".to_string());
-        }
-        if args.mcp_port != 6789 {
-            return Err("--mcp-port is not supported in --stdio mode".to_string());
-        }
+        reject_mode_flag(
+            args.provider != CodeProvider::Gemini,
+            "--provider",
+            "--stdio",
+        )?;
+        reject_mode_flag(args.model.is_some(), "--model", "--stdio")?;
+        reject_mode_flag(args.temperature.is_some(), "--temperature", "--stdio")?;
+        reject_mode_flag(args.context.is_some(), "--context", "--stdio")?;
+        reject_mode_flag(args.resume, "--resume", "--stdio")?;
+        reject_mode_flag(args.api_base.is_some(), "--api-base", "--stdio")?;
+        reject_mode_flag(args.host != "127.0.0.1", "--host", "--stdio")?;
+        reject_mode_flag(args.port != 3000, "--port", "--stdio")?;
+        reject_mode_flag(args.mcp_port != 6789, "--mcp-port", "--stdio")?;
     }
 
+    Ok(())
+}
+
+fn reject_mode_flag(is_invalid: bool, flag: &str, mode: &str) -> Result<(), String> {
+    if is_invalid {
+        return Err(format!("{flag} is not supported in {mode} mode"));
+    }
     Ok(())
 }
 

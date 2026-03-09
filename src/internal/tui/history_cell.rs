@@ -202,11 +202,6 @@ impl AssistantHistoryCell {
         }
     }
 
-    /// Append text to the content.
-    pub fn append(&mut self, text: &str) {
-        self.content.push_str(text);
-    }
-
     /// Mark the response as complete.
     pub fn complete(&mut self) {
         self.is_streaming = false;

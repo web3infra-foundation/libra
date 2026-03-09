@@ -14,7 +14,7 @@ mod status_indicator;
 mod terminal;
 
 pub use app::{App, AppConfig, AppExitInfo, ExitReason};
-pub use app_event::{AgentEvent, AgentStatus, AppEvent, ExitMode};
+pub use app_event::{AgentEvent, AgentStatus, AppEvent};
 pub use diff::{DiffSummary, FileChange};
 pub use history_cell::DiffHistoryCell;
 pub use slash_command::{BuiltinCommand, parse_builtin};
