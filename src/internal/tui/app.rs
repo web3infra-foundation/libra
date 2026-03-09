@@ -7,7 +7,10 @@ use std::{
     collections::HashMap,
     future::Future,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -20,7 +23,7 @@ use tokio::{
 use tokio_stream::StreamExt;
 
 use super::{
-    app_event::{AgentEvent, AgentStatus, AppEvent, ExitMode},
+    app_event::{AgentEvent, AgentStatus, AppEvent, ExitMode, TurnId},
     chatwidget::ChatWidget,
     diff::FileChange,
     history_cell::{
@@ -119,6 +122,7 @@ const LATEST_EXECUTION_PLAN_ID: &str = "latest_execution_plan_id";
 const LATEST_INTENTSPEC_JSON: &str = "latest_intentspec_json";
 const MAX_INTENTSPEC_REPAIR_ATTEMPTS: usize = 2;
 const MCP_WRITE_TIMEOUT: Duration = Duration::from_secs(8);
+const MCP_TURN_TRACKING_TIMEOUT: Duration = Duration::from_secs(3);
 
 fn summarize_mcp_content(content: &[rmcp::model::Content]) -> Option<String> {
     let mut parts = Vec::new();
@@ -259,6 +263,12 @@ pub struct App<M: CompletionModel> {
     mcp_ids: McpIds,
     /// Pending detached MCP write operations that must finish before shutdown.
     mcp_write_tracker: McpWriteTracker,
+    /// Current active async turn. Events from stale turns are ignored.
+    active_turn_id: Option<TurnId>,
+    /// Monotonic turn counter.
+    next_turn_id: TurnId,
+    /// Shared view of active turn for global retry observer callbacks.
+    active_turn_signal: Arc<AtomicU64>,
 }
 
 impl<M: CompletionModel + Clone + 'static> App<M> {
@@ -271,18 +281,27 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         app_config: AppConfig,
     ) -> Self {
         let (app_event_tx, app_event_rx) = mpsc::unbounded_channel();
+        let active_turn_signal = Arc::new(AtomicU64::new(0));
         struct TuiRetryObserver {
             tx: UnboundedSender<AppEvent>,
+            active_turn_signal: Arc<AtomicU64>,
         }
 
         impl CompletionRetryObserver for TuiRetryObserver {
             fn on_retry(&self, event: &CompletionRetryEvent) {
-                let _ = self.tx.send(AppEvent::AgentEvent(AgentEvent::Retrying {
-                    attempt: event.next_attempt,
-                    total_attempts: event.total_attempts,
-                    delay_ms: event.delay.as_millis().min(u128::from(u64::MAX)) as u64,
-                    error: event.error.clone(),
-                }));
+                let turn_id = self.active_turn_signal.load(Ordering::Relaxed);
+                if turn_id == 0 {
+                    return;
+                }
+                let _ = self.tx.send(AppEvent::AgentEvent {
+                    turn_id,
+                    event: AgentEvent::Retrying {
+                        attempt: event.next_attempt,
+                        total_attempts: event.total_attempts,
+                        delay_ms: event.delay.as_millis().min(u128::from(u64::MAX)) as u64,
+                        error: event.error.clone(),
+                    },
+                });
             }
         }
         let history = app_config.session.to_history();
@@ -320,6 +339,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 .with_policy(CompletionRetryPolicy::default())
                 .with_observer(Arc::new(TuiRetryObserver {
                     tx: app_event_tx.clone(),
+                    active_turn_signal: active_turn_signal.clone(),
                 })),
             registry,
             config,
@@ -345,6 +365,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             mcp_server: app_config.mcp_server,
             mcp_ids,
             mcp_write_tracker: McpWriteTracker::default(),
+            active_turn_id: None,
+            next_turn_id: 1,
+            active_turn_signal,
         }
     }
 
@@ -439,6 +462,23 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         self.create_mcp_exit_decision(&exit_info.reason).await;
 
         Ok(exit_info)
+    }
+
+    fn begin_turn(&mut self) -> TurnId {
+        let turn_id = self.next_turn_id;
+        self.next_turn_id = self.next_turn_id.saturating_add(1);
+        self.active_turn_id = Some(turn_id);
+        self.active_turn_signal.store(turn_id, Ordering::Relaxed);
+        turn_id
+    }
+
+    fn clear_active_turn(&mut self) {
+        self.active_turn_id = None;
+        self.active_turn_signal.store(0, Ordering::Relaxed);
+    }
+
+    fn is_active_turn(&self, turn_id: TurnId) -> bool {
+        self.active_turn_id == Some(turn_id)
     }
 
     /// Handle a terminal event.
@@ -861,6 +901,12 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
     /// Handle an app event.
     async fn handle_app_event(&mut self, event: AppEvent) -> anyhow::Result<bool> {
+        if let Some(turn_id) = event.turn_id()
+            && !self.is_active_turn(turn_id)
+        {
+            return Ok(false);
+        }
+
         match event {
             AppEvent::Exit(mode) => match mode {
                 ExitMode::Immediate => {
@@ -873,6 +919,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 }
             },
             AppEvent::SubmitUserMessage {
+                turn_id,
                 text,
                 allowed_tools,
             } => {
@@ -889,7 +936,15 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 self.widget.bottom_pane.set_status(AgentStatus::Thinking);
                 self.schedule_draw();
 
-                self.start_mcp_turn_tracking(&text).await;
+                if timeout(
+                    MCP_TURN_TRACKING_TIMEOUT,
+                    self.start_mcp_turn_tracking(&text),
+                )
+                .await
+                .is_err()
+                {
+                    tracing::warn!("MCP turn tracking timed out before agent start");
+                }
 
                 // Prepare components for background task
                 let model = self.model.clone();
@@ -911,12 +966,16 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         mcp_server: Option<Arc<LibraMcpServer>>,
                         run_id: Option<String>,
                         mcp_write_tracker: McpWriteTracker,
+                        turn_id: TurnId,
                     }
 
                     impl crate::internal::ai::agent::ToolLoopObserver for UiObserver {
                         fn on_assistant_step_text(&mut self, text: &str) {
                             let cell = Box::new(AssistantHistoryCell::new(text.to_string()));
-                            let _ = self.tx.send(AppEvent::InsertHistoryCell(cell));
+                            let _ = self.tx.send(AppEvent::InsertHistoryCell {
+                                turn_id: self.turn_id,
+                                cell,
+                            });
                         }
 
                         fn on_tool_call_begin(
@@ -926,26 +985,47 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                             arguments: &serde_json::Value,
                         ) {
                             let _ = self.tx.send(AppEvent::ToolCallBegin {
+                                turn_id: self.turn_id,
                                 call_id: call_id.to_string(),
                                 tool_name: tool_name.to_string(),
                                 arguments: arguments.clone(),
                             });
+                        }
 
-                            // Record tool invocation via MCP if available
+                        fn on_tool_call_end(
+                            &mut self,
+                            call_id: &str,
+                            tool_name: &str,
+                            result: &Result<ToolOutput, String>,
+                        ) {
+                            let _ = self.tx.send(AppEvent::ToolCallEnd {
+                                turn_id: self.turn_id,
+                                call_id: call_id.to_string(),
+                                tool_name: tool_name.to_string(),
+                                result: result.clone(),
+                            });
+
+                            // Record tool invocation via MCP with final status.
                             if let (Some(mcp_server), Some(run_id)) =
                                 (self.mcp_server.clone(), self.run_id.clone())
                             {
                                 let tool_name = tool_name.to_string();
-                                let arguments = arguments.clone();
+                                let result = result.clone();
                                 self.mcp_write_tracker.spawn(async move {
-                                    // Create tool invocation
+                                    let (status, result_summary) = match &result {
+                                        Ok(output) => {
+                                            ("ok".to_string(), Some(summarize_tool_output(output)))
+                                        }
+                                        Err(err) => ("error".to_string(), Some(err.clone())),
+                                    };
+
                                     let invocation_params = CreateToolInvocationParams {
                                         run_id,
-                                        tool_name: tool_name.clone(),
-                                        args_json: Some(arguments.to_string()),
-                                        status: Some("ok".to_string()),
+                                        tool_name,
+                                        status: Some(status),
+                                        args_json: None,
                                         io_footprint: None,
-                                        result_summary: None,
+                                        result_summary,
                                         artifacts: None,
                                         tags: None,
                                         external_ids: None,
@@ -953,7 +1033,6 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                                         actor_id: Some("libra-agent".to_string()),
                                     };
 
-                                    // Resolve actor
                                     let actor = match mcp_server.resolve_actor_from_params(
                                         invocation_params.actor_kind.as_deref(),
                                         invocation_params.actor_id.as_deref(),
@@ -968,7 +1047,6 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                                         }
                                     };
 
-                                    // Call MCP interface to create tool invocation
                                     match mcp_server
                                         .create_tool_invocation_impl(invocation_params, actor)
                                         .await
@@ -991,19 +1069,6 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                                 });
                             }
                         }
-
-                        fn on_tool_call_end(
-                            &mut self,
-                            call_id: &str,
-                            tool_name: &str,
-                            result: &Result<ToolOutput, String>,
-                        ) {
-                            let _ = self.tx.send(AppEvent::ToolCallEnd {
-                                call_id: call_id.to_string(),
-                                tool_name: tool_name.to_string(),
-                                result: result.clone(),
-                            });
-                        }
                     }
 
                     let mut observer = UiObserver {
@@ -1011,6 +1076,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         mcp_server,
                         run_id,
                         mcp_write_tracker,
+                        turn_id,
                     };
                     let result = run_tool_loop_with_history_and_observer(
                         &model,
@@ -1024,24 +1090,31 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
                     match result {
                         Ok(turn) => {
-                            let _ = observer.tx.send(AppEvent::AgentEvent(
-                                AgentEvent::ResponseComplete {
+                            let _ = observer.tx.send(AppEvent::AgentEvent {
+                                turn_id: observer.turn_id,
+                                event: AgentEvent::ResponseComplete {
                                     text: turn.final_text,
                                     new_history: turn.history,
                                 },
-                            ));
+                            });
                         }
                         Err(e) => {
-                            let _ = observer.tx.send(AppEvent::AgentEvent(AgentEvent::Error {
-                                message: e.to_string(),
-                            }));
+                            let _ = observer.tx.send(AppEvent::AgentEvent {
+                                turn_id: observer.turn_id,
+                                event: AgentEvent::Error {
+                                    message: e.to_string(),
+                                },
+                            });
                         }
                     }
                 });
 
                 self.agent_task = Some(handle);
             }
-            AppEvent::AgentEvent(agent_event) => {
+            AppEvent::AgentEvent {
+                turn_id: _turn_id,
+                event: agent_event,
+            } => {
                 match agent_event {
                     AgentEvent::TextDelta { delta } => {
                         // Find and update the streaming assistant cell
@@ -1058,6 +1131,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     }
                     AgentEvent::ResponseComplete { text, new_history } => {
                         self.agent_task = None;
+                        self.clear_active_turn();
                         self.history = new_history;
 
                         // Track in session
@@ -1080,6 +1154,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     }
                     AgentEvent::Error { message } => {
                         self.agent_task = None;
+                        self.clear_active_turn();
 
                         self.complete_streaming_assistant_cell(format!("Error: {}", message));
                         self.widget.bottom_pane.set_status(AgentStatus::Idle);
@@ -1101,6 +1176,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 }
             }
             AppEvent::PlanWorkflowComplete {
+                turn_id: _turn_id,
                 text,
                 new_history,
                 intent_id,
@@ -1108,6 +1184,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 spec_json,
             } => {
                 self.agent_task = None;
+                self.clear_active_turn();
                 self.history = new_history;
                 self.session.add_assistant_message(&text);
                 self.session.metadata.insert(
@@ -1148,11 +1225,15 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     .set_status(AgentStatus::AwaitingPostPlanChoice);
                 self.schedule_draw();
             }
-            AppEvent::InsertHistoryCell(cell) => {
+            AppEvent::InsertHistoryCell {
+                turn_id: _turn_id,
+                cell,
+            } => {
                 self.insert_before_streaming_assistant(cell);
                 self.schedule_draw();
             }
             AppEvent::ToolCallBegin {
+                turn_id: _turn_id,
                 call_id,
                 tool_name,
                 arguments,
@@ -1177,6 +1258,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 self.schedule_draw();
             }
             AppEvent::ToolCallEnd {
+                turn_id: _turn_id,
                 call_id,
                 tool_name,
                 result,
@@ -1216,15 +1298,23 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 self.widget.bottom_pane.set_status(AgentStatus::Thinking);
                 self.schedule_draw();
             }
-            AppEvent::AgentStatusUpdate { status } => {
+            AppEvent::AgentStatusUpdate {
+                turn_id: _turn_id,
+                status,
+            } => {
                 self.widget.bottom_pane.set_status(status);
                 self.schedule_draw();
             }
             AppEvent::RequestUserInput { request } => {
                 self.handle_user_input_request(request);
             }
-            AppEvent::ExecuteWorkflowComplete { text, new_history } => {
+            AppEvent::ExecuteWorkflowComplete {
+                turn_id: _turn_id,
+                text,
+                new_history,
+            } => {
                 self.agent_task = None;
+                self.clear_active_turn();
                 self.history = new_history;
                 self.session.add_assistant_message(&text);
                 self.complete_streaming_assistant_cell(text);
@@ -1267,7 +1357,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             effective_text
         };
 
+        let turn_id = self.begin_turn();
         let _ = self.app_event_tx.send(AppEvent::SubmitUserMessage {
+            turn_id,
             text: final_text,
             allowed_tools,
         });
@@ -1431,7 +1523,8 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
         let run_params = CreateRunParams {
             task_id,
-            base_commit_sha: current_head_sha(self.registry.working_dir()),
+            base_commit_sha: current_head_sha_async(self.registry.working_dir().to_path_buf())
+                .await,
             plan_id: self.mcp_ids.plan_id.clone(),
             status: Some("created".to_string()),
             context_snapshot_id,
@@ -1588,6 +1681,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             .add_cell(Box::new(AssistantHistoryCell::streaming()));
         self.widget.bottom_pane.set_status(AgentStatus::Thinking);
         self.schedule_draw();
+        let turn_id = self.begin_turn();
 
         let model = self.model.clone();
         let registry = self.registry.clone();
@@ -1607,13 +1701,15 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         let handle = tokio::spawn(async move {
             struct UiOrchestratorObserver {
                 tx: UnboundedSender<AppEvent>,
+                turn_id: TurnId,
             }
 
             impl UiOrchestratorObserver {
                 fn send_note(&self, text: String) {
-                    let _ = self.tx.send(AppEvent::InsertHistoryCell(Box::new(
-                        AssistantHistoryCell::new(text),
-                    )));
+                    let _ = self.tx.send(AppEvent::InsertHistoryCell {
+                        turn_id: self.turn_id,
+                        cell: Box::new(AssistantHistoryCell::new(text)),
+                    });
                 }
 
                 fn scoped_call_id(task: &TaskSpec, call_id: &str) -> String {
@@ -1639,6 +1735,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         None => "implementation".to_string(),
                     };
                     let _ = self.tx.send(AppEvent::AgentStatusUpdate {
+                        turn_id: self.turn_id,
                         status: AgentStatus::Thinking,
                     });
                     self.send_note(format!("Starting [{kind}] {}", task.title()));
@@ -1675,6 +1772,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     arguments: &serde_json::Value,
                 ) {
                     let _ = self.tx.send(AppEvent::ToolCallBegin {
+                        turn_id: self.turn_id,
                         call_id: Self::scoped_call_id(task, call_id),
                         tool_name: tool_name.to_string(),
                         arguments: arguments.clone(),
@@ -1689,6 +1787,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     result: &Result<ToolOutput, String>,
                 ) {
                     let _ = self.tx.send(AppEvent::ToolCallEnd {
+                        turn_id: self.turn_id,
                         call_id: Self::scoped_call_id(task, call_id),
                         tool_name: tool_name.to_string(),
                         result: result.clone(),
@@ -1770,8 +1869,10 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 }
             }
 
-            let observer: Arc<dyn OrchestratorObserver> =
-                Arc::new(UiOrchestratorObserver { tx: tx.clone() });
+            let observer: Arc<dyn OrchestratorObserver> = Arc::new(UiOrchestratorObserver {
+                tx: tx.clone(),
+                turn_id,
+            });
             let config = OrchestratorConfig {
                 working_dir,
                 base_commit: None,
@@ -1794,6 +1895,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             new_history.push(Message::assistant(summary.clone()));
 
             let _ = tx.send(AppEvent::ExecuteWorkflowComplete {
+                turn_id,
                 text: summary,
                 new_history,
             });
@@ -1813,6 +1915,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         }
 
         let user_text = format!("/plan {request}");
+        let turn_id = self.begin_turn();
         self.session.add_user_message(&user_text);
         self.widget
             .add_cell(Box::new(UserHistoryCell::new(user_text.clone())));
@@ -1848,15 +1951,17 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         let handle = tokio::spawn(async move {
             struct PlanObserver {
                 tx: UnboundedSender<AppEvent>,
+                turn_id: TurnId,
                 draft: Option<IntentDraft>,
                 risk_prompted: bool,
                 selected_risk: Option<RiskLevel>,
             }
 
             impl PlanObserver {
-                fn new(tx: UnboundedSender<AppEvent>) -> Self {
+                fn new(tx: UnboundedSender<AppEvent>, turn_id: TurnId) -> Self {
                     Self {
                         tx,
+                        turn_id,
                         draft: None,
                         risk_prompted: false,
                         selected_risk: None,
@@ -1872,6 +1977,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     arguments: &serde_json::Value,
                 ) {
                     let _ = self.tx.send(AppEvent::ToolCallBegin {
+                        turn_id: self.turn_id,
                         call_id: call_id.to_string(),
                         tool_name: tool_name.to_string(),
                         arguments: arguments.clone(),
@@ -1903,6 +2009,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     result: &Result<ToolOutput, String>,
                 ) {
                     let _ = self.tx.send(AppEvent::ToolCallEnd {
+                        turn_id: self.turn_id,
                         call_id: call_id.to_string(),
                         tool_name: tool_name.to_string(),
                         result: result.clone(),
@@ -1919,7 +2026,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 }
             }
 
-            let mut observer = PlanObserver::new(tx.clone());
+            let mut observer = PlanObserver::new(tx.clone(), turn_id);
             let fallback_history = history.clone();
             let run_result = run_tool_loop_with_history_and_observer(
                 &model,
@@ -1938,35 +2045,45 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         && observer.selected_risk.is_some()
                         && observer.draft.is_some()
                     {
-                        let _ = tx.send(AppEvent::InsertHistoryCell(Box::new(
-                            AssistantHistoryCell::new(format!(
+                        let _ = tx.send(AppEvent::InsertHistoryCell {
+                            turn_id,
+                            cell: Box::new(AssistantHistoryCell::new(format!(
                                 "Planner response failed after draft submission. Continuing with the submitted draft.\nReason: {}",
                                 e
-                            )),
-                        )));
+                            ))),
+                        });
                         None
                     } else {
-                        let _ = tx.send(AppEvent::AgentEvent(AgentEvent::Error {
-                            message: e.to_string(),
-                        }));
+                        let _ = tx.send(AppEvent::AgentEvent {
+                            turn_id,
+                            event: AgentEvent::Error {
+                                message: e.to_string(),
+                            },
+                        });
                         return;
                     }
                 }
             };
 
             if !observer.risk_prompted {
-                let _ = tx.send(AppEvent::AgentEvent(AgentEvent::Error {
-                    message: "Plan failed: planner did not ask for risk profile.".to_string(),
-                }));
+                let _ = tx.send(AppEvent::AgentEvent {
+                    turn_id,
+                    event: AgentEvent::Error {
+                        message: "Plan failed: planner did not ask for risk profile.".to_string(),
+                    },
+                });
                 return;
             }
 
             let risk_level = match observer.selected_risk.clone() {
                 Some(level) => level,
                 None => {
-                    let _ = tx.send(AppEvent::AgentEvent(AgentEvent::Error {
-                        message: "Plan failed: risk profile was not selected.".to_string(),
-                    }));
+                    let _ = tx.send(AppEvent::AgentEvent {
+                        turn_id,
+                        event: AgentEvent::Error {
+                            message: "Plan failed: risk profile was not selected.".to_string(),
+                        },
+                    });
                     return;
                 }
             };
@@ -1974,9 +2091,12 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             let draft = match observer.draft.take() {
                 Some(d) => d,
                 None => {
-                    let _ = tx.send(AppEvent::AgentEvent(AgentEvent::Error {
-                        message: "Plan failed: no intent draft was submitted.".to_string(),
-                    }));
+                    let _ = tx.send(AppEvent::AgentEvent {
+                        turn_id,
+                        event: AgentEvent::Error {
+                            message: "Plan failed: no intent draft was submitted.".to_string(),
+                        },
+                    });
                     return;
                 }
             };
@@ -2006,12 +2126,15 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     .map(|i| format!("- {}: {}", i.path, i.message))
                     .collect::<Vec<_>>()
                     .join("\n");
-                let _ = tx.send(AppEvent::AgentEvent(AgentEvent::Error {
-                    message: format!(
-                        "Plan failed after automatic repair.\nValidation issues:\n{}",
-                        report
-                    ),
-                }));
+                let _ = tx.send(AppEvent::AgentEvent {
+                    turn_id,
+                    event: AgentEvent::Error {
+                        message: format!(
+                            "Plan failed after automatic repair.\nValidation issues:\n{}",
+                            report
+                        ),
+                    },
+                });
                 return;
             }
 
@@ -2019,9 +2142,12 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 match crate::internal::ai::intentspec::canonical::to_canonical_json(&spec) {
                     Ok(v) => v,
                     Err(e) => {
-                        let _ = tx.send(AppEvent::AgentEvent(AgentEvent::Error {
-                            message: format!("Plan failed: cannot serialize IntentSpec: {e}"),
-                        }));
+                        let _ = tx.send(AppEvent::AgentEvent {
+                            turn_id,
+                            event: AgentEvent::Error {
+                                message: format!("Plan failed: cannot serialize IntentSpec: {e}"),
+                            },
+                        });
                         return;
                     }
                 };
@@ -2071,9 +2197,12 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             let execution_plan = match compile_execution_plan_spec(&spec) {
                 Ok(plan) => plan,
                 Err(e) => {
-                    let _ = tx.send(AppEvent::AgentEvent(AgentEvent::Error {
-                        message: format!("Plan failed: cannot compile execution plan: {e}"),
-                    }));
+                    let _ = tx.send(AppEvent::AgentEvent {
+                        turn_id,
+                        event: AgentEvent::Error {
+                            message: format!("Plan failed: cannot compile execution plan: {e}"),
+                        },
+                    });
                     return;
                 }
             };
@@ -2116,6 +2245,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             new_history.push(Message::assistant(summary.clone()));
 
             let _ = tx.send(AppEvent::PlanWorkflowComplete {
+                turn_id,
                 text: summary,
                 new_history,
                 intent_id,
@@ -2181,6 +2311,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         if let Some(handle) = self.agent_task.take() {
             handle.abort();
         }
+        self.clear_active_turn();
     }
 
     fn insert_before_streaming_assistant(
@@ -2439,6 +2570,21 @@ fn summarize_retry_error(error: &str) -> String {
     }
 }
 
+fn summarize_tool_output(output: &ToolOutput) -> String {
+    let raw = match output {
+        ToolOutput::Function { content, .. } => content.as_str().trim().to_string(),
+        ToolOutput::Mcp { result } => serde_json::to_string(result).unwrap_or_default(),
+    };
+    const MAX_LEN: usize = 240;
+    if raw.chars().count() <= MAX_LEN {
+        raw
+    } else {
+        let mut truncated: String = raw.chars().take(MAX_LEN).collect();
+        truncated.push_str("...");
+        truncated
+    }
+}
+
 fn render_execution_plan_summary(plan: &ExecutionPlanSpec, plan_id: Option<&str>) -> String {
     let mut lines = Vec::new();
     lines.push("## Execution Plan".to_string());
@@ -2576,6 +2722,12 @@ fn current_head_sha(working_dir: &std::path::Path) -> String {
         }
         _ => "HEAD".to_string(),
     }
+}
+
+async fn current_head_sha_async(working_dir: std::path::PathBuf) -> String {
+    tokio::task::spawn_blocking(move || current_head_sha(&working_dir))
+        .await
+        .unwrap_or_else(|_| "HEAD".to_string())
 }
 
 fn parse_created_id(result: &rmcp::model::CallToolResult) -> Option<String> {

@@ -11,6 +11,9 @@ use crate::internal::ai::{
     tools::{ToolOutput, context::UserInputRequest},
 };
 
+/// Logical turn identifier for isolating async event streams.
+pub type TurnId = u64;
+
 /// Events emitted by agent execution to notify the UI.
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
@@ -64,17 +67,19 @@ pub enum ExitMode {
 #[derive(Debug)]
 pub enum AppEvent {
     /// Event from the agent execution.
-    AgentEvent(AgentEvent),
+    AgentEvent { turn_id: TurnId, event: AgentEvent },
     /// Request to exit the application.
     Exit(ExitMode),
     /// Submit a user message.
     SubmitUserMessage {
+        turn_id: TurnId,
         text: String,
         /// If set, restrict tools for this message (agent tool restriction).
         allowed_tools: Option<Vec<String>>,
     },
     /// Complete result for a `/plan` workflow run.
     PlanWorkflowComplete {
+        turn_id: TurnId,
         text: String,
         new_history: Vec<Message>,
         intent_id: Option<String>,
@@ -82,26 +87,73 @@ pub enum AppEvent {
         spec_json: String,
     },
     /// Insert a history cell into the chat.
-    InsertHistoryCell(Box<dyn HistoryCell>),
+    InsertHistoryCell {
+        turn_id: TurnId,
+        cell: Box<dyn HistoryCell>,
+    },
     /// Tool call is starting.
     ToolCallBegin {
+        turn_id: TurnId,
         call_id: String,
         tool_name: String,
         arguments: Value,
     },
     /// Tool call has completed.
     ToolCallEnd {
+        turn_id: TurnId,
         call_id: String,
         tool_name: String,
         result: Result<ToolOutput, String>,
     },
     /// Agent status has changed.
-    AgentStatusUpdate { status: AgentStatus },
+    AgentStatusUpdate {
+        turn_id: TurnId,
+        status: AgentStatus,
+    },
     /// The agent is requesting user input via the `request_user_input` tool.
     RequestUserInput { request: UserInputRequest },
     /// Orchestrator workflow completed.
     ExecuteWorkflowComplete {
+        turn_id: TurnId,
         text: String,
         new_history: Vec<Message>,
     },
+}
+
+impl AppEvent {
+    pub fn turn_id(&self) -> Option<TurnId> {
+        match self {
+            AppEvent::Exit(_) => None,
+            AppEvent::RequestUserInput { .. } => None,
+            AppEvent::AgentEvent { turn_id, .. }
+            | AppEvent::SubmitUserMessage { turn_id, .. }
+            | AppEvent::PlanWorkflowComplete { turn_id, .. }
+            | AppEvent::InsertHistoryCell { turn_id, .. }
+            | AppEvent::ToolCallBegin { turn_id, .. }
+            | AppEvent::ToolCallEnd { turn_id, .. }
+            | AppEvent::AgentStatusUpdate { turn_id, .. }
+            | AppEvent::ExecuteWorkflowComplete { turn_id, .. } => Some(*turn_id),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn turn_id_is_exposed_for_turn_scoped_events() {
+        let event = AppEvent::SubmitUserMessage {
+            turn_id: 42,
+            text: "hello".to_string(),
+            allowed_tools: None,
+        };
+        assert_eq!(event.turn_id(), Some(42));
+    }
+
+    #[test]
+    fn turn_id_is_none_for_non_turn_events() {
+        let event = AppEvent::Exit(ExitMode::Immediate);
+        assert_eq!(event.turn_id(), None);
+    }
 }
