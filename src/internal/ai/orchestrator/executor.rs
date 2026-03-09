@@ -15,6 +15,7 @@ use tokio::sync::Semaphore;
 
 use super::{
     acl::{AclVerdict, check_tool_acl},
+    checkpoint_policy::dagrs_checkpointing_enabled,
     gate, policy,
     run_state::{RunStateSnapshot, RunStateStore},
     types::{
@@ -398,6 +399,12 @@ struct DagrsDependencySignal {
     success: bool,
 }
 
+async fn broadcast_dependency_signal(out_channels: &mut OutChannels, success: bool) {
+    let _ = out_channels
+        .broadcast(dagrs::Content::new(DagrsDependencySignal { success }))
+        .await;
+}
+
 #[async_trait]
 impl<M: CompletionModel + 'static> Action for TaskDagrsAction<M> {
     async fn run(
@@ -423,22 +430,14 @@ impl<M: CompletionModel + 'static> Action for TaskDagrsAction<M> {
         }
 
         if !dependencies_ok {
-            let _ = out_channels
-                .broadcast(dagrs::Content::new(DagrsDependencySignal {
-                    success: false,
-                }))
-                .await;
+            broadcast_dependency_signal(out_channels, false).await;
             return Output::empty();
         }
 
         let _parallel_permit = match Arc::clone(&self.parallelism).acquire_owned().await {
             Ok(permit) => permit,
             Err(err) => {
-                let _ = out_channels
-                    .broadcast(dagrs::Content::new(DagrsDependencySignal {
-                        success: false,
-                    }))
-                    .await;
+                broadcast_dependency_signal(out_channels, false).await;
                 return Output::error(format!(
                     "failed to acquire execution permit for task {}: {}",
                     self.task.title(),
@@ -461,17 +460,11 @@ impl<M: CompletionModel + 'static> Action for TaskDagrsAction<M> {
 
         match result.status {
             TaskNodeStatus::Completed => {
-                let _ = out_channels
-                    .broadcast(dagrs::Content::new(DagrsDependencySignal { success: true }))
-                    .await;
+                broadcast_dependency_signal(out_channels, true).await;
                 Output::empty()
             }
             TaskNodeStatus::Failed => {
-                let _ = out_channels
-                    .broadcast(dagrs::Content::new(DagrsDependencySignal {
-                        success: false,
-                    }))
-                    .await;
+                broadcast_dependency_signal(out_channels, false).await;
                 Output::error(
                     result
                         .agent_output
@@ -480,19 +473,11 @@ impl<M: CompletionModel + 'static> Action for TaskDagrsAction<M> {
                 )
             }
             TaskNodeStatus::Skipped => {
-                let _ = out_channels
-                    .broadcast(dagrs::Content::new(DagrsDependencySignal {
-                        success: false,
-                    }))
-                    .await;
+                broadcast_dependency_signal(out_channels, false).await;
                 Output::empty()
             }
             TaskNodeStatus::Pending | TaskNodeStatus::Running => {
-                let _ = out_channels
-                    .broadcast(dagrs::Content::new(DagrsDependencySignal {
-                        success: false,
-                    }))
-                    .await;
+                broadcast_dependency_signal(out_channels, false).await;
                 Output::error(format!(
                     "task {} returned invalid terminal state",
                     self.task.title()
@@ -565,20 +550,6 @@ fn configure_graph_runtime(graph: &mut Graph, plan: &ExecutionPlanSpec, config: 
             .with_node_interval(checkpoint_interval)
             .with_max_checkpoints(8),
     );
-}
-
-fn dagrs_checkpointing_enabled(spec: &IntentSpec) -> bool {
-    let checkpoint_on_replan = spec
-        .libra
-        .as_ref()
-        .and_then(|libra| libra.context_pipeline.as_ref())
-        .is_none_or(|pipeline| pipeline.checkpoint_on_replan);
-    let checkpoint_before_replan = spec
-        .libra
-        .as_ref()
-        .and_then(|libra| libra.decision_policy.as_ref())
-        .is_none_or(|policy| policy.checkpoint_before_replan);
-    checkpoint_on_replan || checkpoint_before_replan
 }
 
 fn dagrs_checkpoint_dir(working_dir: &Path, plan: &ExecutionPlanSpec) -> PathBuf {

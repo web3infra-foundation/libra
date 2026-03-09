@@ -12,6 +12,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use super::{
+    checkpoint_policy::{checkpoint_before_replan, checkpoint_on_replan},
     run_state::RunStateSnapshot,
     types::{
         DecisionOutcome, ExecutionPlanSpec, GateStage, OrchestratorError, PersistedCheckpoint,
@@ -258,18 +259,21 @@ pub async fn persist_execution(
                     gate.kind,
                     if gate.passed { "passed" } else { "failed" }
                 );
-                let evidence_id = create_evidence(EvidenceRequest {
-                    mcp_server: request.mcp_server,
-                    run_id: &run_id,
-                    patchset_id: persisted.patchset_id.as_deref(),
-                    kind: normalize_evidence_kind(&gate.kind),
-                    tool: task_gate_tool_name(task.gate_stage.as_ref()),
-                    command: Some(gate.check_id.clone()),
-                    exit_code: Some(gate.exit_code),
-                    summary: Some(summary),
-                })
+                let patchset_id = persisted.patchset_id.clone();
+                append_evidence_id(
+                    &mut persisted,
+                    EvidenceRequest {
+                        mcp_server: request.mcp_server,
+                        run_id: &run_id,
+                        patchset_id: patchset_id.as_deref(),
+                        kind: normalize_evidence_kind(&gate.kind),
+                        tool: task_gate_tool_name(task.gate_stage.as_ref()),
+                        command: Some(gate.check_id.clone()),
+                        exit_code: Some(gate.exit_code),
+                        summary: Some(summary),
+                    },
+                )
                 .await?;
-                persisted.evidence_ids.push(evidence_id);
             }
         }
 
@@ -280,18 +284,21 @@ pub async fn persist_execution(
                 .map(|violation| format!("{}: {}", violation.code, violation.message))
                 .collect::<Vec<_>>()
                 .join("; ");
-            let evidence_id = create_evidence(EvidenceRequest {
-                mcp_server: request.mcp_server,
-                run_id: &run_id,
-                patchset_id: persisted.patchset_id.as_deref(),
-                kind: "policy",
-                tool: "policy-engine",
-                command: None,
-                exit_code: None,
-                summary: Some(summary),
-            })
+            let patchset_id = persisted.patchset_id.clone();
+            append_evidence_id(
+                &mut persisted,
+                EvidenceRequest {
+                    mcp_server: request.mcp_server,
+                    run_id: &run_id,
+                    patchset_id: patchset_id.as_deref(),
+                    kind: "policy",
+                    tool: "policy-engine",
+                    command: None,
+                    exit_code: None,
+                    summary: Some(summary),
+                },
+            )
             .await?;
-            persisted.evidence_ids.push(evidence_id);
         }
 
         if let Some(review) = &result.review {
@@ -300,18 +307,21 @@ pub async fn persist_execution(
             } else {
                 format!("{} [{}]", review.summary, review.issues.join("; "))
             };
-            let evidence_id = create_evidence(EvidenceRequest {
-                mcp_server: request.mcp_server,
-                run_id: &run_id,
-                patchset_id: persisted.patchset_id.as_deref(),
-                kind: "review",
-                tool: "reviewer",
-                command: None,
-                exit_code: None,
-                summary: Some(summary),
-            })
+            let patchset_id = persisted.patchset_id.clone();
+            append_evidence_id(
+                &mut persisted,
+                EvidenceRequest {
+                    mcp_server: request.mcp_server,
+                    run_id: &run_id,
+                    patchset_id: patchset_id.as_deref(),
+                    kind: "review",
+                    tool: "reviewer",
+                    command: None,
+                    exit_code: None,
+                    summary: Some(summary),
+                },
+            )
             .await?;
-            persisted.evidence_ids.push(evidence_id);
         }
 
         persisted_tasks.push(persisted);
@@ -895,6 +905,15 @@ async fn create_evidence(request: EvidenceRequest<'_>) -> Result<String, Orchest
     parse_created_id("evidence", &result)
 }
 
+async fn append_evidence_id(
+    persisted: &mut PersistedTaskArtifacts,
+    request: EvidenceRequest<'_>,
+) -> Result<(), OrchestratorError> {
+    let evidence_id = create_evidence(request).await?;
+    persisted.evidence_ids.push(evidence_id);
+    Ok(())
+}
+
 async fn create_decision(request: FinalDecisionRequest<'_>) -> Result<String, OrchestratorError> {
     let decision_type = match request.decision {
         DecisionOutcome::Commit => "commit",
@@ -1314,20 +1333,6 @@ fn snapshot_on_run_start(spec: &IntentSpec) -> bool {
         .as_ref()
         .and_then(|libra| libra.run_policy.as_ref())
         .is_none_or(|policy| policy.snapshot_on_run_start)
-}
-
-fn checkpoint_on_replan(spec: &IntentSpec) -> bool {
-    spec.libra
-        .as_ref()
-        .and_then(|libra| libra.context_pipeline.as_ref())
-        .is_none_or(|pipeline| pipeline.checkpoint_on_replan)
-}
-
-fn checkpoint_before_replan(spec: &IntentSpec) -> bool {
-    spec.libra
-        .as_ref()
-        .and_then(|libra| libra.decision_policy.as_ref())
-        .is_none_or(|policy| policy.checkpoint_before_replan)
 }
 
 #[cfg(test)]

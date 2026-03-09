@@ -1,4 +1,5 @@
 pub mod acl;
+mod checkpoint_policy;
 pub mod decider;
 pub mod executor;
 pub mod gate;

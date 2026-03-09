@@ -41,6 +41,10 @@ use crate::internal::{
     tui::{App, AppConfig, Tui, tui_init, tui_restore},
 };
 
+const DEFAULT_WEB_PORT: u16 = 3000;
+const DEFAULT_MCP_PORT: u16 = 6789;
+const DEFAULT_BIND_HOST: &str = "127.0.0.1";
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum CodeProvider {
     Gemini,
@@ -68,11 +72,11 @@ pub struct CodeArgs {
     pub web_only: bool,
 
     /// Port to listen on (web server)
-    #[arg(short, long, default_value = "3000")]
+    #[arg(short, long, default_value_t = DEFAULT_WEB_PORT)]
     pub port: u16,
 
     /// Host address to bind to (web server)
-    #[arg(long, default_value = "127.0.0.1")]
+    #[arg(long, default_value = DEFAULT_BIND_HOST)]
     pub host: String,
 
     /// AI provider backend
@@ -96,7 +100,7 @@ pub struct CodeArgs {
     pub resume: bool,
 
     /// Port to listen on (MCP server)
-    #[arg(long, default_value_t = 6789)]
+    #[arg(long, default_value_t = DEFAULT_MCP_PORT)]
     pub mcp_port: u16,
 
     /// Run the MCP server over Stdio (for Claude Desktop integration)
@@ -114,7 +118,7 @@ pub async fn execute(args: CodeArgs) {
         return;
     }
     if args.stdio {
-        execute_stdio(args).await
+        execute_stdio().await
     } else if args.web_only {
         execute_web_only(args).await
     } else {
@@ -138,14 +142,27 @@ async fn root() -> Html<&'static str> {
     )
 }
 
-struct WebHandle {
+struct WebServerHandle {
+    addr: SocketAddr,
+    shutdown_tx: oneshot::Sender<()>,
+    join: tokio::task::JoinHandle<anyhow::Result<()>>,
+}
+
+impl WebServerHandle {
+    async fn shutdown(self) {
+        let _ = self.shutdown_tx.send(());
+        let _ = self.join.await;
+    }
+}
+
+struct McpServerHandle {
     addr: SocketAddr,
     shutdown_tx: oneshot::Sender<()>,
     join: tokio::task::JoinHandle<anyhow::Result<()>>,
     connection_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
-impl WebHandle {
+impl McpServerHandle {
     async fn shutdown(self) {
         let _ = self.shutdown_tx.send(());
         let _ = self.join.await;
@@ -160,7 +177,7 @@ impl WebHandle {
     }
 }
 
-async fn start_web_server(host: &str, port: u16) -> anyhow::Result<WebHandle> {
+async fn start_web_server(host: &str, port: u16) -> anyhow::Result<WebServerHandle> {
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
@@ -176,11 +193,10 @@ async fn start_web_server(host: &str, port: u16) -> anyhow::Result<WebHandle> {
             .map_err(|e| anyhow::anyhow!(e))
     });
 
-    Ok(WebHandle {
+    Ok(WebServerHandle {
         addr,
         shutdown_tx,
         join,
-        connection_tasks: Arc::new(Mutex::new(Vec::new())),
     })
 }
 
@@ -524,7 +540,7 @@ async fn start_mcp_server(
     host: &str,
     port: u16,
     mcp_server: Arc<LibraMcpServer>,
-) -> anyhow::Result<WebHandle> {
+) -> anyhow::Result<McpServerHandle> {
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
@@ -577,7 +593,7 @@ async fn start_mcp_server(
         Ok(())
     });
 
-    Ok(WebHandle {
+    Ok(McpServerHandle {
         addr,
         shutdown_tx,
         join,
@@ -654,7 +670,7 @@ fn resolve_storage_root(working_dir: &std::path::Path) -> std::path::PathBuf {
         .unwrap_or_else(|_| working_dir.join(".libra"))
 }
 
-async fn execute_stdio(_args: CodeArgs) {
+async fn execute_stdio() {
     // Use repository working directory to ensure correct initialization of .libra resources.
     let working_dir = crate::utils::util::working_dir();
 
@@ -670,8 +686,7 @@ async fn execute_stdio(_args: CodeArgs) {
 
     match serve_server(mcp_server, transport).await {
         Ok(running) => {
-            let result = running.waiting().await;
-            if let Err(e) = result {
+            if let Err(e) = running.waiting().await {
                 eprintln!("MCP Stdio server error: {}", e);
             }
         }
@@ -690,28 +705,14 @@ fn validate_mode_args(args: &CodeArgs) -> Result<(), String> {
     }
 
     if args.web_only {
-        reject_mode_flag(args.provider != CodeProvider::Gemini, "--provider", "--web")?;
-        reject_mode_flag(args.model.is_some(), "--model", "--web")?;
-        reject_mode_flag(args.temperature.is_some(), "--temperature", "--web")?;
-        reject_mode_flag(args.context.is_some(), "--context", "--web")?;
-        reject_mode_flag(args.resume, "--resume", "--web")?;
-        reject_mode_flag(args.api_base.is_some(), "--api-base", "--web")?;
+        reject_non_tui_flags(args, "--web")?;
     }
 
     if args.stdio {
-        reject_mode_flag(
-            args.provider != CodeProvider::Gemini,
-            "--provider",
-            "--stdio",
-        )?;
-        reject_mode_flag(args.model.is_some(), "--model", "--stdio")?;
-        reject_mode_flag(args.temperature.is_some(), "--temperature", "--stdio")?;
-        reject_mode_flag(args.context.is_some(), "--context", "--stdio")?;
-        reject_mode_flag(args.resume, "--resume", "--stdio")?;
-        reject_mode_flag(args.api_base.is_some(), "--api-base", "--stdio")?;
-        reject_mode_flag(args.host != "127.0.0.1", "--host", "--stdio")?;
-        reject_mode_flag(args.port != 3000, "--port", "--stdio")?;
-        reject_mode_flag(args.mcp_port != 6789, "--mcp-port", "--stdio")?;
+        reject_non_tui_flags(args, "--stdio")?;
+        reject_mode_flag(args.host != DEFAULT_BIND_HOST, "--host", "--stdio")?;
+        reject_mode_flag(args.port != DEFAULT_WEB_PORT, "--port", "--stdio")?;
+        reject_mode_flag(args.mcp_port != DEFAULT_MCP_PORT, "--mcp-port", "--stdio")?;
     }
 
     Ok(())
@@ -724,6 +725,16 @@ fn reject_mode_flag(is_invalid: bool, flag: &str, mode: &str) -> Result<(), Stri
     Ok(())
 }
 
+fn reject_non_tui_flags(args: &CodeArgs, mode: &str) -> Result<(), String> {
+    reject_mode_flag(args.provider != CodeProvider::Gemini, "--provider", mode)?;
+    reject_mode_flag(args.model.is_some(), "--model", mode)?;
+    reject_mode_flag(args.temperature.is_some(), "--temperature", mode)?;
+    reject_mode_flag(args.context.is_some(), "--context", mode)?;
+    reject_mode_flag(args.resume, "--resume", mode)?;
+    reject_mode_flag(args.api_base.is_some(), "--api-base", mode)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -731,14 +742,14 @@ mod tests {
     fn base_args() -> CodeArgs {
         CodeArgs {
             web_only: false,
-            port: 3000,
-            host: "127.0.0.1".to_string(),
+            port: DEFAULT_WEB_PORT,
+            host: DEFAULT_BIND_HOST.to_string(),
             provider: CodeProvider::Gemini,
             model: None,
             temperature: None,
             context: None,
             resume: false,
-            mcp_port: 6789,
+            mcp_port: DEFAULT_MCP_PORT,
             stdio: false,
             api_base: None,
         }

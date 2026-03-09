@@ -67,13 +67,6 @@ use crate::{
     },
 };
 
-/// MCP resource IDs for tracking the workflow
-#[derive(Debug, Clone, Default)]
-pub struct McpIds {
-    pub plan_id: Option<String>,
-    pub run_id: Option<String>,
-}
-
 #[derive(Debug, Clone, Default)]
 struct McpWriteTracker {
     tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
@@ -224,8 +217,6 @@ pub struct App<M: CompletionModel> {
     app_event_rx: UnboundedReceiver<AppEvent>,
     /// Sender for app events.
     app_event_tx: UnboundedSender<AppEvent>,
-    /// Whether the app should exit.
-    should_exit: bool,
     /// The exit info, if any.
     exit_info: Option<AppExitInfo>,
     /// Last draw time for frame rate control.
@@ -256,8 +247,10 @@ pub struct App<M: CompletionModel> {
     provider_name: String,
     /// MCP server instance for writing data.
     mcp_server: Option<Arc<LibraMcpServer>>,
-    /// MCP resource IDs for tracking the workflow
-    mcp_ids: McpIds,
+    /// Latest execution plan ID for attaching new turn runs.
+    mcp_plan_id: Option<String>,
+    /// Active turn run ID for appending decisions and tool invocations.
+    mcp_run_id: Option<String>,
     /// Pending detached MCP write operations that must finish before shutdown.
     mcp_write_tracker: McpWriteTracker,
     /// Current active async turn. Events from stale turns are ignored.
@@ -316,15 +309,12 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         widget
             .bottom_pane
             .set_cwd(registry.working_dir().to_path_buf());
-        let mut mcp_ids = McpIds::default();
-        if let Some(plan_id) = app_config
+        let mcp_plan_id = app_config
             .session
             .metadata
             .get(LATEST_EXECUTION_PLAN_ID)
             .and_then(|value| value.as_str())
-        {
-            mcp_ids.plan_id = Some(plan_id.to_string());
-        }
+            .map(ToString::to_string);
         Self {
             tui,
             widget,
@@ -340,7 +330,6 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             history,
             app_event_rx,
             app_event_tx,
-            should_exit: false,
             exit_info: None,
             last_draw_time: Instant::now(),
             agent_task: None,
@@ -356,7 +345,8 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             model_name: app_config.model_name,
             provider_name: app_config.provider_name,
             mcp_server: app_config.mcp_server,
-            mcp_ids,
+            mcp_plan_id,
+            mcp_run_id: None,
             mcp_write_tracker: McpWriteTracker::default(),
             active_turn_id: None,
             next_turn_id: 1,
@@ -415,7 +405,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
         loop {
             // Check if we should exit
-            if self.should_exit {
+            if self.exit_info.is_some() {
                 break;
             }
 
@@ -427,9 +417,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
                 // Handle app events
                 Some(event) = self.app_event_rx.recv() => {
-                    if self.handle_app_event(event).await? {
-                        break;
-                    }
+                    self.handle_app_event(event).await?;
                 }
 
                 // Handle user-input requests from the tool handler
@@ -472,6 +460,11 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         self.active_turn_id = None;
         self.active_turn_signal.store(0, Ordering::Relaxed);
         self.active_turn_run_id = None;
+    }
+
+    fn clear_turn_tracking(&mut self) {
+        self.clear_active_turn();
+        self.clear_mcp_run_id();
     }
 
     fn is_active_turn(&self, turn_id: TurnId) -> bool {
@@ -519,7 +512,6 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             self.exit_info = Some(AppExitInfo {
                 reason: ExitReason::UserRequested,
             });
-            self.should_exit = true;
             return Ok(());
         }
 
@@ -654,8 +646,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         "Turn interrupted by user".to_string(),
                     );
                     self.interrupt_agent_task();
-                    self.clear_mcp_turn_ids();
-                    self.running_tool_calls = 0;
+                    self.clear_mcp_run_id();
                     self.widget.bottom_pane.set_status(AgentStatus::Idle);
                     self.complete_streaming_assistant_cell("Interrupted.".to_string());
                     self.complete_running_tool_cells_with_interrupt();
@@ -703,13 +694,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 if let Some(ref mut pending) = self.pending_user_input {
                     let q = &pending.request.questions[pending.current_question];
                     let base = q.options.as_ref().map_or(0, |o| o.len());
-                    let max = if q.is_other {
-                        base
-                    } else if base > 0 {
-                        base - 1
-                    } else {
-                        0
-                    };
+                    let max = max_selectable_option(base, q.is_other);
                     if pending.selected_option < max {
                         pending.selected_option += 1;
                     }
@@ -723,13 +708,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 if let Some(ref mut pending) = self.pending_user_input {
                     let q = &pending.request.questions[pending.current_question];
                     let base = q.options.as_ref().map_or(0, |o| o.len());
-                    let max = if q.is_other {
-                        base
-                    } else if base > 0 {
-                        base - 1
-                    } else {
-                        0
-                    };
+                    let max = max_selectable_option(base, q.is_other);
                     if idx <= max {
                         pending.selected_option = idx;
                     }
@@ -903,9 +882,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
     }
 
     /// Handle an app event.
-    async fn handle_app_event(&mut self, event: AppEvent) -> anyhow::Result<bool> {
+    async fn handle_app_event(&mut self, event: AppEvent) -> anyhow::Result<()> {
         if !self.is_active_turn(event.turn_id()) {
-            return Ok(false);
+            return Ok(());
         }
 
         match event {
@@ -927,7 +906,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     .add_cell(Box::new(AssistantHistoryCell::streaming()));
                 self.widget.bottom_pane.set_status(AgentStatus::Thinking);
                 self.schedule_draw();
-                self.clear_mcp_turn_ids();
+                self.clear_mcp_run_id();
                 if let Some(run_id_slot) = self.active_turn_run_id.as_ref()
                     && let Ok(mut slot) = run_id_slot.lock()
                 {
@@ -936,7 +915,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 if let Some(mcp_server) = self.mcp_server.clone() {
                     let tx = self.app_event_tx.clone();
                     let working_dir = self.registry.working_dir().to_path_buf();
-                    let plan_id = self.mcp_ids.plan_id.clone();
+                    let plan_id = self.mcp_plan_id.clone();
                     let mcp_text = text.clone();
                     tokio::spawn(async move {
                         match timeout(
@@ -1133,47 +1112,27 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             } => {
                 match agent_event {
                     AgentEvent::ResponseComplete { text, new_history } => {
-                        self.agent_task = None;
-                        self.running_tool_calls = 0;
                         self.enqueue_mcp_turn_decision(
                             "checkpoint",
                             "Turn completed successfully".to_string(),
                         );
-                        self.clear_mcp_turn_ids();
-                        self.clear_active_turn();
+                        self.finish_turn_state();
                         self.history = new_history;
 
                         // Track in session
                         self.session.add_assistant_message(&text);
-
-                        // Find and complete the streaming assistant cell
-                        // (may not be the last cell if tool calls were made)
-                        for cell in self.widget.cells.iter_mut().rev() {
-                            if let Some(assistant_cell) =
-                                cell.as_any_mut().downcast_mut::<AssistantHistoryCell>()
-                                && assistant_cell.is_streaming
-                            {
-                                assistant_cell.content = text;
-                                assistant_cell.complete();
-                                break;
-                            }
-                        }
-                        self.widget.bottom_pane.set_status(AgentStatus::Idle);
-                        self.schedule_draw();
+                        self.complete_streaming_assistant_cell(text);
+                        self.set_idle_and_draw();
                     }
                     AgentEvent::Error { message } => {
-                        self.agent_task = None;
-                        self.running_tool_calls = 0;
                         self.enqueue_mcp_turn_decision(
                             "abandon",
                             format!("Turn failed: {message}"),
                         );
-                        self.clear_mcp_turn_ids();
-                        self.clear_active_turn();
+                        self.finish_turn_state();
 
                         self.complete_streaming_assistant_cell(format!("Error: {}", message));
-                        self.widget.bottom_pane.set_status(AgentStatus::Idle);
-                        self.schedule_draw();
+                        self.set_idle_and_draw();
                     }
                     AgentEvent::Retrying {
                         attempt,
@@ -1198,10 +1157,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 plan_id,
                 spec_json,
             } => {
-                self.agent_task = None;
-                self.running_tool_calls = 0;
-                self.clear_active_turn();
-                self.clear_mcp_turn_ids();
+                self.finish_turn_state();
                 self.history = new_history;
                 self.session.add_assistant_message(&text);
                 self.session.metadata.insert(
@@ -1221,10 +1177,10 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         LATEST_EXECUTION_PLAN_ID.to_string(),
                         serde_json::Value::String(id.clone()),
                     );
-                    self.mcp_ids.plan_id = Some(id);
+                    self.mcp_plan_id = Some(id);
                 } else {
                     self.session.metadata.remove(LATEST_EXECUTION_PLAN_ID);
-                    self.mcp_ids.plan_id = None;
+                    self.mcp_plan_id = None;
                 }
 
                 self.complete_streaming_assistant_cell(text);
@@ -1324,7 +1280,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 turn_id: _turn_id,
                 run_id,
             } => {
-                self.mcp_ids.run_id = run_id.clone();
+                self.mcp_run_id = run_id.clone();
                 if let Some(run_id_slot) = self.active_turn_run_id.as_ref()
                     && let Ok(mut slot) = run_id_slot.lock()
                 {
@@ -1336,19 +1292,15 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 text,
                 new_history,
             } => {
-                self.agent_task = None;
-                self.running_tool_calls = 0;
-                self.clear_active_turn();
-                self.clear_mcp_turn_ids();
+                self.finish_turn_state();
                 self.history = new_history;
                 self.session.add_assistant_message(&text);
                 self.complete_streaming_assistant_cell(text);
-                self.widget.bottom_pane.set_status(AgentStatus::Idle);
-                self.schedule_draw();
+                self.set_idle_and_draw();
             }
         }
 
-        Ok(false)
+        Ok(())
     }
 
     /// Submit a user message, expanding slash commands and applying agent context.
@@ -1415,7 +1367,8 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 self.widget.clear();
                 self.history.clear();
                 self.session = SessionState::new(&self.registry.working_dir().to_string_lossy());
-                self.mcp_ids = McpIds::default();
+                self.mcp_plan_id = None;
+                self.mcp_run_id = None;
             }
             BuiltinCommand::Model => {
                 let info = format!(
@@ -1442,7 +1395,6 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 self.handle_intent_command(args).await;
             }
             BuiltinCommand::Quit => {
-                self.should_exit = true;
                 self.exit_info = Some(AppExitInfo {
                     reason: ExitReason::UserRequested,
                 });
@@ -1451,8 +1403,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
     }
 
     async fn create_mcp_exit_decision(&self, reason: &ExitReason) {
-        let (Some(mcp_server), Some(run_id)) =
-            (self.mcp_server.clone(), self.mcp_ids.run_id.clone())
+        let (Some(mcp_server), Some(run_id)) = (self.mcp_server.clone(), self.mcp_run_id.clone())
         else {
             return;
         };
@@ -1465,92 +1416,33 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             ),
         };
 
-        let decision_params = CreateDecisionParams {
-            run_id,
-            decision_type: decision_type.to_string(),
-            chosen_patchset_id: None,
-            result_commit_sha: None,
-            rationale: Some(rationale),
-            checkpoint_id: None,
-            tags: None,
-            external_ids: None,
-            actor_kind: Some("system".to_string()),
-            actor_id: Some("libra-code".to_string()),
-        };
-        let actor = match mcp_server.resolve_actor_from_params(
-            decision_params.actor_kind.as_deref(),
-            decision_params.actor_id.as_deref(),
-        ) {
-            Ok(actor) => actor,
-            Err(e) => {
-                cli_error!(e, "error: failed to resolve actor for decision");
-                return;
-            }
-        };
-
-        match mcp_server
-            .create_decision_impl(decision_params, actor)
-            .await
-        {
-            Ok(result) => {
-                if result.is_error.unwrap_or(false) {
-                    render_mcp_error("failed to create decision", result.content);
-                }
-            }
-            Err(e) => {
-                cli_error!(e, "error: failed to create decision");
-            }
-        }
+        write_mcp_decision(mcp_server, run_id, decision_type.to_string(), rationale).await;
     }
 
     fn enqueue_mcp_turn_decision(&self, decision_type: &str, rationale: String) {
-        let (Some(mcp_server), Some(run_id)) =
-            (self.mcp_server.clone(), self.mcp_ids.run_id.clone())
+        let (Some(mcp_server), Some(run_id)) = (self.mcp_server.clone(), self.mcp_run_id.clone())
         else {
             return;
         };
         let decision_type = decision_type.to_string();
         self.mcp_write_tracker.spawn(async move {
-            let decision_params = CreateDecisionParams {
-                run_id,
-                decision_type,
-                chosen_patchset_id: None,
-                result_commit_sha: None,
-                rationale: Some(rationale),
-                checkpoint_id: None,
-                tags: None,
-                external_ids: None,
-                actor_kind: Some("system".to_string()),
-                actor_id: Some("libra-code".to_string()),
-            };
-            let actor = match mcp_server.resolve_actor_from_params(
-                decision_params.actor_kind.as_deref(),
-                decision_params.actor_id.as_deref(),
-            ) {
-                Ok(actor) => actor,
-                Err(e) => {
-                    cli_error!(e, "error: failed to resolve actor for turn decision");
-                    return;
-                }
-            };
-            match mcp_server
-                .create_decision_impl(decision_params, actor)
-                .await
-            {
-                Ok(result) => {
-                    if result.is_error.unwrap_or(false) {
-                        render_mcp_error("failed to create turn decision", result.content);
-                    }
-                }
-                Err(e) => {
-                    cli_error!(e, "error: failed to create turn decision");
-                }
-            }
+            write_mcp_decision(mcp_server, run_id, decision_type, rationale).await;
         });
     }
 
-    fn clear_mcp_turn_ids(&mut self) {
-        self.mcp_ids.run_id = None;
+    fn clear_mcp_run_id(&mut self) {
+        self.mcp_run_id = None;
+    }
+
+    fn finish_turn_state(&mut self) {
+        self.agent_task = None;
+        self.running_tool_calls = 0;
+        self.clear_turn_tracking();
+    }
+
+    fn set_idle_and_draw(&mut self) {
+        self.widget.bottom_pane.set_status(AgentStatus::Idle);
+        self.schedule_draw();
     }
 
     // ── Post-plan dialog ────────────────────────────────────────────
@@ -1586,8 +1478,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
     fn dismiss_post_plan_dialog(&mut self) {
         self.pending_post_plan = None;
-        self.widget.bottom_pane.set_status(AgentStatus::Idle);
-        self.schedule_draw();
+        self.set_idle_and_draw();
     }
 
     async fn start_execute_workflow(&mut self, spec_json: &str) {
@@ -1606,8 +1497,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     .add_cell(Box::new(AssistantHistoryCell::new(format!(
                         "Failed to parse IntentSpec: {e}"
                     ))));
-                self.widget.bottom_pane.set_status(AgentStatus::Idle);
-                self.schedule_draw();
+                self.set_idle_and_draw();
                 return;
             }
         };
@@ -2520,6 +2410,58 @@ fn summarize_retry_error(error: &str) -> String {
         "network issue".to_string()
     } else {
         "transient error".to_string()
+    }
+}
+
+fn max_selectable_option(base: usize, is_other: bool) -> usize {
+    if is_other {
+        base
+    } else {
+        base.saturating_sub(1)
+    }
+}
+
+async fn write_mcp_decision(
+    mcp_server: Arc<LibraMcpServer>,
+    run_id: String,
+    decision_type: String,
+    rationale: String,
+) {
+    let decision_params = CreateDecisionParams {
+        run_id,
+        decision_type,
+        chosen_patchset_id: None,
+        result_commit_sha: None,
+        rationale: Some(rationale),
+        checkpoint_id: None,
+        tags: None,
+        external_ids: None,
+        actor_kind: Some("system".to_string()),
+        actor_id: Some("libra-code".to_string()),
+    };
+    let actor = match mcp_server.resolve_actor_from_params(
+        decision_params.actor_kind.as_deref(),
+        decision_params.actor_id.as_deref(),
+    ) {
+        Ok(actor) => actor,
+        Err(e) => {
+            cli_error!(e, "error: failed to resolve actor for decision");
+            return;
+        }
+    };
+
+    match mcp_server
+        .create_decision_impl(decision_params, actor)
+        .await
+    {
+        Ok(result) => {
+            if result.is_error.unwrap_or(false) {
+                render_mcp_error("failed to create decision", result.content);
+            }
+        }
+        Err(e) => {
+            cli_error!(e, "error: failed to create decision");
+        }
     }
 }
 
