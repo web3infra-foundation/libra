@@ -86,7 +86,10 @@ impl McpWriteTracker {
     {
         let handle = tokio::spawn(fut);
         match self.tasks.lock() {
-            Ok(mut tasks) => tasks.push(handle),
+            Ok(mut tasks) => {
+                tasks.retain(|task| !task.is_finished());
+                tasks.push(handle);
+            }
             Err(_) => handle.abort(),
         }
     }

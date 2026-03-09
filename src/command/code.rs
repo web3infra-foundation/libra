@@ -626,7 +626,10 @@ async fn start_mcp_server(
                                 }
                             });
                             match tracked_connections.lock() {
-                                Ok(mut tasks) => tasks.push(conn_task),
+                                Ok(mut tasks) => {
+                                    tasks.retain(|task| !task.is_finished());
+                                    tasks.push(conn_task);
+                                }
                                 Err(_) => conn_task.abort(),
                             }
                         }
