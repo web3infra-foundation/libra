@@ -391,7 +391,6 @@ mod tests {
         let release_id = release_task.header().object_id();
         ExecutionPlanSpec {
             intent_spec_id: "test".into(),
-            summary: "summary".into(),
             revision: 1,
             parent_revision: None,
             replan_reason: None,
@@ -430,7 +429,6 @@ mod tests {
                 },
             ],
             max_parallel: 1,
-            parallel_groups: vec![],
             checkpoints: vec![ExecutionCheckpoint {
                 label: "after-release".into(),
                 after_tasks: vec![release_id],

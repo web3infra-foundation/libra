@@ -1200,13 +1200,11 @@ mod tests {
     fn plan_for_tasks(tasks: Vec<TaskSpec>, max_parallel: u8) -> ExecutionPlanSpec {
         ExecutionPlanSpec {
             intent_spec_id: "test".into(),
-            summary: "test plan".into(),
             revision: 1,
             parent_revision: None,
             replan_reason: None,
             tasks,
             max_parallel,
-            parallel_groups: vec![],
             checkpoints: vec![],
         }
     }

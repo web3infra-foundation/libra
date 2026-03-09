@@ -1503,9 +1503,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     self.send_note(format!(
                         "Compiled execution plan rev {}: {}  \nTasks: {} | Parallel groups: {} | Checkpoints: {}",
                         plan.revision,
-                        plan.summary,
+                        plan.summary_line(),
                         plan.tasks.len(),
-                        plan.parallel_groups.len(),
+                        plan.parallel_groups().len(),
                         plan.checkpoints.len()
                     ));
                 }
@@ -2208,8 +2208,8 @@ fn format_orchestrator_result(
     lines.push(String::new());
     lines.push(format!(
         "Plan: {} | Parallel groups: {} | Replans: {}",
-        result.execution_plan_spec.summary,
-        result.execution_plan_spec.parallel_groups.len(),
+        result.execution_plan_spec.summary_line(),
+        result.execution_plan_spec.parallel_groups().len(),
         result.replan_count
     ));
     if let Some(persistence) = &result.persistence {
@@ -2320,10 +2320,10 @@ fn render_execution_plan_summary(plan: &ExecutionPlanSpec, plan_id: Option<&str>
     if let Some(id) = plan_id {
         lines.push(format!("Plan ID: {id}"));
     }
-    lines.push(plan.summary.clone());
+    lines.push(plan.summary_line());
     lines.push(format!(
         "Parallel groups: {} | Checkpoints: {}",
-        plan.parallel_groups.len(),
+        plan.parallel_groups().len(),
         plan.checkpoints.len()
     ));
     lines.push(String::new());

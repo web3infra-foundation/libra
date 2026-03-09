@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
 
 use git_internal::internal::object::{plan::PlanStep, task::Task as GitTask};
 use serde::{Deserialize, Serialize};
@@ -140,7 +140,6 @@ pub struct ExecutionCheckpoint {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ExecutionPlanSpec {
     pub intent_spec_id: String,
-    pub summary: String,
     #[serde(default = "default_execution_revision")]
     pub revision: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -151,9 +150,49 @@ pub struct ExecutionPlanSpec {
     pub tasks: Vec<TaskSpec>,
     pub max_parallel: u8,
     #[serde(default)]
-    pub parallel_groups: Vec<Vec<Uuid>>,
-    #[serde(default)]
     pub checkpoints: Vec<ExecutionCheckpoint>,
+}
+
+impl ExecutionPlanSpec {
+    pub fn summary_line(&self) -> String {
+        let mut summary = format!(
+            "plan revision {} for intent {} ({} tasks, parallelism {})",
+            self.revision,
+            self.intent_spec_id,
+            self.tasks.len(),
+            self.max_parallel
+        );
+        if let Some(reason) = &self.replan_reason
+            && !reason.trim().is_empty()
+        {
+            summary.push_str(&format!("; replan: {}", reason.trim()));
+        }
+        summary
+    }
+
+    pub fn parallel_groups(&self) -> Vec<Vec<Uuid>> {
+        let mut remaining = self.tasks.clone();
+        let mut completed = BTreeSet::new();
+        let mut groups = Vec::new();
+
+        while !remaining.is_empty() {
+            let ready: Vec<Uuid> = remaining
+                .iter()
+                .filter(|task| task.dependencies().iter().all(|dep| completed.contains(dep)))
+                .map(TaskSpec::id)
+                .collect();
+            if ready.is_empty() {
+                break;
+            }
+            for id in &ready {
+                completed.insert(*id);
+            }
+            remaining.retain(|task| !ready.contains(&task.id()));
+            groups.push(ready);
+        }
+
+        groups
+    }
 }
 
 /// A policy violation detected before or after a tool call.
@@ -299,6 +338,8 @@ pub struct OrchestratorResult {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PersistedTaskArtifacts {
     pub task_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persisted_task_id: Option<String>,
     #[serde(default)]
     pub tool_invocation_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -468,19 +509,17 @@ mod tests {
         let b = second.id();
         let spec = ExecutionPlanSpec {
             intent_spec_id: "spec-123".into(),
-            summary: "summary".into(),
             revision: 1,
             parent_revision: None,
             replan_reason: None,
             tasks: vec![first, second],
             max_parallel: 2,
-            parallel_groups: vec![vec![a], vec![b]],
             checkpoints: vec![],
         };
 
         assert_eq!(spec.tasks.len(), 2);
         assert_eq!(spec.tasks[1].dependencies(), &[a]);
-        assert_eq!(spec.parallel_groups, vec![vec![a], vec![b]]);
+        assert_eq!(spec.parallel_groups(), vec![vec![a], vec![b]]);
     }
 
     #[test]
@@ -489,13 +528,11 @@ mod tests {
         let id = task.id();
         let spec = ExecutionPlanSpec {
             intent_spec_id: "spec-123".into(),
-            summary: "summary".into(),
             revision: 2,
             parent_revision: Some(1),
             replan_reason: Some("replan".into()),
             tasks: vec![task],
             max_parallel: 2,
-            parallel_groups: vec![vec![id]],
             checkpoints: vec![ExecutionCheckpoint {
                 label: "after-fast".into(),
                 after_tasks: vec![id],
@@ -517,13 +554,11 @@ mod tests {
             decision: DecisionOutcome::Commit,
             execution_plan_spec: ExecutionPlanSpec {
                 intent_spec_id: "test".into(),
-                summary: "summary".into(),
                 revision: 2,
                 parent_revision: Some(1),
                 replan_reason: Some("security gate failed".into()),
                 tasks: vec![task],
                 max_parallel: 1,
-                parallel_groups: vec![vec![id]],
                 checkpoints: vec![],
             },
             plan_revision_specs: vec![],
@@ -563,6 +598,7 @@ mod tests {
                 }],
                 tasks: vec![PersistedTaskArtifacts {
                     task_id: id,
+                    persisted_task_id: Some("task-1".into()),
                     tool_invocation_ids: vec!["inv-1".into()],
                     patchset_id: Some("patch-1".into()),
                     evidence_ids: vec!["ev-1".into()],

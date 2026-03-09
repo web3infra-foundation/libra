@@ -52,10 +52,10 @@ pub fn build_git_plan(intent_id: Uuid, plan_spec: &ExecutionPlanSpec) -> Result<
 
 pub fn build_git_task(intent_id: Option<Uuid>, task: &TaskSpec) -> Result<GitTask> {
     let actor = executor_actor()?;
-    let goal = Some(match task.kind {
+    let goal = task.task.goal().cloned().or(Some(match task.kind {
         TaskKind::Gate => GoalType::Test,
         TaskKind::Implementation => GoalType::Other("implementation".to_string()),
-    });
+    }));
 
     let mut git_task = GitTask::new(actor, task.title().to_string(), goal)
         .map_err(anyhow::Error::msg)
@@ -173,13 +173,11 @@ mod tests {
             Uuid::new_v4(),
             &ExecutionPlanSpec {
                 intent_spec_id: "intent-1".into(),
-                summary: "summary".into(),
                 revision: 1,
                 parent_revision: None,
                 replan_reason: None,
                 tasks: vec![t.clone()],
                 max_parallel: 1,
-                parallel_groups: vec![vec![t.id()]],
                 checkpoints: vec![ExecutionCheckpoint {
                     label: "after-fast".into(),
                     after_tasks: vec![t.id()],

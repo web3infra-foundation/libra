@@ -339,13 +339,11 @@ mod tests {
         let spec = spec_with_triggers();
         let plan = ExecutionPlanSpec {
             intent_spec_id: "test".into(),
-            summary: "summary".into(),
             revision: 1,
             parent_revision: None,
             replan_reason: None,
             tasks: vec![],
             max_parallel: 1,
-            parallel_groups: vec![],
             checkpoints: vec![],
         };
         let directive = detect_replan(

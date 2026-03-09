@@ -118,19 +118,11 @@ pub fn compile_execution_plan_spec(
 
     Ok(ExecutionPlanSpec {
         intent_spec_id: spec.metadata.id.clone(),
-        summary: format!(
-            "{} change: {} ({} tasks, parallelism {})",
-            change_type_label(&spec.intent.change_type),
-            spec.intent.summary,
-            tasks.len(),
-            max_parallel
-        ),
         revision: 1,
         parent_revision: None,
         replan_reason: None,
         tasks: tasks.clone(),
         max_parallel,
-        parallel_groups: compute_parallel_groups(&tasks),
         checkpoints,
     })
 }
@@ -467,30 +459,6 @@ fn should_force_serial(plan_config: &PlanGenerationConfig, max_parallel: u8) -> 
     max_parallel <= 1 || plan_config.conflict_resolution == ConflictResolution::ForceSerial
 }
 
-fn compute_parallel_groups(tasks: &[TaskSpec]) -> Vec<Vec<Uuid>> {
-    let mut remaining = tasks.to_vec();
-    let mut completed = BTreeSet::new();
-    let mut groups = Vec::new();
-
-    while !remaining.is_empty() {
-        let ready: Vec<Uuid> = remaining
-            .iter()
-            .filter(|node| node.dependencies().iter().all(|dep| completed.contains(dep)))
-            .map(TaskSpec::id)
-            .collect();
-        if ready.is_empty() {
-            break;
-        }
-        for id in &ready {
-            completed.insert(*id);
-        }
-        remaining.retain(|node| !ready.contains(&node.id()));
-        groups.push(ready);
-    }
-
-    groups
-}
-
 fn git_task(
     title: String,
     description: Option<String>,
@@ -581,18 +549,6 @@ fn dependency_policy_label(policy: &DependencyPolicy) -> &'static str {
     }
 }
 
-fn change_type_label(change_type: &ChangeType) -> &'static str {
-    match change_type {
-        ChangeType::Bugfix => "bugfix",
-        ChangeType::Feature => "feature",
-        ChangeType::Refactor => "refactor",
-        ChangeType::Performance => "performance",
-        ChangeType::Security => "security",
-        ChangeType::Docs => "docs",
-        ChangeType::Chore => "chore",
-        ChangeType::Unknown => "unknown",
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -764,7 +720,7 @@ mod tests {
     fn test_compile_execution_plan_builds_gate_tasks() {
         let plan = compile_execution_plan_spec(&minimal_spec()).unwrap();
         assert_eq!(plan.tasks.len(), 6);
-        assert_eq!(plan.parallel_groups.len(), 6);
+        assert_eq!(plan.parallel_groups().len(), 6);
         assert!(
             plan.tasks
                 .iter()
@@ -783,7 +739,7 @@ mod tests {
                 .iter()
                 .any(|task| task.gate_stage == Some(GateStage::Fast))
         );
-        assert_eq!(plan_spec.parallel_groups.len(), 6);
+        assert_eq!(plan_spec.parallel_groups().len(), 6);
     }
 
     #[test]

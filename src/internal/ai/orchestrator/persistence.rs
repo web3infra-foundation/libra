@@ -6,7 +6,7 @@ use std::{
     sync::Arc,
 };
 
-use git_internal::internal::object::types::ActorRef;
+use git_internal::internal::object::{plan::Plan as GitPlan, types::ActorRef};
 use rmcp::model::CallToolResult;
 use serde_json::json;
 use uuid::Uuid;
@@ -33,6 +33,7 @@ use crate::internal::ai::{
     },
     workflow_objects::{build_git_plan, parse_object_id},
 };
+use crate::utils::storage_ext::StorageExt;
 
 const ZERO_COMMIT_SHA: &str = "0000000000000000000000000000000000000000";
 
@@ -92,6 +93,21 @@ struct RunRequest<'a> {
     model_name: &'a str,
 }
 
+struct PersistedTaskRequest<'a> {
+    mcp_server: &'a Arc<LibraMcpServer>,
+    intent_id: &'a str,
+    parent_task_id: &'a str,
+    task: &'a super::types::TaskSpec,
+    dependency_task_ids: Vec<String>,
+    persisted_step_id: Option<Uuid>,
+    status: &'a str,
+}
+
+struct PersistedPlanRevision {
+    plan_id: String,
+    step_id_map: HashMap<Uuid, Uuid>,
+}
+
 pub async fn persist_execution(
     request: ExecutionPersistenceRequest<'_>,
 ) -> Result<PersistedExecution, OrchestratorError> {
@@ -123,22 +139,34 @@ pub async fn persist_execution(
     };
     let mut plan_ids = Vec::with_capacity(request.plan_revision_specs.len());
     let mut parent_plan_id = None;
+    let mut persisted_step_ids = HashMap::new();
     for plan_spec in request.plan_revision_specs {
-        let plan_id = create_plan_revision(
+        let persisted_plan = create_plan_revision(
             request.mcp_server,
             &intent_id,
             parent_plan_id.as_deref(),
             plan_spec,
         )
         .await?;
-        parent_plan_id = Some(plan_id.clone());
-        plan_ids.push(plan_id);
+        persisted_step_ids = persisted_plan.step_id_map;
+        parent_plan_id = Some(persisted_plan.plan_id.clone());
+        plan_ids.push(persisted_plan.plan_id);
     }
+    let execution_summary = request.execution_plan_spec.summary_line();
     let root_task_id = create_execution_task(
         request.mcp_server,
         &intent_id,
-        request.execution_plan_spec.summary.as_str(),
+        execution_summary.as_str(),
         request.spec.intent.problem_statement.as_str(),
+    )
+    .await?;
+    let persisted_task_ids = create_compiled_tasks(
+        request.mcp_server,
+        &intent_id,
+        &root_task_id,
+        request.execution_plan_spec,
+        request.run_state,
+        &persisted_step_ids,
     )
     .await?;
     let run_id = create_run(RunRequest {
@@ -195,6 +223,7 @@ pub async fn persist_execution(
 
         let mut persisted = PersistedTaskArtifacts {
             task_id: result.task_id,
+            persisted_task_id: persisted_task_ids.get(&result.task_id).cloned(),
             ..PersistedTaskArtifacts::default()
         };
 
@@ -473,12 +502,143 @@ async fn create_execution_task(
     parse_created_id("task", &result)
 }
 
+async fn create_compiled_tasks(
+    mcp_server: &Arc<LibraMcpServer>,
+    intent_id: &str,
+    parent_task_id: &str,
+    plan: &ExecutionPlanSpec,
+    run_state: &RunStateSnapshot,
+    persisted_step_ids: &HashMap<Uuid, Uuid>,
+) -> Result<HashMap<Uuid, String>, OrchestratorError> {
+    let mut persisted_ids = HashMap::new();
+    let mut remaining = plan.tasks.iter().collect::<Vec<_>>();
+
+    while !remaining.is_empty() {
+        let mut progressed = false;
+        let mut next_remaining = Vec::new();
+
+        for task in remaining {
+            if !task
+                .dependencies()
+                .iter()
+                .all(|dep| persisted_ids.contains_key(dep))
+            {
+                next_remaining.push(task);
+                continue;
+            }
+
+            let dependency_task_ids = task
+                .dependencies()
+                .iter()
+                .map(|dep| {
+                    persisted_ids.get(dep).cloned().ok_or_else(|| {
+                        OrchestratorError::PlanningFailed(format!(
+                            "missing persisted dependency task for compiled task {}",
+                            task.id()
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let status = match run_state.status_for(task.id()) {
+                super::types::TaskNodeStatus::Completed => "done",
+                super::types::TaskNodeStatus::Failed => "failed",
+                super::types::TaskNodeStatus::Running => "running",
+                super::types::TaskNodeStatus::Pending | super::types::TaskNodeStatus::Skipped => {
+                    "draft"
+                }
+            };
+
+            let persisted_id = create_compiled_task(PersistedTaskRequest {
+                mcp_server,
+                intent_id,
+                parent_task_id,
+                task,
+                dependency_task_ids,
+                persisted_step_id: persisted_step_ids.get(&task.step_id()).copied(),
+                status,
+            })
+            .await?;
+            persisted_ids.insert(task.id(), persisted_id);
+            progressed = true;
+        }
+
+        if !progressed {
+            return Err(OrchestratorError::PlanningFailed(
+                "unable to persist compiled tasks due to unresolved task dependencies".to_string(),
+            ));
+        }
+
+        remaining = next_remaining;
+    }
+
+    Ok(persisted_ids)
+}
+
+async fn create_compiled_task(
+    request: PersistedTaskRequest<'_>,
+) -> Result<String, OrchestratorError> {
+    let goal_type = request
+        .task
+        .task
+        .goal()
+        .map(|goal| goal.as_str().to_string())
+        .or_else(|| {
+            Some(match request.task.kind {
+                TaskKind::Implementation => "implementation".to_string(),
+                TaskKind::Gate => "test".to_string(),
+            })
+        });
+    let description = request
+        .task
+        .description()
+        .map(ToString::to_string)
+        .or_else(|| Some(request.task.objective.clone()));
+    let params = CreateTaskParams {
+        title: request.task.title().to_string(),
+        description,
+        goal_type,
+        constraints: (!request.task.constraints().is_empty())
+            .then(|| request.task.constraints().to_vec()),
+        acceptance_criteria: (!request.task.acceptance_criteria().is_empty())
+            .then(|| request.task.acceptance_criteria().to_vec()),
+        requested_by_kind: None,
+        requested_by_id: None,
+        dependencies: (!request.dependency_task_ids.is_empty())
+            .then_some(request.dependency_task_ids),
+        intent_id: Some(request.intent_id.to_string()),
+        parent_task_id: Some(request.parent_task_id.to_string()),
+        origin_step_id: request
+            .persisted_step_id
+            .map(|step_id| step_id.to_string()),
+        status: Some(request.status.to_string()),
+        reason: Some("compiled execution task".to_string()),
+        tags: None,
+        external_ids: None,
+        actor_kind: Some("agent".to_string()),
+        actor_id: Some("libra-executor".to_string()),
+    };
+
+    let actor = resolve_actor(
+        request.mcp_server,
+        params.actor_kind.as_deref(),
+        params.actor_id.as_deref(),
+    )?;
+    let result = request
+        .mcp_server
+        .create_task_impl(params, actor)
+        .await
+        .map_err(|e| {
+            OrchestratorError::ConfigError(format!("MCP create_task failed: {e:?}"))
+        })?;
+    parse_created_id("task", &result)
+}
+
 async fn create_plan_revision(
     mcp_server: &Arc<LibraMcpServer>,
     intent_id: &str,
     parent_plan_id: Option<&str>,
     plan: &ExecutionPlanSpec,
-) -> Result<String, OrchestratorError> {
+) -> Result<PersistedPlanRevision, OrchestratorError> {
     let git_plan = build_git_plan(
         parse_object_id(intent_id)
             .map_err(|e| OrchestratorError::ConfigError(format!("invalid intent id: {e}")))?,
@@ -515,7 +675,54 @@ async fn create_plan_revision(
         .create_plan_impl(params, actor)
         .await
         .map_err(|e| OrchestratorError::ConfigError(format!("MCP create_plan failed: {e:?}")))?;
-    parse_created_id("plan", &result)
+    let plan_id = parse_created_id("plan", &result)?;
+    let persisted_plan = load_persisted_plan(mcp_server, &plan_id).await?;
+    if persisted_plan.steps().len() != plan.tasks.len() {
+        return Err(OrchestratorError::ConfigError(format!(
+            "persisted plan step count mismatch: expected {}, got {}",
+            plan.tasks.len(),
+            persisted_plan.steps().len()
+        )));
+    }
+
+    let step_id_map = plan
+        .tasks
+        .iter()
+        .zip(persisted_plan.steps().iter())
+        .map(|(task, step)| (task.step_id(), step.step_id()))
+        .collect();
+
+    Ok(PersistedPlanRevision {
+        plan_id,
+        step_id_map,
+    })
+}
+
+async fn load_persisted_plan(
+    mcp_server: &Arc<LibraMcpServer>,
+    plan_id: &str,
+) -> Result<GitPlan, OrchestratorError> {
+    let history = mcp_server
+        .intent_history_manager
+        .as_ref()
+        .ok_or_else(|| OrchestratorError::ConfigError("MCP history not available".to_string()))?;
+    let storage = mcp_server
+        .storage
+        .as_ref()
+        .ok_or_else(|| OrchestratorError::ConfigError("MCP storage not available".to_string()))?;
+    let plan_uuid = parse_object_id(plan_id)
+        .map_err(|e| OrchestratorError::ConfigError(format!("invalid plan id: {e}")))?;
+    let hash = history
+        .get_object_hash("plan", &plan_uuid.to_string())
+        .await
+        .map_err(|e| OrchestratorError::ConfigError(format!("failed to resolve plan hash: {e}")))?
+        .ok_or_else(|| {
+            OrchestratorError::ConfigError(format!("persisted plan not found: {plan_id}"))
+        })?;
+
+    storage.get_json::<GitPlan>(&hash).await.map_err(|e| {
+        OrchestratorError::ConfigError(format!("failed to load persisted plan: {e}"))
+    })
 }
 
 async fn create_provenance(
@@ -529,8 +736,8 @@ async fn create_provenance(
 ) -> Result<String, OrchestratorError> {
     let parameters_json = json!({
         "intentSpecId": execution_plan.intent_spec_id,
-        "planSummary": execution_plan.summary,
-        "parallelGroups": execution_plan.parallel_groups.len(),
+        "planSummary": execution_plan.summary_line(),
+        "parallelGroups": execution_plan.parallel_groups().len(),
         "checkpoints": execution_plan.checkpoints.iter().map(|checkpoint| checkpoint.label.clone()).collect::<Vec<_>>(),
         "decision": format!("{decision:?}"),
         "systemReport": {
@@ -701,7 +908,7 @@ async fn create_decision(request: FinalDecisionRequest<'_>) -> Result<String, Or
     };
     let rationale = Some(format!(
         "{}; overall_passed={}; failed_tasks={}; checkpoints={}",
-        request.execution_plan.summary,
+        request.execution_plan.summary_line(),
         request.system_report.overall_passed,
         request
             .task_results
@@ -1132,7 +1339,7 @@ fn checkpoint_before_replan(spec: &IntentSpec) -> bool {
 mod tests {
     use std::{collections::BTreeMap, path::Path, sync::Arc};
 
-    use git_internal::internal::object::{task::Task as GitTask, types::ActorRef};
+    use git_internal::internal::object::{plan::Plan as GitPlan, task::Task as GitTask, types::ActorRef};
     use sea_orm::{ConnectionTrait, Database, Schema};
     use tempfile::tempdir;
     use super::*;
@@ -1151,7 +1358,7 @@ mod tests {
             },
             model::reference,
         },
-        utils::storage::local::LocalStorage,
+        utils::{storage::local::LocalStorage, storage_ext::StorageExt},
     };
 
     async fn setup_server() -> Arc<LibraMcpServer> {
@@ -1343,7 +1550,6 @@ mod tests {
         let gate_task_id = gate_task.header().object_id();
         let plan_spec = ExecutionPlanSpec {
             intent_spec_id: "intent-1".to_string(),
-            summary: "Implement feature and verify it".to_string(),
             revision: 1,
             parent_revision: None,
             replan_reason: None,
@@ -1374,7 +1580,6 @@ mod tests {
                 },
             ],
             max_parallel: 1,
-            parallel_groups: vec![vec![impl_task_id], vec![gate_task_id]],
             checkpoints: vec![ExecutionCheckpoint {
                 label: "after-fast".to_string(),
                 after_tasks: vec![gate_task_id],
@@ -1474,11 +1679,13 @@ mod tests {
         assert_eq!(persisted.plan_ids.len(), 1);
         assert_eq!(persisted.checkpoints.len(), 1);
         assert_eq!(persisted.tasks.len(), 2);
+        assert!(persisted.tasks.iter().all(|task| task.persisted_task_id.is_some()));
         assert_eq!(persisted.tasks[0].tool_invocation_ids.len(), 1);
         assert!(persisted.tasks[0].patchset_id.is_some());
         assert_eq!(persisted.tasks[1].evidence_ids.len(), 1);
 
         let history = server.intent_history_manager.as_ref().unwrap();
+        assert_eq!(history.list_objects("task").await.unwrap().len(), 3);
         assert_eq!(history.list_objects("run").await.unwrap().len(), 1);
         assert_eq!(history.list_objects("patchset").await.unwrap().len(), 1);
         assert_eq!(history.list_objects("evidence").await.unwrap().len(), 1);
@@ -1486,5 +1693,29 @@ mod tests {
         assert_eq!(history.list_objects("provenance").await.unwrap().len(), 1);
         assert_eq!(history.list_objects("invocation").await.unwrap().len(), 1);
         assert_eq!(history.list_objects("snapshot").await.unwrap().len(), 2);
+
+        let storage = server.storage.as_ref().unwrap();
+        let plan_hash = history
+            .get_object_hash("plan", &parse_object_id(&persisted.plan_ids[0]).unwrap().to_string())
+            .await
+            .unwrap()
+            .unwrap();
+        let persisted_plan = storage.get_json::<GitPlan>(&plan_hash).await.unwrap();
+        let persisted_step_ids = persisted_plan
+            .steps()
+            .iter()
+            .map(|step| step.step_id())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        for task_artifacts in &persisted.tasks {
+            let persisted_task_id = task_artifacts.persisted_task_id.as_ref().unwrap();
+            let task_hash = history
+                .get_object_hash("task", &parse_object_id(persisted_task_id).unwrap().to_string())
+                .await
+                .unwrap()
+                .unwrap();
+            let persisted_task = storage.get_json::<GitTask>(&task_hash).await.unwrap();
+            assert!(persisted_step_ids.contains(&persisted_task.origin_step_id().unwrap()));
+        }
     }
 }

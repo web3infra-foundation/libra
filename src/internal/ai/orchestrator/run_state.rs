@@ -167,10 +167,8 @@ mod tests {
     fn test_plan() -> ExecutionPlanSpec {
         let actor = ActorRef::agent("test-run-state").unwrap();
         let git_task = GitTask::new(actor, "task", None).unwrap();
-        let task_id = git_task.header().object_id();
         ExecutionPlanSpec {
             intent_spec_id: "spec-1".into(),
-            summary: "summary".into(),
             revision: 3,
             parent_revision: Some(2),
             replan_reason: Some("test".into()),
@@ -187,7 +185,6 @@ mod tests {
                 contract: TaskContract::default(),
             }],
             max_parallel: 1,
-            parallel_groups: vec![vec![task_id]],
             checkpoints: vec![],
         }
     }
