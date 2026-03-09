@@ -13,7 +13,7 @@ jobs:
   build-and-upload:
     runs-on: ${{ matrix.target.runner }}
     strategy:
-      fail-fast: true # if it is set to true, then one job failed the other jobs will be cancelled  together.
+      fail-fast: false # if it is set to true, then one job failed the other jobs will be cancelled  together.
       matrix:
         component: [libra]
         target:
