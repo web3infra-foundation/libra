@@ -3,6 +3,9 @@
 This document describes the AI object model in `git-internal` after the
 snapshot / event / Libra split.
 
+For developers who prefer Chinese, a synchronized overview is available in
+[`agent-overview-zh.md`](./agent-overview-zh.md).
+
 ## Design Principle
 
 `git-internal` stores immutable historical facts.

@@ -292,18 +292,21 @@ impl ClientStorage {
                 db_path,
             };
 
-            loop {
-                match INDEX_UPDATE_CHANNEL.try_send(msg.clone()) {
-                    Ok(_) => break,
-                    Err(TrySendError::Full(_)) => {
-                        // Channel full, wait a bit and retry (backpressure)
-                        std::thread::sleep(Duration::from_millis(10));
-                    }
-                    Err(TrySendError::Closed(_)) => {
-                        PENDING_TASKS.fetch_sub(1, Ordering::Relaxed);
-                        tracing::warn!("Failed to queue object index update: channel closed");
-                        break;
-                    }
+            match INDEX_UPDATE_CHANNEL.try_send(msg) {
+                Ok(_) => {}
+                Err(TrySendError::Full(msg)) => {
+                    // Avoid blocking the caller thread if the bounded queue is
+                    // full; wait for capacity on the dedicated storage runtime.
+                    RUNTIME.spawn(async move {
+                        if INDEX_UPDATE_CHANNEL.send(msg).await.is_err() {
+                            PENDING_TASKS.fetch_sub(1, Ordering::Relaxed);
+                            tracing::warn!("Failed to queue object index update: channel closed");
+                        }
+                    });
+                }
+                Err(TrySendError::Closed(_)) => {
+                    PENDING_TASKS.fetch_sub(1, Ordering::Relaxed);
+                    tracing::warn!("Failed to queue object index update: channel closed");
                 }
             }
         }
@@ -541,7 +544,13 @@ async fn update_object_index(
     match update_object_index_once(db_path, o_id, o_type, o_size).await {
         Ok(()) => Ok(()),
         Err(_err) if !db_path.exists() => Ok(()),
-        Err(_first_err) => {
+        Err(first_err) => {
+            tracing::debug!(
+                db_path = %db_path.display(),
+                object_id = o_id,
+                error = %first_err,
+                "Retrying object index update after resetting cached database connection"
+            );
             db::reset_db_conn_instance_for_path(db_path).await;
             match update_object_index_once(db_path, o_id, o_type, o_size).await {
                 Ok(()) => Ok(()),

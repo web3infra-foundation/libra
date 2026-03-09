@@ -4,6 +4,10 @@
 //! `Plan`, `Task`, `Run`, and `ContextFrame` history. They represent the
 //! scheduler's current selection, active work, and live context window without
 //! rewriting the underlying snapshot or event objects.
+//!
+//! TODO(test): add CRUD and round-trip persistence coverage once the
+//! `SchedulerState` store lands. The domain types are defined before the
+//! projector / repository implementation to keep the schema work isolated.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

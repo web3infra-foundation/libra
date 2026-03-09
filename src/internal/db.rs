@@ -100,6 +100,9 @@ async fn get_or_init_db_conn_instance(db_path: PathBuf) -> io::Result<&'static D
 }
 
 /// Get global database connection instance (singleton per SQLite file).
+///
+/// TODO(error): migrate legacy call sites to `get_db_conn_instance_for_path`
+/// and make this convenience wrapper return `io::Result` instead of panicking.
 pub async fn get_db_conn_instance() -> &'static DbConn {
     let db_path = path::database();
     get_db_conn_instance_for_path(&db_path)

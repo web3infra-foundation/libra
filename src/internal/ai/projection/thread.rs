@@ -473,6 +473,8 @@ impl ThreadProjection {
         // active thread ids, then one full reconstruction per thread. That is
         // acceptable for the current small UI/TUI working set, but should move
         // to a batched loader if active thread counts grow materially.
+        // TODO(perf): switch to `find_by_ids_with_conn` batching before active
+        // thread lists regularly exceed low double digits (roughly 20-50 rows).
         for row in rows {
             let thread_id = Uuid::parse_str(&row.thread_id).with_context(|| {
                 format!(
@@ -1220,6 +1222,58 @@ mod tests {
             .await
             .unwrap();
         assert!(second_row.is_none());
+    }
+
+    #[tokio::test]
+    async fn thread_projection_find_by_intent_id_rejects_ambiguous_mapping() {
+        let db = setup_test_db().await;
+        let first = sample_projection();
+        first.create(&db).await.unwrap();
+
+        let backend = db.get_database_backend();
+        db.execute(Statement::from_string(
+            backend,
+            "DROP INDEX uq_ai_thread_intent_intent".to_string(),
+        ))
+        .await
+        .unwrap();
+
+        let second = ThreadProjection {
+            thread_id: Uuid::parse_str("66666666-6666-6666-6666-666666666666").unwrap(),
+            current_intent_id: Some(
+                Uuid::parse_str("33333333-3333-3333-3333-333333333333").unwrap(),
+            ),
+            latest_intent_id: Some(
+                Uuid::parse_str("88888888-8888-8888-8888-888888888888").unwrap(),
+            ),
+            intents: vec![
+                ThreadIntentRef {
+                    intent_id: Uuid::parse_str("33333333-3333-3333-3333-333333333333").unwrap(),
+                    ordinal: 0,
+                    is_head: false,
+                    linked_at: ts(1_700_000_220),
+                    link_reason: ThreadIntentLinkReason::Imported,
+                },
+                ThreadIntentRef {
+                    intent_id: Uuid::parse_str("88888888-8888-8888-8888-888888888888").unwrap(),
+                    ordinal: 1,
+                    is_head: true,
+                    linked_at: ts(1_700_000_230),
+                    link_reason: ThreadIntentLinkReason::Revision,
+                },
+            ],
+            updated_at: ts(1_700_000_250),
+            ..sample_projection()
+        };
+        second.create(&db).await.unwrap();
+
+        let err = ThreadProjection::find_by_intent_id(
+            &db,
+            Uuid::parse_str("33333333-3333-3333-3333-333333333333").unwrap(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("mapping is ambiguous"));
     }
 
     #[tokio::test]
