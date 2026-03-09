@@ -652,7 +652,12 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             AgentStatus::Thinking | AgentStatus::Retrying | AgentStatus::ExecutingTool => {
                 // During processing, only handle Escape for interrupt
                 if key.code == KeyCode::Esc {
+                    self.enqueue_mcp_turn_decision(
+                        "abandon",
+                        "Turn interrupted by user".to_string(),
+                    );
                     self.interrupt_agent_task();
+                    self.clear_mcp_turn_ids();
                     self.widget.bottom_pane.set_status(AgentStatus::Idle);
                     self.complete_streaming_assistant_cell("Interrupted.".to_string());
                     self.complete_running_tool_cells_with_interrupt();
@@ -1131,6 +1136,11 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     }
                     AgentEvent::ResponseComplete { text, new_history } => {
                         self.agent_task = None;
+                        self.enqueue_mcp_turn_decision(
+                            "checkpoint",
+                            "Turn completed successfully".to_string(),
+                        );
+                        self.clear_mcp_turn_ids();
                         self.clear_active_turn();
                         self.history = new_history;
 
@@ -1154,6 +1164,11 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     }
                     AgentEvent::Error { message } => {
                         self.agent_task = None;
+                        self.enqueue_mcp_turn_decision(
+                            "abandon",
+                            format!("Turn failed: {message}"),
+                        );
+                        self.clear_mcp_turn_ids();
                         self.clear_active_turn();
 
                         self.complete_streaming_assistant_cell(format!("Error: {}", message));
@@ -1185,6 +1200,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             } => {
                 self.agent_task = None;
                 self.clear_active_turn();
+                self.clear_mcp_turn_ids();
                 self.history = new_history;
                 self.session.add_assistant_message(&text);
                 self.session.metadata.insert(
@@ -1315,6 +1331,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             } => {
                 self.agent_task = None;
                 self.clear_active_turn();
+                self.clear_mcp_turn_ids();
                 self.history = new_history;
                 self.session.add_assistant_message(&text);
                 self.complete_streaming_assistant_cell(text);
@@ -1616,6 +1633,58 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 cli_error!(e, "error: failed to create decision");
             }
         }
+    }
+
+    fn enqueue_mcp_turn_decision(&self, decision_type: &str, rationale: String) {
+        let (Some(mcp_server), Some(run_id)) =
+            (self.mcp_server.clone(), self.mcp_ids.run_id.clone())
+        else {
+            return;
+        };
+        let decision_type = decision_type.to_string();
+        self.mcp_write_tracker.spawn(async move {
+            let decision_params = CreateDecisionParams {
+                run_id,
+                decision_type,
+                chosen_patchset_id: None,
+                result_commit_sha: None,
+                rationale: Some(rationale),
+                checkpoint_id: None,
+                tags: None,
+                external_ids: None,
+                actor_kind: Some("system".to_string()),
+                actor_id: Some("libra-code".to_string()),
+            };
+            let actor = match mcp_server.resolve_actor_from_params(
+                decision_params.actor_kind.as_deref(),
+                decision_params.actor_id.as_deref(),
+            ) {
+                Ok(actor) => actor,
+                Err(e) => {
+                    cli_error!(e, "error: failed to resolve actor for turn decision");
+                    return;
+                }
+            };
+            match mcp_server
+                .create_decision_impl(decision_params, actor)
+                .await
+            {
+                Ok(result) => {
+                    if result.is_error.unwrap_or(false) {
+                        render_mcp_error("failed to create turn decision", result.content);
+                    }
+                }
+                Err(e) => {
+                    cli_error!(e, "error: failed to create turn decision");
+                }
+            }
+        });
+    }
+
+    fn clear_mcp_turn_ids(&mut self) {
+        self.mcp_ids.run_id = None;
+        self.mcp_ids.task_id = None;
+        self.mcp_ids._context_snapshot_id = None;
     }
 
     // ── Post-plan dialog ────────────────────────────────────────────
