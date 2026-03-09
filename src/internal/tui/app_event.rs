@@ -110,6 +110,13 @@ pub enum AppEvent {
         turn_id: TurnId,
         status: AgentStatus,
     },
+    /// MCP turn-tracking IDs became available for this turn.
+    McpTurnTrackingReady {
+        turn_id: TurnId,
+        task_id: Option<String>,
+        run_id: Option<String>,
+        context_snapshot_id: Option<String>,
+    },
     /// The agent is requesting user input via the `request_user_input` tool.
     RequestUserInput { request: UserInputRequest },
     /// Orchestrator workflow completed.
@@ -132,6 +139,7 @@ impl AppEvent {
             | AppEvent::ToolCallBegin { turn_id, .. }
             | AppEvent::ToolCallEnd { turn_id, .. }
             | AppEvent::AgentStatusUpdate { turn_id, .. }
+            | AppEvent::McpTurnTrackingReady { turn_id, .. }
             | AppEvent::ExecuteWorkflowComplete { turn_id, .. } => Some(*turn_id),
         }
     }

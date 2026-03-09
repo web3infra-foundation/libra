@@ -271,6 +271,8 @@ pub struct App<M: CompletionModel> {
     active_turn_signal: Arc<AtomicU64>,
     /// Number of tool calls currently running in UI.
     running_tool_calls: usize,
+    /// Shared run-id slot for the active turn, backfilled by MCP tracking.
+    active_turn_run_id: Option<Arc<Mutex<Option<String>>>>,
 }
 
 impl<M: CompletionModel + Clone + 'static> App<M> {
@@ -371,6 +373,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             next_turn_id: 1,
             active_turn_signal,
             running_tool_calls: 0,
+            active_turn_run_id: None,
         }
     }
 
@@ -472,12 +475,14 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         self.next_turn_id = self.next_turn_id.saturating_add(1);
         self.active_turn_id = Some(turn_id);
         self.active_turn_signal.store(turn_id, Ordering::Relaxed);
+        self.active_turn_run_id = Some(Arc::new(Mutex::new(None)));
         turn_id
     }
 
     fn clear_active_turn(&mut self) {
         self.active_turn_id = None;
         self.active_turn_signal.store(0, Ordering::Relaxed);
+        self.active_turn_run_id = None;
     }
 
     fn is_active_turn(&self, turn_id: TurnId) -> bool {
@@ -945,15 +950,37 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     .add_cell(Box::new(AssistantHistoryCell::streaming()));
                 self.widget.bottom_pane.set_status(AgentStatus::Thinking);
                 self.schedule_draw();
-
-                if timeout(
-                    MCP_TURN_TRACKING_TIMEOUT,
-                    self.start_mcp_turn_tracking(&text),
-                )
-                .await
-                .is_err()
+                self.clear_mcp_turn_ids();
+                if let Some(run_id_slot) = self.active_turn_run_id.as_ref()
+                    && let Ok(mut slot) = run_id_slot.lock()
                 {
-                    tracing::warn!("MCP turn tracking timed out before agent start");
+                    *slot = None;
+                }
+                if let Some(mcp_server) = self.mcp_server.clone() {
+                    let tx = self.app_event_tx.clone();
+                    let working_dir = self.registry.working_dir().to_path_buf();
+                    let plan_id = self.mcp_ids.plan_id.clone();
+                    let mcp_text = text.clone();
+                    tokio::spawn(async move {
+                        match timeout(
+                            MCP_TURN_TRACKING_TIMEOUT,
+                            resolve_mcp_turn_tracking(mcp_server, plan_id, working_dir, mcp_text),
+                        )
+                        .await
+                        {
+                            Ok(result) => {
+                                let _ = tx.send(AppEvent::McpTurnTrackingReady {
+                                    turn_id,
+                                    task_id: result.task_id,
+                                    run_id: result.run_id,
+                                    context_snapshot_id: result.context_snapshot_id,
+                                });
+                            }
+                            Err(_) => {
+                                tracing::warn!("MCP turn tracking timed out before agent start");
+                            }
+                        }
+                    });
                 }
 
                 // Prepare components for background task
@@ -966,7 +993,10 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 let tx = self.app_event_tx.clone();
                 let user_text = text;
                 let mcp_server = self.mcp_server.clone();
-                let run_id = self.mcp_ids.run_id.clone();
+                let run_id = self
+                    .active_turn_run_id
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(Mutex::new(None)));
                 let mcp_write_tracker = self.mcp_write_tracker.clone();
 
                 // Execute agent call in background task
@@ -974,7 +1004,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     struct UiObserver {
                         tx: UnboundedSender<AppEvent>,
                         mcp_server: Option<Arc<LibraMcpServer>>,
-                        run_id: Option<String>,
+                        run_id: Arc<Mutex<Option<String>>>,
                         mcp_write_tracker: McpWriteTracker,
                         turn_id: TurnId,
                     }
@@ -1016,8 +1046,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                             });
 
                             // Record tool invocation via MCP with final status.
+                            let run_id = self.run_id.lock().ok().and_then(|slot| slot.clone());
                             if let (Some(mcp_server), Some(run_id)) =
-                                (self.mcp_server.clone(), self.run_id.clone())
+                                (self.mcp_server.clone(), run_id)
                             {
                                 let tool_name = tool_name.to_string();
                                 let result = result.clone();
@@ -1329,6 +1360,21 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 self.widget.bottom_pane.set_status(status);
                 self.schedule_draw();
             }
+            AppEvent::McpTurnTrackingReady {
+                turn_id: _turn_id,
+                task_id,
+                run_id,
+                context_snapshot_id,
+            } => {
+                self.mcp_ids.task_id = task_id;
+                self.mcp_ids.run_id = run_id.clone();
+                self.mcp_ids._context_snapshot_id = context_snapshot_id;
+                if let Some(run_id_slot) = self.active_turn_run_id.as_ref()
+                    && let Ok(mut slot) = run_id_slot.lock()
+                {
+                    *slot = run_id;
+                }
+            }
             AppEvent::RequestUserInput { request } => {
                 self.handle_user_input_request(request);
             }
@@ -1449,146 +1495,6 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 });
             }
         }
-    }
-
-    async fn start_mcp_turn_tracking(&mut self, text: &str) {
-        self.mcp_ids.task_id = None;
-        self.mcp_ids.run_id = None;
-        self.mcp_ids._context_snapshot_id = None;
-
-        let Some(mcp_server) = self.mcp_server.clone() else {
-            return;
-        };
-
-        let snapshot_params = CreateContextSnapshotParams {
-            selection_strategy: "heuristic".to_string(),
-            items: None,
-            summary: Some(format!("Context for: {text}")),
-            tags: None,
-            external_ids: None,
-            actor_kind: Some("system".to_string()),
-            actor_id: Some("libra-code".to_string()),
-        };
-        let snapshot_actor = match mcp_server.resolve_actor_from_params(
-            snapshot_params.actor_kind.as_deref(),
-            snapshot_params.actor_id.as_deref(),
-        ) {
-            Ok(actor) => actor,
-            Err(e) => {
-                cli_error!(e, "error: failed to resolve actor for snapshot");
-                return;
-            }
-        };
-        let context_snapshot_id = match mcp_server
-            .create_context_snapshot_impl(snapshot_params, snapshot_actor)
-            .await
-        {
-            Ok(result) => {
-                if result.is_error.unwrap_or(false) {
-                    render_mcp_error("failed to create context snapshot", result.content);
-                    None
-                } else {
-                    parse_created_id(&result)
-                }
-            }
-            Err(e) => {
-                cli_error!(e, "error: failed to create context snapshot");
-                None
-            }
-        };
-        self.mcp_ids._context_snapshot_id = context_snapshot_id.clone();
-
-        let task_params = CreateTaskParams {
-            title: summarize_turn_task_title(text),
-            description: Some("Interactive TUI user request".to_string()),
-            goal_type: None,
-            constraints: None,
-            acceptance_criteria: None,
-            requested_by_kind: Some("human".to_string()),
-            requested_by_id: Some("user".to_string()),
-            dependencies: None,
-            intent_id: None,
-            parent_task_id: None,
-            origin_step_id: None,
-            status: Some("created".to_string()),
-            reason: Some("start user turn".to_string()),
-            tags: None,
-            external_ids: None,
-            actor_kind: Some("human".to_string()),
-            actor_id: Some("user".to_string()),
-        };
-        let task_actor = match mcp_server.resolve_actor_from_params(
-            task_params.actor_kind.as_deref(),
-            task_params.actor_id.as_deref(),
-        ) {
-            Ok(actor) => actor,
-            Err(e) => {
-                cli_error!(e, "error: failed to resolve actor for task");
-                return;
-            }
-        };
-
-        let task_id = match mcp_server.create_task_impl(task_params, task_actor).await {
-            Ok(result) => {
-                if result.is_error.unwrap_or(false) {
-                    render_mcp_error("failed to create task", result.content);
-                    None
-                } else {
-                    parse_created_id(&result)
-                }
-            }
-            Err(e) => {
-                cli_error!(e, "error: failed to create task");
-                None
-            }
-        };
-        let Some(task_id) = task_id else {
-            return;
-        };
-        self.mcp_ids.task_id = Some(task_id.clone());
-
-        let run_params = CreateRunParams {
-            task_id,
-            base_commit_sha: current_head_sha_async(self.registry.working_dir().to_path_buf())
-                .await,
-            plan_id: self.mcp_ids.plan_id.clone(),
-            status: Some("created".to_string()),
-            context_snapshot_id,
-            error: None,
-            agent_instances: None,
-            metrics_json: None,
-            reason: Some("start user turn".to_string()),
-            orchestrator_version: None,
-            tags: None,
-            external_ids: None,
-            actor_kind: Some("human".to_string()),
-            actor_id: Some("user".to_string()),
-        };
-        let run_actor = match mcp_server.resolve_actor_from_params(
-            run_params.actor_kind.as_deref(),
-            run_params.actor_id.as_deref(),
-        ) {
-            Ok(actor) => actor,
-            Err(e) => {
-                cli_error!(e, "error: failed to resolve actor for run");
-                return;
-            }
-        };
-
-        self.mcp_ids.run_id = match mcp_server.create_run_impl(run_params, run_actor).await {
-            Ok(result) => {
-                if result.is_error.unwrap_or(false) {
-                    render_mcp_error("failed to create run", result.content);
-                    None
-                } else {
-                    parse_created_id(&result)
-                }
-            }
-            Err(e) => {
-                cli_error!(e, "error: failed to create run");
-                None
-            }
-        };
     }
 
     async fn create_mcp_exit_decision(&self, reason: &ExitReason) {
@@ -2824,6 +2730,163 @@ async fn current_head_sha_async(working_dir: std::path::PathBuf) -> String {
     tokio::task::spawn_blocking(move || current_head_sha(&working_dir))
         .await
         .unwrap_or_else(|_| "HEAD".to_string())
+}
+
+#[derive(Debug, Clone, Default)]
+struct McpTurnTrackingResult {
+    task_id: Option<String>,
+    run_id: Option<String>,
+    context_snapshot_id: Option<String>,
+}
+
+async fn resolve_mcp_turn_tracking(
+    mcp_server: Arc<LibraMcpServer>,
+    plan_id: Option<String>,
+    working_dir: std::path::PathBuf,
+    text: String,
+) -> McpTurnTrackingResult {
+    let snapshot_params = CreateContextSnapshotParams {
+        selection_strategy: "heuristic".to_string(),
+        items: None,
+        summary: Some(format!("Context for: {text}")),
+        tags: None,
+        external_ids: None,
+        actor_kind: Some("system".to_string()),
+        actor_id: Some("libra-code".to_string()),
+    };
+    let snapshot_actor = match mcp_server.resolve_actor_from_params(
+        snapshot_params.actor_kind.as_deref(),
+        snapshot_params.actor_id.as_deref(),
+    ) {
+        Ok(actor) => actor,
+        Err(e) => {
+            cli_error!(e, "error: failed to resolve actor for snapshot");
+            return McpTurnTrackingResult::default();
+        }
+    };
+    let context_snapshot_id = match mcp_server
+        .create_context_snapshot_impl(snapshot_params, snapshot_actor)
+        .await
+    {
+        Ok(result) => {
+            if result.is_error.unwrap_or(false) {
+                render_mcp_error("failed to create context snapshot", result.content);
+                None
+            } else {
+                parse_created_id(&result)
+            }
+        }
+        Err(e) => {
+            cli_error!(e, "error: failed to create context snapshot");
+            None
+        }
+    };
+
+    let task_params = CreateTaskParams {
+        title: summarize_turn_task_title(&text),
+        description: Some("Interactive TUI user request".to_string()),
+        goal_type: None,
+        constraints: None,
+        acceptance_criteria: None,
+        requested_by_kind: Some("human".to_string()),
+        requested_by_id: Some("user".to_string()),
+        dependencies: None,
+        intent_id: None,
+        parent_task_id: None,
+        origin_step_id: None,
+        status: Some("created".to_string()),
+        reason: Some("start user turn".to_string()),
+        tags: None,
+        external_ids: None,
+        actor_kind: Some("human".to_string()),
+        actor_id: Some("user".to_string()),
+    };
+    let task_actor = match mcp_server.resolve_actor_from_params(
+        task_params.actor_kind.as_deref(),
+        task_params.actor_id.as_deref(),
+    ) {
+        Ok(actor) => actor,
+        Err(e) => {
+            cli_error!(e, "error: failed to resolve actor for task");
+            return McpTurnTrackingResult {
+                context_snapshot_id,
+                ..McpTurnTrackingResult::default()
+            };
+        }
+    };
+
+    let task_id = match mcp_server.create_task_impl(task_params, task_actor).await {
+        Ok(result) => {
+            if result.is_error.unwrap_or(false) {
+                render_mcp_error("failed to create task", result.content);
+                None
+            } else {
+                parse_created_id(&result)
+            }
+        }
+        Err(e) => {
+            cli_error!(e, "error: failed to create task");
+            None
+        }
+    };
+    let Some(task_id) = task_id else {
+        return McpTurnTrackingResult {
+            context_snapshot_id,
+            ..McpTurnTrackingResult::default()
+        };
+    };
+
+    let run_params = CreateRunParams {
+        task_id: task_id.clone(),
+        base_commit_sha: current_head_sha_async(working_dir).await,
+        plan_id,
+        status: Some("created".to_string()),
+        context_snapshot_id: context_snapshot_id.clone(),
+        error: None,
+        agent_instances: None,
+        metrics_json: None,
+        reason: Some("start user turn".to_string()),
+        orchestrator_version: None,
+        tags: None,
+        external_ids: None,
+        actor_kind: Some("human".to_string()),
+        actor_id: Some("user".to_string()),
+    };
+    let run_actor = match mcp_server.resolve_actor_from_params(
+        run_params.actor_kind.as_deref(),
+        run_params.actor_id.as_deref(),
+    ) {
+        Ok(actor) => actor,
+        Err(e) => {
+            cli_error!(e, "error: failed to resolve actor for run");
+            return McpTurnTrackingResult {
+                task_id: Some(task_id),
+                context_snapshot_id,
+                ..McpTurnTrackingResult::default()
+            };
+        }
+    };
+
+    let run_id = match mcp_server.create_run_impl(run_params, run_actor).await {
+        Ok(result) => {
+            if result.is_error.unwrap_or(false) {
+                render_mcp_error("failed to create run", result.content);
+                None
+            } else {
+                parse_created_id(&result)
+            }
+        }
+        Err(e) => {
+            cli_error!(e, "error: failed to create run");
+            None
+        }
+    };
+
+    McpTurnTrackingResult {
+        task_id: Some(task_id),
+        run_id,
+        context_snapshot_id,
+    }
 }
 
 fn parse_created_id(result: &rmcp::model::CallToolResult) -> Option<String> {
