@@ -22,6 +22,10 @@ target
 .vscode/
 .claude/
 .qwen/
+.trellis/
+.cursor/
+.agent/
+.agents/
 
 # Buck2
 buck-out/

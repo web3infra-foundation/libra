@@ -1,14 +1,43 @@
 //! Session storage: save and load sessions from disk.
 
-use std::path::{Path, PathBuf};
+use std::{
+    fs::{self, OpenOptions},
+    io::{self, Write},
+    path::{Path, PathBuf},
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
 use super::state::SessionState;
+
+const SESSION_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+const SESSION_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const STALE_SESSION_LOCK_AGE: Duration = Duration::from_secs(30);
 
 /// Manages session persistence on disk.
 ///
 /// Sessions are stored as JSON files in a sessions directory.
 pub struct SessionStore {
     sessions_dir: PathBuf,
+}
+
+#[derive(Debug)]
+pub struct SessionFileLock {
+    lock_path: PathBuf,
+}
+
+impl Drop for SessionFileLock {
+    fn drop(&mut self) {
+        if let Err(err) = fs::remove_file(&self.lock_path)
+            && err.kind() != io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                path = %self.lock_path.display(),
+                error = %err,
+                "failed to release session lock"
+            );
+        }
+    }
 }
 
 impl SessionStore {
@@ -27,44 +56,43 @@ impl SessionStore {
     }
 
     /// Create the sessions directory if it doesn't exist.
-    fn ensure_dir(&self) -> std::io::Result<()> {
-        std::fs::create_dir_all(&self.sessions_dir)
+    fn ensure_dir(&self) -> io::Result<()> {
+        fs::create_dir_all(&self.sessions_dir)
     }
 
     /// Save a session to disk.
-    pub fn save(&self, session: &SessionState) -> std::io::Result<()> {
+    pub fn save(&self, session: &SessionState) -> io::Result<()> {
         self.ensure_dir()?;
         let path = self.session_path(&session.id);
         let json = serde_json::to_string_pretty(session)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        std::fs::write(path, json)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        self.write_atomic(&path, json.as_bytes())
     }
 
     /// Load a session by ID.
-    pub fn load(&self, id: &str) -> std::io::Result<SessionState> {
+    pub fn load(&self, id: &str) -> io::Result<SessionState> {
         let path = self.session_path(id);
-        let content = std::fs::read_to_string(path)?;
-        serde_json::from_str(&content)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        let content = fs::read_to_string(path)?;
+        serde_json::from_str(&content).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
     /// Load the most recently updated session.
-    pub fn load_latest(&self) -> std::io::Result<Option<SessionState>> {
+    pub fn load_latest(&self) -> io::Result<Option<SessionState>> {
         let sessions = self.list()?;
         if sessions.is_empty() {
             return Ok(None);
         }
 
         // Find the most recently modified session file
-        let mut latest: Option<(SessionState, std::time::SystemTime)> = None;
+        let mut latest: Option<(SessionState, SystemTime)> = None;
 
         for info in sessions {
             match self.load(&info.id) {
                 Ok(session) => {
                     let path = self.session_path(&info.id);
-                    let modified = std::fs::metadata(&path)
+                    let modified = fs::metadata(&path)
                         .and_then(|m| m.modified())
-                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                        .unwrap_or(SystemTime::UNIX_EPOCH);
 
                     if latest
                         .as_ref()
@@ -83,17 +111,17 @@ impl SessionStore {
     }
 
     /// List all saved sessions (basic info only).
-    pub fn list(&self) -> std::io::Result<Vec<SessionInfo>> {
+    pub fn list(&self) -> io::Result<Vec<SessionInfo>> {
         if !self.sessions_dir.exists() {
             return Ok(Vec::new());
         }
 
         let mut sessions = Vec::new();
-        for entry in std::fs::read_dir(&self.sessions_dir)? {
+        for entry in fs::read_dir(&self.sessions_dir)? {
             let entry = entry?;
             let path = entry.path();
             if path.extension().is_some_and(|ext| ext == "json") {
-                match std::fs::read_to_string(&path)
+                match fs::read_to_string(&path)
                     .map_err(|e| e.to_string())
                     .and_then(|content| {
                         serde_json::from_str::<SessionState>(&content).map_err(|e| e.to_string())
@@ -121,13 +149,199 @@ impl SessionStore {
     }
 
     /// Delete a session by ID.
-    pub fn delete(&self, id: &str) -> std::io::Result<()> {
+    pub fn delete(&self, id: &str) -> io::Result<()> {
         let path = self.session_path(id);
-        std::fs::remove_file(path)
+        fs::remove_file(path)
+    }
+
+    /// Acquire an exclusive lock for one session ID.
+    ///
+    /// The lock is implemented via a lock file in the sessions directory and
+    /// is automatically released when the returned guard is dropped.
+    pub fn lock_session(&self, id: &str) -> io::Result<SessionFileLock> {
+        self.ensure_dir()?;
+        let lock_path = self.session_lock_path(id);
+        let start = Instant::now();
+
+        loop {
+            match OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&lock_path)
+            {
+                Ok(mut file) => {
+                    let lock_content = format!(
+                        "pid={}\ncreated_at_ns={}\n",
+                        std::process::id(),
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_nanos()
+                    );
+                    file.write_all(lock_content.as_bytes())?;
+                    return Ok(SessionFileLock { lock_path });
+                }
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                    if self.is_stale_lock(&lock_path) {
+                        match fs::remove_file(&lock_path) {
+                            Ok(()) => continue,
+                            Err(remove_err) if remove_err.kind() == io::ErrorKind::NotFound => {
+                                continue;
+                            }
+                            Err(remove_err) => {
+                                return Err(io::Error::new(
+                                    remove_err.kind(),
+                                    format!(
+                                        "failed to clear stale session lock '{}': {remove_err}",
+                                        lock_path.display()
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+
+                    if start.elapsed() >= SESSION_LOCK_TIMEOUT {
+                        return Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            format!(
+                                "timed out waiting for session lock '{}'",
+                                lock_path.display()
+                            ),
+                        ));
+                    }
+                    thread::sleep(SESSION_LOCK_POLL_INTERVAL);
+                }
+                Err(err) => {
+                    return Err(io::Error::new(
+                        err.kind(),
+                        format!(
+                            "failed to open session lock '{}': {err}",
+                            lock_path.display()
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Move a malformed session file out of the way so ingestion can continue.
+    pub fn archive_corrupt_session(&self, id: &str) -> io::Result<Option<PathBuf>> {
+        let source = self.session_path(id);
+        let archived = self.sessions_dir.join(format!(
+            "{id}.corrupt.{}.json",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+
+        match fs::rename(&source, &archived) {
+            Ok(()) => Ok(Some(archived)),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(io::Error::new(
+                err.kind(),
+                format!(
+                    "failed to archive corrupt session file '{}' -> '{}': {err}",
+                    source.display(),
+                    archived.display()
+                ),
+            )),
+        }
     }
 
     fn session_path(&self, id: &str) -> PathBuf {
         self.sessions_dir.join(format!("{id}.json"))
+    }
+
+    fn session_lock_path(&self, id: &str) -> PathBuf {
+        self.sessions_dir.join(format!("{id}.lock"))
+    }
+
+    fn is_stale_lock(&self, lock_path: &Path) -> bool {
+        let Ok(metadata) = fs::metadata(lock_path) else {
+            return false;
+        };
+        let Ok(modified_at) = metadata.modified() else {
+            return false;
+        };
+        let Ok(elapsed) = modified_at.elapsed() else {
+            return false;
+        };
+        elapsed >= STALE_SESSION_LOCK_AGE
+    }
+
+    fn write_atomic(&self, destination: &Path, data: &[u8]) -> io::Result<()> {
+        let parent = destination.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "invalid session file path without parent: '{}'",
+                    destination.display()
+                ),
+            )
+        })?;
+
+        let file_name = destination
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("invalid session file name: '{}'", destination.display()),
+                )
+            })?;
+
+        let unique_suffix = format!(
+            "{}.{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let temp_path = parent.join(format!(".{file_name}.{unique_suffix}.tmp"));
+
+        fs::write(&temp_path, data).map_err(|err| {
+            io::Error::new(
+                err.kind(),
+                format!(
+                    "failed to write temporary session file '{}': {err}",
+                    temp_path.display()
+                ),
+            )
+        })?;
+
+        #[cfg(windows)]
+        {
+            if destination.exists() {
+                match fs::remove_file(destination) {
+                    Ok(()) => {}
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                    Err(err) => {
+                        let _ = fs::remove_file(&temp_path);
+                        return Err(io::Error::new(
+                            err.kind(),
+                            format!(
+                                "failed to replace session file '{}': {err}",
+                                destination.display()
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+
+        fs::rename(&temp_path, destination).map_err(|err| {
+            let _ = fs::remove_file(&temp_path);
+            io::Error::new(
+                err.kind(),
+                format!(
+                    "failed to replace session file '{}' with '{}': {err}",
+                    destination.display(),
+                    temp_path.display()
+                ),
+            )
+        })
     }
 }
 
