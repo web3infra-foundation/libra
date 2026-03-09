@@ -46,7 +46,8 @@ Modes:
 
 Notes:
   - OBJECT is ignored for all --ai* modes.
-  - --ai and --ai-type search the AI history branch by object ID and can resolve custom stored types such as claude_session.
+  - --ai and --ai-type search the AI history branch by object ID and can resolve persisted session objects such as ai_session.
+  - --ai on ai_session objects prints a unified session summary before full JSON.
   - --ai-list only accepts the built-in TYPE names shown in --help.";
 
 const CAT_FILE_AFTER_HELP: &str = "Examples:
@@ -115,6 +116,7 @@ const AI_OBJECT_TYPES: &[&str] = &[
     "provenance",
     "decision",
     "snapshot",
+    "ai_session",
 ];
 const TAG_REF_PREFIX: &str = "refs/tags/";
 
@@ -498,6 +500,9 @@ async fn ai_pretty_print(uuid: &str) {
         Ok(value) => {
             println!("type: {}", type_name);
             println!("hash: {}", hash);
+            if type_name == "ai_session" {
+                print_ai_session_summary(&value);
+            }
             println!("---");
             println!(
                 "{}",
@@ -511,6 +516,75 @@ async fn ai_pretty_print(uuid: &str) {
             println!("hash: {}", hash);
             println!("---");
             print!("{}", String::from_utf8_lossy(&data));
+        }
+    }
+}
+
+fn print_ai_session_summary(value: &serde_json::Value) {
+    if let Some(schema) = value.get("schema").and_then(serde_json::Value::as_str) {
+        println!("schema: {schema}");
+    }
+    if let Some(provider) = value.get("provider").and_then(serde_json::Value::as_str) {
+        println!("provider: {provider}");
+    }
+    if let Some(ai_session_id) = value
+        .get("ai_session_id")
+        .and_then(serde_json::Value::as_str)
+    {
+        println!("ai_session_id: {ai_session_id}");
+    }
+    if let Some(provider_session_id) = value
+        .get("provider_session_id")
+        .and_then(serde_json::Value::as_str)
+    {
+        println!("provider_session_id: {provider_session_id}");
+    }
+
+    if let Some(state_machine) = value.get("state_machine") {
+        if let Some(phase) = state_machine
+            .get("phase")
+            .and_then(serde_json::Value::as_str)
+        {
+            println!("phase: {phase}");
+        }
+        if let Some(status) = state_machine
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+        {
+            println!("status: {status}");
+        }
+        if let Some(event_count) = state_machine
+            .get("event_count")
+            .and_then(serde_json::Value::as_u64)
+        {
+            println!("event_count: {event_count}");
+        }
+    }
+
+    if let Some(summary) = value.get("summary") {
+        if let Some(message_count) = summary
+            .get("message_count")
+            .and_then(serde_json::Value::as_u64)
+        {
+            println!("message_count: {message_count}");
+        }
+        if let Some(tool_event_count) = summary
+            .get("tool_event_count")
+            .and_then(serde_json::Value::as_u64)
+        {
+            println!("tool_event_count: {tool_event_count}");
+        }
+    }
+
+    if let Some(transcript) = value.get("transcript") {
+        if let Some(path) = transcript.get("path").and_then(serde_json::Value::as_str) {
+            println!("transcript_path: {path}");
+        }
+        if let Some(raw_event_count) = transcript
+            .get("raw_event_count")
+            .and_then(serde_json::Value::as_u64)
+        {
+            println!("transcript_raw_event_count: {raw_event_count}");
         }
     }
 }
@@ -631,7 +705,7 @@ mod tests {
         let help = String::from_utf8(help).unwrap();
 
         assert!(help.contains("OBJECT is ignored for all --ai* modes"));
-        assert!(help.contains("custom stored types such as claude_session"));
+        assert!(help.contains("persisted session objects such as ai_session"));
         assert!(help.contains("--ai-type <ID>"));
     }
 

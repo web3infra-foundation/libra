@@ -115,34 +115,67 @@ Update your `claude_desktop_config.json` as follows:
 > **Note**: The `cwd` (current working directory) must be set to the root of a valid Libra repository.
 > If `libra code` is launched outside of a repository, it will exit with an error.
 
-#### Claude Code Hook Forwarding
+#### AI Hook Forwarding
 
-Libra can ingest Claude Code hook events and persist them as AI session history.
-Instead of manually editing `.claude/settings.json`, run:
+Libra can record Claude Code and Gemini CLI sessions as `ai_session` history
+objects. The recommended setup is to install Libra's hook forwarding once in
+your project, then use your AI CLI normally.
+
+Claude Code:
 
 ```bash
-libra claude-code install-hooks
+libra hooks claude install
 ```
 
-This installs forwarding entries for:
-
-- `SessionStart` → `libra claude-code session-start`
-- `UserPromptSubmit` → `libra claude-code prompt`
-- `PostToolUse` → `libra claude-code tool-use`
-- `Stop` → `libra claude-code stop`
-- `SessionEnd` → `libra claude-code session-end`
-
-The generated entries omit Claude's `matcher` field so the hooks run for the
-real runtime queries Claude emits for session lifecycle and tool events.
-
-Advanced usage:
+Gemini CLI:
 
 ```bash
-# Use a custom command prefix (for local dev wrappers)
-libra claude-code install-hooks --command-prefix "go run ./cmd/libra/main.go"
+libra hooks gemini install
+```
 
-# Customize hook timeout seconds written into settings.json
-libra claude-code install-hooks --timeout 15
+After installation, Libra writes hook settings into the provider's project
+config:
+
+- Claude Code: `.claude/settings.json`
+- Gemini CLI: `.gemini/settings.json`
+
+Those generated entries forward provider lifecycle events into:
+
+- `libra hooks claude <event>`
+- `libra hooks gemini <event>`
+
+Useful follow-up commands:
+
+```bash
+# Check whether hooks are installed
+libra hooks claude is-installed
+libra hooks gemini is-installed
+
+# Remove Libra-managed hooks
+libra hooks claude uninstall
+libra hooks gemini uninstall
+```
+
+If `libra` is not on your `PATH`, or you want hooks to call a specific local
+binary, pass an explicit command prefix:
+
+```bash
+libra hooks claude install --command-prefix "/absolute/path/to/libra"
+libra hooks gemini install --command-prefix "/absolute/path/to/libra"
+```
+
+Provider-specific notes:
+
+- Claude Code supports `--timeout`, for example:
+  `libra hooks claude install --timeout 15`
+- Gemini CLI does **not** support `--timeout`
+
+Once installed, use Claude Code or Gemini CLI as usual. When a session ends,
+Libra persists it as an `ai_session` object that you can inspect later with:
+
+```bash
+libra cat-file --ai-list ai_session
+libra cat-file --ai <ai_session_id>
 ```
 
 ### AI Provider Selection
