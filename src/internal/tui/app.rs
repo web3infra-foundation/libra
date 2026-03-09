@@ -450,12 +450,11 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     self.schedule_draw();
                 }
                 // ── Normal idle handlers ─────────────────────────────
-                KeyCode::Enter => {
-                    if !self.widget.bottom_pane.is_empty() {
-                        let text = self.widget.bottom_pane.take_input();
-                        self.submit_message(text).await;
-                    }
+                KeyCode::Enter if !self.widget.bottom_pane.is_empty() => {
+                    let text = self.widget.bottom_pane.take_input();
+                    self.submit_message(text).await;
                 }
+                KeyCode::Enter => {}
                 // Clear screen (Ctrl+K) - must come before generic Char handler
                 KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.widget.clear();
