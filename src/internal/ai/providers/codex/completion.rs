@@ -154,20 +154,22 @@ impl CompletionModelTrait for Model {
         }
 
         // Apply file changes to working directory
-        let mut apply_error: Option<String> = None;
         if !file_changes.is_empty() {
+            // Apply changes and collect any errors
+            let mut errors = Vec::new();
             for change in &file_changes {
                 if let Err(e) = apply_file_change(change) {
-                    // Collect apply errors
-                    apply_error = Some(format!("{}: {}", change.path, e));
+                    errors.push(format!("{}: {}", change.path, e));
                 }
             }
 
+            // Log errors if any
+            if !errors.is_empty() {
+                tracing::warn!("File apply errors: {}", errors.join("; "));
+            }
+
             // Auto-add and commit changes to Libra via MCP
-            if let Err(e) = self
-                .commit_to_libra(&file_changes, apply_error.as_deref())
-                .await
-            {
+            if let Err(e) = self.commit_to_libra(&file_changes).await {
                 tracing::warn!("Failed to commit to Libra via MCP: {}", e);
             }
         }
@@ -510,18 +512,11 @@ pub type CodexModel = Model;
 
 impl Model {
     /// Commit file changes to Libra via MCP tools
-    /// `apply_error` contains error message if any file changes failed to apply
+    /// Commit file changes to Libra via MCP tools
     async fn commit_to_libra(
         &self,
         file_changes: &[FileChange],
-        apply_error: Option<&str>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Determine apply status based on error
-        let apply_status = if apply_error.is_some() {
-            "failed"
-        } else {
-            "applied"
-        };
         use git_internal::internal::object::types::ActorRef;
 
         use crate::internal::ai::mcp::resource::{
@@ -598,10 +593,10 @@ impl Model {
             let params = CreatePatchSetParams {
                 run_id,
                 generation: 1,
+                sequence: None,
                 base_commit_sha: base_commit,
                 touched_files: Some(touched_files),
                 rationale: Some(format!("Codex generated files: {}", files.join(", "))),
-                apply_status: Some(apply_status.to_string()),
                 diff_format: Some("unified_diff".to_string()),
                 diff_artifact,
                 tags: None,

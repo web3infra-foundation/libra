@@ -889,9 +889,12 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     tokio::spawn(async move {
                         // Create Plan via MCP (first, per docs: Intent → Plan)
                         let plan_params = CreatePlanParams {
-                            plan_version: Some(1),
-                            pipeline_id: None,
-                            fwindow: None,
+                            intent_id: mcp_ids_clone
+                                ._intent_id
+                                .clone()
+                                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                            parent_plan_ids: None,
+                            context_frame_ids: None,
                             steps: None,
                             tags: None,
                             external_ids: None,
@@ -943,7 +946,10 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                             requested_by_id: Some("user".to_string()),
                             dependencies: None,
                             intent_id: mcp_ids_clone._intent_id.clone(),
+                            parent_task_id: None,
+                            origin_step_id: None,
                             status: Some("running".to_string()),
+                            reason: Some("User requested task execution".to_string()),
                             tags: None,
                             external_ids: None,
                             actor_kind: Some("human".to_string()),
@@ -1056,7 +1062,8 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                             provider: provider_name,
                             model: model_name,
                             parameters_json: None,
-                            token_usage_json: None,
+                            temperature: None,
+                            max_tokens: None,
                             tags: None,
                             external_ids: None,
                             actor_kind: Some("system".to_string()),
