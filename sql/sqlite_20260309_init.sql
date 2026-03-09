@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS `object_index` (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_object_repo_oid ON `object_index`(`repo_id`, `o_id`);
 CREATE INDEX IF NOT EXISTS idx_object_sync ON `object_index`(`repo_id`, `is_synced`);
 
+-- BEGIN AI PROJECTION SCHEMA
 CREATE TABLE IF NOT EXISTS `ai_thread` (
     `thread_id` TEXT PRIMARY KEY,
     `title` TEXT,
@@ -102,7 +103,7 @@ CREATE TABLE IF NOT EXISTS `ai_thread_intent` (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_thread_intent_thread_ordinal
     ON `ai_thread_intent`(`thread_id`, `ordinal`);
-CREATE INDEX IF NOT EXISTS idx_ai_thread_intent_intent
+CREATE UNIQUE INDEX IF NOT EXISTS uq_ai_thread_intent_intent
     ON `ai_thread_intent`(`intent_id`);
 CREATE INDEX IF NOT EXISTS idx_ai_thread_intent_head
     ON `ai_thread_intent`(`thread_id`, `is_head`);
@@ -224,3 +225,4 @@ CREATE TABLE IF NOT EXISTS `ai_index_intent_context_frame` (
 );
 CREATE INDEX IF NOT EXISTS idx_ai_index_intent_context_frame_relation
     ON `ai_index_intent_context_frame`(`intent_id`, `relation_kind`);
+-- END AI PROJECTION SCHEMA

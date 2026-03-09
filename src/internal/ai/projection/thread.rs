@@ -1168,6 +1168,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn thread_projection_create_rejects_duplicate_intent_membership() {
+        let db = setup_test_db().await;
+        let first = sample_projection();
+        first.create(&db).await.unwrap();
+
+        let second = ThreadProjection {
+            thread_id: Uuid::parse_str("66666666-6666-6666-6666-666666666666").unwrap(),
+            current_intent_id: Some(
+                Uuid::parse_str("33333333-3333-3333-3333-333333333333").unwrap(),
+            ),
+            latest_intent_id: Some(
+                Uuid::parse_str("77777777-7777-7777-7777-777777777777").unwrap(),
+            ),
+            intents: vec![
+                ThreadIntentRef {
+                    intent_id: Uuid::parse_str("33333333-3333-3333-3333-333333333333").unwrap(),
+                    ordinal: 0,
+                    is_head: false,
+                    linked_at: ts(1_700_000_220),
+                    link_reason: ThreadIntentLinkReason::Seed,
+                },
+                ThreadIntentRef {
+                    intent_id: Uuid::parse_str("77777777-7777-7777-7777-777777777777").unwrap(),
+                    ordinal: 1,
+                    is_head: true,
+                    linked_at: ts(1_700_000_230),
+                    link_reason: ThreadIntentLinkReason::Revision,
+                },
+            ],
+            updated_at: ts(1_700_000_250),
+            ..sample_projection()
+        };
+
+        let err = second.create(&db).await.unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("Failed to insert intent"));
+        assert!(message.contains(&second.thread_id.to_string()));
+
+        let stored = ThreadProjection::find_by_intent_id(
+            &db,
+            Uuid::parse_str("33333333-3333-3333-3333-333333333333").unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(stored.thread_id, first.thread_id);
+
+        let second_row = ai_thread::Entity::find_by_id(second.thread_id.to_string())
+            .one(&db)
+            .await
+            .unwrap();
+        assert!(second_row.is_none());
+    }
+
+    #[tokio::test]
     async fn thread_projection_list_active_excludes_archived_and_sorts_by_updated_at() {
         let db = setup_test_db().await;
 

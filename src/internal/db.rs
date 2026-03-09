@@ -28,14 +28,10 @@ pub async fn establish_connection(db_path: &str) -> Result<DatabaseConnection, I
         ));
     }
 
-    let mut option = ConnectOptions::new(format!("sqlite://{db_path}"));
-    option.sqlx_logging(false); // TODO use better option
-    let conn = Database::connect(option)
-        .await
-        .map_err(|err| IOError::other(format!("Database connection error: {err:?}")))?;
+    let conn = connect_database(db_path).await?;
     ensure_ai_projection_schema(&conn)
         .await
-        .map_err(|err| IOError::other(format!("Failed to setup AI projection schema: {err:?}")))?;
+        .map_err(|err| IOError::other(format!("Failed to ensure AI projection schema: {err}")))?;
     Ok(conn)
 }
 // #[cfg(not(test))]
@@ -93,12 +89,12 @@ async fn get_or_init_db_conn_instance(db_path: PathBuf) -> io::Result<&'static D
     drop(connections);
 
     let conn = get_db_conn_for_path(&db_path).await?;
-    let leaked = Box::leak(Box::new(conn));
 
     let mut connections = TEST_DB_CONNECTIONS.lock().await;
     if let Some(existing) = connections.get(&db_path) {
         return Ok(*existing);
     }
+    let leaked = leak_conn(conn);
     connections.insert(db_path, leaked);
     Ok(leaked)
 }
@@ -157,6 +153,8 @@ async fn setup_database_model(conn: &DatabaseConnection) -> Result<(), Transacti
 }
 
 const BOOTSTRAP_SQL: &str = include_str!("../../sql/sqlite_20260309_init.sql");
+const AI_PROJECTION_SCHEMA_START: &str = "-- BEGIN AI PROJECTION SCHEMA";
+const AI_PROJECTION_SCHEMA_END: &str = "-- END AI PROJECTION SCHEMA";
 
 /// create table using the SQLite bootstrap schema
 async fn setup_database_sql(conn: &DatabaseConnection) -> Result<(), TransactionError<DbErr>> {
@@ -173,11 +171,86 @@ async fn setup_database_sql(conn: &DatabaseConnection) -> Result<(), Transaction
     .await
 }
 
-async fn ensure_ai_projection_schema(conn: &DatabaseConnection) -> Result<(), DbErr> {
+fn ai_projection_sql() -> io::Result<&'static str> {
+    let start = BOOTSTRAP_SQL
+        .find(AI_PROJECTION_SCHEMA_START)
+        .ok_or_else(|| {
+            IOError::new(
+                ErrorKind::InvalidData,
+                format!("Bootstrap schema is missing marker: {AI_PROJECTION_SCHEMA_START}"),
+            )
+        })?;
+    let start = start + AI_PROJECTION_SCHEMA_START.len();
+    let end = BOOTSTRAP_SQL[start..]
+        .find(AI_PROJECTION_SCHEMA_END)
+        .ok_or_else(|| {
+            IOError::new(
+                ErrorKind::InvalidData,
+                format!("Bootstrap schema is missing marker: {AI_PROJECTION_SCHEMA_END}"),
+            )
+        })?;
+    let sql = BOOTSTRAP_SQL[start..start + end].trim();
+    if sql.is_empty() {
+        return Err(IOError::new(
+            ErrorKind::InvalidData,
+            "Bootstrap schema AI projection section is empty.",
+        ));
+    }
+
+    Ok(sql)
+}
+
+async fn sqlite_schema_contains(
+    conn: &DatabaseConnection,
+    entry_type: &str,
+    name: &str,
+) -> Result<bool, DbErr> {
     let backend = conn.get_database_backend();
-    conn.execute(Statement::from_string(backend, BOOTSTRAP_SQL))
-        .await?;
+    let stmt = Statement::from_sql_and_values(
+        backend,
+        "SELECT 1 FROM sqlite_master WHERE type = ? AND name = ? LIMIT 1",
+        [entry_type.into(), name.into()],
+    );
+    let row = conn.query_one(stmt).await?;
+    Ok(row.is_some())
+}
+
+async fn ensure_ai_projection_schema(conn: &DatabaseConnection) -> Result<(), IOError> {
+    if !sqlite_schema_contains(conn, "table", "object_index")
+        .await
+        .map_err(|err| IOError::other(format!("Failed to inspect core schema: {err}")))?
+    {
+        let backend = conn.get_database_backend();
+        conn.execute(Statement::from_string(backend, BOOTSTRAP_SQL))
+            .await
+            .map_err(|err| IOError::other(format!("Failed to bootstrap SQLite schema: {err}")))?;
+        return Ok(());
+    }
+
+    let has_ai_table = sqlite_schema_contains(conn, "table", "ai_index_intent_context_frame")
+        .await
+        .map_err(|err| IOError::other(format!("Failed to inspect AI schema: {err}")))?;
+    let has_ai_index = sqlite_schema_contains(conn, "index", "uq_ai_thread_intent_intent")
+        .await
+        .map_err(|err| IOError::other(format!("Failed to inspect AI schema: {err}")))?;
+
+    if has_ai_table && has_ai_index {
+        return Ok(());
+    }
+
+    let backend = conn.get_database_backend();
+    conn.execute(Statement::from_string(backend, ai_projection_sql()?))
+        .await
+        .map_err(|err| IOError::other(format!("Failed to apply AI projection schema: {err}")))?;
     Ok(())
+}
+
+async fn connect_database(db_path: &str) -> io::Result<DatabaseConnection> {
+    let mut option = ConnectOptions::new(format!("sqlite://{db_path}"));
+    option.sqlx_logging(false); // TODO use better option
+    Database::connect(option)
+        .await
+        .map_err(|err| IOError::other(format!("Database connection error: {err:?}")))
 }
 
 /// Create a new SQLite database file at the specified path.
@@ -198,7 +271,7 @@ pub async fn create_database(db_path: &str) -> io::Result<DatabaseConnection> {
         .map_err(|err| IOError::other(format!("Failed to create database file: {err:?}")))?;
 
     // Connect to the new database and set up the schema.
-    match establish_connection(db_path).await {
+    match connect_database(db_path).await {
         Ok(conn) => {
             setup_database_sql(&conn)
                 .await
@@ -211,12 +284,13 @@ pub async fn create_database(db_path: &str) -> io::Result<DatabaseConnection> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, path::PathBuf, sync::Arc};
 
     use sea_orm::{
         ActiveModelTrait, ActiveValue::NotSet, ColumnTrait, EntityTrait, QueryFilter, Set,
     };
     use tests::{object_index, reference::ConfigKind};
+    use tokio::sync::Barrier;
 
     use super::*;
 
@@ -548,5 +622,100 @@ mod tests {
 
         conn.close().await.unwrap();
         fs::remove_file(db_path).unwrap();
+    }
+
+    #[test]
+    fn test_ai_projection_sql_only_contains_ai_schema() {
+        let ai_sql = ai_projection_sql().unwrap();
+
+        assert!(ai_sql.contains("CREATE TABLE IF NOT EXISTS `ai_thread`"));
+        assert!(ai_sql.contains("CREATE TABLE IF NOT EXISTS `ai_scheduler_state`"));
+        assert!(!ai_sql.contains("CREATE TABLE IF NOT EXISTS `config`"));
+        assert!(!ai_sql.contains("CREATE TABLE IF NOT EXISTS `reference`"));
+        assert!(!ai_sql.contains("CREATE TABLE IF NOT EXISTS `object_index`"));
+    }
+
+    #[tokio::test]
+    async fn test_establish_connection_backfills_ai_projection_schema_for_core_only_db() {
+        let mut db_path_buf = std::env::temp_dir();
+        db_path_buf.push("test_ai_projection_backfill_core_only.db");
+        let db_path = db_path_buf.to_str().unwrap();
+
+        if Path::new(db_path).exists() {
+            fs::remove_file(db_path).unwrap();
+        }
+
+        fs::File::create(db_path).unwrap();
+
+        let conn = connect_database(db_path).await.unwrap();
+        let core_sql_end = BOOTSTRAP_SQL.find(AI_PROJECTION_SCHEMA_START).unwrap();
+        let core_sql = BOOTSTRAP_SQL[..core_sql_end].trim();
+        let backend = conn.get_database_backend();
+        conn.execute(Statement::from_string(backend, core_sql))
+            .await
+            .unwrap();
+        conn.close().await.unwrap();
+
+        let conn = establish_connection(db_path).await.unwrap();
+        let backend = conn.get_database_backend();
+
+        let ai_stmt = Statement::from_sql_and_values(
+            backend,
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+            ["ai_thread".into()],
+        );
+        let ai_row = conn.query_one(ai_stmt).await.unwrap();
+        assert!(ai_row.is_some(), "expected ai_thread table to exist");
+
+        let core_stmt = Statement::from_sql_and_values(
+            backend,
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+            ["object_index".into()],
+        );
+        let core_row = conn.query_one(core_stmt).await.unwrap();
+        assert!(
+            core_row.is_some(),
+            "expected object_index table to remain present"
+        );
+
+        conn.close().await.unwrap();
+        fs::remove_file(db_path).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_get_db_conn_instance_for_path_reuses_single_cached_connection_under_race() {
+        let test_db =
+            TestDbPath::new("test_get_db_conn_instance_for_path_reuses_under_race.db").await;
+        let db_path = PathBuf::from(&test_db.0);
+
+        reset_db_conn_instance_for_path(&db_path).await;
+
+        let barrier = Arc::new(Barrier::new(8));
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let barrier = Arc::clone(&barrier);
+            let db_path = db_path.clone();
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                get_db_conn_instance_for_path(&db_path).await
+            }));
+        }
+
+        let mut first: Option<*const DbConn> = None;
+        for task in tasks {
+            let conn = task.await.unwrap().unwrap();
+            let ptr = conn as *const DbConn;
+            if let Some(existing) = first {
+                assert!(std::ptr::eq(existing, ptr));
+            } else {
+                first = Some(ptr);
+            }
+        }
+
+        let connections = TEST_DB_CONNECTIONS.lock().await;
+        let cached = connections.get(&db_path).copied();
+        let first = first.expect("at least one connection result");
+        assert!(cached.is_some());
+        assert!(std::ptr::eq(cached.unwrap(), first));
     }
 }
