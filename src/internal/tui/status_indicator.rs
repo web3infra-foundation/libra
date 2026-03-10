@@ -78,6 +78,7 @@ impl StatusIndicator {
             AgentStatus::Retrying => "Retrying",
             AgentStatus::ExecutingTool => "Executing tool",
             AgentStatus::AwaitingUserInput => "Awaiting input",
+            AgentStatus::AwaitingApproval => "Awaiting approval",
             AgentStatus::Idle | AgentStatus::AwaitingPostPlanChoice => return,
         };
 

@@ -38,6 +38,7 @@ impl ToolHandler for ShellHandler {
 
     async fn handle(&self, invocation: ToolInvocation) -> ToolResult<ToolOutput> {
         let ToolInvocation {
+            call_id,
             payload,
             working_dir,
             runtime_context,
@@ -64,7 +65,8 @@ impl ToolHandler for ShellHandler {
             .unwrap_or(DEFAULT_MAX_OUTPUT_BYTES);
         let sandbox_runtime = runtime_context
             .as_ref()
-            .and_then(|ctx| ctx.sandbox_runtime.as_ref());
+            .and_then(|ctx| ctx.sandbox_runtime.clone());
+        let approval = runtime_context.as_ref().and_then(|ctx| ctx.approval.clone());
         let sandbox = runtime_context.as_ref().and_then(|ctx| {
             ctx.sandbox.clone().map(|mut sandbox| {
                 sandbox.permissions = args.sandbox_permissions;
@@ -72,13 +74,18 @@ impl ToolHandler for ShellHandler {
             })
         });
 
-        let output = crate::internal::ai::sandbox::run_shell_command(
-            &args.command,
-            &cwd,
-            args.timeout_ms,
-            max_output_bytes,
-            sandbox,
-            sandbox_runtime,
+        let output = crate::internal::ai::sandbox::run_shell_command_with_approval(
+            crate::internal::ai::sandbox::ShellCommandRequest {
+                call_id,
+                command: args.command,
+                cwd,
+                timeout_ms: args.timeout_ms,
+                max_output_bytes,
+                sandbox,
+                sandbox_runtime,
+                approval,
+                justification: args.justification,
+            },
         )
         .await
         .map_err(ToolError::ExecutionFailed)?;

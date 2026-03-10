@@ -31,7 +31,8 @@ use crate::internal::{
             zhipu::{Client as ZhipuClient, GLM_5},
         },
         sandbox::{
-            SandboxPermissions, SandboxPolicy, ToolRuntimeContext, ToolSandboxContext,
+            ApprovalStore, AskForApproval, ExecApprovalRequest, SandboxPermissions, SandboxPolicy,
+            ToolApprovalContext, ToolRuntimeContext, ToolSandboxContext,
         },
         tools::{
             ToolRegistry, ToolRegistryBuilder,
@@ -265,6 +266,8 @@ async fn execute_tui(args: CodeArgs) {
     let (user_input_tx, user_input_rx) = tokio::sync::mpsc::unbounded_channel::<
         crate::internal::ai::tools::context::UserInputRequest,
     >();
+    let (exec_approval_tx, exec_approval_rx) =
+        tokio::sync::mpsc::unbounded_channel::<ExecApprovalRequest>();
 
     // Build registry: basic file tools + MCP workflow tools
     let mut builder = ToolRegistryBuilder::with_working_dir(working_dir)
@@ -296,6 +299,8 @@ async fn execute_tui(args: CodeArgs) {
         temperature,
         resume,
         user_input_rx,
+        exec_approval_rx,
+        exec_approval_tx,
         mcp_server,
     };
 
@@ -392,6 +397,8 @@ struct TuiLaunchConfig {
     resume: bool,
     user_input_rx:
         tokio::sync::mpsc::UnboundedReceiver<crate::internal::ai::tools::context::UserInputRequest>,
+    exec_approval_rx: tokio::sync::mpsc::UnboundedReceiver<ExecApprovalRequest>,
+    exec_approval_tx: tokio::sync::mpsc::UnboundedSender<ExecApprovalRequest>,
     mcp_server: Arc<LibraMcpServer>,
 }
 
@@ -430,6 +437,11 @@ async fn run_tui_with_model<M>(
                 permissions: SandboxPermissions::UseDefault,
             }),
             sandbox_runtime: None,
+            approval: Some(ToolApprovalContext {
+                policy: AskForApproval::OnRequest,
+                request_tx: params.exec_approval_tx.clone(),
+                store: Arc::new(tokio::sync::Mutex::new(ApprovalStore::default())),
+            }),
             max_output_bytes: None,
         }),
     };
@@ -508,6 +520,7 @@ async fn run_tui_with_model<M>(
             session,
             session_store,
             user_input_rx: params.user_input_rx,
+            exec_approval_rx: params.exec_approval_rx,
             model_name,
             provider_name,
             mcp_server: Some(params.mcp_server),

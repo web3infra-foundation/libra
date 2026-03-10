@@ -55,6 +55,7 @@ use crate::{
             server::LibraMcpServer,
         },
         orchestrator::{planner::compile_execution_plan_spec, types::ExecutionPlanSpec},
+        sandbox::{ExecApprovalRequest, ReviewDecision},
         session::{SessionState, SessionStore},
         tools::{
             ToolOutput, ToolRegistry,
@@ -181,6 +182,12 @@ struct PendingPostPlan {
     selected: usize, // 0=Execute, 1=Modify, 2=Cancel
 }
 
+/// Pending sandbox approval state.
+struct PendingExecApproval {
+    request: ExecApprovalRequest,
+    selected: usize, // 0=Approve, 1=Approve Session, 2=Deny, 3=Abort
+}
+
 /// Configuration for creating an App.
 pub struct AppConfig {
     pub welcome_message: String,
@@ -189,6 +196,7 @@ pub struct AppConfig {
     pub session: SessionState,
     pub session_store: SessionStore,
     pub user_input_rx: UnboundedReceiver<UserInputRequest>,
+    pub exec_approval_rx: UnboundedReceiver<ExecApprovalRequest>,
     /// Display name of the active model (e.g. "gemini-2.5-flash").
     pub model_name: String,
     /// Provider identifier (e.g. "gemini", "anthropic").
@@ -237,8 +245,12 @@ pub struct App<M: CompletionModel> {
     session_store: SessionStore,
     /// Receiver for user-input requests from the `request_user_input` tool handler.
     user_input_rx: UnboundedReceiver<UserInputRequest>,
+    /// Receiver for exec-approval requests from sandbox-governed handlers.
+    exec_approval_rx: UnboundedReceiver<ExecApprovalRequest>,
     /// Currently pending user-input interaction, if any.
     pending_user_input: Option<PendingUserInput>,
+    /// Currently pending exec approval interaction, if any.
+    pending_exec_approval: Option<PendingExecApproval>,
     /// Post-plan dialog state (present when user is choosing Execute/Modify/Cancel).
     pending_post_plan: Option<PendingPostPlan>,
     /// Display name of the active model.
@@ -340,7 +352,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             session: app_config.session,
             session_store: app_config.session_store,
             user_input_rx: app_config.user_input_rx,
+            exec_approval_rx: app_config.exec_approval_rx,
             pending_user_input: None,
+            pending_exec_approval: None,
             pending_post_plan: None,
             model_name: app_config.model_name,
             provider_name: app_config.provider_name,
@@ -425,6 +439,11 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     self.handle_user_input_request(request);
                 }
 
+                // Handle exec-approval requests from sandbox-governed handlers.
+                Some(request) = self.exec_approval_rx.recv() => {
+                    self.handle_exec_approval_request(request);
+                }
+
                 // Drive subtle status/tool animations while the agent is active.
                 _ = animation_tick.tick() => {
                     if matches!(
@@ -507,6 +526,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         // Check for Ctrl+C first (always handled)
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.cancel_pending_user_input();
+            self.cancel_pending_exec_approval();
             self.dismiss_post_plan_dialog();
             self.interrupt_agent_task();
             self.exit_info = Some(AppExitInfo {
@@ -615,6 +635,29 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             AgentStatus::AwaitingUserInput => {
                 self.handle_user_input_key(key);
             }
+            AgentStatus::AwaitingApproval => match key.code {
+                KeyCode::Up => {
+                    if let Some(ref mut pending) = self.pending_exec_approval {
+                        pending.selected = pending.selected.saturating_sub(1);
+                        self.widget.bottom_pane.exec_approval_selected = pending.selected;
+                    }
+                    self.schedule_draw();
+                }
+                KeyCode::Down => {
+                    if let Some(ref mut pending) = self.pending_exec_approval {
+                        pending.selected = (pending.selected + 1).min(3);
+                        self.widget.bottom_pane.exec_approval_selected = pending.selected;
+                    }
+                    self.schedule_draw();
+                }
+                KeyCode::Enter => {
+                    self.submit_exec_approval_decision();
+                }
+                KeyCode::Esc => {
+                    self.reject_pending_exec_approval();
+                }
+                _ => {}
+            },
             AgentStatus::AwaitingPostPlanChoice => match key.code {
                 KeyCode::Up => {
                     if let Some(ref mut p) = self.pending_post_plan {
@@ -860,6 +903,84 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         self.widget.bottom_pane.clear();
         self.sync_user_input_to_pane();
         self.schedule_draw();
+    }
+
+    fn handle_exec_approval_request(&mut self, request: ExecApprovalRequest) {
+        if self.active_turn_id.is_none() {
+            let _ = request.response_tx.send(ReviewDecision::Denied);
+            return;
+        }
+
+        self.widget.bottom_pane.set_exec_approval(
+            Some(request.command.clone()),
+            Some(request.cwd.display().to_string()),
+            request.reason.clone(),
+            request.is_retry,
+        );
+        self.pending_exec_approval = Some(PendingExecApproval {
+            request,
+            selected: 0,
+        });
+        self.widget.bottom_pane.exec_approval_selected = 0;
+        self.widget
+            .bottom_pane
+            .set_status(AgentStatus::AwaitingApproval);
+        self.schedule_draw();
+    }
+
+    fn submit_exec_approval_decision(&mut self) {
+        let Some(pending) = self.pending_exec_approval.take() else {
+            return;
+        };
+
+        let decision = match pending.selected {
+            0 => ReviewDecision::Approved,
+            1 => ReviewDecision::ApprovedForSession,
+            2 => ReviewDecision::Denied,
+            _ => ReviewDecision::Abort,
+        };
+        let _ = pending.request.response_tx.send(decision);
+
+        self.widget
+            .bottom_pane
+            .set_exec_approval(None, None, None, false);
+
+        if decision == ReviewDecision::Abort {
+            self.enqueue_mcp_turn_decision(
+                "abandon",
+                "Turn interrupted by approval dialog".to_string(),
+            );
+            self.interrupt_agent_task();
+            self.clear_mcp_run_id();
+            self.widget.bottom_pane.set_status(AgentStatus::Idle);
+            self.complete_streaming_assistant_cell("Interrupted.".to_string());
+            self.complete_running_tool_cells_with_interrupt();
+            self.schedule_draw();
+            return;
+        }
+
+        self.widget.bottom_pane.set_status(AgentStatus::ExecutingTool);
+        self.schedule_draw();
+    }
+
+    fn reject_pending_exec_approval(&mut self) {
+        if let Some(pending) = self.pending_exec_approval.take() {
+            let _ = pending.request.response_tx.send(ReviewDecision::Denied);
+        }
+        self.widget
+            .bottom_pane
+            .set_exec_approval(None, None, None, false);
+        self.widget.bottom_pane.set_status(AgentStatus::ExecutingTool);
+        self.schedule_draw();
+    }
+
+    fn cancel_pending_exec_approval(&mut self) {
+        if let Some(pending) = self.pending_exec_approval.take() {
+            let _ = pending.request.response_tx.send(ReviewDecision::Denied);
+        }
+        self.widget
+            .bottom_pane
+            .set_exec_approval(None, None, None, false);
     }
 
     fn handle_mouse_event(&mut self, mouse: crossterm::event::MouseEvent) {
@@ -1435,6 +1556,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
     }
 
     fn finish_turn_state(&mut self) {
+        self.cancel_pending_exec_approval();
         self.agent_task = None;
         self.running_tool_calls = 0;
         self.clear_turn_tracking();
@@ -2145,6 +2267,8 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
     fn update_status_after_tool_progress(&mut self) {
         let next_status = if self.pending_post_plan.is_some() {
             AgentStatus::AwaitingPostPlanChoice
+        } else if self.pending_exec_approval.is_some() {
+            AgentStatus::AwaitingApproval
         } else if self.pending_user_input.is_some() {
             AgentStatus::AwaitingUserInput
         } else if self.running_tool_calls > 0 {

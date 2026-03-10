@@ -992,6 +992,7 @@ fn runtime_context_for_task(
             permissions: SandboxPermissions::UseDefault,
         }),
         sandbox_runtime: None,
+        approval: None,
         max_output_bytes: max_output_limit(&spec.security.tool_acl, "shell", "execute"),
     }
 }
@@ -1013,6 +1014,7 @@ fn runtime_context_for_reviewer(spec: &IntentSpec) -> ToolRuntimeContext {
             permissions: SandboxPermissions::UseDefault,
         }),
         sandbox_runtime: None,
+        approval: None,
         max_output_bytes: max_output_limit(&spec.security.tool_acl, "workspace.fs", "read"),
     }
 }

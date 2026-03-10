@@ -44,6 +44,8 @@ pub enum AgentStatus {
     ExecutingTool,
     /// Agent is waiting for user input (via `request_user_input` tool).
     AwaitingUserInput,
+    /// Agent is waiting for sandbox permission approval.
+    AwaitingApproval,
     /// Waiting for user to choose post-plan action (Execute / Modify / Cancel).
     AwaitingPostPlanChoice,
 }

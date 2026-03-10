@@ -29,6 +29,14 @@ struct UserInputQuestionSnapshot {
     is_secret: bool,
 }
 
+#[derive(Clone)]
+struct ExecApprovalSnapshot {
+    command: String,
+    cwd: String,
+    reason: Option<String>,
+    is_retry: bool,
+}
+
 /// State for the slash-command autocomplete popup.
 struct CommandPopupState {
     /// Known commands: `(name, description)`, set once at startup.
@@ -63,6 +71,10 @@ pub struct BottomPane {
     pub user_input_notes_focused: bool,
     /// Current notes text (driven by App).
     pub user_input_notes_text: String,
+    /// Snapshot of the current exec approval request (while awaiting approval).
+    exec_approval: Option<ExecApprovalSnapshot>,
+    /// Currently selected exec approval option.
+    pub exec_approval_selected: usize,
     /// Slash-command autocomplete popup state.
     command_popup: CommandPopupState,
     /// Currently selected option in the post-plan dialog (0=Execute, 1=Modify, 2=Cancel).
@@ -86,6 +98,8 @@ impl BottomPane {
             user_input_selected_option: 0,
             user_input_notes_focused: false,
             user_input_notes_text: String::new(),
+            exec_approval: None,
+            exec_approval_selected: 0,
             command_popup: CommandPopupState {
                 commands: Vec::new(),
                 visible: false,
@@ -121,7 +135,26 @@ impl BottomPane {
         self.user_input_current_question = 0;
         self.user_input_selected_option = 0;
         self.user_input_notes_focused = false;
-        self.user_input_notes_text.clear();
+            self.user_input_notes_text.clear();
+    }
+
+    pub fn set_exec_approval(
+        &mut self,
+        command: Option<String>,
+        cwd: Option<String>,
+        reason: Option<String>,
+        is_retry: bool,
+    ) {
+        self.exec_approval = match (command, cwd) {
+            (Some(command), Some(cwd)) => Some(ExecApprovalSnapshot {
+                command,
+                cwd,
+                reason,
+                is_retry,
+            }),
+            _ => None,
+        };
+        self.exec_approval_selected = 0;
     }
 
     /// Reset the post-plan dialog selection.
@@ -328,6 +361,10 @@ impl BottomPane {
 
     /// Return the height (in lines) the bottom pane needs for the current state.
     pub fn desired_height(&self) -> u16 {
+        if self.status == AgentStatus::AwaitingApproval {
+            // status(1) + summary(3) + options(4) + help(1) = 9
+            return 9;
+        }
         if self.status == AgentStatus::AwaitingPostPlanChoice {
             // status(1) + 3 options + 1 blank + help(1) = 6
             return 6;
@@ -370,6 +407,9 @@ impl BottomPane {
         if self.status == AgentStatus::AwaitingUserInput {
             return self.render_user_input_mode(area, buf);
         }
+        if self.status == AgentStatus::AwaitingApproval {
+            return self.render_exec_approval_dialog(area, buf);
+        }
         if self.status == AgentStatus::AwaitingPostPlanChoice {
             return self.render_post_plan_dialog(area, buf);
         }
@@ -396,6 +436,9 @@ impl BottomPane {
 
     /// Return the clickable input hitbox for focus handling.
     pub fn input_hitbox(&self, area: Rect) -> Option<Rect> {
+        if self.status == AgentStatus::AwaitingApproval {
+            return None;
+        }
         if self.status == AgentStatus::AwaitingPostPlanChoice {
             return None;
         }
@@ -621,6 +664,69 @@ impl BottomPane {
         None // no cursor in this mode
     }
 
+    fn render_exec_approval_dialog(&self, area: Rect, buf: &mut Buffer) -> Option<Position> {
+        let Some(approval) = &self.exec_approval else {
+            return None;
+        };
+
+        let chunks = Layout::vertical([
+            Constraint::Length(1), // Status bar
+            Constraint::Length(3), // Command summary
+            Constraint::Length(4), // Options
+            Constraint::Length(1), // Help text
+        ])
+        .split(area);
+
+        self.render_status_bar(chunks[0], buf);
+
+        let retry_prefix = if approval.is_retry { "Retry: " } else { "" };
+        let mut summary_lines = vec![
+            Line::styled(
+                format!("  {}{}", retry_prefix, approval.command),
+                Style::default().fg(Color::White),
+            ),
+            Line::styled(
+                format!("  cwd: {}", approval.cwd),
+                Style::default().add_modifier(Modifier::DIM),
+            ),
+        ];
+        if let Some(reason) = approval.reason.as_deref() {
+            summary_lines.push(Line::styled(
+                format!("  reason: {reason}"),
+                Style::default().fg(Color::Yellow),
+            ));
+        }
+        Paragraph::new(Text::from(summary_lines)).render(chunks[1], buf);
+
+        let options = [
+            ("Approve", "Allow this execution once"),
+            ("Approve Session", "Allow matching commands for this session"),
+            ("Deny", "Reject this execution"),
+            ("Abort Turn", "Interrupt the current turn"),
+        ];
+        let mut option_lines: Vec<Line<'static>> = Vec::new();
+        for (i, (label, desc)) in options.iter().enumerate() {
+            let marker = if i == self.exec_approval_selected {
+                "▸"
+            } else {
+                " "
+            };
+            let style = if i == self.exec_approval_selected {
+                Style::default().fg(Color::Cyan).bold()
+            } else {
+                Style::default().fg(Color::White)
+            };
+            option_lines.push(Line::styled(
+                format!("  {} {:<16} {}", marker, label, desc),
+                style,
+            ));
+        }
+        Paragraph::new(Text::from(option_lines)).render(chunks[2], buf);
+
+        self.render_help_text(chunks[3], buf);
+        None
+    }
+
     /// Render the notes input area for option questions.
     fn render_notes_area(&self, area: Rect, buf: &mut Buffer) -> Option<Position> {
         if area.height == 0 {
@@ -754,6 +860,10 @@ impl BottomPane {
                 "● Awaiting input...",
                 Style::default().fg(Color::Magenta).bold(),
             ),
+            AgentStatus::AwaitingApproval => Line::styled(
+                "● Awaiting sandbox approval...",
+                Style::default().fg(Color::Magenta).bold(),
+            ),
             AgentStatus::AwaitingPostPlanChoice => Line::styled(
                 "● Plan complete — choose next step",
                 Style::default().fg(Color::Magenta).bold(),
@@ -863,6 +973,9 @@ impl BottomPane {
             }
             AgentStatus::AwaitingUserInput => {
                 "[Up/Down: Select] [1-9: Quick select] [Enter: Submit] [Esc: Cancel]"
+            }
+            AgentStatus::AwaitingApproval => {
+                "[Up/Down: Select] [Enter: Confirm] [Esc: Deny]"
             }
             AgentStatus::AwaitingPostPlanChoice => {
                 "[Up/Down: Select] [Enter: Confirm] [Esc: Cancel]"
@@ -1074,6 +1187,13 @@ mod tests {
     fn normal_mode_height_is_six_lines() {
         let pane = BottomPane::new();
         assert_eq!(pane.desired_height(), 6);
+    }
+
+    #[test]
+    fn approval_mode_height_is_nine_lines() {
+        let mut pane = BottomPane::new();
+        pane.status = AgentStatus::AwaitingApproval;
+        assert_eq!(pane.desired_height(), 9);
     }
 
     #[test]
