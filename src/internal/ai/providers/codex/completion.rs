@@ -505,5 +505,4 @@ impl CompletionClient for CodexWebSocket {
 
 pub type CodexModel = Model;
 
-impl Model {
-}
+impl Model {}

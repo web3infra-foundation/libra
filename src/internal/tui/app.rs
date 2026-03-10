@@ -12,6 +12,7 @@ use tokio::{
     time::sleep,
 };
 use tokio_stream::StreamExt;
+use walkdir::WalkDir;
 
 use super::{
     app_event::{AgentEvent, AgentStatus, AppEvent, ExitMode},
@@ -23,7 +24,6 @@ use super::{
     },
     terminal::{TARGET_FRAME_INTERVAL, Tui, TuiEvent},
 };
-use walkdir::WalkDir;
 use crate::{
     cli_error,
     internal::ai::{
@@ -936,9 +936,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         };
 
                         // Use the created intent_id, or fall back to mcp_ids
-                        let intent_id = created_intent_id.or_else(|| {
-                            mcp_ids_clone._intent_id.clone()
-                        }).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                        let intent_id = created_intent_id
+                            .or_else(|| mcp_ids_clone._intent_id.clone())
+                            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
                         // Step 2: Create Plan via MCP (per docs: Intent → Plan)
                         let plan_params = CreatePlanParams {
@@ -1334,7 +1334,8 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                             if path.is_file() {
                                 if let Ok(rel_path) = path.strip_prefix(&working_dir) {
                                     let rel_str = rel_path.to_string_lossy().replace("\\", "/");
-                                    if !rel_str.starts_with(".git") && !rel_str.starts_with(".libra")
+                                    if !rel_str.starts_with(".git")
+                                        && !rel_str.starts_with(".libra")
                                     {
                                         previous_files.insert(rel_str);
                                     }
@@ -1388,8 +1389,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                                 let path = entry.path();
                                 if path.is_file() {
                                     if let Ok(rel_path) = path.strip_prefix(&working_dir) {
-                                        let rel_str =
-                                            rel_path.to_string_lossy().replace("\\", "/");
+                                        let rel_str = rel_path.to_string_lossy().replace("\\", "/");
                                         if !rel_str.starts_with(".git")
                                             && !rel_str.starts_with(".libra")
                                         {
@@ -1424,10 +1424,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
                         // Create PatchSet if there are changes
                         if !file_changes.is_empty() {
-                            let actor = match mcp_server.resolve_actor_from_params(
-                                Some("system"),
-                                Some("libra-code"),
-                            ) {
+                            let actor = match mcp_server
+                                .resolve_actor_from_params(Some("system"), Some("libra-code"))
+                            {
                                 Ok(a) => a,
                                 Err(_) => {
                                     // Skip PatchSet creation if actor resolution fails
