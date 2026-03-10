@@ -30,6 +30,9 @@ use crate::internal::{
             openai::{Client as OpenAIClient, GPT_4O_MINI},
             zhipu::{Client as ZhipuClient, GLM_5},
         },
+        sandbox::{
+            SandboxPermissions, SandboxPolicy, ToolRuntimeContext, ToolSandboxContext,
+        },
         tools::{
             ToolRegistry, ToolRegistryBuilder,
             handlers::{
@@ -416,7 +419,18 @@ async fn run_tui_with_model<M>(
         max_steps: None, // TUI mode: unlimited tool steps
         hook_runner,
         allowed_tools: None,
-        runtime_context: None,
+        runtime_context: Some(ToolRuntimeContext {
+            sandbox: Some(ToolSandboxContext {
+                policy: SandboxPolicy::WorkspaceWrite {
+                    writable_roots: vec![registry.working_dir().to_path_buf()],
+                    network_access: true,
+                    exclude_tmpdir_env_var: false,
+                    exclude_slash_tmp: false,
+                },
+                permissions: SandboxPermissions::UseDefault,
+            }),
+            max_output_bytes: None,
+        }),
     };
 
     // Initialize terminal
