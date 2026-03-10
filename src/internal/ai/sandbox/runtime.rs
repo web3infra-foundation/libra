@@ -6,9 +6,9 @@ use std::{
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
-use super::{SandboxPermissions, SandboxPolicy};
 #[cfg(target_os = "linux")]
 use super::WritableRoot;
+use super::{SandboxPermissions, SandboxPolicy};
 
 pub const LIBRA_SANDBOX_NETWORK_DISABLED_ENV_VAR: &str = "LIBRA_SANDBOX_NETWORK_DISABLED";
 const MACOS_PATH_TO_SEATBELT_EXECUTABLE: &str = "/usr/bin/sandbox-exec";
@@ -305,8 +305,9 @@ fn create_seatbelt_command_args(
     } else {
         ""
     };
-    let full_policy =
-        format!("{SEATBELT_BASE_POLICY}\n{file_read_policy}\n{file_write_policy}\n{network_policy}");
+    let full_policy = format!(
+        "{SEATBELT_BASE_POLICY}\n{file_read_policy}\n{file_write_policy}\n{network_policy}"
+    );
 
     let mut seatbelt_args = vec!["-p".to_string(), full_policy];
     let dir_params = [file_write_params, macos_dir_params()].concat();
@@ -350,7 +351,8 @@ fn build_macos_file_write_policy(
         }
 
         let mut require_parts = vec![format!("(subpath (param \"{root_param}\"))")];
-        for (subpath_index, read_only_subpath) in writable_root.read_only_subpaths.iter().enumerate()
+        for (subpath_index, read_only_subpath) in
+            writable_root.read_only_subpaths.iter().enumerate()
         {
             let canonical_read_only_subpath = read_only_subpath
                 .canonicalize()
@@ -409,7 +411,8 @@ fn create_bwrap_command_args(
 
     let writable_roots = sandbox_policy.get_writable_roots_with_cwd(cwd);
     ensure_mount_targets_exist(&writable_roots)?;
-    let allowed_write_paths: Vec<PathBuf> = writable_roots.iter().map(|wr| wr.root.clone()).collect();
+    let allowed_write_paths: Vec<PathBuf> =
+        writable_roots.iter().map(|wr| wr.root.clone()).collect();
 
     let mut args = vec![
         "--new-session".to_string(),
@@ -471,11 +474,15 @@ fn create_bwrap_command_args(
 }
 
 #[cfg(target_os = "linux")]
-fn ensure_mount_targets_exist(writable_roots: &[WritableRoot]) -> Result<(), SandboxTransformError> {
+fn ensure_mount_targets_exist(
+    writable_roots: &[WritableRoot],
+) -> Result<(), SandboxTransformError> {
     for writable_root in writable_roots {
         let root = writable_root.root.as_path();
         if !root.exists() {
-            return Err(SandboxTransformError::MissingWritableRoot(root.to_path_buf()));
+            return Err(SandboxTransformError::MissingWritableRoot(
+                root.to_path_buf(),
+            ));
         }
     }
     Ok(())
@@ -496,7 +503,9 @@ fn collect_read_only_subpaths(writable_roots: &[WritableRoot]) -> Vec<PathBuf> {
 
 #[cfg(target_os = "linux")]
 fn is_within_allowed_write_paths(path: &Path, allowed_write_paths: &[PathBuf]) -> bool {
-    allowed_write_paths.iter().any(|root| path.starts_with(root))
+    allowed_write_paths
+        .iter()
+        .any(|root| path.starts_with(root))
 }
 
 #[cfg(target_os = "linux")]
@@ -577,11 +586,7 @@ mod tests {
         };
 
         assert_eq!(
-            manager.select_initial(
-                Some(&policy),
-                SandboxPermissions::RequireEscalated,
-                None
-            ),
+            manager.select_initial(Some(&policy), SandboxPermissions::RequireEscalated, None),
             SandboxType::None
         );
     }

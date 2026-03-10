@@ -959,7 +959,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             return;
         }
 
-        self.widget.bottom_pane.set_status(AgentStatus::ExecutingTool);
+        self.widget
+            .bottom_pane
+            .set_status(AgentStatus::ExecutingTool);
         self.schedule_draw();
     }
 
@@ -970,7 +972,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         self.widget
             .bottom_pane
             .set_exec_approval(None, None, None, false);
-        self.widget.bottom_pane.set_status(AgentStatus::ExecutingTool);
+        self.widget
+            .bottom_pane
+            .set_status(AgentStatus::ExecutingTool);
         self.schedule_draw();
     }
 

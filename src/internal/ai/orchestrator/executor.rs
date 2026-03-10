@@ -160,11 +160,22 @@ pub async fn execute_task<M: CompletionModel>(
     config: &ExecutorConfig,
 ) -> TaskResult {
     if task.kind == TaskKind::Gate {
-        return execute_gate_task(task, &config.working_dir, &config.spec).await;
+        return execute_gate_task(
+            task,
+            &config.working_dir,
+            &config.spec,
+            config.tool_loop_config.runtime_context.as_ref(),
+        )
+        .await;
     }
 
     let allowed_tools = allowed_tools_for_task(&config.spec, task);
-    let runtime_context = runtime_context_for_task(&config.spec, task, &config.working_dir);
+    let runtime_context = runtime_context_for_task(
+        &config.spec,
+        task,
+        &config.working_dir,
+        config.tool_loop_config.runtime_context.as_ref(),
+    );
     let prompt = build_task_prompt(task, &config.working_dir, &allowed_tools);
     let mut retry_count: u8 = 0;
     let mut accumulated_tool_calls = Vec::new();
@@ -308,8 +319,13 @@ pub async fn execute_task<M: CompletionModel>(
     }
 }
 
-async fn execute_gate_task(task: &TaskSpec, working_dir: &Path, spec: &IntentSpec) -> TaskResult {
-    let runtime_context = runtime_context_for_task(spec, task, working_dir);
+async fn execute_gate_task(
+    task: &TaskSpec,
+    working_dir: &Path,
+    spec: &IntentSpec,
+    inherited_runtime: Option<&ToolRuntimeContext>,
+) -> TaskResult {
+    let runtime_context = runtime_context_for_task(spec, task, working_dir, inherited_runtime);
     let gate_report = if task.checks.is_empty() {
         GateReport::empty()
     } else {
@@ -363,7 +379,10 @@ async fn run_reviewer_pass<M: CompletionModel>(
         preamble: Some(reviewer_preamble),
         allowed_tools: Some(allowed_tools),
         max_steps: Some(6),
-        runtime_context: Some(runtime_context_for_reviewer(&config.spec)),
+        runtime_context: Some(runtime_context_for_reviewer(
+            &config.spec,
+            config.tool_loop_config.runtime_context.as_ref(),
+        )),
         ..config.tool_loop_config.clone()
     };
 
@@ -974,6 +993,7 @@ fn runtime_context_for_task(
     spec: &IntentSpec,
     task: &TaskSpec,
     working_dir: &Path,
+    inherited_runtime: Option<&ToolRuntimeContext>,
 ) -> ToolRuntimeContext {
     let network_access = matches!(
         spec.constraints.security.network_policy,
@@ -991,13 +1011,16 @@ fn runtime_context_for_task(
             policy,
             permissions: SandboxPermissions::UseDefault,
         }),
-        sandbox_runtime: None,
-        approval: None,
+        sandbox_runtime: inherited_runtime.and_then(|ctx| ctx.sandbox_runtime.clone()),
+        approval: inherited_runtime.and_then(|ctx| ctx.approval.clone()),
         max_output_bytes: max_output_limit(&spec.security.tool_acl, "shell", "execute"),
     }
 }
 
-fn runtime_context_for_reviewer(spec: &IntentSpec) -> ToolRuntimeContext {
+fn runtime_context_for_reviewer(
+    spec: &IntentSpec,
+    inherited_runtime: Option<&ToolRuntimeContext>,
+) -> ToolRuntimeContext {
     let policy = if matches!(
         spec.constraints.security.network_policy,
         NetworkPolicy::Allow
@@ -1013,8 +1036,8 @@ fn runtime_context_for_reviewer(spec: &IntentSpec) -> ToolRuntimeContext {
             policy,
             permissions: SandboxPermissions::UseDefault,
         }),
-        sandbox_runtime: None,
-        approval: None,
+        sandbox_runtime: inherited_runtime.and_then(|ctx| ctx.sandbox_runtime.clone()),
+        approval: inherited_runtime.and_then(|ctx| ctx.approval.clone()),
         max_output_bytes: max_output_limit(&spec.security.tool_acl, "workspace.fs", "read"),
     }
 }
@@ -1401,7 +1424,7 @@ mod tests {
             ..implementation_task()
         };
         let dir = tempfile::tempdir().unwrap();
-        let result = execute_gate_task(&task, dir.path(), &spec()).await;
+        let result = execute_gate_task(&task, dir.path(), &spec(), None).await;
         assert_eq!(result.status, TaskNodeStatus::Completed);
         assert!(result.gate_report.unwrap().all_required_passed);
     }

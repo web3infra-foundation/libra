@@ -135,7 +135,7 @@ impl BottomPane {
         self.user_input_current_question = 0;
         self.user_input_selected_option = 0;
         self.user_input_notes_focused = false;
-            self.user_input_notes_text.clear();
+        self.user_input_notes_text.clear();
     }
 
     pub fn set_exec_approval(
@@ -700,7 +700,10 @@ impl BottomPane {
 
         let options = [
             ("Approve", "Allow this execution once"),
-            ("Approve Session", "Allow matching commands for this session"),
+            (
+                "Approve Session",
+                "Allow matching commands for this session",
+            ),
             ("Deny", "Reject this execution"),
             ("Abort Turn", "Interrupt the current turn"),
         ];
@@ -974,9 +977,7 @@ impl BottomPane {
             AgentStatus::AwaitingUserInput => {
                 "[Up/Down: Select] [1-9: Quick select] [Enter: Submit] [Esc: Cancel]"
             }
-            AgentStatus::AwaitingApproval => {
-                "[Up/Down: Select] [Enter: Confirm] [Esc: Deny]"
-            }
+            AgentStatus::AwaitingApproval => "[Up/Down: Select] [Enter: Confirm] [Esc: Deny]",
             AgentStatus::AwaitingPostPlanChoice => {
                 "[Up/Down: Select] [Enter: Confirm] [Esc: Cancel]"
             }

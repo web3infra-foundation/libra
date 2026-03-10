@@ -104,7 +104,12 @@ impl RunStateStore {
             .await
             .values()
             .filter(|result| metered_task_ids.contains(&result.task_id))
-            .filter(|result| matches!(result.status, TaskNodeStatus::Completed | TaskNodeStatus::Failed))
+            .filter(|result| {
+                matches!(
+                    result.status,
+                    TaskNodeStatus::Completed | TaskNodeStatus::Failed
+                )
+            })
             .count()
     }
 

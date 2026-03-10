@@ -59,8 +59,10 @@ impl ToolHandler for ApplyPatchHandler {
             }
         }
 
-        if let Some(approval_ctx) = runtime_context.as_ref().and_then(|ctx| ctx.approval.as_ref())
-            && patch_needs_approval(
+        if let Some(approval_ctx) = runtime_context
+            .as_ref()
+            .and_then(|ctx| ctx.approval.as_ref())
+            && crate::internal::ai::sandbox::approval_required(
                 approval_ctx.policy,
                 runtime_context
                     .as_ref()
@@ -169,26 +171,6 @@ fn parse_patch_text_from_arguments(arguments: &str) -> Result<String, ToolError>
 
     // 3) Raw text (non-JSON) – accept for compatibility.
     Ok(arguments.to_string())
-}
-
-fn patch_needs_approval(
-    policy: crate::internal::ai::sandbox::AskForApproval,
-    sandbox_policy: Option<&crate::internal::ai::sandbox::SandboxPolicy>,
-) -> bool {
-    match policy {
-        crate::internal::ai::sandbox::AskForApproval::Never
-        | crate::internal::ai::sandbox::AskForApproval::OnFailure => false,
-        crate::internal::ai::sandbox::AskForApproval::UnlessTrusted => true,
-        crate::internal::ai::sandbox::AskForApproval::OnRequest => sandbox_policy.is_some_and(
-            |policy| {
-                !matches!(
-                    policy,
-                    crate::internal::ai::sandbox::SandboxPolicy::DangerFullAccess
-                        | crate::internal::ai::sandbox::SandboxPolicy::ExternalSandbox { .. }
-                )
-            },
-        ),
-    }
 }
 
 fn patch_approval_key(path: &std::path::Path, working_dir: &std::path::Path) -> String {

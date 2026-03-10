@@ -40,8 +40,10 @@ impl<M: CompletionModel> CompletionModel for ThrottledCompletionModel<M> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
+    };
 
     use super::*;
     use crate::internal::ai::completion::{

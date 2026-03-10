@@ -66,7 +66,9 @@ impl ToolHandler for ShellHandler {
         let sandbox_runtime = runtime_context
             .as_ref()
             .and_then(|ctx| ctx.sandbox_runtime.clone());
-        let approval = runtime_context.as_ref().and_then(|ctx| ctx.approval.clone());
+        let approval = runtime_context
+            .as_ref()
+            .and_then(|ctx| ctx.approval.clone());
         let sandbox = runtime_context.as_ref().and_then(|ctx| {
             ctx.sandbox.clone().map(|mut sandbox| {
                 sandbox.permissions = args.sandbox_permissions;

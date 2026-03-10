@@ -11,6 +11,7 @@ use tokio::{
     sync::{Mutex, mpsc::UnboundedSender, oneshot},
 };
 
+mod command_safety;
 pub mod policy;
 pub mod runtime;
 
@@ -194,7 +195,12 @@ pub async fn run_shell_command_with_approval(
     let requirement = approval
         .as_ref()
         .map(|ctx| {
-            default_exec_approval_requirement(ctx.policy, sandbox.as_ref().map(|s| &s.policy))
+            shell_exec_approval_requirement(
+                ctx.policy,
+                sandbox.as_ref().map(|s| &s.policy),
+                &command,
+                spec.sandbox_permissions,
+            )
         })
         .unwrap_or(ExecApprovalRequirement::Skip {
             bypass_sandbox: false,
@@ -229,6 +235,9 @@ pub async fn run_shell_command_with_approval(
                     ReviewDecision::Denied => return Err("rejected by user".to_string()),
                     ReviewDecision::Abort => return Err("aborted by user".to_string()),
                 }
+            }
+            ExecApprovalRequirement::Forbidden { ref reason } => {
+                return Err(reason.clone());
             }
         }
     }
@@ -440,7 +449,11 @@ async fn request_exec_approval(
     decision
 }
 
-fn shell_approval_key(command: &str, cwd: &Path, sandbox_permissions: SandboxPermissions) -> String {
+fn shell_approval_key(
+    command: &str,
+    cwd: &Path,
+    sandbox_permissions: SandboxPermissions,
+) -> String {
     format!(
         "{}|{}|{}",
         command,
@@ -456,13 +469,58 @@ fn shell_approval_key(command: &str, cwd: &Path, sandbox_permissions: SandboxPer
 enum ExecApprovalRequirement {
     Skip { bypass_sandbox: bool },
     NeedsApproval { reason: Option<String> },
+    Forbidden { reason: String },
 }
 
-fn default_exec_approval_requirement(
+fn shell_exec_approval_requirement(
     policy: AskForApproval,
     sandbox_policy: Option<&SandboxPolicy>,
+    command: &str,
+    sandbox_permissions: SandboxPermissions,
 ) -> ExecApprovalRequirement {
-    let needs_approval = match policy {
+    if command_safety::is_known_safe_shell_command(command) {
+        return ExecApprovalRequirement::Skip {
+            bypass_sandbox: false,
+        };
+    }
+
+    let runtime_sandbox_is_weak = cfg!(windows)
+        && sandbox_policy.is_some_and(|policy| matches!(policy, SandboxPolicy::ReadOnly));
+    if command_safety::shell_command_might_be_dangerous(command) || runtime_sandbox_is_weak {
+        return if matches!(policy, AskForApproval::Never) {
+            ExecApprovalRequirement::Forbidden {
+                reason: "dangerous command rejected by approval policy".to_string(),
+            }
+        } else {
+            ExecApprovalRequirement::NeedsApproval { reason: None }
+        };
+    }
+
+    match policy {
+        AskForApproval::Never | AskForApproval::OnFailure => ExecApprovalRequirement::Skip {
+            bypass_sandbox: false,
+        },
+        AskForApproval::UnlessTrusted => ExecApprovalRequirement::NeedsApproval { reason: None },
+        AskForApproval::OnRequest => match sandbox_policy {
+            Some(SandboxPolicy::DangerFullAccess | SandboxPolicy::ExternalSandbox { .. })
+            | None => ExecApprovalRequirement::Skip {
+                bypass_sandbox: false,
+            },
+            Some(SandboxPolicy::ReadOnly | SandboxPolicy::WorkspaceWrite { .. }) => {
+                if sandbox_permissions.requires_escalated_permissions() {
+                    ExecApprovalRequirement::NeedsApproval { reason: None }
+                } else {
+                    ExecApprovalRequirement::Skip {
+                        bypass_sandbox: false,
+                    }
+                }
+            }
+        },
+    }
+}
+
+pub fn approval_required(policy: AskForApproval, sandbox_policy: Option<&SandboxPolicy>) -> bool {
+    match policy {
         AskForApproval::Never | AskForApproval::OnFailure => false,
         AskForApproval::OnRequest => sandbox_policy.is_some_and(|policy| {
             !matches!(
@@ -471,14 +529,6 @@ fn default_exec_approval_requirement(
             )
         }),
         AskForApproval::UnlessTrusted => true,
-    };
-
-    if needs_approval {
-        ExecApprovalRequirement::NeedsApproval { reason: None }
-    } else {
-        ExecApprovalRequirement::Skip {
-            bypass_sandbox: false,
-        }
     }
 }
 
@@ -575,21 +625,95 @@ mod tests {
             exclude_tmpdir_env_var: false,
             exclude_slash_tmp: false,
         };
-        let requirement = default_exec_approval_requirement(AskForApproval::OnRequest, Some(&policy));
-        assert!(matches!(requirement, ExecApprovalRequirement::NeedsApproval { .. }));
+        let requirement = shell_exec_approval_requirement(
+            AskForApproval::OnRequest,
+            Some(&policy),
+            "python script.py",
+            SandboxPermissions::RequireEscalated,
+        );
+        assert!(matches!(
+            requirement,
+            ExecApprovalRequirement::NeedsApproval { .. }
+        ));
     }
 
     #[test]
-    fn on_request_skips_approval_in_danger_full_access() {
-        let requirement = default_exec_approval_requirement(
+    fn on_request_skips_approval_for_sandboxed_commands() {
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: Vec::new(),
+            network_access: false,
+            exclude_tmpdir_env_var: false,
+            exclude_slash_tmp: false,
+        };
+        let requirement = shell_exec_approval_requirement(
             AskForApproval::OnRequest,
-            Some(&SandboxPolicy::DangerFullAccess),
+            Some(&policy),
+            "python script.py",
+            SandboxPermissions::UseDefault,
         );
         assert!(matches!(
             requirement,
             ExecApprovalRequirement::Skip {
                 bypass_sandbox: false
             }
+        ));
+    }
+
+    #[test]
+    fn on_request_skips_approval_in_danger_full_access() {
+        let requirement = shell_exec_approval_requirement(
+            AskForApproval::OnRequest,
+            Some(&SandboxPolicy::DangerFullAccess),
+            "python script.py",
+            SandboxPermissions::RequireEscalated,
+        );
+        assert!(matches!(
+            requirement,
+            ExecApprovalRequirement::Skip {
+                bypass_sandbox: false
+            }
+        ));
+    }
+
+    #[test]
+    fn unless_trusted_allows_known_safe_commands() {
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: Vec::new(),
+            network_access: false,
+            exclude_tmpdir_env_var: false,
+            exclude_slash_tmp: false,
+        };
+        let requirement = shell_exec_approval_requirement(
+            AskForApproval::UnlessTrusted,
+            Some(&policy),
+            "ls -la",
+            SandboxPermissions::UseDefault,
+        );
+        assert!(matches!(
+            requirement,
+            ExecApprovalRequirement::Skip {
+                bypass_sandbox: false
+            }
+        ));
+    }
+
+    #[test]
+    fn never_forbids_dangerous_commands() {
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: Vec::new(),
+            network_access: false,
+            exclude_tmpdir_env_var: false,
+            exclude_slash_tmp: false,
+        };
+        let requirement = shell_exec_approval_requirement(
+            AskForApproval::Never,
+            Some(&policy),
+            "git reset --hard",
+            SandboxPermissions::UseDefault,
+        );
+        assert!(matches!(
+            requirement,
+            ExecApprovalRequirement::Forbidden { .. }
         ));
     }
 

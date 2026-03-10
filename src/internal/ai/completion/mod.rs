@@ -13,8 +13,8 @@ pub use request::{CompletionRequest, CompletionResponse};
 pub use retry::{
     CompletionRetryEvent, CompletionRetryObserver, CompletionRetryPolicy, RetryingCompletionModel,
 };
-pub use throttle::ThrottledCompletionModel;
 use thiserror::Error;
+pub use throttle::ThrottledCompletionModel;
 
 #[derive(Debug, Error)]
 pub enum CompletionError {

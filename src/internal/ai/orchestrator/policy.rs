@@ -60,8 +60,9 @@ pub fn evaluate_tool_call(
         {
             return Err(PolicyViolation {
                 code: "sandbox-escalation-deny".into(),
-                message: "shell escalation is blocked while constraints.security.networkPolicy=deny"
-                    .into(),
+                message:
+                    "shell escalation is blocked while constraints.security.networkPolicy=deny"
+                        .into(),
                 tool_name: Some(tool_name.to_string()),
                 path: None,
             });
@@ -157,8 +158,7 @@ pub fn evaluate_tool_result(
             code: "tool-output-too-large".into(),
             message: format!(
                 "tool output exceeds maxOutputBytes constraint ({} > {})",
-                output_bytes,
-                limit
+                output_bytes, limit
             ),
             tool_name: Some(tool_name.to_string()),
             path: None,
