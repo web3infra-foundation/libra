@@ -4,7 +4,10 @@ use std::process::Command;
 
 use git_internal::internal::object::ObjectTrait;
 use libra::{
-    command::init::{InitArgs, init},
+    command::{
+        init::{InitArgs, init},
+        vault::{VaultArgs, VaultCommand},
+    },
     internal::config::Config,
 };
 use serial_test::serial;
@@ -97,6 +100,68 @@ async fn test_init_with_vault_creates_signing_config() {
         loaded.is_some(),
         "unseal key should be loadable after store"
     );
+}
+
+/// Generating a GPG key must deterministically set `vault.signing=true`
+/// even if stale duplicate rows already exist.
+#[tokio::test]
+#[serial]
+async fn test_generate_gpg_key_overwrites_duplicate_signing_rows() {
+    let temp = tempdir().unwrap();
+    test::setup_clean_testing_env_in(temp.path());
+    let test_home = temp.path().join("home");
+    std::fs::create_dir_all(&test_home).unwrap();
+    let _home_guard = EnvVarGuard::set("HOME", test_home.as_os_str());
+    #[cfg(windows)]
+    let _userprofile_guard = EnvVarGuard::set("USERPROFILE", test_home.as_os_str());
+
+    init(InitArgs {
+        bare: false,
+        initial_branch: None,
+        repo_directory: temp.path().to_str().unwrap().to_string(),
+        template: None,
+        quiet: true,
+        shared: None,
+        object_format: None,
+        ref_format: None,
+        from_git_repository: None,
+        separate_libra_dir: None,
+        vault: false,
+    })
+    .await
+    .unwrap();
+
+    let _guard = ChangeDirGuard::new(temp.path());
+    Config::insert("user", None, "name", "Test User").await;
+    Config::insert("user", None, "email", "test@example.com").await;
+
+    use libra::internal::vault as internal_vault;
+    let root_dir = temp.path().join(".libra");
+    let (unseal_key, enc_token) = internal_vault::init_vault(&root_dir).await.unwrap();
+    internal_vault::store_credentials(&unseal_key, &enc_token)
+        .await
+        .unwrap();
+
+    // Create conflicting duplicate values to reproduce the stale-read bug.
+    Config::insert("vault", None, "signing", "false").await;
+    Config::insert("vault", None, "signing", "false").await;
+
+    libra::command::vault::execute_safe(VaultArgs {
+        command: VaultCommand::GenerateGpgKey {
+            name: Some("Test User".to_string()),
+            email: Some("test@example.com".to_string()),
+        },
+    })
+    .await
+    .expect("vault generate-gpg-key should succeed");
+
+    let all_signing = Config::get_all("vault", None, "signing").await;
+    assert_eq!(
+        all_signing.len(),
+        1,
+        "vault.signing should have exactly one row after regeneration, got {all_signing:?}"
+    );
+    assert_eq!(all_signing[0], "true");
 }
 
 /// Vault rollback: if key generation fails, credentials should be cleaned up.

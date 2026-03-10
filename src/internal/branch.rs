@@ -1,11 +1,13 @@
 //! Branch store utilities to find/create/update/delete branch refs in the database with transaction-safe helpers and commit resolution.
 
-use std::str::FromStr;
+use std::{str::FromStr, time::Duration};
 
 use git_internal::hash::ObjectHash;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter,
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DbErr, EntityTrait,
+    QueryFilter,
 };
+use tokio::time::sleep;
 
 use crate::internal::{db::get_db_conn_instance, model::reference};
 
@@ -28,7 +30,7 @@ async fn query_reference_with_conn<C>(
     db: &C,
     branch_name: &str,
     remote: Option<&str>,
-) -> Option<reference::Model>
+) -> Result<Option<reference::Model>, DbErr>
 where
     C: ConnectionTrait,
 {
@@ -41,7 +43,14 @@ where
         })
         .one(db)
         .await
-        .unwrap()
+}
+
+const SQLITE_BUSY_MAX_RETRIES: usize = 15;
+const SQLITE_BUSY_RETRY_BASE_MS: u64 = 100;
+
+fn is_sqlite_busy(err: &DbErr) -> bool {
+    let message = err.to_string();
+    message.contains("database is locked") || message.contains("database schema is locked")
 }
 
 /*
@@ -126,7 +135,13 @@ impl Branch {
     where
         C: ConnectionTrait,
     {
-        let branch = query_reference_with_conn(db, branch_name, remote).await;
+        let branch = match query_reference_with_conn(db, branch_name, remote).await {
+            Ok(branch) => branch,
+            Err(err) => {
+                eprintln!("fatal: failed to query branch '{branch_name}': {err}");
+                return None;
+            }
+        };
         match branch {
             Some(branch) => {
                 // Return None if commit is None (unborn/placeholder)
@@ -192,16 +207,29 @@ impl Branch {
     ) where
         C: ConnectionTrait,
     {
-        let branch = query_reference_with_conn(db, branch_name, remote).await;
+        for attempt in 0..=SQLITE_BUSY_MAX_RETRIES {
+            let branch = match query_reference_with_conn(db, branch_name, remote).await {
+                Ok(branch) => branch,
+                Err(err) if is_sqlite_busy(&err) && attempt < SQLITE_BUSY_MAX_RETRIES => {
+                    sleep(Duration::from_millis(
+                        SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
+                    ))
+                    .await;
+                    continue;
+                }
+                Err(err) => {
+                    eprintln!("fatal: failed to query branch '{branch_name}': {err}");
+                    return;
+                }
+            };
 
-        match branch {
-            Some(branch) => {
-                let mut branch: reference::ActiveModel = branch.into();
-                branch.commit = Set(Some(commit_hash.to_owned()));
-                branch.update(db).await.unwrap();
-            }
-            None => {
-                reference::ActiveModel {
+            let write_result = match branch {
+                Some(branch) => {
+                    let mut branch: reference::ActiveModel = branch.into();
+                    branch.commit = Set(Some(commit_hash.to_owned()));
+                    branch.update(db).await.map(|_| ())
+                }
+                None => reference::ActiveModel {
                     name: Set(Some(branch_name.to_owned())),
                     kind: Set(reference::ConfigKind::Branch),
                     commit: Set(Some(commit_hash.to_owned())),
@@ -210,7 +238,21 @@ impl Branch {
                 }
                 .insert(db)
                 .await
-                .unwrap();
+                .map(|_| ()),
+            };
+
+            match write_result {
+                Ok(()) => return,
+                Err(err) if is_sqlite_busy(&err) && attempt < SQLITE_BUSY_MAX_RETRIES => {
+                    sleep(Duration::from_millis(
+                        SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
+                    ))
+                    .await;
+                }
+                Err(err) => {
+                    eprintln!("fatal: failed to update branch '{branch_name}': {err}");
+                    return;
+                }
             }
         }
     }
@@ -225,11 +267,21 @@ impl Branch {
     where
         C: ConnectionTrait,
     {
-        let branch: reference::ActiveModel = query_reference_with_conn(db, branch_name, remote)
-            .await
-            .unwrap()
-            .into();
-        branch.delete(db).await.unwrap();
+        let branch = match query_reference_with_conn(db, branch_name, remote).await {
+            Ok(branch) => branch,
+            Err(err) => {
+                eprintln!("fatal: failed to query branch '{branch_name}': {err}");
+                return;
+            }
+        };
+        let Some(branch) = branch else {
+            eprintln!("fatal: branch '{branch_name}' not found");
+            return;
+        };
+        let branch: reference::ActiveModel = branch.into();
+        if let Err(err) = branch.delete(db).await {
+            eprintln!("fatal: failed to delete branch '{branch_name}': {err}");
+        }
     }
 
     pub async fn delete_branch(branch_name: &str, remote: Option<&str>) {

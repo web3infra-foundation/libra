@@ -6,9 +6,10 @@
 use std::io::Error as IoError;
 
 use bytes::{Bytes, BytesMut};
-use futures_util::stream::{self, StreamExt};
+use futures_util::stream::StreamExt;
 use git_internal::errors::GitError;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio_stream::wrappers::ReceiverStream;
 
 use super::{
     DiscoveryResult, FetchStream, generate_upload_pack_content, parse_discovered_references,
@@ -229,21 +230,85 @@ impl SshClient {
 
         // Send the upload-pack request
         let body = generate_upload_pack_content(have, want, depth);
-        let stdin = child
+        let mut stdin = child
             .stdin
-            .as_mut()
+            .take()
             .ok_or_else(|| IoError::other("SSH child stdin not captured"))?;
         stdin.write_all(&body).await?;
         stdin.shutdown().await?;
 
-        let output = child.wait_with_output().await?;
-        if !output.status.success() {
-            return Err(IoError::other(format!(
-                "SSH upload-pack failed: {}",
-                describe_process_output(&output)
-            )));
-        }
-        Ok(stream::once(async move { Ok(Bytes::from(output.stdout)) }).boxed())
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| IoError::other("SSH child stdout not captured"))?;
+        let mut stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| IoError::other("SSH child stderr not captured"))?;
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, IoError>>(32);
+
+        tokio::spawn(async move {
+            let stderr_task = tokio::spawn(async move {
+                let mut buf = Vec::new();
+                let _ = stderr.read_to_end(&mut buf).await;
+                buf
+            });
+
+            let mut buf = [0u8; 16 * 1024];
+            loop {
+                match stdout.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if tx
+                            .send(Ok(Bytes::copy_from_slice(&buf[..n])))
+                            .await
+                            .is_err()
+                        {
+                            let _ = child.kill().await;
+                            let _ = child.wait().await;
+                            let _ = stderr_task.await;
+                            return;
+                        }
+                    }
+                    Err(err) => {
+                        let _ = tx
+                            .send(Err(IoError::other(format!(
+                                "failed to read SSH upload-pack stdout: {err}"
+                            ))))
+                            .await;
+                        let _ = child.kill().await;
+                        let _ = child.wait().await;
+                        let _ = stderr_task.await;
+                        return;
+                    }
+                }
+            }
+
+            let status = match child.wait().await {
+                Ok(status) => status,
+                Err(err) => {
+                    let _ = tx
+                        .send(Err(IoError::other(format!(
+                            "failed to wait for SSH upload-pack process: {err}"
+                        ))))
+                        .await;
+                    let _ = stderr_task.await;
+                    return;
+                }
+            };
+            let stderr_buf = stderr_task.await.unwrap_or_default();
+
+            if !status.success() {
+                let _ = tx
+                    .send(Err(IoError::other(format!(
+                        "SSH upload-pack failed: {}",
+                        describe_status_with_stderr(&status, &stderr_buf)
+                    ))))
+                    .await;
+            }
+        });
+
+        Ok(ReceiverStream::new(rx).boxed())
     }
 
     pub async fn send_pack(&self, data: Bytes) -> Result<Bytes, IoError> {
@@ -287,11 +352,15 @@ impl SshClient {
 }
 
 fn describe_process_output(output: &std::process::Output) -> String {
-    let status = output.status.code().map_or_else(
+    describe_status_with_stderr(&output.status, &output.stderr)
+}
+
+fn describe_status_with_stderr(status: &std::process::ExitStatus, stderr: &[u8]) -> String {
+    let status = status.code().map_or_else(
         || "terminated by signal".to_string(),
         |code| code.to_string(),
     );
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stderr = String::from_utf8_lossy(stderr).trim().to_string();
     if stderr.is_empty() {
         format!("exit status {status}")
     } else {

@@ -3,8 +3,8 @@
 use std::{collections::HashSet, mem::swap};
 
 use sea_orm::{
-    ActiveValue::Set, ColumnTrait, ConnectionTrait, EntityTrait, ModelTrait, QueryFilter,
-    entity::ActiveModelTrait,
+    ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, ModelTrait,
+    QueryFilter, entity::ActiveModelTrait,
 };
 
 use crate::internal::{
@@ -14,6 +14,22 @@ use crate::internal::{
 };
 
 pub struct Config;
+
+trait DatabaseConnectionRef {
+    fn as_db_conn_ref(&self) -> &DatabaseConnection;
+}
+
+impl DatabaseConnectionRef for DatabaseConnection {
+    fn as_db_conn_ref(&self) -> &DatabaseConnection {
+        self
+    }
+}
+
+impl DatabaseConnectionRef for &DatabaseConnection {
+    fn as_db_conn_ref(&self) -> &DatabaseConnection {
+        self
+    }
+}
 
 #[derive(Clone)]
 pub struct RemoteConfig {
@@ -437,7 +453,15 @@ impl Config {
         delete_all: bool,
     ) -> Result<(), sea_orm::DbErr> {
         let db = get_db_conn_instance().await;
-        Self::remove_config_with_conn(db, configuration, name, key, valuepattern, delete_all).await
+        Self::remove_config_with_conn(
+            db.as_db_conn_ref(),
+            configuration,
+            name,
+            key,
+            valuepattern,
+            delete_all,
+        )
+        .await
     }
 
     /// Remove all entries matching the given configuration/name/key triple.

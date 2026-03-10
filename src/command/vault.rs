@@ -80,6 +80,8 @@ pub async fn execute_safe(args: VaultArgs) -> CliResult<()> {
                 vault::generate_pgp_key(&root_dir, &unseal_key, &user_name, &user_email)
                     .await
                     .map_err(|e| CliError::fatal(e.to_string()))?;
+            // Ensure duplicate stale rows cannot keep an older "false" effective value.
+            let _ = Config::remove("vault", None, "signing").await;
             Config::insert("vault", None, "signing", "true").await;
             println!("{public_key}");
         }
