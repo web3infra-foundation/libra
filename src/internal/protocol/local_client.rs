@@ -199,9 +199,9 @@ impl LocalClient {
                 child.stdin(std::process::Stdio::piped());
                 child.stdout(std::process::Stdio::piped());
                 child.stderr(std::process::Stdio::piped());
-                let mut child = child
-                    .spawn()
-                    .map_err(|e| IoError::other(format!("Failed to spawn git-receive-pack: {e}")))?;
+                let mut child = child.spawn().map_err(|e| {
+                    IoError::other(format!("Failed to spawn git-receive-pack: {e}"))
+                })?;
 
                 if let Some(mut stdin) = child.stdin.take() {
                     stdin.write_all(&data).await?;

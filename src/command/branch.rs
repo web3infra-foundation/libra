@@ -5,12 +5,14 @@ use std::collections::{HashSet, VecDeque};
 use clap::{ArgGroup, Parser};
 use colored::Colorize;
 use git_internal::{hash::ObjectHash, internal::object::commit::Commit};
+use sea_orm::{DbErr, TransactionTrait};
 
 use crate::{
     command::{get_target_commit, load_object},
     internal::{
         branch::{self, Branch},
         config::Config,
+        db::get_db_conn_instance,
         head::Head,
     },
     utils::error::{CliError, CliResult},
@@ -57,7 +59,8 @@ pub struct BranchArgs {
     #[clap(short = 'd', long = "delete", group = "action")]
     pub delete_safe: Option<String>,
 
-    ///  Set up `branchname`>`'s tracking information so `<`upstream`>` is considered `<`branchname`>`'s upstream branch.
+    /// Set the current branch's upstream tracking target to `<remote>/<branch>`.
+    /// See README.md "Remote Tracking Behavior" for details.
     #[clap(short = 'u', long, group = "action")]
     pub set_upstream_to: Option<String>,
 
@@ -133,25 +136,101 @@ pub async fn set_upstream(branch: &str, upstream: &str) {
     }
 }
 
-pub async fn set_upstream_safe(branch: &str, upstream: &str) -> CliResult<()> {
-    let branch_config = Config::branch_config(branch).await;
-    if branch_config.is_none() {
-        let (remote, remote_branch) = match upstream.split_once('/') {
-            Some((remote, branch)) => (remote, branch),
-            None => {
-                return Err(CliError::fatal(format!("invalid upstream '{}'", upstream)));
-            }
-        };
-        Config::insert("branch", Some(branch), "remote", remote).await;
-        // set upstream branch (tracking branch)
-        Config::insert(
-            "branch",
-            Some(branch),
-            "merge",
-            &format!("refs/heads/{remote_branch}"),
-        )
-        .await;
+async fn parse_upstream_target(upstream: &str) -> Option<(String, String)> {
+    if upstream.is_empty() || upstream != upstream.trim() {
+        return None;
     }
+
+    // Prefer the longest configured remote prefix so names like "org/team"
+    // work correctly with branch names that may also include '/'.
+    let mut matched: Option<(String, String)> = None;
+    for remote in Config::all_remote_configs()
+        .await
+        .into_iter()
+        .map(|r| r.name)
+    {
+        if let Some(branch_part) = upstream
+            .strip_prefix(&remote)
+            .and_then(|suffix| suffix.strip_prefix('/'))
+        {
+            if branch_part.is_empty() {
+                continue;
+            }
+
+            let should_replace = match &matched {
+                Some((current_remote, _)) => remote.len() > current_remote.len(),
+                None => true,
+            };
+            if should_replace {
+                matched = Some((remote, branch_part.to_string()));
+            }
+        }
+    }
+
+    let (remote, branch) = match matched {
+        Some(pair) => pair,
+        None => upstream
+            .split_once('/')
+            .map(|(remote, branch)| (remote.to_string(), branch.to_string()))?,
+    };
+
+    if remote.is_empty()
+        || branch.is_empty()
+        || remote != remote.trim()
+        || branch != branch.trim()
+        || !is_valid_git_branch_name(&branch)
+    {
+        return None;
+    }
+
+    Some((remote, branch))
+}
+
+/// Configure tracking info for `branch` to follow `<remote>/<branch>`.
+///
+/// Repeated calls update existing `branch.<name>.remote` / `branch.<name>.merge`
+/// entries instead of silently keeping stale values. The two writes are wrapped
+/// in one transaction to avoid partial updates.
+pub async fn set_upstream_safe(branch: &str, upstream: &str) -> CliResult<()> {
+    let (remote, remote_branch) = parse_upstream_target(upstream)
+        .await
+        .ok_or_else(|| CliError::fatal(format!("invalid upstream '{}'", upstream)))?;
+
+    let branch_name = branch.to_string();
+    let remote_name = remote;
+    let merge_ref = format!("refs/heads/{remote_branch}");
+    let db = get_db_conn_instance().await;
+    db.transaction(move |txn| {
+        let branch_name = branch_name.clone();
+        let remote_name = remote_name.clone();
+        let merge_ref = merge_ref.clone();
+        Box::pin(async move {
+            // Keep exactly one value per tracking key and avoid stale duplicates.
+            Config::remove_config_with_conn(
+                txn,
+                "branch",
+                Some(&branch_name),
+                "remote",
+                None,
+                true,
+            )
+            .await;
+            Config::remove_config_with_conn(txn, "branch", Some(&branch_name), "merge", None, true)
+                .await;
+            Config::insert_with_conn(txn, "branch", Some(&branch_name), "remote", &remote_name)
+                .await;
+            Config::insert_with_conn(txn, "branch", Some(&branch_name), "merge", &merge_ref).await;
+
+            Ok::<(), DbErr>(())
+        })
+    })
+    .await
+    .map_err(|err| {
+        CliError::fatal(format!(
+            "failed to update tracking config for branch '{branch}': {err}"
+        ))
+    })?;
+
     println!("Branch '{branch}' set up to track remote branch '{upstream}'");
     Ok(())
 }

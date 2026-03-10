@@ -1,6 +1,6 @@
 //! Config storage helpers backed by SeaORM to insert, update, and retrieve values, manage remote/branch settings, and merge scoped configs.
 
-use std::{collections::HashSet, mem::swap};
+use std::collections::HashSet;
 
 use sea_orm::{
     ActiveValue::Set, ColumnTrait, ConnectionTrait, EntityTrait, ModelTrait, QueryFilter,
@@ -342,31 +342,24 @@ impl Config {
         if config_entries.is_empty() {
             None
         } else {
-            assert_eq!(config_entries.len(), 2);
-            // if branch_config[0].key == "merge" {
-            //     Some(BranchConfig {
-            //         name: name.to_owned(),
-            //         merge: branch_config[0].value.clone(),
-            //         remote: branch_config[1].value.clone(),
-            //     })
-            // } else {
-            //     Some(BranchConfig {
-            //         name: name.to_owned(),
-            //         merge: branch_config[1].value.clone(),
-            //         remote: branch_config[0].value.clone(),
-            //     })
-            // }
-            let mut branch_config = BranchConfig {
-                name: name.to_owned(),
-                merge: config_entries[0].value.clone(),
-                remote: config_entries[1].value.clone(),
-            };
-            if config_entries[0].key == "remote" {
-                swap(&mut branch_config.merge, &mut branch_config.remote);
-            }
-            branch_config.merge = branch_config.merge[11..].into(); // cut refs/heads/
+            let remote = config_entries
+                .iter()
+                .find(|entry| entry.key == "remote")
+                .map(|entry| entry.value.to_owned())?;
+            let merge = config_entries
+                .iter()
+                .find(|entry| entry.key == "merge")
+                .map(|entry| entry.value.to_owned())?;
+            let merge = merge
+                .strip_prefix("refs/heads/")
+                .unwrap_or(&merge)
+                .to_owned();
 
-            Some(branch_config)
+            Some(BranchConfig {
+                name: name.to_owned(),
+                merge,
+                remote,
+            })
         }
     }
 

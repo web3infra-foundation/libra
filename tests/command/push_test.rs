@@ -5,7 +5,7 @@ use std::{env, process::Command, time::Duration};
 use clap::Parser;
 use libra::{
     command::push,
-    internal::{db::get_db_conn_instance, reflog::Reflog},
+    internal::{config::Config, db::get_db_conn_instance, reflog::Reflog},
     utils::test::ChangeDirGuard,
 };
 use serial_test::serial;
@@ -184,7 +184,10 @@ async fn test_push_file_remote_succeeds_and_updates_tracking() {
         .next()
         .unwrap_or_default()
         .to_string();
-    assert!(!local_head.is_empty(), "local head hash should not be empty");
+    assert!(
+        !local_head.is_empty(),
+        "local head hash should not be empty"
+    );
 
     let remote_head_out = Command::new("git")
         .args([
@@ -214,7 +217,116 @@ async fn test_push_file_remote_succeeds_and_updates_tracking() {
     let entry = Reflog::find_one(&db, "refs/remotes/origin/main")
         .await
         .expect("query reflog");
-    assert!(entry.is_some(), "reflog should be created after successful push");
+    assert!(
+        entry.is_some(),
+        "reflog should be created after successful push"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_push_set_upstream_tracks_current_branch_when_refspec_differs() {
+    let remote_dir = tempfile::tempdir().unwrap();
+    let remote_path = remote_dir.path();
+    let init_remote = Command::new("git")
+        .args(["init", "--bare", remote_path.to_str().unwrap()])
+        .output()
+        .expect("init remote");
+    assert!(
+        init_remote.status.success(),
+        "failed to initialize bare remote: {}",
+        String::from_utf8_lossy(&init_remote.stderr)
+    );
+
+    let repo = create_committed_repo_via_cli();
+    let repo_path = repo.path();
+
+    let current_branch_out = run_libra_command(&["branch", "--show-current"], repo_path);
+    assert!(
+        current_branch_out.status.success(),
+        "failed to get current branch: {}",
+        String::from_utf8_lossy(&current_branch_out.stderr)
+    );
+    let current_branch = String::from_utf8_lossy(&current_branch_out.stdout)
+        .trim()
+        .to_string();
+    assert!(
+        !current_branch.is_empty(),
+        "current branch should not be empty"
+    );
+
+    let remote_add_out = run_libra_command(
+        &["remote", "add", "origin", remote_path.to_str().unwrap()],
+        repo_path,
+    );
+    assert!(
+        remote_add_out.status.success(),
+        "remote add failed: {}",
+        String::from_utf8_lossy(&remote_add_out.stderr)
+    );
+
+    let create_branch_out = run_libra_command(&["branch", "topic"], repo_path);
+    assert!(
+        create_branch_out.status.success(),
+        "branch create failed: {}",
+        String::from_utf8_lossy(&create_branch_out.stderr)
+    );
+
+    let push_out = run_libra_command(&["push", "-u", "origin", "topic"], repo_path);
+    assert!(
+        push_out.status.success(),
+        "push with upstream should succeed: {}",
+        String::from_utf8_lossy(&push_out.stderr)
+    );
+
+    {
+        let _guard = ChangeDirGuard::new(repo_path);
+        let branch_config = Config::branch_config(&current_branch)
+            .await
+            .expect("current branch should have tracking config");
+        assert_eq!(branch_config.remote, "origin");
+        assert_eq!(branch_config.merge, "topic");
+    }
+
+    let pull_out = run_libra_command(&["pull"], repo_path);
+    assert!(
+        pull_out.status.success(),
+        "pull should succeed with tracking config after push -u: {}",
+        String::from_utf8_lossy(&pull_out.stderr)
+    );
+}
+
+#[test]
+#[serial]
+fn test_push_set_upstream_with_detached_head_returns_fatal_128() {
+    let repo = create_committed_repo_via_cli();
+    let repo_path = repo.path();
+
+    let log_out = run_libra_command(&["log", "-n", "1", "--oneline"], repo_path);
+    assert!(
+        log_out.status.success(),
+        "failed to read current commit: {}",
+        String::from_utf8_lossy(&log_out.stderr)
+    );
+    let commit_hash = String::from_utf8_lossy(&log_out.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    assert!(!commit_hash.is_empty(), "commit hash should not be empty");
+
+    let detach_out = run_libra_command(&["switch", "--detach", &commit_hash], repo_path);
+    assert!(
+        detach_out.status.success(),
+        "detach should succeed: {}",
+        String::from_utf8_lossy(&detach_out.stderr)
+    );
+
+    let push_out = run_libra_command(&["push", "-u", "origin", "main"], repo_path);
+    assert_eq!(push_out.status.code(), Some(128));
+    assert!(
+        String::from_utf8_lossy(&push_out.stderr).contains("fatal: HEAD is detached while pushing")
+    );
 }
 
 #[tokio::test]

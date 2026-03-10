@@ -55,6 +55,7 @@ pub struct PushArgs {
     #[clap(requires("repository"))]
     refspec: Option<String>,
 
+    /// After a successful push, track `<repository>/<refspec>` from the current branch.
     #[clap(long, short = 'u', requires("refspec"), requires("repository"))]
     set_upstream: bool,
 
@@ -137,7 +138,7 @@ pub async fn execute_safe(args: PushArgs) -> CliResult<()> {
         ));
     }
 
-    let branch = match Head::current().await {
+    let current_branch = match Head::current().await {
         Head::Branch(name) => name,
         Head::Detached(_) => return Err(CliError::fatal("HEAD is detached while pushing")),
     };
@@ -146,7 +147,7 @@ pub async fn execute_safe(args: PushArgs) -> CliResult<()> {
         Some(repo) => repo,
         None => {
             // e.g. [branch "master"].remote = origin
-            let remote = Config::get_remote(&branch).await;
+            let remote = Config::get_remote(&current_branch).await;
             if let Some(remote) = remote {
                 remote
             } else {
@@ -160,15 +161,18 @@ pub async fn execute_safe(args: PushArgs) -> CliResult<()> {
     };
     let repo_url = Config::get_remote_url(&repository).await;
 
-    let branch = args.refspec.unwrap_or(branch);
-    let commit_hash = match Branch::find_branch(&branch, None).await {
+    let push_branch = args.refspec.unwrap_or_else(|| current_branch.clone());
+    let commit_hash = match Branch::find_branch(&push_branch, None).await {
         Some(branch_info) => branch_info.commit.to_string(),
         None => {
-            return Err(CliError::fatal(format!("branch '{}' not found", branch)));
+            return Err(CliError::fatal(format!(
+                "branch '{}' not found",
+                push_branch
+            )));
         }
     };
 
-    println!("pushing {branch}({commit_hash}) to {repository}({repo_url})");
+    println!("pushing {push_branch}({commit_hash}) to {repository}({repo_url})");
 
     let url = match Url::parse(&repo_url).or_else(|e| {
         if e == url::ParseError::RelativeUrlWithoutBase && Path::new(&repo_url).exists() {
@@ -215,9 +219,9 @@ pub async fn execute_safe(args: PushArgs) -> CliResult<()> {
     set_wire_hash_kind(discovery.hash_kind);
     let refs = discovery.refs;
 
-    let tracked_branch = Config::get("branch", Some(&branch), "merge")
+    let tracked_branch = Config::get("branch", Some(&push_branch), "merge")
         .await // New branch may not have tracking branch
-        .unwrap_or_else(|| format!("refs/heads/{branch}"));
+        .unwrap_or_else(|| format!("refs/heads/{push_branch}"));
 
     let tracked_ref = refs.iter().find(|r| r._ref == tracked_branch);
     // [0; 20] if new branch
@@ -243,11 +247,12 @@ pub async fn execute_safe(args: PushArgs) -> CliResult<()> {
 
     // If remote has commits that local doesn't have and force is not specified, reject push
     if !can_fast_forward && !args.force {
-        return Err(
-            CliError::fatal(format!("cannot push to '{}' (non-fast-forward)", branch))
-                .with_hint("integrate the remote changes first, for example with 'libra pull'.")
-                .with_hint("or use '--force' to overwrite the remote history."),
-        );
+        return Err(CliError::fatal(format!(
+            "cannot push to '{}' (non-fast-forward)",
+            push_branch
+        ))
+        .with_hint("integrate the remote changes first, for example with 'libra pull'.")
+        .with_hint("or use '--force' to overwrite the remote history."));
     } else if !can_fast_forward && args.force {
         // Force push case - only show warning when force is actually needed
         println!(
@@ -265,7 +270,7 @@ pub async fn execute_safe(args: PushArgs) -> CliResult<()> {
         println!("To {}", repo_url);
         if remote_hash == ObjectHash::default().to_string() {
             // New branch
-            println!(" * [new branch]      {} -> {}", branch, branch);
+            println!(" * [new branch]      {} -> {}", push_branch, push_branch);
         } else {
             // Update existing branch
             let remote_short = &remote_hash[..7];
@@ -274,13 +279,13 @@ pub async fn execute_safe(args: PushArgs) -> CliResult<()> {
                 // Force push uses + and ...
                 println!(
                     " + {}...{} {} -> {} (forced update)",
-                    remote_short, local_short, branch, branch
+                    remote_short, local_short, push_branch, push_branch
                 );
             } else {
                 // Normal push uses space and ..
                 println!(
                     "   {}..{}  {} -> {}",
-                    remote_short, local_short, branch, branch
+                    remote_short, local_short, push_branch, push_branch
                 );
             }
         }
@@ -366,12 +371,12 @@ pub async fn execute_safe(args: PushArgs) -> CliResult<()> {
 
     println!("{}", "Push success".green());
 
-    let remote_tracking_branch = format!("refs/remotes/{}/{}", repository, branch);
+    let remote_tracking_branch = format!("refs/remotes/{}/{}", repository, push_branch);
     update_remote_tracking(&remote_tracking_branch, &commit_hash, &repository).await?;
 
-    // set after push success
+    // set after push success; match git `push -u` behavior for current branch tracking
     if args.set_upstream {
-        branch::set_upstream_safe(&branch, &format!("{repository}/{branch}")).await?;
+        branch::set_upstream_safe(&current_branch, &format!("{repository}/{push_branch}")).await?;
     }
     Ok(())
 }

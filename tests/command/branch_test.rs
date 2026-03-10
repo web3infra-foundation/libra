@@ -24,6 +24,153 @@ fn test_branch_cli_invalid_start_point_returns_fatal_128() {
 
 #[tokio::test]
 #[serial]
+async fn test_set_upstream_updates_existing_tracking_config() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    commit::execute(CommitArgs {
+        message: Some("seed".to_string()),
+        file: None,
+        allow_empty: true,
+        conventional: false,
+        amend: false,
+        no_edit: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    })
+    .await;
+
+    libra::command::branch::set_upstream_safe("main", "origin/main")
+        .await
+        .expect("first set-upstream should succeed");
+    libra::command::branch::set_upstream_safe("main", "origin/feature")
+        .await
+        .expect("second set-upstream should update existing config");
+
+    let branch_config = Config::branch_config("main")
+        .await
+        .expect("branch config should exist after set-upstream");
+    assert_eq!(branch_config.remote, "origin");
+    assert_eq!(branch_config.merge, "feature");
+
+    let remote_values = Config::get_all("branch", Some("main"), "remote").await;
+    let merge_values = Config::get_all("branch", Some("main"), "merge").await;
+    assert_eq!(remote_values, vec!["origin".to_string()]);
+    assert_eq!(merge_values, vec!["refs/heads/feature".to_string()]);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_set_upstream_rejects_whitespace_padded_target() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    commit::execute(CommitArgs {
+        message: Some("seed".to_string()),
+        file: None,
+        allow_empty: true,
+        conventional: false,
+        amend: false,
+        no_edit: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    })
+    .await;
+
+    let err = libra::command::branch::set_upstream_safe("main", "origin/ feature")
+        .await
+        .expect_err("upstream with whitespace should be rejected");
+    assert!(
+        err.render()
+            .contains("fatal: invalid upstream 'origin/ feature'")
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_branch_config_ignores_non_tracking_entries() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    commit::execute(CommitArgs {
+        message: Some("seed".to_string()),
+        file: None,
+        allow_empty: true,
+        conventional: false,
+        amend: false,
+        no_edit: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    })
+    .await;
+
+    libra::command::branch::set_upstream_safe("main", "origin/main")
+        .await
+        .expect("set-upstream should succeed");
+    Config::insert("branch", Some("main"), "description", "for-testing").await;
+
+    let branch_config = Config::branch_config("main")
+        .await
+        .expect("branch config should still be readable with extra keys");
+    assert_eq!(branch_config.remote, "origin");
+    assert_eq!(branch_config.merge, "main");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_set_upstream_supports_remote_names_with_slash() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    commit::execute(CommitArgs {
+        message: Some("seed".to_string()),
+        file: None,
+        allow_empty: true,
+        conventional: false,
+        amend: false,
+        no_edit: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    })
+    .await;
+
+    Config::insert(
+        "remote",
+        Some("org/team"),
+        "url",
+        "https://example.com/libra.git",
+    )
+    .await;
+
+    libra::command::branch::set_upstream_safe("main", "org/team/feature/topic")
+        .await
+        .expect("set-upstream should resolve the longest remote prefix");
+
+    let branch_config = Config::branch_config("main")
+        .await
+        .expect("branch config should exist");
+    assert_eq!(branch_config.remote, "org/team");
+    assert_eq!(branch_config.merge, "feature/topic");
+}
+
+#[tokio::test]
+#[serial]
 /// Tests core branch management functionality including creation and listing.
 /// Verifies branches can be created from specific commits.
 async fn test_branch() {

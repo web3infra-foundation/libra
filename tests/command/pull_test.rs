@@ -42,7 +42,9 @@ fn test_pull_cli_with_tracking_from_local_remote_succeeds() {
         "failed to get current branch: {}",
         String::from_utf8_lossy(&branch_out.stderr)
     );
-    let branch = String::from_utf8_lossy(&branch_out.stdout).trim().to_string();
+    let branch = String::from_utf8_lossy(&branch_out.stdout)
+        .trim()
+        .to_string();
     assert!(!branch.is_empty(), "current branch should not be empty");
 
     let remote_add = run_libra_command(

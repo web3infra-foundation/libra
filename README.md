@@ -243,6 +243,14 @@ Libra’s core implementation is essentially compatible with **Git** (developed 
 
 This allows Libra to interact seamlessly with Git servers (for example, `push` and `pull` work with standard Git remotes).
 
+### Remote Tracking Behavior
+
+Libra follows Git-style branch tracking for common upstream workflows:
+
+- `libra branch -u <remote>/<branch>` updates tracking for the current local branch.
+- `libra push -u <remote> <branch>` configures the current local branch to track `<remote>/<branch>` after the push succeeds.
+- After either command, `libra pull` can use the configured upstream automatically.
+
 ### Differences from Git
 
 While maintaining compatibility with Git, Libra intentionally diverges in some areas:
