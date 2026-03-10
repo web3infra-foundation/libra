@@ -54,17 +54,39 @@ pub fn evaluate_tool_call(
         }
     }
 
-    if spec.constraints.security.network_policy == NetworkPolicy::Deny
-        && tool_name == "shell"
-        && shell_looks_networked(arguments)
-    {
-        return Err(PolicyViolation {
-            code: "network-policy-deny".into(),
-            message: "shell command appears to require network access while networkPolicy=deny"
-                .into(),
-            tool_name: Some(tool_name.to_string()),
-            path: None,
-        });
+    if tool_name == "shell" {
+        if shell_requests_escalation(arguments)
+            && spec.constraints.security.network_policy == NetworkPolicy::Deny
+        {
+            return Err(PolicyViolation {
+                code: "sandbox-escalation-deny".into(),
+                message: "shell escalation is blocked while constraints.security.networkPolicy=deny"
+                    .into(),
+                tool_name: Some(tool_name.to_string()),
+                path: None,
+            });
+        }
+
+        if shell_requests_escalation(arguments) && !shell_has_justification(arguments) {
+            return Err(PolicyViolation {
+                code: "sandbox-escalation-justification-required".into(),
+                message: "shell escalation requires a non-empty justification".into(),
+                tool_name: Some(tool_name.to_string()),
+                path: None,
+            });
+        }
+
+        if spec.constraints.security.network_policy == NetworkPolicy::Deny
+            && shell_looks_networked(arguments)
+        {
+            return Err(PolicyViolation {
+                code: "network-policy-deny".into(),
+                message: "shell command appears to require network access while networkPolicy=deny"
+                    .into(),
+                tool_name: Some(tool_name.to_string()),
+                path: None,
+            });
+        }
     }
 
     for path in &writes {
@@ -130,11 +152,12 @@ pub fn evaluate_tool_result(
         && let Some(text) = output.as_text()
         && text.len() > limit
     {
+        let output_bytes = text.len();
         return Err(PolicyViolation {
             code: "tool-output-too-large".into(),
             message: format!(
                 "tool output exceeds maxOutputBytes constraint ({} > {})",
-                text.len(),
+                output_bytes,
                 limit
             ),
             tool_name: Some(tool_name.to_string()),
@@ -305,6 +328,25 @@ fn shell_looks_networked(arguments: &Value) -> bool {
         "git fetch",
     ];
     needles.iter().any(|needle| command.contains(needle))
+}
+
+fn shell_requests_escalation(arguments: &Value) -> bool {
+    arguments
+        .get("sandbox_permissions")
+        .and_then(Value::as_str)
+        .map(|value| {
+            let normalized = value.to_ascii_lowercase();
+            normalized == "require_escalated" || normalized == "require-escalated"
+        })
+        .unwrap_or(false)
+}
+
+fn shell_has_justification(arguments: &Value) -> bool {
+    arguments
+        .get("justification")
+        .and_then(Value::as_str)
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
 }
 
 fn patch_metadata_looks_unsafe(metadata: &Value) -> bool {
@@ -559,5 +601,61 @@ mod tests {
             Path::new("/tmp/work"),
         );
         assert!(matches!(res, Err(PolicyViolation { code, .. }) if code == "network-policy-deny"));
+    }
+
+    #[test]
+    fn test_network_policy_rejects_shell_escalation() {
+        let res = evaluate_tool_call(
+            &spec(),
+            &task(),
+            "shell",
+            &serde_json::json!({
+                "command": "echo hi",
+                "sandbox_permissions": "require_escalated",
+                "justification": "needs host access",
+            }),
+            Path::new("/tmp/work"),
+        );
+        assert!(
+            matches!(res, Err(PolicyViolation { code, .. }) if code == "sandbox-escalation-deny")
+        );
+    }
+
+    #[test]
+    fn test_shell_escalation_requires_justification_when_network_allowed() {
+        let mut intent = spec();
+        intent.constraints.security.network_policy = NetworkPolicy::Allow;
+        let res = evaluate_tool_call(
+            &intent,
+            &task(),
+            "shell",
+            &serde_json::json!({
+                "command": "echo hi",
+                "sandbox_permissions": "require_escalated",
+            }),
+            Path::new("/tmp/work"),
+        );
+        assert!(matches!(
+            res,
+            Err(PolicyViolation { code, .. }) if code == "sandbox-escalation-justification-required"
+        ));
+    }
+
+    #[test]
+    fn test_shell_escalation_allowed_with_justification_when_network_allowed() {
+        let mut intent = spec();
+        intent.constraints.security.network_policy = NetworkPolicy::Allow;
+        let res = evaluate_tool_call(
+            &intent,
+            &task(),
+            "shell",
+            &serde_json::json!({
+                "command": "echo hi",
+                "sandbox_permissions": "require_escalated",
+                "justification": "requires host tools",
+            }),
+            Path::new("/tmp/work"),
+        );
+        assert!(res.is_ok());
     }
 }
