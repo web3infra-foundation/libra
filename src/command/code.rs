@@ -70,6 +70,28 @@ pub enum CodeContext {
     Research,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum CodeApprovalPolicy {
+    Never,
+    #[value(alias = "on-failure")]
+    OnFailure,
+    #[value(alias = "on-request")]
+    OnRequest,
+    #[value(alias = "unless-trusted", alias = "untrusted")]
+    Untrusted,
+}
+
+impl From<CodeApprovalPolicy> for AskForApproval {
+    fn from(value: CodeApprovalPolicy) -> Self {
+        match value {
+            CodeApprovalPolicy::Never => AskForApproval::Never,
+            CodeApprovalPolicy::OnFailure => AskForApproval::OnFailure,
+            CodeApprovalPolicy::OnRequest => AskForApproval::OnRequest,
+            CodeApprovalPolicy::Untrusted => AskForApproval::UnlessTrusted,
+        }
+    }
+}
+
 #[derive(Parser, Debug)]
 pub struct CodeArgs {
     /// Run the web server only (no TUI). Alias: `--web`.
@@ -103,6 +125,10 @@ pub struct CodeArgs {
     /// Resume the most recent session
     #[arg(long)]
     pub resume: bool,
+
+    /// Tool approval policy: never, on-failure, on-request, or untrusted.
+    #[arg(long, value_enum, default_value_t = CodeApprovalPolicy::OnRequest)]
+    pub approval_policy: CodeApprovalPolicy,
 
     /// Port to listen on (MCP server)
     #[arg(long, default_value_t = DEFAULT_MCP_PORT)]
@@ -298,6 +324,7 @@ async fn execute_tui(args: CodeArgs) {
         preamble,
         temperature,
         resume,
+        approval_policy: args.approval_policy.into(),
         user_input_rx,
         exec_approval_rx,
         exec_approval_tx,
@@ -395,6 +422,7 @@ struct TuiLaunchConfig {
     preamble: String,
     temperature: Option<f64>,
     resume: bool,
+    approval_policy: AskForApproval,
     user_input_rx:
         tokio::sync::mpsc::UnboundedReceiver<crate::internal::ai::tools::context::UserInputRequest>,
     exec_approval_rx: tokio::sync::mpsc::UnboundedReceiver<ExecApprovalRequest>,
@@ -438,7 +466,7 @@ async fn run_tui_with_model<M>(
             }),
             sandbox_runtime: None,
             approval: Some(ToolApprovalContext {
-                policy: AskForApproval::OnRequest,
+                policy: params.approval_policy,
                 request_tx: params.exec_approval_tx.clone(),
                 store: Arc::new(tokio::sync::Mutex::new(ApprovalStore::default())),
             }),
@@ -749,6 +777,11 @@ fn reject_non_tui_flags(args: &CodeArgs, mode: &str) -> Result<(), String> {
     reject_mode_flag(args.temperature.is_some(), "--temperature", mode)?;
     reject_mode_flag(args.context.is_some(), "--context", mode)?;
     reject_mode_flag(args.resume, "--resume", mode)?;
+    reject_mode_flag(
+        args.approval_policy != CodeApprovalPolicy::OnRequest,
+        "--approval-policy",
+        mode,
+    )?;
     reject_mode_flag(args.api_base.is_some(), "--api-base", mode)?;
     Ok(())
 }
@@ -767,6 +800,7 @@ mod tests {
             temperature: None,
             context: None,
             resume: false,
+            approval_policy: CodeApprovalPolicy::OnRequest,
             mcp_port: DEFAULT_MCP_PORT,
             stdio: false,
             api_base: None,
