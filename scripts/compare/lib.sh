@@ -62,8 +62,50 @@ counter_inc() {
     counter_set "$map" "$key" "$(( current + delta ))"
 }
 
+# Generic state storage (supports string values, including whitespace/newlines).
+state_var_name() {
+    local map="$1"
+    local key="$2"
+    local raw="${map}_${key}"
+    local safe
+    safe="$(printf '%s' "$raw" | tr -c 'A-Za-z0-9_' '_')"
+    printf 'CMP_STATE_%s' "$safe"
+}
+
+state_set() {
+    local map="$1"
+    local key="$2"
+    local value="$3"
+    local var
+    var="$(state_var_name "$map" "$key")"
+    printf -v "$var" '%s' "$value"
+}
+
+state_get() {
+    local map="$1"
+    local key="$2"
+    local default_value="${3:-}"
+    local var
+    var="$(state_var_name "$map" "$key")"
+    if eval "[[ \${$var+x} == x ]]"; then
+        eval "printf '%s' \"\${$var}\""
+    else
+        printf '%s' "$default_value"
+    fi
+}
+
+state_has() {
+    local map="$1"
+    local key="$2"
+    local var
+    var="$(state_var_name "$map" "$key")"
+    eval "[[ \${$var+x} == x ]]"
+}
+
 CURRENT_CATEGORY=""
 TOTAL_TESTS=0
+RAW_OUTPUT_MAX_BYTES="${RAW_OUTPUT_MAX_BYTES:-2000}"
+declare -a ALL_CASE_KEYS=()
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -237,6 +279,75 @@ run_tool() {
 # ---------------------------------------------------------------------------
 # Test execution framework
 # ---------------------------------------------------------------------------
+case_compound_key() {
+    local category="$1"
+    local label="$2"
+    printf '%s|%s' "$category" "$label"
+}
+
+case_tool_key() {
+    local category="$1"
+    local label="$2"
+    local tool="$3"
+    printf '%s|%s|%s' "$category" "$label" "$tool"
+}
+
+register_case() {
+    local category="$1"
+    local label="$2"
+    local case_key
+    case_key="$(case_compound_key "$category" "$label")"
+    if ! state_has "case_seen" "$case_key"; then
+        state_set "case_seen" "$case_key" "1"
+        ALL_CASE_KEYS+=("$case_key")
+    fi
+}
+
+case_set() {
+    local map="$1"
+    local category="$2"
+    local label="$3"
+    local tool="$4"
+    local value="$5"
+    local key
+    key="$(case_tool_key "$category" "$label" "$tool")"
+    state_set "case_${map}" "$key" "$value"
+}
+
+case_get() {
+    local map="$1"
+    local category="$2"
+    local label="$3"
+    local tool="$4"
+    local default_value="${5:-}"
+    local key
+    key="$(case_tool_key "$category" "$label" "$tool")"
+    state_get "case_${map}" "$key" "$default_value"
+}
+
+record_case_metadata() {
+    local category="$1"
+    local label="$2"
+    local tool="$3"
+    local command="$4"
+    local expectation="$5"
+    register_case "$category" "$label"
+    case_set "command" "$category" "$label" "$tool" "$command"
+    case_set "expectation" "$category" "$label" "$tool" "$expectation"
+}
+
+record_case_outcome() {
+    local category="$1"
+    local label="$2"
+    local tool="$3"
+    local result="$4"
+    local exit_code="$5"
+    local notes="${6:-}"
+    case_set "result" "$category" "$label" "$tool" "$result"
+    case_set "exit_code" "$category" "$label" "$tool" "$exit_code"
+    case_set "notes" "$category" "$label" "$tool" "$notes"
+}
+
 set_category() {
     CURRENT_CATEGORY="$1"
     for tool in git jj libra; do
@@ -249,50 +360,63 @@ set_category() {
     done
 }
 
-# record_result <tool> <label> <actual_rc> <expect_success|expect_fail>
+# record_result <tool> <label> <actual_rc> <expect_success|expect_fail> [command]
 record_result() {
     local tool="$1"
     local label="$2"
     local actual_rc="$3"
     local expectation="${4:-expect_success}"   # expect_success | expect_fail
+    local command="${5:-}"
 
     local key="${CURRENT_CATEGORY}_${tool}"
     counter_inc total "$key" 1
     TOTAL_TESTS=$((TOTAL_TESTS + 1))
 
+    record_case_metadata "$CURRENT_CATEGORY" "$label" "$tool" "$command" "$expectation"
+
+    local result=""
+    local notes=""
+
     if [[ "$expectation" == "expect_fail" ]]; then
         if [[ "$actual_rc" -ne 0 ]]; then
             counter_inc xfail "$key" 1
+            result="XFAIL"
             log_expected "$tool | $label (exit=$actual_rc, expected failure)"
-            md_result_row "$label" "$tool" "XFAIL" "$actual_rc"
         else
             counter_inc fail "$key" 1
+            result="UPASS"
             log_fail "$tool | $label (exit=0, expected failure but succeeded!)"
-            md_result_row "$label" "$tool" "UNEXPECTED_PASS" "$actual_rc"
         fi
     else
         if [[ "$actual_rc" -eq 0 ]]; then
             counter_inc pass "$key" 1
+            result="PASS"
             log_success "$tool | $label"
-            md_result_row "$label" "$tool" "PASS" "$actual_rc"
         else
             counter_inc fail "$key" 1
             local stderr_snippet
             stderr_snippet="$(head -c 200 "$SANDBOX/out/${label}.${tool}.stderr" 2>/dev/null || echo '(no stderr)')"
+            result="FAIL"
+            notes="$stderr_snippet"
             log_fail "$tool | $label (exit=$actual_rc) — $stderr_snippet"
-            md_result_row "$label" "$tool" "FAIL" "$actual_rc" "$stderr_snippet"
         fi
     fi
+
+    record_case_outcome "$CURRENT_CATEGORY" "$label" "$tool" "$result" "$actual_rc" "$notes"
+    md_result_row "$label" "$tool" "$result" "$actual_rc" "$notes"
 }
 
 record_na() {
     local tool="$1"
     local label="$2"
     local reason="${3:-no equivalent command}"
+    local command="${4:-NA}"
     local key="${CURRENT_CATEGORY}_${tool}"
     counter_inc total "$key" 1
     counter_inc na "$key" 1
     TOTAL_TESTS=$((TOTAL_TESTS + 1))
+    record_case_metadata "$CURRENT_CATEGORY" "$label" "$tool" "$command" "NA"
+    record_case_outcome "$CURRENT_CATEGORY" "$label" "$tool" "N/A" "-" "$reason"
     log_na "$tool | $label ($reason)"
     md_result_row "$label" "$tool" "N/A" "-" "$reason"
 }
@@ -311,16 +435,18 @@ run_compare() {
     printf "  %-45s" "$label"
 
     for tool in git jj libra; do
+        local args_var="${tool}_args"
+        local args="${!args_var}"
+        record_case_metadata "$CURRENT_CATEGORY" "$label" "$tool" "$args" "$expectation"
+
         if ! is_tool_enabled "$tool"; then
+            record_case_outcome "$CURRENT_CATEGORY" "$label" "$tool" "skip" "-" "tool not enabled"
             printf "  ${DIM}skip${RESET}"
             continue
         fi
 
-        local args_var="${tool}_args"
-        local args="${!args_var}"
-
         if [[ "$args" == "NA" ]]; then
-            record_na "$tool" "$label"
+            record_na "$tool" "$label" "no equivalent command" "$args"
             printf "  ${DIM}N/A${RESET} "
             continue
         fi
@@ -328,7 +454,7 @@ run_compare() {
         local rc=0
         # Run in current directory (caller should cd to appropriate repo)
         eval "run_tool $tool '$label' $args" || rc=$?
-        record_result "$tool" "$label" "$rc" "$expectation"
+        record_result "$tool" "$label" "$rc" "$expectation" "$args"
 
         if [[ "$expectation" == "expect_fail" ]]; then
             if [[ "$rc" -ne 0 ]]; then
@@ -570,6 +696,192 @@ md_category_summary() {
     done
 }
 
+md_escape_cell() {
+    local text="$1"
+    text="${text//$'\r'/}"
+    text="${text//$'\n'/<br>}"
+    text="${text//|/\\|}"
+    printf '%s' "$text"
+}
+
+case_result_for_report() {
+    local category="$1"
+    local label="$2"
+    local tool="$3"
+    local result
+    result="$(case_get result "$category" "$label" "$tool" "")"
+    if [[ -n "$result" ]]; then
+        printf '%s' "$result"
+        return
+    fi
+
+    if is_tool_enabled "$tool"; then
+        printf '%s' "(missing)"
+    else
+        printf '%s' "skip"
+    fi
+}
+
+compare_case_results() {
+    local left="$1"
+    local right="$2"
+
+    if [[ "$left" == "skip" || "$right" == "skip" ]]; then
+        printf '%s' "skip"
+        return
+    fi
+    if [[ "$left" == "N/A" || "$right" == "N/A" ]]; then
+        printf '%s' "N/A"
+        return
+    fi
+    if [[ "$left" == "$right" ]]; then
+        printf '%s' "match"
+    else
+        printf '%s' "diff"
+    fi
+}
+
+md_emit_output_snippet() {
+    local file="$1"
+    local max_bytes="$2"
+    if [[ ! -f "$file" ]]; then
+        printf '(no output file)\n'
+        return
+    fi
+
+    local size
+    size="$(wc -c < "$file" | tr -d ' ')"
+    if [[ "$size" -eq 0 ]]; then
+        printf '(empty)\n'
+        return
+    fi
+
+    if [[ "$size" -le "$max_bytes" ]]; then
+        cat "$file"
+        printf '\n'
+        return
+    fi
+
+    head -c "$max_bytes" "$file"
+    printf '\n'
+    printf '... (truncated: showing first %s of %s bytes)\n' "$max_bytes" "$size"
+}
+
+md_case_summary_table() {
+    local diff_libra_git=0
+    local diff_libra_jj=0
+
+    echo "" >> "$REPORT_FILE"
+    echo "### Case Summary Table" >> "$REPORT_FILE"
+    echo "" >> "$REPORT_FILE"
+    echo "| Category | Test | git | jj | libra | Libra vs git | Libra vs jj |" >> "$REPORT_FILE"
+    echo "|----------|------|-----|----|-------|--------------|-------------|" >> "$REPORT_FILE"
+
+    for case_key in "${ALL_CASE_KEYS[@]}"; do
+        local category label
+        IFS='|' read -r category label <<< "$case_key"
+
+        local git_result jj_result libra_result
+        git_result="$(case_result_for_report "$category" "$label" "git")"
+        jj_result="$(case_result_for_report "$category" "$label" "jj")"
+        libra_result="$(case_result_for_report "$category" "$label" "libra")"
+
+        local vs_git vs_jj
+        vs_git="$(compare_case_results "$libra_result" "$git_result")"
+        vs_jj="$(compare_case_results "$libra_result" "$jj_result")"
+
+        if [[ "$vs_git" == "diff" ]]; then
+            diff_libra_git=$((diff_libra_git + 1))
+        fi
+        if [[ "$vs_jj" == "diff" ]]; then
+            diff_libra_jj=$((diff_libra_jj + 1))
+        fi
+
+        echo "| $(md_escape_cell "$category") | $(md_escape_cell "$label") | $git_result | $jj_result | $libra_result | $vs_git | $vs_jj |" >> "$REPORT_FILE"
+    done
+
+    echo "" >> "$REPORT_FILE"
+    echo "| Metric | Value |" >> "$REPORT_FILE"
+    echo "|--------|-------|" >> "$REPORT_FILE"
+    echo "| Total cases | ${#ALL_CASE_KEYS[@]} |" >> "$REPORT_FILE"
+    echo "| Libra vs git mismatches | $diff_libra_git |" >> "$REPORT_FILE"
+    echo "| Libra vs jj mismatches | $diff_libra_jj |" >> "$REPORT_FILE"
+}
+
+md_raw_outputs() {
+    echo "" >> "$REPORT_FILE"
+    echo "## Raw Command Outputs" >> "$REPORT_FILE"
+    echo "" >> "$REPORT_FILE"
+    echo "_Each stdout/stderr block below is truncated to first ${RAW_OUTPUT_MAX_BYTES} bytes. Full files are in \`$SANDBOX/out\`._" >> "$REPORT_FILE"
+
+    for case_key in "${ALL_CASE_KEYS[@]}"; do
+        local category label
+        IFS='|' read -r category label <<< "$case_key"
+
+        echo "" >> "$REPORT_FILE"
+        echo "### $(md_escape_cell "$category") / $(md_escape_cell "$label")" >> "$REPORT_FILE"
+        echo "" >> "$REPORT_FILE"
+        echo "| Tool | Command | Expectation | Result | Exit Code |" >> "$REPORT_FILE"
+        echo "|------|---------|-------------|--------|-----------|" >> "$REPORT_FILE"
+
+        for tool in git jj libra; do
+            local command expectation result exit_code
+            command="$(case_get command "$category" "$label" "$tool" "")"
+            expectation="$(case_get expectation "$category" "$label" "$tool" "-")"
+            result="$(case_result_for_report "$category" "$label" "$tool")"
+            exit_code="$(case_get exit_code "$category" "$label" "$tool" "-")"
+
+            if [[ -z "$command" ]]; then
+                if [[ "$result" == "N/A" ]]; then
+                    command="NA"
+                elif [[ "$result" == "skip" ]]; then
+                    command="(tool disabled)"
+                else
+                    command="(not recorded)"
+                fi
+            fi
+
+            echo "| $tool | $(md_escape_cell "$command") | $(md_escape_cell "$expectation") | $result | $exit_code |" >> "$REPORT_FILE"
+        done
+
+        for tool in git jj libra; do
+            local tool_result
+            tool_result="$(case_result_for_report "$category" "$label" "$tool")"
+
+            echo "" >> "$REPORT_FILE"
+            echo "<details>" >> "$REPORT_FILE"
+            echo "<summary><code>$tool</code> stdout/stderr</summary>" >> "$REPORT_FILE"
+            echo "" >> "$REPORT_FILE"
+
+            if [[ "$tool_result" == "N/A" || "$tool_result" == "skip" ]]; then
+                echo "_No output captured for this tool ($tool_result)._" >> "$REPORT_FILE"
+                echo "" >> "$REPORT_FILE"
+                echo "</details>" >> "$REPORT_FILE"
+                continue
+            fi
+
+            local stdout_file stderr_file
+            stdout_file="$SANDBOX/out/${label}.${tool}.stdout"
+            stderr_file="$SANDBOX/out/${label}.${tool}.stderr"
+
+            echo "**stdout** (\`$stdout_file\`)" >> "$REPORT_FILE"
+            echo "" >> "$REPORT_FILE"
+            echo "~~~text" >> "$REPORT_FILE"
+            md_emit_output_snippet "$stdout_file" "$RAW_OUTPUT_MAX_BYTES" >> "$REPORT_FILE"
+            echo "~~~" >> "$REPORT_FILE"
+            echo "" >> "$REPORT_FILE"
+
+            echo "**stderr** (\`$stderr_file\`)" >> "$REPORT_FILE"
+            echo "" >> "$REPORT_FILE"
+            echo "~~~text" >> "$REPORT_FILE"
+            md_emit_output_snippet "$stderr_file" "$RAW_OUTPUT_MAX_BYTES" >> "$REPORT_FILE"
+            echo "~~~" >> "$REPORT_FILE"
+            echo "" >> "$REPORT_FILE"
+            echo "</details>" >> "$REPORT_FILE"
+        done
+    done
+}
+
 # ---------------------------------------------------------------------------
 # Final scoreboard (terminal + markdown)
 # ---------------------------------------------------------------------------
@@ -651,16 +963,19 @@ print_scoreboard() {
         printf "| %s" "$cat" >> "$REPORT_FILE"
         for tool in git jj libra; do
             local key="${cat}_${tool}"
-            local p x f t
+            local p x t
             p="$(counter_get pass "$key")"
             x="$(counter_get xfail "$key")"
-            f="$(counter_get fail "$key")"
             t="$(counter_get total "$key")"
             printf " | %d+%dxf/%d" "$p" "$x" "$t" >> "$REPORT_FILE"
         done
         echo " |" >> "$REPORT_FILE"
     done
     echo "| **TOTAL** | **$grand_pass_git/$grand_total_git** | **$grand_pass_jj/$grand_total_jj** | **$grand_pass_libra/$grand_total_libra** |" >> "$REPORT_FILE"
+
+    md_case_summary_table
+    md_raw_outputs
+
     echo "" >> "$REPORT_FILE"
     echo "_Generated: $(date -u '+%Y-%m-%d %H:%M:%S UTC')_" >> "$REPORT_FILE"
 }

@@ -182,13 +182,9 @@ run_case_internal() {
     local libra_args="$1"; shift
 
     printf "  %-48s" "$label"
+    register_case "$CURRENT_CATEGORY" "$label"
 
     for tool in git jj libra; do
-        if ! is_tool_enabled "$tool"; then
-            printf "  ${DIM}skip${RESET}"
-            continue
-        fi
-
         local expect args
         case "$tool" in
             git)
@@ -209,8 +205,16 @@ run_case_internal() {
                 ;;
         esac
 
+        record_case_metadata "$CURRENT_CATEGORY" "$label" "$tool" "$args" "$expect"
+
+        if ! is_tool_enabled "$tool"; then
+            record_case_outcome "$CURRENT_CATEGORY" "$label" "$tool" "skip" "-" "tool not enabled"
+            printf "  ${DIM}skip${RESET}"
+            continue
+        fi
+
         if [[ "$args" == "NA" ]]; then
-            record_na "$tool" "$label"
+            record_na "$tool" "$label" "no equivalent command" "$args"
             printf "  ${DIM}N/A${RESET} "
             continue
         fi
@@ -230,7 +234,7 @@ run_case_internal() {
             ) || rc=$?
         fi
 
-        record_result "$tool" "$label" "$rc" "$expect"
+        record_result "$tool" "$label" "$rc" "$expect" "$args"
         print_badge "$expect" "$rc"
     done
 
