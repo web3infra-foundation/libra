@@ -1389,7 +1389,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                                     && let Ok(rel_path) = path.strip_prefix(&working_dir)
                                 {
                                     let rel_str = rel_path.to_string_lossy().replace("\\", "/");
-                                    if !rel_str.starts_with(".git") && !rel_str.starts_with(".libra") {
+                                    if !rel_str.starts_with(".git")
+                                        && !rel_str.starts_with(".libra")
+                                    {
                                         current_files.insert(rel_str.clone());
 
                                         // New or modified file
