@@ -239,7 +239,7 @@ mod tests {
         let (runner, _tmp) = make_runner(vec![make_hook(
             HookEvent::PreToolUse,
             "shell",
-            r#"echo "{\"message\":\"dangerous command blocked\"}" && exit 2"#,
+            r#"printf '{"message":"dangerous command blocked"}\n' && exit 2"#,
         )]);
 
         let action = runner
