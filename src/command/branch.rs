@@ -223,12 +223,13 @@ pub async fn set_upstream_safe(branch: &str, upstream: &str) -> CliResult<()> {
                 None,
                 true,
             )
-            .await;
+            .await?;
             Config::remove_config_with_conn(txn, "branch", Some(&branch_name), "merge", None, true)
-                .await;
+                .await?;
             Config::insert_with_conn(txn, "branch", Some(&branch_name), "remote", &remote_name)
-                .await;
-            Config::insert_with_conn(txn, "branch", Some(&branch_name), "merge", &merge_ref).await;
+                .await?;
+            Config::insert_with_conn(txn, "branch", Some(&branch_name), "merge", &merge_ref)
+                .await?;
 
             Ok::<(), DbErr>(())
         })

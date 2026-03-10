@@ -521,7 +521,9 @@ impl ScopedConfig {
         value: &str,
     ) -> Result<(), String> {
         let conn = Self::get_connection(scope).await?;
-        config::Config::insert_with_conn(&conn, configuration, name, key, value).await;
+        config::Config::insert_with_conn(&conn, configuration, name, key, value)
+            .await
+            .map_err(|e| format!("failed to insert config: {e}"))?;
         Ok(())
     }
 
@@ -534,7 +536,9 @@ impl ScopedConfig {
         value: &str,
     ) -> Result<(), String> {
         let conn = Self::get_connection(scope).await?;
-        config::Config::update_with_conn(&conn, configuration, name, key, value).await;
+        config::Config::update_with_conn(&conn, configuration, name, key, value)
+            .await
+            .map_err(|e| format!("failed to update config: {e}"))?;
         Ok(())
     }
 
@@ -546,7 +550,9 @@ impl ScopedConfig {
         key: &str,
     ) -> Result<Option<String>, String> {
         let conn = Self::get_connection(scope).await?;
-        Ok(config::Config::get_with_conn(&conn, configuration, name, key).await)
+        config::Config::get_with_conn(&conn, configuration, name, key)
+            .await
+            .map_err(|e| format!("failed to get config: {e}"))
     }
 
     /// Get all configurations with scope
@@ -557,13 +563,17 @@ impl ScopedConfig {
         key: &str,
     ) -> Result<Vec<String>, String> {
         let conn = Self::get_connection(scope).await?;
-        Ok(config::Config::get_all_with_conn(&conn, configuration, name, key).await)
+        config::Config::get_all_with_conn(&conn, configuration, name, key)
+            .await
+            .map_err(|e| format!("failed to get all config: {e}"))
     }
 
     /// List all configurations with scope
     pub async fn list_all(scope: ConfigScope) -> Result<Vec<(String, String)>, String> {
         let conn = Self::get_connection(scope).await?;
-        Ok(config::Config::list_all_with_conn(&conn).await)
+        config::Config::list_all_with_conn(&conn)
+            .await
+            .map_err(|e| format!("failed to list config: {e}"))
     }
 
     /// Remove configuration with scope
@@ -584,7 +594,8 @@ impl ScopedConfig {
             valuepattern,
             delete_all,
         )
-        .await;
+        .await
+        .map_err(|e| format!("failed to remove config: {e}"))?;
         Ok(())
     }
 }

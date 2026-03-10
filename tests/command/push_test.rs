@@ -332,7 +332,7 @@ fn test_push_set_upstream_with_detached_head_returns_fatal_128() {
     let push_out = run_libra_command(&["push", "-u", "origin", "main"], repo_path);
     assert_eq!(push_out.status.code(), Some(128));
     assert!(
-        String::from_utf8_lossy(&push_out.stderr).contains("fatal: HEAD is detached while pushing")
+        String::from_utf8_lossy(&push_out.stderr).contains("cannot set upstream: HEAD is detached")
     );
 }
 
@@ -431,4 +431,60 @@ async fn test_push_force_with_local_changes() {
 
     // Note: This is a placeholder for a more comprehensive integration test
     // that would require a more complex setup with actual Git repositories
+}
+
+#[test]
+#[serial]
+fn test_push_unsupported_url_scheme_returns_fatal_128() {
+    let repo = create_committed_repo_via_cli();
+    let repo_path = repo.path();
+
+    // Add a remote with an unsupported scheme (e.g., ftp)
+    let remote_add_out = run_libra_command(
+        &["remote", "add", "origin", "ftp://example.com/repo"],
+        repo_path,
+    );
+    assert!(
+        remote_add_out.status.success(),
+        "remote add failed: {}",
+        String::from_utf8_lossy(&remote_add_out.stderr)
+    );
+
+    // Push should fail with unsupported URL scheme error
+    let push_out = run_libra_command(&["push", "origin", "main"], repo_path);
+    let stderr = String::from_utf8_lossy(&push_out.stderr);
+
+    assert_eq!(push_out.status.code(), Some(128));
+    assert!(
+        stderr.contains("unsupported URL scheme"),
+        "expected unsupported URL scheme error, got: {stderr}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_push_ssh_url_scheme_returns_fatal_128() {
+    let repo = create_committed_repo_via_cli();
+    let repo_path = repo.path();
+
+    // Add a remote with SSH protocol scheme
+    let remote_add_out = run_libra_command(
+        &["remote", "add", "origin", "ssh://git@example.com/repo.git"],
+        repo_path,
+    );
+    assert!(
+        remote_add_out.status.success(),
+        "remote add failed: {}",
+        String::from_utf8_lossy(&remote_add_out.stderr)
+    );
+
+    // Push should fail with unsupported URL scheme error
+    let push_out = run_libra_command(&["push", "origin", "main"], repo_path);
+    let stderr = String::from_utf8_lossy(&push_out.stderr);
+
+    assert_eq!(push_out.status.code(), Some(128));
+    assert!(
+        stderr.contains("unsupported URL scheme"),
+        "expected unsupported URL scheme error, got: {stderr}"
+    );
 }

@@ -1,9 +1,7 @@
 //! Config storage helpers backed by SeaORM to insert, update, and retrieve values, manage remote/branch settings, and merge scoped configs.
 
-use std::collections::HashSet;
-
 use sea_orm::{
-    ActiveValue::Set, ColumnTrait, ConnectionTrait, EntityTrait, ModelTrait, QueryFilter,
+    ActiveValue::Set, ColumnTrait, ConnectionTrait, DbErr, EntityTrait, ModelTrait, QueryFilter,
     entity::ActiveModelTrait,
 };
 
@@ -57,7 +55,7 @@ impl Config {
         name: Option<&str>,
         key: &str,
         value: &str,
-    ) {
+    ) -> Result<(), DbErr> {
         let config = ActiveModel {
             configuration: Set(configuration.to_owned()),
             name: Set(name.map(|s| s.to_owned())),
@@ -65,7 +63,8 @@ impl Config {
             value: Set(value.to_owned()),
             ..Default::default()
         };
-        config.save(db).await.unwrap();
+        config.save(db).await?;
+        Ok(())
     }
 
     // _with_conn version for update
@@ -75,8 +74,8 @@ impl Config {
         name: Option<&str>,
         key: &str,
         value: &str,
-    ) -> Model {
-        let mut config: ActiveModel = config::Entity::find()
+    ) -> Result<Model, DbErr> {
+        let entry = config::Entity::find()
             .filter(config::Column::Configuration.eq(configuration))
             .filter(match name {
                 Some(str) => config::Column::Name.eq(str),
@@ -84,12 +83,18 @@ impl Config {
             })
             .filter(config::Column::Key.eq(key))
             .one(db)
-            .await
-            .unwrap()
-            .unwrap()
-            .into();
+            .await?
+            .ok_or_else(|| {
+                DbErr::RecordNotFound(format!(
+                    "config entry not found: {}.{}.{}",
+                    configuration,
+                    name.unwrap_or("<none>"),
+                    key
+                ))
+            })?;
+        let mut config: ActiveModel = entry.into();
         config.value = Set(value.to_owned());
-        config.update(db).await.unwrap()
+        config.update(db).await
     }
 
     // _with_conn version for query
@@ -98,7 +103,7 @@ impl Config {
         configuration: &str,
         name: Option<&str>,
         key: &str,
-    ) -> Vec<Model> {
+    ) -> Result<Vec<Model>, DbErr> {
         config::Entity::find()
             .filter(config::Column::Configuration.eq(configuration))
             .filter(match name {
@@ -108,7 +113,6 @@ impl Config {
             .filter(config::Column::Key.eq(key))
             .all(db)
             .await
-            .unwrap()
     }
 
     // _with_conn version for get
@@ -117,13 +121,16 @@ impl Config {
         configuration: &str,
         name: Option<&str>,
         key: &str,
-    ) -> Option<String> {
-        let values = Self::query_with_conn(db, configuration, name, key).await;
-        values.first().map(|c| c.value.to_owned())
+    ) -> Result<Option<String>, DbErr> {
+        let values = Self::query_with_conn(db, configuration, name, key).await?;
+        Ok(values.first().map(|c| c.value.to_owned()))
     }
 
     // _with_conn version for get_remote
-    pub async fn get_remote_with_conn<C: ConnectionTrait>(db: &C, branch: &str) -> Option<String> {
+    pub async fn get_remote_with_conn<C: ConnectionTrait>(
+        db: &C,
+        branch: &str,
+    ) -> Result<Option<String>, DbErr> {
         Config::get_with_conn(db, "branch", Some(branch), "remote").await
     }
 
@@ -132,7 +139,9 @@ impl Config {
         db: &C,
     ) -> Result<Option<String>, ()> {
         match Head::current_with_conn(db).await {
-            Head::Branch(name) => Ok(Config::get_remote_with_conn(db, &name).await),
+            Head::Branch(name) => Config::get_remote_with_conn(db, &name)
+                .await
+                .map_err(|_| ()),
             Head::Detached(_) => {
                 eprintln!("fatal: HEAD is detached, cannot get remote");
                 Err(())
@@ -141,18 +150,25 @@ impl Config {
     }
 
     // _with_conn version for get_remote_url
-    pub async fn get_remote_url_with_conn<C: ConnectionTrait>(db: &C, remote: &str) -> String {
-        match Config::get_with_conn(db, "remote", Some(remote), "url").await {
-            Some(url) => url,
-            None => panic!("fatal: No URL configured for remote '{remote}'."),
-        }
+    pub async fn get_remote_url_with_conn<C: ConnectionTrait>(
+        db: &C,
+        remote: &str,
+    ) -> Result<String, DbErr> {
+        Config::get_with_conn(db, "remote", Some(remote), "url")
+            .await?
+            .ok_or_else(|| {
+                DbErr::RecordNotFound(format!("no URL configured for remote '{remote}'"))
+            })
     }
 
     // _with_conn version for get_current_remote_url
-    pub async fn get_current_remote_url_with_conn<C: ConnectionTrait>(db: &C) -> Option<String> {
-        match Config::get_current_remote_with_conn(db).await.unwrap() {
-            Some(remote) => Some(Config::get_remote_url_with_conn(db, &remote).await),
-            None => None,
+    pub async fn get_current_remote_url_with_conn<C: ConnectionTrait>(
+        db: &C,
+    ) -> Result<Option<String>, DbErr> {
+        match Config::get_current_remote_with_conn(db).await {
+            Ok(Some(remote)) => Ok(Some(Config::get_remote_url_with_conn(db, &remote).await?)),
+            Ok(None) => Ok(None),
+            Err(()) => Ok(None),
         }
     }
 
@@ -162,20 +178,21 @@ impl Config {
         configuration: &str,
         name: Option<&str>,
         key: &str,
-    ) -> Vec<String> {
-        Self::query_with_conn(db, configuration, name, key)
-            .await
+    ) -> Result<Vec<String>, DbErr> {
+        Ok(Self::query_with_conn(db, configuration, name, key)
+            .await?
             .iter()
             .map(|c| c.value.to_owned())
-            .collect()
+            .collect())
     }
 
     // _with_conn version for list_all
-    pub async fn list_all_with_conn<C: ConnectionTrait>(db: &C) -> Vec<(String, String)> {
-        config::Entity::find()
+    pub async fn list_all_with_conn<C: ConnectionTrait>(
+        db: &C,
+    ) -> Result<Vec<(String, String)>, DbErr> {
+        Ok(config::Entity::find()
             .all(db)
-            .await
-            .unwrap()
+            .await?
             .iter()
             .map(|m| {
                 (
@@ -186,7 +203,7 @@ impl Config {
                     m.value.to_owned(),
                 )
             })
-            .collect()
+            .collect())
     }
 
     // _with_conn version for remove_config
@@ -197,23 +214,26 @@ impl Config {
         key: &str,
         valuepattern: Option<&str>,
         delete_all: bool,
-    ) {
-        let entries: Vec<Model> = Self::query_with_conn(db, configuration, name, key).await;
+    ) -> Result<(), DbErr> {
+        let entries: Vec<Model> = Self::query_with_conn(db, configuration, name, key).await?;
         for e in entries {
-            let _res = match valuepattern {
+            match valuepattern {
                 Some(vp) => {
                     if e.value.contains(vp) {
-                        e.delete(db).await
+                        e.delete(db).await?;
                     } else {
                         continue;
                     }
                 }
-                None => e.delete(db).await,
+                None => {
+                    e.delete(db).await?;
+                }
             };
             if !delete_all {
                 break;
             }
         }
+        Ok(())
     }
 
     // _with_conn version for remove_remote
@@ -226,13 +246,15 @@ impl Config {
             .filter(config::Column::Name.eq(name))
             .all(db)
             .await
-            .unwrap();
+            .map_err(|e| format!("failed to query remote '{name}': {e}"))?;
         if remote.is_empty() {
             return Err(format!("fatal: No such remote: {name}"));
         }
         for r in remote {
             let r: ActiveModel = r.into();
-            r.delete(db).await.unwrap();
+            r.delete(db)
+                .await
+                .map_err(|e| format!("failed to delete remote '{name}': {e}"))?;
         }
         Ok(())
     }
@@ -243,10 +265,18 @@ impl Config {
         new: &str,
     ) -> Result<(), String> {
         // Ensure the requested rename has a valid source and no conflicts.
-        if Self::remote_config_with_conn(db, old).await.is_none() {
+        if Self::remote_config_with_conn(db, old)
+            .await
+            .map_err(|e| format!("failed to look up remote '{old}': {e}"))?
+            .is_none()
+        {
             return Err(format!("fatal: No such remote: {old}"));
         }
-        if Self::remote_config_with_conn(db, new).await.is_some() {
+        if Self::remote_config_with_conn(db, new)
+            .await
+            .map_err(|e| format!("failed to look up remote '{new}': {e}"))?
+            .is_some()
+        {
             return Err(format!("fatal: remote {new} already exists."));
         }
 
@@ -255,13 +285,15 @@ impl Config {
             .filter(config::Column::Name.eq(old))
             .all(db)
             .await
-            .unwrap();
+            .map_err(|e| format!("failed to query remote entries for '{old}': {e}"))?;
 
         // Update remote.<name>.* entries to point at the new name.
         for entry in remote_entries {
             let mut active: ActiveModel = entry.into();
             active.name = Set(Some(new.to_owned()));
-            active.update(db).await.unwrap();
+            active.update(db).await.map_err(|e| {
+                format!("failed to rename remote entry from '{old}' to '{new}': {e}")
+            })?;
         }
 
         let branch_entries = config::Entity::find()
@@ -270,121 +302,127 @@ impl Config {
             .filter(config::Column::Value.eq(old))
             .all(db)
             .await
-            .unwrap();
+            .map_err(|e| format!("failed to query branch entries referencing '{old}': {e}"))?;
 
         // Repoint branch.*.remote values that referenced the old remote.
         for entry in branch_entries {
             let mut active: ActiveModel = entry.into();
             active.value = Set(new.to_owned());
-            active.update(db).await.unwrap();
+            active.update(db).await.map_err(|e| {
+                format!("failed to update branch remote from '{old}' to '{new}': {e}")
+            })?;
         }
 
         Ok(())
     }
 
     // _with_conn version for all_remote_configs
-    pub async fn all_remote_configs_with_conn<C: ConnectionTrait>(db: &C) -> Vec<RemoteConfig> {
+    pub async fn all_remote_configs_with_conn<C: ConnectionTrait>(
+        db: &C,
+    ) -> Result<Vec<RemoteConfig>, DbErr> {
         let remotes = config::Entity::find()
             .filter(config::Column::Configuration.eq("remote"))
+            .filter(config::Column::Key.eq("url"))
             .all(db)
-            .await
-            .unwrap();
-        let remote_names = remotes
-            .iter()
-            .map(|remote| remote.name.as_ref().unwrap().clone())
-            .collect::<HashSet<String>>();
+            .await?;
 
-        remote_names
-            .iter()
-            .map(|name| {
-                let url = remotes
-                    .iter()
-                    .find(|remote| remote.name.as_ref().unwrap() == name)
-                    .unwrap()
-                    .value
-                    .to_owned();
-                RemoteConfig {
-                    name: name.to_owned(),
-                    url,
-                }
+        Ok(remotes
+            .into_iter()
+            .filter_map(|entry| {
+                let name = entry.name?;
+                Some(RemoteConfig {
+                    name,
+                    url: entry.value,
+                })
             })
-            .collect()
+            .collect())
     }
 
     // _with_conn version for remote_config
     pub async fn remote_config_with_conn<C: ConnectionTrait>(
         db: &C,
         name: &str,
-    ) -> Option<RemoteConfig> {
+    ) -> Result<Option<RemoteConfig>, DbErr> {
         let remote = config::Entity::find()
             .filter(config::Column::Configuration.eq("remote"))
             .filter(config::Column::Name.eq(name))
+            .filter(config::Column::Key.eq("url"))
             .one(db)
-            .await
-            .unwrap();
-        remote.map(|r| RemoteConfig {
-            name: r.name.unwrap(),
+            .await?;
+        Ok(remote.map(|r| RemoteConfig {
+            name: r.name.unwrap_or_default(),
             url: r.value,
-        })
+        }))
     }
 
     // _with_conn version for branch_config
     pub async fn branch_config_with_conn<C: ConnectionTrait>(
         db: &C,
         name: &str,
-    ) -> Option<BranchConfig> {
+    ) -> Result<Option<BranchConfig>, DbErr> {
         let config_entries = config::Entity::find()
             .filter(config::Column::Configuration.eq("branch"))
             .filter(config::Column::Name.eq(name))
             .all(db)
-            .await
-            .unwrap();
+            .await?;
         if config_entries.is_empty() {
-            None
+            Ok(None)
         } else {
             let remote = config_entries
                 .iter()
                 .find(|entry| entry.key == "remote")
-                .map(|entry| entry.value.to_owned())?;
+                .map(|entry| entry.value.to_owned());
             let merge = config_entries
                 .iter()
                 .find(|entry| entry.key == "merge")
-                .map(|entry| entry.value.to_owned())?;
-            let merge = merge
-                .strip_prefix("refs/heads/")
-                .unwrap_or(&merge)
-                .to_owned();
-
-            Some(BranchConfig {
-                name: name.to_owned(),
-                merge,
-                remote,
-            })
+                .map(|entry| entry.value.to_owned());
+            match (remote, merge) {
+                (Some(remote), Some(merge)) => {
+                    let merge = merge
+                        .strip_prefix("refs/heads/")
+                        .unwrap_or(&merge)
+                        .to_owned();
+                    Ok(Some(BranchConfig {
+                        name: name.to_owned(),
+                        merge,
+                        remote,
+                    }))
+                }
+                _ => Ok(None),
+            }
         }
     }
 
     pub async fn insert(configuration: &str, name: Option<&str>, key: &str, value: &str) {
         let db = get_db_conn_instance().await;
-        Self::insert_with_conn(&db, configuration, name, key, value).await;
+        Self::insert_with_conn(&db, configuration, name, key, value)
+            .await
+            .expect("failed to insert config entry");
     }
 
     // Update one configuration entry in database using given configuration, name, key and value
     pub async fn update(configuration: &str, name: Option<&str>, key: &str, value: &str) -> Model {
         let db = get_db_conn_instance().await;
-        Self::update_with_conn(&db, configuration, name, key, value).await
+        Self::update_with_conn(&db, configuration, name, key, value)
+            .await
+            .expect("failed to update config entry")
     }
 
     /// Get one configuration value
     pub async fn get(configuration: &str, name: Option<&str>, key: &str) -> Option<String> {
         let db = get_db_conn_instance().await;
-        Self::get_with_conn(&db, configuration, name, key).await
+        Self::get_with_conn(&db, configuration, name, key)
+            .await
+            .expect("failed to query config")
     }
 
     /// Get remote repo name by branch name
     /// - You may need to `[branch::set-upstream]` if return `None`
     pub async fn get_remote(branch: &str) -> Option<String> {
         let db = get_db_conn_instance().await;
-        Self::get_remote_with_conn(&db, branch).await
+        Self::get_remote_with_conn(&db, branch)
+            .await
+            .expect("failed to query remote config")
     }
 
     /// Get remote repo name of current branch
@@ -396,26 +434,34 @@ impl Config {
 
     pub async fn get_remote_url(remote: &str) -> String {
         let db = get_db_conn_instance().await;
-        Self::get_remote_url_with_conn(&db, remote).await
+        Self::get_remote_url_with_conn(&db, remote)
+            .await
+            .expect("failed to get remote URL")
     }
 
     /// return `None` if no remote is set
     pub async fn get_current_remote_url() -> Option<String> {
         let db = get_db_conn_instance().await;
-        Self::get_current_remote_url_with_conn(&db).await
+        Self::get_current_remote_url_with_conn(&db)
+            .await
+            .expect("failed to get current remote URL")
     }
 
     /// Get all configuration values
     /// - e.g. remote.origin.url can be multiple
     pub async fn get_all(configuration: &str, name: Option<&str>, key: &str) -> Vec<String> {
         let db = get_db_conn_instance().await;
-        Self::get_all_with_conn(&db, configuration, name, key).await
+        Self::get_all_with_conn(&db, configuration, name, key)
+            .await
+            .expect("failed to get all config values")
     }
 
     /// Get literally all the entries in database without any filtering
     pub async fn list_all() -> Vec<(String, String)> {
         let db = get_db_conn_instance().await;
-        Self::list_all_with_conn(&db).await
+        Self::list_all_with_conn(&db)
+            .await
+            .expect("failed to list all config entries")
     }
 
     /// Delete one or all configuration using given key and value pattern
@@ -428,7 +474,8 @@ impl Config {
     ) {
         let db = get_db_conn_instance().await;
         Self::remove_config_with_conn(&db, configuration, name, key, valuepattern, delete_all)
-            .await;
+            .await
+            .expect("failed to remove config entry");
     }
 
     /// Delete all the configuration entries using given configuration field (--remove-section)
@@ -447,16 +494,22 @@ impl Config {
 
     pub async fn all_remote_configs() -> Vec<RemoteConfig> {
         let db = get_db_conn_instance().await;
-        Self::all_remote_configs_with_conn(&db).await
+        Self::all_remote_configs_with_conn(&db)
+            .await
+            .expect("failed to query all remote configs")
     }
 
     pub async fn remote_config(name: &str) -> Option<RemoteConfig> {
         let db = get_db_conn_instance().await;
-        Self::remote_config_with_conn(&db, name).await
+        Self::remote_config_with_conn(&db, name)
+            .await
+            .expect("failed to query remote config")
     }
 
     pub async fn branch_config(name: &str) -> Option<BranchConfig> {
         let db = get_db_conn_instance().await;
-        Self::branch_config_with_conn(&db, name).await
+        Self::branch_config_with_conn(&db, name)
+            .await
+            .expect("failed to query branch config")
     }
 }

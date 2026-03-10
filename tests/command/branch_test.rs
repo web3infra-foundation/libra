@@ -244,6 +244,96 @@ async fn test_set_upstream_supports_remote_names_with_slash() {
 
 #[tokio::test]
 #[serial]
+async fn test_set_upstream_with_no_remotes_uses_slash_fallback() {
+    // When no remotes are configured (e.g., switch --track creates a ref directly),
+    // parse_upstream_target should fall back to splitting on '/'.
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    commit::execute(CommitArgs {
+        message: Some("seed".to_string()),
+        file: None,
+        allow_empty: true,
+        conventional: false,
+        amend: false,
+        no_edit: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    })
+    .await;
+
+    // Do NOT insert any remote config — simulates switch --track scenario
+    libra::command::branch::set_upstream_safe("main", "origin/main")
+        .await
+        .expect("set-upstream with no remotes should use slash fallback");
+
+    let branch_config = Config::branch_config("main")
+        .await
+        .expect("branch config should exist");
+    assert_eq!(branch_config.remote, "origin");
+    assert_eq!(branch_config.merge, "main");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_set_upstream_config_entries_are_transactional() {
+    // Verify that set_upstream_safe creates both remote and merge entries atomically.
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    commit::execute(CommitArgs {
+        message: Some("seed".to_string()),
+        file: None,
+        allow_empty: true,
+        conventional: false,
+        amend: false,
+        no_edit: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    })
+    .await;
+
+    Config::insert(
+        "remote",
+        Some("origin"),
+        "url",
+        "https://example.com/repo.git",
+    )
+    .await;
+
+    // Set upstream first time
+    libra::command::branch::set_upstream_safe("main", "origin/dev")
+        .await
+        .expect("first set-upstream should succeed");
+
+    // Replace it — old entries must be removed
+    libra::command::branch::set_upstream_safe("main", "origin/staging")
+        .await
+        .expect("second set-upstream should succeed");
+
+    // Verify exactly one of each config key exists (no duplicates)
+    let remote_values = Config::get_all("branch", Some("main"), "remote").await;
+    let merge_values = Config::get_all("branch", Some("main"), "merge").await;
+    assert_eq!(
+        remote_values.len(),
+        1,
+        "should have exactly one remote entry"
+    );
+    assert_eq!(merge_values.len(), 1, "should have exactly one merge entry");
+    assert_eq!(remote_values[0], "origin");
+    assert_eq!(merge_values[0], "refs/heads/staging");
+}
+
+#[tokio::test]
+#[serial]
 /// Tests core branch management functionality including creation and listing.
 /// Verifies branches can be created from specific commits.
 async fn test_branch() {

@@ -818,7 +818,9 @@ mod tests {
         let db_conn = db::create_database(db_path.to_str().unwrap())
             .await
             .unwrap();
-        Config::insert_with_conn(&db_conn, "libra", None, "repoid", "repo-from-storage").await;
+        Config::insert_with_conn(&db_conn, "libra", None, "repoid", "repo-from-storage")
+            .await
+            .unwrap();
 
         let _guard = ChangeDirGuard::new(unrelated_dir.path());
 

@@ -139,15 +139,26 @@ pub async fn execute_safe(args: PushArgs) -> CliResult<()> {
     }
 
     let current_branch = match Head::current().await {
-        Head::Branch(name) => name,
-        Head::Detached(_) => return Err(CliError::fatal("HEAD is detached while pushing")),
+        Head::Branch(name) => Some(name),
+        Head::Detached(_) => {
+            if args.set_upstream {
+                return Err(CliError::fatal(
+                    "cannot set upstream: HEAD is detached (no current branch to track)",
+                ));
+            }
+            None
+        }
     };
 
     let repository = match args.repository {
         Some(repo) => repo,
         None => {
+            let branch_name = current_branch.as_deref().ok_or_else(|| {
+                CliError::fatal("HEAD is detached and no remote was specified")
+                    .with_hint("specify the remote explicitly: 'libra push <remote> <branch>'")
+            })?;
             // e.g. [branch "master"].remote = origin
-            let remote = Config::get_remote(&current_branch).await;
+            let remote = Config::get_remote(branch_name).await;
             if let Some(remote) = remote {
                 remote
             } else {
@@ -161,7 +172,13 @@ pub async fn execute_safe(args: PushArgs) -> CliResult<()> {
     };
     let repo_url = Config::get_remote_url(&repository).await;
 
-    let push_branch = args.refspec.unwrap_or_else(|| current_branch.clone());
+    let push_branch = match args.refspec {
+        Some(refspec) => refspec,
+        None => current_branch.clone().ok_or_else(|| {
+            CliError::fatal("HEAD is detached and no branch was specified")
+                .with_hint("specify the branch explicitly: 'libra push <remote> <branch>'")
+        })?,
+    };
     let commit_hash = match Branch::find_branch(&push_branch, None).await {
         Some(branch_info) => branch_info.commit.to_string(),
         None => {

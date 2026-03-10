@@ -372,7 +372,7 @@ pub(crate) async fn setup_repository(
                         "merge",
                         &merge_ref,
                     )
-                    .await;
+                    .await?;
                     Config::insert_with_conn(
                         txn,
                         "branch",
@@ -380,7 +380,7 @@ pub(crate) async fn setup_repository(
                         "remote",
                         &remote_config.name,
                     )
-                    .await;
+                    .await?;
                     Config::insert_with_conn(
                         txn,
                         "remote",
@@ -388,7 +388,7 @@ pub(crate) async fn setup_repository(
                         "url",
                         &remote_config.url,
                     )
-                    .await;
+                    .await?;
                     Ok(())
                 })
             },

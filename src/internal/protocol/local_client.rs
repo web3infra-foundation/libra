@@ -133,10 +133,14 @@ impl LocalClient {
             RepoType::GitRepo => {
                 let mut cmd = match service {
                     ServiceType::UploadPack => Command::new("git-upload-pack"),
-                    ServiceType::ReceivePack => Command::new("git-receive-pack"),
+                    ServiceType::ReceivePack => {
+                        let mut c = Command::new("git-receive-pack");
+                        // receive-pack requires --stateless-rpc for ref advertisement
+                        c.arg("--stateless-rpc");
+                        c
+                    }
                 };
                 let output = cmd
-                    .arg("--stateless-rpc")
                     .arg("--advertise-refs")
                     .arg(&self.repo_path)
                     .output()

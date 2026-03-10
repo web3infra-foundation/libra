@@ -169,9 +169,13 @@ impl Reflog {
         // we just set default user info.
         let name = config::Config::get_with_conn(db, "user", None, "name")
             .await
+            .ok()
+            .flatten()
             .unwrap_or("mega".to_string());
         let email = config::Config::get_with_conn(db, "user", None, "email")
             .await
+            .ok()
+            .flatten()
             .unwrap_or("admin@mega.org".to_string());
         let message = context.to_string();
 

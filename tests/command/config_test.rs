@@ -1084,3 +1084,105 @@ fn test_config_system_rejects_relative_programdata() {
     let _guard = EnvVarGuard::set("PROGRAMDATA", std::ffi::OsStr::new("relative/path"));
     assert_eq!(config::ConfigScope::System.get_config_path(), None);
 }
+
+#[tokio::test]
+#[serial]
+async fn test_config_insert_and_get_with_conn_returns_result() {
+    // Verify that _with_conn methods return proper Result types
+    // instead of panicking on success.
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    use libra::internal::{config::Config, db::get_db_conn_instance};
+
+    let db = get_db_conn_instance().await;
+
+    // insert_with_conn should return Ok(())
+    Config::insert_with_conn(&db, "test", Some("section"), "key1", "value1")
+        .await
+        .expect("insert_with_conn should return Ok");
+
+    // get_with_conn should return Ok(Some(...))
+    let val = Config::get_with_conn(&db, "test", Some("section"), "key1")
+        .await
+        .expect("get_with_conn should return Ok");
+    assert_eq!(val, Some("value1".to_string()));
+
+    // get_with_conn for missing key should return Ok(None)
+    let val = Config::get_with_conn(&db, "test", Some("section"), "nonexistent")
+        .await
+        .expect("get_with_conn for missing key should return Ok");
+    assert_eq!(val, None);
+
+    // update_with_conn should return Ok(Model)
+    let updated = Config::update_with_conn(&db, "test", Some("section"), "key1", "updated_value")
+        .await
+        .expect("update_with_conn should return Ok");
+    assert_eq!(updated.value, "updated_value");
+
+    // remove_config_with_conn should return Ok(())
+    Config::remove_config_with_conn(&db, "test", Some("section"), "key1", None, false)
+        .await
+        .expect("remove_config_with_conn should return Ok");
+
+    // Verify removal
+    let val = Config::get_with_conn(&db, "test", Some("section"), "key1")
+        .await
+        .expect("get_with_conn after removal should return Ok");
+    assert_eq!(val, None);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_update_with_conn_returns_error_for_missing_entry() {
+    // update_with_conn should return Err when the entry doesn't exist.
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    use libra::internal::{config::Config, db::get_db_conn_instance};
+
+    let db = get_db_conn_instance().await;
+
+    let result = Config::update_with_conn(&db, "test", Some("missing"), "key", "value").await;
+    assert!(
+        result.is_err(),
+        "update_with_conn should return Err for missing entry"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_list_all_with_conn_returns_result() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    use libra::internal::{config::Config, db::get_db_conn_instance};
+
+    let db = get_db_conn_instance().await;
+
+    Config::insert_with_conn(&db, "core", None, "bare", "false")
+        .await
+        .expect("insert should succeed");
+    Config::insert_with_conn(&db, "remote", Some("origin"), "url", "https://example.com")
+        .await
+        .expect("insert should succeed");
+
+    let all = Config::list_all_with_conn(&db)
+        .await
+        .expect("list_all_with_conn should return Ok");
+    assert!(all.len() >= 2, "should have at least two entries");
+
+    // Check entries are formatted correctly
+    let keys: Vec<&str> = all.iter().map(|(k, _)| k.as_str()).collect();
+    assert!(
+        keys.contains(&"core.bare"),
+        "should contain 'core.bare' key"
+    );
+    assert!(
+        keys.contains(&"remote.origin.url"),
+        "should contain 'remote.origin.url' key"
+    );
+}
