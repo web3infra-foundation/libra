@@ -91,6 +91,10 @@ impl RunStateStore {
         !self.results.lock().await.is_empty()
     }
 
+    pub async fn result_count(&self) -> usize {
+        self.results.lock().await.len()
+    }
+
     pub async fn record_graph_progress(&self, completed_nodes: usize, total_nodes: usize) {
         let mut runtime = self.dagrs_runtime.lock().await;
         runtime.completed_nodes = completed_nodes;
