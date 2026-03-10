@@ -1331,14 +1331,12 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                             .filter_map(|e| e.ok())
                         {
                             let path = entry.path();
-                            if path.is_file() {
-                                if let Ok(rel_path) = path.strip_prefix(&working_dir) {
-                                    let rel_str = rel_path.to_string_lossy().replace("\\", "/");
-                                    if !rel_str.starts_with(".git")
-                                        && !rel_str.starts_with(".libra")
-                                    {
-                                        previous_files.insert(rel_str);
-                                    }
+                            if path.is_file()
+                                && let Ok(rel_path) = path.strip_prefix(&working_dir)
+                            {
+                                let rel_str = rel_path.to_string_lossy().replace("\\", "/");
+                                if !rel_str.starts_with(".git") && !rel_str.starts_with(".libra") {
+                                    previous_files.insert(rel_str);
                                 }
                             }
                         }
@@ -1387,23 +1385,21 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                                 .filter_map(|e| e.ok())
                             {
                                 let path = entry.path();
-                                if path.is_file() {
-                                    if let Ok(rel_path) = path.strip_prefix(&working_dir) {
-                                        let rel_str = rel_path.to_string_lossy().replace("\\", "/");
-                                        if !rel_str.starts_with(".git")
-                                            && !rel_str.starts_with(".libra")
-                                        {
-                                            current_files.insert(rel_str.clone());
+                                if path.is_file()
+                                    && let Ok(rel_path) = path.strip_prefix(&working_dir)
+                                {
+                                    let rel_str = rel_path.to_string_lossy().replace("\\", "/");
+                                    if !rel_str.starts_with(".git") && !rel_str.starts_with(".libra") {
+                                        current_files.insert(rel_str.clone());
 
-                                            // New or modified file
-                                            if !previous_files.contains(&rel_str) {
-                                                file_changes.push(TouchedFileParams {
-                                                    path: rel_str,
-                                                    change_type: "add".to_string(),
-                                                    lines_added: 0,
-                                                    lines_deleted: 0,
-                                                });
-                                            }
+                                        // New or modified file
+                                        if !previous_files.contains(&rel_str) {
+                                            file_changes.push(TouchedFileParams {
+                                                path: rel_str,
+                                                change_type: "add".to_string(),
+                                                lines_added: 0,
+                                                lines_deleted: 0,
+                                            });
                                         }
                                     }
                                 }
