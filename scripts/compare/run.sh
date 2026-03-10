@@ -732,10 +732,13 @@ run_flow_experience_category() {
         "expect_success" "bookmark create flow-main-jj -r @-" \
         "expect_success" "branch flow-main-libra"
 
+    # git uses HEAD:ref syntax which sets tracking for the current branch.
+    # libra does not support src:dst syntax; push the current branch directly
+    # so that -u sets tracking for the current branch (matching pull later).
     run_case_repo "flow_15_push_local_remote" \
         "expect_success" "push -u origin HEAD:refs/heads/flow-main-git" \
         "expect_success" "git push --bookmark flow-main-jj" \
-        "expect_success" "push -u origin flow-main-libra"
+        "expect_success" "push -u origin main"
 
     run_case_repo "flow_16_fetch_origin" \
         "expect_success" "fetch origin" \

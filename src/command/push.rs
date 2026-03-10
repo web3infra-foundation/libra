@@ -182,7 +182,15 @@ pub async fn execute_safe(args: PushArgs) -> CliResult<()> {
             Err(e)
         }
     }) {
-        Ok(u) => u,
+        Ok(mut u) => {
+            // Convert Windows drive-letter paths (e.g. "D:\repo" parses as scheme "d").
+            if u.scheme().len() == 1 {
+                u = Url::parse(&format!("file:///{}:{}", u.scheme(), u.path())).map_err(|_| {
+                    CliError::fatal(format!("invalid Windows file url: {}", repo_url))
+                })?;
+            }
+            u
+        }
         Err(e) => {
             return Err(CliError::fatal(format!(
                 "invalid remote url '{}': {}",
@@ -205,7 +213,13 @@ pub async fn execute_safe(args: PushArgs) -> CliResult<()> {
             })?;
             PushRemoteClient::Local(client)
         }
-        _ => PushRemoteClient::Http(HttpsClient::from_url(&url)),
+        "http" | "https" => PushRemoteClient::Http(HttpsClient::from_url(&url)),
+        other => {
+            return Err(CliError::fatal(format!(
+                "unsupported URL scheme '{}' for push (expected file, http, or https)",
+                other
+            )));
+        }
     };
 
     let discovery = remote_client.discovery_reference().await?;

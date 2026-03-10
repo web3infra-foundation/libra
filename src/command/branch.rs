@@ -173,7 +173,10 @@ async fn parse_upstream_target(upstream: &str) -> Option<(String, String)> {
         Some(pair) => pair,
         None => {
             let (remote, branch) = upstream.split_once('/')?;
-            if !remotes.iter().any(|configured| configured == remote) {
+            // If remotes are configured, validate against them to catch typos.
+            // When no remotes exist (e.g. switch --track with a manually created
+            // remote tracking ref), allow the split_once fallback.
+            if !remotes.is_empty() && !remotes.iter().any(|configured| configured == remote) {
                 return None;
             }
             (remote.to_string(), branch.to_string())

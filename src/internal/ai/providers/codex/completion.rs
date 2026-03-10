@@ -512,7 +512,6 @@ pub type CodexModel = Model;
 
 impl Model {
     /// Commit file changes to Libra via MCP tools
-    /// Commit file changes to Libra via MCP tools
     async fn commit_to_libra(
         &self,
         file_changes: &[FileChange],
@@ -545,11 +544,15 @@ impl Model {
                     .as_ref()
                     .map(|s| s.lines().count() as u32)
                     .unwrap_or(0);
+                let (lines_added, lines_deleted) = match change_type {
+                    "delete" => (0, lines),
+                    _ => (lines, 0),
+                };
                 TouchedFileParams {
                     path: c.path.clone(),
                     change_type: change_type.to_string(),
-                    lines_added: lines,
-                    lines_deleted: 0,
+                    lines_added,
+                    lines_deleted,
                 }
             })
             .collect();
@@ -608,10 +611,10 @@ impl Model {
             // Call the MCP tool directly via create_patchset_impl
             match mcp_server.create_patchset_impl(params, actor).await {
                 Ok(_result) => {
-                    // tracing::info!("Created patchset via MCP: {:?}", _result);
+                    tracing::info!("Created patchset via MCP");
                 }
-                Err(_e) => {
-                    // tracing::warn!("Failed to create patchset via MCP: {:?}", _e);
+                Err(e) => {
+                    tracing::warn!("Failed to create patchset via MCP: {:?}", e);
                 }
             }
         }

@@ -497,6 +497,9 @@ pub async fn get_commit_base(name: &str) -> Result<ObjectHash, String> {
         if let Some(branch) = Branch::find_branch(branch_name, Some(remote)).await {
             return Ok(branch.commit);
         }
+        // Remote tracking refs are stored with full ref path as name and
+        // the remote as a separate column, e.g. name = "refs/remotes/origin/main",
+        // remote = "origin".
         let remote_tracking_ref = format!("refs/remotes/{remote}/{branch_name}");
         if let Some(branch) = Branch::find_branch(&remote_tracking_ref, Some(remote)).await {
             return Ok(branch.commit);
