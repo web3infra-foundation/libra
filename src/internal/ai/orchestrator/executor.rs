@@ -470,6 +470,8 @@ impl<M: CompletionModel + 'static> Action for TaskDagrsAction<M> {
             }
         };
 
+        // Cost units are currently metered as completed/failed implementation tasks.
+        // TODO: switch to provider token/cost usage accumulation when usage plumbing lands.
         let max_cost_units = self.config.spec.constraints.resources.max_cost_units as usize;
         let mut cost_budget_guard = None;
         if max_cost_units > 0 {

@@ -891,7 +891,9 @@ git commit + SBOM + attestation + Rekor proof
 
 **`constraints.security.dependencyPolicy`** drives SCA gate behaviour: `no-new` means the SCA report is scanned for any newly introduced package; any new package is a gate fail. `allow-with-review` permits additions but mandates an `sca-report` artifact for human review and a licence check against `allowedSpdx`.
 
-**`constraints.resources`** fields are enforced at runtime — not just recorded. `maxWallClockSeconds` sets the Run timeout; `maxCostUnits` caps `Provenance.token_usage.cost_usd` accumulation. When the cost cap is approached, the orchestrator reduces `maxParallelTasks` to 1 before deciding whether to continue or checkpoint. This directly addresses the OWASP "Unbounded Consumption" risk.
+**`constraints.resources`** fields are enforced at runtime — not just recorded. `maxWallClockSeconds` sets the Run timeout; `maxCostUnits` caps the orchestrator cost budget. When the cost cap is approached, the orchestrator reduces `maxParallelTasks` to 1 before deciding whether to continue or checkpoint. This directly addresses the OWASP "Unbounded Consumption" risk.
+
+Implementation note (current as of 2026-03-10): `maxCostUnits` is currently metered as completed/failed implementation-task units. Direct mapping to `Provenance.token_usage.cost_usd` is planned after provider usage plumbing is wired through task execution records.
 
 ---
 
