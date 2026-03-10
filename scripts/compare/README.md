@@ -25,6 +25,16 @@ What it covers:
 Outputs:
 
 - Markdown report: `<sandbox>/report.md`
+  - Per-category result tables
+  - Final summary table
+  - Case-level summary table (`Libra vs git/jj`)
+  - Raw command output section (per case, per tool, stdout/stderr snippets)
 - Per-command stdout/stderr/rc/time: `<sandbox>/out/`
+
+You can tune raw output snippet size in the Markdown report via:
+
+```bash
+RAW_OUTPUT_MAX_BYTES=4000 scripts/compare/run.sh
+```
 
 The script uses an isolated sandbox HOME and does not touch your real global git/jj configs.

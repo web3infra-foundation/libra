@@ -365,7 +365,7 @@ run_identity_config_category() {
     run_case_repo "identity_commit_no_config" \
         "expect_fail" "commit -m identity_no_config" \
         "expect_success" "commit -m identity_no_config" \
-        "expect_success" "commit -m identity_no_config"
+        "expect_fail" "commit -m identity_no_config"
 
     restore_identity_env
 
@@ -574,7 +574,7 @@ run_behavior_matrix_category() {
     run_case_repo "behavior_rebase_invalid" \
         "expect_fail" "rebase no_such_base_123" \
         "expect_fail" "rebase -b @ -o no_such_base_123" \
-        "expect_success" "rebase no_such_base_123"
+        "expect_fail" "rebase no_such_base_123"
 
     run_case_repo "behavior_merge_invalid" \
         "expect_fail" "merge no_such_branch_123" \
@@ -594,7 +594,7 @@ run_behavior_matrix_category() {
     run_case_repo "behavior_checkout_feature" \
         "expect_success" "checkout feature" \
         "expect_success" "NA" \
-        "expect_fail" "checkout feature"
+        "expect_success" "checkout feature"
 
     create_file_in_repos "junk.tmp" "junk"
 
@@ -616,7 +616,7 @@ run_behavior_matrix_category() {
     run_case_repo "behavior_remote_add_origin_duplicate" \
         "expect_fail" "remote add origin $origin_q" \
         "expect_fail" "git remote add origin $origin_q" \
-        "expect_success" "remote add origin $origin_q"
+        "expect_fail" "remote add origin $origin_q"
 
     run_case_repo "behavior_fetch_missing" \
         "expect_fail" "fetch missing" \
@@ -676,7 +676,7 @@ run_flow_experience_category() {
     run_case_repo "flow_05_commit_no_config" \
         "expect_fail" "commit -m flow_first_without_config" \
         "expect_success" "commit -m flow_first_without_config" \
-        "expect_success" "commit -m flow_first_without_config"
+        "expect_fail" "commit -m flow_first_without_config"
 
     restore_identity_env
 
@@ -735,17 +735,17 @@ run_flow_experience_category() {
     run_case_repo "flow_15_push_local_remote" \
         "expect_success" "push -u origin HEAD:refs/heads/flow-main-git" \
         "expect_success" "git push --bookmark flow-main-jj" \
-        "expect_fail" "push origin flow-main-libra"
+        "expect_success" "push -u origin flow-main-libra"
 
     run_case_repo "flow_16_fetch_origin" \
         "expect_success" "fetch origin" \
         "expect_success" "git fetch --remote origin" \
         "expect_success" "fetch origin"
 
-    run_case_repo "flow_17_pull_without_tracking" \
+    run_case_repo "flow_17_pull_with_tracking" \
         "expect_success" "pull" \
         "expect_fail" "NA" \
-        "expect_fail" "pull"
+        "expect_success" "pull"
 
     if [[ "$SKIP_GITHUB_PUSH" -eq 0 ]]; then
         local github_fail_url="https://github.com/nonexistent-owner/libra-compare-nonexistent.git"
