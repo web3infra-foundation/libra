@@ -628,6 +628,8 @@ async fn collect_stream(
 
 #[cfg(test)]
 mod tests {
+    use tokio::sync::mpsc::error::TryRecvError;
+
     use super::*;
 
     #[test]
@@ -739,5 +741,70 @@ mod tests {
             timed_out: false,
         };
         assert!(is_likely_sandbox_denied(&output));
+    }
+
+    #[tokio::test]
+    async fn cached_approval_skips_prompt_when_all_keys_are_preapproved() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let store = Arc::new(tokio::sync::Mutex::new(ApprovalStore::default()));
+        {
+            let mut guard = store.lock().await;
+            guard.put("k1".to_string(), ReviewDecision::ApprovedForSession);
+            guard.put("k2".to_string(), ReviewDecision::ApprovedForSession);
+        }
+        let ctx = ToolApprovalContext {
+            policy: AskForApproval::OnRequest,
+            request_tx: tx,
+            store: Arc::clone(&store),
+        };
+        let keys = vec!["k1".to_string(), "k2".to_string()];
+
+        let decision =
+            request_cached_approval_with_keys(&ctx, &keys, |response_tx| ExecApprovalRequest {
+                call_id: "call-1".to_string(),
+                command: "echo hi".to_string(),
+                cwd: PathBuf::from("/tmp"),
+                reason: None,
+                is_retry: false,
+                response_tx,
+            })
+            .await;
+
+        assert_eq!(decision, ReviewDecision::ApprovedForSession);
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn approved_for_session_decision_is_cached_for_each_key() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let store = Arc::new(tokio::sync::Mutex::new(ApprovalStore::default()));
+        let ctx = ToolApprovalContext {
+            policy: AskForApproval::OnRequest,
+            request_tx: tx,
+            store: Arc::clone(&store),
+        };
+        let keys = vec!["a".to_string(), "b".to_string()];
+
+        let responder = tokio::spawn(async move {
+            let request = rx.recv().await.expect("approval request expected");
+            let _ = request.response_tx.send(ReviewDecision::ApprovedForSession);
+        });
+
+        let decision =
+            request_cached_approval_with_keys(&ctx, &keys, |response_tx| ExecApprovalRequest {
+                call_id: "call-2".to_string(),
+                command: "apply_patch".to_string(),
+                cwd: PathBuf::from("/tmp"),
+                reason: Some("test".to_string()),
+                is_retry: false,
+                response_tx,
+            })
+            .await;
+
+        responder.await.expect("responder task failed");
+        assert_eq!(decision, ReviewDecision::ApprovedForSession);
+        let guard = store.lock().await;
+        assert_eq!(guard.get("a"), Some(ReviewDecision::ApprovedForSession));
+        assert_eq!(guard.get("b"), Some(ReviewDecision::ApprovedForSession));
     }
 }
