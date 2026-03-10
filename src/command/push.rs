@@ -374,9 +374,9 @@ pub async fn execute_safe(args: PushArgs) -> CliResult<()> {
     let remote_tracking_branch = format!("refs/remotes/{}/{}", repository, push_branch);
     update_remote_tracking(&remote_tracking_branch, &commit_hash, &repository).await?;
 
-    // set after push success; match git `push -u` behavior for current branch tracking
+    // set after push success; match git `push -u` behavior for pushed branch tracking
     if args.set_upstream {
-        branch::set_upstream_safe(&current_branch, &format!("{repository}/{push_branch}")).await?;
+        branch::set_upstream_safe(&push_branch, &format!("{repository}/{push_branch}")).await?;
     }
     Ok(())
 }

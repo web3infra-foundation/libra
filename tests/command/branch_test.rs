@@ -44,6 +44,14 @@ async fn test_set_upstream_updates_existing_tracking_config() {
     })
     .await;
 
+    Config::insert(
+        "remote",
+        Some("origin"),
+        "url",
+        "https://example.com/libra.git",
+    )
+    .await;
+
     libra::command::branch::set_upstream_safe("main", "origin/main")
         .await
         .expect("first set-upstream should succeed");
@@ -85,6 +93,14 @@ async fn test_set_upstream_rejects_whitespace_padded_target() {
     })
     .await;
 
+    Config::insert(
+        "remote",
+        Some("origin"),
+        "url",
+        "https://example.com/libra.git",
+    )
+    .await;
+
     let err = libra::command::branch::set_upstream_safe("main", "origin/ feature")
         .await
         .expect_err("upstream with whitespace should be rejected");
@@ -92,6 +108,55 @@ async fn test_set_upstream_rejects_whitespace_padded_target() {
         err.render()
             .contains("fatal: invalid upstream 'origin/ feature'")
     );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_set_upstream_rejects_unknown_remote_and_preserves_existing_config() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    commit::execute(CommitArgs {
+        message: Some("seed".to_string()),
+        file: None,
+        allow_empty: true,
+        conventional: false,
+        amend: false,
+        no_edit: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    })
+    .await;
+
+    Config::insert(
+        "remote",
+        Some("origin"),
+        "url",
+        "https://example.com/libra.git",
+    )
+    .await;
+
+    libra::command::branch::set_upstream_safe("main", "origin/main")
+        .await
+        .expect("initial upstream setup should succeed");
+
+    let err = libra::command::branch::set_upstream_safe("main", "orign/main")
+        .await
+        .expect_err("unknown remote should be rejected");
+    assert!(
+        err.render()
+            .contains("fatal: invalid upstream 'orign/main'")
+    );
+
+    let branch_config = Config::branch_config("main")
+        .await
+        .expect("existing tracking config should remain unchanged");
+    assert_eq!(branch_config.remote, "origin");
+    assert_eq!(branch_config.merge, "main");
 }
 
 #[tokio::test]
@@ -114,6 +179,14 @@ async fn test_branch_config_ignores_non_tracking_entries() {
         no_verify: false,
         author: None,
     })
+    .await;
+
+    Config::insert(
+        "remote",
+        Some("origin"),
+        "url",
+        "https://example.com/libra.git",
+    )
     .await;
 
     libra::command::branch::set_upstream_safe("main", "origin/main")

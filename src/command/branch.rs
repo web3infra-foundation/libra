@@ -141,16 +141,18 @@ async fn parse_upstream_target(upstream: &str) -> Option<(String, String)> {
         return None;
     }
 
-    // Prefer the longest configured remote prefix so names like "org/team"
-    // work correctly with branch names that may also include '/'.
-    let mut matched: Option<(String, String)> = None;
-    for remote in Config::all_remote_configs()
+    let remotes: Vec<String> = Config::all_remote_configs()
         .await
         .into_iter()
         .map(|r| r.name)
-    {
+        .collect();
+
+    // Prefer the longest configured remote prefix so names like "org/team"
+    // work correctly with branch names that may also include '/'.
+    let mut matched: Option<(String, String)> = None;
+    for remote in &remotes {
         if let Some(branch_part) = upstream
-            .strip_prefix(&remote)
+            .strip_prefix(remote)
             .and_then(|suffix| suffix.strip_prefix('/'))
         {
             if branch_part.is_empty() {
@@ -162,16 +164,20 @@ async fn parse_upstream_target(upstream: &str) -> Option<(String, String)> {
                 None => true,
             };
             if should_replace {
-                matched = Some((remote, branch_part.to_string()));
+                matched = Some((remote.to_string(), branch_part.to_string()));
             }
         }
     }
 
     let (remote, branch) = match matched {
         Some(pair) => pair,
-        None => upstream
-            .split_once('/')
-            .map(|(remote, branch)| (remote.to_string(), branch.to_string()))?,
+        None => {
+            let (remote, branch) = upstream.split_once('/')?;
+            if !remotes.iter().any(|configured| configured == remote) {
+                return None;
+            }
+            (remote.to_string(), branch.to_string())
+        }
     };
 
     if remote.is_empty()

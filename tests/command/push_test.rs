@@ -225,7 +225,7 @@ async fn test_push_file_remote_succeeds_and_updates_tracking() {
 
 #[tokio::test]
 #[serial]
-async fn test_push_set_upstream_tracks_current_branch_when_refspec_differs() {
+async fn test_push_set_upstream_tracks_pushed_branch_when_refspec_differs() {
     let remote_dir = tempfile::tempdir().unwrap();
     let remote_path = remote_dir.path();
     let init_remote = Command::new("git")
@@ -281,17 +281,24 @@ async fn test_push_set_upstream_tracks_current_branch_when_refspec_differs() {
 
     {
         let _guard = ChangeDirGuard::new(repo_path);
-        let branch_config = Config::branch_config(&current_branch)
+        let pushed_branch_config = Config::branch_config("topic")
             .await
-            .expect("current branch should have tracking config");
-        assert_eq!(branch_config.remote, "origin");
-        assert_eq!(branch_config.merge, "topic");
+            .expect("pushed branch should have tracking config");
+        assert_eq!(pushed_branch_config.remote, "origin");
+        assert_eq!(pushed_branch_config.merge, "topic");
+
+        assert!(
+            Config::branch_config(&current_branch).await.is_none(),
+            "current branch should keep its existing tracking config"
+        );
     }
 
     let pull_out = run_libra_command(&["pull"], repo_path);
+    assert_eq!(pull_out.status.code(), Some(128));
     assert!(
-        pull_out.status.success(),
-        "pull should succeed with tracking config after push -u: {}",
+        String::from_utf8_lossy(&pull_out.stderr)
+            .contains("no configured remote for the current branch"),
+        "pull should fail on current branch without tracking after push -u to another branch: {}",
         String::from_utf8_lossy(&pull_out.stderr)
     );
 }
