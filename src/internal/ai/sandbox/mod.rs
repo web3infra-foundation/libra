@@ -290,40 +290,10 @@ fn build_linux_bwrap_command(
     cwd: &Path,
     policy: &SandboxPolicy,
 ) -> Result<Command, String> {
-    let mut args = Vec::<String>::new();
+    let mut args = Vec::new();
     args.push("--new-session".to_string());
     args.push("--die-with-parent".to_string());
-
-    if !policy.has_full_disk_write_access() {
-        args.push("--ro-bind".to_string());
-        args.push("/".to_string());
-        args.push("/".to_string());
-
-        let writable_roots = policy.get_writable_roots_with_cwd(cwd);
-        for root in &writable_roots {
-            if !root.root.exists() {
-                continue;
-            }
-            let root_path = root.root.to_string_lossy().to_string();
-            args.push("--bind".to_string());
-            args.push(root_path.clone());
-            args.push(root_path);
-        }
-
-        for subpath in writable_roots
-            .iter()
-            .flat_map(|root| &root.read_only_subpaths)
-        {
-            if !subpath.exists() {
-                continue;
-            }
-            let ro_path = subpath.to_string_lossy().to_string();
-            args.push("--ro-bind".to_string());
-            args.push(ro_path.clone());
-            args.push(ro_path);
-        }
-    }
-
+    args.extend(build_linux_filesystem_args(policy, cwd)?);
     if !policy.has_full_network_access() {
         args.push("--unshare-net".to_string());
     }
@@ -339,6 +309,159 @@ fn build_linux_bwrap_command(
     let mut cmd = Command::new("bwrap");
     cmd.args(args);
     Ok(cmd)
+}
+
+#[cfg(target_os = "linux")]
+fn build_linux_filesystem_args(policy: &SandboxPolicy, cwd: &Path) -> Result<Vec<String>, String> {
+    if policy.has_full_disk_write_access() {
+        return Ok(Vec::new());
+    }
+
+    let writable_roots = policy.get_writable_roots_with_cwd(cwd);
+    ensure_linux_mount_targets_exist(&writable_roots)?;
+    let allowed_write_paths: Vec<std::path::PathBuf> = writable_roots
+        .iter()
+        .map(|root| root.root.clone())
+        .collect();
+
+    let mut args = Vec::new();
+    args.push("--ro-bind".to_string());
+    args.push("/".to_string());
+    args.push("/".to_string());
+
+    for writable_root in &writable_roots {
+        let root = writable_root.root.to_string_lossy().to_string();
+        args.push("--bind".to_string());
+        args.push(root.clone());
+        args.push(root);
+    }
+
+    for subpath in collect_linux_read_only_subpaths(&writable_roots) {
+        if let Some(symlink_path) = find_linux_symlink_in_path(&subpath, &allowed_write_paths) {
+            let symlink = symlink_path.to_string_lossy().to_string();
+            args.push("--ro-bind".to_string());
+            args.push("/dev/null".to_string());
+            args.push(symlink);
+            continue;
+        }
+
+        if !subpath.exists() {
+            if let Some(first_missing) = find_linux_first_nonexistent_component(&subpath)
+                && is_within_linux_allowed_write_paths(&first_missing, &allowed_write_paths)
+            {
+                let missing = first_missing.to_string_lossy().to_string();
+                args.push("--ro-bind".to_string());
+                args.push("/dev/null".to_string());
+                args.push(missing);
+            }
+            continue;
+        }
+
+        if is_within_linux_allowed_write_paths(&subpath, &allowed_write_paths) {
+            let read_only_path = subpath.to_string_lossy().to_string();
+            args.push("--ro-bind".to_string());
+            args.push(read_only_path.clone());
+            args.push(read_only_path);
+        }
+    }
+
+    Ok(args)
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_linux_mount_targets_exist(writable_roots: &[WritableRoot]) -> Result<(), String> {
+    for writable_root in writable_roots {
+        if !writable_root.root.exists() {
+            return Err(format!(
+                "sandbox expected writable root {}, but it does not exist",
+                writable_root.root.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn collect_linux_read_only_subpaths(writable_roots: &[WritableRoot]) -> Vec<std::path::PathBuf> {
+    use std::collections::BTreeSet;
+    let mut subpaths = BTreeSet::new();
+    for writable_root in writable_roots {
+        for subpath in &writable_root.read_only_subpaths {
+            subpaths.insert(subpath.clone());
+        }
+    }
+    subpaths.into_iter().collect()
+}
+
+#[cfg(target_os = "linux")]
+fn is_within_linux_allowed_write_paths(
+    path: &Path,
+    allowed_write_paths: &[std::path::PathBuf],
+) -> bool {
+    allowed_write_paths.iter().any(|root| path.starts_with(root))
+}
+
+#[cfg(target_os = "linux")]
+fn find_linux_symlink_in_path(
+    target_path: &Path,
+    allowed_write_paths: &[std::path::PathBuf],
+) -> Option<std::path::PathBuf> {
+    use std::path::{Component, PathBuf};
+
+    let mut current = PathBuf::new();
+    for component in target_path.components() {
+        match component {
+            Component::RootDir => {
+                current.push(Path::new("/"));
+                continue;
+            }
+            Component::CurDir => continue,
+            Component::ParentDir => {
+                current.pop();
+                continue;
+            }
+            Component::Normal(part) => current.push(part),
+            Component::Prefix(_) => continue,
+        }
+
+        let metadata = match std::fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata,
+            Err(_) => break,
+        };
+        if metadata.file_type().is_symlink()
+            && is_within_linux_allowed_write_paths(&current, allowed_write_paths)
+        {
+            return Some(current);
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn find_linux_first_nonexistent_component(target_path: &Path) -> Option<std::path::PathBuf> {
+    use std::path::{Component, PathBuf};
+
+    let mut current = PathBuf::new();
+    for component in target_path.components() {
+        match component {
+            Component::RootDir => {
+                current.push(Path::new("/"));
+                continue;
+            }
+            Component::CurDir => continue,
+            Component::ParentDir => {
+                current.pop();
+                continue;
+            }
+            Component::Normal(part) => current.push(part),
+            Component::Prefix(_) => continue,
+        }
+
+        if !current.exists() {
+            return Some(current);
+        }
+    }
+    None
 }
 
 async fn drain_reader(
