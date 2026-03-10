@@ -180,6 +180,7 @@ impl<M: CompletionModel> ToolLoopAction<M> {
                 max_steps,
                 hook_runner: None,
                 allowed_tools: None,
+                runtime_context: None,
             },
         }
     }

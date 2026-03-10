@@ -16,7 +16,7 @@ pub fn check_tool_acl(
     tool_name: &str,
     action: &str,
 ) -> AclVerdict {
-    check_tool_acl_with_args(acl, tool_name, action, None)
+    check_tool_acl_with_context(acl, tool_name, action, None, &[])
 }
 
 /// Check tool access against the ACL rules with optional invocation arguments.
@@ -26,15 +26,28 @@ pub fn check_tool_acl_with_args(
     action: &str,
     arguments: Option<&Value>,
 ) -> AclVerdict {
+    check_tool_acl_with_context(acl, tool_name, action, arguments, &[])
+}
+
+/// Check tool access against ACL rules with invocation arguments and resolved write paths.
+pub fn check_tool_acl_with_context(
+    acl: &crate::internal::ai::intentspec::types::ToolAcl,
+    tool_name: &str,
+    action: &str,
+    arguments: Option<&Value>,
+    paths_written: &[String],
+) -> AclVerdict {
     // Check deny rules first
     for rule in &acl.deny {
         if matches_rule(&rule.tool, tool_name)
             && (rule.actions.contains(&"*".to_string()) || rule.actions.iter().any(|a| a == action))
         {
-            if let Some(reason) = check_deny_constraints(&rule.constraints, arguments) {
+            if let Some(reason) =
+                check_deny_constraints(&rule.constraints, arguments, paths_written)
+            {
                 return AclVerdict::Deny(reason);
             }
-            if !rule.constraints.contains_key("denySubstrings") {
+            if rule.constraints.is_empty() {
                 return AclVerdict::Deny(format!(
                     "tool '{}' action '{}' denied by rule",
                     tool_name, action
@@ -44,52 +57,193 @@ pub fn check_tool_acl_with_args(
     }
 
     // Check allow rules
+    let mut matched_allow_rule = false;
+    let mut first_constraint_error: Option<String> = None;
     for rule in &acl.allow {
         if matches_rule(&rule.tool, tool_name)
             && (rule.actions.contains(&"*".to_string()) || rule.actions.iter().any(|a| a == action))
         {
-            return AclVerdict::Allow;
+            matched_allow_rule = true;
+            match check_allow_constraints(&rule.constraints, arguments, paths_written) {
+                Ok(()) => return AclVerdict::Allow,
+                Err(reason) => {
+                    if first_constraint_error.is_none() {
+                        first_constraint_error = Some(reason);
+                    }
+                }
+            }
         }
     }
 
+    if let Some(reason) = first_constraint_error {
+        return AclVerdict::Deny(reason);
+    }
+
     // No allow rule matched → deny
-    AclVerdict::Deny(format!(
-        "no allow rule for tool '{}' action '{}'",
-        tool_name, action
-    ))
+    if matched_allow_rule {
+        AclVerdict::Deny(format!(
+            "allow rule constraints rejected tool '{}' action '{}'",
+            tool_name, action
+        ))
+    } else {
+        AclVerdict::Deny(format!(
+            "no allow rule for tool '{}' action '{}'",
+            tool_name, action
+        ))
+    }
 }
 
 /// Check deny constraints for additional matching.
 fn check_deny_constraints(
     constraints: &std::collections::BTreeMap<String, Value>,
     arguments: Option<&Value>,
+    paths_written: &[String],
 ) -> Option<String> {
-    if let Some(Value::Array(substrings)) = constraints.get("denySubstrings") {
-        let rules: Vec<String> = substrings
+    if constraints.is_empty() {
+        return Some("tool denied by explicit deny rule".to_string());
+    }
+
+    if let Some(Value::Array(substrings)) = constraints.get("denySubstrings")
+        && let Some(reason) = substring_violation(arguments, substrings)
+    {
+        return Some(reason);
+    }
+
+    if let Some(Value::Array(roots)) = constraints.get("writeRoots")
+        && let Some(reason) = write_roots_violation(paths_written, roots)
+    {
+        return Some(reason);
+    }
+
+    None
+}
+
+fn check_allow_constraints(
+    constraints: &std::collections::BTreeMap<String, Value>,
+    arguments: Option<&Value>,
+    paths_written: &[String],
+) -> Result<(), String> {
+    if let Some(Value::Array(allow_commands)) = constraints.get("allowCommands") {
+        let command = arguments.and_then(extract_command).ok_or_else(|| {
+            "allowCommands constraint requires a string 'command' argument".to_string()
+        })?;
+        let matches = allow_commands
             .iter()
-            .filter_map(|v| v.as_str().map(|s| s.to_ascii_lowercase()))
-            .collect();
-        if rules.is_empty() {
-            return None;
-        }
-
-        let arguments = arguments?;
-
-        let mut string_leaves = Vec::new();
-        collect_string_leaves(arguments, &mut string_leaves);
-        string_leaves.push(arguments.to_string());
-        let haystack = string_leaves.join("\n").to_ascii_lowercase();
-        let matched = rules
-            .iter()
-            .filter(|needle| haystack.contains(needle.as_str()))
-            .cloned()
-            .collect::<Vec<_>>();
-
-        if !matched.is_empty() {
-            return Some(format!("denied substrings matched: {}", matched.join(", ")));
+            .filter_map(Value::as_str)
+            .any(|pattern| {
+                let pattern = pattern.trim();
+                if let Some(prefix) = pattern.strip_suffix('*') {
+                    command.starts_with(prefix.trim())
+                } else {
+                    command == pattern
+                        || command
+                            .strip_prefix(pattern)
+                            .is_some_and(|rest| rest.starts_with(' '))
+                }
+            });
+        if !matches {
+            return Err(format!(
+                "command '{}' is not allowed by allowCommands",
+                command
+            ));
         }
     }
+
+    if let Some(Value::Array(substrings)) = constraints.get("denySubstrings")
+        && let Some(reason) = substring_violation(arguments, substrings)
+    {
+        return Err(reason);
+    }
+
+    if let Some(Value::Array(roots)) = constraints.get("writeRoots")
+        && let Some(reason) = write_roots_violation(paths_written, roots)
+    {
+        return Err(reason);
+    }
+
+    Ok(())
+}
+
+fn substring_violation(arguments: Option<&Value>, substrings: &[Value]) -> Option<String> {
+    let rules: Vec<String> = substrings
+        .iter()
+        .filter_map(|v| v.as_str().map(|s| s.to_ascii_lowercase()))
+        .collect();
+    if rules.is_empty() {
+        return None;
+    }
+
+    let arguments = arguments?;
+
+    let mut string_leaves = Vec::new();
+    collect_string_leaves(arguments, &mut string_leaves);
+    string_leaves.push(arguments.to_string());
+    let haystack = string_leaves.join("\n").to_ascii_lowercase();
+    let matched = rules
+        .iter()
+        .filter(|needle| haystack.contains(needle.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if !matched.is_empty() {
+        return Some(format!("denied substrings matched: {}", matched.join(", ")));
+    }
+
     None
+}
+
+fn write_roots_violation(paths_written: &[String], roots: &[Value]) -> Option<String> {
+    if paths_written.is_empty() {
+        return None;
+    }
+
+    let normalized_roots: Vec<String> = roots
+        .iter()
+        .filter_map(Value::as_str)
+        .map(normalize_slash_path)
+        .collect();
+    if normalized_roots.is_empty() {
+        return Some("writeRoots is empty but writes were requested".to_string());
+    }
+
+    for path in paths_written.iter().map(normalize_slash_path) {
+        let allowed = normalized_roots
+            .iter()
+            .any(|root| path_matches_root(&path, root));
+        if !allowed {
+            return Some(format!(
+                "path '{}' is outside allowed writeRoots ({})",
+                path,
+                normalized_roots.join(", ")
+            ));
+        }
+    }
+
+    None
+}
+
+fn normalize_slash_path(path: impl Into<String>) -> String {
+    let mut normalized = path.into().replace('\\', "/");
+    if normalized.starts_with("./") {
+        normalized = normalized.trim_start_matches("./").to_string();
+    }
+    while normalized.ends_with('/') && normalized.len() > 1 {
+        normalized.pop();
+    }
+    normalized
+}
+
+fn path_matches_root(path: &str, root: &str) -> bool {
+    let path = path.trim_start_matches('/');
+    let root = root.trim_start_matches('/').trim_end_matches('/');
+    path == root
+        || path
+            .strip_prefix(root)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+fn extract_command(arguments: &Value) -> Option<&str> {
+    arguments.get("command").and_then(Value::as_str)
 }
 
 fn collect_string_leaves(value: &Value, out: &mut Vec<String>) {
@@ -305,6 +459,73 @@ mod tests {
             Some(&serde_json::json!({ "command": "echo safe" })),
         );
         assert_eq!(verdict, AclVerdict::Allow);
+    }
+
+    #[test]
+    fn test_allow_constraints_allow_commands() {
+        let mut constraints = BTreeMap::new();
+        constraints.insert(
+            "allowCommands".into(),
+            Value::Array(vec![Value::String("cargo test".into())]),
+        );
+        let acl = ToolAcl {
+            allow: vec![ToolRule {
+                tool: "shell".into(),
+                actions: vec!["execute".into()],
+                constraints,
+            }],
+            deny: vec![],
+        };
+        let ok = check_tool_acl_with_args(
+            &acl,
+            "shell",
+            "execute",
+            Some(&serde_json::json!({ "command": "cargo test -p libra" })),
+        );
+        assert_eq!(ok, AclVerdict::Allow);
+
+        let denied = check_tool_acl_with_args(
+            &acl,
+            "shell",
+            "execute",
+            Some(&serde_json::json!({ "command": "npm test" })),
+        );
+        assert!(matches!(denied, AclVerdict::Deny(reason) if reason.contains("allowCommands")));
+    }
+
+    #[test]
+    fn test_allow_constraints_write_roots() {
+        let mut constraints = BTreeMap::new();
+        constraints.insert(
+            "writeRoots".into(),
+            Value::Array(vec![Value::String("src".into())]),
+        );
+        let acl = ToolAcl {
+            allow: vec![ToolRule {
+                tool: "workspace.fs".into(),
+                actions: vec!["write".into()],
+                constraints,
+            }],
+            deny: vec![],
+        };
+
+        let allowed = check_tool_acl_with_context(
+            &acl,
+            "workspace.fs",
+            "write",
+            None,
+            &["src/lib.rs".into()],
+        );
+        assert_eq!(allowed, AclVerdict::Allow);
+
+        let denied = check_tool_acl_with_context(
+            &acl,
+            "workspace.fs",
+            "write",
+            None,
+            &["docs/readme.md".into()],
+        );
+        assert!(matches!(denied, AclVerdict::Deny(reason) if reason.contains("writeRoots")));
     }
 
     // Scope tests

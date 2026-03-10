@@ -103,8 +103,24 @@ impl ToolSpec {
                     "number",
                     "Timeout in milliseconds (default: 10000)",
                 ),
+                (
+                    "sandbox_permissions",
+                    "string",
+                    "Sandbox override: use_default (default) or require_escalated",
+                ),
+                (
+                    "justification",
+                    "string",
+                    "Reason for requesting escalated execution outside sandbox",
+                ),
             ],
-            [("command", true), ("workdir", false), ("timeout_ms", false)],
+            [
+                ("command", true),
+                ("workdir", false),
+                ("timeout_ms", false),
+                ("sandbox_permissions", false),
+                ("justification", false),
+            ],
         ))
     }
 

@@ -1,104 +1,57 @@
 use std::{path::Path, time::Instant};
 
-use tokio::process::Command;
+use serde_json::json;
 
-use super::types::{GateReport, GateResult};
-use crate::internal::ai::intentspec::types::{Check, CheckKind};
+use super::{
+    policy,
+    types::{GateReport, GateResult, TaskSpec},
+};
+use crate::internal::ai::{
+    intentspec::types::{Check, CheckKind, IntentSpec},
+    sandbox::ToolRuntimeContext,
+};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 900;
+#[cfg(test)]
 const TIMEOUT_EXIT_CODE: i32 = 124;
 const MAX_OUTPUT_BYTES: usize = 100 * 1024;
 
 /// Execute a single verification check and return its result.
 pub async fn run_check(check: &Check, working_dir: &Path) -> GateResult {
+    run_check_with_context(check, working_dir, None, None, None).await
+}
+
+pub async fn run_check_with_context(
+    check: &Check,
+    working_dir: &Path,
+    spec: Option<&IntentSpec>,
+    task: Option<&TaskSpec>,
+    runtime_context: Option<&ToolRuntimeContext>,
+) -> GateResult {
     match check.kind {
-        CheckKind::Policy => GateResult {
-            check_id: check.id.clone(),
-            kind: "policy".into(),
-            passed: true,
-            exit_code: 0,
-            stdout: String::new(),
-            stderr: String::new(),
-            duration_ms: 0,
-            timed_out: false,
-        },
-        CheckKind::Command | CheckKind::TestSuite => {
-            let command = match &check.command {
-                Some(cmd) => cmd.clone(),
-                None => {
-                    return GateResult {
-                        check_id: check.id.clone(),
-                        kind: format!("{:?}", check.kind).to_lowercase(),
-                        passed: false,
-                        exit_code: -1,
-                        stdout: String::new(),
-                        stderr: "no command specified".into(),
-                        duration_ms: 0,
-                        timed_out: false,
-                    };
-                }
-            };
-
-            let timeout_secs = check.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECS);
-            let expected_exit = check.expected_exit_code.unwrap_or(0);
-            let start = Instant::now();
-
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-            let mut cmd = Command::new(&shell);
-            cmd.arg("-c")
-                .arg(&command)
-                .current_dir(working_dir)
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped());
-
-            let result = match cmd.spawn() {
-                Ok(child) => {
-                    let timeout_dur = std::time::Duration::from_secs(timeout_secs);
-                    tokio::select! {
-                        output = child.wait_with_output() => {
-                            match output {
-                                Ok(out) => {
-                                    let stdout = truncate_output(&out.stdout);
-                                    let stderr = truncate_output(&out.stderr);
-                                    let exit_code = out.status.code().unwrap_or(-1);
-                                    (exit_code, stdout, stderr, false)
-                                }
-                                Err(e) => (-1, String::new(), e.to_string(), false),
-                            }
-                        }
-                        _ = tokio::time::sleep(timeout_dur) => {
-                            (TIMEOUT_EXIT_CODE, String::new(), "timed out".into(), true)
-                        }
-                    }
-                }
-                Err(e) => (-1, String::new(), e.to_string(), false),
-            };
-
-            let (exit_code, stdout, stderr, timed_out) = result;
-            let duration_ms = start.elapsed().as_millis() as u64;
-            let passed = !timed_out && exit_code == expected_exit;
-
-            GateResult {
-                check_id: check.id.clone(),
-                kind: format!("{:?}", check.kind).to_lowercase(),
-                passed,
-                exit_code,
-                stdout,
-                stderr,
-                duration_ms,
-                timed_out,
-            }
+        CheckKind::Policy | CheckKind::Command | CheckKind::TestSuite => {
+            run_command_check(check, working_dir, spec, task, runtime_context).await
         }
     }
 }
 
 /// Execute multiple checks sequentially and aggregate results.
 pub async fn run_gates(checks: &[Check], working_dir: &Path) -> GateReport {
+    run_gates_with_context(checks, working_dir, None, None, None).await
+}
+
+pub async fn run_gates_with_context(
+    checks: &[Check],
+    working_dir: &Path,
+    spec: Option<&IntentSpec>,
+    task: Option<&TaskSpec>,
+    runtime_context: Option<&ToolRuntimeContext>,
+) -> GateReport {
     let mut results = Vec::with_capacity(checks.len());
     let mut all_required_passed = true;
 
     for check in checks {
-        let result = run_check(check, working_dir).await;
+        let result = run_check_with_context(check, working_dir, spec, task, runtime_context).await;
         if !result.passed && check.required {
             all_required_passed = false;
         }
@@ -111,14 +64,85 @@ pub async fn run_gates(checks: &[Check], working_dir: &Path) -> GateReport {
     }
 }
 
-fn truncate_output(raw: &[u8]) -> String {
-    let s = String::from_utf8_lossy(raw);
-    if s.len() > MAX_OUTPUT_BYTES {
-        let mut truncated = s[..MAX_OUTPUT_BYTES].to_string();
-        truncated.push_str("\n[output truncated]");
-        truncated
-    } else {
-        s.into_owned()
+async fn run_command_check(
+    check: &Check,
+    working_dir: &Path,
+    spec: Option<&IntentSpec>,
+    task: Option<&TaskSpec>,
+    runtime_context: Option<&ToolRuntimeContext>,
+) -> GateResult {
+    let command = match &check.command {
+        Some(cmd) => cmd.clone(),
+        None => {
+            return GateResult {
+                check_id: check.id.clone(),
+                kind: format!("{:?}", check.kind).to_lowercase(),
+                passed: false,
+                exit_code: -1,
+                stdout: String::new(),
+                stderr: "no command specified".into(),
+                duration_ms: 0,
+                timed_out: false,
+            };
+        }
+    };
+
+    if let (Some(spec), Some(task)) = (spec, task) {
+        let args = json!({ "command": command });
+        if let Err(violation) = policy::evaluate_tool_call(spec, task, "shell", &args, working_dir)
+        {
+            return GateResult {
+                check_id: check.id.clone(),
+                kind: format!("{:?}", check.kind).to_lowercase(),
+                passed: false,
+                exit_code: -1,
+                stdout: String::new(),
+                stderr: format!("policy preflight rejected check: {}", violation.message),
+                duration_ms: 0,
+                timed_out: false,
+            };
+        }
+    }
+
+    let timeout_secs = check.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECS);
+    let expected_exit = check.expected_exit_code.unwrap_or(0);
+    let start = Instant::now();
+    let max_output_bytes = runtime_context
+        .and_then(|ctx| ctx.max_output_bytes)
+        .unwrap_or(MAX_OUTPUT_BYTES);
+    let sandbox = runtime_context.and_then(|ctx| ctx.sandbox.clone());
+
+    let result = crate::internal::ai::sandbox::run_shell_command(
+        &command,
+        working_dir,
+        Some(timeout_secs.saturating_mul(1000)),
+        max_output_bytes,
+        sandbox,
+    )
+    .await;
+
+    let (exit_code, stdout, stderr, timed_out) = match result {
+        Ok(output) => (
+            output.exit_code,
+            output.stdout,
+            output.stderr,
+            output.timed_out,
+        ),
+        Err(err) => (-1, String::new(), err, false),
+    };
+
+    let duration_ms = start.elapsed().as_millis() as u64;
+    let passed = !timed_out && exit_code == expected_exit;
+
+    GateResult {
+        check_id: check.id.clone(),
+        kind: format!("{:?}", check.kind).to_lowercase(),
+        passed,
+        exit_code,
+        stdout,
+        stderr,
+        duration_ms,
+        timed_out,
     }
 }
 
@@ -194,7 +218,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_check_policy_passthrough() {
-        let check = make_check("t5", CheckKind::Policy, None);
+        let check = make_check("t5", CheckKind::Policy, Some("true"));
         let dir = tempfile::tempdir().unwrap();
         let result = run_check(&check, dir.path()).await;
         assert!(result.passed);

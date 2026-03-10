@@ -35,6 +35,7 @@ pub mod node_adapter;
 pub mod orchestrator;
 pub mod prompt;
 pub mod providers;
+pub mod sandbox;
 pub mod session;
 pub mod tools;
 pub mod util;

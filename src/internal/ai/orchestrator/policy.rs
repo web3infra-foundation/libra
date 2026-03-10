@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use super::{
-    acl::{AclVerdict, ScopeVerdict, check_scope, check_tool_acl_with_args},
+    acl::{AclVerdict, ScopeVerdict, check_scope, check_tool_acl_with_context},
     types::{PolicyViolation, TaskSpec, ToolCallRecord, ToolDiffRecord},
 };
 use crate::internal::ai::{
@@ -36,7 +36,13 @@ pub fn evaluate_tool_call(
             }
         })?;
 
-    match check_tool_acl_with_args(&spec.security.tool_acl, &acl_tool, &action, Some(arguments)) {
+    match check_tool_acl_with_context(
+        &spec.security.tool_acl,
+        &acl_tool,
+        &action,
+        Some(arguments),
+        &writes,
+    ) {
         AclVerdict::Allow => {}
         AclVerdict::Deny(reason) => {
             return Err(PolicyViolation {
@@ -119,7 +125,50 @@ pub fn evaluate_tool_result(
         });
     }
 
+    let acl_tool_name = acl_tool_alias(&record.tool_name);
+    if let Some(limit) = max_output_limit(spec, acl_tool_name, &record.action)
+        && let Some(text) = output.as_text()
+        && text.len() > limit
+    {
+        return Err(PolicyViolation {
+            code: "tool-output-too-large".into(),
+            message: format!(
+                "tool output exceeds maxOutputBytes constraint ({} > {})",
+                text.len(),
+                limit
+            ),
+            tool_name: Some(tool_name.to_string()),
+            path: None,
+        });
+    }
+
     Ok(())
+}
+
+fn acl_tool_alias(tool_name: &str) -> &str {
+    match tool_name {
+        "read_file" | "list_dir" | "grep_files" | "apply_patch" => "workspace.fs",
+        "request_user_input" => "interaction",
+        "submit_intent_draft" => "planning",
+        _ => tool_name,
+    }
+}
+
+fn max_output_limit(spec: &IntentSpec, tool_name: &str, action: &str) -> Option<usize> {
+    spec.security
+        .tool_acl
+        .allow
+        .iter()
+        .filter(|rule| rule.tool == tool_name || rule.tool == "*")
+        .filter(|rule| {
+            rule.actions
+                .iter()
+                .any(|value| value == action || value == "*")
+        })
+        .filter_map(|rule| rule.constraints.get("maxOutputBytes"))
+        .filter_map(|value| value.as_u64())
+        .map(|value| value as usize)
+        .min()
 }
 
 fn extract_patch_diffs(meta: &Value) -> Vec<ToolDiffRecord> {

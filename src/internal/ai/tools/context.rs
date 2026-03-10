@@ -5,7 +5,10 @@ use std::{collections::HashMap, fmt, path::PathBuf};
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
-use crate::internal::ai::intentspec::IntentDraft;
+use crate::internal::ai::{
+    intentspec::IntentDraft,
+    sandbox::{SandboxPermissions, ToolRuntimeContext},
+};
 
 /// The kind of tool payload.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -29,6 +32,8 @@ pub struct ToolInvocation {
     pub payload: ToolPayload,
     /// Working directory for file operations.
     pub working_dir: PathBuf,
+    /// Optional runtime constraints attached by the orchestrator.
+    pub runtime_context: Option<ToolRuntimeContext>,
 }
 
 impl ToolInvocation {
@@ -44,7 +49,14 @@ impl ToolInvocation {
             tool_name: tool_name.into(),
             payload,
             working_dir,
+            runtime_context: None,
         }
+    }
+
+    /// Attach runtime context to this invocation.
+    pub fn with_runtime_context(mut self, runtime_context: ToolRuntimeContext) -> Self {
+        self.runtime_context = Some(runtime_context);
+        self
     }
 
     /// Get the payload as a string for logging.
@@ -275,6 +287,12 @@ pub struct ShellArgs {
     /// Timeout in milliseconds. Defaults to 10,000 ms (10 seconds).
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    /// Controls whether the command uses sandbox defaults or requests escalation.
+    #[serde(default)]
+    pub sandbox_permissions: SandboxPermissions,
+    /// Optional justification for escalated command execution.
+    #[serde(default)]
+    pub justification: Option<String>,
 }
 
 /// Arguments for the grep_files tool.

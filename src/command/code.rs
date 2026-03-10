@@ -416,6 +416,7 @@ async fn run_tui_with_model<M>(
         max_steps: None, // TUI mode: unlimited tool steps
         hook_runner,
         allowed_tools: None,
+        runtime_context: None,
     };
 
     // Initialize terminal

@@ -1,6 +1,9 @@
 //! Utility functions for tool handlers.
 
-use std::path::{Path, PathBuf};
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+};
 
 use crate::{
     internal::ai::tools::error::{ToolError, ToolResult},
@@ -16,8 +19,11 @@ pub fn validate_path(path: &Path, working_dir: &Path) -> ToolResult<()> {
         return Err(ToolError::PathNotAbsolute(path.to_path_buf()));
     }
 
-    // Check if path is within working directory
-    if !utils::util::is_sub_path(path, working_dir) {
+    let working_dir_canonical = canonicalize_for_boundary(working_dir)?;
+    let path_canonical = canonicalize_for_boundary(path)?;
+
+    // Check if path is within canonicalized working directory boundaries.
+    if !utils::util::is_sub_path(&path_canonical, &working_dir_canonical) {
         return Err(ToolError::PathOutsideWorkingDir(path.to_path_buf()));
     }
 
@@ -36,6 +42,36 @@ pub fn resolve_path(path: &Path, working_dir: &Path) -> ToolResult<PathBuf> {
     };
     validate_path(&resolved, working_dir)?;
     Ok(resolved)
+}
+
+fn canonicalize_for_boundary(path: &Path) -> ToolResult<PathBuf> {
+    if path.exists() {
+        return path.canonicalize().map_err(ToolError::Io);
+    }
+
+    let mut suffix = Vec::<OsString>::new();
+    let mut cursor = path;
+    while !cursor.exists() {
+        let name = cursor.file_name().ok_or_else(|| {
+            ToolError::ExecutionFailed(format!(
+                "cannot resolve path boundary for '{}'",
+                path.display()
+            ))
+        })?;
+        suffix.push(name.to_os_string());
+        cursor = cursor.parent().ok_or_else(|| {
+            ToolError::ExecutionFailed(format!(
+                "cannot resolve parent path for '{}'",
+                path.display()
+            ))
+        })?;
+    }
+
+    let mut canonical = cursor.canonicalize().map_err(ToolError::Io)?;
+    for part in suffix.iter().rev() {
+        canonical.push(part);
+    }
+    Ok(canonical)
 }
 
 #[cfg(test)]

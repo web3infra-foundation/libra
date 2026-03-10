@@ -10,6 +10,7 @@ use crate::internal::ai::{
     hooks::HookRunner,
     tools::{
         FunctionParameters, ToolDefinition, ToolInvocation, ToolOutput, ToolPayload, ToolRegistry,
+        ToolRuntimeContext,
     },
 };
 
@@ -61,6 +62,8 @@ pub struct ToolLoopConfig {
     pub hook_runner: Option<Arc<HookRunner>>,
     /// If set, only expose these tools to the model (agent tool restriction).
     pub allowed_tools: Option<Vec<String>>,
+    /// Optional runtime constraints injected into every tool invocation.
+    pub runtime_context: Option<ToolRuntimeContext>,
 }
 
 impl Default for ToolLoopConfig {
@@ -71,6 +74,7 @@ impl Default for ToolLoopConfig {
             max_steps: Some(8),
             hook_runner: None,
             allowed_tools: None,
+            runtime_context: None,
         }
     }
 }
@@ -243,7 +247,7 @@ pub async fn run_tool_loop_with_history_and_observer<M: CompletionModel, O: Tool
                     continue;
                 }
 
-                let invocation = ToolInvocation::new(
+                let mut invocation = ToolInvocation::new(
                     call.id.clone(),
                     call.function.name.clone(),
                     ToolPayload::Function {
@@ -251,6 +255,9 @@ pub async fn run_tool_loop_with_history_and_observer<M: CompletionModel, O: Tool
                     },
                     registry.working_dir().to_path_buf(),
                 );
+                if let Some(runtime_context) = config.runtime_context.clone() {
+                    invocation = invocation.with_runtime_context(runtime_context);
+                }
 
                 let tool_result: Result<ToolOutput, String> =
                     match registry.dispatch(invocation).await {
@@ -476,6 +483,7 @@ mod tests {
                 max_steps: Some(4),
                 hook_runner: None,
                 allowed_tools: None,
+                runtime_context: None,
             },
             &mut observer,
         )
@@ -602,6 +610,7 @@ mod tests {
                 max_steps: Some(2),
                 hook_runner: None,
                 allowed_tools: None,
+                runtime_context: None,
             },
         )
         .await;
@@ -701,6 +710,7 @@ mod tests {
                 max_steps: Some(4),
                 hook_runner: None,
                 allowed_tools: None,
+                runtime_context: None,
             },
             &mut observer,
         )
@@ -734,6 +744,7 @@ mod tests {
                 max_steps: Some(0),
                 hook_runner: None,
                 allowed_tools: None,
+                runtime_context: None,
             },
         )
         .await;
@@ -797,6 +808,7 @@ mod tests {
                 max_steps: Some(4),
                 hook_runner: None,
                 allowed_tools: Some(vec!["other_tool".to_string()]),
+                runtime_context: None,
             },
             &mut observer,
         )

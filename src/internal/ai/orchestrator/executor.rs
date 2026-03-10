@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -26,7 +27,8 @@ use super::{
 use crate::internal::ai::{
     agent::{ToolLoopConfig, ToolLoopObserver, run_tool_loop_with_history_and_observer},
     completion::{CompletionError, CompletionModel},
-    intentspec::types::IntentSpec,
+    intentspec::types::{IntentSpec, NetworkPolicy},
+    sandbox::{SandboxPermissions, SandboxPolicy, ToolRuntimeContext, ToolSandboxContext},
     tools::{ToolOutput, registry::ToolRegistry},
 };
 
@@ -157,10 +159,11 @@ pub async fn execute_task<M: CompletionModel>(
     config: &ExecutorConfig,
 ) -> TaskResult {
     if task.kind == TaskKind::Gate {
-        return execute_gate_task(task, &config.working_dir).await;
+        return execute_gate_task(task, &config.working_dir, &config.spec).await;
     }
 
     let allowed_tools = allowed_tools_for_task(&config.spec, task);
+    let runtime_context = runtime_context_for_task(&config.spec, task, &config.working_dir);
     let prompt = build_task_prompt(task, &config.working_dir, &allowed_tools);
     let mut retry_count: u8 = 0;
     let mut accumulated_tool_calls = Vec::new();
@@ -176,6 +179,7 @@ pub async fn execute_task<M: CompletionModel>(
         );
         let tool_loop_config = ToolLoopConfig {
             allowed_tools: Some(allowed_tools.clone()),
+            runtime_context: Some(runtime_context.clone()),
             ..config.tool_loop_config.clone()
         };
         let agent_result = run_tool_loop_with_history_and_observer(
@@ -303,11 +307,19 @@ pub async fn execute_task<M: CompletionModel>(
     }
 }
 
-async fn execute_gate_task(task: &TaskSpec, working_dir: &Path) -> TaskResult {
+async fn execute_gate_task(task: &TaskSpec, working_dir: &Path, spec: &IntentSpec) -> TaskResult {
+    let runtime_context = runtime_context_for_task(spec, task, working_dir);
     let gate_report = if task.checks.is_empty() {
         GateReport::empty()
     } else {
-        gate::run_gates(&task.checks, working_dir).await
+        gate::run_gates_with_context(
+            &task.checks,
+            working_dir,
+            Some(spec),
+            Some(task),
+            Some(&runtime_context),
+        )
+        .await
     };
 
     TaskResult {
@@ -350,6 +362,7 @@ async fn run_reviewer_pass<M: CompletionModel>(
         preamble: Some(reviewer_preamble),
         allowed_tools: Some(allowed_tools),
         max_steps: Some(6),
+        runtime_context: Some(runtime_context_for_reviewer(&config.spec)),
         ..config.tool_loop_config.clone()
     };
 
@@ -663,7 +676,29 @@ pub async fn execute_dag<M: CompletionModel + 'static>(
         plan_spec.tasks.len(),
     ));
 
-    let execution_result = graph.async_start().await;
+    let wall_clock_limit_secs = config.spec.constraints.resources.max_wall_clock_seconds as u64;
+    let execution_result = if wall_clock_limit_secs == 0 {
+        graph.async_start().await
+    } else {
+        match tokio::time::timeout(
+            Duration::from_secs(wall_clock_limit_secs),
+            graph.async_start(),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                drop(graph);
+                if let Err(err) = event_monitor.await {
+                    tracing::warn!("dagrs event monitor terminated unexpectedly: {}", err);
+                }
+                return Err(OrchestratorError::AgentError(format!(
+                    "execution exceeded constraints.resources.maxWallClockSeconds={}s",
+                    wall_clock_limit_secs
+                )));
+            }
+        }
+    };
     drop(graph);
     if let Err(err) = event_monitor.await {
         tracing::warn!("dagrs event monitor terminated unexpectedly: {}", err);
@@ -866,6 +901,132 @@ fn parse_reviewer_decision(raw: &str) -> Result<ReviewerDecision, String> {
         .ok_or_else(|| "reviewer response missing JSON terminator".to_string())?;
     serde_json::from_str::<ReviewerDecision>(&raw[start..=end])
         .map_err(|err| format!("invalid reviewer JSON: {err}"))
+}
+
+fn runtime_context_for_task(
+    spec: &IntentSpec,
+    task: &TaskSpec,
+    working_dir: &Path,
+) -> ToolRuntimeContext {
+    let network_access = matches!(
+        spec.constraints.security.network_policy,
+        NetworkPolicy::Allow
+    );
+    let writable_roots = collect_writable_roots(spec, task, working_dir);
+    let policy = SandboxPolicy::WorkspaceWrite {
+        writable_roots,
+        network_access,
+        exclude_tmpdir_env_var: false,
+        exclude_slash_tmp: false,
+    };
+    ToolRuntimeContext {
+        sandbox: Some(ToolSandboxContext {
+            policy,
+            permissions: SandboxPermissions::UseDefault,
+        }),
+        max_output_bytes: max_output_limit(&spec.security.tool_acl, "shell", "execute"),
+    }
+}
+
+fn runtime_context_for_reviewer(spec: &IntentSpec) -> ToolRuntimeContext {
+    let policy = if matches!(
+        spec.constraints.security.network_policy,
+        NetworkPolicy::Allow
+    ) {
+        SandboxPolicy::ExternalSandbox {
+            network_access: crate::internal::ai::sandbox::NetworkAccess::Enabled,
+        }
+    } else {
+        SandboxPolicy::ReadOnly
+    };
+    ToolRuntimeContext {
+        sandbox: Some(ToolSandboxContext {
+            policy,
+            permissions: SandboxPermissions::UseDefault,
+        }),
+        max_output_bytes: max_output_limit(&spec.security.tool_acl, "workspace.fs", "read"),
+    }
+}
+
+fn collect_writable_roots(spec: &IntentSpec, task: &TaskSpec, working_dir: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::<PathBuf>::new();
+    push_unique_root(&mut roots, working_dir.to_path_buf());
+
+    for scope in &task.scope_in {
+        if scope.contains('*') {
+            continue;
+        }
+        let resolved = if Path::new(scope).is_absolute() {
+            PathBuf::from(scope)
+        } else {
+            working_dir.join(scope)
+        };
+        push_unique_root(&mut roots, resolved);
+    }
+
+    for rule in &spec.security.tool_acl.allow {
+        let writes_allowed = rule
+            .actions
+            .iter()
+            .any(|action| action == "*" || action == "write");
+        if !writes_allowed {
+            continue;
+        }
+        if let Some(serde_json::Value::Array(write_roots)) = rule.constraints.get("writeRoots") {
+            for root in write_roots.iter().filter_map(serde_json::Value::as_str) {
+                if root.contains('*') {
+                    continue;
+                }
+                let resolved = if Path::new(root).is_absolute() {
+                    PathBuf::from(root)
+                } else {
+                    working_dir.join(root)
+                };
+                push_unique_root(&mut roots, resolved);
+            }
+        }
+    }
+
+    roots
+}
+
+fn push_unique_root(roots: &mut Vec<PathBuf>, root: PathBuf) {
+    let normalized = root.canonicalize().unwrap_or(root);
+    if roots.iter().any(|existing| existing == &normalized) {
+        return;
+    }
+    roots.push(normalized);
+}
+
+fn max_output_limit(
+    acl: &crate::internal::ai::intentspec::types::ToolAcl,
+    tool_name: &str,
+    action: &str,
+) -> Option<usize> {
+    acl.allow
+        .iter()
+        .filter(|rule| {
+            rule.tool == "*" || rule.tool == tool_name || matches_tool_glob(&rule.tool, tool_name)
+        })
+        .filter(|rule| {
+            rule.actions
+                .iter()
+                .any(|rule_action| rule_action == "*" || rule_action == action)
+        })
+        .filter_map(|rule| rule.constraints.get("maxOutputBytes"))
+        .filter_map(serde_json::Value::as_u64)
+        .map(|value| value as usize)
+        .min()
+}
+
+fn matches_tool_glob(pattern: &str, tool_name: &str) -> bool {
+    if let Some(prefix) = pattern.strip_suffix(".*") {
+        return tool_name.starts_with(prefix)
+            && tool_name
+                .get(prefix.len()..)
+                .is_some_and(|rest| rest.starts_with('.'));
+    }
+    false
 }
 
 #[cfg(test)]
@@ -1169,7 +1330,7 @@ mod tests {
             ..implementation_task()
         };
         let dir = tempfile::tempdir().unwrap();
-        let result = execute_gate_task(&task, dir.path()).await;
+        let result = execute_gate_task(&task, dir.path(), &spec()).await;
         assert_eq!(result.status, TaskNodeStatus::Completed);
         assert!(result.gate_report.unwrap().all_required_passed);
     }
