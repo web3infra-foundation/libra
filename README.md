@@ -92,7 +92,7 @@ This mode is designed for integration with AI clients like **Claude Desktop**.
 libra code --stdio
 ```
 
-- **Storage**: Uses the local project directory (`.libra/`) for history persistence (same as TUI/Web modes).  
+- **Storage**: Uses the local project directory (`.libra/`) for history persistence (same as TUI/Web mode).  
   The directory must be writable by the calling process (including sandboxed desktop AI apps).
 
 #### Claude Desktop Configuration
