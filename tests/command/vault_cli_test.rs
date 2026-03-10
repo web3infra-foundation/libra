@@ -142,3 +142,56 @@ fn test_cli_vault_generate_ssh_key_and_show_public_key() {
         );
     }
 }
+
+#[test]
+#[serial]
+fn test_cli_vault_generate_ssh_key_without_unseal_key_exits_non_zero() {
+    let temp_root = tempdir().unwrap();
+    let workdir = temp_root.path().join("work");
+    let home = temp_root.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+
+    let init_out = run_libra(
+        temp_root.path(),
+        &home,
+        &["init", "--vault", workdir.to_str().unwrap()],
+    );
+    assert!(
+        init_out.status.success(),
+        "init --vault should succeed, stderr: {}",
+        String::from_utf8_lossy(&init_out.stderr)
+    );
+
+    let repoid_out = run_libra(
+        &workdir,
+        &home,
+        &["config", "--local", "--get", "libra.repoid"],
+    );
+    assert!(
+        repoid_out.status.success(),
+        "config --get libra.repoid should succeed, stderr: {}",
+        String::from_utf8_lossy(&repoid_out.stderr)
+    );
+    let repo_id = String::from_utf8_lossy(&repoid_out.stdout)
+        .trim()
+        .to_string();
+    assert!(!repo_id.is_empty(), "repo id should not be empty");
+
+    let unseal_key_path = home.join(".libra").join("vault-keys").join(repo_id);
+    fs::remove_file(&unseal_key_path).expect("failed to remove unseal key");
+
+    let gen_out = run_libra(
+        &workdir,
+        &home,
+        &["vault", "generate-ssh-key", "--name", "libra-tester"],
+    );
+    assert!(
+        !gen_out.status.success(),
+        "vault command should exit non-zero when unseal key is missing"
+    );
+    let stderr = String::from_utf8_lossy(&gen_out.stderr);
+    assert!(
+        stderr.contains("fatal: vault unseal key not found"),
+        "stderr should include a fatal message, got: {stderr}"
+    );
+}

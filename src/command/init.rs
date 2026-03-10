@@ -190,10 +190,11 @@ pub struct InitArgs {
 
     /// Initialize a libvault instance for PGP commit signing.
     ///
-    /// When provided, a vault database is created inside `.libra/` and a PGP
-    /// key pair is generated automatically. Subsequent `libra commit` calls
-    /// will detect the vault and sign commits with the generated key.
-    #[clap(long, required = false)]
+    /// This option is required. A vault database is created inside `.libra/`
+    /// and a PGP key pair is generated automatically. Subsequent
+    /// `libra commit` calls will detect the vault and sign commits with the
+    /// generated key.
+    #[clap(long, required = true)]
     pub vault: bool,
 }
 
@@ -207,6 +208,13 @@ pub async fn execute(args: InitArgs) {
 /// errors and exiting. Creates `.libra` storage, seeds HEAD and default
 /// refs/config, and initialises the backing SQLite database.
 pub async fn execute_safe(args: InitArgs) -> CliResult<()> {
+    if !args.vault {
+        return Err(CliError::command_usage(
+            "the following required arguments were not provided:\n  --vault",
+        )
+        .with_hint("run `libra init --vault` to initialize a repository."));
+    }
+
     let from_git = args.from_git_repository.clone();
     let is_bare = args.bare;
     let enable_vault = args.vault;
@@ -866,8 +874,8 @@ async fn init_vault_for_repo(root_dir: &Path) -> anyhow::Result<()> {
         match vault::generate_pgp_key(root_dir, &unseal_key, &user_name, &user_email).await {
             Ok(pk) => pk,
             Err(e) => {
-                // Rollback: remove vault credentials so signing is never half-enabled
-                vault::remove_credentials().await;
+                // Roll back both credentials and vault.db so init --vault remains atomic.
+                rollback_failed_vault_init(root_dir).await;
                 return Err(e);
             }
         };

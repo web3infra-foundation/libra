@@ -61,6 +61,20 @@ fn create_simple_git_repo() -> (tempfile::TempDir, std::path::PathBuf) {
     (temp_root, git_dir)
 }
 
+fn libra_command(cwd: &Path) -> Command {
+    let home = cwd.join(".libra-test-home");
+    let config_home = home.join(".config");
+    fs::create_dir_all(&config_home).expect("failed to create isolated HOME for CLI test");
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_libra"));
+    cmd.current_dir(cwd)
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", &config_home);
+    #[cfg(windows)]
+    cmd.env("USERPROFILE", &home);
+    cmd
+}
+
 #[tokio::test]
 #[serial]
 async fn test_init_from_git_repository_converts_repo() {
@@ -68,9 +82,13 @@ async fn test_init_from_git_repository_converts_repo() {
     let libra_dir = temp_root.path().join("libra-repo");
     fs::create_dir_all(&libra_dir).unwrap();
 
-    let status = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(&libra_dir)
-        .args(["init", "--from-git-repository", git_dir.to_str().unwrap()])
+    let status = libra_command(&libra_dir)
+        .args([
+            "init",
+            "--vault",
+            "--from-git-repository",
+            git_dir.to_str().unwrap(),
+        ])
         .status()
         .expect("failed to execute libra init");
     assert!(status.success(), "libra init should succeed");
@@ -105,9 +123,13 @@ async fn test_init_from_git_repository_missing_source_fails() {
 
     let missing = temp_root.path().join("missing-git");
 
-    let status = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(&libra_dir)
-        .args(["init", "--from-git-repository", missing.to_str().unwrap()])
+    let status = libra_command(&libra_dir)
+        .args([
+            "init",
+            "--vault",
+            "--from-git-repository",
+            missing.to_str().unwrap(),
+        ])
         .status()
         .expect("failed to execute libra init");
     assert!(
@@ -126,10 +148,10 @@ async fn test_init_from_git_repository_non_git_path_fails() {
     let libra_dir = temp_root.path().join("libra-repo");
     fs::create_dir_all(&libra_dir).unwrap();
 
-    let status = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(&libra_dir)
+    let status = libra_command(&libra_dir)
         .args([
             "init",
+            "--vault",
             "--from-git-repository",
             non_git_dir.to_str().unwrap(),
         ])
@@ -159,9 +181,13 @@ async fn test_init_from_git_repository_empty_git_repo_fails() {
     let libra_dir = temp_root.path().join("libra-repo");
     fs::create_dir_all(&libra_dir).unwrap();
 
-    let status = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(&libra_dir)
-        .args(["init", "--from-git-repository", git_dir.to_str().unwrap()])
+    let status = libra_command(&libra_dir)
+        .args([
+            "init",
+            "--vault",
+            "--from-git-repository",
+            git_dir.to_str().unwrap(),
+        ])
         .status()
         .expect("failed to execute libra init");
     assert!(
@@ -267,9 +293,13 @@ async fn test_init_from_git_repository_multiple_branches() {
     let libra_dir = temp_root.path().join("libra-repo");
     fs::create_dir_all(&libra_dir).unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(&libra_dir)
-        .args(["init", "--from-git-repository", git_dir.to_str().unwrap()])
+    let output = libra_command(&libra_dir)
+        .args([
+            "init",
+            "--vault",
+            "--from-git-repository",
+            git_dir.to_str().unwrap(),
+        ])
         .output()
         .expect("failed to execute libra init");
 
@@ -283,8 +313,7 @@ async fn test_init_from_git_repository_multiple_branches() {
         "fetch should skip symbolic HEAD without warning, got stderr: {stderr}"
     );
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(&libra_dir)
+    let output = libra_command(&libra_dir)
         .args(["branch", "-r"])
         .output()
         .expect("failed to execute libra branch");
@@ -453,9 +482,13 @@ async fn test_init_from_git_repository_with_gitlink_entry_succeeds() {
             .success()
     );
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(&libra_dir)
-        .args(["init", "--from-git-repository", git_dir.to_str().unwrap()])
+    let output = libra_command(&libra_dir)
+        .args([
+            "init",
+            "--vault",
+            "--from-git-repository",
+            git_dir.to_str().unwrap(),
+        ])
         .output()
         .expect("failed to execute libra init");
 
@@ -487,9 +520,13 @@ async fn test_init_from_git_repository_bare_source_repo() {
     let libra_dir = temp_root.path().join("libra-repo");
     fs::create_dir_all(&libra_dir).unwrap();
 
-    let status = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(&libra_dir)
-        .args(["init", "--from-git-repository", git_dir.to_str().unwrap()])
+    let status = libra_command(&libra_dir)
+        .args([
+            "init",
+            "--vault",
+            "--from-git-repository",
+            git_dir.to_str().unwrap(),
+        ])
         .status()
         .expect("failed to execute libra init");
     assert!(status.success(), "libra init should succeed for bare repo");
@@ -507,10 +544,10 @@ async fn test_init_from_git_repository_bare_target_repo() {
     let libra_dir = temp_root.path().join("libra-repo-bare");
     fs::create_dir_all(&libra_dir).unwrap();
 
-    let status = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(&libra_dir)
+    let status = libra_command(&libra_dir)
         .args([
             "init",
+            "--vault",
             "--bare",
             "--from-git-repository",
             git_dir.to_str().unwrap(),

@@ -36,6 +36,6 @@ rust_library(
         "//third-party/rust/crates/serde_spanned/0.6.9:serde_spanned",
         "//third-party/rust/crates/toml_datetime/0.6.11:toml_datetime",
         "//third-party/rust/crates/toml_write/0.1.2:toml_write",
-        "//third-party/rust/crates/winnow/0.7.14:winnow",
+        "//third-party/rust/crates/winnow/0.7.15:winnow",
     ],
 )

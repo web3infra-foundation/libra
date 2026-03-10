@@ -227,6 +227,9 @@ Libra supports repository-local vault initialization for commit signing:
 libra init --vault [--separate-libra-dir <dir>] [<repo_directory>]
 ```
 
+`--vault` is mandatory for `libra init`. Running `libra init` without
+`--vault` returns a command-usage error.
+
 When `--vault` is enabled:
 
 - A vault database (`vault.db`) is created in the repository storage directory (`.libra/` or the directory passed via `--separate-libra-dir`).

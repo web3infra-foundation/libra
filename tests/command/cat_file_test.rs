@@ -12,7 +12,7 @@ fn init_temp_repo() -> tempfile::TempDir {
 
     let output = Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(temp_path)
-        .arg("init")
+        .args(["init", "--vault"])
         .output()
         .expect("Failed to execute libra binary");
 

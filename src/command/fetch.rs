@@ -184,7 +184,7 @@ fn load_ssh_host_key_checking_mode() -> Option<String> {
     if util::try_get_storage_path(None).is_err() {
         return None;
     }
-    load_config_sync("ssh", None, "stricthostkeychecking")
+    load_config_sync("ssh", None, "strictHostKeyChecking")
 }
 
 fn load_config_sync(configuration: &str, name: Option<&str>, key: &str) -> Option<String> {

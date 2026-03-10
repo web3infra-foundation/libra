@@ -584,7 +584,8 @@ impl ScopedConfig {
             valuepattern,
             delete_all,
         )
-        .await;
+        .await
+        .map_err(|e| format!("failed to remove config entry: {e}"))?;
         Ok(())
     }
 }

@@ -136,7 +136,7 @@ async fn test_vault_rollback_removes_credentials() {
 
     // Store some dummy credentials
     let dummy_key = b"dummy-unseal-key-for-test-00000";
-    let dummy_enc = vault::encrypt_token(dummy_key, b"dummy-token");
+    let dummy_enc = vault::encrypt_token(dummy_key, b"dummy-token").unwrap();
     vault::store_credentials(dummy_key, &dummy_enc)
         .await
         .unwrap();
@@ -238,6 +238,8 @@ async fn test_commit_with_vault_has_signature() {
     );
 
     let _guard = ChangeDirGuard::new(&repo_dir);
+    Config::insert("user", None, "name", "Test User").await;
+    Config::insert("user", None, "email", "test@example.com").await;
     test::ensure_file("signed.txt", Some("signed content"));
     add::execute(AddArgs {
         pathspec: vec!["signed.txt".into()],

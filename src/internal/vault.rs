@@ -46,38 +46,39 @@ const PKI_MOUNT_PATH: &str = "pki";
 // ── Encryption helpers for root token ──
 
 /// Derive a 256-bit AES key from the raw unseal key using HKDF-SHA256.
-fn derive_token_key(unseal_key: &[u8]) -> ring::aead::LessSafeKey {
+fn derive_token_key(unseal_key: &[u8]) -> Result<ring::aead::LessSafeKey> {
     use ring::{aead, hkdf};
     let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, b"libra-vault-token-enc");
     let prk = salt.extract(unseal_key);
     let okm = prk
         .expand(&[b"token-encryption"], &aead::AES_256_GCM)
-        .expect("HKDF expand failed");
+        .map_err(|_| anyhow!("failed to derive vault token encryption key"))?;
     let key_bytes: aead::UnboundKey = okm.into();
-    aead::LessSafeKey::new(key_bytes)
+    Ok(aead::LessSafeKey::new(key_bytes))
 }
 
 /// Encrypt `plaintext` with AES-256-GCM using a key derived from `unseal_key`.
 /// Returns `nonce || ciphertext || tag` as a single byte vector.
-pub fn encrypt_token(unseal_key: &[u8], plaintext: &[u8]) -> Vec<u8> {
+pub fn encrypt_token(unseal_key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
     use ring::{
         aead,
         rand::{SecureRandom, SystemRandom},
     };
 
-    let key = derive_token_key(unseal_key);
+    let key = derive_token_key(unseal_key)?;
     let rng = SystemRandom::new();
     let mut nonce_bytes = [0u8; 12];
-    rng.fill(&mut nonce_bytes).expect("RNG failed");
+    rng.fill(&mut nonce_bytes)
+        .map_err(|_| anyhow!("failed to generate nonce for vault token encryption"))?;
     let nonce = aead::Nonce::assume_unique_for_key(nonce_bytes);
 
     let mut in_out = plaintext.to_vec();
     key.seal_in_place_append_tag(nonce, aead::Aad::empty(), &mut in_out)
-        .expect("AES-GCM seal failed");
+        .map_err(|_| anyhow!("failed to encrypt vault root token"))?;
 
     let mut result = nonce_bytes.to_vec();
     result.extend(in_out);
-    result
+    Ok(result)
 }
 
 /// Decrypt `nonce || ciphertext || tag` with AES-256-GCM.
@@ -90,7 +91,7 @@ fn decrypt_token(unseal_key: &[u8], data: &[u8]) -> Result<String> {
     let (nonce_bytes, ciphertext_and_tag) = data.split_at(12);
     let nonce = aead::Nonce::try_assume_unique_for_key(nonce_bytes)
         .map_err(|_| anyhow!("invalid nonce"))?;
-    let key = derive_token_key(unseal_key);
+    let key = derive_token_key(unseal_key)?;
     let mut buf = ciphertext_and_tag.to_vec();
     let plaintext = key
         .open_in_place(nonce, aead::Aad::empty(), &mut buf)
@@ -142,7 +143,7 @@ pub async fn init_vault(root_dir: &Path) -> Result<(Vec<u8>, Vec<u8>)> {
         .await
         .map_err(|e| anyhow!("vault seal failed: {e}"))?;
 
-    let enc_token = encrypt_token(&unseal_key, root_token.as_bytes());
+    let enc_token = encrypt_token(&unseal_key, root_token.as_bytes())?;
     Ok((unseal_key, enc_token))
 }
 
@@ -375,19 +376,33 @@ pub async fn get_gpg_public_key(root_dir: &Path, unseal_key: &[u8]) -> Result<St
     let root_token = recover_root_token(unseal_key).await?;
     vault.set_token(&root_token);
 
-    let pgp_key_path = format!("{PKI_MOUNT_PATH}/keys/{PGP_KEY_NAME}");
-    let resp = vault
-        .read(Some(root_token), &pgp_key_path)
+    let read_result = async {
+        let pgp_key_path = format!("{PKI_MOUNT_PATH}/keys/{PGP_KEY_NAME}");
+        let resp = vault
+            .read(Some(root_token), &pgp_key_path)
+            .await
+            .map_err(|e| anyhow!("vault read PGP key failed: {e}"))?;
+
+        resp.and_then(|r| r.data)
+            .and_then(|d| d.get("public_key").cloned())
+            .and_then(|v| v.as_str().map(String::from))
+            .ok_or_else(|| anyhow!("no PGP public key found in vault"))
+    }
+    .await;
+
+    let seal_result = vault
+        .seal()
         .await
-        .map_err(|e| anyhow!("vault read PGP key failed: {e}"))?;
+        .map_err(|e| anyhow!("vault seal failed: {e}"));
 
-    let public_key = resp
-        .and_then(|r| r.data)
-        .and_then(|d| d.get("public_key").cloned())
-        .and_then(|v| v.as_str().map(String::from))
-        .ok_or_else(|| anyhow!("no PGP public key found in vault"))?;
-
-    Ok(public_key)
+    match (read_result, seal_result) {
+        (Ok(public_key), Ok(())) => Ok(public_key),
+        (Ok(_), Err(seal_err)) => Err(seal_err),
+        (Err(read_err), Ok(())) => Err(read_err),
+        (Err(read_err), Err(seal_err)) => {
+            Err(read_err.context(format!("additionally failed to reseal vault: {seal_err}")))
+        }
+    }
 }
 
 /// Get the path to the SSH private key file for the current repo.
@@ -444,7 +459,8 @@ pub fn signature_to_gpgsig(signature_hex: &str) -> Result<String> {
     let b64 = STANDARD.encode(&sig_bytes);
     let mut armored = String::from("-----BEGIN PGP SIGNATURE-----\n\n");
     for chunk in b64.as_bytes().chunks(76) {
-        armored.push_str(std::str::from_utf8(chunk).unwrap());
+        let line = std::str::from_utf8(chunk).context("base64 signature chunk is not UTF-8")?;
+        armored.push_str(line);
         armored.push('\n');
     }
     armored.push_str("-----END PGP SIGNATURE-----");
@@ -504,7 +520,7 @@ pub async fn store_credentials(unseal_key: &[u8], encrypted_token: &[u8]) -> Res
         .context("failed to store vault unseal key in ~/.libra/")?;
 
     // Clean up any legacy insecure storage if present.
-    Config::remove("vault", None, "unsealkey").await;
+    let _ = Config::remove("vault", None, "unsealkey").await;
 
     // Encrypted token always goes in repo config
     Config::insert(
@@ -527,8 +543,8 @@ pub async fn remove_credentials() {
     // Remove from home dir
     let _ = remove_unseal_key_from_home().await;
     // Remove legacy repo-config entries
-    Config::remove("vault", None, "unsealkey").await;
-    Config::remove("vault", None, "roottoken_enc").await;
+    let _ = Config::remove("vault", None, "unsealkey").await;
+    let _ = Config::remove("vault", None, "roottoken_enc").await;
 }
 
 // ── Internal helpers ──

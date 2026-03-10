@@ -123,8 +123,7 @@ fn test_init_warns_on_separate_git_dir_alias() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(&workdir)
-        .arg("init")
-        .arg("--separate-git-dir")
+        .args(["init", "--vault", "--separate-git-dir"])
         .arg(storage.to_str().unwrap())
         .output()
         .expect("Failed to execute libra binary");

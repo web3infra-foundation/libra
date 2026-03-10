@@ -197,23 +197,26 @@ impl Config {
         key: &str,
         valuepattern: Option<&str>,
         delete_all: bool,
-    ) {
+    ) -> Result<(), sea_orm::DbErr> {
         let entries: Vec<Model> = Self::query_with_conn(db, configuration, name, key).await;
         for e in entries {
-            let _res = match valuepattern {
+            match valuepattern {
                 Some(vp) => {
                     if e.value.contains(vp) {
-                        e.delete(db).await
+                        e.delete(db).await?;
                     } else {
                         continue;
                     }
                 }
-                None => e.delete(db).await,
+                None => {
+                    e.delete(db).await?;
+                }
             };
             if !delete_all {
                 break;
             }
         }
+        Ok(())
     }
 
     // _with_conn version for remove_remote
@@ -432,14 +435,18 @@ impl Config {
         key: &str,
         valuepattern: Option<&str>,
         delete_all: bool,
-    ) {
+    ) -> Result<(), sea_orm::DbErr> {
         let db = get_db_conn_instance().await;
-        Self::remove_config_with_conn(db, configuration, name, key, valuepattern, delete_all).await;
+        Self::remove_config_with_conn(db, configuration, name, key, valuepattern, delete_all).await
     }
 
     /// Remove all entries matching the given configuration/name/key triple.
-    pub async fn remove(configuration: &str, name: Option<&str>, key: &str) {
-        Self::remove_config(configuration, name, key, None, true).await;
+    pub async fn remove(
+        configuration: &str,
+        name: Option<&str>,
+        key: &str,
+    ) -> Result<(), sea_orm::DbErr> {
+        Self::remove_config(configuration, name, key, None, true).await
     }
 
     /// Delete all the configuration entries using given configuration field (--remove-section)

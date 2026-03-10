@@ -52,8 +52,12 @@ async fn test_commit_requires_configured_identity_in_strict_mode() {
     }
 
     use libra::internal::config::Config;
-    Config::remove_config("user", None, "name", None, true).await;
-    Config::remove_config("user", None, "email", None, true).await;
+    Config::remove_config("user", None, "name", None, true)
+        .await
+        .unwrap();
+    Config::remove_config("user", None, "email", None, true)
+        .await
+        .unwrap();
     Config::insert("user", None, "useConfigOnly", "true").await;
 
     test::ensure_file("identity.txt", Some("identity"));
@@ -546,8 +550,12 @@ async fn test_commit_with_custom_author() {
 
     // Set default user config using libra's internal config
     use libra::internal::config::Config;
-    Config::remove_config("user", None, "name", None, true).await;
-    Config::remove_config("user", None, "email", None, true).await;
+    Config::remove_config("user", None, "name", None, true)
+        .await
+        .unwrap();
+    Config::remove_config("user", None, "email", None, true)
+        .await
+        .unwrap();
     Config::insert("user", None, "name", "Default User").await;
     Config::insert("user", None, "email", "default@example.com").await;
 
@@ -605,8 +613,12 @@ async fn test_commit_amend_with_custom_author() {
 
     // Set default user config
     use libra::internal::config::Config;
-    Config::remove_config("user", None, "name", None, true).await;
-    Config::remove_config("user", None, "email", None, true).await;
+    Config::remove_config("user", None, "name", None, true)
+        .await
+        .unwrap();
+    Config::remove_config("user", None, "email", None, true)
+        .await
+        .unwrap();
     Config::insert("user", None, "name", "Default User").await;
     Config::insert("user", None, "email", "default@example.com").await;
 
@@ -810,8 +822,12 @@ async fn test_commit_without_identity_fails_by_default() {
     }
 
     // Ensure useConfigOnly is NOT set (default)
-    Config::remove_config("user", None, "name", None, true).await;
-    Config::remove_config("user", None, "email", None, true).await;
+    Config::remove_config("user", None, "name", None, true)
+        .await
+        .unwrap();
+    Config::remove_config("user", None, "email", None, true)
+        .await
+        .unwrap();
 
     test::ensure_file("autodetect.txt", Some("content"));
     add::execute(add::AddArgs {

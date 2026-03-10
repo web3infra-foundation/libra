@@ -16,6 +16,32 @@ use tokio::{process::Command as TokioCommand, time::timeout};
 
 use super::{create_committed_repo_via_cli, run_libra_command};
 
+fn libra_command(cwd: &std::path::Path) -> Command {
+    let home = cwd.join(".libra-test-home");
+    let config_home = home.join(".config");
+    fs::create_dir_all(&config_home).expect("failed to create isolated HOME");
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_libra"));
+    cmd.current_dir(cwd)
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("USERPROFILE", &home);
+    cmd
+}
+
+fn libra_tokio_command(cwd: &std::path::Path) -> TokioCommand {
+    let home = cwd.join(".libra-test-home");
+    let config_home = home.join(".config");
+    fs::create_dir_all(&config_home).expect("failed to create isolated HOME");
+
+    let mut cmd = TokioCommand::new(env!("CARGO_BIN_EXE_libra"));
+    cmd.current_dir(cwd)
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("USERPROFILE", &home);
+    cmd
+}
+
 /// Helper function: Initialize a temporary Libra repository
 fn init_temp_repo() -> TempDir {
     let temp_dir = tempfile::tempdir().expect("Failed to create temporary directory");
@@ -27,9 +53,8 @@ fn init_temp_repo() -> TempDir {
         "Temporary path is not a valid directory"
     );
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
-        .arg("init")
+    let output = libra_command(temp_path)
+        .args(["init", "--vault"])
         .output()
         .expect("Failed to execute libra binary");
 
@@ -42,6 +67,29 @@ fn init_temp_repo() -> TempDir {
 
     eprintln!("Initialized libra repo at: {temp_path:?}");
     temp_dir
+}
+
+#[cfg(unix)]
+fn configure_local_identity(repo: &Path) {
+    let name_out = libra_command(repo)
+        .args(["config", "user.name", "Push Test User"])
+        .output()
+        .expect("failed to configure user.name");
+    assert!(
+        name_out.status.success(),
+        "failed to configure user.name: {}",
+        String::from_utf8_lossy(&name_out.stderr)
+    );
+
+    let email_out = libra_command(repo)
+        .args(["config", "user.email", "push-test@example.com"])
+        .output()
+        .expect("failed to configure user.email");
+    assert!(
+        email_out.status.success(),
+        "failed to configure user.email: {}",
+        String::from_utf8_lossy(&email_out.stderr)
+    );
 }
 
 #[test]
@@ -125,9 +173,8 @@ async fn test_push_file_remote_fails_without_reflog() {
     let local_dir = tempfile::tempdir().unwrap();
     let local_path = local_dir.path();
     let _guard = ChangeDirGuard::new(local_path);
-    let out = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(local_path)
-        .arg("init")
+    let out = libra_command(local_path)
+        .args(["init", "--vault"])
         .output()
         .expect("init");
     assert!(
@@ -135,8 +182,7 @@ async fn test_push_file_remote_fails_without_reflog() {
         "init failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let out = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(local_path)
+    let out = libra_command(local_path)
         .args(["config", "user.name", "Push Test User"])
         .output()
         .expect("set user.name");
@@ -145,8 +191,7 @@ async fn test_push_file_remote_fails_without_reflog() {
         "set user.name failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let out = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(local_path)
+    let out = libra_command(local_path)
         .args(["config", "user.email", "push-test@example.com"])
         .output()
         .expect("set user.email");
@@ -158,8 +203,7 @@ async fn test_push_file_remote_fails_without_reflog() {
 
     // add file + commit
     std::fs::write(local_path.join("file.txt"), "hello").unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(local_path)
+    let out = libra_command(local_path)
         .args(["add", "file.txt"])
         .output()
         .expect("add");
@@ -168,8 +212,7 @@ async fn test_push_file_remote_fails_without_reflog() {
         "add failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let out = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(local_path)
+    let out = libra_command(local_path)
         .args(["commit", "-m", "init"])
         .output()
         .expect("commit");
@@ -180,8 +223,7 @@ async fn test_push_file_remote_fails_without_reflog() {
     );
 
     // add remote (local path, will be treated as file://)
-    let out = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(local_path)
+    let out = libra_command(local_path)
         .args(["remote", "add", "origin", remote_path.to_str().unwrap()])
         .output()
         .expect("remote add");
@@ -192,8 +234,7 @@ async fn test_push_file_remote_fails_without_reflog() {
     );
 
     // push should fail with clear fatal message
-    let out = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(local_path)
+    let out = libra_command(local_path)
         .args(["push", "origin", "main"])
         .output()
         .expect("push");
@@ -227,8 +268,7 @@ async fn test_push_invalid_remote() {
 
     // Configure an invalid remote repository
     eprintln!("Adding invalid remote: https://invalid-url.example/repo.git");
-    let remote_output = TokioCommand::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let remote_output = libra_tokio_command(temp_path)
         .args([
             "remote",
             "add",
@@ -247,8 +287,7 @@ async fn test_push_invalid_remote() {
 
     // Set upstream branch
     eprintln!("Setting upstream to origin/main");
-    let branch_output = TokioCommand::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
+    let branch_output = libra_tokio_command(temp_path)
         .args(["branch", "--set-upstream-to", "origin/main"])
         .output()
         .await
@@ -263,11 +302,7 @@ async fn test_push_invalid_remote() {
     // Attempt to push with 15-second timeout to avoid hanging CI
     eprintln!("Attempting 'libra push' with 15s timeout...");
     let push_result = timeout(Duration::from_secs(15), async {
-        TokioCommand::new(env!("CARGO_BIN_EXE_libra"))
-            .current_dir(temp_path)
-            .arg("push")
-            .output()
-            .await
+        libra_tokio_command(temp_path).arg("push").output().await
     })
     .await;
 
@@ -331,9 +366,8 @@ async fn test_push_ssh_remote_via_fake_ssh() {
     );
 
     fs::create_dir_all(&local_dir).expect("failed to create local dir");
-    let init_out = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(&local_dir)
-        .arg("init")
+    let init_out = libra_command(&local_dir)
+        .args(["init", "--vault"])
         .output()
         .expect("failed to init local libra repo");
     assert!(
@@ -341,10 +375,10 @@ async fn test_push_ssh_remote_via_fake_ssh() {
         "local init failed: {}",
         String::from_utf8_lossy(&init_out.stderr)
     );
+    configure_local_identity(&local_dir);
 
     fs::write(local_dir.join("hello.txt"), "hello push ssh").expect("failed to write file");
-    let add_out = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(&local_dir)
+    let add_out = libra_command(&local_dir)
         .args(["add", "hello.txt"])
         .output()
         .expect("failed to add file");
@@ -353,8 +387,7 @@ async fn test_push_ssh_remote_via_fake_ssh() {
         "add failed: {}",
         String::from_utf8_lossy(&add_out.stderr)
     );
-    let commit_out = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(&local_dir)
+    let commit_out = libra_command(&local_dir)
         .args(["commit", "-m", "initial commit"])
         .output()
         .expect("failed to commit");
@@ -363,10 +396,23 @@ async fn test_push_ssh_remote_via_fake_ssh() {
         "commit failed: {}",
         String::from_utf8_lossy(&commit_out.stderr)
     );
+    let current_branch = String::from_utf8(
+        libra_command(&local_dir)
+            .args(["branch", "--show-current"])
+            .output()
+            .expect("failed to read current branch")
+            .stdout,
+    )
+    .expect("branch name not utf8")
+    .trim()
+    .to_string();
+    assert!(
+        !current_branch.is_empty(),
+        "current branch should not be empty"
+    );
 
     let ssh_remote = format!("git@fakehost:{}", remote_dir.to_string_lossy());
-    let remote_add_out = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(&local_dir)
+    let remote_add_out = libra_command(&local_dir)
         .args(["remote", "add", "origin", &ssh_remote])
         .output()
         .expect("failed to add ssh remote");
@@ -376,11 +422,10 @@ async fn test_push_ssh_remote_via_fake_ssh() {
         String::from_utf8_lossy(&remote_add_out.stderr)
     );
 
-    let push_out = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(&local_dir)
+    let push_out = libra_command(&local_dir)
         .env("LIBRA_SSH_COMMAND", &ssh_script)
         .env("LIBRA_TEST_SSH_LOG", &log_path)
-        .args(["push", "origin", "master"])
+        .args(["push", "origin", &current_branch])
         .output()
         .expect("failed to run push over fake ssh");
     assert!(
@@ -399,7 +444,7 @@ async fn test_push_ssh_remote_via_fake_ssh() {
             "--git-dir",
             remote_dir.to_str().unwrap(),
             "rev-parse",
-            "refs/heads/master",
+            &format!("refs/heads/{current_branch}"),
         ])
         .output()
         .expect("failed to read remote head");
@@ -438,9 +483,8 @@ async fn test_push_ssh_host_key_failure_is_reported() {
     );
 
     fs::create_dir_all(&local_dir).expect("failed to create local dir");
-    let init_out = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(&local_dir)
-        .arg("init")
+    let init_out = libra_command(&local_dir)
+        .args(["init", "--vault"])
         .output()
         .expect("failed to init local libra repo");
     assert!(
@@ -448,10 +492,10 @@ async fn test_push_ssh_host_key_failure_is_reported() {
         "local init failed: {}",
         String::from_utf8_lossy(&init_out.stderr)
     );
+    configure_local_identity(&local_dir);
 
     fs::write(local_dir.join("hello.txt"), "hello push ssh fail").expect("failed to write file");
-    let add_out = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(&local_dir)
+    let add_out = libra_command(&local_dir)
         .args(["add", "hello.txt"])
         .output()
         .expect("failed to add file");
@@ -460,8 +504,7 @@ async fn test_push_ssh_host_key_failure_is_reported() {
         "add failed: {}",
         String::from_utf8_lossy(&add_out.stderr)
     );
-    let commit_out = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(&local_dir)
+    let commit_out = libra_command(&local_dir)
         .args(["commit", "-m", "initial commit"])
         .output()
         .expect("failed to commit");
@@ -470,10 +513,23 @@ async fn test_push_ssh_host_key_failure_is_reported() {
         "commit failed: {}",
         String::from_utf8_lossy(&commit_out.stderr)
     );
+    let current_branch = String::from_utf8(
+        libra_command(&local_dir)
+            .args(["branch", "--show-current"])
+            .output()
+            .expect("failed to read current branch")
+            .stdout,
+    )
+    .expect("branch name not utf8")
+    .trim()
+    .to_string();
+    assert!(
+        !current_branch.is_empty(),
+        "current branch should not be empty"
+    );
 
     let ssh_remote = format!("git@fakehost:{}", remote_dir.to_string_lossy());
-    let remote_add_out = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(&local_dir)
+    let remote_add_out = libra_command(&local_dir)
         .args(["remote", "add", "origin", &ssh_remote])
         .output()
         .expect("failed to add ssh remote");
@@ -483,11 +539,10 @@ async fn test_push_ssh_host_key_failure_is_reported() {
         String::from_utf8_lossy(&remote_add_out.stderr)
     );
 
-    let push_out = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(&local_dir)
+    let push_out = libra_command(&local_dir)
         .env("LIBRA_SSH_COMMAND", &ssh_script)
         .env("LIBRA_TEST_SSH_FAIL", "hostkey")
-        .args(["push", "origin", "master"])
+        .args(["push", "origin", &current_branch])
         .output()
         .expect("failed to run push over fake ssh");
     let stderr = String::from_utf8_lossy(&push_out.stderr);
@@ -501,7 +556,7 @@ async fn test_push_ssh_host_key_failure_is_reported() {
             "--git-dir",
             remote_dir.to_str().unwrap(),
             "rev-parse",
-            "refs/heads/master",
+            &format!("refs/heads/{current_branch}"),
         ])
         .output()
         .expect("failed to read remote head");
