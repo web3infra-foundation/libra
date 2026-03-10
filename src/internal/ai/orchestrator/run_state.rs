@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -93,6 +96,16 @@ impl RunStateStore {
 
     pub async fn result_count(&self) -> usize {
         self.results.lock().await.len()
+    }
+
+    pub async fn metered_result_count(&self, metered_task_ids: &HashSet<Uuid>) -> usize {
+        self.results
+            .lock()
+            .await
+            .values()
+            .filter(|result| metered_task_ids.contains(&result.task_id))
+            .filter(|result| matches!(result.status, TaskNodeStatus::Completed | TaskNodeStatus::Failed))
+            .count()
     }
 
     pub async fn record_graph_progress(&self, completed_nodes: usize, total_nodes: usize) {
@@ -216,5 +229,54 @@ mod tests {
         assert_eq!(snapshot.revision, 3);
         assert_eq!(snapshot.task_results.len(), 1);
         assert_eq!(snapshot.status_for(task_id), TaskNodeStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn metered_result_count_ignores_skipped_and_non_metered() {
+        let plan = test_plan();
+        let task_id = plan.tasks[0].id();
+        let skipped_id = Uuid::new_v4();
+        let other_id = Uuid::new_v4();
+        let store = RunStateStore::new();
+
+        store
+            .record_result(TaskResult {
+                task_id,
+                status: TaskNodeStatus::Completed,
+                gate_report: None,
+                agent_output: Some("ok".into()),
+                retry_count: 0,
+                tool_calls: vec![],
+                policy_violations: vec![],
+                review: None,
+            })
+            .await;
+        store
+            .record_result(TaskResult {
+                task_id: skipped_id,
+                status: TaskNodeStatus::Skipped,
+                gate_report: None,
+                agent_output: None,
+                retry_count: 0,
+                tool_calls: vec![],
+                policy_violations: vec![],
+                review: None,
+            })
+            .await;
+        store
+            .record_result(TaskResult {
+                task_id: other_id,
+                status: TaskNodeStatus::Failed,
+                gate_report: None,
+                agent_output: Some("failed".into()),
+                retry_count: 0,
+                tool_calls: vec![],
+                policy_violations: vec![],
+                review: None,
+            })
+            .await;
+
+        let metered = HashSet::from([task_id, skipped_id]);
+        assert_eq!(store.metered_result_count(&metered).await, 1);
     }
 }

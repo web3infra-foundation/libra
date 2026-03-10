@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -13,6 +13,7 @@ use dagrs::{
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::Semaphore;
+use uuid::Uuid;
 
 use super::{
     acl::{AclVerdict, check_tool_acl},
@@ -404,6 +405,15 @@ struct TaskDagrsAction<M: CompletionModel + 'static> {
     registry: Arc<ToolRegistry>,
     config: ExecutorConfig,
     run_state: RunStateStore,
+    metered_task_ids: Arc<HashSet<Uuid>>,
+    parallelism: Arc<Semaphore>,
+    cost_budget_serial: Arc<tokio::sync::Mutex<()>>,
+}
+
+#[derive(Clone)]
+struct DagrsBuildContext {
+    run_state: RunStateStore,
+    metered_task_ids: Arc<HashSet<Uuid>>,
     parallelism: Arc<Semaphore>,
     cost_budget_serial: Arc<tokio::sync::Mutex<()>>,
 }
@@ -463,7 +473,10 @@ impl<M: CompletionModel + 'static> Action for TaskDagrsAction<M> {
         let max_cost_units = self.config.spec.constraints.resources.max_cost_units as usize;
         let mut cost_budget_guard = None;
         if max_cost_units > 0 {
-            let consumed = self.run_state.result_count().await;
+            let consumed = self
+                .run_state
+                .metered_result_count(&self.metered_task_ids)
+                .await;
             if consumed >= max_cost_units {
                 broadcast_dependency_signal(out_channels, false).await;
                 return Output::error(format!(
@@ -475,7 +488,10 @@ impl<M: CompletionModel + 'static> Action for TaskDagrsAction<M> {
             let remaining = max_cost_units.saturating_sub(consumed);
             if remaining <= 1 {
                 let guard = self.cost_budget_serial.lock().await;
-                let consumed_after_lock = self.run_state.result_count().await;
+                let consumed_after_lock = self
+                    .run_state
+                    .metered_result_count(&self.metered_task_ids)
+                    .await;
                 if consumed_after_lock >= max_cost_units {
                     broadcast_dependency_signal(out_channels, false).await;
                     return Output::error(format!(
@@ -534,9 +550,7 @@ fn build_dagrs_graph<M: CompletionModel + 'static>(
     model: &M,
     registry: &Arc<ToolRegistry>,
     config: &ExecutorConfig,
-    run_state: RunStateStore,
-    parallelism: Arc<Semaphore>,
-    cost_budget_serial: Arc<tokio::sync::Mutex<()>>,
+    context: DagrsBuildContext,
 ) -> Result<Graph, OrchestratorError> {
     let mut graph = Graph::new();
     configure_graph_runtime(&mut graph, plan, config);
@@ -549,9 +563,10 @@ fn build_dagrs_graph<M: CompletionModel + 'static>(
             model: model.clone(),
             registry: Arc::clone(registry),
             config: config.clone(),
-            run_state: run_state.clone(),
-            parallelism: Arc::clone(&parallelism),
-            cost_budget_serial: Arc::clone(&cost_budget_serial),
+            run_state: context.run_state.clone(),
+            metered_task_ids: Arc::clone(&context.metered_task_ids),
+            parallelism: Arc::clone(&context.parallelism),
+            cost_budget_serial: Arc::clone(&context.cost_budget_serial),
         };
         let dagrs_node =
             DefaultNode::with_action(task_spec.id().to_string(), action, &mut node_table);
@@ -683,6 +698,14 @@ pub async fn execute_dag<M: CompletionModel + 'static>(
     let registry_snapshot = Arc::clone(registry);
     let config_snapshot = config.clone();
     let run_state_snapshot = run_state.clone();
+    let metered_task_ids = Arc::new(
+        plan_spec
+            .tasks
+            .iter()
+            .filter(|task| matches!(task.kind, TaskKind::Implementation))
+            .map(TaskSpec::id)
+            .collect::<HashSet<_>>(),
+    );
     let max_cost_units = config.spec.constraints.resources.max_cost_units as usize;
     let initial_parallel = if max_cost_units > 0 && max_cost_units <= 2 {
         1
@@ -691,17 +714,19 @@ pub async fn execute_dag<M: CompletionModel + 'static>(
     };
     let parallelism = Arc::new(Semaphore::new(initial_parallel));
     let cost_budget_serial = Arc::new(tokio::sync::Mutex::new(()));
-    let parallelism_snapshot = Arc::clone(&parallelism);
-    let cost_budget_serial_snapshot = Arc::clone(&cost_budget_serial);
+    let graph_context = DagrsBuildContext {
+        run_state: run_state_snapshot,
+        metered_task_ids,
+        parallelism,
+        cost_budget_serial,
+    };
     let mut graph = tokio::task::spawn_blocking(move || {
         build_dagrs_graph(
             &plan_snapshot,
             &model_snapshot,
             &registry_snapshot,
             &config_snapshot,
-            run_state_snapshot,
-            parallelism_snapshot,
-            cost_budget_serial_snapshot,
+            graph_context,
         )
     })
     .await
