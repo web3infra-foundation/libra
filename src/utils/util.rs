@@ -493,9 +493,14 @@ pub async fn get_commit_base(name: &str) -> Result<ObjectHash, String> {
     if let Some((remote, branch_name)) = name.split_once('/')
         && !remote.is_empty()
         && !branch_name.is_empty()
-        && let Some(branch) = Branch::find_branch(branch_name, Some(remote)).await
     {
-        return Ok(branch.commit);
+        if let Some(branch) = Branch::find_branch(branch_name, Some(remote)).await {
+            return Ok(branch.commit);
+        }
+        let remote_tracking_ref = format!("refs/remotes/{remote}/{branch_name}");
+        if let Some(branch) = Branch::find_branch(&remote_tracking_ref, Some(remote)).await {
+            return Ok(branch.commit);
+        }
     }
 
     // 3. Check for a tag

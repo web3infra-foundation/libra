@@ -73,10 +73,19 @@ async fn test_push_force_flag_parsing() {
 
 #[tokio::test]
 #[serial]
-async fn test_push_file_remote_fails_without_reflog() {
-    // local file remotes are not supported; ensure we fail loudly and avoid reflog writes
+async fn test_push_file_remote_succeeds_and_updates_tracking() {
+    // Local file remotes should behave like regular Git remotes for push.
     let remote_dir = tempfile::tempdir().unwrap();
     let remote_path = remote_dir.path();
+    let init_remote = Command::new("git")
+        .args(["init", "--bare", remote_path.to_str().unwrap()])
+        .output()
+        .expect("init remote");
+    assert!(
+        init_remote.status.success(),
+        "failed to initialize bare remote: {}",
+        String::from_utf8_lossy(&init_remote.stderr)
+    );
 
     // local repo
     let local_dir = tempfile::tempdir().unwrap();
@@ -148,28 +157,64 @@ async fn test_push_file_remote_fails_without_reflog() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // push should fail with clear fatal message
+    // push should succeed to local file remotes and write remote-tracking reflog
     let out = Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(local_path)
-        .args(["push", "origin", "main"])
+        .args(["push", "-u", "origin", "main"])
         .output()
         .expect("push");
-    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("pushing to local file repositories is not yet supported"),
-        "stderr should mention unsupported file:// push, got: {stderr}"
+        out.status.success(),
+        "push to local remote should succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
 
-    // ensure no reflog entry is written
+    let local_head_out = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(local_path)
+        .args(["log", "-n", "1", "--oneline"])
+        .output()
+        .expect("read local head");
+    assert!(
+        local_head_out.status.success(),
+        "failed to read local head: {}",
+        String::from_utf8_lossy(&local_head_out.stderr)
+    );
+    let local_head = String::from_utf8_lossy(&local_head_out.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    assert!(!local_head.is_empty(), "local head hash should not be empty");
+
+    let remote_head_out = Command::new("git")
+        .args([
+            "--git-dir",
+            remote_path.to_str().unwrap(),
+            "rev-parse",
+            "refs/heads/main",
+        ])
+        .output()
+        .expect("read remote head");
+    assert!(
+        remote_head_out.status.success(),
+        "failed to read remote head: {}",
+        String::from_utf8_lossy(&remote_head_out.stderr)
+    );
+    let remote_head = String::from_utf8_lossy(&remote_head_out.stdout)
+        .trim()
+        .to_string();
+    assert!(
+        remote_head.starts_with(&local_head),
+        "remote branch should point to pushed commit, remote={remote_head}, local_prefix={local_head}"
+    );
+
+    // ensure reflog entry is written for remote tracking update
     env::set_current_dir(local_path).expect("set current dir to local repo");
     let db = get_db_conn_instance().await;
-    let entry = Reflog::find_one(&db, "refs/remotes/origin/master")
+    let entry = Reflog::find_one(&db, "refs/remotes/origin/main")
         .await
         .expect("query reflog");
-    assert!(
-        entry.is_none(),
-        "reflog should not be created when push fails"
-    );
+    assert!(entry.is_some(), "reflog should be created after successful push");
 }
 
 #[tokio::test]

@@ -536,8 +536,15 @@ async fn preflight_rebase(args: &RebaseArgs) -> CliResult<()> {
 
     resolve_branch_or_commit(upstream)
         .await
-        .map_err(CliError::fatal)?;
+        .map_err(|err| CliError::fatal(normalize_fatal_message(&err)))?;
     Ok(())
+}
+
+fn normalize_fatal_message(message: &str) -> String {
+    message
+        .strip_prefix("fatal: ")
+        .unwrap_or(message)
+        .to_string()
 }
 
 /// Start a new rebase operation

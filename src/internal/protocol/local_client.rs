@@ -129,27 +129,27 @@ impl LocalClient {
         &self,
         service: ServiceType,
     ) -> Result<DiscoveryResult, GitError> {
-        if service != ServiceType::UploadPack {
-            return Err(GitError::NetworkError(
-                "Unsupported service type for local protocol".to_string(),
-            ));
-        }
         match self.source_type {
             RepoType::GitRepo => {
-                let output = Command::new("git-upload-pack")
+                let mut cmd = match service {
+                    ServiceType::UploadPack => Command::new("git-upload-pack"),
+                    ServiceType::ReceivePack => Command::new("git-receive-pack"),
+                };
+                let output = cmd
+                    .arg("--stateless-rpc")
                     .arg("--advertise-refs")
                     .arg(&self.repo_path)
                     .output()
                     .await
                     .map_err(|e| {
                         GitError::NetworkError(format!(
-                            "Failed to spawn git-upload-pack for discovery: {}",
+                            "Failed to spawn local git service for discovery: {}",
                             e
                         ))
                     })?;
                 if !output.status.success() {
                     return Err(GitError::NetworkError(format!(
-                        "git-upload-pack --advertise-refs failed: {}",
+                        "local discovery command failed: {}",
                         String::from_utf8_lossy(&output.stderr)
                     )));
                 }
@@ -185,6 +185,50 @@ impl LocalClient {
                 env::set_current_dir(original_dir)?;
                 Ok(result)
             }
+        }
+    }
+
+    /// Send a receive-pack request to a local Git repository and return the raw
+    /// pkt-line response payload from `git-receive-pack`.
+    pub async fn send_pack(&self, data: Bytes) -> Result<Bytes, IoError> {
+        match self.source_type {
+            RepoType::GitRepo => {
+                let mut child = Command::new("git-receive-pack");
+                child.arg("--stateless-rpc");
+                child.arg(&self.repo_path);
+                child.stdin(std::process::Stdio::piped());
+                child.stdout(std::process::Stdio::piped());
+                child.stderr(std::process::Stdio::piped());
+                let mut child = child
+                    .spawn()
+                    .map_err(|e| IoError::other(format!("Failed to spawn git-receive-pack: {e}")))?;
+
+                if let Some(mut stdin) = child.stdin.take() {
+                    stdin.write_all(&data).await?;
+                } else {
+                    return Err(IoError::other(
+                        "Failed to capture stdin for git-receive-pack process",
+                    ));
+                }
+
+                let output = child.wait_with_output().await.map_err(|e| {
+                    IoError::other(format!("Failed to wait for git-receive-pack: {e}"))
+                })?;
+                if !output.status.success() {
+                    tracing::error!(
+                        "git-receive-pack stderr: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    return Err(IoError::other(format!(
+                        "git-receive-pack exited with failure: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    )));
+                }
+                Ok(Bytes::from(output.stdout))
+            }
+            RepoType::LibraRepo => Err(IoError::other(
+                "pushing to local libra repositories is not yet supported",
+            )),
         }
     }
 

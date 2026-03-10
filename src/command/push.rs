@@ -7,7 +7,7 @@ use std::{
     str::FromStr,
 };
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use clap::Parser;
 use colored::Colorize;
 use git_internal::{
@@ -35,8 +35,8 @@ use crate::{
         db::get_db_conn_instance,
         head::Head,
         protocol::{
-            ProtocolClient, get_wire_hash_kind, https_client::HttpsClient, lfs_client::LFSClient,
-            set_wire_hash_kind,
+            DiscoveryResult, ProtocolClient, get_wire_hash_kind, https_client::HttpsClient,
+            lfs_client::LFSClient, local_client::LocalClient, set_wire_hash_kind,
         },
         reflog::{Reflog, ReflogAction, ReflogContext, ReflogError},
     },
@@ -65,6 +65,54 @@ pub struct PushArgs {
     /// Do everything except actually send the updates
     #[clap(long, short = 'n')]
     pub dry_run: bool,
+}
+
+enum PushRemoteClient {
+    Http(HttpsClient),
+    Local(LocalClient),
+}
+
+impl PushRemoteClient {
+    async fn discovery_reference(&self) -> CliResult<DiscoveryResult> {
+        match self {
+            PushRemoteClient::Http(client) => client
+                .discovery_reference(ReceivePack)
+                .await
+                .map_err(|e| CliError::fatal(e.to_string())),
+            PushRemoteClient::Local(client) => client
+                .discovery_reference(ReceivePack)
+                .await
+                .map_err(|e| CliError::fatal(e.to_string())),
+        }
+    }
+
+    async fn send_pack(&self, data: Bytes) -> CliResult<Bytes> {
+        match self {
+            PushRemoteClient::Http(client) => {
+                let res = client
+                    .send_pack(data)
+                    .await
+                    .map_err(|e| CliError::fatal(format!("failed to send pack data: {e}")))?;
+                if res.status() != 200 {
+                    return Err(CliError::fatal(format!(
+                        "unexpected server response (status {})",
+                        res.status()
+                    )));
+                }
+                res.bytes()
+                    .await
+                    .map_err(|e| CliError::fatal(format!("failed to read server response: {e}")))
+            }
+            PushRemoteClient::Local(client) => client
+                .send_pack(data)
+                .await
+                .map_err(|e| CliError::fatal(format!("failed to send pack data: {e}"))),
+        }
+    }
+
+    fn should_upload_lfs(&self) -> bool {
+        matches!(self, PushRemoteClient::Http(_))
+    }
 }
 
 pub async fn execute(args: PushArgs) {
@@ -139,20 +187,24 @@ pub async fn execute_safe(args: PushArgs) -> CliResult<()> {
         }
     };
 
-    // Local file path remote is not supported for push; avoid pretending success.
-    if url.scheme() == "file" {
-        return Err(CliError::fatal(
-            "pushing to local file repositories is not yet supported",
-        ));
-    }
-
-    let client = HttpsClient::from_url(&url);
-    let discovery = match client.discovery_reference(ReceivePack).await {
-        Ok(result) => result,
-        Err(e) => {
-            return Err(CliError::fatal(e.to_string()));
+    let remote_client = match url.scheme() {
+        "file" => {
+            let repo_path = url.to_file_path().map_err(|_| {
+                CliError::fatal(format!("invalid local repository path '{}'", repo_url))
+            })?;
+            let client = LocalClient::from_path(&repo_path).map_err(|e| {
+                CliError::fatal(format!(
+                    "invalid local repository '{}': {}",
+                    repo_path.display(),
+                    e
+                ))
+            })?;
+            PushRemoteClient::Local(client)
         }
+        _ => PushRemoteClient::Http(HttpsClient::from_url(&url)),
     };
+
+    let discovery = remote_client.discovery_reference().await?;
     let local_kind = get_hash_kind();
     if discovery.hash_kind != local_kind {
         return Err(CliError::fatal(format!(
@@ -256,7 +308,7 @@ pub async fn execute_safe(args: PushArgs) -> CliResult<()> {
             .map_err(|_| CliError::fatal(format!("invalid remote hash: {remote_hash}")))?,
     );
 
-    {
+    if remote_client.should_upload_lfs() {
         // upload lfs files
         let client = LFSClient::from_url(&url);
         let res = client.push_objects(&objs).await;
@@ -295,21 +347,7 @@ pub async fn execute_safe(args: PushArgs) -> CliResult<()> {
     data.extend_from_slice(&pack_data);
     println!("Delta compression done.");
 
-    let res = client
-        .send_pack(data.freeze())
-        .await
-        .map_err(|e| CliError::fatal(format!("failed to send pack data: {e}")))?;
-
-    if res.status() != 200 {
-        return Err(CliError::fatal(format!(
-            "unexpected server response (status {})",
-            res.status()
-        )));
-    }
-    let mut data = res
-        .bytes()
-        .await
-        .map_err(|e| CliError::fatal(format!("failed to read server response: {e}")))?;
+    let mut data = remote_client.send_pack(data.freeze()).await?;
     let (_, pkt_line) = read_pkt_line(&mut data);
     if pkt_line != "unpack ok\n" {
         return Err(CliError::fatal("unpack failed"));

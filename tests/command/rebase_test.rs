@@ -50,6 +50,10 @@ fn test_rebase_cli_invalid_upstream_returns_fatal_128() {
         stderr.contains("nonexistent-upstream"),
         "stderr should include invalid ref name, got: {stderr}"
     );
+    assert!(
+        !stderr.contains("fatal: fatal:"),
+        "stderr should not contain duplicated fatal prefixes, got: {stderr}"
+    );
 }
 
 fn commit_messages_from_head(start: &ObjectHash, max: usize) -> Vec<String> {
