@@ -222,7 +222,9 @@ pub async fn create_branch_safe(
     })?;
 
     // create branch
-    Branch::update_branch(&new_branch, &commit_id.to_string(), None).await;
+    Branch::update_branch(&new_branch, &commit_id.to_string(), None)
+        .await
+        .map_err(|e| CliError::fatal(format!("failed to create branch '{}': {e}", new_branch)))?;
     Ok(())
 }
 
@@ -374,7 +376,9 @@ async fn rename_branch(args: Vec<String>) -> CliResult<()> {
     let commit_hash = old_branch.commit.to_string();
 
     // create new branch with the same commit
-    Branch::update_branch(&new_name, &commit_hash, None).await;
+    Branch::update_branch(&new_name, &commit_hash, None)
+        .await
+        .map_err(|e| CliError::fatal(format!("failed to create branch '{}': {e}", new_name)))?;
 
     // update HEAD if renaming current branch
     let head = Head::current().await;

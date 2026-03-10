@@ -166,7 +166,9 @@ async fn create_test_commit_tree() -> String {
         _ => panic!("should be branch"),
     };
 
-    Branch::update_branch(&branch_name, &commit_6.id.to_string(), None).await;
+    Branch::update_branch(&branch_name, &commit_6.id.to_string(), None)
+        .await
+        .unwrap();
 
     commit_6.id.to_string()
 }

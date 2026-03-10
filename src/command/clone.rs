@@ -362,7 +362,7 @@ pub(crate) async fn setup_repository(
                         &origin_branch.commit.to_string(),
                         None,
                     )
-                    .await;
+                    .await?;
                     Head::update_with_conn(txn, Head::Branch(branch_name.to_owned()), None).await;
 
                     let merge_ref = format!("refs/heads/{}", branch_name);

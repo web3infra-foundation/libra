@@ -197,7 +197,8 @@ async fn test_switch_track_sets_upstream() {
         &master_commit.to_string(),
         None,
     )
-    .await;
+    .await
+    .unwrap();
 
     let args = SwitchArgs {
         branch: Some("origin/feature".to_string()),
@@ -409,7 +410,9 @@ async fn create_commit_tree() {
         );
         commit_last.committer.timestamp = 100;
         save_object(&commit_last, &commit_last.id).unwrap();
-        Branch::update_branch("main", &commit_last.id.to_string(), None).await;
+        Branch::update_branch("main", &commit_last.id.to_string(), None)
+            .await
+            .unwrap();
     }
 }
 

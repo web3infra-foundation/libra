@@ -177,7 +177,12 @@ async fn switch_to_tracked_remote_branch(target: String) -> CliResult<()> {
         &remote_tracking_branch.commit.to_string(),
         None,
     )
-    .await;
+    .await
+    .map_err(|e| {
+        CliError::fatal(format!(
+            "failed to create branch '{remote_branch_name}': {e}"
+        ))
+    })?;
     branch::set_upstream(
         &remote_branch_name,
         &format!("{remote_name}/{remote_branch_name}"),

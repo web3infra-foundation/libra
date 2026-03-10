@@ -113,7 +113,9 @@ async fn test_merge_remote_branch() {
     let feature_commit = Head::current_commit()
         .await
         .expect("feature branch should have a tip");
-    Branch::update_branch("feature", &feature_commit.to_string(), Some("origin")).await;
+    Branch::update_branch("feature", &feature_commit.to_string(), Some("origin"))
+        .await
+        .unwrap();
 
     Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(temp_path)

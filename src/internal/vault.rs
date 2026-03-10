@@ -435,7 +435,9 @@ async fn store_ssh_private_key(private_key: &str) -> Result<()> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).ok();
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).with_context(
+                || format!("failed to set permissions to 700 on '{}'", parent.display()),
+            )?;
         }
     }
     tokio::fs::write(&path, private_key)
@@ -444,7 +446,14 @@ async fn store_ssh_private_key(private_key: &str) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).ok();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).with_context(
+            || {
+                format!(
+                    "failed to set permissions to 600 on SSH private key '{}'",
+                    path.display()
+                )
+            },
+        )?;
     }
     Ok(())
 }
@@ -750,7 +759,9 @@ async fn store_unseal_key_to_home(unseal_key: &[u8]) -> Result<()> {
         {
             use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(0o700);
-            std::fs::set_permissions(parent, perms).ok();
+            std::fs::set_permissions(parent, perms).with_context(|| {
+                format!("failed to set permissions to 700 on '{}'", parent.display())
+            })?;
         }
     }
     tokio::fs::write(&path, hex::encode(unseal_key))
@@ -761,7 +772,12 @@ async fn store_unseal_key_to_home(unseal_key: &[u8]) -> Result<()> {
     {
         use std::os::unix::fs::PermissionsExt;
         let perms = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(&path, perms).ok();
+        std::fs::set_permissions(&path, perms).with_context(|| {
+            format!(
+                "failed to set permissions to 600 on unseal key '{}'",
+                path.display()
+            )
+        })?;
     }
     Ok(())
 }

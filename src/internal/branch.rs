@@ -204,7 +204,8 @@ impl Branch {
         branch_name: &str,
         commit_hash: &str,
         remote: Option<&str>,
-    ) where
+    ) -> Result<(), DbErr>
+    where
         C: ConnectionTrait,
     {
         for attempt in 0..=SQLITE_BUSY_MAX_RETRIES {
@@ -217,10 +218,7 @@ impl Branch {
                     .await;
                     continue;
                 }
-                Err(err) => {
-                    eprintln!("fatal: failed to query branch '{branch_name}': {err}");
-                    return;
-                }
+                Err(err) => return Err(err),
             };
 
             let write_result = match branch {
@@ -242,22 +240,24 @@ impl Branch {
             };
 
             match write_result {
-                Ok(()) => return,
+                Ok(()) => return Ok(()),
                 Err(err) if is_sqlite_busy(&err) && attempt < SQLITE_BUSY_MAX_RETRIES => {
                     sleep(Duration::from_millis(
                         SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
                     ))
                     .await;
                 }
-                Err(err) => {
-                    eprintln!("fatal: failed to update branch '{branch_name}': {err}");
-                    return;
-                }
+                Err(err) => return Err(err),
             }
         }
+        unreachable!("sqlite retry loop must return")
     }
 
-    pub async fn update_branch(branch_name: &str, commit_hash: &str, remote: Option<&str>) {
+    pub async fn update_branch(
+        branch_name: &str,
+        commit_hash: &str,
+        remote: Option<&str>,
+    ) -> Result<(), DbErr> {
         let db_conn = get_db_conn_instance().await;
         Self::update_branch_with_conn(&db_conn, branch_name, commit_hash, remote).await
     }
@@ -308,10 +308,18 @@ mod tests {
         let _guard = test::ChangeDirGuard::new(temp_path.path());
 
         let commit_hash = ObjectHash::zero_str(get_hash_kind()).to_string();
-        Branch::update_branch("upstream/origin/master", &commit_hash, None).await; // should match
-        Branch::update_branch("origin/master", &commit_hash, Some("upstream")).await; // should match
-        Branch::update_branch("master", &commit_hash, Some("upstream/origin")).await; // should match
-        Branch::update_branch("feature", &commit_hash, Some("upstream/origin/master")).await; // should not match
+        Branch::update_branch("upstream/origin/master", &commit_hash, None)
+            .await
+            .unwrap(); // should match
+        Branch::update_branch("origin/master", &commit_hash, Some("upstream"))
+            .await
+            .unwrap(); // should match
+        Branch::update_branch("master", &commit_hash, Some("upstream/origin"))
+            .await
+            .unwrap(); // should match
+        Branch::update_branch("feature", &commit_hash, Some("upstream/origin/master"))
+            .await
+            .unwrap(); // should not match
 
         let branches = Branch::search_branch("upstream/origin/master").await;
         assert_eq!(branches.len(), 3);

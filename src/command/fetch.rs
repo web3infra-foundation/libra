@@ -624,7 +624,8 @@ async fn update_references(
                     &reference._hash,
                     Some(&remote_config.name),
                 )
-                .await;
+                .await
+                .map_err(ReflogError::from)?;
 
                 let context = ReflogContext {
                     old_oid: old_oid.to_string(),

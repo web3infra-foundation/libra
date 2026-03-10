@@ -245,7 +245,7 @@ async fn create_cherry_pick_commit(
         context,
         move |txn| {
             Box::pin(async move {
-                update_head(txn, &commit.id.to_string()).await;
+                update_head(txn, &commit.id.to_string()).await?;
                 Ok(())
             })
         },
@@ -439,8 +439,9 @@ async fn resolve_commit(reference: &str) -> Result<ObjectHash, String> {
 /// This function updates the current branch to point to the specified commit.
 /// It only works when HEAD is pointing to a branch (not in detached HEAD state).
 /// The branch reference is updated to the new commit ID.
-async fn update_head<C: ConnectionTrait>(db: &C, commit_id: &str) {
+async fn update_head<C: ConnectionTrait>(db: &C, commit_id: &str) -> Result<(), sea_orm::DbErr> {
     if let Head::Branch(name) = Head::current_with_conn(db).await {
-        Branch::update_branch_with_conn(db, &name, commit_id, None).await;
+        Branch::update_branch_with_conn(db, &name, commit_id, None).await?;
     }
+    Ok(())
 }

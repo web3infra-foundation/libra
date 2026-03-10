@@ -402,7 +402,8 @@ async fn update_remote_tracking(
                     &commit_hash,
                     Some(&remote_name),
                 )
-                .await;
+                .await
+                .map_err(ReflogError::from)?;
 
                 // Record the reflog
                 let context = ReflogContext {

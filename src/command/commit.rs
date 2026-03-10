@@ -789,7 +789,9 @@ async fn get_parents_ids() -> Vec<ObjectHash> {
 async fn update_head<C: ConnectionTrait>(db: &C, commit_id: &str) -> Result<(), String> {
     match Head::current_with_conn(db).await {
         Head::Branch(name) => {
-            Branch::update_branch_with_conn(db, &name, commit_id, None).await;
+            Branch::update_branch_with_conn(db, &name, commit_id, None)
+                .await
+                .map_err(|e| format!("failed to update branch '{name}': {e}"))?;
         }
         Head::Detached(_) => {
             let head = Head::Detached(
