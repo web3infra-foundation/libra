@@ -16,7 +16,7 @@ use std::sync::Arc;
 use types::{OrchestratorConfig, OrchestratorError, OrchestratorResult};
 
 use crate::internal::ai::{
-    completion::CompletionModel,
+    completion::{CompletionModel, ThrottledCompletionModel},
     intentspec::{repair_intentspec, types::IntentSpec, validate_intentspec},
     tools::registry::ToolRegistry,
 };
@@ -96,9 +96,17 @@ impl<M: CompletionModel + 'static> Orchestrator<M> {
                 observer: observer.clone(),
             };
 
-            let run_state =
-                executor::execute_dag(&plan_spec, &self.model, &self.registry, &executor_config)
-                    .await?;
+            let provider_parallel_limit =
+                usize::from(spec.execution.concurrency.max_parallel_tasks.max(1));
+            let throttled_model =
+                ThrottledCompletionModel::new(self.model.clone(), provider_parallel_limit);
+            let run_state = executor::execute_dag(
+                &plan_spec,
+                &throttled_model,
+                &self.registry,
+                &executor_config,
+            )
+            .await?;
 
             // Phase 3: System verification
             let system_report = verifier::build_system_report(&spec, &plan_spec, &run_state);

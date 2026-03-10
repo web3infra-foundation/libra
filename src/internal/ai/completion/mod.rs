@@ -1,6 +1,7 @@
 pub mod message;
 pub mod request;
 pub mod retry;
+pub mod throttle;
 
 use std::future::Future;
 
@@ -12,6 +13,7 @@ pub use request::{CompletionRequest, CompletionResponse};
 pub use retry::{
     CompletionRetryEvent, CompletionRetryObserver, CompletionRetryPolicy, RetryingCompletionModel,
 };
+pub use throttle::ThrottledCompletionModel;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
