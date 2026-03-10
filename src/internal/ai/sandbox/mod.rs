@@ -75,6 +75,41 @@ impl ApprovalStore {
     }
 }
 
+pub async fn request_cached_approval_with_keys<F>(
+    ctx: &ToolApprovalContext,
+    keys: &[String],
+    build_request: F,
+) -> ReviewDecision
+where
+    F: FnOnce(oneshot::Sender<ReviewDecision>) -> ExecApprovalRequest,
+{
+    let already_approved = if keys.is_empty() {
+        false
+    } else {
+        let store = ctx.store.lock().await;
+        keys.iter()
+            .all(|key| matches!(store.get(key), Some(ReviewDecision::ApprovedForSession)))
+    };
+    if already_approved {
+        return ReviewDecision::ApprovedForSession;
+    }
+
+    let (response_tx, response_rx) = oneshot::channel();
+    let request = build_request(response_tx);
+    if ctx.request_tx.send(request).is_err() {
+        return ReviewDecision::Denied;
+    }
+
+    let decision = response_rx.await.unwrap_or_default();
+    if matches!(decision, ReviewDecision::ApprovedForSession) && !keys.is_empty() {
+        let mut store = ctx.store.lock().await;
+        for key in keys {
+            store.put(key.clone(), ReviewDecision::ApprovedForSession);
+        }
+    }
+    decision
+}
+
 #[derive(Clone, Debug)]
 pub struct ToolApprovalContext {
     pub policy: AskForApproval,
@@ -415,38 +450,16 @@ async fn request_exec_approval(
     sandbox_permissions: SandboxPermissions,
     is_retry: bool,
 ) -> ReviewDecision {
-    let cache_key = shell_approval_key(command, cwd, sandbox_permissions);
-    let already_approved = {
-        let store = ctx.store.lock().await;
-        matches!(
-            store.get(&cache_key),
-            Some(ReviewDecision::ApprovedForSession)
-        )
-    };
-    if already_approved {
-        return ReviewDecision::ApprovedForSession;
-    }
-
-    let (response_tx, response_rx) = oneshot::channel();
-    let request = ExecApprovalRequest {
+    let keys = vec![shell_approval_key(command, cwd, sandbox_permissions)];
+    request_cached_approval_with_keys(ctx, &keys, |response_tx| ExecApprovalRequest {
         call_id: call_id.to_string(),
         command: command.to_string(),
         cwd: cwd.to_path_buf(),
         reason,
         is_retry,
         response_tx,
-    };
-
-    if ctx.request_tx.send(request).is_err() {
-        return ReviewDecision::Denied;
-    }
-
-    let decision = response_rx.await.unwrap_or_default();
-    if matches!(decision, ReviewDecision::ApprovedForSession) {
-        let mut store = ctx.store.lock().await;
-        store.put(cache_key, ReviewDecision::ApprovedForSession);
-    }
-    decision
+    })
+    .await
 }
 
 fn shell_approval_key(

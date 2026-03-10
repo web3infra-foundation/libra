@@ -3,7 +3,6 @@
 use std::collections::BTreeSet;
 
 use async_trait::async_trait;
-use tokio::sync::oneshot;
 
 use crate::internal::ai::tools::{
     apply_patch::{self, ApplyPatchArgs},
@@ -71,47 +70,28 @@ impl ToolHandler for ApplyPatchHandler {
                 .iter()
                 .map(|path| patch_approval_key(path, &working_dir))
                 .collect::<Vec<_>>();
-            let already_approved = {
-                let store = approval_ctx.store.lock().await;
-                keys.iter().all(|key| {
-                    matches!(
-                        store.get(key),
-                        Some(crate::internal::ai::sandbox::ReviewDecision::ApprovedForSession)
-                    )
-                })
-            };
-
-            if !already_approved {
-                let (response_tx, response_rx) = oneshot::channel();
-                let request = crate::internal::ai::sandbox::ExecApprovalRequest {
+            let decision = crate::internal::ai::sandbox::request_cached_approval_with_keys(
+                approval_ctx,
+                &keys,
+                |response_tx| crate::internal::ai::sandbox::ExecApprovalRequest {
                     call_id: call_id.clone(),
                     command: format!("apply_patch ({} path(s))", touched_paths.len()),
                     cwd: working_dir.clone(),
                     reason: Some(format_patch_approval_reason(&touched_paths, &working_dir)),
                     is_retry: false,
                     response_tx,
-                };
-                approval_ctx.request_tx.send(request).map_err(|_| {
-                    ToolError::ExecutionFailed("Approval UI is not available".to_string())
-                })?;
+                },
+            )
+            .await;
 
-                match response_rx.await.unwrap_or_default() {
-                    crate::internal::ai::sandbox::ReviewDecision::Approved => {}
-                    crate::internal::ai::sandbox::ReviewDecision::ApprovedForSession => {
-                        let mut store = approval_ctx.store.lock().await;
-                        for key in keys {
-                            store.put(
-                                key,
-                                crate::internal::ai::sandbox::ReviewDecision::ApprovedForSession,
-                            );
-                        }
-                    }
-                    crate::internal::ai::sandbox::ReviewDecision::Denied => {
-                        return Err(ToolError::ExecutionFailed("rejected by user".to_string()));
-                    }
-                    crate::internal::ai::sandbox::ReviewDecision::Abort => {
-                        return Err(ToolError::ExecutionFailed("aborted by user".to_string()));
-                    }
+            match decision {
+                crate::internal::ai::sandbox::ReviewDecision::Approved
+                | crate::internal::ai::sandbox::ReviewDecision::ApprovedForSession => {}
+                crate::internal::ai::sandbox::ReviewDecision::Denied => {
+                    return Err(ToolError::ExecutionFailed("rejected by user".to_string()));
+                }
+                crate::internal::ai::sandbox::ReviewDecision::Abort => {
+                    return Err(ToolError::ExecutionFailed("aborted by user".to_string()));
                 }
             }
         }
