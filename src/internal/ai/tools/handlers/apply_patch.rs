@@ -58,16 +58,14 @@ impl ToolHandler for ApplyPatchHandler {
                 touched_paths.insert(path);
             }
         }
+        let constrained_to_workspace = touched_paths
+            .iter()
+            .all(|path| path.starts_with(&working_dir));
 
         if let Some(approval_ctx) = runtime_context
             .as_ref()
             .and_then(|ctx| ctx.approval.as_ref())
-            && crate::internal::ai::sandbox::approval_required(
-                approval_ctx.policy,
-                runtime_context
-                    .as_ref()
-                    .and_then(|ctx| ctx.sandbox.as_ref().map(|s| &s.policy)),
-            )
+            && patch_needs_approval(approval_ctx.policy, constrained_to_workspace)?
         {
             let keys = touched_paths
                 .iter()
@@ -173,6 +171,26 @@ fn parse_patch_text_from_arguments(arguments: &str) -> Result<String, ToolError>
     Ok(arguments.to_string())
 }
 
+fn patch_needs_approval(
+    policy: crate::internal::ai::sandbox::AskForApproval,
+    constrained_to_workspace: bool,
+) -> Result<bool, ToolError> {
+    match policy {
+        crate::internal::ai::sandbox::AskForApproval::UnlessTrusted => Ok(true),
+        crate::internal::ai::sandbox::AskForApproval::Never => {
+            if constrained_to_workspace {
+                Ok(false)
+            } else {
+                Err(ToolError::ExecutionFailed(
+                    "writing outside of the project; rejected by approval policy".to_string(),
+                ))
+            }
+        }
+        crate::internal::ai::sandbox::AskForApproval::OnFailure
+        | crate::internal::ai::sandbox::AskForApproval::OnRequest => Ok(!constrained_to_workspace),
+    }
+}
+
 fn patch_approval_key(path: &std::path::Path, working_dir: &std::path::Path) -> String {
     let rendered = path
         .strip_prefix(working_dir)
@@ -229,6 +247,35 @@ mod tests {
 
     fn wrap_patch(body: &str) -> String {
         format!("*** Begin Patch\n{body}\n*** End Patch")
+    }
+
+    #[test]
+    fn patch_needs_approval_matches_codex_policy_intent() {
+        assert!(
+            !patch_needs_approval(
+                crate::internal::ai::sandbox::AskForApproval::OnRequest,
+                true
+            )
+            .unwrap()
+        );
+        assert!(
+            !patch_needs_approval(
+                crate::internal::ai::sandbox::AskForApproval::OnFailure,
+                true
+            )
+            .unwrap()
+        );
+        assert!(
+            !patch_needs_approval(crate::internal::ai::sandbox::AskForApproval::Never, true)
+                .unwrap()
+        );
+        assert!(
+            patch_needs_approval(
+                crate::internal::ai::sandbox::AskForApproval::UnlessTrusted,
+                true
+            )
+            .unwrap()
+        );
     }
 
     #[tokio::test]
