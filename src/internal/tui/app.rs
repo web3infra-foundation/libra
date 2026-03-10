@@ -23,6 +23,7 @@ use super::{
     },
     terminal::{TARGET_FRAME_INTERVAL, Tui, TuiEvent},
 };
+use walkdir::WalkDir;
 use crate::{
     cli_error,
     internal::ai::{
@@ -38,8 +39,8 @@ use crate::{
         mcp::{
             resource::{
                 CreateContextSnapshotParams, CreateDecisionParams, CreateEvidenceParams,
-                CreatePlanParams, CreateProvenanceParams, CreateRunParams, CreateTaskParams,
-                CreateToolInvocationParams,
+                CreateIntentParams, CreatePatchSetParams, CreatePlanParams, CreateProvenanceParams,
+                CreateRunParams, CreateTaskParams, CreateToolInvocationParams, TouchedFileParams,
             },
             server::LibraMcpServer,
         },
@@ -886,12 +887,62 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     let model_name = self.model_name.clone();
 
                     tokio::spawn(async move {
-                        // Create Plan via MCP (first, per docs: Intent → Plan)
+                        // Step 1: Create Intent (per docs: Intent → Plan)
+                        let intent_params = CreateIntentParams {
+                            content: text_clone.clone(),
+                            structured_content: None,
+                            parent_id: mcp_ids_clone._intent_id.clone(),
+                            parent_ids: None,
+                            analysis_context_frame_ids: None,
+                            status: Some("active".to_string()),
+                            commit_sha: None,
+                            reason: Some("User submitted message".to_string()),
+                            next_intent_id: None,
+                            actor_kind: Some("human".to_string()),
+                            actor_id: Some("user".to_string()),
+                        };
+
+                        // Resolve actor for intent
+                        let intent_actor = match mcp_server_clone.resolve_actor_from_params(
+                            intent_params.actor_kind.as_deref(),
+                            intent_params.actor_id.as_deref(),
+                        ) {
+                            Ok(actor) => actor,
+                            Err(e) => {
+                                cli_error!(e, "error: failed to resolve actor for intent");
+                                return;
+                            }
+                        };
+
+                        // Call MCP interface to create intent
+                        let created_intent_id = match mcp_server_clone
+                            .create_intent_impl(intent_params, intent_actor)
+                            .await
+                        {
+                            Ok(result) => {
+                                // Extract intent_id from result: "Intent created with ID: {uuid}"
+                                result.content.iter().find_map(|c| {
+                                    c.as_text().and_then(|t| {
+                                        t.text
+                                            .strip_prefix("Intent created with ID: ")
+                                            .map(|s| s.to_string())
+                                    })
+                                })
+                            }
+                            Err(e) => {
+                                cli_error!(e, "error: failed to create intent");
+                                None
+                            }
+                        };
+
+                        // Use the created intent_id, or fall back to mcp_ids
+                        let intent_id = created_intent_id.or_else(|| {
+                            mcp_ids_clone._intent_id.clone()
+                        }).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+                        // Step 2: Create Plan via MCP (per docs: Intent → Plan)
                         let plan_params = CreatePlanParams {
-                            intent_id: mcp_ids_clone
-                                ._intent_id
-                                .clone()
-                                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                            intent_id: intent_id.clone(),
                             parent_plan_ids: None,
                             context_frame_ids: None,
                             steps: None,
@@ -1257,15 +1308,39 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         }
                     }
 
+                    // Clone mcp_server for observer (it will be consumed)
+                    let mcp_server_for_observer = mcp_server.clone();
+
                     let mut observer = UiObserver {
                         tx,
-                        mcp_server,
+                        mcp_server: mcp_server_for_observer,
                         mcp_ids: mcp_ids.clone(),
                     };
 
                     // Set run_id on the model if available (for Codex to link patchsets)
                     if let Some(run_id) = mcp_ids.run_id.clone() {
                         model.set_run_id(run_id);
+                    }
+
+                    // Step 1: Take file snapshot before agent execution
+                    let working_dir = registry.working_dir().to_path_buf();
+                    let mut previous_files = std::collections::HashSet::new();
+                    if working_dir.exists() {
+                        for entry in WalkDir::new(&working_dir)
+                            .into_iter()
+                            .filter_map(|e| e.ok())
+                        {
+                            let path = entry.path();
+                            if path.is_file() {
+                                if let Ok(rel_path) = path.strip_prefix(&working_dir) {
+                                    let rel_str = rel_path.to_string_lossy().replace("\\", "/");
+                                    if !rel_str.starts_with(".git") && !rel_str.starts_with(".libra")
+                                    {
+                                        previous_files.insert(rel_str);
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     let result = run_tool_loop_with_history_and_observer(
@@ -1291,6 +1366,103 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                             let _ = observer.tx.send(AppEvent::AgentEvent(AgentEvent::Error {
                                 message: e.to_string(),
                             }));
+                        }
+                    }
+
+                    // Step 2: Detect file changes and create PatchSet
+                    if let Some(ref mcp_server) = mcp_server {
+                        let run_id = mcp_ids
+                            .run_id
+                            .clone()
+                            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+                        // Detect current files
+                        let mut current_files = std::collections::HashSet::new();
+                        let mut file_changes: Vec<TouchedFileParams> = Vec::new();
+
+                        if working_dir.exists() {
+                            for entry in WalkDir::new(&working_dir)
+                                .into_iter()
+                                .filter_map(|e| e.ok())
+                            {
+                                let path = entry.path();
+                                if path.is_file() {
+                                    if let Ok(rel_path) = path.strip_prefix(&working_dir) {
+                                        let rel_str =
+                                            rel_path.to_string_lossy().replace("\\", "/");
+                                        if !rel_str.starts_with(".git")
+                                            && !rel_str.starts_with(".libra")
+                                        {
+                                            current_files.insert(rel_str.clone());
+
+                                            // New or modified file
+                                            if !previous_files.contains(&rel_str) {
+                                                file_changes.push(TouchedFileParams {
+                                                    path: rel_str,
+                                                    change_type: "add".to_string(),
+                                                    lines_added: 0,
+                                                    lines_deleted: 0,
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Detect deleted files
+                            for prev_file in &previous_files {
+                                if !current_files.contains(prev_file) {
+                                    file_changes.push(TouchedFileParams {
+                                        path: prev_file.clone(),
+                                        change_type: "delete".to_string(),
+                                        lines_added: 0,
+                                        lines_deleted: 0,
+                                    });
+                                }
+                            }
+                        }
+
+                        // Create PatchSet if there are changes
+                        if !file_changes.is_empty() {
+                            let actor = match mcp_server.resolve_actor_from_params(
+                                Some("system"),
+                                Some("libra-code"),
+                            ) {
+                                Ok(a) => a,
+                                Err(_) => {
+                                    // Skip PatchSet creation if actor resolution fails
+                                    return;
+                                }
+                            };
+
+                            let params = CreatePatchSetParams {
+                                run_id,
+                                generation: 1,
+                                sequence: None,
+                                base_commit_sha: "0".repeat(64),
+                                touched_files: Some(file_changes),
+                                rationale: Some("Files changed during agent execution".to_string()),
+                                diff_format: Some("unified_diff".to_string()),
+                                diff_artifact: None,
+                                tags: None,
+                                external_ids: None,
+                                actor_kind: Some("system".to_string()),
+                                actor_id: Some("libra-code".to_string()),
+                            };
+
+                            let mcp_server_clone = mcp_server.clone();
+                            tokio::spawn(async move {
+                                match mcp_server_clone.create_patchset_impl(params, actor).await {
+                                    Ok(result) => {
+                                        if result.is_error.unwrap_or(false) {
+                                            tracing::warn!("Failed to create patchset");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Failed to create patchset: {}", e);
+                                    }
+                                }
+                            });
                         }
                     }
                 });
