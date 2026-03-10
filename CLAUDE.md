@@ -66,7 +66,7 @@ tests/
 └── storage_r2_test.rs           # R2 storage tests
 
 docs/                            # Community docs, contributing guide, agent specs
-sql/sqlite_20240331_init.sql     # SQLite schema bootstrap
+sql/sqlite_20260309_init.sql     # SQLite schema bootstrap
 template/                        # Git hook templates (pre-commit, exclude)
 third-party/                     # Buck2/Buckal vendored crate metadata (generated)
 platforms/, toolchains/          # Buck2 platform & toolchain configs
@@ -197,7 +197,7 @@ docs(readme): update provider table
 
 ## Database Schema
 
-SQLite database at `.libra/libra.db` with tables: `config`, `reference`, `reflog`, `rebase_state`, `object_index`. Schema bootstrap in `sql/sqlite_20240331_init.sql`.
+SQLite database at `.libra/libra.db` with tables: `config`, `reference`, `reflog`, `rebase_state`, `object_index`. Schema bootstrap in `sql/sqlite_20260309_init.sql`.
 
 ## Environment Variables
 

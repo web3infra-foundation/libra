@@ -324,7 +324,7 @@ pub(crate) async fn setup_repository(
     checkout_worktree: bool,
 ) -> Result<(), CloneError> {
     let db = crate::internal::db::get_db_conn_instance().await;
-    let remote_head = Head::remote_current_with_conn(db, &remote_config.name).await;
+    let remote_head = Head::remote_current_with_conn(&db, &remote_config.name).await;
 
     let branch_to_checkout = match specified_branch {
         Some(branch_name) => Some(branch_name),
@@ -337,7 +337,7 @@ pub(crate) async fn setup_repository(
     if let Some(branch_name) = branch_to_checkout {
         let remote_tracking_ref = format!("refs/remotes/{}/{}", remote_config.name, branch_name);
         let origin_branch =
-            Branch::find_branch_with_conn(db, &remote_tracking_ref, Some(&remote_config.name))
+            Branch::find_branch_with_conn(&db, &remote_tracking_ref, Some(&remote_config.name))
                 .await
                 .ok_or_else(|| CloneError::RemoteBranchNotFound {
                     branch: branch_name.clone(),

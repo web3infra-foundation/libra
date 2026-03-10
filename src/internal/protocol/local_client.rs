@@ -170,7 +170,7 @@ impl LocalClient {
                     DiscoveryResult {
                         refs: local_branches
                             .into_iter()
-                            .chain(remote_branches.into_iter())
+                            .chain(remote_branches)
                             .map(Into::into)
                             .chain(Head::current_commit().await.map(|x| x.to_string()).map(
                                 |hash| DiscRef {

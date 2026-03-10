@@ -77,7 +77,7 @@ pub async fn create(name: &str, message: Option<String>, force: bool) -> Result<
     let exists = reference::Entity::find()
         .filter(reference::Column::Name.eq(format!("{}{}", TAG_REF_PREFIX, name)))
         .filter(reference::Column::Kind.eq(reference::ConfigKind::Tag))
-        .one(db)
+        .one(&db)
         .await?;
 
     if exists.is_some() && !force {
@@ -125,7 +125,7 @@ pub async fn create(name: &str, message: Option<String>, force: bool) -> Result<
         commit: Set(Some(ref_target_id.to_string())),
         ..Default::default()
     };
-    new_ref.insert(db_conn).await?;
+    new_ref.insert(&db_conn).await?;
 
     Ok(())
 }
@@ -135,7 +135,7 @@ pub async fn list() -> Result<Vec<Tag>, anyhow::Error> {
     let db_conn = get_db_conn_instance().await;
     let models = reference::Entity::find()
         .filter(reference::Column::Kind.eq(reference::ConfigKind::Tag))
-        .all(db_conn)
+        .all(&db_conn)
         .await?;
 
     let mut tags = Vec::new();
@@ -172,7 +172,7 @@ pub async fn delete(name: &str) -> Result<(), anyhow::Error> {
     let result = reference::Entity::delete_many()
         .filter(reference::Column::Name.eq(full_ref_name))
         .filter(reference::Column::Kind.eq(reference::ConfigKind::Tag))
-        .exec(db_conn)
+        .exec(&db_conn)
         .await?;
 
     if result.rows_affected == 0 {
@@ -190,7 +190,7 @@ pub async fn find_tag_and_commit(name: &str) -> Result<Option<(TagObject, Commit
     let model = reference::Entity::find()
         .filter(reference::Column::Name.eq(full_ref_name))
         .filter(reference::Column::Kind.eq(reference::ConfigKind::Tag))
-        .one(db_conn)
+        .one(&db_conn)
         .await
         .map_err(|e| GitError::CustomError(e.to_string()))?;
 

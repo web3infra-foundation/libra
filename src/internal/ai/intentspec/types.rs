@@ -787,6 +787,7 @@ pub enum PatchsetFormat {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ActorMappingConfig {
+    /// Legacy compatibility field for the Scheduler actor ID.
     #[serde(
         rename = "orchestratorActorId",
         default = "ActorMappingConfig::default_orchestrator"

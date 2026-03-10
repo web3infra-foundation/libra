@@ -247,7 +247,7 @@ async fn test_push_file_remote_fails_without_reflog() {
     // ensure no reflog entry is written
     env::set_current_dir(local_path).expect("set current dir to local repo");
     let db = get_db_conn_instance().await;
-    let entry = Reflog::find_one(db, "refs/remotes/origin/master")
+    let entry = Reflog::find_one(&db, "refs/remotes/origin/master")
         .await
         .expect("query reflog");
     assert!(

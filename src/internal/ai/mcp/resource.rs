@@ -517,7 +517,7 @@ pub struct CreateRunParams {
     pub metrics_json: Option<String>,
     /// Optional lifecycle reason for the initial run event.
     pub reason: Option<String>,
-    /// Orchestrator version (default: libra-builtin).
+    /// Scheduler version (legacy field name: orchestrator_version).
     /// Accepted for forward compatibility; not yet persisted by the Run object model.
     pub orchestrator_version: Option<String>,
     /// Search tags (key-value pairs)

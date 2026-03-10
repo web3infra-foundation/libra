@@ -145,7 +145,7 @@ async fn handle_show(ref_name: &str, options: ReflogShowOptions) -> CliResult<()
         .map_err(|e| CliError::fatal(format!("invalid --until date: {e}")))?;
 
     let ref_name = parse_ref_name(ref_name).await;
-    let logs = Reflog::find_all(db, &ref_name)
+    let logs = Reflog::find_all(&db, &ref_name)
         .await
         .map_err(|e| CliError::fatal(format!("failed to get reflog entries: {e}")))?;
 
@@ -218,7 +218,7 @@ async fn parse_ref_name(partial_ref_name: &str) -> String {
 
 async fn handle_exists(ref_name: &str) -> CliResult<()> {
     let db = get_db_conn_instance().await;
-    let log = Reflog::find_one(db, ref_name)
+    let log = Reflog::find_one(&db, ref_name)
         .await
         .map_err(|e| CliError::fatal(format!("failed to get reflog entry: {e}")))?;
     if log.is_none() {

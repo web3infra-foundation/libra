@@ -992,6 +992,10 @@ fn test_filter_branches_propagates_error_for_corrupt_commit() {
     use git_internal::hash::ObjectHash;
     use libra::internal::branch::Branch;
 
+    let temp_path = tempdir().unwrap();
+    init_repo_via_cli(temp_path.path());
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
     // Fabricate a branch whose commit hash does not exist in any storage.
     let bogus_hash =
         ObjectHash::from_str("0000000000000000000000000000000000000000000000000000000000000000")
