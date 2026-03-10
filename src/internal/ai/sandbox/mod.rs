@@ -6,6 +6,9 @@ pub mod policy;
 
 pub use policy::{NetworkAccess, SandboxPermissions, SandboxPolicy, WritableRoot};
 
+#[cfg(target_os = "macos")]
+use std::path::PathBuf;
+
 /// Runtime sandbox configuration attached to a tool invocation.
 #[derive(Clone, Debug)]
 pub struct ToolSandboxContext {
@@ -170,58 +173,115 @@ fn build_macos_seatbelt_command(
 ) -> Result<Command, String> {
     const SEATBELT_EXECUTABLE: &str = "/usr/bin/sandbox-exec";
 
-    let profile = build_seatbelt_profile(policy, cwd)?;
+    let args = build_macos_seatbelt_args(command, policy, cwd);
     let mut cmd = Command::new(SEATBELT_EXECUTABLE);
-    cmd.arg("-p").arg(profile).arg("--");
-    cmd.args(command);
+    cmd.args(args);
     Ok(cmd)
 }
 
 #[cfg(target_os = "macos")]
-fn build_seatbelt_profile(policy: &SandboxPolicy, cwd: &Path) -> Result<String, String> {
-    let mut lines = vec![
-        "(version 1)".to_string(),
-        "(deny default)".to_string(),
-        "(import \"system.sb\")".to_string(),
-        "(allow process*)".to_string(),
-        "(allow file-read*)".to_string(),
-        "(allow file-write* (literal \"/dev/null\"))".to_string(),
-    ];
+fn build_macos_seatbelt_args(command: Vec<String>, policy: &SandboxPolicy, cwd: &Path) -> Vec<String> {
+    const SEATBELT_BASE_POLICY: &str = include_str!("seatbelt_base_policy.sbpl");
+    const SEATBELT_NETWORK_POLICY: &str = include_str!("seatbelt_network_policy.sbpl");
+
+    let (file_write_policy, file_write_params) = build_macos_file_write_policy(policy, cwd);
+    let network_policy = if policy.has_full_network_access() {
+        SEATBELT_NETWORK_POLICY
+    } else {
+        ""
+    };
+
+    let full_policy = format!(
+        "{SEATBELT_BASE_POLICY}\n; allow read-only file operations\n(allow file-read*)\n{file_write_policy}\n{network_policy}"
+    );
+
+    let mut args = vec!["-p".to_string(), full_policy];
+    let dir_params = [file_write_params, macos_dir_params()].concat();
+    args.extend(
+        dir_params
+            .into_iter()
+            .map(|(key, value)| format!("-D{key}={}", value.to_string_lossy())),
+    );
+    args.push("--".to_string());
+    args.extend(command);
+    args
+}
+
+#[cfg(target_os = "macos")]
+fn build_macos_file_write_policy(
+    policy: &SandboxPolicy,
+    cwd: &Path,
+) -> (String, Vec<(String, PathBuf)>) {
+    if policy.has_full_disk_write_access() {
+        return (
+            r#"(allow file-write* (regex #"^/"))"#.to_string(),
+            Vec::new(),
+        );
+    }
 
     let writable_roots = policy.get_writable_roots_with_cwd(cwd);
-    if policy.has_full_disk_write_access() {
-        lines.push("(allow file-write* (regex #\"^/\"))".to_string());
-    } else {
-        for root in &writable_roots {
-            let root = root
-                .root
-                .canonicalize()
-                .unwrap_or_else(|_| root.root.clone())
-                .to_string_lossy()
-                .replace('\\', "\\\\")
-                .replace('"', "\\\"");
-            lines.push(format!("(allow file-write* (subpath \"{root}\"))"));
+    let mut writable_folder_policies = Vec::new();
+    let mut file_write_params = Vec::new();
+
+    for (index, writable_root) in writable_roots.iter().enumerate() {
+        let canonical_root = writable_root
+            .root
+            .canonicalize()
+            .unwrap_or_else(|_| writable_root.root.clone());
+        let root_param = format!("WRITABLE_ROOT_{index}");
+        file_write_params.push((root_param.clone(), canonical_root));
+
+        if writable_root.read_only_subpaths.is_empty() {
+            writable_folder_policies.push(format!("(subpath (param \"{root_param}\"))"));
+            continue;
         }
-        for subpath in writable_roots
-            .iter()
-            .flat_map(|root| &root.read_only_subpaths)
+
+        let mut require_parts = vec![format!("(subpath (param \"{root_param}\"))")];
+        for (subpath_index, read_only_subpath) in writable_root.read_only_subpaths.iter().enumerate()
         {
-            if !subpath.exists() {
-                continue;
-            }
-            let escaped = subpath
-                .to_string_lossy()
-                .replace('\\', "\\\\")
-                .replace('"', "\\\"");
-            lines.push(format!("(deny file-write* (subpath \"{escaped}\"))"));
+            let canonical_read_only_subpath = read_only_subpath
+                .canonicalize()
+                .unwrap_or_else(|_| read_only_subpath.clone());
+            let read_only_param = format!("WRITABLE_ROOT_{index}_RO_{subpath_index}");
+            file_write_params.push((read_only_param.clone(), canonical_read_only_subpath));
+            require_parts.push(format!(
+                "(require-not (subpath (param \"{read_only_param}\")))"
+            ));
         }
+        writable_folder_policies.push(format!("(require-all {} )", require_parts.join(" ")));
     }
 
-    if policy.has_full_network_access() {
-        lines.push("(allow network*)".to_string());
+    if writable_folder_policies.is_empty() {
+        ("".to_string(), file_write_params)
+    } else {
+        (
+            format!(
+                "(allow file-write*\n{}\n)",
+                writable_folder_policies.join(" ")
+            ),
+            file_write_params,
+        )
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_dir_params() -> Vec<(String, PathBuf)> {
+    if let Some(path) = std::env::var_os("DARWIN_USER_CACHE_DIR")
+        .map(PathBuf::from)
+        .and_then(|path| path.canonicalize().ok().or(Some(path)))
+    {
+        return vec![("DARWIN_USER_CACHE_DIR".to_string(), path)];
     }
 
-    Ok(lines.join("\n"))
+    if let Some(path) = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join("Library").join("Caches"))
+        .and_then(|path| path.canonicalize().ok().or(Some(path)))
+    {
+        return vec![("DARWIN_USER_CACHE_DIR".to_string(), path)];
+    }
+
+    Vec::new()
 }
 
 #[cfg(target_os = "linux")]
