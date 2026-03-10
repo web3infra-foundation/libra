@@ -44,6 +44,7 @@ use crate::internal::{
 const DEFAULT_WEB_PORT: u16 = 3000;
 const DEFAULT_MCP_PORT: u16 = 6789;
 const DEFAULT_BIND_HOST: &str = "127.0.0.1";
+const BROWSE_PAGE_HTML: &str = include_str!("code/index.html");
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum CodeProvider {
@@ -127,19 +128,7 @@ pub async fn execute(args: CodeArgs) {
 }
 
 async fn root() -> Html<&'static str> {
-    Html(
-        r#"<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Libra Code</title>
-  </head>
-  <body>
-    <h1>Hello, Libra Code!</h1>
-  </body>
-</html>"#,
-    )
+    Html(BROWSE_PAGE_HTML)
 }
 
 struct WebServerHandle {
