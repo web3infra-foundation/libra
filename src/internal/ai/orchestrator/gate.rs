@@ -111,6 +111,7 @@ async fn run_command_check(
         .and_then(|ctx| ctx.max_output_bytes)
         .unwrap_or(MAX_OUTPUT_BYTES);
     let sandbox = runtime_context.and_then(|ctx| ctx.sandbox.clone());
+    let sandbox_runtime = runtime_context.and_then(|ctx| ctx.sandbox_runtime.as_ref());
 
     let result = crate::internal::ai::sandbox::run_shell_command(
         &command,
@@ -118,6 +119,7 @@ async fn run_command_check(
         Some(timeout_secs.saturating_mul(1000)),
         max_output_bytes,
         sandbox,
+        sandbox_runtime,
     )
     .await;
 

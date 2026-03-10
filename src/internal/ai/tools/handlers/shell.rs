@@ -62,8 +62,11 @@ impl ToolHandler for ShellHandler {
             .as_ref()
             .and_then(|ctx| ctx.max_output_bytes)
             .unwrap_or(DEFAULT_MAX_OUTPUT_BYTES);
-        let sandbox = runtime_context.and_then(|ctx| {
-            ctx.sandbox.map(|mut sandbox| {
+        let sandbox_runtime = runtime_context
+            .as_ref()
+            .and_then(|ctx| ctx.sandbox_runtime.as_ref());
+        let sandbox = runtime_context.as_ref().and_then(|ctx| {
+            ctx.sandbox.clone().map(|mut sandbox| {
                 sandbox.permissions = args.sandbox_permissions;
                 sandbox
             })
@@ -75,6 +78,7 @@ impl ToolHandler for ShellHandler {
             args.timeout_ms,
             max_output_bytes,
             sandbox,
+            sandbox_runtime,
         )
         .await
         .map_err(ToolError::ExecutionFailed)?;

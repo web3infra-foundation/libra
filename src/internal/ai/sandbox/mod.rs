@@ -26,7 +26,14 @@ pub struct ToolSandboxContext {
 #[derive(Clone, Debug, Default)]
 pub struct ToolRuntimeContext {
     pub sandbox: Option<ToolSandboxContext>,
+    pub sandbox_runtime: Option<SandboxRuntimeConfig>,
     pub max_output_bytes: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SandboxRuntimeConfig {
+    pub linux_sandbox_exe: Option<PathBuf>,
+    pub use_linux_sandbox_bwrap: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -53,9 +60,29 @@ pub async fn run_shell_command(
     timeout_ms: Option<u64>,
     max_output_bytes: usize,
     sandbox: Option<ToolSandboxContext>,
+    sandbox_runtime: Option<&SandboxRuntimeConfig>,
+) -> Result<SandboxExecOutput, String> {
+    let spec = CommandSpec::shell(
+        command,
+        cwd.to_path_buf(),
+        timeout_ms,
+        sandbox
+            .as_ref()
+            .map(|context| context.permissions)
+            .unwrap_or(SandboxPermissions::UseDefault),
+        None,
+    );
+    run_command_spec(spec, max_output_bytes, sandbox, sandbox_runtime).await
+}
+
+pub async fn run_command_spec(
+    spec: CommandSpec,
+    max_output_bytes: usize,
+    sandbox: Option<ToolSandboxContext>,
+    sandbox_runtime: Option<&SandboxRuntimeConfig>,
 ) -> Result<SandboxExecOutput, String> {
     let (mut cmd, timeout_override) =
-        build_sandboxed_shell_command(command, cwd, timeout_ms, sandbox.as_ref())?;
+        build_command_from_spec(spec, sandbox.as_ref(), sandbox_runtime)?;
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd
         .spawn()
@@ -83,8 +110,7 @@ pub async fn run_shell_command(
         Arc::clone(&stderr_state),
     ));
 
-    let timeout_dur =
-        Duration::from_millis(timeout_override.or(timeout_ms).unwrap_or(DEFAULT_TIMEOUT_MS));
+    let timeout_dur = Duration::from_millis(timeout_override.unwrap_or(DEFAULT_TIMEOUT_MS));
     let (exit_code, timed_out) = tokio::select! {
         status = child.wait() => {
             let code = status
@@ -126,29 +152,24 @@ pub async fn run_shell_command(
     })
 }
 
-fn build_sandboxed_shell_command(
-    command: &str,
-    cwd: &Path,
-    timeout_ms: Option<u64>,
+fn build_command_from_spec(
+    spec: CommandSpec,
     sandbox: Option<&ToolSandboxContext>,
+    sandbox_runtime: Option<&SandboxRuntimeConfig>,
 ) -> Result<(tokio::process::Command, Option<u64>), String> {
-    let linux_sandbox_exe = std::env::var_os("LIBRA_LINUX_SANDBOX_EXE").map(PathBuf::from);
-    let use_linux_sandbox_bwrap = env_flag_enabled("LIBRA_USE_LINUX_SANDBOX_BWRAP");
+    let sandbox_policy_cwd = spec.cwd.clone();
+    let linux_sandbox_exe = sandbox_runtime
+        .and_then(|config| config.linux_sandbox_exe.clone())
+        .or_else(|| std::env::var_os("LIBRA_LINUX_SANDBOX_EXE").map(PathBuf::from));
+    let use_linux_sandbox_bwrap = sandbox_runtime
+        .map(|config| config.use_linux_sandbox_bwrap)
+        .unwrap_or_else(|| env_flag_enabled("LIBRA_USE_LINUX_SANDBOX_BWRAP"));
     let manager = SandboxManager::new();
-    let spec = CommandSpec::shell(
-        command,
-        cwd.to_path_buf(),
-        timeout_ms,
-        sandbox
-            .map(|context| context.permissions)
-            .unwrap_or(SandboxPermissions::UseDefault),
-        None,
-    );
     let exec_env = manager
         .transform(SandboxTransformRequest {
             spec,
             policy: sandbox.map(|context| &context.policy),
-            sandbox_policy_cwd: cwd,
+            sandbox_policy_cwd: &sandbox_policy_cwd,
             linux_sandbox_exe: linux_sandbox_exe.as_ref(),
             use_linux_sandbox_bwrap,
         })

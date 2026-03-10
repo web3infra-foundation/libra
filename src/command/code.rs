@@ -429,6 +429,7 @@ async fn run_tui_with_model<M>(
                 },
                 permissions: SandboxPermissions::UseDefault,
             }),
+            sandbox_runtime: None,
             max_output_bytes: None,
         }),
     };
