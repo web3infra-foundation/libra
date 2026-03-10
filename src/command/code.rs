@@ -72,11 +72,15 @@ pub enum CodeContext {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum CodeApprovalPolicy {
+    /// Never prompt; dangerous commands are rejected.
     Never,
+    /// Prompt only when retrying after sandbox denial.
     #[value(alias = "on-failure")]
     OnFailure,
+    /// Run inside sandbox by default; prompt when escalation or policy requires it.
     #[value(alias = "on-request")]
     OnRequest,
+    /// Prompt for non-trusted operations (safe read commands are auto-allowed).
     #[value(alias = "unless-trusted", alias = "untrusted")]
     Untrusted,
 }
@@ -126,7 +130,11 @@ pub struct CodeArgs {
     #[arg(long)]
     pub resume: bool,
 
-    /// Tool approval policy: never, on-failure, on-request, or untrusted.
+    /// Tool approval policy:
+    /// - `never`: no prompts, dangerous commands are rejected
+    /// - `on-failure`: prompt only for retry outside sandbox after sandbox denial
+    /// - `on-request`: run sandboxed by default; prompt for escalation/policy-required cases
+    /// - `untrusted`: prompt for non-trusted operations, auto-allow known-safe reads
     #[arg(long, value_enum, default_value_t = CodeApprovalPolicy::OnRequest)]
     pub approval_policy: CodeApprovalPolicy,
 
