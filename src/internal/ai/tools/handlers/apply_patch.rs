@@ -1,6 +1,9 @@
 //! Handler for the apply_patch tool using Codex-style format.
 
+use std::collections::BTreeSet;
+
 use async_trait::async_trait;
+use tokio::sync::oneshot;
 
 use crate::internal::ai::tools::{
     apply_patch::{self, ApplyPatchArgs},
@@ -29,8 +32,10 @@ impl ToolHandler for ApplyPatchHandler {
 
     async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, ToolError> {
         let ToolInvocation {
+            call_id,
             payload,
             working_dir,
+            runtime_context,
             ..
         } = invocation;
 
@@ -46,9 +51,68 @@ impl ToolHandler for ApplyPatchHandler {
         let parsed = apply_patch::parse_patch(&patch_text)
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 
+        let mut touched_paths = BTreeSet::new();
         for hunk in &parsed.hunks {
             for path in hunk.all_resolved_paths(&working_dir) {
                 validate_path(&path, &working_dir)?;
+                touched_paths.insert(path);
+            }
+        }
+
+        if let Some(approval_ctx) = runtime_context.as_ref().and_then(|ctx| ctx.approval.as_ref())
+            && patch_needs_approval(
+                approval_ctx.policy,
+                runtime_context
+                    .as_ref()
+                    .and_then(|ctx| ctx.sandbox.as_ref().map(|s| &s.policy)),
+            )
+        {
+            let keys = touched_paths
+                .iter()
+                .map(|path| patch_approval_key(path, &working_dir))
+                .collect::<Vec<_>>();
+            let already_approved = {
+                let store = approval_ctx.store.lock().await;
+                keys.iter().all(|key| {
+                    matches!(
+                        store.get(key),
+                        Some(crate::internal::ai::sandbox::ReviewDecision::ApprovedForSession)
+                    )
+                })
+            };
+
+            if !already_approved {
+                let (response_tx, response_rx) = oneshot::channel();
+                let request = crate::internal::ai::sandbox::ExecApprovalRequest {
+                    call_id: call_id.clone(),
+                    command: format!("apply_patch ({} path(s))", touched_paths.len()),
+                    cwd: working_dir.clone(),
+                    reason: Some(format_patch_approval_reason(&touched_paths, &working_dir)),
+                    is_retry: false,
+                    response_tx,
+                };
+                approval_ctx.request_tx.send(request).map_err(|_| {
+                    ToolError::ExecutionFailed("Approval UI is not available".to_string())
+                })?;
+
+                match response_rx.await.unwrap_or_default() {
+                    crate::internal::ai::sandbox::ReviewDecision::Approved => {}
+                    crate::internal::ai::sandbox::ReviewDecision::ApprovedForSession => {
+                        let mut store = approval_ctx.store.lock().await;
+                        for key in keys {
+                            store.put(
+                                key,
+                                crate::internal::ai::sandbox::ReviewDecision::ApprovedForSession,
+                            );
+                        }
+                    }
+                    crate::internal::ai::sandbox::ReviewDecision::Denied => {
+                        return Err(ToolError::ExecutionFailed("rejected by user".to_string()));
+                    }
+                    crate::internal::ai::sandbox::ReviewDecision::Abort => {
+                        return Err(ToolError::ExecutionFailed("aborted by user".to_string()));
+                    }
+                }
             }
         }
 
@@ -105,6 +169,71 @@ fn parse_patch_text_from_arguments(arguments: &str) -> Result<String, ToolError>
 
     // 3) Raw text (non-JSON) – accept for compatibility.
     Ok(arguments.to_string())
+}
+
+fn patch_needs_approval(
+    policy: crate::internal::ai::sandbox::AskForApproval,
+    sandbox_policy: Option<&crate::internal::ai::sandbox::SandboxPolicy>,
+) -> bool {
+    match policy {
+        crate::internal::ai::sandbox::AskForApproval::Never
+        | crate::internal::ai::sandbox::AskForApproval::OnFailure => false,
+        crate::internal::ai::sandbox::AskForApproval::UnlessTrusted => true,
+        crate::internal::ai::sandbox::AskForApproval::OnRequest => sandbox_policy.is_some_and(
+            |policy| {
+                !matches!(
+                    policy,
+                    crate::internal::ai::sandbox::SandboxPolicy::DangerFullAccess
+                        | crate::internal::ai::sandbox::SandboxPolicy::ExternalSandbox { .. }
+                )
+            },
+        ),
+    }
+}
+
+fn patch_approval_key(path: &std::path::Path, working_dir: &std::path::Path) -> String {
+    let rendered = path
+        .strip_prefix(working_dir)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .to_string();
+    format!("apply_patch|{rendered}")
+}
+
+fn format_patch_approval_reason(
+    touched_paths: &BTreeSet<std::path::PathBuf>,
+    working_dir: &std::path::Path,
+) -> String {
+    let mut rendered_paths = touched_paths
+        .iter()
+        .map(|path| {
+            path.strip_prefix(working_dir)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    rendered_paths.sort();
+
+    let shown = rendered_paths
+        .iter()
+        .take(8)
+        .map(|path| format!(" - {path}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if rendered_paths.len() > 8 {
+        format!(
+            "apply_patch will modify {} paths:\n{}\n - ...",
+            rendered_paths.len(),
+            shown
+        )
+    } else {
+        format!(
+            "apply_patch will modify {} paths:\n{}",
+            rendered_paths.len(),
+            shown
+        )
+    }
 }
 
 #[cfg(test)]
