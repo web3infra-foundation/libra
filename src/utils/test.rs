@@ -6,6 +6,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use tracing::level_filters::LevelFilter;
+
 use crate::{command, utils::util};
 
 pub struct ChangeDirGuard {
@@ -129,14 +131,24 @@ pub async fn setup_with_new_libra_in(temp_path: impl AsRef<Path>) {
 }
 /// change the log level to reduce verbose output.
 pub fn init_debug_logger() {
-    let _ = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .try_init(); // avoid multi-init
+    init_logger_with_default_level(LevelFilter::DEBUG);
 }
 
 pub fn init_logger() {
+    init_logger_with_default_level(LevelFilter::INFO);
+}
+
+fn init_logger_with_default_level(default_level: LevelFilter) {
+    let effective_level =
+        if env::var_os("LIBRA_TEST_LOG").is_some() || env::var_os("RUST_LOG").is_some() {
+            default_level
+        } else {
+            // Keep tests quiet by default; opt in with LIBRA_TEST_LOG=1 when debugging.
+            LevelFilter::OFF
+        };
+
     let _ = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
+        .with_max_level(effective_level)
         .try_init(); // avoid multi-init
 }
 

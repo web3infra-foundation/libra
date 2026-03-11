@@ -76,14 +76,12 @@ pub async fn execute_safe(args: VaultArgs) -> CliResult<()> {
                     .unwrap_or_else(|| "user@libra.local".to_string()),
             };
 
-            let public_key =
-                vault::generate_pgp_key(&root_dir, &unseal_key, &user_name, &user_email)
-                    .await
-                    .map_err(|e| CliError::fatal(e.to_string()))?;
+            let _ = vault::generate_pgp_key(&root_dir, &unseal_key, &user_name, &user_email)
+                .await
+                .map_err(|e| CliError::fatal(e.to_string()))?;
             // Ensure duplicate stale rows cannot keep an older "false" effective value.
             let _ = Config::remove("vault", None, "signing").await;
             Config::insert("vault", None, "signing", "true").await;
-            println!("{public_key}");
         }
         VaultCommand::GenerateSshKey { name } => {
             let unseal_key = match vault::load_unseal_key().await {
@@ -100,10 +98,9 @@ pub async fn execute_safe(args: VaultArgs) -> CliResult<()> {
                     .unwrap_or_else(|| "Libra User".to_string()),
             };
 
-            let public_key = vault::generate_ssh_key(&root_dir, &unseal_key, &user_name)
+            let _ = vault::generate_ssh_key(&root_dir, &unseal_key, &user_name)
                 .await
                 .map_err(|e| CliError::fatal(e.to_string()))?;
-            println!("{public_key}");
         }
         VaultCommand::GpgPublicKey => {
             if let Some(public_key) = Config::get("vault", None, "gpg_pubkey").await {

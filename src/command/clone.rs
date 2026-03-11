@@ -231,7 +231,7 @@ async fn clone_into_destination(
         git_internal::hash::HashKind::Sha256 => "sha256".to_string(),
     };
 
-    command::init::init(command::init::InitArgs {
+    command::init::execute_safe(command::init::InitArgs {
         bare: args.bare,
         template: None,
         initial_branch: args.branch.clone(),
@@ -242,7 +242,7 @@ async fn clone_into_destination(
         ref_format: None,
         from_git_repository: None,
         separate_libra_dir: None,
-        vault: false,
+        vault: true,
     })
     .await
     .map_err(|error| CloneError::InitializeRepository {

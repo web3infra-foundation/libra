@@ -870,21 +870,14 @@ async fn init_vault_for_repo(root_dir: &Path) -> anyhow::Result<()> {
     // Generate PGP key for commit signing — only enable signing on success.
     // If key generation fails, roll back the persisted vault credentials so the
     // repo is not left in a half-configured state.
-    let public_key =
-        match vault::generate_pgp_key(root_dir, &unseal_key, &user_name, &user_email).await {
-            Ok(pk) => pk,
-            Err(e) => {
-                // Roll back both credentials and vault.db so init --vault remains atomic.
-                rollback_failed_vault_init(root_dir).await;
-                return Err(e);
-            }
-        };
+    if let Err(e) = vault::generate_pgp_key(root_dir, &unseal_key, &user_name, &user_email).await {
+        // Roll back both credentials and vault.db so init --vault remains atomic.
+        rollback_failed_vault_init(root_dir).await;
+        return Err(e);
+    }
 
     // Only mark signing as enabled after key generation succeeded
     UserConfig::insert("vault", None, "signing", "true").await;
-
-    println!("Vault initialized with PGP signing key");
-    println!("Public key:\n{public_key}");
 
     Ok(())
 }
