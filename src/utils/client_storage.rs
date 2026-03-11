@@ -18,7 +18,7 @@ use git_internal::{
 };
 use once_cell::sync::Lazy;
 use regex::Regex;
-use sea_orm::{ActiveModelTrait, Set};
+use sea_orm::{ActiveModelTrait, DatabaseConnection, Set};
 use tokio::{
     runtime::Runtime,
     sync::mpsc::{Sender, channel, error::TrySendError},
@@ -516,22 +516,27 @@ fn get_or_create_repo_id_for_prefix() -> Option<String> {
     rx.recv().ok().flatten()
 }
 
-async fn load_repo_id_with_conn<C: sea_orm::ConnectionTrait>(
-    db: &C,
-) -> Result<String, sea_orm::DbErr> {
+/// Resolve repository ID for object-index rows.
+///
+/// Best effort only: if config cannot be read (e.g. temp repo already removed),
+/// use a stable fallback to avoid panicking background tasks.
+async fn resolve_repo_id_for_index(db_conn: &DatabaseConnection) -> String {
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
-    let repo_id = config_model::Entity::find()
+    match config_model::Entity::find()
         .filter(config_model::Column::Configuration.eq("libra"))
         .filter(config_model::Column::Name.is_null())
         .filter(config_model::Column::Key.eq("repoid"))
-        .one(db)
-        .await?
-        .map(|entry| entry.value)
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "unknown-repo".to_string());
-
-    Ok(repo_id)
+        .one(db_conn)
+        .await
+    {
+        Ok(Some(row)) if !row.value.trim().is_empty() => row.value,
+        Ok(_) => "unknown-repo".to_string(),
+        Err(err) => {
+            tracing::debug!("Failed to resolve repo id for object index update: {}", err);
+            "unknown-repo".to_string()
+        }
+    }
 }
 
 async fn update_object_index(
@@ -548,9 +553,8 @@ async fn update_object_index(
                 db_path = %db_path.display(),
                 object_id = o_id,
                 error = %first_err,
-                "Retrying object index update after resetting cached database connection"
+                "Retrying object index update after transient failure"
             );
-            db::reset_db_conn_instance_for_path(db_path).await;
             match update_object_index_once(db_path, o_id, o_type, o_size).await {
                 Ok(()) => Ok(()),
                 Err(_err) if !db_path.exists() => Ok(()),
@@ -571,30 +575,31 @@ async fn update_object_index_once(
         return Ok(());
     }
 
-    let db_conn = match db::get_db_conn_instance_for_path(db_path).await {
-        Ok(conn) => conn,
-        Err(err) if err.kind() == io::ErrorKind::NotFound || !db_path.exists() => return Ok(()),
-        Err(err) => {
-            return Err(format!(
-                "Failed to connect to object index database {}: {}",
-                db_path.display(),
-                err
-            ));
-        }
-    };
+    let db_path_str = db_path.to_str().ok_or_else(|| {
+        format!(
+            "database path is not valid UTF-8 for object index update: {}",
+            db_path.display()
+        )
+    })?;
 
-    let repo_id = match load_repo_id_with_conn(&db_conn).await {
-        Ok(repo_id) => repo_id,
-        Err(_err) if !db_path.exists() => return Ok(()),
-        Err(err) => {
-            return Err(format!(
-                "Failed to load repo id from {}: {}",
-                db_path.display(),
-                err
-            ));
-        }
-    };
+    // Background indexing is best-effort. Use a short busy timeout so foreground
+    // repo mutations (commit/reflog/etc.) are not blocked by index updates.
+    let db_conn =
+        match db::establish_connection_with_busy_timeout(db_path_str, Duration::from_millis(200))
+            .await
+        {
+            Ok(conn) => conn,
+            Err(err) if err.kind() == io::ErrorKind::NotFound || !db_path.exists() => return Ok(()),
+            Err(err) => {
+                return Err(format!(
+                    "Failed to connect to object index database {}: {}",
+                    db_path.display(),
+                    err
+                ));
+            }
+        };
 
+    let repo_id = resolve_repo_id_for_index(&db_conn).await;
     let created_at = chrono::Utc::now().timestamp();
 
     // Check if object already exists

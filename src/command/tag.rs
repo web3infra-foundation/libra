@@ -192,12 +192,31 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::{cli::parse_async, internal::tag, utils::test::ChangeDirGuard};
+    use crate::{
+        cli::parse_async,
+        command::init::{self, InitArgs},
+        internal::tag,
+        utils::test::ChangeDirGuard,
+    };
 
     async fn setup_repo_with_commit() -> (tempfile::TempDir, ChangeDirGuard) {
         let temp_dir = tempdir().unwrap();
         let guard = ChangeDirGuard::new(temp_dir.path());
-        parse_async(Some(&["libra", "init"])).await.unwrap();
+        init::init(InitArgs {
+            bare: false,
+            template: None,
+            initial_branch: None,
+            repo_directory: ".".to_string(),
+            quiet: false,
+            shared: None,
+            separate_libra_dir: None,
+            object_format: None,
+            ref_format: None,
+            from_git_repository: None,
+            vault: false,
+        })
+        .await
+        .unwrap();
         parse_async(Some(&["libra", "config", "user.name", "Tag Test User"]))
             .await
             .unwrap();

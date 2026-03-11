@@ -167,8 +167,12 @@ async fn test_config_import_local_from_git_repository() {
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
     use libra::internal::config::Config;
-    Config::remove_config("user", None, "name", None, true).await;
-    Config::remove_config("user", None, "email", None, true).await;
+    Config::remove_config("user", None, "name", None, true)
+        .await
+        .unwrap();
+    Config::remove_config("user", None, "email", None, true)
+        .await
+        .unwrap();
 
     let git_init = Command::new("git").args(["init"]).output().unwrap();
     assert!(git_init.status.success());

@@ -5,10 +5,10 @@ load("@buckal//:wrapper.bzl", "rust_library")
 
 http_archive(
     name = "bumpalo-vendor",
-    urls = ["https://static.crates.io/crates/bumpalo/bumpalo-3.20.2.crate"],
-    sha256 = "5d20789868f4b01b2f2caec9f5c4e0213b41e3e5702a50157d699ae31ced2fcb",
+    urls = ["https://static.crates.io/crates/bumpalo/bumpalo-3.19.1.crate"],
+    sha256 = "5dd9dc738b7a8311c7ade152424974d8115f2cdad61e8dab8dac9f2362298510",
     type = "tar.gz",
-    strip_prefix = "bumpalo-3.20.2",
+    strip_prefix = "bumpalo-3.19.1",
     out = "vendor",
 )
 

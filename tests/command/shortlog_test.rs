@@ -223,7 +223,9 @@ async fn create_test_commit_tree() -> String {
         _ => panic!("should be branch"),
     };
 
-    Branch::update_branch(&branch_name, &commit_14.id.to_string(), None).await;
+    Branch::update_branch(&branch_name, &commit_14.id.to_string(), None)
+        .await
+        .unwrap();
 
     commit_14.id.to_string()
 }
@@ -570,7 +572,9 @@ async fn test_shortlog_committer_date_filter() {
         Head::Branch(name) => name,
         _ => panic!("should be branch"),
     };
-    Branch::update_branch(&branch_name, &commit.id.to_string(), None).await;
+    Branch::update_branch(&branch_name, &commit.id.to_string(), None)
+        .await
+        .unwrap();
 
     // Filter since 2026-01-15
     // Should exclude if using author date (Jan 1 < Jan 15)

@@ -13,6 +13,22 @@ use crate::internal::{
 
 pub struct Config;
 
+trait DatabaseConnectionRef {
+    fn as_db_conn_ref(&self) -> &DatabaseConnection;
+}
+
+impl DatabaseConnectionRef for DatabaseConnection {
+    fn as_db_conn_ref(&self) -> &DatabaseConnection {
+        self
+    }
+}
+
+impl DatabaseConnectionRef for &DatabaseConnection {
+    fn as_db_conn_ref(&self) -> &DatabaseConnection {
+        self
+    }
+}
+
 #[derive(Clone)]
 pub struct RemoteConfig {
     pub name: String,
@@ -471,7 +487,7 @@ impl Config {
         key: &str,
         valuepattern: Option<&str>,
         delete_all: bool,
-    ) {
+    ) -> Result<(), sea_orm::DbErr> {
         let db = get_db_conn_instance().await;
         Self::remove_config_with_conn(&db, configuration, name, key, valuepattern, delete_all)
             .await

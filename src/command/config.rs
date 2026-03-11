@@ -882,14 +882,21 @@ async fn get_config(
     };
 
     if let Some(v) = value {
+        // Build the full dotted key for secret detection
+        let full_key = match &key.name {
+            Some(n) => format!("{}.{}.{}", key.configuration, n, key.key),
+            None => format!("{}.{}", key.configuration, key.key),
+        };
+        let redact = is_secret_key(&full_key);
+        // Match against the raw value, but display redacted if needed
         if let Some(vp) = valuepattern {
-            // if value pattern is present, check it
             if v.contains(vp) {
-                println!("{v}");
+                let display_value = if redact { "<REDACTED>".to_string() } else { v };
+                println!("{display_value}");
             }
         } else {
-            // if value pattern is not present, just print it
-            println!("{v}");
+            let display_value = if redact { "<REDACTED>".to_string() } else { v };
+            println!("{display_value}");
         }
     } else if let Some(default_value) = default {
         // if value does not exist just return the default value if it's present
@@ -913,16 +920,29 @@ async fn get_all_config(
         ScopedConfig::get_all(scope, &key.configuration, key.name.as_deref(), &key.key).await?
     };
 
+    // Build the full dotted key for secret detection
+    let full_key = match &key.name {
+        Some(n) => format!("{}.{}.{}", key.configuration, n, key.key),
+        None => format!("{}.{}", key.configuration, key.key),
+    };
+    let redact = is_secret_key(&full_key);
+
     let mut matched_any = false;
     for value in values {
+        let display_value = if redact {
+            "<REDACTED>".to_string()
+        } else {
+            value.clone()
+        };
         if let Some(vp) = valuepattern {
+            // When redacting, match against the original value but display redacted
             if value.contains(vp) {
-                println!("{value}");
+                println!("{display_value}");
                 matched_any = true;
             }
         } else {
             matched_any = true;
-            println!("{value}");
+            println!("{display_value}");
         }
     }
     if !matched_any && let Some(default_value) = default {
@@ -1031,12 +1051,24 @@ async fn list_config(name_only: bool, scope: ConfigScope, use_cascade: bool) -> 
     for (key, value) in configurations {
         if name_only {
             println!("{key}");
+        } else if is_secret_key(&key) {
+            println!("{key}=<REDACTED>");
         } else {
             println!("{key}={value}");
         }
     }
 
     Ok(())
+}
+
+/// Returns true if the config key holds sensitive material that should not be
+/// printed in plaintext (e.g. vault unseal key, encrypted root token).
+fn is_secret_key(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    lower.starts_with("vault.unsealkey")
+        || lower.starts_with("vault.roottoken")
+        || lower.contains("secret")
+        || lower.contains("token")
 }
 
 /// List an effective, precedence-aware view of all configuration entries

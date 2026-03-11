@@ -188,20 +188,26 @@ pub async fn execute_safe(command: RemoteCmds) -> CliResult<()> {
 
             if delete {
                 // Delete matching entries; if --all then delete all matching, else delete first matching
-                Config::remove_config("remote", Some(&name), key, Some(&value), all).await;
+                Config::remove_config("remote", Some(&name), key, Some(&value), all)
+                    .await
+                    .map_err(|e| CliError::fatal(format!("failed to remove config: {e}")))?;
                 return Ok(());
             }
 
             // Default: replace behavior
             if all {
                 // Remove all existing entries for this key, then insert the new value once
-                Config::remove_config("remote", Some(&name), key, None, true).await;
+                Config::remove_config("remote", Some(&name), key, None, true)
+                    .await
+                    .map_err(|e| CliError::fatal(format!("failed to remove config: {e}")))?;
                 Config::insert("remote", Some(&name), key, &value).await;
             } else {
                 // Replace first existing entry: remove first occurrence then insert new value.
                 // If no URL existed initially, the removal is a no-op and the insert will add the new URL.
                 // This handles both the 'replace existing' and 'set new URL when none exists' cases.
-                Config::remove_config("remote", Some(&name), key, None, false).await;
+                Config::remove_config("remote", Some(&name), key, None, false)
+                    .await
+                    .map_err(|e| CliError::fatal(format!("failed to remove config: {e}")))?;
                 Config::insert("remote", Some(&name), key, &value).await;
             }
         }

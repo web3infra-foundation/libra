@@ -311,7 +311,9 @@ pub async fn create_branch_safe(
     })?;
 
     // create branch
-    Branch::update_branch(&new_branch, &commit_id.to_string(), None).await;
+    Branch::update_branch(&new_branch, &commit_id.to_string(), None)
+        .await
+        .map_err(|e| CliError::fatal(format!("failed to create branch '{}': {e}", new_branch)))?;
     Ok(())
 }
 
@@ -463,7 +465,9 @@ async fn rename_branch(args: Vec<String>) -> CliResult<()> {
     let commit_hash = old_branch.commit.to_string();
 
     // create new branch with the same commit
-    Branch::update_branch(&new_name, &commit_hash, None).await;
+    Branch::update_branch(&new_name, &commit_hash, None)
+        .await
+        .map_err(|e| CliError::fatal(format!("failed to create branch '{}': {e}", new_name)))?;
 
     // update HEAD if renaming current branch
     let head = Head::current().await;
@@ -507,13 +511,16 @@ async fn display_head_state() -> String {
 }
 
 fn format_branch_name(branch: &Branch) -> String {
-    branch
-        .remote
-        .as_ref()
-        .map(|remote| format!("{}/{}", remote, branch.name))
-        .unwrap_or_else(|| branch.name.clone())
-        .red()
-        .to_string()
+    let display_name = if let Some(stripped) = branch.name.strip_prefix("refs/remotes/") {
+        stripped.to_string()
+    } else {
+        branch
+            .remote
+            .as_ref()
+            .map(|remote| format!("{remote}/{}", branch.name))
+            .unwrap_or_else(|| branch.name.clone())
+    };
+    display_name.red().to_string()
 }
 
 fn display_branches(branches: Vec<Branch>, head_name: &str, is_remote: bool) {
@@ -722,4 +729,38 @@ pub fn is_valid_git_branch_name(name: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use std::str::FromStr;
+
+    use git_internal::hash::{ObjectHash, get_hash_kind};
+
+    use super::{Branch, format_branch_name};
+
+    fn any_hash() -> ObjectHash {
+        ObjectHash::from_str(&ObjectHash::zero_str(get_hash_kind())).unwrap()
+    }
+
+    #[test]
+    fn test_format_branch_name_with_full_remote_ref() {
+        colored::control::set_override(false);
+        let branch = Branch {
+            name: "refs/remotes/origin/main".to_string(),
+            commit: any_hash(),
+            remote: Some("origin".to_string()),
+        };
+
+        assert_eq!(format_branch_name(&branch), "origin/main");
+    }
+
+    #[test]
+    fn test_format_branch_name_with_short_remote_ref() {
+        colored::control::set_override(false);
+        let branch = Branch {
+            name: "main".to_string(),
+            commit: any_hash(),
+            remote: Some("origin".to_string()),
+        };
+
+        assert_eq!(format_branch_name(&branch), "origin/main");
+    }
+}

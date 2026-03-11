@@ -23,6 +23,7 @@ rust_library(
     crate = "subtle",
     crate_root = "vendor/src/lib.rs",
     edition = "2018",
+    features = ["i128"],
     rustc_flags = ["@$(location :subtle-manifest[env_flags])"],
     visibility = ["PUBLIC"],
 )

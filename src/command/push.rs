@@ -27,7 +27,7 @@ use tokio::sync::mpsc;
 use url::Url;
 
 use crate::{
-    command::branch,
+    command::{branch, fetch::RemoteClient},
     git_protocol::{ServiceType::ReceivePack, add_pkt_line_string, read_pkt_line},
     internal::{
         branch::Branch,
@@ -210,7 +210,7 @@ pub async fn execute_safe(args: PushArgs) -> CliResult<()> {
         }
         Err(e) => {
             return Err(CliError::fatal(format!(
-                "invalid remote url '{}': {}",
+                "failed to create remote client for '{}': {}",
                 repo_url, e
             )));
         }
@@ -452,7 +452,8 @@ async fn update_remote_tracking(
                     &commit_hash,
                     Some(&remote_name),
                 )
-                .await;
+                .await
+                .map_err(ReflogError::from)?;
 
                 // Record the reflog
                 let context = ReflogContext {
@@ -473,6 +474,18 @@ async fn update_remote_tracking(
         )));
     }
     Ok(())
+}
+
+fn is_local_file_remote(spec: &str) -> bool {
+    if let Ok(url) = Url::parse(spec) {
+        // file:// URL or parsed Windows drive path (e.g. D:\repo) should both
+        // be treated as local-path push targets.
+        if url.scheme() == "file" || url.scheme().len() == 1 {
+            return true;
+        }
+        return false;
+    }
+    Path::new(spec).exists()
 }
 
 /// collect all commits from `commit_id` to root commit
