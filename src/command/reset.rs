@@ -221,7 +221,7 @@ async fn perform_reset(
                             &target_commit_id.to_string(),
                             None,
                         )
-                        .await;
+                        .await?;
                     }
                     // If in a detached state, update the HEAD pointer directly.
                     Head::Detached(_) => {

@@ -145,7 +145,7 @@ async fn merge_ff(target_commit: Commit, target_branch_name: &str) -> CliResult<
                             &target_commit.id.to_string(),
                             None,
                         )
-                        .await;
+                        .await?;
                     }
                     Head::Detached(_) => {
                         // Merging into a detached HEAD is unusual but possible. We just move HEAD.

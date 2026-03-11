@@ -226,6 +226,7 @@ async fn test_ai_hooks_use_repo_object_format_for_persistence() {
         object_format: Some("sha256".to_string()),
         ref_format: None,
         from_git_repository: None,
+        vault: false,
     })
     .await
     .unwrap();

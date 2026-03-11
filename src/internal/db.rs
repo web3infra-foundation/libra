@@ -4,6 +4,7 @@ use std::{
     io,
     io::{Error as IOError, ErrorKind},
     path::Path,
+    time::Duration,
 };
 
 use sea_orm::{
@@ -21,6 +22,18 @@ use crate::{internal::model::*, utils::path};
 /// - Returns a `DatabaseConnection` if successful, or an `IOError` if the database file does not exist.
 #[allow(dead_code)]
 pub async fn establish_connection(db_path: &str) -> Result<DatabaseConnection, IOError> {
+    establish_connection_with_busy_timeout(db_path, Duration::from_secs(30)).await
+}
+
+/// Establish a SQLite connection with a caller-specified busy timeout.
+///
+/// This is useful for best-effort/background jobs that should fail fast on lock
+/// contention instead of waiting for long periods.
+#[allow(dead_code)]
+pub async fn establish_connection_with_busy_timeout(
+    db_path: &str,
+    busy_timeout: Duration,
+) -> Result<DatabaseConnection, IOError> {
     if !Path::new(db_path).exists() {
         return Err(IOError::new(
             ErrorKind::NotFound,
@@ -28,7 +41,12 @@ pub async fn establish_connection(db_path: &str) -> Result<DatabaseConnection, I
         ));
     }
 
-    let conn = connect_database(db_path).await?;
+    let mut option = ConnectOptions::new(format!("sqlite://{db_path}"));
+    option.sqlx_logging(false); // TODO use better option
+    option.map_sqlx_sqlite_opts(move |sqlx_opts| sqlx_opts.busy_timeout(busy_timeout));
+    let conn = Database::connect(option)
+        .await
+        .map_err(|err| IOError::other(format!("Database connection error: {err:?}")))?;
     ensure_ai_projection_schema(&conn)
         .await
         .map_err(|err| IOError::other(format!("Failed to ensure AI projection schema: {err}")))?;

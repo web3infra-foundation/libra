@@ -35,3 +35,8 @@
 
 [project]
   ignore = .git .buckal buck-out target
+[download]
+  proxy = http://127.0.0.1:10808
+
+[download]
+  proxy = http://127.0.0.1:10808

@@ -26,11 +26,13 @@ rust_library(
     features = [
         "debug",
         "default",
+        "display",
     ],
     rustc_flags = ["@$(location :derive_more-impl-manifest[env_flags])"],
     proc_macro = True,
     visibility = ["PUBLIC"],
     deps = [
+        "//third-party/rust/crates/convert_case/0.10.0:convert_case",
         "//third-party/rust/crates/proc-macro2/1.0.106:proc-macro2",
         "//third-party/rust/crates/quote/1.0.45:quote",
         "//third-party/rust/crates/syn/2.0.117:syn",

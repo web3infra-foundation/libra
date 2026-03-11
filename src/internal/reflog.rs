@@ -4,13 +4,14 @@ use std::{
     fmt::{Debug, Display, Formatter},
     future::Future,
     pin::Pin,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseTransaction, DbBackend, DbErr,
     EntityTrait, QueryFilter, QueryOrder, Set, Statement, TransactionError, TransactionTrait,
 };
+use tokio::time::sleep;
 
 use crate::internal::{
     config,
@@ -23,6 +24,13 @@ use crate::internal::{
 };
 
 pub const HEAD: &str = "HEAD";
+const SQLITE_BUSY_MAX_RETRIES: usize = 15;
+const SQLITE_BUSY_RETRY_BASE_MS: u64 = 100;
+
+fn is_sqlite_busy(err: &DbErr) -> bool {
+    let message = err.to_string();
+    message.contains("database is locked") || message.contains("database schema is locked")
+}
 
 #[derive(Debug)]
 pub struct ReflogContext {
@@ -187,7 +195,18 @@ impl Reflog {
             ..Default::default()
         };
 
-        model.save(db).await?;
+        for attempt in 0..=SQLITE_BUSY_MAX_RETRIES {
+            match model.clone().save(db).await {
+                Ok(_) => return Ok(()),
+                Err(err) if is_sqlite_busy(&err) && attempt < SQLITE_BUSY_MAX_RETRIES => {
+                    sleep(Duration::from_millis(
+                        SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
+                    ))
+                    .await;
+                }
+                Err(err) => return Err(err.into()),
+            }
+        }
         Ok(())
     }
 
@@ -363,7 +382,18 @@ async fn ensure_reflog_table_exists<C: ConnectionTrait>(db: &C) -> Result<(), Re
         .to_string(),
     );
 
-    db.execute(create_table_stmt).await?;
+    for attempt in 0..=SQLITE_BUSY_MAX_RETRIES {
+        match db.execute(create_table_stmt.clone()).await {
+            Ok(_) => break,
+            Err(err) if is_sqlite_busy(&err) && attempt < SQLITE_BUSY_MAX_RETRIES => {
+                sleep(Duration::from_millis(
+                    SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
+                ))
+                .await;
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
 
     let create_index_stmt = Statement::from_string(
         DbBackend::Sqlite,
@@ -373,6 +403,17 @@ async fn ensure_reflog_table_exists<C: ConnectionTrait>(db: &C) -> Result<(), Re
         .to_string(),
     );
 
-    db.execute(create_index_stmt).await?;
+    for attempt in 0..=SQLITE_BUSY_MAX_RETRIES {
+        match db.execute(create_index_stmt.clone()).await {
+            Ok(_) => break,
+            Err(err) if is_sqlite_busy(&err) && attempt < SQLITE_BUSY_MAX_RETRIES => {
+                sleep(Duration::from_millis(
+                    SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
+                ))
+                .await;
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
     Ok(())
 }

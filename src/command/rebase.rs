@@ -637,7 +637,7 @@ async fn start_rebase(upstream: &str) {
                         &upstream_id_str,
                         None,
                     )
-                    .await;
+                    .await?;
                     Head::update_with_conn(txn, Head::Branch(branch_name_cloned), None).await;
                     Ok(())
                 })
@@ -877,7 +877,7 @@ async fn finalize_rebase(state: &RebaseState) -> anyhow::Result<()> {
                     &final_commit_id.to_string(),
                     None,
                 )
-                .await;
+                .await?;
 
                 // Also, re-attach HEAD to the newly moved branch.
                 Head::update_with_conn(txn, Head::Branch(branch_name_cloned.clone()), None).await;
@@ -1096,7 +1096,7 @@ async fn rebase_abort() {
                     &orig_head_str_for_txn,
                     None,
                 )
-                .await;
+                .await?;
                 Head::update_with_conn(txn, Head::Branch(branch_name_cloned), None).await;
                 Ok(())
             })
@@ -1109,7 +1109,15 @@ async fn rebase_abort() {
         Err(e) => {
             eprintln!("warning: failed to record reflog: {e}");
             // Continue anyway; ensure branch ref is corrected.
-            Branch::update_branch_with_conn(&db, &state.head_name, &orig_head_str, None).await;
+            if let Err(err) =
+                Branch::update_branch_with_conn(&db, &state.head_name, &orig_head_str, None).await
+            {
+                eprintln!(
+                    "fatal: failed to restore branch '{}' during rebase abort: {err}",
+                    state.head_name
+                );
+                return;
+            }
         }
     }
     Head::update_with_conn(&db, Head::Branch(state.head_name.clone()), None).await;

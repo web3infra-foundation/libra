@@ -65,7 +65,7 @@ pub struct CliError {
 impl CliError {
     pub fn repo_not_found() -> Self {
         Self::fatal("not a libra repository (or any of the parent directories): .libra")
-            .with_hint("run 'libra init' to create a repository in the current directory.")
+            .with_hint("run 'libra init --vault' to create a repository in the current directory.")
     }
 
     pub fn unknown_command(message: impl Into<String>) -> Self {
@@ -279,7 +279,7 @@ mod tests {
         let rendered = CliError::repo_not_found().render();
         assert_eq!(
             rendered,
-            "fatal: not a libra repository (or any of the parent directories): .libra\nHint: run 'libra init' to create a repository in the current directory."
+            "fatal: not a libra repository (or any of the parent directories): .libra\nHint: run 'libra init --vault' to create a repository in the current directory."
         );
     }
 

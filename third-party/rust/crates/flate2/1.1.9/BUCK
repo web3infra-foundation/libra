@@ -32,6 +32,7 @@ rust_library(
         "miniz_oxide",
         "rust_backend",
         "zlib",
+        "zlib-rs",
     ],
     rustc_flags = ["@$(location :flate2-manifest[env_flags])"],
     visibility = ["PUBLIC"],
@@ -39,5 +40,6 @@ rust_library(
         "//third-party/rust/crates/crc32fast/1.5.0:crc32fast",
         "//third-party/rust/crates/libz-sys/1.1.24:libz-sys",
         "//third-party/rust/crates/miniz_oxide/0.8.9:miniz_oxide",
+        "//third-party/rust/crates/zlib-rs/0.6.3:zlib-rs",
     ],
 )
