@@ -519,12 +519,9 @@ pub async fn execute_safe(args: RebaseArgs) -> CliResult<()> {
                 } else {
                     "continue"
                 };
-                return Err(
-                    CliError::fatal("no rebase in progress")
-                        .with_hint(format!(
-                            "cannot --{verb} because there is no rebase in progress."
-                        ))
-                );
+                return Err(CliError::fatal("no rebase in progress").with_hint(format!(
+                    "cannot --{verb} because there is no rebase in progress."
+                )));
             }
             Err(err) => {
                 return Err(CliError::fatal(format!(
