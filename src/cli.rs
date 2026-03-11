@@ -75,6 +75,8 @@ enum Commands {
     Clone(command::clone::CloneArgs),
     #[command(about = "Start Libra Code interactive TUI (with background web server)")]
     Code(command::code::CodeArgs),
+    #[command(about = "Connect to Codex app-server via WebSocket")]
+    AgentCodex(command::agent_codex::AgentCodexArgs),
     #[command(about = "Unified provider hook ingestion and setup")]
     Hooks(command::hooks::HooksCommand),
 
@@ -457,6 +459,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         }
         Commands::Clone(args) => command::clone::execute_safe(args).await?, //clone will use init internally,so we don't need to set hash kind here again
         Commands::Code(args) => command::code::execute(args).await,
+        Commands::AgentCodex(args) => command::agent_codex::execute(args).await,
         Commands::Hooks(cmd) => command::hooks::execute(cmd)
             .await
             .map_err(|e| CliError::fatal(e.to_string()))?,

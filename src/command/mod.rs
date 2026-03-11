@@ -10,6 +10,7 @@ pub mod clean;
 pub mod clone;
 pub mod cloud;
 pub mod code;
+pub mod agent_codex;
 pub mod commit;
 pub mod config;
 pub mod describe;
