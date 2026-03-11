@@ -54,7 +54,7 @@ fn init_temp_repo() -> TempDir {
     );
 
     let output = libra_command(temp_path)
-        .args(["init", "--vault"])
+        .args(["init"])
         .output()
         .expect("Failed to execute libra binary");
 
@@ -174,7 +174,7 @@ async fn test_push_file_remote_fails_without_reflog() {
     let local_path = local_dir.path();
     let _guard = ChangeDirGuard::new(local_path);
     let out = libra_command(local_path)
-        .args(["init", "--vault"])
+        .args(["init"])
         .output()
         .expect("init");
     assert!(
@@ -367,7 +367,7 @@ async fn test_push_ssh_remote_via_fake_ssh() {
 
     fs::create_dir_all(&local_dir).expect("failed to create local dir");
     let init_out = libra_command(&local_dir)
-        .args(["init", "--vault"])
+        .args(["init"])
         .output()
         .expect("failed to init local libra repo");
     assert!(
@@ -484,7 +484,7 @@ async fn test_push_ssh_host_key_failure_is_reported() {
 
     fs::create_dir_all(&local_dir).expect("failed to create local dir");
     let init_out = libra_command(&local_dir)
-        .args(["init", "--vault"])
+        .args(["init"])
         .output()
         .expect("failed to init local libra repo");
     assert!(

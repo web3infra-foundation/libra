@@ -361,7 +361,7 @@ run_identity_config_category() {
     run_case_repo "identity_commit_no_config" \
         "expect_fail" "commit -m identity_no_config" \
         "expect_success" "commit -m identity_no_config" \
-        "expect_success" "commit -m identity_no_config"
+        "expect_fail" "commit -m identity_no_config"
 
     restore_identity_env
 
@@ -570,7 +570,7 @@ run_behavior_matrix_category() {
     run_case_repo "behavior_rebase_invalid" \
         "expect_fail" "rebase no_such_base_123" \
         "expect_fail" "rebase -b @ -o no_such_base_123" \
-        "expect_success" "rebase no_such_base_123"
+        "expect_fail" "rebase no_such_base_123"
 
     run_case_repo "behavior_merge_invalid" \
         "expect_fail" "merge no_such_branch_123" \
@@ -590,7 +590,7 @@ run_behavior_matrix_category() {
     run_case_repo "behavior_checkout_feature" \
         "expect_success" "checkout feature" \
         "expect_success" "NA" \
-        "expect_fail" "checkout feature"
+        "expect_success" "checkout feature"
 
     create_file_in_repos "junk.tmp" "junk"
 
@@ -612,7 +612,7 @@ run_behavior_matrix_category() {
     run_case_repo "behavior_remote_add_origin_duplicate" \
         "expect_fail" "remote add origin $origin_q" \
         "expect_fail" "git remote add origin $origin_q" \
-        "expect_success" "remote add origin $origin_q"
+        "expect_fail" "remote add origin $origin_q"
 
     run_case_repo "behavior_fetch_missing" \
         "expect_fail" "fetch missing" \
@@ -672,7 +672,7 @@ run_flow_experience_category() {
     run_case_repo "flow_05_commit_no_config" \
         "expect_fail" "commit -m flow_first_without_config" \
         "expect_success" "commit -m flow_first_without_config" \
-        "expect_success" "commit -m flow_first_without_config"
+        "expect_fail" "commit -m flow_first_without_config"
 
     restore_identity_env
 
@@ -790,6 +790,341 @@ run_flow_experience_category() {
     md_category_summary "$category"
 }
 
+run_extended_behavior_category() {
+    local category="Extended Behavior"
+    log_section "$category"
+    set_category "$category"
+    register_category "$category"
+    md_section "$category"
+
+    # ── Setup: create repos with config and initial commit ──────────────────
+    setup_all_repos "ext"
+    configure_identities_for_current_repos
+
+    create_file_in_repos "README.md" "ext line 1"
+
+    run_case_repo "ext_add_initial" \
+        "expect_success" "add README.md" \
+        "expect_success" "file track README.md" \
+        "expect_success" "add README.md"
+
+    run_case_repo "ext_commit_initial" \
+        "expect_success" "commit -m ext_initial" \
+        "expect_success" "commit -m ext_initial" \
+        "expect_success" "commit -m ext_initial"
+
+    # ── Branch operations ───────────────────────────────────────────────────
+
+    run_case_repo "ext_branch_show_current" \
+        "expect_success" "branch --show-current" \
+        "expect_success" "NA" \
+        "expect_success" "branch --show-current"
+
+    run_case_repo "ext_branch_list" \
+        "expect_success" "branch --list" \
+        "expect_success" "bookmark list" \
+        "expect_success" "branch --list"
+
+    run_case_repo "ext_branch_create_feature" \
+        "expect_success" "branch ext-feature" \
+        "expect_success" "bookmark create ext-feature -r @-" \
+        "expect_success" "branch ext-feature"
+
+    run_case_repo "ext_branch_delete_safe" \
+        "expect_success" "branch -d ext-feature" \
+        "expect_success" "bookmark delete ext-feature" \
+        "expect_success" "branch -d ext-feature"
+
+    run_case_repo "ext_branch_delete_missing" \
+        "expect_fail" "branch -d no_such_ext_branch" \
+        "expect_fail" "bookmark delete no_such_ext_branch" \
+        "expect_fail" "branch -d no_such_ext_branch"
+
+    run_case_repo "ext_branch_create_for_rename" \
+        "expect_success" "branch ext-rename-src" \
+        "expect_success" "bookmark create ext-rename-src -r @-" \
+        "expect_success" "branch ext-rename-src"
+
+    run_case_repo "ext_branch_rename" \
+        "expect_success" "branch -m ext-rename-src ext-rename-dst" \
+        "expect_success" "NA" \
+        "expect_success" "branch -m ext-rename-src ext-rename-dst"
+
+    # ── Tag operations ──────────────────────────────────────────────────────
+
+    run_case_repo "ext_tag_list" \
+        "expect_success" "tag -l" \
+        "expect_success" "tag list" \
+        "expect_success" "tag --list"
+
+    run_case_repo "ext_tag_create_annotated" \
+        "expect_success" "tag -a ext-ann-v1 -m annotated" \
+        "expect_success" "NA" \
+        "expect_success" "tag ext-ann-v1 -m annotated"
+
+    run_case_repo "ext_tag_delete_existing" \
+        "expect_success" "tag -d ext-ann-v1" \
+        "expect_success" "NA" \
+        "expect_success" "tag -d ext-ann-v1"
+
+    run_case_repo "ext_tag_create_simple" \
+        "expect_success" "tag ext-v2" \
+        "expect_success" "tag set ext-v2 -r @-" \
+        "expect_success" "tag ext-v2"
+
+    run_case_repo "ext_tag_duplicate" \
+        "expect_fail" "tag ext-v2" \
+        "expect_success" "tag set ext-v2 -r @-" \
+        "expect_fail" "tag ext-v2"
+
+    # ── Switch / Checkout advanced ──────────────────────────────────────────
+
+    run_case_repo "ext_switch_create" \
+        "expect_success" "switch -c ext-new-branch" \
+        "expect_success" "NA" \
+        "expect_success" "switch -c ext-new-branch"
+
+    run_case_repo "ext_switch_detach" \
+        "expect_success" "switch --detach HEAD" \
+        "expect_success" "NA" \
+        "expect_success" "switch --detach HEAD"
+
+    run_case_repo "ext_checkout_create_branch" \
+        "expect_success" "checkout -b ext-checkout-new" \
+        "expect_success" "NA" \
+        "expect_success" "checkout -b ext-checkout-new"
+
+    # Go back to a named branch for subsequent tests
+    run_case_repo "ext_switch_back" \
+        "expect_success" "switch ext-new-branch" \
+        "expect_success" "NA" \
+        "expect_success" "switch ext-new-branch"
+
+    # ── Diff operations ─────────────────────────────────────────────────────
+
+    create_file_in_repos "README.md" $'ext line 1\next line 2'
+
+    run_case_repo "ext_add_for_staged" \
+        "expect_success" "add README.md" \
+        "expect_success" "file track README.md" \
+        "expect_success" "add README.md"
+
+    run_case_repo "ext_diff_staged" \
+        "expect_success" "diff --staged" \
+        "expect_success" "diff" \
+        "expect_success" "diff --staged"
+
+    # ── Commit operations ───────────────────────────────────────────────────
+
+    run_case_repo "ext_commit_second" \
+        "expect_success" "commit -m ext_second" \
+        "expect_success" "commit -m ext_second" \
+        "expect_success" "commit -m ext_second"
+
+    create_file_in_repos "README.md" $'ext line 1\next line 2\next line 3'
+
+    run_case_repo "ext_add_for_amend" \
+        "expect_success" "add README.md" \
+        "expect_success" "file track README.md" \
+        "expect_success" "add README.md"
+
+    run_case_repo "ext_commit_amend" \
+        "expect_success" "commit --amend --no-edit" \
+        "expect_success" "NA" \
+        "expect_success" "commit --amend --no-edit"
+
+    run_case_repo "ext_commit_allow_empty" \
+        "expect_success" "commit --allow-empty -m ext_empty" \
+        "expect_success" "NA" \
+        "expect_success" "commit --allow-empty -m ext_empty"
+
+    # ── Reset operations ────────────────────────────────────────────────────
+
+    run_case_repo "ext_reset_soft" \
+        "expect_success" "reset --soft HEAD~1" \
+        "expect_success" "NA" \
+        "expect_success" "reset --soft HEAD~1"
+
+    # Recommit for hard reset test
+    run_case_repo "ext_recommit_for_hard" \
+        "expect_success" "commit --allow-empty -m ext_recommit" \
+        "expect_success" "NA" \
+        "expect_success" "commit --allow-empty -m ext_recommit"
+
+    run_case_repo "ext_reset_hard" \
+        "expect_success" "reset --hard HEAD" \
+        "expect_success" "NA" \
+        "expect_success" "reset --hard HEAD"
+
+    # ── Restore operations ──────────────────────────────────────────────────
+
+    create_file_in_repos "staged_file.txt" "staged content"
+
+    run_case_repo "ext_add_for_restore" \
+        "expect_success" "add staged_file.txt" \
+        "expect_success" "file track staged_file.txt" \
+        "expect_success" "add staged_file.txt"
+
+    run_case_repo "ext_restore_staged" \
+        "expect_success" "restore --staged staged_file.txt" \
+        "expect_success" "NA" \
+        "expect_success" "restore --staged staged_file.txt"
+
+    # ── Stash operations ────────────────────────────────────────────────────
+
+    create_file_in_repos "stash_ext.txt" "stash extended"
+
+    run_case_repo "ext_add_for_stash" \
+        "expect_success" "add stash_ext.txt" \
+        "expect_success" "file track stash_ext.txt" \
+        "expect_success" "add stash_ext.txt"
+
+    run_case_repo "ext_stash_push" \
+        "expect_success" "stash push -m ext_stash" \
+        "expect_success" "NA" \
+        "expect_success" "stash push --message ext_stash"
+
+    run_case_repo "ext_stash_list" \
+        "expect_success" "stash list" \
+        "expect_success" "NA" \
+        "expect_success" "stash list"
+
+    run_case_repo "ext_stash_pop" \
+        "expect_success" "stash pop" \
+        "expect_success" "NA" \
+        "expect_success" "stash pop"
+
+    create_file_in_repos "stash_ext2.txt" "stash for apply"
+
+    run_case_repo "ext_add_for_stash2" \
+        "expect_success" "add stash_ext2.txt" \
+        "expect_success" "NA" \
+        "expect_success" "add stash_ext2.txt"
+
+    run_case_repo "ext_stash_push2" \
+        "expect_success" "stash push -m ext_stash2" \
+        "expect_success" "NA" \
+        "expect_success" "stash push --message ext_stash2"
+
+    run_case_repo "ext_stash_apply" \
+        "expect_success" "stash apply" \
+        "expect_success" "NA" \
+        "expect_success" "stash apply"
+
+    # Clean stash_ext2.txt before drop
+    run_case_repo "ext_add_stash2_file" \
+        "expect_success" "add stash_ext2.txt" \
+        "expect_success" "NA" \
+        "expect_success" "add stash_ext2.txt"
+
+    run_case_repo "ext_commit_stash2" \
+        "expect_success" "commit -m ext_stash2_commit" \
+        "expect_success" "NA" \
+        "expect_success" "commit -m ext_stash2_commit"
+
+    run_case_repo "ext_stash_drop" \
+        "expect_success" "stash drop" \
+        "expect_success" "NA" \
+        "expect_success" "stash drop"
+
+    # ── Add operations ──────────────────────────────────────────────────────
+
+    create_file_in_repos "add_a1.txt" "add all 1"
+    create_file_in_repos "add_a2.txt" "add all 2"
+
+    run_case_repo "ext_add_all" \
+        "expect_success" "add -A" \
+        "expect_success" "file track ." \
+        "expect_success" "add -A"
+
+    run_case_repo "ext_commit_add_all" \
+        "expect_success" "commit -m ext_add_all" \
+        "expect_success" "commit -m ext_add_all" \
+        "expect_success" "commit -m ext_add_all"
+
+    # ── Clean operations ────────────────────────────────────────────────────
+
+    create_file_in_repos "clean_junk.tmp" "junk to clean"
+
+    run_case_repo "ext_clean_no_flag" \
+        "expect_fail" "clean" \
+        "expect_fail" "NA" \
+        "expect_fail" "clean"
+
+    run_case_repo "ext_clean_force" \
+        "expect_success" "clean -f" \
+        "expect_success" "NA" \
+        "expect_success" "clean -f"
+
+    # ── rm operations ───────────────────────────────────────────────────────
+
+    create_file_in_repos "rm_cached.txt" "rm cached content"
+
+    run_case_repo "ext_add_for_rm" \
+        "expect_success" "add rm_cached.txt" \
+        "expect_success" "file track rm_cached.txt" \
+        "expect_success" "add rm_cached.txt"
+
+    run_case_repo "ext_commit_for_rm" \
+        "expect_success" "commit -m ext_rm_setup" \
+        "expect_success" "commit -m ext_rm_setup" \
+        "expect_success" "commit -m ext_rm_setup"
+
+    run_case_repo "ext_rm_cached" \
+        "expect_success" "rm --cached rm_cached.txt" \
+        "expect_success" "file untrack rm_cached.txt" \
+        "expect_success" "rm --cached rm_cached.txt"
+
+    # ── Remote operations ───────────────────────────────────────────────────
+
+    local ext_origin
+    ext_origin="$(create_bare_remote "ext-origin.git")"
+    local ext_origin_q
+    ext_origin_q="$(quote_for_shell "$ext_origin")"
+
+    run_case_repo "ext_remote_add" \
+        "expect_success" "remote add origin $ext_origin_q" \
+        "expect_success" "git remote add origin $ext_origin_q" \
+        "expect_success" "remote add origin $ext_origin_q"
+
+    run_case_repo "ext_remote_list" \
+        "expect_success" "remote -v" \
+        "expect_success" "git remote -v" \
+        "expect_success" "remote -v"
+
+    run_case_repo "ext_remote_rename" \
+        "expect_success" "remote rename origin upstream" \
+        "expect_success" "NA" \
+        "expect_success" "remote rename origin upstream"
+
+    run_case_repo "ext_remote_remove" \
+        "expect_success" "remote remove upstream" \
+        "expect_success" "NA" \
+        "expect_success" "remote remove upstream"
+
+    # ── Config operations ───────────────────────────────────────────────────
+
+    run_case_repo "ext_config_get" \
+        "expect_success" "config --get user.name" \
+        "expect_success" "config get user.name" \
+        "expect_success" "config --get user.name"
+
+    # ── Log operations ──────────────────────────────────────────────────────
+
+    run_case_repo "ext_log_oneline" \
+        "expect_success" "log --oneline -3" \
+        "expect_success" "log -n 3 --no-graph" \
+        "expect_success" "log --oneline -3"
+
+    # ── Rebase abort (no rebase in progress) ────────────────────────────────
+    run_case_repo "ext_rebase_abort_no_rebase" \
+        "expect_fail" "rebase --abort" \
+        "expect_fail" "NA" \
+        "expect_fail" "rebase --abort"
+
+    md_category_summary "$category"
+}
+
 main() {
     parse_args "$@"
     setup_sandbox
@@ -806,6 +1141,7 @@ main() {
     run_identity_config_category
     run_behavior_matrix_category
     run_flow_experience_category
+    run_extended_behavior_category
 
     print_scoreboard
 

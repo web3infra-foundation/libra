@@ -503,6 +503,34 @@ pub async fn execute(args: RebaseArgs) {
 /// (such as missing/unknown upstream refs) so callers receive a non-zero exit code.
 pub async fn execute_safe(args: RebaseArgs) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
+
+    // For --continue, --abort, --skip: verify that a rebase is actually in
+    // progress before delegating to the legacy execute() path.  This ensures
+    // a non-zero exit code (128) is returned when there is nothing to do,
+    // matching the behaviour of `git rebase --abort` / `--continue` / `--skip`.
+    if args.continue_rebase || args.abort || args.skip {
+        match RebaseState::is_in_progress().await {
+            Ok(true) => { /* rebase in progress – proceed */ }
+            Ok(false) => {
+                let verb = if args.abort {
+                    "abort"
+                } else if args.skip {
+                    "skip"
+                } else {
+                    "continue"
+                };
+                return Err(CliError::fatal("no rebase in progress").with_hint(format!(
+                    "cannot --{verb} because there is no rebase in progress."
+                )));
+            }
+            Err(err) => {
+                return Err(CliError::fatal(format!(
+                    "failed to check rebase state: {err}"
+                )));
+            }
+        }
+    }
+
     preflight_rebase(&args).await?;
     execute(args).await;
     Ok(())
@@ -534,9 +562,11 @@ async fn preflight_rebase(args: &RebaseArgs) -> CliResult<()> {
         }
     }
 
+    // `resolve_branch_or_commit` returns legacy `"fatal: ..."` prefixed strings,
+    // so `from_legacy_string` strips the prefix to avoid double-prefix rendering.
     resolve_branch_or_commit(upstream)
         .await
-        .map_err(CliError::fatal)?;
+        .map_err(CliError::from_legacy_string)?;
     Ok(())
 }
 

@@ -188,13 +188,14 @@ pub struct InitArgs {
     #[clap(long = "from-git-repository", value_name = "path", required = false)]
     pub from_git_repository: Option<String>,
 
-    /// Initialize a libvault instance for PGP commit signing.
+    /// Enable libvault for PGP commit signing (enabled by default).
     ///
-    /// This option is required. A vault database is created inside `.libra/`
-    /// and a PGP key pair is generated automatically. Subsequent
-    /// `libra commit` calls will detect the vault and sign commits with the
-    /// generated key.
-    #[clap(long, required = true)]
+    /// A vault database is created inside `.libra/` and a PGP key pair is
+    /// generated automatically. Subsequent `libra commit` calls will detect
+    /// the vault and sign commits with the generated key.
+    ///
+    /// Use `--vault false` to skip vault initialisation.
+    #[clap(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub vault: bool,
 }
 
@@ -208,13 +209,6 @@ pub async fn execute(args: InitArgs) {
 /// errors and exiting. Creates `.libra` storage, seeds HEAD and default
 /// refs/config, and initialises the backing SQLite database.
 pub async fn execute_safe(args: InitArgs) -> CliResult<()> {
-    if !args.vault {
-        return Err(CliError::command_usage(
-            "the following required arguments were not provided:\n  --vault",
-        )
-        .with_hint("run `libra init --vault` to initialize a repository."));
-    }
-
     let from_git = args.from_git_repository.clone();
     let is_bare = args.bare;
     let enable_vault = args.vault;
@@ -871,7 +865,7 @@ async fn init_vault_for_repo(root_dir: &Path) -> anyhow::Result<()> {
     // If key generation fails, roll back the persisted vault credentials so the
     // repo is not left in a half-configured state.
     if let Err(e) = vault::generate_pgp_key(root_dir, &unseal_key, &user_name, &user_email).await {
-        // Roll back both credentials and vault.db so init --vault remains atomic.
+        // Roll back both credentials and vault.db so init remains atomic.
         rollback_failed_vault_init(root_dir).await;
         return Err(e);
     }

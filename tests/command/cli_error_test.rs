@@ -74,7 +74,7 @@ fn command_usage_error_uses_exit_code_129() {
     let temp = tempdir().unwrap();
     let repo = temp.path().join("repo");
     std::fs::create_dir_all(&repo).unwrap();
-    let init = run_libra(&["init", "--vault"], &repo);
+    let init = run_libra(&["init"], &repo);
     assert!(init.status.success());
 
     let output = run_libra(&["add", "--bad"], &repo);
@@ -97,21 +97,7 @@ fn runtime_fatal_uses_exit_code_128() {
         "unexpected stderr: {stderr}"
     );
     assert!(
-        stderr.contains("Hint: run 'libra init --vault'"),
+        stderr.contains("Hint: run 'libra init'"),
         "missing init hint in stderr: {stderr}"
     );
-}
-
-#[test]
-fn init_without_vault_is_command_usage_error() {
-    let temp = tempdir().unwrap();
-    let repo = temp.path().join("repo");
-    std::fs::create_dir_all(&repo).unwrap();
-
-    let output = run_libra(&["init"], &repo);
-    assert_eq!(output.status.code(), Some(129));
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("the following required arguments were not provided"));
-    assert!(stderr.contains("--vault"));
 }
