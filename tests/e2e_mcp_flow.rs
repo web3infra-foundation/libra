@@ -105,7 +105,7 @@ async fn test_e2e_mcp_flow() {
 
     // Init repo
     let status = Command::new(&libra_bin)
-        .args(["init", "--vault"])
+        .args(["init"])
         .current_dir(repo_path)
         .env("HOME", &home_dir)
         .env("XDG_CONFIG_HOME", &config_home)

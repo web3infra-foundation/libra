@@ -83,9 +83,14 @@ pub async fn execute_safe(args: CherryPickArgs) -> CliResult<()> {
         );
     }
 
+    // Resolve each commit reference. `resolve_commit` returns legacy
+    // `"fatal: ..."` prefixed strings, so `from_legacy_string` strips the
+    // prefix before wrapping in `CliError` to avoid a double-prefix.
     let mut commit_ids = Vec::new();
     for commit_ref in &args.commits {
-        let id = resolve_commit(commit_ref).await.map_err(CliError::fatal)?;
+        let id = resolve_commit(commit_ref)
+            .await
+            .map_err(CliError::from_legacy_string)?;
         commit_ids.push(id);
     }
 

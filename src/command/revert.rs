@@ -62,10 +62,13 @@ pub async fn execute_safe(args: RevertArgs) -> CliResult<()> {
         ));
     }
 
-    // Resolve the commit reference to a ObjectHash hash
+    // Resolve the commit reference to an ObjectHash.
+    // `resolve_commit` returns legacy `"fatal: ..."` prefixed strings, so
+    // `from_legacy_string` strips the prefix before wrapping in `CliError`
+    // to avoid a double `"fatal: fatal: ..."` message in rendered output.
     let commit_id = resolve_commit(&args.commit)
         .await
-        .map_err(CliError::fatal)?;
+        .map_err(CliError::from_legacy_string)?;
 
     // Perform the actual revert operation
     match revert_single_commit(&commit_id, &args).await {

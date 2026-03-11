@@ -23,7 +23,7 @@ fn run_libra(args: &[&str], cwd: &Path) -> std::process::Output {
 
 fn init_repo(repo: &Path) {
     fs::create_dir_all(repo).unwrap();
-    let output = run_libra(&["init", "--vault"], repo);
+    let output = run_libra(&["init"], repo);
     assert!(output.status.success(), "{:?}", output);
 }
 

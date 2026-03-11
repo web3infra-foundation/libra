@@ -39,7 +39,7 @@ impl Drop for EnvVarGuard {
     }
 }
 
-/// `init --vault` should complete without error and set `vault.signing = true`.
+/// `init` should complete without error and set `vault.signing = true`.
 #[tokio::test]
 #[serial]
 async fn test_init_with_vault_creates_signing_config() {
@@ -291,14 +291,13 @@ async fn test_commit_with_vault_has_signature() {
         .current_dir(temp_root.path())
         .env("HOME", &test_home)
         .arg("init")
-        .arg("--vault")
         .arg(repo_dir.to_str().unwrap());
     #[cfg(windows)]
     init_cmd.env("USERPROFILE", &test_home);
-    let init_out = init_cmd.output().expect("failed to run libra init --vault");
+    let init_out = init_cmd.output().expect("failed to run libra init");
     assert!(
         init_out.status.success(),
-        "init --vault should succeed, stderr: {}",
+        "init should succeed, stderr: {}",
         String::from_utf8_lossy(&init_out.stderr)
     );
 
@@ -358,17 +357,16 @@ fn test_cli_init_with_vault_and_separate_libra_dir() {
     cmd.current_dir(temp_root.path())
         .env("HOME", &test_home)
         .arg("init")
-        .arg("--vault")
         .arg("--separate-libra-dir")
         .arg(storage.to_str().unwrap())
         .arg(workdir.to_str().unwrap());
     #[cfg(windows)]
     cmd.env("USERPROFILE", &test_home);
-    let output = cmd.output().expect("failed to run libra init --vault");
+    let output = cmd.output().expect("failed to run libra init");
 
     assert!(
         output.status.success(),
-        "init --vault should succeed, stderr: {}",
+        "init should succeed, stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
@@ -441,15 +439,14 @@ fn test_cli_init_with_vault_fails_when_home_unwritable() {
     cmd.current_dir(temp_root.path())
         .env("HOME", &bad_home)
         .arg("init")
-        .arg("--vault")
         .arg(workdir.to_str().unwrap());
     #[cfg(windows)]
     cmd.env("USERPROFILE", &bad_home);
-    let output = cmd.output().expect("failed to run libra init --vault");
+    let output = cmd.output().expect("failed to run libra init");
 
     assert!(
         !output.status.success(),
-        "init --vault should fail when HOME is unusable"
+        "init should fail when HOME is unusable"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(

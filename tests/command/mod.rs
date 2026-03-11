@@ -67,7 +67,7 @@ fn assert_cli_success(output: &Output, context: &str) {
 /// Initialize a repository through the CLI to exercise the real process entrypoint.
 fn init_repo_via_cli(repo: &Path) {
     fs::create_dir_all(repo).expect("failed to create repository directory");
-    let output = run_libra_command(&["init", "--vault"], repo);
+    let output = run_libra_command(&["init"], repo);
     assert_cli_success(&output, "failed to initialize repository");
 }
 

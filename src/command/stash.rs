@@ -56,12 +56,16 @@ pub async fn execute_safe(stash_cmd: Stash) -> CliResult<()> {
         Stash::Apply { stash } => apply(stash).await,
         Stash::Drop { stash } => drop_stash(stash).await,
     };
-    result.map_err(CliError::fatal)
+    // `resolve_stash_to_commit_hash` returns strings with a legacy "fatal: "
+    // prefix (e.g., "fatal: Stash does not exist").  Use `from_legacy_string`
+    // so the prefix is stripped before `CliError::render()` re-adds it,
+    // avoiding the double "fatal: fatal: …" output.
+    result.map_err(CliError::from_legacy_string)
 }
 
 async fn push(message: Option<String>) -> Result<(), String> {
     if !has_changes().await {
-        eprintln!("No local changes to save");
+        println!("No local changes to save");
         return Ok(());
     }
 
@@ -287,7 +291,7 @@ async fn do_apply(stash: Option<String>) -> Result<(), String> {
         Head::Detached(_) => "(no branch)".to_string(),
     };
     println!(
-        "On branch {}\nChanges not staged for commit:\n  (use \"git add <file>...\" to update what will be committed)\n  (use \"git restore <file>...\" to discard changes in working directory)\n",
+        "On branch {}\nChanges not staged for commit:\n  (use \"libra add <file>...\" to update what will be committed)\n  (use \"libra restore <file>...\" to discard changes in working directory)\n",
         current_branch_name
     );
     Ok(())
@@ -604,6 +608,7 @@ fn create_tree_from_workdir(workdir: &Path, git_dir: &Path, index: &Index) -> Re
         for entry in entries {
             let entry = entry.map_err(|e| e.to_string())?;
             let path = entry.path();
+            // INVARIANT: `read_dir` entries always have a file name component.
             let file_name = path.file_name().unwrap().to_str().unwrap().to_string();
 
             // Ignore the .libra directory
@@ -619,6 +624,8 @@ fn create_tree_from_workdir(workdir: &Path, git_dir: &Path, index: &Index) -> Re
                 items.push(TreeItem::new(TreeItemMode::Tree, subtree_hash, file_name));
             } else if path.is_file() {
                 let metadata = fs::metadata(&path).map_err(|e| e.to_string())?;
+                // INVARIANT: `path` is obtained by traversing `workdir`, so
+                // `strip_prefix` always succeeds.
                 let relative_path = path.strip_prefix(workdir).unwrap();
                 let relative_path_str = relative_path.to_str().unwrap();
 

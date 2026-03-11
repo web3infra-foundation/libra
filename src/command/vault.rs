@@ -50,7 +50,7 @@ pub async fn execute_safe(args: VaultArgs) -> CliResult<()> {
     let root_dir = util::storage_path();
     if !vault::vault_exists(&root_dir) {
         return Err(CliError::fatal(
-            "vault is not initialized in this repository; run `libra init --vault`",
+            "vault is not initialized in this repository; run `libra init`",
         ));
     }
 
