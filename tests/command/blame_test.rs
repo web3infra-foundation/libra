@@ -45,6 +45,7 @@ async fn setup_repo_with_hash(
         ref_format: None,
         from_git_repository: None,
         separate_libra_dir: None,
+        vault: false,
     })
     .await
     .unwrap();

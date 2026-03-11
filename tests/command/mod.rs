@@ -37,8 +37,8 @@ use tempfile::tempdir;
 
 /// Run the Libra binary with an isolated HOME so host config never leaks into tests.
 fn run_libra_command(args: &[&str], cwd: &Path) -> Output {
-    let home = tempdir().expect("failed to create isolated HOME");
-    let config_home = home.path().join(".config");
+    let home = cwd.join(".libra-test-home");
+    let config_home = home.join(".config");
     fs::create_dir_all(&config_home).expect("failed to create isolated config directory");
 
     Command::new(env!("CARGO_BIN_EXE_libra"))
@@ -46,7 +46,8 @@ fn run_libra_command(args: &[&str], cwd: &Path) -> Output {
         .current_dir(cwd)
         .env_clear()
         .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
-        .env("HOME", home.path())
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
         .env("XDG_CONFIG_HOME", &config_home)
         .env("LANG", "C")
         .env("LC_ALL", "C")
@@ -66,7 +67,7 @@ fn assert_cli_success(output: &Output, context: &str) {
 /// Initialize a repository through the CLI to exercise the real process entrypoint.
 fn init_repo_via_cli(repo: &Path) {
     fs::create_dir_all(repo).expect("failed to create repository directory");
-    let output = run_libra_command(&["init"], repo);
+    let output = run_libra_command(&["init", "--vault"], repo);
     assert_cli_success(&output, "failed to initialize repository");
 }
 
@@ -138,4 +139,6 @@ mod show_test;
 mod status_test;
 mod switch_test;
 mod tag_test;
+mod vault_cli_test;
+mod vault_test;
 mod worktree_test;

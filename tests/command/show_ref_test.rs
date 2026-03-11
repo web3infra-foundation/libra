@@ -198,7 +198,9 @@ async fn test_show_ref_pattern_match() {
 
     // Create a second branch to verify filtering
     let head_hash = Head::current_commit().await.unwrap().to_string();
-    Branch::update_branch("feature", &head_hash, None).await;
+    Branch::update_branch("feature", &head_hash, None)
+        .await
+        .unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(temp.path())

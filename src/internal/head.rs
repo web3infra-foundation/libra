@@ -1,11 +1,13 @@
 //! HEAD management backed by the database, supporting local and remote heads, detached states, and transaction-safe query/update helpers.
 
-use std::str::FromStr;
+use std::{str::FromStr, time::Duration};
 
 use git_internal::hash::ObjectHash;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter,
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DbErr, EntityTrait,
+    QueryFilter,
 };
+use tokio::time::sleep;
 
 use crate::internal::{branch::Branch, db::get_db_conn_instance, model::reference};
 
@@ -39,29 +41,74 @@ pub enum Head {
  */
 
 impl Head {
+    const SQLITE_BUSY_MAX_RETRIES: usize = 15;
+    const SQLITE_BUSY_RETRY_BASE_MS: u64 = 100;
+
+    fn is_sqlite_busy(err: &DbErr) -> bool {
+        let message = err.to_string();
+        message.contains("database is locked") || message.contains("database schema is locked")
+    }
+
     async fn query_local_head_with_conn<C>(db: &C) -> reference::Model
     where
         C: ConnectionTrait,
     {
-        reference::Entity::find()
-            .filter(reference::Column::Kind.eq(reference::ConfigKind::Head))
-            .filter(reference::Column::Remote.is_null())
-            .one(db)
-            .await
-            .unwrap()
-            .expect("fatal: storage broken, HEAD not found")
+        for attempt in 0..=Self::SQLITE_BUSY_MAX_RETRIES {
+            match reference::Entity::find()
+                .filter(reference::Column::Kind.eq(reference::ConfigKind::Head))
+                .filter(reference::Column::Remote.is_null())
+                .one(db)
+                .await
+            {
+                Ok(Some(model)) => return model,
+                Ok(None) => panic!("fatal: storage broken, HEAD not found"),
+                Err(err)
+                    if Self::is_sqlite_busy(&err) && attempt < Self::SQLITE_BUSY_MAX_RETRIES =>
+                {
+                    sleep(Duration::from_millis(
+                        Self::SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
+                    ))
+                    .await;
+                }
+                Err(err) => panic!("fatal: failed to query HEAD: {err}"),
+            }
+        }
+
+        unreachable!("sqlite retry loop must return")
     }
 
     async fn query_remote_head_with_conn<C>(db: &C, remote: &str) -> Option<reference::Model>
     where
         C: ConnectionTrait,
     {
-        reference::Entity::find()
-            .filter(reference::Column::Kind.eq(reference::ConfigKind::Head))
-            .filter(reference::Column::Remote.eq(remote))
-            .one(db)
-            .await
-            .unwrap()
+        for attempt in 0..=Self::SQLITE_BUSY_MAX_RETRIES {
+            match reference::Entity::find()
+                .filter(reference::Column::Kind.eq(reference::ConfigKind::Head))
+                .filter(reference::Column::Remote.eq(remote))
+                .one(db)
+                .await
+            {
+                Ok(model) => return model,
+                Err(err)
+                    if Self::is_sqlite_busy(&err) && attempt < Self::SQLITE_BUSY_MAX_RETRIES =>
+                {
+                    sleep(Duration::from_millis(
+                        Self::SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
+                    ))
+                    .await;
+                }
+                Err(err) => {
+                    tracing::error!(
+                        remote,
+                        error = %err,
+                        "Failed to query remote HEAD"
+                    );
+                    return None;
+                }
+            }
+        }
+
+        None
     }
 
     pub async fn current_with_conn<C>(db: &C) -> Head
@@ -127,48 +174,76 @@ impl Head {
     where
         C: ConnectionTrait,
     {
-        let head = match remote {
-            Some(remote) => Self::query_remote_head_with_conn(db, remote).await,
-            None => Some(Self::query_local_head_with_conn(db).await),
-        };
-        match head {
-            Some(head) => {
-                // update
-                let mut head: reference::ActiveModel = head.into();
-                if remote.is_some() {
-                    head.remote = Set(remote.map(|s| s.to_owned()));
-                }
-                match new_head {
-                    Head::Detached(commit_hash) => {
-                        head.commit = Set(Some(commit_hash.to_string()));
-                        head.name = Set(None);
+        for attempt in 0..=Self::SQLITE_BUSY_MAX_RETRIES {
+            let head = match remote {
+                Some(remote) => Self::query_remote_head_with_conn(db, remote).await,
+                None => Some(Self::query_local_head_with_conn(db).await),
+            };
+
+            let write_result = match head {
+                Some(head) => {
+                    // update
+                    let mut head: reference::ActiveModel = head.into();
+                    if remote.is_some() {
+                        head.remote = Set(remote.map(|s| s.to_owned()));
                     }
-                    Head::Branch(branch_name) => {
-                        head.name = Set(Some(branch_name));
-                        head.commit = Set(None);
+                    match &new_head {
+                        Head::Detached(commit_hash) => {
+                            head.commit = Set(Some(commit_hash.to_string()));
+                            head.name = Set(None);
+                        }
+                        Head::Branch(branch_name) => {
+                            head.name = Set(Some(branch_name.clone()));
+                            head.commit = Set(None);
+                        }
                     }
+                    head.update(db).await.map(|_| ())
                 }
-                head.update(db).await.unwrap();
-            }
-            None => {
-                let mut head = reference::ActiveModel {
-                    kind: Set(reference::ConfigKind::Head),
-                    ..Default::default()
-                };
-                if remote.is_some() {
-                    head.remote = Set(remote.map(|s| s.to_owned()));
-                }
-                match new_head {
-                    Head::Detached(commit_hash) => {
-                        head.commit = Set(Some(commit_hash.to_string()));
+                None => {
+                    let mut head = reference::ActiveModel {
+                        kind: Set(reference::ConfigKind::Head),
+                        ..Default::default()
+                    };
+                    if remote.is_some() {
+                        head.remote = Set(remote.map(|s| s.to_owned()));
                     }
-                    Head::Branch(branch_name) => {
-                        head.name = Set(Some(branch_name));
+                    match &new_head {
+                        Head::Detached(commit_hash) => {
+                            head.commit = Set(Some(commit_hash.to_string()));
+                        }
+                        Head::Branch(branch_name) => {
+                            head.name = Set(Some(branch_name.clone()));
+                        }
                     }
+                    head.save(db).await.map(|_| ())
                 }
-                head.save(db).await.unwrap();
+            };
+
+            match write_result {
+                Ok(()) => return,
+                Err(err)
+                    if Self::is_sqlite_busy(&err) && attempt < Self::SQLITE_BUSY_MAX_RETRIES =>
+                {
+                    sleep(Duration::from_millis(
+                        Self::SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
+                    ))
+                    .await;
+                }
+                Err(err) => {
+                    tracing::error!(
+                        remote = ?remote,
+                        error = %err,
+                        "Failed to update HEAD reference"
+                    );
+                    return;
+                }
             }
         }
+
+        tracing::error!(
+            remote = ?remote,
+            "Failed to update HEAD reference after sqlite busy retries"
+        );
     }
 
     // HEAD is unique, update if exists, insert if not

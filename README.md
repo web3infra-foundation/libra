@@ -45,6 +45,7 @@ Commands:
   remote       Manage set of tracked repositories
   open         Open the repository in the browser
   config       Manage repository configurations
+  vault        Manage vault-backed signing and SSH keys
   reflog       Manage the log of reference changes (e.g., HEAD, branches)
   worktree     Manage multiple working trees attached to this repository
   cloud        Cloud backup and restore operations (D1/R2)
@@ -248,6 +249,100 @@ This allows Libra to interact seamlessly with Git servers (for example, `push` a
 While maintaining compatibility with Git, Libra intentionally diverges in some areas:
 
 - Uses an **SQLite** database to manage loosely structured files such as `config`, `HEAD`, and `refs`, providing unified and transactional management instead of plain-text files.
+
+---
+
+## Vault-Backed Signing
+
+Libra supports repository-local vault initialization for commit signing:
+
+```bash
+libra init --vault [--separate-libra-dir <dir>] [<repo_directory>]
+```
+
+`--vault` is mandatory for `libra init`. Running `libra init` without
+`--vault` returns a command-usage error.
+
+When `--vault` is enabled:
+
+- A vault database (`vault.db`) is created in the repository storage directory (`.libra/` or the directory passed via `--separate-libra-dir`).
+- Libra generates a signing key and enables `vault.signing=true`.
+- The vault unseal key is stored outside the repository at `~/.libra/vault-keys/<repoid>`.
+- The encrypted root token is stored in repository config (`vault.roottoken_enc`).
+
+Security note:
+
+- Libra no longer falls back to storing the unseal key inside repository config.
+- If the home directory is not writable/usable, `libra init --vault` fails with a fatal error.
+
+Troubleshooting:
+
+- Ensure `HOME` (or `USERPROFILE` on Windows) points to a writable directory.
+- In container/CI environments, explicitly set `HOME` to a writable path before running `libra init --vault`.
+
+Key management commands:
+
+```bash
+# Print current vault GPG public key (for GitHub GPG key settings)
+libra vault gpg-public-key
+
+# Generate an SSH key in vault and print public key (for GitHub SSH key settings)
+libra vault generate-ssh-key [--name <user>]
+
+# Print current vault SSH public key
+libra vault ssh-public-key
+
+# Generate (or rotate) vault GPG signing key and print public key
+libra vault generate-gpg-key [--name <user>] [--email <mail>]
+```
+
+### GitHub End-to-End Verification (libvault + Git conversion)
+
+The following flow validates:
+
+- `libvault` integration with Libra storage (`.libra/vault.db` + config metadata in SQLite)
+- Conversion from Git repository format to Libra repository format
+- Vault-backed GPG signing on commit
+- SSH push from Libra to GitHub
+
+```bash
+# 1) Clone an existing GitHub repository locally with Git (SSH).
+#    (This step can use your existing SSH credential.)
+git clone git@github.com:<owner>/<repo>.git /tmp/<repo>-git
+
+# 2) Convert the cloned Git repository into a Libra repository and
+#    initialize vault in the same command.
+mkdir -p /tmp/<repo>-libra
+cd /tmp/<repo>-libra
+libra init --vault --from-git-repository /tmp/<repo>-git
+
+# 3) Export vault public keys and register them in GitHub settings:
+#    - GPG key: GitHub -> Settings -> SSH and GPG keys -> New GPG key
+#    - SSH key: GitHub -> Settings -> SSH and GPG keys -> New SSH key
+libra vault gpg-public-key
+libra vault generate-ssh-key --name "<github-username>"
+libra vault ssh-public-key
+
+# 4) Make sure origin points to GitHub SSH URL in Libra config.
+libra remote set-url origin git@github.com:<owner>/<repo>.git
+
+# 5) Create a signed commit and push through SSH.
+echo "vault e2e" > vault-e2e.txt
+libra add vault-e2e.txt
+libra commit -m "feat(vault): verify signed commit to GitHub"
+libra push origin master
+```
+
+Verification points:
+
+- `libra commit` should produce a commit object containing `gpgsig`.
+- `libra push` should succeed over SSH (`git@github.com:...`).
+- The commit should appear in GitHub with signature metadata.
+
+Note:
+
+- For the very first `git clone` in step 1, Git may still use your existing SSH credentials.
+  After step 3, Libra fetch/push uses the vault-generated key for this repository.
 
 ---
 

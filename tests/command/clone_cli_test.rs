@@ -5,9 +5,24 @@ use std::{fs, path::Path, process::Command};
 use tempfile::tempdir;
 
 fn run_libra(args: &[&str], cwd: &Path) -> std::process::Output {
+    let home = cwd.join(".home");
+    fs::create_dir_all(&home).unwrap();
+
     Command::new(env!("CARGO_BIN_EXE_libra"))
         .args(args)
         .current_dir(cwd)
+        .env("HOME", home)
+        .env_remove("RUST_LOG")
+        .env_remove("LIBRA_LOG")
+        .output()
+        .unwrap()
+}
+
+fn run_libra_with_home(args: &[&str], cwd: &Path, home: &Path) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_libra"))
+        .args(args)
+        .current_dir(cwd)
+        .env("HOME", home)
         .env_remove("RUST_LOG")
         .env_remove("LIBRA_LOG")
         .output()
@@ -129,4 +144,43 @@ fn successful_clone_output_has_no_debug_noise() {
     assert!(!stderr.contains("fatal: fatal:"));
     assert!(!stderr.contains('\u{2}'));
     assert!(dest.join("README.md").exists());
+}
+
+#[test]
+fn successful_clone_initializes_vault() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("clone");
+    let home = temp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+
+    let output = run_libra_with_home(
+        &["clone", remote.to_str().unwrap(), dest.to_str().unwrap()],
+        temp.path(),
+        &home,
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        dest.join(".libra").join("vault.db").exists(),
+        "clone should initialize .libra/vault.db for vault-backed workflows"
+    );
+
+    let signing_output = run_libra_with_home(&["config", "--get", "vault.signing"], &dest, &home);
+    assert_eq!(
+        signing_output.status.code(),
+        Some(0),
+        "failed to read vault.signing: {}",
+        String::from_utf8_lossy(&signing_output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&signing_output.stdout).trim(),
+        "true",
+        "clone should enable vault.signing"
+    );
 }
