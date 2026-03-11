@@ -14,7 +14,7 @@ pub use utils::error::{CliError, CliErrorKind, CliResult};
 /// ### Caution
 /// There is a tokio runtime inside. Ensure you are NOT in a tokio runtime which can't be nested.
 /// ### Example
-/// - `["init", "--vault"]`
+/// - `["init"]`
 /// - `["add", "."]`
 pub fn exec(mut args: Vec<&str>) -> CliResult<()> {
     args.insert(0, env!("CARGO_PKG_NAME"));

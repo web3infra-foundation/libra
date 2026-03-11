@@ -534,9 +534,11 @@ async fn preflight_rebase(args: &RebaseArgs) -> CliResult<()> {
         }
     }
 
+    // `resolve_branch_or_commit` returns legacy `"fatal: ..."` prefixed strings,
+    // so `from_legacy_string` strips the prefix to avoid double-prefix rendering.
     resolve_branch_or_commit(upstream)
         .await
-        .map_err(CliError::fatal)?;
+        .map_err(CliError::from_legacy_string)?;
     Ok(())
 }
 
