@@ -56,7 +56,7 @@ fn init_temp_repo() -> TempDir {
     );
 
     let output = libra_command(temp_path)
-        .args(["init", "--vault"])
+        .args(["init"])
         .output()
         .expect("Failed to execute libra binary");
 

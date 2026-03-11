@@ -24,11 +24,11 @@ fn test_cli_vault_gpg_public_key_after_init() {
     let init_out = run_libra(
         temp_root.path(),
         &home,
-        &["init", "--vault", workdir.to_str().unwrap()],
+        &["init", workdir.to_str().unwrap()],
     );
     assert!(
         init_out.status.success(),
-        "init --vault should succeed, stderr: {}",
+        "init should succeed, stderr: {}",
         String::from_utf8_lossy(&init_out.stderr)
     );
 
@@ -60,11 +60,11 @@ fn test_cli_vault_generate_ssh_key_and_show_public_key() {
     let init_out = run_libra(
         temp_root.path(),
         &home,
-        &["init", "--vault", workdir.to_str().unwrap()],
+        &["init", workdir.to_str().unwrap()],
     );
     assert!(
         init_out.status.success(),
-        "init --vault should succeed, stderr: {}",
+        "init should succeed, stderr: {}",
         String::from_utf8_lossy(&init_out.stderr)
     );
 
@@ -154,11 +154,11 @@ fn test_cli_vault_generate_ssh_key_without_unseal_key_exits_non_zero() {
     let init_out = run_libra(
         temp_root.path(),
         &home,
-        &["init", "--vault", workdir.to_str().unwrap()],
+        &["init", workdir.to_str().unwrap()],
     );
     assert!(
         init_out.status.success(),
-        "init --vault should succeed, stderr: {}",
+        "init should succeed, stderr: {}",
         String::from_utf8_lossy(&init_out.stderr)
     );
 

@@ -51,7 +51,7 @@ fn init_repo() -> tempfile::TempDir {
     std::fs::create_dir_all(&config_home).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(dir.path())
-        .args(["init", "--vault"])
+        .args(["init"])
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", &config_home)
         .env("USERPROFILE", &home)
@@ -479,7 +479,7 @@ async fn cloud_full_workflow_end_to_end() {
     std::fs::create_dir_all(&restore_config_a).unwrap();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_libra"));
     cmd.current_dir(restore_path_a)
-        .args(["init", "--vault"])
+        .args(["init"])
         .env("HOME", &restore_home_a)
         .env("XDG_CONFIG_HOME", &restore_config_a)
         .env("USERPROFILE", &restore_home_a);
@@ -538,7 +538,7 @@ async fn cloud_full_workflow_end_to_end() {
     std::fs::create_dir_all(&restore_config_b).unwrap();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_libra"));
     cmd.current_dir(restore_path_b)
-        .args(["init", "--vault"])
+        .args(["init"])
         .env("HOME", &restore_home_b)
         .env("XDG_CONFIG_HOME", &restore_config_b)
         .env("USERPROFILE", &restore_home_b);
