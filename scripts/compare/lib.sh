@@ -99,6 +99,12 @@ setup_sandbox() {
 
     # Ensure git doesn't prompt
     export GIT_TERMINAL_PROMPT=0
+    # Disable pager to prevent interactive hang
+    export GIT_PAGER=cat
+    export PAGER=cat
+    export MANPAGER=cat
+    export MAN_DISABLE=1
+    export COLUMNS=120
 
     log_info "Sandbox: $SANDBOX"
     log_info "Report:  $REPORT_FILE"
@@ -215,12 +221,30 @@ run_tool() {
 
     local out_prefix="$SANDBOX/out/${label}.${tool}"
     local rc=0
+    local tool_timeout="${TOOL_TIMEOUT:-60}"
 
     # Capture timing
     local start_time
     start_time=$(date +%s%N 2>/dev/null || python3 -c 'import time; print(int(time.time()*1e9))' 2>/dev/null || echo 0)
 
-    "$bin" "$@" >"${out_prefix}.stdout" 2>"${out_prefix}.stderr" || rc=$?
+    # Run with timeout via background process + polling
+    "$bin" "$@" >"${out_prefix}.stdout" 2>"${out_prefix}.stderr" &
+    local pid=$!
+    local elapsed=0
+    while kill -0 "$pid" 2>/dev/null; do
+        if (( elapsed >= tool_timeout )); then
+            kill -9 "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            rc=124
+            echo "TIMEOUT after ${tool_timeout}s" >> "${out_prefix}.stderr"
+            break
+        fi
+        sleep 1
+        (( elapsed++ )) || true
+    done
+    if (( rc != 124 )); then
+        wait "$pid" 2>/dev/null || rc=$?
+    fi
 
     local end_time
     end_time=$(date +%s%N 2>/dev/null || python3 -c 'import time; print(int(time.time()*1e9))' 2>/dev/null || echo 0)
