@@ -257,13 +257,12 @@ While maintaining compatibility with Git, Libra intentionally diverges in some a
 Libra supports repository-local vault initialization for commit signing:
 
 ```bash
-libra init --vault [--separate-libra-dir <dir>] [<repo_directory>]
+libra init [--separate-libra-dir <dir>] [<repo_directory>]
 ```
 
-`--vault` is mandatory for `libra init`. Running `libra init` without
-`--vault` returns a command-usage error.
+Vault is enabled by default for all `libra init` invocations — no extra flag is needed.
 
-When `--vault` is enabled:
+When vault is enabled:
 
 - A vault database (`vault.db`) is created in the repository storage directory (`.libra/` or the directory passed via `--separate-libra-dir`).
 - Libra generates a signing key and enables `vault.signing=true`.
@@ -273,12 +272,12 @@ When `--vault` is enabled:
 Security note:
 
 - Libra no longer falls back to storing the unseal key inside repository config.
-- If the home directory is not writable/usable, `libra init --vault` fails with a fatal error.
+- If the home directory is not writable/usable, `libra init` fails with a fatal error.
 
 Troubleshooting:
 
 - Ensure `HOME` (or `USERPROFILE` on Windows) points to a writable directory.
-- In container/CI environments, explicitly set `HOME` to a writable path before running `libra init --vault`.
+- In container/CI environments, explicitly set `HOME` to a writable path before running `libra init`.
 
 Key management commands:
 
@@ -314,7 +313,7 @@ git clone git@github.com:<owner>/<repo>.git /tmp/<repo>-git
 #    initialize vault in the same command.
 mkdir -p /tmp/<repo>-libra
 cd /tmp/<repo>-libra
-libra init --vault --from-git-repository /tmp/<repo>-git
+libra init --from-git-repository /tmp/<repo>-git
 
 # 3) Export vault public keys and register them in GitHub settings:
 #    - GPG key: GitHub -> Settings -> SSH and GPG keys -> New GPG key
