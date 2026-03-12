@@ -6,8 +6,6 @@ use std::{
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
-#[cfg(target_os = "linux")]
-use super::WritableRoot;
 use super::{SandboxPermissions, SandboxPolicy};
 
 pub const LIBRA_SANDBOX_NETWORK_DISABLED_ENV_VAR: &str = "LIBRA_SANDBOX_NETWORK_DISABLED";
@@ -18,8 +16,7 @@ const MACOS_PATH_TO_SEATBELT_EXECUTABLE: &str = "/usr/bin/sandbox-exec";
 pub enum SandboxType {
     None,
     MacosSeatbelt,
-    LinuxBwrap,
-    LinuxHelper,
+    LinuxSeccomp,
     WindowsRestrictedToken,
 }
 
@@ -94,9 +91,7 @@ pub struct SandboxTransformRequest<'a> {
 pub enum SandboxTransformError {
     #[error("missing command program")]
     MissingProgram,
-    #[error("sandbox expected writable root {0}, but it does not exist")]
-    MissingWritableRoot(PathBuf),
-    #[error("failed to serialize sandbox policy for linux helper: {0}")]
+    #[error("failed to serialize sandbox policy for linux sandbox: {0}")]
     LinuxPolicySerialize(#[from] serde_json::Error),
     #[error("missing linux sandbox executable path")]
     MissingLinuxSandboxExecutable,
@@ -118,7 +113,6 @@ impl SandboxManager {
         &self,
         policy: Option<&SandboxPolicy>,
         permissions: SandboxPermissions,
-        _linux_sandbox_exe: Option<&PathBuf>,
     ) -> SandboxType {
         if permissions.requires_escalated_permissions() {
             return SandboxType::None;
@@ -128,7 +122,10 @@ impl SandboxManager {
             return SandboxType::None;
         };
 
-        if policy.has_full_disk_write_access() && policy.has_full_network_access() {
+        if matches!(
+            policy,
+            SandboxPolicy::DangerFullAccess | SandboxPolicy::ExternalSandbox { .. }
+        ) {
             return SandboxType::None;
         }
 
@@ -138,11 +135,7 @@ impl SandboxManager {
         }
         #[cfg(target_os = "linux")]
         {
-            if _linux_sandbox_exe.is_some() {
-                SandboxType::LinuxHelper
-            } else {
-                SandboxType::LinuxBwrap
-            }
+            SandboxType::LinuxSeccomp
         }
         #[cfg(target_os = "windows")]
         {
@@ -168,6 +161,8 @@ impl SandboxManager {
 
         #[cfg(not(target_os = "linux"))]
         let _ = use_linux_sandbox_bwrap;
+        #[cfg(not(target_os = "linux"))]
+        let _ = linux_sandbox_exe;
 
         if spec.program.is_empty() {
             return Err(SandboxTransformError::MissingProgram);
@@ -185,7 +180,7 @@ impl SandboxManager {
         command.push(spec.program.clone());
         command.extend(spec.args.clone());
 
-        let sandbox = self.select_initial(policy, spec.sandbox_permissions, linux_sandbox_exe);
+        let sandbox = self.select_initial(policy, spec.sandbox_permissions);
         let (command, arg0) = match sandbox {
             SandboxType::None => (command, None),
             SandboxType::MacosSeatbelt => {
@@ -204,37 +199,21 @@ impl SandboxManager {
                     return Err(SandboxTransformError::UnsupportedPlatform);
                 }
             }
-            SandboxType::LinuxBwrap => {
-                #[cfg(target_os = "linux")]
-                {
-                    let policy = policy.ok_or(SandboxTransformError::UnsupportedPlatform)?;
-                    let mut bwrap_args =
-                        create_bwrap_command_args(command, policy, sandbox_policy_cwd)?;
-                    let mut full = Vec::with_capacity(1 + bwrap_args.len());
-                    full.push("bwrap".to_string());
-                    full.append(&mut bwrap_args);
-                    (full, None)
-                }
-                #[cfg(not(target_os = "linux"))]
-                {
-                    return Err(SandboxTransformError::UnsupportedPlatform);
-                }
-            }
-            SandboxType::LinuxHelper => {
+            SandboxType::LinuxSeccomp => {
                 #[cfg(target_os = "linux")]
                 {
                     let policy = policy.ok_or(SandboxTransformError::UnsupportedPlatform)?;
                     let linux_sandbox_exe = linux_sandbox_exe
                         .ok_or(SandboxTransformError::MissingLinuxSandboxExecutable)?;
-                    let mut helper_args = create_linux_sandbox_helper_args(
+                    let mut sandbox_args = create_linux_sandbox_command_args(
                         command,
                         policy,
                         sandbox_policy_cwd,
                         use_linux_sandbox_bwrap,
                     )?;
-                    let mut full = Vec::with_capacity(1 + helper_args.len());
+                    let mut full = Vec::with_capacity(1 + sandbox_args.len());
                     full.push(linux_sandbox_exe.to_string_lossy().to_string());
-                    full.append(&mut helper_args);
+                    full.append(&mut sandbox_args);
                     (full, Some("libra-linux-sandbox".to_string()))
                 }
                 #[cfg(not(target_os = "linux"))]
@@ -268,7 +247,7 @@ impl SandboxManager {
 }
 
 #[cfg(target_os = "linux")]
-fn create_linux_sandbox_helper_args(
+fn create_linux_sandbox_command_args(
     command: Vec<String>,
     sandbox_policy: &SandboxPolicy,
     sandbox_policy_cwd: &Path,
@@ -399,178 +378,6 @@ fn macos_dir_params() -> Vec<(String, PathBuf)> {
     Vec::new()
 }
 
-#[cfg(target_os = "linux")]
-fn create_bwrap_command_args(
-    command: Vec<String>,
-    sandbox_policy: &SandboxPolicy,
-    cwd: &Path,
-) -> Result<Vec<String>, SandboxTransformError> {
-    if sandbox_policy.has_full_disk_write_access() {
-        return Ok(command);
-    }
-
-    let writable_roots = sandbox_policy.get_writable_roots_with_cwd(cwd);
-    ensure_mount_targets_exist(&writable_roots)?;
-    let allowed_write_paths: Vec<PathBuf> =
-        writable_roots.iter().map(|wr| wr.root.clone()).collect();
-
-    let mut args = vec![
-        "--new-session".to_string(),
-        "--die-with-parent".to_string(),
-        "--ro-bind".to_string(),
-        "/".to_string(),
-        "/".to_string(),
-    ];
-
-    for writable_root in &writable_roots {
-        let root = writable_root.root.to_string_lossy().to_string();
-        args.push("--bind".to_string());
-        args.push(root.clone());
-        args.push(root);
-    }
-
-    for subpath in collect_read_only_subpaths(&writable_roots) {
-        if let Some(symlink_path) = find_symlink_in_path(&subpath, &allowed_write_paths) {
-            args.push("--ro-bind".to_string());
-            args.push("/dev/null".to_string());
-            args.push(symlink_path.to_string_lossy().to_string());
-            continue;
-        }
-
-        if !subpath.exists() {
-            if let Some(first_missing) = find_first_nonexistent_component(&subpath)
-                && is_within_allowed_write_paths(&first_missing, &allowed_write_paths)
-            {
-                args.push("--ro-bind".to_string());
-                args.push("/dev/null".to_string());
-                args.push(first_missing.to_string_lossy().to_string());
-            }
-            continue;
-        }
-
-        if is_within_allowed_write_paths(&subpath, &allowed_write_paths) {
-            let path = subpath.to_string_lossy().to_string();
-            args.push("--ro-bind".to_string());
-            args.push(path.clone());
-            args.push(path);
-        }
-    }
-
-    if !sandbox_policy.has_full_network_access() {
-        args.push("--unshare-net".to_string());
-    }
-
-    args.extend([
-        "--unshare-pid".to_string(),
-        "--proc".to_string(),
-        "/proc".to_string(),
-        "--dev-bind".to_string(),
-        "/dev/null".to_string(),
-        "/dev/null".to_string(),
-        "--".to_string(),
-    ]);
-    args.extend(command);
-    Ok(args)
-}
-
-#[cfg(target_os = "linux")]
-fn ensure_mount_targets_exist(
-    writable_roots: &[WritableRoot],
-) -> Result<(), SandboxTransformError> {
-    for writable_root in writable_roots {
-        let root = writable_root.root.as_path();
-        if !root.exists() {
-            return Err(SandboxTransformError::MissingWritableRoot(
-                root.to_path_buf(),
-            ));
-        }
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn collect_read_only_subpaths(writable_roots: &[WritableRoot]) -> Vec<PathBuf> {
-    use std::collections::BTreeSet;
-
-    let mut subpaths: BTreeSet<PathBuf> = BTreeSet::new();
-    for writable_root in writable_roots {
-        for subpath in &writable_root.read_only_subpaths {
-            subpaths.insert(subpath.clone());
-        }
-    }
-    subpaths.into_iter().collect()
-}
-
-#[cfg(target_os = "linux")]
-fn is_within_allowed_write_paths(path: &Path, allowed_write_paths: &[PathBuf]) -> bool {
-    allowed_write_paths
-        .iter()
-        .any(|root| path.starts_with(root))
-}
-
-#[cfg(target_os = "linux")]
-fn find_symlink_in_path(target_path: &Path, allowed_write_paths: &[PathBuf]) -> Option<PathBuf> {
-    use std::path::Component;
-
-    let mut current = PathBuf::new();
-    for component in target_path.components() {
-        match component {
-            Component::RootDir => {
-                current.push(Path::new("/"));
-                continue;
-            }
-            Component::CurDir => continue,
-            Component::ParentDir => {
-                current.pop();
-                continue;
-            }
-            Component::Normal(part) => current.push(part),
-            Component::Prefix(_) => continue,
-        }
-
-        let metadata = match std::fs::symlink_metadata(&current) {
-            Ok(metadata) => metadata,
-            Err(_) => break,
-        };
-
-        if metadata.file_type().is_symlink()
-            && is_within_allowed_write_paths(&current, allowed_write_paths)
-        {
-            return Some(current);
-        }
-    }
-
-    None
-}
-
-#[cfg(target_os = "linux")]
-fn find_first_nonexistent_component(target_path: &Path) -> Option<PathBuf> {
-    use std::path::Component;
-
-    let mut current = PathBuf::new();
-    for component in target_path.components() {
-        match component {
-            Component::RootDir => {
-                current.push(Path::new("/"));
-                continue;
-            }
-            Component::CurDir => continue,
-            Component::ParentDir => {
-                current.pop();
-                continue;
-            }
-            Component::Normal(part) => current.push(part),
-            Component::Prefix(_) => continue,
-        }
-
-        if !current.exists() {
-            return Some(current);
-        }
-    }
-
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -586,9 +393,67 @@ mod tests {
         };
 
         assert_eq!(
-            manager.select_initial(Some(&policy), SandboxPermissions::RequireEscalated, None),
+            manager.select_initial(Some(&policy), SandboxPermissions::RequireEscalated),
             SandboxType::None
         );
+    }
+
+    #[test]
+    fn select_initial_uses_none_for_external_sandbox() {
+        let manager = SandboxManager::new();
+        let policy = SandboxPolicy::ExternalSandbox {
+            network_access: super::super::NetworkAccess::Restricted,
+        };
+        assert_eq!(
+            manager.select_initial(Some(&policy), SandboxPermissions::UseDefault),
+            SandboxType::None
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn select_initial_uses_linux_seccomp_when_sandboxed() {
+        let manager = SandboxManager::new();
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![],
+            network_access: false,
+            exclude_tmpdir_env_var: false,
+            exclude_slash_tmp: false,
+        };
+        assert_eq!(
+            manager.select_initial(Some(&policy), SandboxPermissions::UseDefault),
+            SandboxType::LinuxSeccomp
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn transform_linux_seccomp_requires_helper_executable() {
+        let manager = SandboxManager::new();
+        let cwd = std::env::temp_dir();
+        let request = SandboxTransformRequest {
+            spec: CommandSpec::shell(
+                "echo ok",
+                cwd.clone(),
+                Some(1_000),
+                SandboxPermissions::UseDefault,
+                None,
+            ),
+            policy: Some(&SandboxPolicy::WorkspaceWrite {
+                writable_roots: vec![],
+                network_access: false,
+                exclude_tmpdir_env_var: false,
+                exclude_slash_tmp: false,
+            }),
+            sandbox_policy_cwd: &cwd,
+            linux_sandbox_exe: None,
+            use_linux_sandbox_bwrap: false,
+        };
+
+        assert!(matches!(
+            manager.transform(request),
+            Err(SandboxTransformError::MissingLinuxSandboxExecutable)
+        ));
     }
 
     #[test]
