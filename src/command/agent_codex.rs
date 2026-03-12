@@ -1,6 +1,11 @@
 //! Agent Codex command - directly connect to Codex app-server via WebSocket.
 
-use std::sync::{Arc, Mutex};
+#![allow(clippy::all)]
+
+use std::{
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+};
 
 use chrono::Utc;
 use clap::Parser;
@@ -9,9 +14,68 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-use crate::cli_error;
+use crate::{
+    cli_error,
+    internal::{
+        ai::{history::HistoryManager, mcp::server::LibraMcpServer},
+        db,
+    },
+    utils::{storage_ext::StorageExt, util::try_get_storage_path},
+};
 
 const CODEX_WS_URL: &str = "ws://127.0.0.1:8080";
+
+/// Initialize MCP server for storing agent data
+async fn init_mcp_server(working_dir: &Path) -> Arc<LibraMcpServer> {
+    let storage_dir = try_get_storage_path(Some(working_dir.to_path_buf()))
+        .unwrap_or_else(|_| working_dir.join(".libra"));
+    let (objects_dir, dot_libra) = (storage_dir.join("objects"), storage_dir);
+
+    // Try to create the directory
+    if let Err(_e) = std::fs::create_dir_all(&objects_dir) {
+        eprintln!(
+            "Warning: Failed to create storage directory: {}. Running in read-only mode.",
+            objects_dir.display()
+        );
+        return Arc::new(LibraMcpServer::new(None, None));
+    }
+
+    // Connect to DB
+    let db_path = dot_libra.join("libra.db");
+    let db_path_str = db_path.to_str().unwrap_or_default();
+
+    #[cfg(target_os = "windows")]
+    let db_path_string = db_path_str.replace("\\", "/");
+    #[cfg(target_os = "windows")]
+    let db_path_str = &db_path_string;
+
+    let db_conn = match db::establish_connection(db_path_str).await {
+        Ok(conn) => conn,
+        Err(e) => {
+            eprintln!(
+                "Warning: Failed to connect to database: {}. Running in read-only mode. Error: {}",
+                db_path.display(),
+                e
+            );
+            return Arc::new(LibraMcpServer::new(None, None));
+        }
+    };
+
+    // Initialize storage
+    let storage: Arc<dyn crate::utils::storage::Storage + Send + Sync> =
+        Arc::new(crate::utils::storage::local::LocalStorage::new(objects_dir));
+
+    let intent_history_manager = Arc::new(HistoryManager::new(
+        storage.clone(),
+        dot_libra,
+        Arc::new(db_conn),
+    ));
+
+    Arc::new(LibraMcpServer::new(
+        Some(intent_history_manager),
+        Some(storage),
+    ))
+}
 
 #[derive(Parser, Debug, Clone)]
 pub struct AgentCodexArgs {
@@ -62,7 +126,7 @@ impl CodexMessage {
 }
 
 // =============================================================================
-// Data Structures for Agent Storage 
+// Data Structures for Agent Storage
 // =============================================================================
 
 /// Thread status
@@ -142,6 +206,7 @@ pub enum ApprovalType {
 pub struct CodexThread {
     pub id: String,
     pub status: ThreadStatus,
+    pub name: Option<String>,
     pub current_turn_id: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
@@ -153,6 +218,7 @@ impl Default for CodexThread {
         Self {
             id: String::new(),
             status: ThreadStatus::Pending,
+            name: None,
             current_turn_id: None,
             created_at: now,
             updated_at: now,
@@ -205,6 +271,29 @@ pub struct Run {
     pub status: RunStatus,
     pub started_at: chrono::DateTime<chrono::Utc>,
     pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Token usage breakdown
+/// Corresponds to: RunUsage[E] in agent-overview-zh.md
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TokenUsage {
+    pub cached_input_tokens: Option<i64>,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub reasoning_output_tokens: Option<i64>,
+    pub total_tokens: Option<i64>,
+}
+
+/// Token usage for a turn
+/// Corresponds to: RunUsage[E] in agent-overview-zh.md
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TurnTokenUsage {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub last: TokenUsage,
+    pub total: TokenUsage,
+    pub model_context_window: Option<i64>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// ToolInvocation - tool call record
@@ -298,6 +387,7 @@ pub struct CodexSession {
     pub patchsets: Vec<PatchSet>,
     pub approval_requests: Vec<ApprovalRequest>,
     pub agent_messages: Vec<AgentMessage>,
+    pub token_usages: Vec<TurnTokenUsage>,
 }
 
 impl CodexSession {
@@ -308,15 +398,26 @@ impl CodexSession {
     /// Print summary of current session (for debug)
     pub fn print_summary(&self) {
         eprintln!("\n========== SESSION DATA ==========");
-        eprintln!("Thread: id={}, status={:?}, current_turn={:?}",
-            self.thread.id, self.thread.status, self.thread.current_turn_id);
+        eprintln!(
+            "Thread: id={}, status={:?}, name={:?}, current_turn={:?}",
+            self.thread.id, self.thread.status, self.thread.name, self.thread.current_turn_id
+        );
         eprintln!("Intents: {}", self.intents.len());
         for intent in &self.intents {
-            eprintln!("  - Intent: {} - {}", intent.id, &intent.content[..intent.content.len().min(50)]);
+            eprintln!(
+                "  - Intent: {} - {}",
+                intent.id,
+                &intent.content[..intent.content.len().min(50)]
+            );
         }
         eprintln!("Plans: {}", self.plans.len());
         for plan in &self.plans {
-            eprintln!("  - Plan: {} - {} (status: {:?})", plan.id, &plan.text[..plan.text.len().min(30)], plan.status);
+            eprintln!(
+                "  - Plan: {} - {} (status: {:?})",
+                plan.id,
+                &plan.text[..plan.text.len().min(30)],
+                plan.status
+            );
         }
         eprintln!("Runs: {}", self.runs.len());
         for run in &self.runs {
@@ -324,30 +425,58 @@ impl CodexSession {
         }
         eprintln!("ToolInvocations: {}", self.tool_invocations.len());
         for inv in &self.tool_invocations {
-            eprintln!("  - Tool: {} - {} (status: {:?})", inv.id, inv.tool_name, inv.status);
+            eprintln!(
+                "  - Tool: {} - {} (status: {:?})",
+                inv.id, inv.tool_name, inv.status
+            );
         }
         eprintln!("Reasonings: {}", self.reasonings.len());
         eprintln!("PatchSets: {}", self.patchsets.len());
         for ps in &self.patchsets {
-            eprintln!("  - PatchSet: {} (status: {:?}, {} changes)", ps.id, ps.status, ps.changes.len());
+            eprintln!(
+                "  - PatchSet: {} (status: {:?}, {} changes)",
+                ps.id,
+                ps.status,
+                ps.changes.len()
+            );
         }
         eprintln!("ApprovalRequests: {}", self.approval_requests.len());
         for ar in &self.approval_requests {
-            eprintln!("  - Approval: {} - {:?} (decision: {:?})", ar.id, ar.approval_type, ar.decision);
+            eprintln!(
+                "  - Approval: {} - {:?} (decision: {:?})",
+                ar.id, ar.approval_type, ar.decision
+            );
         }
         eprintln!("AgentMessages: {}", self.agent_messages.len());
+        eprintln!("TokenUsages: {}", self.token_usages.len());
+        for usage in &self.token_usages {
+            eprintln!(
+                "  - TokenUsage: turn={}, total_tokens={}",
+                usage.turn_id,
+                usage.total.total_tokens.unwrap_or(0)
+            );
+        }
         eprintln!("================================\n");
     }
 
     /// Add a new intent
     pub fn add_intent(&mut self, intent: Intent) {
-        eprintln!("[DEBUG] Added Intent: {} - {}", intent.id, &intent.content[..intent.content.len().min(50)]);
+        eprintln!(
+            "[DEBUG] Added Intent: {} - {}",
+            intent.id,
+            &intent.content[..intent.content.len().min(50)]
+        );
         self.intents.push(intent);
     }
 
     /// Add a new plan
     pub fn add_plan(&mut self, plan: Plan) {
-        eprintln!("[DEBUG] Added Plan: {} - {} (status: {:?})", plan.id, &plan.text[..plan.text.len().min(30)], plan.status);
+        eprintln!(
+            "[DEBUG] Added Plan: {} - {} (status: {:?})",
+            plan.id,
+            &plan.text[..plan.text.len().min(30)],
+            plan.status
+        );
         self.plans.push(plan);
     }
 
@@ -365,7 +494,10 @@ impl CodexSession {
 
     /// Add a new tool invocation
     pub fn add_tool_invocation(&mut self, invocation: ToolInvocation) {
-        eprintln!("[DEBUG] Added ToolInvocation: {} - {}", invocation.id, invocation.tool_name);
+        eprintln!(
+            "[DEBUG] Added ToolInvocation: {} - {}",
+            invocation.id, invocation.tool_name
+        );
         self.tool_invocations.push(invocation);
     }
 
@@ -383,7 +515,10 @@ impl CodexSession {
 
     /// Add a new approval request
     pub fn add_approval_request(&mut self, approval: ApprovalRequest) {
-        eprintln!("[DEBUG] Added ApprovalRequest: {} - {:?}", approval.id, approval.approval_type);
+        eprintln!(
+            "[DEBUG] Added ApprovalRequest: {} - {:?}",
+            approval.id, approval.approval_type
+        );
         self.approval_requests.push(approval);
     }
 
@@ -393,9 +528,22 @@ impl CodexSession {
         self.agent_messages.push(msg);
     }
 
+    /// Add token usage for a turn
+    pub fn add_token_usage(&mut self, usage: TurnTokenUsage) {
+        eprintln!(
+            "[DEBUG] Added TokenUsage: turn={}, total_tokens={}",
+            usage.turn_id,
+            usage.total.total_tokens.unwrap_or(0)
+        );
+        self.token_usages.push(usage);
+    }
+
     /// Update thread status
     pub fn update_thread(&mut self, thread: CodexThread) {
-        eprintln!("[DEBUG] Updated Thread: {} (status: {:?})", thread.id, thread.status);
+        eprintln!(
+            "[DEBUG] Updated Thread: {} (status: {:?})",
+            thread.id, thread.status
+        );
         self.thread = thread;
     }
 
@@ -410,7 +558,39 @@ impl CodexSession {
     }
 }
 
+/// Store an object to MCP storage
+async fn store_to_mcp<T: serde::Serialize + Send + Sync>(
+    mcp_server: &Arc<LibraMcpServer>,
+    object_type: &str,
+    object_id: &str,
+    object: &T,
+) {
+    if let Some(storage) = &mcp_server.storage {
+        match storage.put_json(object).await {
+            Ok(hash) => {
+                // Also add to history if available
+                if let Some(history) = &mcp_server.intent_history_manager
+                    && let Err(e) = history.append(object_type, object_id, hash).await
+                {
+                    eprintln!("[WARN] Failed to append to history: {e}");
+                }
+                eprintln!("[DEBUG] Stored {object_type} {object_id} to MCP (hash: {hash})");
+            }
+            Err(e) => {
+                eprintln!("[WARN] Failed to store {object_type} to MCP: {e}");
+            }
+        }
+    } else {
+        eprintln!("[WARN] MCP storage not available");
+    }
+}
+
 pub async fn execute(args: AgentCodexArgs) {
+    // Initialize MCP server first
+    let working_dir = PathBuf::from(&args.cwd);
+    let mcp_server = init_mcp_server(&working_dir).await;
+    println!("MCP server initialized.");
+
     println!("Connecting to Codex at {}...", args.url);
 
     let (ws_stream, _) = match connect_async(args.url.as_str()).await {
@@ -430,7 +610,8 @@ pub async fn execute(args: AgentCodexArgs) {
     let (tx, mut rx) = mpsc::channel::<String>(100);
 
     // Channel for approval requests (reader -> main loop)
-    let (approval_tx, mut approval_rx) = mpsc::channel::<(serde_json::Value, tokio::sync::oneshot::Sender<bool>)>(10);
+    let (approval_tx, mut approval_rx) =
+        mpsc::channel::<(serde_json::Value, tokio::sync::oneshot::Sender<bool>)>(10);
 
     // Shared state
     let mut thread_id = String::new();
@@ -461,6 +642,7 @@ pub async fn execute(args: AgentCodexArgs) {
     let approval_mode = args.approval.clone();
     let _debug_mode = args.debug;
     let session_clone = session.clone();
+    let mcp_server_clone = mcp_server.clone();
     let _reader_task = tokio::spawn(async move {
         let mut read = read;
         loop {
@@ -483,52 +665,156 @@ pub async fn execute(args: AgentCodexArgs) {
 
                             // Handle all notifications based on method name
                             // See schema/ServerNotification.json for full list
-                            // Filter out noisy notifications like tokenUsage
-                            let is_noise = method_str.contains("tokenUsage")
-                                || method_str.contains("token/usage");
-                            let show_notification = !is_noise && (
-                                method_str.contains("initialized")
-                                || method_str.contains("task_started")
-                                || method_str.contains("task_complete")
-                                || method_str.contains("agent_reasoning")
-                                || method_str.contains("turn/completed")
-                                || method_str.contains("turn_started")
-                                || method_str.contains("turn/plan")
-                                || method_str.contains("thread/started")
-                                || method_str.contains("thread/status")
-                                || method_str.contains("item/")
-                                || method_str.contains("requestApproval")
-                                || method_str.contains("reasoning")
-                            );
+                            // Filter out truly noisy notifications
+                            let is_noise = method_str.contains("token/usage");
+                            let show_notification = !is_noise
+                                && (method_str.contains("initialized")
+                                    || method_str.contains("task_started")
+                                    || method_str.contains("task_complete")
+                                    || method_str.contains("agent_reasoning")
+                                    || method_str.contains("turn/completed")
+                                    || method_str.contains("turn_started")
+                                    || method_str.contains("turn/plan")
+                                    || method_str.contains("thread/started")
+                                    || method_str.contains("thread/status")
+                                    || method_str.contains("item/")
+                                    || method_str.contains("requestApproval")
+                                    || method_str.contains("reasoning"));
 
                             // Extract and print useful info based on notification type
                             if let Some(params) = json.get("params") {
                                 // Show hierarchical flow: Thread → Turn → Plan → Item → Detail
                                 if method_str.contains("thread/started") {
                                     // params: { thread: { threadId, ... } }
-                                    let thread_id = params.get("thread")
+                                    let thread_id = params
+                                        .get("thread")
                                         .and_then(|t| t.get("threadId"))
                                         .and_then(|t| t.as_str())
                                         .unwrap_or("");
-                                    println!("\n=== New Thread: {} ===", thread_id);
+                                    println!(
+                                        "\n=== New Thread: {} ===",
+                                        &thread_id[..8.min(thread_id.len())]
+                                    );
 
                                     // Store thread in session
                                     let thread = CodexThread {
                                         id: thread_id.to_string(),
                                         status: ThreadStatus::Running,
+                                        name: None,
                                         current_turn_id: None,
                                         created_at: Utc::now(),
                                         updated_at: Utc::now(),
                                     };
+                                    let thread_id_for_mcp = thread_id.to_string();
+                                    let thread_for_mcp = thread.clone();
                                     session_clone.lock().unwrap().update_thread(thread);
-                                } else if method_str.contains("turn/started") || method_str.contains("turnStarted") {
+
+                                    // Store to MCP in background
+                                    let mcp_server_for_thread = mcp_server_clone.clone();
+                                    tokio::spawn(async move {
+                                        store_to_mcp(
+                                            &mcp_server_for_thread,
+                                            "thread",
+                                            &thread_id_for_mcp,
+                                            &thread_for_mcp,
+                                        )
+                                        .await;
+                                    });
+                                } else if method_str.contains("thread/status/changed") {
+                                    // params: { threadId, status }
+                                    let thread_id = params
+                                        .get("threadId")
+                                        .and_then(|t| t.as_str())
+                                        .unwrap_or("");
+                                    let status =
+                                        params.get("status").and_then(|s| s.as_str()).unwrap_or("");
+
+                                    let new_status = match status {
+                                        "pending" => ThreadStatus::Pending,
+                                        "running" => ThreadStatus::Running,
+                                        "completed" => ThreadStatus::Completed,
+                                        "archived" => ThreadStatus::Archived,
+                                        "closed" => ThreadStatus::Closed,
+                                        _ => ThreadStatus::Running,
+                                    };
+
+                                    if args.debug {
+                                        eprintln!(
+                                            "[DEBUG] Thread status changed: {} -> {:?}",
+                                            thread_id, new_status
+                                        );
+                                    }
+
+                                    let mut session = session_clone.lock().unwrap();
+                                    session.thread.status = new_status;
+                                    session.thread.updated_at = Utc::now();
+                                } else if method_str.contains("thread/name/updated") {
+                                    // params: { threadId, name }
+                                    let thread_id = params
+                                        .get("threadId")
+                                        .and_then(|t| t.as_str())
+                                        .unwrap_or("");
+                                    let name = params
+                                        .get("name")
+                                        .and_then(|n| n.as_str())
+                                        .map(String::from);
+
+                                    if args.debug {
+                                        eprintln!(
+                                            "[DEBUG] Thread name updated: {} -> {:?}",
+                                            thread_id, name
+                                        );
+                                    }
+
+                                    let mut session = session_clone.lock().unwrap();
+                                    session.thread.name = name;
+                                    session.thread.updated_at = Utc::now();
+                                } else if method_str.contains("thread/archived") {
+                                    // params: { threadId }
+                                    let thread_id = params
+                                        .get("threadId")
+                                        .and_then(|t| t.as_str())
+                                        .unwrap_or("");
+
+                                    if args.debug {
+                                        eprintln!("[DEBUG] Thread archived: {}", thread_id);
+                                    }
+
+                                    let mut session = session_clone.lock().unwrap();
+                                    session.thread.status = ThreadStatus::Archived;
+                                    session.thread.updated_at = Utc::now();
+                                } else if method_str.contains("thread/closed") {
+                                    // params: { threadId }
+                                    let thread_id = params
+                                        .get("threadId")
+                                        .and_then(|t| t.as_str())
+                                        .unwrap_or("");
+
+                                    if args.debug {
+                                        eprintln!("[DEBUG] Thread closed: {}", thread_id);
+                                    }
+
+                                    let mut session = session_clone.lock().unwrap();
+                                    session.thread.status = ThreadStatus::Closed;
+                                    session.thread.updated_at = Utc::now();
+                                } else if method_str.contains("turn/started")
+                                    || method_str.contains("turnStarted")
+                                {
                                     // params: { turn: { id, ... }, threadId }
-                                    let turn_id = params.get("turn")
+                                    let turn_id = params
+                                        .get("turn")
                                         .and_then(|t| t.get("id"))
                                         .and_then(|t| t.as_str())
                                         .unwrap_or("");
-                                    let thread_id = params.get("threadId").and_then(|t| t.as_str()).unwrap_or("");
-                                    println!("\n--- Turn started: {} (thread: {}) ---", &turn_id[..8.min(turn_id.len())], &thread_id[..8.min(thread_id.len())]);
+                                    let thread_id = params
+                                        .get("threadId")
+                                        .and_then(|t| t.as_str())
+                                        .unwrap_or("");
+                                    println!(
+                                        "\n--- Turn started: {} (thread: {}) ---",
+                                        &turn_id[..8.min(turn_id.len())],
+                                        &thread_id[..8.min(thread_id.len())]
+                                    );
 
                                     // Store run in session
                                     let run = Run {
@@ -538,24 +824,46 @@ pub async fn execute(args: AgentCodexArgs) {
                                         started_at: Utc::now(),
                                         completed_at: None,
                                     };
+                                    let run_id = turn_id.to_string();
+                                    let run_for_mcp = run.clone();
                                     let mut session = session_clone.lock().unwrap();
                                     session.add_run(run);
                                     // Update thread's current turn
                                     session.thread.current_turn_id = Some(turn_id.to_string());
                                     session.thread.status = ThreadStatus::Running;
+
+                                    // Store to MCP in background
+                                    let mcp_server_for_run = mcp_server_clone.clone();
+                                    tokio::spawn(async move {
+                                        store_to_mcp(
+                                            &mcp_server_for_run,
+                                            "run",
+                                            &run_id,
+                                            &run_for_mcp,
+                                        )
+                                        .await;
+                                    });
                                     session.thread.updated_at = Utc::now();
-                                } else if method_str.contains("turn/completed") || method_str.contains("turnCompleted") {
+                                } else if method_str.contains("turn/completed")
+                                    || method_str.contains("turnCompleted")
+                                {
                                     // params: { threadId, turn: { id, ... } }
-                                    let turn_id = params.get("turn")
+                                    let turn_id = params
+                                        .get("turn")
                                         .and_then(|t| t.get("id"))
                                         .and_then(|t| t.as_str())
                                         .unwrap_or("");
                                     if !turn_id.is_empty() {
-                                        println!("--- Turn completed: {} ---", &turn_id[..8.min(turn_id.len())]);
+                                        println!(
+                                            "--- Turn completed: {} ---",
+                                            &turn_id[..8.min(turn_id.len())]
+                                        );
 
                                         // Update run status in session
                                         let mut session = session_clone.lock().unwrap();
-                                        if let Some(run) = session.runs.iter_mut().find(|r| r.id == turn_id) {
+                                        if let Some(run) =
+                                            session.runs.iter_mut().find(|r| r.id == turn_id)
+                                        {
                                             run.status = RunStatus::Completed;
                                             run.completed_at = Some(Utc::now());
                                         }
@@ -563,24 +871,119 @@ pub async fn execute(args: AgentCodexArgs) {
                                     } else {
                                         println!("--- Turn completed ---");
                                     }
-                                } else if method_str.contains("turn/plan/updated") || method_str.contains("plan/updated") {
+                                } else if method_str.contains("tokenUsage") {
+                                    // params: { threadId, turnId, tokenUsage: { last, total, modelContextWindow? } }
+                                    let thread_id = params
+                                        .get("threadId")
+                                        .and_then(|t| t.as_str())
+                                        .unwrap_or("");
+                                    let turn_id =
+                                        params.get("turnId").and_then(|t| t.as_str()).unwrap_or("");
+
+                                    // Parse token usage
+                                    let last = params
+                                        .get("tokenUsage")
+                                        .and_then(|tu| tu.get("last"))
+                                        .cloned()
+                                        .unwrap_or(serde_json::Value::Null);
+                                    let total = params
+                                        .get("tokenUsage")
+                                        .and_then(|tu| tu.get("total"))
+                                        .cloned()
+                                        .unwrap_or(serde_json::Value::Null);
+                                    let model_context_window = params
+                                        .get("tokenUsage")
+                                        .and_then(|tu| tu.get("modelContextWindow"))
+                                        .and_then(|m| m.as_i64());
+
+                                    let parse_token = |v: &serde_json::Value| -> TokenUsage {
+                                        TokenUsage {
+                                            cached_input_tokens: v
+                                                .get("cachedInputTokens")
+                                                .and_then(|c| c.as_i64()),
+                                            input_tokens: v
+                                                .get("inputTokens")
+                                                .and_then(|i| i.as_i64()),
+                                            output_tokens: v
+                                                .get("outputTokens")
+                                                .and_then(|o| o.as_i64()),
+                                            reasoning_output_tokens: v
+                                                .get("reasoningOutputTokens")
+                                                .and_then(|r| r.as_i64()),
+                                            total_tokens: v
+                                                .get("totalTokens")
+                                                .and_then(|t| t.as_i64()),
+                                        }
+                                    };
+
+                                    let usage = TurnTokenUsage {
+                                        thread_id: thread_id.to_string(),
+                                        turn_id: turn_id.to_string(),
+                                        last: parse_token(&last),
+                                        total: parse_token(&total),
+                                        model_context_window,
+                                        updated_at: Utc::now(),
+                                    };
+
+                                    // Debug output
+                                    if args.debug {
+                                        eprintln!(
+                                            "[DEBUG] TokenUsage: turn={}, total_tokens={}",
+                                            turn_id,
+                                            usage.total.total_tokens.unwrap_or(0)
+                                        );
+                                    }
+
+                                    let usage_for_mcp = usage.clone();
+                                    let usage_turn_id = turn_id.to_string();
+                                    session_clone.lock().unwrap().add_token_usage(usage);
+
+                                    // Store to MCP in background
+                                    let mcp_server_for_usage = mcp_server_clone.clone();
+                                    tokio::spawn(async move {
+                                        store_to_mcp(
+                                            &mcp_server_for_usage,
+                                            "run_usage",
+                                            &usage_turn_id,
+                                            &usage_for_mcp,
+                                        )
+                                        .await;
+                                    });
+                                } else if method_str.contains("turn/plan/updated")
+                                    || method_str.contains("plan/updated")
+                                {
                                     // params: { plan: [...], threadId, turnId, explanation? }
-                                    let thread_id = params.get("threadId").and_then(|t| t.as_str()).unwrap_or("");
-                                    let turn_id = params.get("turnId").and_then(|t| t.as_str()).unwrap_or("");
+                                    let thread_id = params
+                                        .get("threadId")
+                                        .and_then(|t| t.as_str())
+                                        .unwrap_or("");
+                                    let turn_id =
+                                        params.get("turnId").and_then(|t| t.as_str()).unwrap_or("");
                                     if let Some(plan) = params.get("plan") {
-                                        let explanation = params.get("explanation").and_then(|e| e.as_str());
+                                        let explanation =
+                                            params.get("explanation").and_then(|e| e.as_str());
                                         println!("\n📋 Plan Updated:");
                                         if let Some(exp) = explanation {
                                             println!("  Explanation: {}", exp);
                                         }
-                                        if let Ok(plan_array) = serde_json::from_str::<Vec<serde_json::Value>>(&plan.to_string()) {
+                                        if let Ok(plan_array) =
+                                            serde_json::from_str::<Vec<serde_json::Value>>(
+                                                &plan.to_string(),
+                                            )
+                                        {
                                             for item in plan_array.iter() {
-                                                let status = item.get("status").and_then(|s| s.as_str()).unwrap_or("unknown");
-                                                let step = item.get("step").and_then(|s| s.as_str()).unwrap_or("");
+                                                let status = item
+                                                    .get("status")
+                                                    .and_then(|s| s.as_str())
+                                                    .unwrap_or("unknown");
+                                                let step = item
+                                                    .get("step")
+                                                    .and_then(|s| s.as_str())
+                                                    .unwrap_or("");
                                                 let marker = match status {
                                                     "completed" => "✓",
                                                     "inProgress" => "▶",
-                                                    _ => "○"
+                                                    _ => "○",
                                                 };
                                                 println!("  {} {}", marker, step);
 
@@ -592,7 +995,7 @@ pub async fn execute(args: AgentCodexArgs) {
                                                     _ => PlanStatus::Pending,
                                                 };
                                                 let plan = Plan {
-                                                    id: plan_id,
+                                                    id: plan_id.clone(),
                                                     text: step.to_string(),
                                                     intent_id: None,
                                                     thread_id: thread_id.to_string(),
@@ -600,7 +1003,20 @@ pub async fn execute(args: AgentCodexArgs) {
                                                     status: plan_status,
                                                     created_at: Utc::now(),
                                                 };
+                                                let plan_for_mcp = plan.clone();
                                                 session_clone.lock().unwrap().add_plan(plan);
+
+                                                // Store to MCP in background
+                                                let mcp_server_for_plan = mcp_server_clone.clone();
+                                                tokio::spawn(async move {
+                                                    store_to_mcp(
+                                                        &mcp_server_for_plan,
+                                                        "plan",
+                                                        &plan_id,
+                                                        &plan_for_mcp,
+                                                    )
+                                                    .await;
+                                                });
                                             }
                                         }
                                     }
@@ -609,12 +1025,51 @@ pub async fn execute(args: AgentCodexArgs) {
                                     println!("[Codex] Server initialized");
                                 } else if method_str.contains("codex/event/task_started") {
                                     // Task started - top level notification
-                                    let thread_id = params.get("threadId").and_then(|t| t.as_str()).unwrap_or("");
-                                    if !thread_id.is_empty() {
-                                        println!("\n🚀 Task Started (thread: {})", &thread_id[..8.min(thread_id.len())]);
-                                    } else {
-                                        println!("\n🚀 Task Started");
-                                    }
+                                    let thread_id = params
+                                        .get("threadId")
+                                        .and_then(|t| t.as_str())
+                                        .unwrap_or("");
+                                    let task_id =
+                                        params.get("taskId").and_then(|t| t.as_str()).unwrap_or("");
+                                    let task_name = params
+                                        .get("taskName")
+                                        .and_then(|t| t.as_str())
+                                        .unwrap_or("");
+
+                                    println!(
+                                        "\n🚀 Task Started: {} (thread: {})",
+                                        task_name,
+                                        &thread_id[..8.min(thread_id.len())]
+                                    );
+
+                                    // Store Task (tool_name stores task name)
+                                    let task = Task {
+                                        id: task_id.to_string(),
+                                        tool_name: Some(task_name.to_string()),
+                                        plan_id: None,
+                                        thread_id: thread_id.to_string(),
+                                        turn_id: None,
+                                        status: crate::command::agent_codex::TaskStatus::InProgress,
+                                        created_at: Utc::now(),
+                                    };
+                                    let task_id_for_mcp = task_id.to_string();
+                                    let task_for_mcp = task.clone();
+
+                                    let mut session = session_clone.lock().unwrap();
+                                    session.add_task(task);
+
+                                    // Store to MCP in background
+                                    drop(session);
+                                    let mcp_server_for_task = mcp_server_clone.clone();
+                                    tokio::spawn(async move {
+                                        store_to_mcp(
+                                            &mcp_server_for_task,
+                                            "task",
+                                            &task_id_for_mcp,
+                                            &task_for_mcp,
+                                        )
+                                        .await;
+                                    });
                                 } else if method_str.contains("codex/event/task_complete") {
                                     // Task completed - top level notification
                                     println!("\n✅ Task Completed");
@@ -624,21 +1079,37 @@ pub async fn execute(args: AgentCodexArgs) {
                                 // Handle thread/started
                                 if method_str.contains("item/started") {
                                     // Get common fields
-                                    let thread_id = params.get("threadId").and_then(|t| t.as_str()).unwrap_or("");
-                                    let turn_id = params.get("turnId").and_then(|t| t.as_str()).unwrap_or("");
+                                    let thread_id = params
+                                        .get("threadId")
+                                        .and_then(|t| t.as_str())
+                                        .unwrap_or("");
+                                    let turn_id =
+                                        params.get("turnId").and_then(|t| t.as_str()).unwrap_or("");
 
                                     // params.item.type contains the type
                                     if let Some(item) = params.get("item") {
-                                        if let Some(item_type) = item.get("type").and_then(|t| t.as_str()) {
-                                            let item_id = item.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+                                        if let Some(item_type) =
+                                            item.get("type").and_then(|t| t.as_str())
+                                        {
+                                            let item_id = item
+                                                .get("id")
+                                                .and_then(|i| i.as_str())
+                                                .unwrap_or("")
+                                                .to_string();
 
                                             // Get current run_id
                                             let run_id = turn_id.to_string();
 
                                             // Get tool name if it's a tool call
                                             if item_type == "mcpToolCall" {
-                                                let tool = item.get("tool").and_then(|t| t.as_str()).unwrap_or("unknown");
-                                                let server = item.get("server").and_then(|s| s.as_str()).unwrap_or("");
+                                                let tool = item
+                                                    .get("tool")
+                                                    .and_then(|t| t.as_str())
+                                                    .unwrap_or("unknown");
+                                                let server = item
+                                                    .get("server")
+                                                    .and_then(|s| s.as_str())
+                                                    .unwrap_or("");
                                                 let args = item.get("arguments").cloned();
                                                 print!("  MCP Tool: {}", tool);
                                                 if !server.is_empty() {
@@ -649,7 +1120,10 @@ pub async fn execute(args: AgentCodexArgs) {
                                                 if let Some(arguments) = &args {
                                                     let args_str = arguments.to_string();
                                                     if args_str.len() > 200 {
-                                                        println!("    Args: {}...", &args_str[..200]);
+                                                        println!(
+                                                            "    Args: {}...",
+                                                            &args_str[..200]
+                                                        );
                                                     } else {
                                                         println!("    Args: {}", args_str);
                                                     }
@@ -669,11 +1143,16 @@ pub async fn execute(args: AgentCodexArgs) {
                                                     duration_ms: None,
                                                     created_at: Utc::now(),
                                                 };
-                                                session_clone.lock().unwrap().add_tool_invocation(invocation);
-
+                                                session_clone
+                                                    .lock()
+                                                    .unwrap()
+                                                    .add_tool_invocation(invocation);
                                             } else if item_type == "toolCall" {
-                                                let tool = item.get("name").or_else(|| item.get("tool"))
-                                                    .and_then(|t| t.as_str()).unwrap_or("unknown");
+                                                let tool = item
+                                                    .get("name")
+                                                    .or_else(|| item.get("tool"))
+                                                    .and_then(|t| t.as_str())
+                                                    .unwrap_or("unknown");
                                                 let args = item.get("arguments").cloned();
                                                 println!("  Tool: {} started", tool);
 
@@ -691,10 +1170,29 @@ pub async fn execute(args: AgentCodexArgs) {
                                                     duration_ms: None,
                                                     created_at: Utc::now(),
                                                 };
-                                                session_clone.lock().unwrap().add_tool_invocation(invocation);
+                                                let tool_id = item_id.clone();
+                                                let tool_for_mcp = invocation.clone();
+                                                session_clone
+                                                    .lock()
+                                                    .unwrap()
+                                                    .add_tool_invocation(invocation);
 
+                                                // Store to MCP in background
+                                                let mcp_server_for_tool = mcp_server_clone.clone();
+                                                tokio::spawn(async move {
+                                                    store_to_mcp(
+                                                        &mcp_server_for_tool,
+                                                        "tool_invocation",
+                                                        &tool_id,
+                                                        &tool_for_mcp,
+                                                    )
+                                                    .await;
+                                                });
                                             } else if item_type == "commandExecution" {
-                                                let cmd = item.get("command").and_then(|c| c.as_str()).unwrap_or("");
+                                                let cmd = item
+                                                    .get("command")
+                                                    .and_then(|c| c.as_str())
+                                                    .unwrap_or("");
                                                 println!("  Command: {} started", cmd);
 
                                                 // Store ToolInvocation
@@ -704,15 +1202,35 @@ pub async fn execute(args: AgentCodexArgs) {
                                                     thread_id: thread_id.to_string(),
                                                     tool_name: "commandExecution".to_string(),
                                                     server: None,
-                                                    arguments: Some(serde_json::json!({ "command": cmd })),
+                                                    arguments: Some(
+                                                        serde_json::json!({ "command": cmd }),
+                                                    ),
                                                     result: None,
                                                     error: None,
                                                     status: ToolStatus::InProgress,
-                                                    duration_ms: item.get("durationMs").and_then(|d| d.as_i64()),
+                                                    duration_ms: item
+                                                        .get("durationMs")
+                                                        .and_then(|d| d.as_i64()),
                                                     created_at: Utc::now(),
                                                 };
-                                                session_clone.lock().unwrap().add_tool_invocation(invocation);
+                                                let cmd_id = item_id.clone();
+                                                let cmd_for_mcp = invocation.clone();
+                                                session_clone
+                                                    .lock()
+                                                    .unwrap()
+                                                    .add_tool_invocation(invocation);
 
+                                                // Store to MCP in background
+                                                let mcp_server_for_cmd = mcp_server_clone.clone();
+                                                tokio::spawn(async move {
+                                                    store_to_mcp(
+                                                        &mcp_server_for_cmd,
+                                                        "tool_invocation",
+                                                        &cmd_id,
+                                                        &cmd_for_mcp,
+                                                    )
+                                                    .await;
+                                                });
                                             } else if item_type == "reasoning" {
                                                 println!("  Thinking started");
 
@@ -725,11 +1243,31 @@ pub async fn execute(args: AgentCodexArgs) {
                                                     text: None,
                                                     created_at: Utc::now(),
                                                 };
-                                                session_clone.lock().unwrap().add_reasoning(reasoning);
+                                                let reasoning_id = item_id.clone();
+                                                let reasoning_for_mcp = reasoning.clone();
+                                                session_clone
+                                                    .lock()
+                                                    .unwrap()
+                                                    .add_reasoning(reasoning);
 
+                                                // Store to MCP in background
+                                                let mcp_server_for_reasoning =
+                                                    mcp_server_clone.clone();
+                                                tokio::spawn(async move {
+                                                    store_to_mcp(
+                                                        &mcp_server_for_reasoning,
+                                                        "reasoning",
+                                                        &reasoning_id,
+                                                        &reasoning_for_mcp,
+                                                    )
+                                                    .await;
+                                                });
                                             } else if item_type == "plan" {
                                                 // Plan item - show the plan text
-                                                let text = item.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                                                let text = item
+                                                    .get("text")
+                                                    .and_then(|t| t.as_str())
+                                                    .unwrap_or("");
                                                 if !text.is_empty() {
                                                     println!("  Plan started: {}", text);
                                                 } else {
@@ -746,8 +1284,22 @@ pub async fn execute(args: AgentCodexArgs) {
                                                     status: PlanStatus::InProgress,
                                                     created_at: Utc::now(),
                                                 };
+                                                let plan_id_2 = item_id.clone();
+                                                let plan_for_mcp_2 = plan.clone();
                                                 session_clone.lock().unwrap().add_plan(plan);
 
+                                                // Store to MCP in background
+                                                let mcp_server_for_plan_2 =
+                                                    mcp_server_clone.clone();
+                                                tokio::spawn(async move {
+                                                    store_to_mcp(
+                                                        &mcp_server_for_plan_2,
+                                                        "plan",
+                                                        &plan_id_2,
+                                                        &plan_for_mcp_2,
+                                                    )
+                                                    .await;
+                                                });
                                             } else if item_type == "fileChange" {
                                                 // File change - at item/started, changes may not be available yet
                                                 // Just show that file change has started
@@ -762,11 +1314,31 @@ pub async fn execute(args: AgentCodexArgs) {
                                                     status: PatchStatus::InProgress,
                                                     created_at: Utc::now(),
                                                 };
-                                                session_clone.lock().unwrap().add_patchset(patchset);
+                                                let patchset_id = item_id.clone();
+                                                let patchset_for_mcp = patchset.clone();
+                                                session_clone
+                                                    .lock()
+                                                    .unwrap()
+                                                    .add_patchset(patchset);
 
+                                                // Store to MCP in background
+                                                let mcp_server_for_patchset =
+                                                    mcp_server_clone.clone();
+                                                tokio::spawn(async move {
+                                                    store_to_mcp(
+                                                        &mcp_server_for_patchset,
+                                                        "patchset",
+                                                        &patchset_id,
+                                                        &patchset_for_mcp,
+                                                    )
+                                                    .await;
+                                                });
                                             } else if item_type == "dynamicToolCall" {
                                                 // Dynamic tool call
-                                                let tool = item.get("tool").and_then(|t| t.as_str()).unwrap_or("unknown");
+                                                let tool = item
+                                                    .get("tool")
+                                                    .and_then(|t| t.as_str())
+                                                    .unwrap_or("unknown");
                                                 let args = item.get("arguments").cloned();
                                                 println!("  Dynamic Tool: {} started", tool);
 
@@ -781,14 +1353,35 @@ pub async fn execute(args: AgentCodexArgs) {
                                                     result: None,
                                                     error: None,
                                                     status: ToolStatus::InProgress,
-                                                    duration_ms: item.get("durationMs").and_then(|d| d.as_i64()),
+                                                    duration_ms: item
+                                                        .get("durationMs")
+                                                        .and_then(|d| d.as_i64()),
                                                     created_at: Utc::now(),
                                                 };
-                                                session_clone.lock().unwrap().add_tool_invocation(invocation);
+                                                let dyn_tool_id = item_id.clone();
+                                                let dyn_tool_for_mcp = invocation.clone();
+                                                session_clone
+                                                    .lock()
+                                                    .unwrap()
+                                                    .add_tool_invocation(invocation);
 
+                                                // Store to MCP in background
+                                                let mcp_server_for_dyn = mcp_server_clone.clone();
+                                                tokio::spawn(async move {
+                                                    store_to_mcp(
+                                                        &mcp_server_for_dyn,
+                                                        "tool_invocation",
+                                                        &dyn_tool_id,
+                                                        &dyn_tool_for_mcp,
+                                                    )
+                                                    .await;
+                                                });
                                             } else if item_type == "webSearch" {
                                                 // Web search
-                                                let query = item.get("query").and_then(|q| q.as_str()).unwrap_or("");
+                                                let query = item
+                                                    .get("query")
+                                                    .and_then(|q| q.as_str())
+                                                    .unwrap_or("");
                                                 println!("  Web Search: {}", query);
 
                                                 // Store ToolInvocation
@@ -798,23 +1391,47 @@ pub async fn execute(args: AgentCodexArgs) {
                                                     thread_id: thread_id.to_string(),
                                                     tool_name: "webSearch".to_string(),
                                                     server: None,
-                                                    arguments: Some(serde_json::json!({ "query": query })),
+                                                    arguments: Some(
+                                                        serde_json::json!({ "query": query }),
+                                                    ),
                                                     result: None,
                                                     error: None,
                                                     status: ToolStatus::InProgress,
                                                     duration_ms: None,
                                                     created_at: Utc::now(),
                                                 };
-                                                session_clone.lock().unwrap().add_tool_invocation(invocation);
+                                                let ws_id = item_id.clone();
+                                                let ws_for_mcp = invocation.clone();
+                                                session_clone
+                                                    .lock()
+                                                    .unwrap()
+                                                    .add_tool_invocation(invocation);
 
+                                                // Store to MCP in background
+                                                let mcp_server_for_ws = mcp_server_clone.clone();
+                                                tokio::spawn(async move {
+                                                    store_to_mcp(
+                                                        &mcp_server_for_ws,
+                                                        "tool_invocation",
+                                                        &ws_id,
+                                                        &ws_for_mcp,
+                                                    )
+                                                    .await;
+                                                });
                                             } else if item_type == "userMessage" {
                                                 // User message -> Intent
-                                                let content = item.get("content").and_then(|c| c.as_array())
+                                                let content = item
+                                                    .get("content")
+                                                    .and_then(|c| c.as_array())
                                                     .and_then(|arr| arr.first())
                                                     .and_then(|first| first.get("text"))
                                                     .and_then(|t| t.as_str())
                                                     .unwrap_or("");
-                                                let truncated = if content.len() > 50 { &content[..50] } else { content };
+                                                let truncated = if content.len() > 50 {
+                                                    &content[..50]
+                                                } else {
+                                                    content
+                                                };
                                                 println!("  User: {}", truncated);
 
                                                 // Store Intent
@@ -824,11 +1441,28 @@ pub async fn execute(args: AgentCodexArgs) {
                                                     thread_id: thread_id.to_string(),
                                                     created_at: Utc::now(),
                                                 };
+                                                let intent_id = item_id.clone();
+                                                let intent_for_mcp = intent.clone();
                                                 session_clone.lock().unwrap().add_intent(intent);
 
+                                                // Store to MCP in background
+                                                let mcp_server_for_intent =
+                                                    mcp_server_clone.clone();
+                                                tokio::spawn(async move {
+                                                    store_to_mcp(
+                                                        &mcp_server_for_intent,
+                                                        "intent",
+                                                        &intent_id,
+                                                        &intent_for_mcp,
+                                                    )
+                                                    .await;
+                                                });
                                             } else if item_type == "agentMessage" {
                                                 // Agent message - will stream
-                                                let content = item.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                                                let content = item
+                                                    .get("text")
+                                                    .and_then(|t| t.as_str())
+                                                    .unwrap_or("");
                                                 println!("\n  🤖 Agent Response started\n");
 
                                                 // Store AgentMessage
@@ -839,8 +1473,10 @@ pub async fn execute(args: AgentCodexArgs) {
                                                     content: content.to_string(),
                                                     created_at: Utc::now(),
                                                 };
-                                                session_clone.lock().unwrap().add_agent_message(msg);
-
+                                                session_clone
+                                                    .lock()
+                                                    .unwrap()
+                                                    .add_agent_message(msg);
                                             } else {
                                                 println!("  Task: {} started", item_type);
                                             }
@@ -849,27 +1485,52 @@ pub async fn execute(args: AgentCodexArgs) {
                                 }
                                 // Handle item/completed notification
                                 else if method_str.contains("item/completed") {
-                                    let thread_id = params.get("threadId").and_then(|t| t.as_str()).unwrap_or("");
-                                    let turn_id = params.get("turnId").and_then(|t| t.as_str()).unwrap_or("");
+                                    let _thread_id = params
+                                        .get("threadId")
+                                        .and_then(|t| t.as_str())
+                                        .unwrap_or("");
+                                    let _turn_id =
+                                        params.get("turnId").and_then(|t| t.as_str()).unwrap_or("");
 
                                     if let Some(item) = params.get("item") {
-                                        if let Some(item_type) = item.get("type").and_then(|t| t.as_str()) {
-                                            let item_id = item.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+                                        if let Some(item_type) =
+                                            item.get("type").and_then(|t| t.as_str())
+                                        {
+                                            let item_id = item
+                                                .get("id")
+                                                .and_then(|i| i.as_str())
+                                                .unwrap_or("")
+                                                .to_string();
 
                                             if item_type == "mcpToolCall" {
-                                                let tool = item.get("tool").and_then(|t| t.as_str()).unwrap_or("unknown");
-                                                let status = item.get("status").and_then(|s| s.as_str()).unwrap_or("completed");
+                                                let tool = item
+                                                    .get("tool")
+                                                    .and_then(|t| t.as_str())
+                                                    .unwrap_or("unknown");
+                                                let status = item
+                                                    .get("status")
+                                                    .and_then(|s| s.as_str())
+                                                    .unwrap_or("completed");
                                                 let result = item.get("result").cloned();
-                                                let error = item.get("error").and_then(|e| e.as_str()).map(|s| s.to_string());
-                                                let duration_ms = item.get("durationMs").and_then(|d| d.as_i64());
+                                                let error = item
+                                                    .get("error")
+                                                    .and_then(|e| e.as_str())
+                                                    .map(|s| s.to_string());
+                                                let duration_ms =
+                                                    item.get("durationMs").and_then(|d| d.as_i64());
 
                                                 print!("  MCP Tool: {} - {}", tool, status);
                                                 // Show result if available
                                                 if let Some(result) = item.get("result") {
                                                     let result_str = result.to_string();
                                                     if result_str.len() > 100 {
-                                                        println!(" | Result: {}...", &result_str[..100]);
-                                                    } else if !result_str.is_empty() && result_str != "null" {
+                                                        println!(
+                                                            " | Result: {}...",
+                                                            &result_str[..100]
+                                                        );
+                                                    } else if !result_str.is_empty()
+                                                        && result_str != "null"
+                                                    {
                                                         println!(" | Result: {}", result_str);
                                                     } else {
                                                         println!();
@@ -882,7 +1543,11 @@ pub async fn execute(args: AgentCodexArgs) {
 
                                                 // Update ToolInvocation status
                                                 let mut session = session_clone.lock().unwrap();
-                                                if let Some(invocation) = session.tool_invocations.iter_mut().find(|i| i.id == item_id) {
+                                                if let Some(invocation) = session
+                                                    .tool_invocations
+                                                    .iter_mut()
+                                                    .find(|i| i.id == item_id)
+                                                {
                                                     invocation.status = match status {
                                                         "completed" => ToolStatus::Completed,
                                                         "failed" => ToolStatus::Failed,
@@ -892,46 +1557,94 @@ pub async fn execute(args: AgentCodexArgs) {
                                                     invocation.error = error;
                                                     invocation.duration_ms = duration_ms;
                                                 }
-
                                             } else if item_type == "commandExecution" {
-                                                let cmd = item.get("command").and_then(|c| c.as_str()).unwrap_or("");
-                                                let exit_code = item.get("exitCode").and_then(|c| c.as_i64());
-                                                let duration_ms = item.get("durationMs").and_then(|d| d.as_i64());
-                                                let output = item.get("aggregatedOutput").and_then(|o| o.as_str());
+                                                let cmd = item
+                                                    .get("command")
+                                                    .and_then(|c| c.as_str())
+                                                    .unwrap_or("");
+                                                let exit_code =
+                                                    item.get("exitCode").and_then(|c| c.as_i64());
+                                                let duration_ms =
+                                                    item.get("durationMs").and_then(|d| d.as_i64());
+                                                let output = item
+                                                    .get("aggregatedOutput")
+                                                    .and_then(|o| o.as_str());
 
                                                 println!("  Command: {} exit={:?}", cmd, exit_code);
 
                                                 // Update ToolInvocation status
                                                 let mut session = session_clone.lock().unwrap();
-                                                if let Some(invocation) = session.tool_invocations.iter_mut().find(|i| i.id == item_id) {
+                                                let updated_invocation = if let Some(invocation) =
+                                                    session
+                                                        .tool_invocations
+                                                        .iter_mut()
+                                                        .find(|i| i.id == item_id)
+                                                {
                                                     invocation.status = match exit_code {
                                                         Some(0) => ToolStatus::Completed,
                                                         Some(_) => ToolStatus::Failed,
                                                         None => ToolStatus::Completed,
                                                     };
-                                                    invocation.result = output.map(|o| serde_json::json!({ "output": o }));
+                                                    invocation.result = output.map(
+                                                        |o| serde_json::json!({ "output": o }),
+                                                    );
                                                     invocation.duration_ms = duration_ms;
-                                                }
+                                                    Some(invocation.clone())
+                                                } else {
+                                                    None
+                                                };
+                                                drop(session);
 
+                                                // Store updated tool invocation to MCP
+                                                if let Some(inv) = updated_invocation {
+                                                    let mcp_server_for_inv =
+                                                        mcp_server_clone.clone();
+                                                    let inv_id = item_id.clone();
+                                                    tokio::spawn(async move {
+                                                        store_to_mcp(
+                                                            &mcp_server_for_inv,
+                                                            "tool_invocation",
+                                                            &inv_id,
+                                                            &inv,
+                                                        )
+                                                        .await;
+                                                    });
+                                                }
                                             } else if item_type == "reasoning" {
                                                 println!("  Thinking completed");
 
                                                 // Update Reasoning
-                                                let summary = item.get("summary")
+                                                let summary = item
+                                                    .get("summary")
                                                     .and_then(|s| s.as_array())
-                                                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                                                    .map(|arr| {
+                                                        arr.iter()
+                                                            .filter_map(|v| {
+                                                                v.as_str().map(String::from)
+                                                            })
+                                                            .collect()
+                                                    })
                                                     .unwrap_or_default();
-                                                let text = item.get("text").and_then(|t| t.as_str()).map(String::from);
+                                                let text = item
+                                                    .get("text")
+                                                    .and_then(|t| t.as_str())
+                                                    .map(String::from);
 
                                                 let mut session = session_clone.lock().unwrap();
-                                                if let Some(reasoning) = session.reasonings.iter_mut().find(|r| r.id == item_id) {
+                                                if let Some(reasoning) = session
+                                                    .reasonings
+                                                    .iter_mut()
+                                                    .find(|r| r.id == item_id)
+                                                {
                                                     reasoning.summary = summary;
                                                     reasoning.text = text;
                                                 }
-
                                             } else if item_type == "plan" {
                                                 // Plan item - show the plan text
-                                                let text = item.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                                                let text = item
+                                                    .get("text")
+                                                    .and_then(|t| t.as_str())
+                                                    .unwrap_or("");
                                                 if !text.is_empty() {
                                                     println!("  Plan completed: {}", text);
                                                 } else {
@@ -940,17 +1653,24 @@ pub async fn execute(args: AgentCodexArgs) {
 
                                                 // Update Plan status
                                                 let mut session = session_clone.lock().unwrap();
-                                                if let Some(plan) = session.plans.iter_mut().find(|p| p.id == item_id) {
+                                                if let Some(plan) = session
+                                                    .plans
+                                                    .iter_mut()
+                                                    .find(|p| p.id == item_id)
+                                                {
                                                     plan.status = PlanStatus::Completed;
                                                     if !text.is_empty() {
                                                         plan.text = text.to_string();
                                                     }
                                                 }
-
                                             } else if item_type == "fileChange" {
                                                 // File change - show files and diff
-                                                let status = item.get("status").and_then(|s| s.as_str()).unwrap_or("completed");
-                                                let changes = item.get("changes").and_then(|c| c.as_array());
+                                                let status = item
+                                                    .get("status")
+                                                    .and_then(|s| s.as_str())
+                                                    .unwrap_or("completed");
+                                                let changes =
+                                                    item.get("changes").and_then(|c| c.as_array());
 
                                                 println!("  📝 File Change: {}", status);
 
@@ -958,22 +1678,34 @@ pub async fn execute(args: AgentCodexArgs) {
                                                 let mut file_changes = vec![];
                                                 if let Some(changes) = changes {
                                                     for change in changes.iter().take(5) {
-                                                        let path = change.get("path").and_then(|p| p.as_str()).unwrap_or("?");
-                                                        let kind = change.get("kind").and_then(|k| {
-                                                            if let Some(t) = k.get("type").and_then(|t| t.as_str()) {
-                                                                Some(t)
-                                                            } else {
-                                                                None
-                                                            }
-                                                        }).unwrap_or("update");
+                                                        let path = change
+                                                            .get("path")
+                                                            .and_then(|p| p.as_str())
+                                                            .unwrap_or("?");
+                                                        let kind = change
+                                                            .get("kind")
+                                                            .and_then(|k| {
+                                                                if let Some(t) = k
+                                                                    .get("type")
+                                                                    .and_then(|t| t.as_str())
+                                                                {
+                                                                    Some(t)
+                                                                } else {
+                                                                    None
+                                                                }
+                                                            })
+                                                            .unwrap_or("update");
                                                         let marker = match kind {
                                                             "add" => "+",
                                                             "delete" => "-",
-                                                            _ => "~"
+                                                            _ => "~",
                                                         };
                                                         println!("    {} {}", marker, path);
                                                         // Show diff if available (full content)
-                                                        let diff = change.get("diff").and_then(|d| d.as_str()).unwrap_or("");
+                                                        let diff = change
+                                                            .get("diff")
+                                                            .and_then(|d| d.as_str())
+                                                            .unwrap_or("");
                                                         if !diff.is_empty() {
                                                             for line in diff.lines() {
                                                                 println!("      {}", line);
@@ -986,13 +1718,20 @@ pub async fn execute(args: AgentCodexArgs) {
                                                         }
                                                     }
                                                     if changes.len() > 5 {
-                                                        println!("    ... and {} more", changes.len() - 5);
+                                                        println!(
+                                                            "    ... and {} more",
+                                                            changes.len() - 5
+                                                        );
                                                     }
                                                 }
 
                                                 // Update PatchSet
                                                 let mut session = session_clone.lock().unwrap();
-                                                if let Some(patchset) = session.patchsets.iter_mut().find(|p| p.id == item_id) {
+                                                if let Some(patchset) = session
+                                                    .patchsets
+                                                    .iter_mut()
+                                                    .find(|p| p.id == item_id)
+                                                {
                                                     patchset.status = match status {
                                                         "completed" => PatchStatus::Completed,
                                                         "failed" => PatchStatus::Failed,
@@ -1003,46 +1742,74 @@ pub async fn execute(args: AgentCodexArgs) {
                                                         patchset.changes = file_changes;
                                                     }
                                                 }
-
                                             } else if item_type == "dynamicToolCall" {
-                                                let tool = item.get("tool").and_then(|t| t.as_str()).unwrap_or("unknown");
-                                                let status = item.get("status").and_then(|s| s.as_str()).unwrap_or("completed");
-                                                let duration_ms = item.get("durationMs").and_then(|d| d.as_i64());
-                                                let success = item.get("success").and_then(|s| s.as_bool());
+                                                let tool = item
+                                                    .get("tool")
+                                                    .and_then(|t| t.as_str())
+                                                    .unwrap_or("unknown");
+                                                let status = item
+                                                    .get("status")
+                                                    .and_then(|s| s.as_str())
+                                                    .unwrap_or("completed");
+                                                let duration_ms =
+                                                    item.get("durationMs").and_then(|d| d.as_i64());
+                                                let success =
+                                                    item.get("success").and_then(|s| s.as_bool());
 
                                                 println!("  Dynamic Tool: {} - {}", tool, status);
 
                                                 // Update ToolInvocation status
                                                 let mut session = session_clone.lock().unwrap();
-                                                if let Some(invocation) = session.tool_invocations.iter_mut().find(|i| i.id == item_id) {
+                                                if let Some(invocation) = session
+                                                    .tool_invocations
+                                                    .iter_mut()
+                                                    .find(|i| i.id == item_id)
+                                                {
                                                     invocation.status = match (status, success) {
-                                                        ("completed", Some(true)) | ("completed", None) => ToolStatus::Completed,
-                                                        ("failed", _) | (_, Some(false)) => ToolStatus::Failed,
+                                                        ("completed", Some(true))
+                                                        | ("completed", None) => {
+                                                            ToolStatus::Completed
+                                                        }
+                                                        ("failed", _) | (_, Some(false)) => {
+                                                            ToolStatus::Failed
+                                                        }
                                                         _ => ToolStatus::Completed,
                                                     };
                                                     invocation.duration_ms = duration_ms;
                                                 }
-
                                             } else if item_type == "webSearch" {
-                                                let query = item.get("query").and_then(|q| q.as_str()).unwrap_or("");
+                                                let query = item
+                                                    .get("query")
+                                                    .and_then(|q| q.as_str())
+                                                    .unwrap_or("");
                                                 println!("  Web Search done: {}", query);
 
                                                 // Update ToolInvocation status
                                                 let mut session = session_clone.lock().unwrap();
-                                                if let Some(invocation) = session.tool_invocations.iter_mut().find(|i| i.id == item_id) {
+                                                if let Some(invocation) = session
+                                                    .tool_invocations
+                                                    .iter_mut()
+                                                    .find(|i| i.id == item_id)
+                                                {
                                                     invocation.status = ToolStatus::Completed;
                                                 }
-
                                             } else if item_type == "agentMessage" {
                                                 println!("\n  ✅ Agent Response completed\n");
 
                                                 // Update AgentMessage content
-                                                let content = item.get("text").and_then(|t| t.as_str()).map(String::from).unwrap_or_default();
+                                                let content = item
+                                                    .get("text")
+                                                    .and_then(|t| t.as_str())
+                                                    .map(String::from)
+                                                    .unwrap_or_default();
                                                 let mut session = session_clone.lock().unwrap();
-                                                if let Some(msg) = session.agent_messages.iter_mut().find(|m| m.id == item_id) {
+                                                if let Some(msg) = session
+                                                    .agent_messages
+                                                    .iter_mut()
+                                                    .find(|m| m.id == item_id)
+                                                {
                                                     msg.content = content;
                                                 }
-
                                             } else {
                                                 println!("  Task: {} completed", item_type);
                                             }
@@ -1051,15 +1818,21 @@ pub async fn execute(args: AgentCodexArgs) {
                                 }
                                 // Handle agent message delta - direct text output
                                 // Only handle specific delta types to avoid duplicates
-                                else if method_str.contains("agentMessage") || method_str.contains("agent_message") {
+                                else if method_str.contains("agentMessage")
+                                    || method_str.contains("agent_message")
+                                {
                                     // Only process agent_message_content_delta to avoid duplicates
                                     // Codex sends the same content in multiple formats, we only need one
-                                    let msg_type = params.get("type")
+                                    let msg_type = params
+                                        .get("type")
                                         .or_else(|| params.get("msg").and_then(|m| m.get("type")))
                                         .and_then(|t| t.as_str());
 
                                     // Only handle content_delta types, skip others to avoid duplicates
-                                    if !msg_type.map(|t| t.contains("content_delta")).unwrap_or(false) {
+                                    if !msg_type
+                                        .map(|t| t.contains("content_delta"))
+                                        .unwrap_or(false)
+                                    {
                                         continue;
                                     }
 
@@ -1069,7 +1842,8 @@ pub async fn execute(args: AgentCodexArgs) {
                                     }
 
                                     // Check for delta at different levels
-                                    let delta = params.get("delta")
+                                    let delta = params
+                                        .get("delta")
                                         .or_else(|| params.get("msg").and_then(|m| m.get("delta")))
                                         .or_else(|| params.get("text"))
                                         .and_then(|d| d.as_str());
@@ -1086,18 +1860,30 @@ pub async fn execute(args: AgentCodexArgs) {
                                 }
                                 // Handle plan delta
                                 else if method_str.contains("plan") {
-                                    if let Some(plan_val) = params.get("plan").or_else(|| params.get("delta")) {
+                                    if let Some(plan_val) =
+                                        params.get("plan").or_else(|| params.get("delta"))
+                                    {
                                         // Try to parse as JSON array and format nicely
                                         let plan_str = plan_val.to_string();
-                                        if let Ok(plan_array) = serde_json::from_str::<Vec<serde_json::Value>>(&plan_str) {
+                                        if let Ok(plan_array) =
+                                            serde_json::from_str::<Vec<serde_json::Value>>(
+                                                &plan_str,
+                                            )
+                                        {
                                             println!("  Plan:");
                                             for item in plan_array.iter() {
-                                                let status = item.get("status").and_then(|s| s.as_str()).unwrap_or("unknown");
-                                                let step = item.get("step").and_then(|s| s.as_str()).unwrap_or("");
+                                                let status = item
+                                                    .get("status")
+                                                    .and_then(|s| s.as_str())
+                                                    .unwrap_or("unknown");
+                                                let step = item
+                                                    .get("step")
+                                                    .and_then(|s| s.as_str())
+                                                    .unwrap_or("");
                                                 let marker = match status {
                                                     "completed" => "✓",
                                                     "inProgress" => "▶",
-                                                    _ => "○"
+                                                    _ => "○",
                                                 };
                                                 println!("    {} {}", marker, step);
                                             }
@@ -1109,7 +1895,9 @@ pub async fn execute(args: AgentCodexArgs) {
                                 }
                                 // Handle command output delta
                                 else if method_str.contains("commandExecution/outputDelta") {
-                                    if let Some(output) = params.get("output").or_else(|| params.get("delta")) {
+                                    if let Some(output) =
+                                        params.get("output").or_else(|| params.get("delta"))
+                                    {
                                         let output_str = output.as_str().unwrap_or("");
                                         if !output_str.trim().is_empty() {
                                             print!("{}", output_str);
@@ -1119,8 +1907,12 @@ pub async fn execute(args: AgentCodexArgs) {
                                     }
                                 }
                                 // Handle file change output delta (diff streaming)
-                                else if method_str.contains("fileChange/outputDelta") || method_str.contains("filechange/outputDelta") {
-                                    if let Some(delta) = params.get("delta").or_else(|| params.get("output")) {
+                                else if method_str.contains("fileChange/outputDelta")
+                                    || method_str.contains("filechange/outputDelta")
+                                {
+                                    if let Some(delta) =
+                                        params.get("delta").or_else(|| params.get("output"))
+                                    {
                                         let delta_str = delta.as_str().unwrap_or("");
                                         if !delta_str.trim().is_empty() {
                                             print!("{}", delta_str);
@@ -1132,7 +1924,8 @@ pub async fn execute(args: AgentCodexArgs) {
                                 // Handle reasoning/thinking process
                                 else if method_str.contains("reasoning") {
                                     // Check for textDelta, summaryTextDelta, or delta
-                                    let reasoning_text = params.get("delta")
+                                    let reasoning_text = params
+                                        .get("delta")
                                         .or_else(|| params.get("textDelta"))
                                         .or_else(|| params.get("summaryTextDelta"))
                                         .or_else(|| params.get("summary"))
@@ -1148,21 +1941,29 @@ pub async fn execute(args: AgentCodexArgs) {
                                     }
                                 }
                                 // Handle MCP tool call progress
-                                else if method_str.contains("mcpToolCall") || method_str.contains("tool") {
+                                else if method_str.contains("mcpToolCall")
+                                    || method_str.contains("tool")
+                                {
                                     if let Some(name) = params.get("name") {
                                         println!("  Tool: {}", name);
-                                    } else if let Some(tool_call) = params.get("toolCall").or_else(|| params.get("tool")) {
+                                    } else if let Some(tool_call) =
+                                        params.get("toolCall").or_else(|| params.get("tool"))
+                                    {
                                         if let Some(name) = tool_call.get("name") {
                                             println!("  Tool: {}", name);
                                         }
                                     }
                                 }
                                 // Handle turn completion
-                                else if method_str.contains("turn/completed") || method_str.contains("turnCompleted") {
+                                else if method_str.contains("turn/completed")
+                                    || method_str.contains("turnCompleted")
+                                {
                                     println!("\n[Turn completed]");
                                 }
                                 // Handle turn started
-                                else if method_str.contains("turn/started") || method_str.contains("turnStarted") {
+                                else if method_str.contains("turn/started")
+                                    || method_str.contains("turnStarted")
+                                {
                                     println!("[Turn started]");
                                 }
                             }
@@ -1185,14 +1986,20 @@ pub async fn execute(args: AgentCodexArgs) {
                                 println!("  Method: {}", method_str);
 
                                 // Get approval ID from different possible fields
-                                let request_id = json.get("params")
+                                let request_id = json
+                                    .get("params")
                                     .and_then(|p| p.get("requestId"))
-                                    .or_else(|| json.get("params").and_then(|p| p.get("approvalId")))
+                                    .or_else(|| {
+                                        json.get("params").and_then(|p| p.get("approvalId"))
+                                    })
                                     .or_else(|| json.get("params").and_then(|p| p.get("call_id")))
                                     .cloned()
                                     .and_then(|v| v.as_str().map(String::from))
-                                    .unwrap_or_else(|| format!("approval_{}", Utc::now().timestamp_millis()));
-                                let approval_params = json.get("params").cloned().unwrap_or(serde_json::json!({}));
+                                    .unwrap_or_else(|| {
+                                        format!("approval_{}", Utc::now().timestamp_millis())
+                                    });
+                                let approval_params =
+                                    json.get("params").cloned().unwrap_or(serde_json::json!({}));
 
                                 // Determine approval type
                                 let approval_type = if method_str.contains("commandExecution") {
@@ -1206,30 +2013,44 @@ pub async fn execute(args: AgentCodexArgs) {
                                 };
 
                                 // Get item_id if available
-                                let item_id = approval_params.get("itemId")
+                                let item_id = approval_params
+                                    .get("itemId")
                                     .or_else(|| approval_params.get("call_id"))
                                     .and_then(|v| v.as_str())
                                     .map(String::from)
                                     .unwrap_or_default();
 
                                 // Get thread_id if available
-                                let thread_id = approval_params.get("threadId")
+                                let thread_id = approval_params
+                                    .get("threadId")
                                     .and_then(|v| v.as_str())
                                     .map(String::from)
                                     .unwrap_or_default();
 
                                 // Get command or changes from approval_params
-                                let command = approval_params.get("command").and_then(|v| v.as_str()).map(String::from);
-                                let changes = approval_params.get("changes").and_then(|c| c.as_array())
-                                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect());
-                                let description: Option<String> = approval_params.get("description").and_then(|v| v.as_str()).map(String::from);
+                                let command = approval_params
+                                    .get("command")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from);
+                                let changes = approval_params
+                                    .get("changes")
+                                    .and_then(|c| c.as_array())
+                                    .map(|arr| {
+                                        arr.iter()
+                                            .filter_map(|v| v.as_str().map(String::from))
+                                            .collect()
+                                    });
+                                let description: Option<String> = approval_params
+                                    .get("description")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from);
 
                                 // Store approval request in session
                                 let approval_request = ApprovalRequest {
                                     id: request_id.clone(),
                                     approval_type,
                                     item_id,
-                                    thread_id,
+                                    thread_id: thread_id.clone(),
                                     run_id: None,
                                     command,
                                     changes,
@@ -1238,10 +2059,24 @@ pub async fn execute(args: AgentCodexArgs) {
                                     requested_at: Utc::now(),
                                     resolved_at: None,
                                 };
+                                let approval_id = request_id.clone();
+                                let approval_for_mcp = approval_request.clone();
                                 {
                                     let mut session = session_clone.lock().unwrap();
                                     session.add_approval_request(approval_request);
                                 }
+
+                                // Store to MCP in background
+                                let mcp_server_for_approval = mcp_server_clone.clone();
+                                tokio::spawn(async move {
+                                    store_to_mcp(
+                                        &mcp_server_for_approval,
+                                        "approval_request",
+                                        &approval_id,
+                                        &approval_for_mcp,
+                                    )
+                                    .await;
+                                });
 
                                 let approved = if approval_mode == "accept" {
                                     // Auto-accept
@@ -1253,13 +2088,19 @@ pub async fn execute(args: AgentCodexArgs) {
                                     false
                                 } else {
                                     // Ask mode - send to main loop for interactive input
-                                    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel::<bool>();
-                                    let _ = approval_tx_clone.send((approval_params.clone(), oneshot_tx)).await;
+                                    let (oneshot_tx, oneshot_rx) =
+                                        tokio::sync::oneshot::channel::<bool>();
+                                    let _ = approval_tx_clone
+                                        .send((approval_params.clone(), oneshot_tx))
+                                        .await;
 
                                     // Wait for user response
                                     match oneshot_rx.await {
                                         Ok(approved) => {
-                                            println!("[User {}]", if approved { "approved" } else { "declined" });
+                                            println!(
+                                                "[User {}]",
+                                                if approved { "approved" } else { "declined" }
+                                            );
                                             approved
                                         }
                                         Err(_) => {
@@ -1272,7 +2113,11 @@ pub async fn execute(args: AgentCodexArgs) {
                                 // Update approval request with decision
                                 {
                                     let mut session = session_clone.lock().unwrap();
-                                    if let Some(approval) = session.approval_requests.iter_mut().find(|a| a.id == request_id) {
+                                    if let Some(approval) = session
+                                        .approval_requests
+                                        .iter_mut()
+                                        .find(|a| a.id == request_id)
+                                    {
                                         approval.decision = Some(approved);
                                         approval.resolved_at = Some(Utc::now());
                                     }
@@ -1338,13 +2183,23 @@ pub async fn execute(args: AgentCodexArgs) {
     }
 
     // Initialize
-    match send_request(&tx, &responses, "initialize", serde_json::json!({
-        "protocolVersion": "1.0",
-        "capabilities": {},
-        "clientInfo": { "name": "libra", "version": "1.0.0" }
-    })).await {
+    match send_request(
+        &tx,
+        &responses,
+        "initialize",
+        serde_json::json!({
+            "protocolVersion": "1.0",
+            "capabilities": {},
+            "clientInfo": { "name": "libra", "version": "1.0.0" }
+        }),
+    )
+    .await
+    {
         Ok(_) => println!("Initialized"),
-        Err(e) => { eprintln!("Init failed: {}", e); return; }
+        Err(e) => {
+            eprintln!("Init failed: {}", e);
+            return;
+        }
     }
 
     // Start thread
@@ -1357,7 +2212,10 @@ pub async fn execute(args: AgentCodexArgs) {
                 }
             }
         }
-        Err(e) => { eprintln!("Thread start failed: {}", e); return; }
+        Err(e) => {
+            eprintln!("Thread start failed: {}", e);
+            return;
+        }
     }
 
     println!("\n=== Ready! Type your message ===\n");
