@@ -12,6 +12,7 @@ mod history_cell;
 mod slash_command;
 mod status_indicator;
 mod terminal;
+mod welcome_shader;
 
 pub use app::{App, AppConfig, AppExitInfo, ExitReason};
 pub use app_event::{AgentEvent, AgentStatus, AppEvent};

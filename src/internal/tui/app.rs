@@ -31,6 +31,7 @@ use super::{
         UserHistoryCell,
     },
     terminal::{TARGET_FRAME_INTERVAL, Tui, TuiEvent},
+    welcome_shader::{self, WelcomeView},
 };
 use crate::{
     cli_error,
@@ -235,6 +236,10 @@ pub struct App<M: CompletionModel> {
     scheduled_draw_task: Option<JoinHandle<()>>,
     /// Initial welcome message.
     welcome_message: String,
+    /// Whether the animated welcome screen is shown.
+    welcome_active: bool,
+    /// Animation start time for the welcome screen.
+    welcome_started_at: Instant,
     /// Slash command dispatcher.
     command_dispatcher: CommandDispatcher,
     /// Agent router for auto-selection.
@@ -321,6 +326,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         widget
             .bottom_pane
             .set_cwd(registry.working_dir().to_path_buf());
+        widget
+            .bottom_pane
+            .set_git_branch(current_git_branch_label(registry.working_dir()));
         let mcp_plan_id = app_config
             .session
             .metadata
@@ -347,6 +355,8 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             agent_task: None,
             scheduled_draw_task: None,
             welcome_message: app_config.welcome_message,
+            welcome_active: true,
+            welcome_started_at: Instant::now(),
             command_dispatcher: app_config.command_dispatcher,
             agent_router: app_config.agent_router,
             session: app_config.session,
@@ -405,11 +415,6 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         );
         self.widget.bottom_pane.set_command_hints(hints);
 
-        // Welcome message
-        self.widget.add_cell(Box::new(AssistantHistoryCell::new(
-            self.welcome_message.clone(),
-        )));
-
         // Initial draw - ensure UI is rendered immediately
         self.draw()?;
 
@@ -449,7 +454,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     if matches!(
                         self.widget.bottom_pane.status,
                         AgentStatus::Thinking | AgentStatus::Retrying | AgentStatus::ExecutingTool
-                    ) {
+                    ) || self.welcome_active {
                         self.schedule_draw();
                     }
                 }
@@ -560,6 +565,10 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 KeyCode::Enter => {
                     if !self.widget.bottom_pane.is_empty() {
                         let text = self.widget.bottom_pane.take_input();
+                        if self.welcome_active {
+                            self.welcome_active = false;
+                            self.schedule_draw();
+                        }
                         self.submit_message(text).await;
                     }
                 }
@@ -1344,7 +1353,12 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         };
                     let cell = Box::new(PlanUpdateHistoryCell::new(call_id, explanation, steps));
                     self.insert_before_streaming_assistant(cell);
-                } else {
+                } else if !append_to_last_tool_group_cell(
+                    &mut self.widget.cells,
+                    call_id.clone(),
+                    tool_name.as_str(),
+                    arguments.clone(),
+                ) {
                     let cell = Box::new(ToolCallHistoryCell::new(call_id, tool_name, arguments));
                     self.insert_before_streaming_assistant(cell);
                 }
@@ -1382,10 +1396,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     for cell in self.widget.cells.iter_mut().rev() {
                         if let Some(tool_cell) =
                             cell.as_any_mut().downcast_mut::<ToolCallHistoryCell>()
-                            && tool_cell.call_id == call_id
-                            && tool_cell.is_running
+                            && tool_cell.contains_call_id(&call_id)
                         {
-                            tool_cell.complete(result);
+                            tool_cell.complete_call(&call_id, result);
                             break;
                         }
                     }
@@ -1567,6 +1580,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
     }
 
     fn set_idle_and_draw(&mut self) {
+        self.widget
+            .bottom_pane
+            .set_git_branch(current_git_branch_label(self.registry.working_dir()));
         self.widget.bottom_pane.set_status(AgentStatus::Idle);
         self.schedule_draw();
     }
@@ -2367,10 +2383,8 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
     fn complete_running_tool_cells_with_interrupt(&mut self) {
         for cell in self.widget.cells.iter_mut() {
-            if let Some(tool_cell) = cell.as_any_mut().downcast_mut::<ToolCallHistoryCell>()
-                && tool_cell.is_running
-            {
-                tool_cell.complete(Err("Interrupted".to_string()));
+            if let Some(tool_cell) = cell.as_any_mut().downcast_mut::<ToolCallHistoryCell>() {
+                tool_cell.interrupt_running();
             }
         }
     }
@@ -2411,13 +2425,62 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
     fn draw(&mut self) -> anyhow::Result<()> {
         self.tui.draw(|frame| {
             let area = frame.area();
-            let cursor_pos = self.widget.render(area, frame.buffer_mut());
+            let cursor_pos = if self.welcome_active {
+                let chat_area = self.widget.chat_area_rect(area);
+                let welcome_view = WelcomeView {
+                    elapsed: self.welcome_started_at.elapsed(),
+                    welcome_message: &self.welcome_message,
+                    model_name: &self.model_name,
+                    provider_name: &self.provider_name,
+                    cwd: self.registry.working_dir(),
+                };
+                welcome_shader::render(chat_area, frame.buffer_mut(), welcome_view);
+                self.widget
+                    .render_bottom_pane_only(area, frame.buffer_mut())
+            } else {
+                self.widget.render(area, frame.buffer_mut())
+            };
             if let Some(pos) = cursor_pos {
                 frame.set_cursor_position(pos);
             }
         })?;
         Ok(())
     }
+}
+
+fn append_to_last_tool_group_cell(
+    cells: &mut Vec<Box<dyn super::history_cell::HistoryCell>>,
+    call_id: String,
+    tool_name: &str,
+    arguments: serde_json::Value,
+) -> bool {
+    let anchor_index = if let Some(streaming_index) = cells.iter().rposition(|cell| {
+        cell.as_any()
+            .downcast_ref::<AssistantHistoryCell>()
+            .is_some_and(|assistant| assistant.is_streaming)
+    }) {
+        streaming_index.checked_sub(1)
+    } else {
+        cells.len().checked_sub(1)
+    };
+
+    let Some(anchor_index) = anchor_index else {
+        return false;
+    };
+
+    let Some(tool_cell) = cells[anchor_index]
+        .as_any_mut()
+        .downcast_mut::<ToolCallHistoryCell>()
+    else {
+        return false;
+    };
+
+    if !tool_cell.can_merge(tool_name) {
+        return false;
+    }
+
+    tool_cell.append_call(call_id, tool_name.to_string(), arguments);
+    true
 }
 
 fn format_orchestrator_result(
@@ -2524,6 +2587,62 @@ fn format_orchestrator_result(
     }
 
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::append_to_last_tool_group_cell;
+    use crate::internal::tui::history_cell::{
+        AssistantHistoryCell, HistoryCell, ToolCallHistoryCell,
+    };
+
+    #[test]
+    fn appends_to_last_matching_tool_group_before_streaming_cell() {
+        let mut cells: Vec<Box<dyn HistoryCell>> = vec![
+            Box::new(ToolCallHistoryCell::new(
+                "1".to_string(),
+                "read_file".to_string(),
+                json!({"file_path":"src/main.rs"}),
+            )),
+            Box::new(AssistantHistoryCell::streaming()),
+        ];
+
+        assert!(append_to_last_tool_group_cell(
+            &mut cells,
+            "2".to_string(),
+            "list_dir",
+            json!({"dir_path":"src"}),
+        ));
+
+        let tool_cell = cells[0]
+            .as_any()
+            .downcast_ref::<ToolCallHistoryCell>()
+            .expect("expected grouped tool cell");
+        assert!(tool_cell.contains_call_id("1"));
+        assert!(tool_cell.contains_call_id("2"));
+    }
+
+    #[test]
+    fn does_not_append_across_non_tool_cells() {
+        let mut cells: Vec<Box<dyn HistoryCell>> = vec![
+            Box::new(ToolCallHistoryCell::new(
+                "1".to_string(),
+                "read_file".to_string(),
+                json!({"file_path":"src/main.rs"}),
+            )),
+            Box::new(AssistantHistoryCell::new("note".to_string())),
+            Box::new(AssistantHistoryCell::streaming()),
+        ];
+
+        assert!(!append_to_last_tool_group_cell(
+            &mut cells,
+            "2".to_string(),
+            "list_dir",
+            json!({"dir_path":"src"}),
+        ));
+    }
 }
 
 fn summarize_retry_error(error: &str) -> String {
@@ -2744,6 +2863,38 @@ fn current_head_sha(working_dir: &std::path::Path) -> String {
             }
         }
         _ => "HEAD".to_string(),
+    }
+}
+
+fn current_git_branch_label(working_dir: &std::path::Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .current_dir(working_dir)
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !branch.is_empty() {
+            return Some(branch);
+        }
+    }
+
+    let detached = std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .current_dir(working_dir)
+        .output()
+        .ok()?;
+
+    if !detached.status.success() {
+        return None;
+    }
+
+    let sha = String::from_utf8_lossy(&detached.stdout).trim().to_string();
+    if sha.is_empty() {
+        None
+    } else {
+        Some(format!("detached@{sha}"))
     }
 }
 

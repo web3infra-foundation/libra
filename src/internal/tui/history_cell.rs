@@ -41,11 +41,11 @@ fn truncate_utf8(text: &str, max_bytes: usize) -> String {
 }
 
 const ACTIVE_GRADIENT_COLORS: [Color; 5] = [
-    Color::Rgb(110, 160, 255),
-    Color::Rgb(120, 210, 255),
-    Color::Rgb(235, 245, 255),
-    Color::Rgb(120, 210, 255),
-    Color::Rgb(110, 160, 255),
+    Color::Rgb(76, 108, 152),
+    Color::Rgb(84, 124, 160),
+    Color::Rgb(156, 168, 188),
+    Color::Rgb(84, 124, 160),
+    Color::Rgb(76, 108, 152),
 ];
 
 fn animation_phase(step_ms: u128) -> usize {
@@ -258,41 +258,137 @@ impl HistoryCell for AssistantHistoryCell {
 }
 
 /// A tool call in the chat history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ToolCallGroup {
+    Explore,
+    Edit,
+    Shell,
+    Input,
+    Draft,
+    Other(String),
+}
+
+impl ToolCallGroup {
+    fn for_tool(tool_name: &str) -> Self {
+        match tool_name {
+            "read_file" | "list_dir" | "grep_files" => Self::Explore,
+            "apply_patch" => Self::Edit,
+            "shell" => Self::Shell,
+            "request_user_input" => Self::Input,
+            "submit_intent_draft" => Self::Draft,
+            _ => Self::Other(tool_name.to_string()),
+        }
+    }
+
+    fn labels(&self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Self::Explore => ("Exploring", "Explored", "Explore failed"),
+            Self::Edit => ("Editing", "Edited", "Edit failed"),
+            Self::Shell => ("Running command", "Ran command", "Command failed"),
+            Self::Input => ("Waiting for input", "Input received", "Input cancelled"),
+            Self::Draft => ("Drafting", "Drafted", "Draft failed"),
+            Self::Other(_) => ("Working", "Completed", "Failed"),
+        }
+    }
+
+    fn action_style(&self) -> Style {
+        match self {
+            Self::Explore => Style::default().fg(Color::Rgb(128, 154, 194)),
+            Self::Edit => Style::default().fg(Color::Rgb(176, 156, 98)),
+            Self::Shell => Style::default().fg(Color::Rgb(102, 146, 102)),
+            Self::Input => Style::default().fg(Color::Rgb(152, 124, 152)),
+            Self::Draft => Style::default().fg(Color::Rgb(98, 146, 152)),
+            Self::Other(_) => Style::default().fg(Color::DarkGray),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum ToolCallEntryStatus {
+    Running,
+    Success,
+    Failed(String),
+}
+
+#[derive(Debug, Clone)]
+struct ToolCallEntry {
+    call_id: String,
+    summary: String,
+    status: ToolCallEntryStatus,
+}
+
 #[derive(Debug, Clone)]
 pub struct ToolCallHistoryCell {
-    /// Unique id for this tool call.
-    pub call_id: String,
-    /// The name of the tool.
-    pub tool_name: String,
-    /// The arguments passed to the tool.
-    pub arguments: Value,
-    /// The result of the tool call, if complete.
-    pub result: Option<Result<ToolOutput, String>>,
-    /// Whether the tool is still running.
-    pub is_running: bool,
+    group: ToolCallGroup,
+    entries: Vec<ToolCallEntry>,
 }
 
 impl ToolCallHistoryCell {
     /// Create a new tool call cell.
     pub fn new(call_id: String, tool_name: String, arguments: Value) -> Self {
         Self {
-            call_id,
-            tool_name,
-            arguments,
-            result: None,
-            is_running: true,
+            group: ToolCallGroup::for_tool(&tool_name),
+            entries: vec![ToolCallEntry {
+                call_id,
+                summary: summarize_tool_call(&tool_name, &arguments),
+                status: ToolCallEntryStatus::Running,
+            }],
         }
     }
 
-    /// Complete the tool call with a result.
-    pub fn complete(&mut self, result: Result<ToolOutput, String>) {
-        self.result = Some(result);
-        self.is_running = false;
+    pub fn can_merge(&self, tool_name: &str) -> bool {
+        self.group == ToolCallGroup::for_tool(tool_name)
     }
 
-    /// Check if the tool call succeeded.
+    pub fn append_call(&mut self, call_id: String, tool_name: String, arguments: Value) {
+        self.entries.push(ToolCallEntry {
+            call_id,
+            summary: summarize_tool_call(&tool_name, &arguments),
+            status: ToolCallEntryStatus::Running,
+        });
+    }
+
+    pub fn contains_call_id(&self, call_id: &str) -> bool {
+        self.entries.iter().any(|entry| entry.call_id == call_id)
+    }
+
+    /// Complete a single tool call inside the group.
+    pub fn complete_call(&mut self, call_id: &str, result: Result<ToolOutput, String>) {
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.call_id == call_id) {
+            entry.status = match result {
+                Ok(output) if output.is_success() => ToolCallEntryStatus::Success,
+                Ok(output) => ToolCallEntryStatus::Failed(summarize_tool_output_failure(&output)),
+                Err(err) => ToolCallEntryStatus::Failed(err),
+            };
+        }
+    }
+
+    pub fn interrupt_running(&mut self) {
+        for entry in &mut self.entries {
+            if matches!(entry.status, ToolCallEntryStatus::Running) {
+                entry.status = ToolCallEntryStatus::Failed("Interrupted".to_string());
+            }
+        }
+    }
+
+    pub fn has_running(&self) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| matches!(entry.status, ToolCallEntryStatus::Running))
+    }
+
     pub fn is_success(&self) -> bool {
-        self.result.as_ref().is_some_and(|r| r.is_ok())
+        !self.has_running()
+            && self
+                .entries
+                .iter()
+                .all(|entry| matches!(entry.status, ToolCallEntryStatus::Success))
+    }
+
+    fn has_failure(&self) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| matches!(entry.status, ToolCallEntryStatus::Failed(_)))
     }
 }
 
@@ -300,17 +396,19 @@ impl HistoryCell for ToolCallHistoryCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         let mut lines: Vec<Line<'static>> = Vec::new();
         let phase = animation_phase(120);
-        let (running_label, done_label, failed_label) = friendly_tool_labels(&self.tool_name);
+        let (running_label, done_label, failed_label) = self.group.labels();
 
         // Tool state summary line
-        let summary = if self.is_running {
+        let summary = if self.has_running() {
             running_label
-        } else if self.is_success() {
-            done_label
         } else {
-            failed_label
+            if self.has_failure() {
+                failed_label
+            } else {
+                done_label
+            }
         };
-        if self.is_running {
+        if self.has_running() {
             lines.push(gradient_line(
                 &format!("● {summary}"),
                 &ACTIVE_GRADIENT_COLORS,
@@ -319,9 +417,9 @@ impl HistoryCell for ToolCallHistoryCell {
             ));
         } else {
             let status_color = if self.is_success() {
-                Color::Green
+                Color::Rgb(96, 136, 96)
             } else {
-                Color::Red
+                Color::Rgb(148, 102, 102)
             };
             lines.push(Line::styled(
                 format!("● {summary}"),
@@ -329,54 +427,26 @@ impl HistoryCell for ToolCallHistoryCell {
             ));
         }
 
-        // Arguments (abbreviated)
-        let args_str = self.arguments.to_string();
-        let truncated = if args_str.len() > 100 {
-            format!("{}...", truncate_utf8(&args_str, 100))
-        } else {
-            args_str
-        };
-        lines.push(Line::styled(
-            format!("  Args: {}", truncated),
-            Style::default().add_modifier(Modifier::DIM),
-        ));
+        for (idx, entry) in self.entries.iter().enumerate() {
+            let prefix = if idx + 1 == self.entries.len() {
+                "  └ "
+            } else {
+                "  ├ "
+            };
+            lines.extend(wrap_tool_entry(
+                &entry.summary,
+                prefix,
+                width,
+                self.group.action_style(),
+            ));
 
-        // Result
-        if let Some(ref result) = self.result {
-            match result {
-                Ok(output) => {
-                    let result_str = match output {
-                        ToolOutput::Function {
-                            content, success, ..
-                        } => {
-                            let status = success
-                                .map(|s| if s { "success" } else { "failed" })
-                                .unwrap_or("done");
-                            let preview = if content.len() > 50 {
-                                format!("{}...", truncate_utf8(content, 50))
-                            } else {
-                                content.clone()
-                            };
-                            format!("{}: {}", status, preview)
-                        }
-                        ToolOutput::Mcp { result } => {
-                            format!("MCP result: {:?}", result)
-                        }
-                    };
-                    lines.push(Line::styled(
-                        format!("  Result: {}", result_str),
-                        Style::default().fg(Color::Green),
-                    ));
-                }
-                Err(e) => {
-                    // Wrap error messages so they don't overflow the terminal width.
-                    lines.extend(wrap_text(
-                        e,
-                        "  Error: ",
-                        width,
-                        Style::default().fg(Color::Red),
-                    ));
-                }
+            if let ToolCallEntryStatus::Failed(error) = &entry.status {
+                lines.extend(wrap_text(
+                    &truncate_utf8(error.trim(), 180),
+                    "    ",
+                    width,
+                    Style::default().fg(Color::Red).add_modifier(Modifier::DIM),
+                ));
             }
         }
 
@@ -393,16 +463,147 @@ impl HistoryCell for ToolCallHistoryCell {
     }
 }
 
-fn friendly_tool_labels(tool_name: &str) -> (&'static str, &'static str, &'static str) {
+fn summarize_tool_call(tool_name: &str, arguments: &Value) -> String {
     match tool_name {
-        "read_file" | "list_dir" | "grep_files" => ("Exploring", "Explored", "Explore failed"),
-        "apply_patch" => ("Editing", "Edited", "Edit failed"),
-        "shell" => ("Running command", "Command completed", "Command failed"),
-        "request_user_input" => ("Waiting for input", "Input received", "Input cancelled"),
-        "update_plan" => ("Planning", "Planned", "Plan update failed"),
-        "submit_intent_draft" => ("Drafting", "Drafted", "Draft failed"),
-        _ => ("Working", "Completed", "Failed"),
+        "read_file" => format!("Read {}", argument_string(arguments, "file_path").unwrap_or("?")),
+        "list_dir" => format!("List {}", argument_string(arguments, "dir_path").unwrap_or(".")),
+        "grep_files" => {
+            let pattern = argument_string(arguments, "pattern").unwrap_or("(pattern)");
+            let path = argument_string(arguments, "path").unwrap_or(".");
+            format!(
+                "Search {} in {}",
+                truncate_utf8(pattern, 80),
+                truncate_utf8(path, 80)
+            )
+        }
+        "shell" => format!(
+            "Run {}",
+            truncate_utf8(argument_string(arguments, "command").unwrap_or("(command)"), 120)
+        ),
+        "apply_patch" => summarize_apply_patch(arguments),
+        "request_user_input" => "Ask for input".to_string(),
+        "submit_intent_draft" => "Submit intent draft".to_string(),
+        _ => format!("Run {}", tool_name.replace('_', " ")),
     }
+}
+
+fn summarize_apply_patch(arguments: &Value) -> String {
+    let patch_text = arguments
+        .as_str()
+        .or_else(|| argument_string(arguments, "input"))
+        .or_else(|| argument_string(arguments, "patch"));
+
+    let Some(patch_text) = patch_text else {
+        return "Apply patch".to_string();
+    };
+
+    let mut files = Vec::new();
+    for line in patch_text.lines() {
+        let file = line
+            .strip_prefix("*** Update File: ")
+            .or_else(|| line.strip_prefix("*** Add File: "))
+            .or_else(|| line.strip_prefix("*** Delete File: "))
+            .or_else(|| line.strip_prefix("*** Move to: "));
+        if let Some(file) = file {
+            files.push(file.trim().to_string());
+        }
+    }
+
+    match files.as_slice() {
+        [] => "Apply patch".to_string(),
+        [file] => format!("Edit {file}"),
+        [first, second] => format!("Edit {first} and {second}"),
+        [first, rest @ ..] => format!("Edit {first} (+{} more)", rest.len()),
+    }
+}
+
+fn summarize_tool_output_failure(output: &ToolOutput) -> String {
+    match output {
+        ToolOutput::Function { content, .. } => first_non_empty_line(content)
+            .map(|line| truncate_utf8(line, 180))
+            .unwrap_or_else(|| "Tool failed".to_string()),
+        ToolOutput::Mcp { .. } => "MCP tool failed".to_string(),
+    }
+}
+
+fn first_non_empty_line(text: &str) -> Option<&str> {
+    text.lines().map(str::trim).find(|line| !line.is_empty())
+}
+
+fn argument_string<'a>(arguments: &'a Value, key: &str) -> Option<&'a str> {
+    arguments.get(key).and_then(Value::as_str)
+}
+
+fn wrap_tool_entry(summary: &str, prefix: &str, width: u16, action_style: Style) -> Vec<Line<'static>> {
+    let (action, detail) = summary
+        .split_once(' ')
+        .map_or((summary, ""), |(action, detail)| (action, detail));
+
+    if detail.is_empty() {
+        return vec![Line::from(vec![
+            Span::styled(prefix.to_string(), Style::default().fg(Color::White)),
+            Span::styled(action.to_string(), action_style),
+        ])];
+    }
+
+    let total_cols = (width as usize).max(8);
+    let prefix_cols = prefix.chars().count();
+    let action_cols = action.chars().count();
+    let first_available = total_cols
+        .saturating_sub(prefix_cols + action_cols + 1)
+        .max(1);
+    let continuation_prefix = " ".repeat(prefix_cols + action_cols + 1);
+    let continuation_available = total_cols
+        .saturating_sub(continuation_prefix.chars().count())
+        .max(1);
+    let detail_chunks = wrap_plain_chunks(detail, first_available, continuation_available);
+
+    let mut lines = Vec::with_capacity(detail_chunks.len());
+    if let Some((first, rest)) = detail_chunks.split_first() {
+        lines.push(Line::from(vec![
+            Span::styled(prefix.to_string(), Style::default().fg(Color::White)),
+            Span::styled(action.to_string(), action_style),
+            Span::styled(format!(" {first}"), Style::default().fg(Color::White)),
+        ]));
+
+        for chunk in rest {
+            lines.push(Line::from(vec![Span::styled(
+                format!("{continuation_prefix}{chunk}"),
+                Style::default().fg(Color::White),
+            )]));
+        }
+    }
+
+    lines
+}
+
+fn wrap_plain_chunks(text: &str, first_width: usize, continuation_width: usize) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut remaining = text;
+    let mut available = first_width.max(1);
+
+    loop {
+        let char_count = remaining.chars().count();
+        if char_count <= available {
+            chunks.push(remaining.to_string());
+            break;
+        }
+
+        let split_byte = remaining
+            .char_indices()
+            .nth(available)
+            .map(|(idx, _)| idx)
+            .unwrap_or(remaining.len());
+        chunks.push(remaining[..split_byte].to_string());
+        remaining = &remaining[split_byte..];
+        available = continuation_width.max(1);
+    }
+
+    if chunks.is_empty() {
+        chunks.push(String::new());
+    }
+
+    chunks
 }
 
 /// A diff/patch display cell in the chat history.
@@ -545,7 +746,10 @@ mod tests {
         AssistantHistoryCell, HistoryCell, PlanUpdateHistoryCell, ToolCallHistoryCell,
         UserHistoryCell,
     };
-    use crate::internal::ai::tools::context::{PlanStep, StepStatus};
+    use crate::internal::ai::tools::{
+        ToolOutput,
+        context::{PlanStep, StepStatus},
+    };
 
     fn to_strings(lines: Vec<ratatui::text::Line<'static>>) -> Vec<String> {
         lines.iter().map(ToString::to_string).collect()
@@ -581,6 +785,48 @@ mod tests {
         let cell = ToolCallHistoryCell::new("1".to_string(), "read_file".to_string(), json!({}));
         let rendered = to_strings(cell.display_lines(80));
         assert!(rendered.iter().any(|line| line.starts_with("● ")));
+    }
+
+    #[test]
+    fn tool_cell_hides_raw_args_and_results() {
+        let mut cell = ToolCallHistoryCell::new(
+            "1".to_string(),
+            "read_file".to_string(),
+            json!({"file_path":"src/main.rs"}),
+        );
+        cell.complete_call("1", Ok(ToolOutput::success("L1: fn main() {}")));
+
+        let rendered = to_strings(cell.display_lines(80));
+        let joined = rendered.join("\n");
+
+        assert!(joined.contains("Explored"));
+        assert!(joined.contains("Read src/main.rs"));
+        assert!(!joined.contains("Args:"));
+        assert!(!joined.contains("Result:"));
+        assert!(!joined.contains("L1: fn main() {}"));
+    }
+
+    #[test]
+    fn tool_cell_renders_grouped_entries() {
+        let mut cell = ToolCallHistoryCell::new(
+            "1".to_string(),
+            "grep_files".to_string(),
+            json!({"pattern":"cwd|pwd","path":"src"}),
+        );
+        cell.append_call(
+            "2".to_string(),
+            "list_dir".to_string(),
+            json!({"dir_path":"src"}),
+        );
+        cell.complete_call("1", Ok(ToolOutput::success("src/internal/tui/app.rs")));
+        cell.complete_call("2", Ok(ToolOutput::success("Absolute path: /tmp/src")));
+
+        let rendered = to_strings(cell.display_lines(100));
+        let joined = rendered.join("\n");
+
+        assert!(joined.contains("Explored"));
+        assert!(joined.contains("Search cwd|pwd in src"));
+        assert!(joined.contains("List src"));
     }
 
     #[test]

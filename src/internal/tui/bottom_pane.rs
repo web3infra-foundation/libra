@@ -81,6 +81,8 @@ pub struct BottomPane {
     pub post_plan_selected: usize,
     /// Current working directory shown in the input border.
     cwd: Option<PathBuf>,
+    /// Current Git branch or detached HEAD label shown beside the working directory.
+    git_branch: Option<String>,
     /// Current retry notice shown in the status line.
     retry_notice: Option<String>,
 }
@@ -108,6 +110,7 @@ impl BottomPane {
             },
             post_plan_selected: 0,
             cwd: None,
+            git_branch: None,
             retry_notice: None,
         }
     }
@@ -233,6 +236,11 @@ impl BottomPane {
     /// Set the current working directory badge shown on the input border.
     pub fn set_cwd(&mut self, cwd: PathBuf) {
         self.cwd = Some(cwd);
+    }
+
+    /// Set or clear the Git branch label shown on the input border.
+    pub fn set_git_branch(&mut self, git_branch: Option<String>) {
+        self.git_branch = git_branch;
     }
 
     /// Show a transient retry notice in the status line.
@@ -913,7 +921,7 @@ impl BottomPane {
         };
 
         Paragraph::new(display_text).block(block).render(area, buf);
-        self.render_cwd_badge(area, buf, border_style);
+        self.render_workspace_badge(area, buf, border_style);
 
         if !self.focused || inner.width == 0 || inner.height == 0 {
             return None;
@@ -925,7 +933,7 @@ impl BottomPane {
         })
     }
 
-    fn render_cwd_badge(&self, area: Rect, buf: &mut Buffer, border_style: Style) {
+    fn render_workspace_badge(&self, area: Rect, buf: &mut Buffer, border_style: Style) {
         if area.width < 12 || area.height == 0 {
             return;
         }
@@ -934,7 +942,11 @@ impl BottomPane {
             return;
         };
 
-        let badge = format_cwd_badge(cwd, area.width.saturating_sub(6) as usize);
+        let badge = format_workspace_badge(
+            cwd,
+            self.git_branch.as_deref(),
+            area.width.saturating_sub(6) as usize,
+        );
         if badge.is_empty() {
             return;
         }
@@ -957,7 +969,6 @@ impl BottomPane {
                     .fg(Color::Rgb(188, 208, 255))
                     .add_modifier(Modifier::DIM),
             ),
-            Span::styled("╯", border_style),
         ];
         buf.set_line(x, y, &Line::from(spans), area.width.saturating_sub(x));
     }
@@ -1109,7 +1120,7 @@ fn gradient_line(text: &str, colors: &[Color], phase: usize, bold: bool) -> Line
     Line::from(spans)
 }
 
-fn format_cwd_badge(path: &Path, max_width: usize) -> String {
+fn format_workspace_badge(path: &Path, git_branch: Option<&str>, max_width: usize) -> String {
     if max_width <= 2 {
         return String::new();
     }
@@ -1126,6 +1137,11 @@ fn format_cwd_badge(path: &Path, max_width: usize) -> String {
         }
     } else {
         path.display().to_string()
+    };
+
+    let display = match git_branch.filter(|branch| !branch.trim().is_empty()) {
+        Some(branch) => format!("{display} ({branch})"),
+        None => display,
     };
 
     format!(
@@ -1220,6 +1236,7 @@ mod tests {
     fn input_box_renders_cwd_badge_on_bottom_border() {
         let mut pane = BottomPane::new();
         pane.set_cwd(PathBuf::from("/Users/neon/Documents/Projects/libra"));
+        pane.set_git_branch(Some("main".to_string()));
 
         let area = Rect::new(0, 0, 48, 6);
         let mut buf = Buffer::empty(area);
@@ -1227,7 +1244,9 @@ mod tests {
 
         let bottom_of_box = row_text(&buf, 4, area.width);
         assert!(bottom_of_box.contains("libra"));
+        assert!(bottom_of_box.contains("(main)"));
         assert!(bottom_of_box.contains("┤"));
+        assert!(bottom_of_box.ends_with("─╯"));
     }
 
     #[test]
