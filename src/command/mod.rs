@@ -1,6 +1,7 @@
 //! Command module hub exporting all subcommands plus shared helpers for loading/saving objects and prompting for authentication.
 
 pub mod add;
+pub mod agent_codex;
 pub mod blame;
 pub mod branch;
 pub mod cat_file;
@@ -10,7 +11,6 @@ pub mod clean;
 pub mod clone;
 pub mod cloud;
 pub mod code;
-pub mod agent_codex;
 pub mod commit;
 pub mod config;
 pub mod describe;

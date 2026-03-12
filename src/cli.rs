@@ -40,8 +40,7 @@ async fn set_local_hash_kind() -> CliResult<()> {
         "sha256" => HashKind::Sha256,
         _ => {
             return Err(CliError::fatal(format!(
-                "unsupported object format: '{}'",
-                object_format
+                "unsupported object format: '{object_format}'"
             )));
         }
     };
@@ -384,8 +383,7 @@ fn classify_parse_error(argv: &[String], err: &clap::Error) -> CliError {
     if let Some(cmd) = is_top_level_unknown_command(argv, err) {
         let (_, _, hints) = parse_error_components(err);
         let mut cli_error = CliError::unknown_command(format!(
-            "libra: '{}' is not a libra command. See 'libra --help'.",
-            cmd
+            "libra: '{cmd}' is not a libra command. See 'libra --help'."
         ));
         for hint in hints {
             cli_error = cli_error.with_hint(hint);
