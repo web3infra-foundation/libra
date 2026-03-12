@@ -9,6 +9,7 @@ mod bottom_pane;
 mod chatwidget;
 mod diff;
 mod history_cell;
+mod markdown_render;
 mod slash_command;
 mod status_indicator;
 mod terminal;

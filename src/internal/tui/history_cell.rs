@@ -14,7 +14,10 @@ use std::{
 use ratatui::prelude::*;
 use serde_json::Value;
 
-use super::diff::{DiffSummary, FileChange, create_diff_summary};
+use super::{
+    diff::{DiffSummary, FileChange, create_diff_summary},
+    markdown_render::render_markdown_lines,
+};
 use crate::internal::ai::tools::{
     ToolOutput,
     context::{PlanStep, StepStatus},
@@ -212,30 +215,14 @@ impl HistoryCell for AssistantHistoryCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         let mut lines: Vec<Line<'static>> = Vec::new();
 
-        // Simple markdown-like rendering
         let content = self.content.trim();
         if !content.is_empty() {
-            for (idx, line) in content.lines().enumerate() {
+            let rendered = render_markdown_lines(content, width.saturating_sub(2));
+            for (idx, line) in rendered.into_iter().enumerate() {
                 let prefix = if idx == 0 { "● " } else { "  " };
-                // Simple code block detection
-                if line.starts_with("```") {
-                    lines.extend(wrap_text(
-                        line,
-                        prefix,
-                        width,
-                        Style::default().fg(Color::Yellow),
-                    ));
-                } else if line.starts_with("    ") || line.starts_with("\t") {
-                    // Code indent
-                    lines.extend(wrap_text(
-                        line,
-                        prefix,
-                        width,
-                        Style::default().fg(Color::Yellow),
-                    ));
-                } else {
-                    lines.extend(wrap_text(line, prefix, width, Style::default()));
-                }
+                let mut spans = vec![Span::raw(prefix.to_string())];
+                spans.extend(line.spans);
+                lines.push(Line::from(spans).style(line.style));
             }
         }
 
