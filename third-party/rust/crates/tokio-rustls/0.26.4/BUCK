@@ -24,6 +24,8 @@ rust_library(
     crate_root = "vendor/src/lib.rs",
     edition = "2021",
     features = [
+        "aws-lc-rs",
+        "aws_lc_rs",
         "ring",
         "tls12",
     ],

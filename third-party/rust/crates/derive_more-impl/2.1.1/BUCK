@@ -27,6 +27,7 @@ rust_library(
         "debug",
         "default",
         "display",
+        "is_variant",
     ],
     rustc_flags = ["@$(location :derive_more-impl-manifest[env_flags])"],
     proc_macro = True,
