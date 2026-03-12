@@ -84,6 +84,11 @@ setup_sandbox() {
     SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/libra-compare.XXXXXX")"
     mkdir -p "$SANDBOX/out" "$SANDBOX/repos" "$SANDBOX/home" "$SANDBOX/bare"
     REPORT_DIR="${REPORT_DIR:-$SANDBOX}"
+    if [[ -e "$REPORT_DIR" && ! -d "$REPORT_DIR" ]]; then
+        echo "report dir exists but is not a directory: $REPORT_DIR" >&2
+        exit 2
+    fi
+    mkdir -p "$REPORT_DIR"
     REPORT_FILE="$REPORT_DIR/report.md"
 
     # Isolated HOME so we don't pick up real ~/.gitconfig / ~/.jjconfig.toml
@@ -223,6 +228,15 @@ run_tool() {
     local rc=0
     local tool_timeout="${TOOL_TIMEOUT:-60}"
 
+    {
+        printf '%q' "$bin"
+        for a in "$@"; do
+            printf ' %q' "$a"
+        done
+        printf '\n'
+    } > "${out_prefix}.cmd"
+    pwd > "${out_prefix}.cwd"
+
     # Capture timing
     local start_time
     start_time=$(date +%s%N 2>/dev/null || python3 -c 'import time; print(int(time.time()*1e9))' 2>/dev/null || echo 0)
@@ -256,6 +270,125 @@ run_tool() {
     fi
 
     return $rc
+}
+
+md_html_escape() {
+    local s="$1"
+    s="${s//&/&amp;}"
+    s="${s//</&lt;}"
+    s="${s//>/&gt;}"
+    printf '%s' "$s"
+}
+
+md_fenced_file() {
+    local file="$1"
+    local fence='```'
+    if [[ -f "$file" ]] && grep -q '```' "$file" 2>/dev/null; then
+        fence='~~~~'
+    fi
+    echo "${fence}text" >> "$REPORT_FILE"
+    if [[ -f "$file" ]]; then
+        cat "$file" >> "$REPORT_FILE"
+    fi
+    echo "" >> "$REPORT_FILE"
+    echo "${fence}" >> "$REPORT_FILE"
+}
+
+sanitize_cat() {
+    local file="$1"
+    if [[ ! -f "$file" ]]; then
+        return 0
+    fi
+    if command -v col >/dev/null 2>&1; then
+        col -b < "$file"
+        return 0
+    fi
+    python3 - "$file" <<'PY'
+import sys,re
+p=sys.argv[1]
+try:
+  s=open(p,'rb').read().decode('utf-8','replace')
+except Exception:
+  s=open(p,'rb').read().decode('latin1','replace')
+s=re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', s)
+while '\x08' in s:
+  s=re.sub(r'.\x08', '', s)
+sys.stdout.write(s)
+PY
+}
+
+md_fenced_file_sanitized() {
+    local file="$1"
+    local fence='```'
+    if [[ -f "$file" ]] && grep -q '```' "$file" 2>/dev/null; then
+        fence='~~~~'
+    fi
+    echo "${fence}text" >> "$REPORT_FILE"
+    sanitize_cat "$file"
+    echo "" >> "$REPORT_FILE"
+    echo "${fence}" >> "$REPORT_FILE"
+}
+
+md_case_outputs() {
+    local label="$1"
+    local safe_label
+    safe_label="$(md_html_escape "$label")"
+
+    echo "" >> "$REPORT_FILE"
+    echo "<details>" >> "$REPORT_FILE"
+    echo "<summary><code>${safe_label}</code> outputs</summary>" >> "$REPORT_FILE"
+    echo "" >> "$REPORT_FILE"
+
+    for tool in git jj libra; do
+        local prefix="$SANDBOX/out/${label}.${tool}"
+        echo "### ${tool}" >> "$REPORT_FILE"
+        echo "" >> "$REPORT_FILE"
+
+        if ! is_tool_enabled "$tool"; then
+            echo "**Result**: \`skip\`" >> "$REPORT_FILE"
+            echo "" >> "$REPORT_FILE"
+            continue
+        fi
+
+        if [[ ! -f "${prefix}.rc" && ! -f "${prefix}.stdout" && ! -f "${prefix}.stderr" ]]; then
+            echo "**Result**: \`N/A\`" >> "$REPORT_FILE"
+            echo "" >> "$REPORT_FILE"
+            continue
+        fi
+
+        if [[ -f "${prefix}.cmd" ]]; then
+            echo "**Command**: \`$(cat "${prefix}.cmd")\`" >> "$REPORT_FILE"
+        fi
+        if [[ -f "${prefix}.cwd" ]]; then
+            echo "**CWD**: \`$(cat "${prefix}.cwd")\`" >> "$REPORT_FILE"
+        fi
+        if [[ -f "${prefix}.rc" ]]; then
+            echo "**Exit**: \`$(cat "${prefix}.rc")\`" >> "$REPORT_FILE"
+        fi
+        if [[ -f "${prefix}.time_ms" ]]; then
+            echo "**Time**: \`$(cat "${prefix}.time_ms")ms\`" >> "$REPORT_FILE"
+        fi
+
+        echo "" >> "$REPORT_FILE"
+        echo "**Stdout**" >> "$REPORT_FILE"
+        md_fenced_file_sanitized "${prefix}.stdout"
+        echo "" >> "$REPORT_FILE"
+        echo "**Stderr**" >> "$REPORT_FILE"
+        md_fenced_file_sanitized "${prefix}.stderr"
+        echo "" >> "$REPORT_FILE"
+    done
+
+    echo "</details>" >> "$REPORT_FILE"
+}
+
+md_all_case_outputs() {
+    echo "" >> "$REPORT_FILE"
+    echo "---" >> "$REPORT_FILE"
+    echo "" >> "$REPORT_FILE"
+    echo "## Command Outputs" >> "$REPORT_FILE"
+    for label in "${ALL_LABELS[@]}"; do
+        md_case_outputs "$label"
+    done
 }
 
 # ---------------------------------------------------------------------------
@@ -302,7 +435,11 @@ record_result() {
         else
             counter_inc fail "$key" 1
             local stderr_snippet
-            stderr_snippet="$(head -c 200 "$SANDBOX/out/${label}.${tool}.stderr" 2>/dev/null || echo '(no stderr)')"
+            if [[ -f "$SANDBOX/out/${label}.${tool}.stderr" ]]; then
+                stderr_snippet="$(sanitize_cat "$SANDBOX/out/${label}.${tool}.stderr" | head -c 200 2>/dev/null)"
+            else
+                stderr_snippet="(no stderr)"
+            fi
             log_fail "$tool | $label (exit=$actual_rc) — $stderr_snippet"
             md_result_row "$label" "$tool" "FAIL" "$actual_rc" "$stderr_snippet"
         fi
@@ -598,9 +735,28 @@ md_category_summary() {
 # Final scoreboard (terminal + markdown)
 # ---------------------------------------------------------------------------
 declare -a ALL_CATEGORIES=()
+declare -a ALL_LABELS=()
 
 register_category() {
     ALL_CATEGORIES+=("$1")
+}
+
+label_seen_var_name() {
+    local key="$1"
+    local safe
+    safe="$(printf '%s' "$key" | tr -c 'A-Za-z0-9_' '_')"
+    printf 'CMP_LABEL_SEEN_%s' "$safe"
+}
+
+register_label() {
+    local label="$1"
+    local var
+    var="$(label_seen_var_name "$label")"
+    eval "local seen=\"\${$var:-0}\""
+    if [[ "$seen" != "1" ]]; then
+        ALL_LABELS+=("$label")
+        eval "$var=1"
+    fi
 }
 
 print_scoreboard() {
@@ -687,4 +843,5 @@ print_scoreboard() {
     echo "| **TOTAL** | **$grand_pass_git/$grand_total_git** | **$grand_pass_jj/$grand_total_jj** | **$grand_pass_libra/$grand_total_libra** |" >> "$REPORT_FILE"
     echo "" >> "$REPORT_FILE"
     echo "_Generated: $(date -u '+%Y-%m-%d %H:%M:%S UTC')_" >> "$REPORT_FILE"
+    md_all_case_outputs
 }
