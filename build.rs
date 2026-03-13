@@ -8,7 +8,16 @@
 use std::{env, path::Path, process::Command};
 
 fn main() {
-    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+    let manifest_dir = match env::var("CARGO_MANIFEST_DIR") {
+        Ok(dir) => dir,
+        Err(err) => {
+            eprintln!(
+                "build.rs: failed to read CARGO_MANIFEST_DIR environment variable: {err}. \
+                 This is required to locate the `web/` frontend directory."
+            );
+            std::process::exit(1);
+        }
+    };
     let web_dir = Path::new(&manifest_dir).join("web");
 
     // Re-run this build script when any web source file changes.
