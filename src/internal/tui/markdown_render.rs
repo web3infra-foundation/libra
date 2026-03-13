@@ -2,10 +2,12 @@
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::{
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+use super::theme;
 
 #[derive(Clone, Copy)]
 struct MarkdownStyles {
@@ -26,24 +28,18 @@ struct MarkdownStyles {
 impl Default for MarkdownStyles {
     fn default() -> Self {
         Self {
-            heading: Style::default()
-                .fg(Color::Rgb(226, 232, 255))
-                .add_modifier(Modifier::BOLD),
-            heading_marker: Style::default().fg(Color::Rgb(116, 145, 199)),
+            heading: theme::text::primary().add_modifier(Modifier::BOLD),
+            heading_marker: theme::markdown::heading_marker(),
             emphasis: Style::default().add_modifier(Modifier::ITALIC),
             strong: Style::default().add_modifier(Modifier::BOLD),
-            code_inline: Style::default().fg(Color::Rgb(130, 194, 240)),
-            code_block: Style::default().fg(Color::Rgb(220, 205, 130)),
-            link: Style::default()
-                .fg(Color::Rgb(115, 177, 214))
-                .add_modifier(Modifier::UNDERLINED),
-            blockquote: Style::default().fg(Color::Rgb(126, 152, 176)),
-            bullet: Style::default().fg(Color::Rgb(116, 145, 199)),
-            ordered: Style::default().fg(Color::Rgb(116, 145, 199)),
-            table_border: Style::default().fg(Color::Rgb(95, 108, 130)),
-            table_header: Style::default()
-                .fg(Color::Rgb(220, 226, 244))
-                .add_modifier(Modifier::BOLD),
+            code_inline: theme::markdown::code_inline(),
+            code_block: theme::markdown::code_block(),
+            link: theme::markdown::link(),
+            blockquote: theme::markdown::blockquote(),
+            bullet: theme::markdown::bullet(),
+            ordered: theme::markdown::ordered(),
+            table_border: theme::markdown::table_border(),
+            table_header: theme::markdown::table_header(),
         }
     }
 }
@@ -169,7 +165,7 @@ impl Renderer {
                     self.ensure_block_spacing();
                     self.lines.push(Line::from(vec![Span::styled(
                         "─".repeat(self.width.min(24)),
-                        Style::default().fg(Color::DarkGray),
+                        theme::text::subtle(),
                     )]));
                     self.needs_block_spacing = true;
                 }
@@ -456,11 +452,9 @@ impl Renderer {
     }
 
     fn pop_prefix(&mut self, kind: PrefixKind) {
-        if let Some(index) = self
-            .prefix_stack
-            .iter()
-            .rposition(|segment| std::mem::discriminant(&segment.kind) == std::mem::discriminant(&kind))
-        {
+        if let Some(index) = self.prefix_stack.iter().rposition(|segment| {
+            std::mem::discriminant(&segment.kind) == std::mem::discriminant(&kind)
+        }) {
             self.prefix_stack.remove(index);
         }
     }
@@ -565,7 +559,9 @@ fn wrap_segments(
 ) -> Vec<Line<'static>> {
     let first_prefix = prefix_spans(prefixes, false);
     let rest_prefix = prefix_spans(prefixes, true);
-    let first_width = total_width.saturating_sub(spans_width(&first_prefix)).max(1);
+    let first_width = total_width
+        .saturating_sub(spans_width(&first_prefix))
+        .max(1);
     let rest_width = total_width.saturating_sub(spans_width(&rest_prefix)).max(1);
 
     let tokens = tokenize_segments(&segments);
@@ -711,7 +707,11 @@ fn split_text_to_width(text: &str, max_width: usize) -> Vec<String> {
     parts
 }
 
-fn render_table(table: TableState, total_width: usize, styles: &MarkdownStyles) -> Vec<Line<'static>> {
+fn render_table(
+    table: TableState,
+    total_width: usize,
+    styles: &MarkdownStyles,
+) -> Vec<Line<'static>> {
     let col_count = table
         .alignments
         .len()
@@ -731,15 +731,39 @@ fn render_table(table: TableState, total_width: usize, styles: &MarkdownStyles) 
     let widths = compute_table_widths(&header, &rows, total_width, col_count);
 
     let mut out = Vec::new();
-    out.push(table_border_line('┌', '┬', '┐', &widths, styles.table_border));
+    out.push(table_border_line(
+        '┌',
+        '┬',
+        '┐',
+        &widths,
+        styles.table_border,
+    ));
     if !header.is_empty() {
-        out.extend(render_table_row(&header, &widths, &alignments, true, styles));
-        out.push(table_border_line('├', '┼', '┤', &widths, styles.table_border));
+        out.extend(render_table_row(
+            &header,
+            &widths,
+            &alignments,
+            true,
+            styles,
+        ));
+        out.push(table_border_line(
+            '├',
+            '┼',
+            '┤',
+            &widths,
+            styles.table_border,
+        ));
     }
     for row in &rows {
         out.extend(render_table_row(row, &widths, &alignments, false, styles));
     }
-    out.push(table_border_line('└', '┴', '┘', &widths, styles.table_border));
+    out.push(table_border_line(
+        '└',
+        '┴',
+        '┘',
+        &widths,
+        styles.table_border,
+    ));
     out
 }
 
@@ -867,7 +891,11 @@ fn render_table_cell(
     lines
 }
 
-fn align_table_cell_line(mut line: Line<'static>, width: usize, alignment: Alignment) -> Line<'static> {
+fn align_table_cell_line(
+    mut line: Line<'static>,
+    width: usize,
+    alignment: Alignment,
+) -> Line<'static> {
     let content_width = line_width(&line);
     let padding = width.saturating_sub(content_width);
     let (left, right) = match alignment {
@@ -897,10 +925,7 @@ fn patch_line_style(line: Line<'static>, style: Style) -> Line<'static> {
 }
 
 fn line_width(line: &Line<'static>) -> usize {
-    line.spans
-        .iter()
-        .map(|span| span.content.width())
-        .sum()
+    line.spans.iter().map(|span| span.content.width()).sum()
 }
 
 fn table_border_line(
@@ -941,14 +966,16 @@ mod tests {
 
     #[test]
     fn preserves_code_block_line_breaks() {
-        let lines = render_markdown_lines(
-            "```rust\nfn main() {\n    println!(\"hi\");\n}\n```",
-            60,
-        );
+        let lines =
+            render_markdown_lines("```rust\nfn main() {\n    println!(\"hi\");\n}\n```", 60);
         let rendered = lines_to_strings(&lines);
         assert!(rendered.iter().any(|line| line.contains("[rust]")));
         assert!(rendered.iter().any(|line| line.contains("fn main() {")));
-        assert!(rendered.iter().any(|line| line.contains("println!(\"hi\");")));
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("println!(\"hi\");"))
+        );
         assert!(rendered.iter().any(|line| line.trim_end().ends_with('}')));
     }
 

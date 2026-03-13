@@ -5,6 +5,8 @@ use ratatui::{
     widgets::{Paragraph, Wrap},
 };
 
+use super::theme;
+
 pub(crate) struct WelcomeView<'a> {
     pub elapsed: Duration,
     pub welcome_message: &'a str,
@@ -167,30 +169,26 @@ fn glyph_style(luminance: f32, mask: f32, glyph: char, visible: bool) -> Style {
 
     if !visible {
         if glyph == '*' {
-            return Style::default().fg(Color::White);
+            return theme::text::primary();
         }
         if glyph == '.' {
-            return Style::default().fg(Color::DarkGray);
+            return theme::text::subtle();
         }
     }
 
     if luminance > 0.82 {
-        return Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD);
+        return theme::text::primary().add_modifier(Modifier::BOLD);
     }
     if luminance > 0.62 {
-        return Style::default()
-            .fg(Color::LightBlue)
-            .add_modifier(Modifier::BOLD);
+        return theme::badge::workspace().add_modifier(Modifier::BOLD);
     }
     if luminance > 0.36 {
-        return Style::default().fg(Color::Cyan);
+        return theme::tool::explore();
     }
     if mask > 0.58 {
-        return Style::default().fg(Color::Blue);
+        return theme::interactive::accent();
     }
-    Style::default().fg(Color::DarkGray)
+    theme::text::subtle()
 }
 
 fn soft_blob(nx: f32, ny: f32, cx: f32, cy: f32, rx: f32, ry: f32, weight: f32) -> f32 {
@@ -263,50 +261,26 @@ fn render_info_panel(area: Rect, buf: &mut Buffer, view: &WelcomeView<'_>) {
     let value_width = area.width.saturating_sub(13) as usize;
     let path = truncate_middle(&view.cwd.display().to_string(), value_width.max(8));
     let mut lines = vec![
-        Line::styled(
-            "L I B R A   C O D E",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Line::styled(
-            "interactive agent console",
-            Style::default().fg(Color::DarkGray),
-        ),
+        Line::styled("L I B R A   C O D E", theme::interactive::title()),
+        Line::styled("interactive agent console", theme::text::subtle()),
         Line::raw(""),
-        kv_line(
-            "provider",
-            view.provider_name,
-            Style::default().fg(Color::White),
-        ),
-        kv_line("model", view.model_name, Style::default().fg(Color::White)),
-        kv_line("cwd", &path, Style::default().fg(Color::Gray)),
-        kv_line(
-            "shader",
-            "luma-noise-scan",
-            Style::default().fg(Color::Yellow),
-        ),
-        Line::styled(
-            "single welcome animation",
-            Style::default().fg(Color::DarkGray),
-        ),
+        kv_line("provider", view.provider_name, theme::text::primary()),
+        kv_line("model", view.model_name, theme::text::primary()),
+        kv_line("cwd", &path, theme::text::muted()),
+        kv_line("shader", "luma-noise-scan", theme::status::warning()),
+        Line::styled("single welcome animation", theme::text::subtle()),
         Line::raw(""),
-        Line::styled(
-            "ready",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Line::styled("ready", theme::status::ready()),
         Line::styled(
             "Type your request below and press Enter.",
-            Style::default().fg(Color::White),
+            theme::text::primary(),
         ),
         Line::styled(
             "The intro screen exits after your first submit.",
-            Style::default().fg(Color::Gray),
+            theme::text::muted(),
         ),
         Line::raw(""),
-        Line::styled(view.welcome_message, Style::default().fg(Color::Gray)),
+        Line::styled(view.welcome_message, theme::text::muted()),
     ];
 
     if lines.len() > area.height as usize {
@@ -322,9 +296,7 @@ fn kv_line(label: &str, value: &str, value_style: Style) -> Line<'static> {
     Line::from(vec![
         Span::styled(
             format!("{label:<10}"),
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
+            theme::text::subtle().add_modifier(Modifier::BOLD),
         ),
         Span::styled(value.to_string(), value_style),
     ])
@@ -358,4 +330,48 @@ fn truncate_middle(text: &str, max_chars: usize) -> String {
         .rev()
         .collect();
     format!("{head}...{tail}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::internal::tui::theme;
+
+    #[test]
+    fn glyph_style_uses_theme_palette() {
+        assert_eq!(
+            glyph_style(0.9, 0.2, '#', true),
+            theme::text::primary().add_modifier(Modifier::BOLD)
+        );
+        assert_eq!(glyph_style(0.5, 0.2, '=', true), theme::tool::explore());
+        assert_eq!(
+            glyph_style(0.1, 0.7, '.', true),
+            theme::interactive::accent()
+        );
+        assert_eq!(glyph_style(0.1, 0.2, '.', false), theme::text::subtle());
+    }
+
+    #[test]
+    fn info_panel_uses_theme_colors() {
+        let view = WelcomeView {
+            elapsed: Duration::from_secs(0),
+            welcome_message: "hello",
+            model_name: "gpt-test",
+            provider_name: "openai",
+            cwd: Path::new("/tmp/demo"),
+        };
+
+        let path = truncate_middle(&view.cwd.display().to_string(), 32);
+        let lines = vec![
+            Line::styled("L I B R A   C O D E", theme::interactive::title()),
+            Line::styled("interactive agent console", theme::text::subtle()),
+            kv_line("provider", view.provider_name, theme::text::primary()),
+            kv_line("cwd", &path, theme::text::muted()),
+        ];
+
+        assert_eq!(lines[0].style, theme::interactive::title());
+        assert_eq!(lines[1].style, theme::text::subtle());
+        assert_eq!(lines[2].spans[1].style, theme::text::primary());
+        assert_eq!(lines[3].spans[1].style, theme::text::muted());
+    }
 }

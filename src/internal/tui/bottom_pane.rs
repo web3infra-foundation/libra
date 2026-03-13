@@ -13,7 +13,7 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::app_event::AgentStatus;
+use super::{app_event::AgentStatus, theme};
 
 /// Snapshot of user-input question data for rendering (avoids borrowing the request).
 #[derive(Clone)]
@@ -531,7 +531,7 @@ impl BottomPane {
         } else {
             "● Awaiting input...".to_string()
         };
-        let status_line = Line::styled(progress, Style::default().fg(Color::Magenta).bold());
+        let status_line = Line::styled(progress, theme::status::pending_input());
         Paragraph::new(status_line).render(chunks[0], buf);
 
         // Question display
@@ -540,13 +540,13 @@ impl BottomPane {
         // Header
         lines.push(Line::styled(
             format!("  {}", question.header),
-            Style::default().fg(Color::Cyan).bold(),
+            theme::interactive::title(),
         ));
 
         // Question text
         lines.push(Line::styled(
             format!("  {}", question.question),
-            Style::default(),
+            theme::text::primary(),
         ));
 
         let selected = self.user_input_selected_option;
@@ -560,9 +560,9 @@ impl BottomPane {
                     " "
                 };
                 let style = if i == selected {
-                    Style::default().fg(Color::Cyan).bold()
+                    theme::interactive::selected_option()
                 } else {
-                    Style::default()
+                    theme::text::primary()
                 };
                 lines.push(Line::styled(
                     format!("  {} {}. {}  {}", marker, i + 1, label, description),
@@ -579,9 +579,9 @@ impl BottomPane {
                     " "
                 };
                 let style = if selected == other_idx {
-                    Style::default().fg(Color::Cyan).bold()
+                    theme::interactive::selected_option()
                 } else {
-                    Style::default().add_modifier(Modifier::DIM)
+                    theme::text::muted().add_modifier(Modifier::DIM)
                 };
                 lines.push(Line::styled(
                     format!(
@@ -615,7 +615,7 @@ impl BottomPane {
         } else {
             "[↑/↓: Select] [1-9: Quick select] [Tab: Notes] [Enter: Submit] [Esc: Cancel]"
         };
-        let help_line = Line::styled(help, Style::default().add_modifier(Modifier::DIM));
+        let help_line = Line::styled(help, theme::text::help());
         Paragraph::new(help_line).render(chunks[4], buf);
 
         // Show cursor: for freeform always, for options only when notes focused
@@ -653,9 +653,9 @@ impl BottomPane {
                 " "
             };
             let style = if i == self.post_plan_selected {
-                Style::default().fg(Color::Cyan).bold()
+                theme::interactive::selected_option()
             } else {
-                Style::default().fg(Color::White)
+                theme::text::primary()
             };
             lines.push(Line::styled(
                 format!("  {} {:<16} {}", marker, label, desc),
@@ -691,17 +691,17 @@ impl BottomPane {
         let mut summary_lines = vec![
             Line::styled(
                 format!("  {}{}", retry_prefix, approval.command),
-                Style::default().fg(Color::White),
+                theme::text::primary(),
             ),
             Line::styled(
                 format!("  cwd: {}", approval.cwd),
-                Style::default().add_modifier(Modifier::DIM),
+                theme::text::muted().add_modifier(Modifier::DIM),
             ),
         ];
         if let Some(reason) = approval.reason.as_deref() {
             summary_lines.push(Line::styled(
                 format!("  reason: {reason}"),
-                Style::default().fg(Color::Yellow),
+                theme::status::warning(),
             ));
         }
         Paragraph::new(Text::from(summary_lines)).render(chunks[1], buf);
@@ -723,9 +723,9 @@ impl BottomPane {
                 " "
             };
             let style = if i == self.exec_approval_selected {
-                Style::default().fg(Color::Cyan).bold()
+                theme::interactive::selected_option()
             } else {
-                Style::default().fg(Color::White)
+                theme::text::primary()
             };
             option_lines.push(Line::styled(
                 format!("  {} {:<16} {}", marker, label, desc),
@@ -745,23 +745,20 @@ impl BottomPane {
         }
 
         let border_style = if self.user_input_notes_focused {
-            Style::default().fg(Color::Cyan)
+            theme::border::focused()
         } else {
-            Style::default().fg(Color::DarkGray)
+            theme::border::idle()
         };
 
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(border_style)
-            .title(" Notes ");
+            .title(Line::styled(" Notes ", theme::interactive::title()));
 
         let inner = block.inner(area);
 
         let display = if self.user_input_notes_text.is_empty() {
-            Text::styled(
-                "Tab to add notes...",
-                Style::default().add_modifier(Modifier::DIM),
-            )
+            Text::styled("Tab to add notes...", theme::text::placeholder())
         } else {
             Text::raw(&self.user_input_notes_text)
         };
@@ -833,17 +830,17 @@ impl BottomPane {
             };
             let text = format!("{}{}", prefix, truncated_desc);
             let style = if is_selected {
-                Style::default().add_modifier(Modifier::REVERSED)
+                theme::interactive::selected_option()
             } else {
-                Style::default().fg(Color::White)
+                theme::text::primary()
             };
             lines.push(Line::styled(text, style));
         }
 
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().add_modifier(Modifier::DIM))
-            .title(" Commands ");
+            .border_style(theme::border::idle())
+            .title(Line::styled(" Commands ", theme::interactive::title()));
 
         let paragraph = Paragraph::new(Text::from(lines)).block(block);
         paragraph.render(clamped, buf);
@@ -852,7 +849,7 @@ impl BottomPane {
     fn render_status_bar(&self, area: Rect, buf: &mut Buffer) {
         let phase = animation_phase(120);
         let status_line = match self.status {
-            AgentStatus::Idle => Line::styled("● Ready", Style::default().fg(Color::Green).bold()),
+            AgentStatus::Idle => Line::styled("● Ready", theme::status::ready()),
             AgentStatus::Thinking => {
                 gradient_line("● Thinking...", &thinking_colors(), phase, true)
             }
@@ -867,17 +864,16 @@ impl BottomPane {
             AgentStatus::ExecutingTool => {
                 gradient_line("● Executing tool...", &executing_tool_colors(), phase, true)
             }
-            AgentStatus::AwaitingUserInput => Line::styled(
-                "● Awaiting input...",
-                Style::default().fg(Color::Magenta).bold(),
-            ),
+            AgentStatus::AwaitingUserInput => {
+                Line::styled("● Awaiting input...", theme::status::pending_input())
+            }
             AgentStatus::AwaitingApproval => Line::styled(
                 "● Awaiting sandbox approval...",
-                Style::default().fg(Color::Magenta).bold(),
+                theme::status::pending_approval(),
             ),
             AgentStatus::AwaitingPostPlanChoice => Line::styled(
                 "● Plan complete — choose next step",
-                Style::default().fg(Color::Magenta).bold(),
+                theme::status::pending_choice(),
             ),
         };
         Paragraph::new(status_line).render(area, buf);
@@ -885,9 +881,9 @@ impl BottomPane {
 
     fn render_input_area(&self, area: Rect, buf: &mut Buffer) -> Option<Position> {
         let border_style = if self.focused {
-            Style::default().fg(Color::Cyan)
+            theme::border::focused()
         } else {
-            Style::default().fg(Color::DarkGray)
+            theme::border::idle()
         };
 
         let block = Block::default()
@@ -906,10 +902,7 @@ impl BottomPane {
                 "Type your message..."
             };
             (
-                Text::from(vec![Line::styled(
-                    placeholder,
-                    Style::default().add_modifier(Modifier::DIM),
-                )]),
+                Text::from(vec![Line::styled(placeholder, theme::text::placeholder())]),
                 0u16,
                 0u16,
             )
@@ -963,12 +956,7 @@ impl BottomPane {
 
         let spans = vec![
             Span::styled("┤", border_style),
-            Span::styled(
-                badge,
-                Style::default()
-                    .fg(Color::Rgb(188, 208, 255))
-                    .add_modifier(Modifier::DIM),
-            ),
+            Span::styled(badge, theme::badge::workspace()),
         ];
         buf.set_line(x, y, &Line::from(spans), area.width.saturating_sub(x));
     }
@@ -994,7 +982,7 @@ impl BottomPane {
             }
         };
 
-        let help_line = Line::styled(help, Style::default().add_modifier(Modifier::DIM));
+        let help_line = Line::styled(help, theme::text::help());
         Paragraph::new(help_line).render(area, buf);
     }
 
@@ -1085,23 +1073,11 @@ fn animation_phase(step_ms: u128) -> usize {
 }
 
 fn thinking_colors() -> [Color; 5] {
-    [
-        Color::Rgb(110, 170, 255),
-        Color::Rgb(135, 200, 255),
-        Color::Rgb(230, 242, 255),
-        Color::Rgb(135, 200, 255),
-        Color::Rgb(110, 170, 255),
-    ]
+    theme::animation::active_gradient()
 }
 
 fn executing_tool_colors() -> [Color; 5] {
-    [
-        Color::Rgb(120, 190, 255),
-        Color::Rgb(120, 230, 210),
-        Color::Rgb(230, 250, 240),
-        Color::Rgb(120, 230, 210),
-        Color::Rgb(120, 190, 255),
-    ]
+    theme::animation::executing_gradient()
 }
 
 fn gradient_line(text: &str, colors: &[Color], phase: usize, bold: bool) -> Line<'static> {
@@ -1190,7 +1166,7 @@ mod tests {
     use ratatui::{buffer::Buffer, layout::Rect};
 
     use super::BottomPane;
-    use crate::internal::tui::app_event::AgentStatus;
+    use crate::internal::tui::{app_event::AgentStatus, theme};
 
     fn row_text(buf: &Buffer, y: u16, width: u16) -> String {
         let mut out = String::new();
@@ -1198,6 +1174,10 @@ mod tests {
             out.push_str(buf[(x, y)].symbol());
         }
         out
+    }
+
+    fn row_symbol_x(buf: &Buffer, y: u16, width: u16, symbol: &str) -> Option<u16> {
+        (0..width).find(|&x| buf[(x, y)].symbol() == symbol)
     }
 
     #[test]
@@ -1247,6 +1227,22 @@ mod tests {
         assert!(bottom_of_box.contains("(main)"));
         assert!(bottom_of_box.contains("┤"));
         assert!(bottom_of_box.ends_with("─╯"));
+    }
+
+    #[test]
+    fn focused_input_uses_shared_theme_colors() {
+        let mut pane = BottomPane::new();
+        pane.set_cwd(PathBuf::from("/Users/neon/Documents/Projects/libra"));
+        pane.set_git_branch(Some("main".to_string()));
+
+        let area = Rect::new(0, 0, 48, 6);
+        let mut buf = Buffer::empty(area);
+        let _ = pane.render(area, &mut buf);
+
+        assert_eq!(theme::border::focused().fg, Some(buf[(0, 0)].fg));
+
+        let badge_x = row_symbol_x(&buf, 4, area.width, "┤").expect("badge separator missing");
+        assert_eq!(theme::border::focused().fg, Some(buf[(badge_x, 4)].fg));
     }
 
     #[test]

@@ -9,9 +9,11 @@ use std::{
 };
 
 use ratatui::{
-    style::{Color, Modifier, Style, Stylize},
+    style::{Modifier, Style, Stylize},
     text::{Line, Span},
 };
+
+use super::theme;
 
 /// File change type for diff display.
 ///
@@ -131,9 +133,9 @@ fn render_changes_block(rows: Vec<Row>, wrap_cols: usize, cwd: &Path) -> Vec<Lin
 
         // File header: ● Update(path) / ● Added(path) / ● Deleted(path)
         let (verb, bullet_color) = match &r.change {
-            FileChange::Add { .. } => ("Added", Color::Green),
-            FileChange::Delete { .. } => ("Deleted", Color::Red),
-            FileChange::Update { .. } => ("Update", Color::Yellow),
+            FileChange::Add { .. } => ("Added", theme::diff::added_header_color()),
+            FileChange::Delete { .. } => ("Deleted", theme::diff::removed_header_color()),
+            FileChange::Update { .. } => ("Update", theme::diff::updated_header_color()),
         };
         let path_display = display_path_for(&r.path, cwd);
         let move_suffix = r
@@ -146,7 +148,7 @@ fn render_changes_block(rows: Vec<Row>, wrap_cols: usize, cwd: &Path) -> Vec<Lin
             Span::styled("● ", Style::default().fg(bullet_color).bold()),
             Span::styled(
                 format!("{verb}({path_display}{move_suffix})"),
-                Style::default().bold(),
+                theme::text::primary().add_modifier(Modifier::BOLD),
             ),
         ]));
 
@@ -154,8 +156,8 @@ fn render_changes_block(rows: Vec<Row>, wrap_cols: usize, cwd: &Path) -> Vec<Lin
         let summary = render_line_count_summary_text(r.added, r.removed);
         if !summary.is_empty() {
             out.push(Line::from(vec![
-                Span::raw(format!("{indent}\u{2514} ")),
-                Span::styled(summary, Style::default().add_modifier(Modifier::DIM)),
+                Span::styled(format!("{indent}\u{2514} "), theme::text::muted()),
+                Span::styled(summary, theme::text::muted().add_modifier(Modifier::DIM)),
             ]));
         }
 
@@ -374,19 +376,19 @@ fn line_number_width(max_line_number: usize) -> usize {
 }
 
 fn style_gutter() -> Style {
-    Style::default().add_modifier(Modifier::DIM)
+    theme::diff::gutter()
 }
 
 fn style_context() -> Style {
-    Style::default()
+    theme::diff::context()
 }
 
 fn style_add() -> Style {
-    Style::default().fg(Color::Green)
+    theme::diff::added_line()
 }
 
 fn style_del() -> Style {
-    Style::default().fg(Color::Red)
+    theme::diff::removed_line()
 }
 
 /// Add a prefix to each line in the vector.
@@ -410,6 +412,7 @@ fn prefix_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::internal::tui::theme;
 
     #[test]
     fn test_calculate_add_remove_from_diff() {
@@ -501,6 +504,18 @@ mod tests {
         // Second line should not have the + sign
         let second_line = &lines[1];
         assert!(!second_line.spans[1].content.starts_with('+'));
+    }
+
+    #[test]
+    fn diff_line_styles_follow_theme() {
+        let insert = push_wrapped_diff_line(1, DiffLineType::Insert, "added", 40, 1);
+        let delete = push_wrapped_diff_line(1, DiffLineType::Delete, "removed", 40, 1);
+        let context = push_wrapped_diff_line(1, DiffLineType::Context, "same", 40, 1);
+
+        assert_eq!(insert[0].spans[0].style, theme::diff::gutter());
+        assert_eq!(insert[0].spans[1].style, theme::diff::added_line());
+        assert_eq!(delete[0].spans[1].style, theme::diff::removed_line());
+        assert_eq!(context[0].spans[1].style, theme::diff::context());
     }
 
     #[test]

@@ -13,6 +13,7 @@ mod markdown_render;
 mod slash_command;
 mod status_indicator;
 mod terminal;
+mod theme;
 mod welcome_shader;
 
 pub use app::{App, AppConfig, AppExitInfo, ExitReason};

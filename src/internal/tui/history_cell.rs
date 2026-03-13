@@ -17,6 +17,7 @@ use serde_json::Value;
 use super::{
     diff::{DiffSummary, FileChange, create_diff_summary},
     markdown_render::render_markdown_lines,
+    theme,
 };
 use crate::internal::ai::tools::{
     ToolOutput,
@@ -42,14 +43,6 @@ fn truncate_utf8(text: &str, max_bytes: usize) -> String {
 
     text[..end].to_string()
 }
-
-const ACTIVE_GRADIENT_COLORS: [Color; 5] = [
-    Color::Rgb(76, 108, 152),
-    Color::Rgb(84, 124, 160),
-    Color::Rgb(156, 168, 188),
-    Color::Rgb(84, 124, 160),
-    Color::Rgb(76, 108, 152),
-];
 
 fn animation_phase(step_ms: u128) -> usize {
     let millis = SystemTime::now()
@@ -158,12 +151,7 @@ impl HistoryCell for UserHistoryCell {
         let mut lines: Vec<Line<'static>> = Vec::new();
 
         for line in self.message.lines() {
-            lines.extend(wrap_text(
-                line,
-                "│ ",
-                width,
-                Style::default().fg(Color::Cyan),
-            ));
+            lines.extend(wrap_text(line, "│ ", width, theme::interactive::accent()));
         }
 
         lines.push(Line::raw("")); // Empty line for spacing
@@ -227,7 +215,7 @@ impl HistoryCell for AssistantHistoryCell {
         }
 
         if self.is_streaming && !content.is_empty() {
-            lines.push(Line::styled("  ▌", Style::default().fg(Color::Green)));
+            lines.push(Line::styled("  ▌", theme::status::ready()));
         } else if !self.is_streaming {
             lines.push(Line::raw("")); // Empty line for spacing
         }
@@ -280,12 +268,12 @@ impl ToolCallGroup {
 
     fn action_style(&self) -> Style {
         match self {
-            Self::Explore => Style::default().fg(Color::Rgb(128, 154, 194)),
-            Self::Edit => Style::default().fg(Color::Rgb(176, 156, 98)),
-            Self::Shell => Style::default().fg(Color::Rgb(102, 146, 102)),
-            Self::Input => Style::default().fg(Color::Rgb(152, 124, 152)),
-            Self::Draft => Style::default().fg(Color::Rgb(98, 146, 152)),
-            Self::Other(_) => Style::default().fg(Color::DarkGray),
+            Self::Explore => theme::tool::explore(),
+            Self::Edit => theme::tool::edit(),
+            Self::Shell => theme::tool::shell(),
+            Self::Input => theme::tool::input(),
+            Self::Draft => theme::tool::draft(),
+            Self::Other(_) => theme::text::subtle(),
         }
     }
 }
@@ -341,7 +329,11 @@ impl ToolCallHistoryCell {
 
     /// Complete a single tool call inside the group.
     pub fn complete_call(&mut self, call_id: &str, result: Result<ToolOutput, String>) {
-        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.call_id == call_id) {
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.call_id == call_id)
+        {
             entry.status = match result {
                 Ok(output) if output.is_success() => ToolCallEntryStatus::Success,
                 Ok(output) => ToolCallEntryStatus::Failed(summarize_tool_output_failure(&output)),
@@ -398,15 +390,15 @@ impl HistoryCell for ToolCallHistoryCell {
         if self.has_running() {
             lines.push(gradient_line(
                 &format!("● {summary}"),
-                &ACTIVE_GRADIENT_COLORS,
+                &theme::animation::active_gradient(),
                 phase,
                 true,
             ));
         } else {
             let status_color = if self.is_success() {
-                Color::Rgb(96, 136, 96)
+                theme::status::success_color()
             } else {
-                Color::Rgb(148, 102, 102)
+                theme::status::danger_color()
             };
             lines.push(Line::styled(
                 format!("● {summary}"),
@@ -432,7 +424,7 @@ impl HistoryCell for ToolCallHistoryCell {
                     &truncate_utf8(error.trim(), 180),
                     "    ",
                     width,
-                    Style::default().fg(Color::Red).add_modifier(Modifier::DIM),
+                    theme::status::danger().add_modifier(Modifier::DIM),
                 ));
             }
         }
@@ -452,8 +444,14 @@ impl HistoryCell for ToolCallHistoryCell {
 
 fn summarize_tool_call(tool_name: &str, arguments: &Value) -> String {
     match tool_name {
-        "read_file" => format!("Read {}", argument_string(arguments, "file_path").unwrap_or("?")),
-        "list_dir" => format!("List {}", argument_string(arguments, "dir_path").unwrap_or(".")),
+        "read_file" => format!(
+            "Read {}",
+            argument_string(arguments, "file_path").unwrap_or("?")
+        ),
+        "list_dir" => format!(
+            "List {}",
+            argument_string(arguments, "dir_path").unwrap_or(".")
+        ),
         "grep_files" => {
             let pattern = argument_string(arguments, "pattern").unwrap_or("(pattern)");
             let path = argument_string(arguments, "path").unwrap_or(".");
@@ -465,7 +463,10 @@ fn summarize_tool_call(tool_name: &str, arguments: &Value) -> String {
         }
         "shell" => format!(
             "Run {}",
-            truncate_utf8(argument_string(arguments, "command").unwrap_or("(command)"), 120)
+            truncate_utf8(
+                argument_string(arguments, "command").unwrap_or("(command)"),
+                120
+            )
         ),
         "apply_patch" => summarize_apply_patch(arguments),
         "request_user_input" => "Ask for input".to_string(),
@@ -521,14 +522,19 @@ fn argument_string<'a>(arguments: &'a Value, key: &str) -> Option<&'a str> {
     arguments.get(key).and_then(Value::as_str)
 }
 
-fn wrap_tool_entry(summary: &str, prefix: &str, width: u16, action_style: Style) -> Vec<Line<'static>> {
+fn wrap_tool_entry(
+    summary: &str,
+    prefix: &str,
+    width: u16,
+    action_style: Style,
+) -> Vec<Line<'static>> {
     let (action, detail) = summary
         .split_once(' ')
         .map_or((summary, ""), |(action, detail)| (action, detail));
 
     if detail.is_empty() {
         return vec![Line::from(vec![
-            Span::styled(prefix.to_string(), Style::default().fg(Color::White)),
+            Span::styled(prefix.to_string(), theme::text::primary()),
             Span::styled(action.to_string(), action_style),
         ])];
     }
@@ -548,15 +554,15 @@ fn wrap_tool_entry(summary: &str, prefix: &str, width: u16, action_style: Style)
     let mut lines = Vec::with_capacity(detail_chunks.len());
     if let Some((first, rest)) = detail_chunks.split_first() {
         lines.push(Line::from(vec![
-            Span::styled(prefix.to_string(), Style::default().fg(Color::White)),
+            Span::styled(prefix.to_string(), theme::text::primary()),
             Span::styled(action.to_string(), action_style),
-            Span::styled(format!(" {first}"), Style::default().fg(Color::White)),
+            Span::styled(format!(" {first}"), theme::text::primary()),
         ]));
 
         for chunk in rest {
             lines.push(Line::from(vec![Span::styled(
                 format!("{continuation_prefix}{chunk}"),
-                Style::default().fg(Color::White),
+                theme::text::primary(),
             )]));
         }
     }
@@ -611,10 +617,7 @@ impl DiffHistoryCell {
 
 impl HistoryCell for DiffHistoryCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let mut lines = vec![Line::styled(
-            "● Diff",
-            Style::default().fg(Color::White).bold(),
-        )];
+        let mut lines = vec![Line::styled("● Diff", theme::text::primary().bold())];
         lines.extend(create_diff_summary(
             &self.summary.changes,
             &self.summary.cwd,
@@ -669,12 +672,12 @@ impl HistoryCell for PlanUpdateHistoryCell {
         // Header
         let status_icon = if self.is_running { "⏳" } else { "✓" };
         let status_color = if self.is_running {
-            Color::Yellow
+            theme::status::warning_color()
         } else {
-            Color::Green
+            theme::status::success_color()
         };
         lines.push(Line::from(vec![
-            Span::styled("● ", Style::default().fg(Color::White).bold()),
+            Span::styled("● ", theme::text::primary().bold()),
             Span::styled(
                 format!("Plan {}:", status_icon),
                 Style::default().fg(status_color).bold(),
@@ -700,7 +703,7 @@ impl HistoryCell for PlanUpdateHistoryCell {
                         .add_modifier(Modifier::DIM)
                         .add_modifier(Modifier::CROSSED_OUT),
                 ),
-                StepStatus::InProgress => ("◐", Style::default().fg(Color::Cyan).bold()),
+                StepStatus::InProgress => ("◐", theme::interactive::in_progress()),
                 StepStatus::Pending => ("□", Style::default().add_modifier(Modifier::DIM)),
             };
 
