@@ -238,8 +238,6 @@ pub struct App<M: CompletionModel> {
     welcome_message: String,
     /// Whether the animated welcome screen is shown.
     welcome_active: bool,
-    /// Animation start time for the welcome screen.
-    welcome_started_at: Instant,
     /// Slash command dispatcher.
     command_dispatcher: CommandDispatcher,
     /// Agent router for auto-selection.
@@ -356,7 +354,6 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             scheduled_draw_task: None,
             welcome_message: app_config.welcome_message,
             welcome_active: true,
-            welcome_started_at: Instant::now(),
             command_dispatcher: app_config.command_dispatcher,
             agent_router: app_config.agent_router,
             session: app_config.session,
@@ -2428,7 +2425,6 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             let cursor_pos = if self.welcome_active {
                 let chat_area = self.widget.chat_area_rect(area);
                 let welcome_view = WelcomeView {
-                    elapsed: self.welcome_started_at.elapsed(),
                     welcome_message: &self.welcome_message,
                     model_name: &self.model_name,
                     provider_name: &self.provider_name,
