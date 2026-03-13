@@ -4,42 +4,43 @@ load("@buckal//:cargo_manifest.bzl", "cargo_manifest")
 load("@buckal//:wrapper.bzl", "buildscript_run", "rust_binary", "rust_library")
 
 filegroup(
-    name = "vendor",
+    name = "libra-vendor",
     srcs = glob(["**/**"]),
+    out = "vendor",
 )
 
 cargo_manifest(
-    name = "manifest",
-    vendor = ":vendor",
+    name = "libra-manifest",
+    vendor = ":libra-vendor",
 )
 
 rust_binary(
     name = "libra",
-    srcs = [":vendor"],
+    srcs = [":libra-vendor"],
     crate = "libra",
     crate_root = "vendor/src/main.rs",
     edition = "2024",
     env = {
-        "OUT_DIR": "$(location :build-script-run[out_dir])",
+        "OUT_DIR": "$(location :libra-build-script-run[out_dir])",
     },
     features = ["default"],
     rustc_flags = [
-        "@$(location :build-script-run[rustc_flags])",
-        "@$(location :manifest[env_flags])",
+        "@$(location :libra-build-script-run[rustc_flags])",
+        "@$(location :libra-manifest[env_flags])",
     ] + select({
         "prelude//os/constraints:windows": select({
             "prelude//abi/constraints:gnu": [
-                "@$(location //third-party/rust/crates/windows_x86_64_gnu/0.42.2:build-script-run[rustc_flags])",
-                "@$(location //third-party/rust/crates/windows_x86_64_gnu/0.48.5:build-script-run[rustc_flags])",
-                "@$(location //third-party/rust/crates/windows_x86_64_gnu/0.52.6:build-script-run[rustc_flags])",
-                "@$(location //third-party/rust/crates/windows_x86_64_gnu/0.53.1:build-script-run[rustc_flags])",
-                "@$(location //third-party/rust/crates/winapi-x86_64-pc-windows-gnu/0.4.0:build-script-run[rustc_flags])",
+                "@$(location //third-party/rust/crates/windows_x86_64_gnu/0.42.2:windows_x86_64_gnu-build-script-run[rustc_flags])",
+                "@$(location //third-party/rust/crates/windows_x86_64_gnu/0.48.5:windows_x86_64_gnu-build-script-run[rustc_flags])",
+                "@$(location //third-party/rust/crates/windows_x86_64_gnu/0.52.6:windows_x86_64_gnu-build-script-run[rustc_flags])",
+                "@$(location //third-party/rust/crates/windows_x86_64_gnu/0.53.1:windows_x86_64_gnu-build-script-run[rustc_flags])",
+                "@$(location //third-party/rust/crates/winapi-x86_64-pc-windows-gnu/0.4.0:winapi-x86_64-pc-windows-gnu-build-script-run[rustc_flags])",
             ],
             "DEFAULT": [
-                "@$(location //third-party/rust/crates/windows_x86_64_msvc/0.42.2:build-script-run[rustc_flags])",
-                "@$(location //third-party/rust/crates/windows_x86_64_msvc/0.48.5:build-script-run[rustc_flags])",
-                "@$(location //third-party/rust/crates/windows_x86_64_msvc/0.52.6:build-script-run[rustc_flags])",
-                "@$(location //third-party/rust/crates/windows_x86_64_msvc/0.53.1:build-script-run[rustc_flags])",
+                "@$(location //third-party/rust/crates/windows_x86_64_msvc/0.42.2:windows_x86_64_msvc-build-script-run[rustc_flags])",
+                "@$(location //third-party/rust/crates/windows_x86_64_msvc/0.48.5:windows_x86_64_msvc-build-script-run[rustc_flags])",
+                "@$(location //third-party/rust/crates/windows_x86_64_msvc/0.52.6:windows_x86_64_msvc-build-script-run[rustc_flags])",
+                "@$(location //third-party/rust/crates/windows_x86_64_msvc/0.53.1:windows_x86_64_msvc-build-script-run[rustc_flags])",
             ],
         }),
         "DEFAULT": [],
@@ -74,7 +75,7 @@ rust_binary(
         "//third-party/rust/crates/futures-core/0.3.32:futures-core",
         "//third-party/rust/crates/futures-util/0.3.32:futures-util",
         "//third-party/rust/crates/futures/0.3.32:futures",
-        "//third-party/rust/crates/git-internal/0.7.0:git-internal",
+        "//third-party/rust/crates/git-internal/0.7.3:git-internal",
         "//third-party/rust/crates/hex/0.4.3:hex",
         "//third-party/rust/crates/http/1.4.0:http",
         "//third-party/rust/crates/hyper-util/0.1.20:hyper-util",
@@ -111,7 +112,7 @@ rust_binary(
         "//third-party/rust/crates/tokio/1.50.0:tokio",
         "//third-party/rust/crates/tower-http/0.6.8:tower-http",
         "//third-party/rust/crates/tower/0.5.3:tower",
-        "//third-party/rust/crates/tracing-subscriber/0.3.22:tracing-subscriber",
+        "//third-party/rust/crates/tracing-subscriber/0.3.23:tracing-subscriber",
         "//third-party/rust/crates/tracing/0.1.44:tracing",
         "//third-party/rust/crates/unicode-width/0.2.2:unicode-width",
         "//third-party/rust/crates/url/2.5.8:url",
@@ -124,17 +125,17 @@ rust_binary(
 
 rust_library(
     name = "libra-lib",
-    srcs = [":vendor"],
+    srcs = [":libra-vendor"],
     crate = "libra",
     crate_root = "vendor/src/lib.rs",
     edition = "2024",
     env = {
-        "OUT_DIR": "$(location :build-script-run[out_dir])",
+        "OUT_DIR": "$(location :libra-build-script-run[out_dir])",
     },
     features = ["default"],
     rustc_flags = [
-        "@$(location :build-script-run[rustc_flags])",
-        "@$(location :manifest[env_flags])",
+        "@$(location :libra-build-script-run[rustc_flags])",
+        "@$(location :libra-manifest[env_flags])",
     ],
     named_deps = {
         "rig": "//third-party/rust/crates/rig-core/0.32.0:rig-core",
@@ -166,7 +167,7 @@ rust_library(
         "//third-party/rust/crates/futures-core/0.3.32:futures-core",
         "//third-party/rust/crates/futures-util/0.3.32:futures-util",
         "//third-party/rust/crates/futures/0.3.32:futures",
-        "//third-party/rust/crates/git-internal/0.7.0:git-internal",
+        "//third-party/rust/crates/git-internal/0.7.3:git-internal",
         "//third-party/rust/crates/hex/0.4.3:hex",
         "//third-party/rust/crates/http/1.4.0:http",
         "//third-party/rust/crates/hyper-util/0.1.20:hyper-util",
@@ -203,7 +204,7 @@ rust_library(
         "//third-party/rust/crates/tokio/1.50.0:tokio",
         "//third-party/rust/crates/tower-http/0.6.8:tower-http",
         "//third-party/rust/crates/tower/0.5.3:tower",
-        "//third-party/rust/crates/tracing-subscriber/0.3.22:tracing-subscriber",
+        "//third-party/rust/crates/tracing-subscriber/0.3.23:tracing-subscriber",
         "//third-party/rust/crates/tracing/0.1.44:tracing",
         "//third-party/rust/crates/unicode-width/0.2.2:unicode-width",
         "//third-party/rust/crates/url/2.5.8:url",
@@ -214,26 +215,26 @@ rust_library(
 )
 
 rust_binary(
-    name = "build-script-build",
-    srcs = [":vendor"],
+    name = "libra-build-script-build",
+    srcs = [":libra-vendor"],
     crate = "build_script_build",
     crate_root = "vendor/build.rs",
     edition = "2024",
     features = ["default"],
-    rustc_flags = ["@$(location :manifest[env_flags])"],
+    rustc_flags = ["@$(location :libra-manifest[env_flags])"],
     visibility = [],
 )
 
 buildscript_run(
-    name = "build-script-run",
+    name = "libra-build-script-run",
     package_name = "libra",
-    buildscript_rule = ":build-script-build",
+    buildscript_rule = ":libra-build-script-build",
     env_srcs = [
         "//third-party/rust/crates/ring/0.17.14:ring-build-script-run[metadata]",
-        ":manifest[env_dict]",
+        ":libra-manifest[env_dict]",
     ],
     features = ["default"],
     version = "0.1.0",
-    manifest_dir = ":vendor",
+    manifest_dir = ":libra-vendor",
     visibility = ["PUBLIC"],
 )
