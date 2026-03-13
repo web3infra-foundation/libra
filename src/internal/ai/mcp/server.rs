@@ -297,77 +297,65 @@ impl LibraMcpServer {
 #[tool_handler]
 impl ServerHandler for LibraMcpServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: ProtocolVersion::V_2024_11_05,
-            capabilities: ServerCapabilities::builder()
+        ServerInfo::new(
+            ServerCapabilities::builder()
                 .enable_resources()
                 .enable_tools()
                 .build(),
-            server_info: Implementation {
-                name: "libra".to_string(),
-                version: env!("CARGO_PKG_VERSION").to_string(),
-                ..Default::default()
-            },
-            instructions: Some(
-                "Libra MCP Server exposes AI workflow objects and event logs (intent/task/run lifecycle events) backed by git-internal 0.7.0.".to_string(),
-            ),
-        }
+        )
+        .with_protocol_version(ProtocolVersion::V_2024_11_05)
+        .with_server_info(Implementation::new("libra", env!("CARGO_PKG_VERSION")))
+        .with_instructions(
+            "Libra MCP Server exposes AI workflow objects and event logs (intent/task/run lifecycle events) backed by git-internal 0.7.0.",
+        )
     }
 
     async fn list_resources(
         &self,
-        _request: Option<PaginatedRequestParam>,
+        _request: Option<PaginatedRequestParams>,
         _: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, ErrorData> {
         let resources = self.list_resources_impl().await?;
-        Ok(ListResourcesResult {
-            resources,
-            next_cursor: None,
-            meta: None,
-        })
+        Ok(ListResourcesResult::with_all_items(resources))
     }
 
     async fn read_resource(
         &self,
-        request: ReadResourceRequestParam,
+        request: ReadResourceRequestParams,
         _: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, ErrorData> {
         let contents = self.read_resource_impl(&request.uri).await?;
-        Ok(ReadResourceResult { contents })
+        Ok(ReadResourceResult::new(contents))
     }
 
     async fn list_resource_templates(
         &self,
-        _request: Option<PaginatedRequestParam>,
+        _request: Option<PaginatedRequestParams>,
         _: RequestContext<RoleServer>,
     ) -> Result<ListResourceTemplatesResult, ErrorData> {
-        Ok(ListResourceTemplatesResult {
-            resource_templates: vec![
-                ResourceTemplate::new(
-                    RawResourceTemplate {
-                        uri_template: "libra://object/{object_id}".to_string(),
-                        name: "Get AI Object by ID".to_string(),
-                        description: None,
-                        mime_type: None,
-                        title: None,
-                        icons: None,
-                    },
-                    None,
-                ),
-                ResourceTemplate::new(
-                    RawResourceTemplate {
-                        uri_template: "libra://objects/{object_type}".to_string(),
-                        name: "List AI Objects by Type".to_string(),
-                        description: None,
-                        mime_type: None,
-                        title: None,
-                        icons: None,
-                    },
-                    None,
-                ),
-            ],
-            next_cursor: None,
-            meta: None,
-        })
+        Ok(ListResourceTemplatesResult::with_all_items(vec![
+            ResourceTemplate::new(
+                RawResourceTemplate {
+                    uri_template: "libra://object/{object_id}".to_string(),
+                    name: "Get AI Object by ID".to_string(),
+                    description: None,
+                    mime_type: None,
+                    title: None,
+                    icons: None,
+                },
+                None,
+            ),
+            ResourceTemplate::new(
+                RawResourceTemplate {
+                    uri_template: "libra://objects/{object_type}".to_string(),
+                    name: "List AI Objects by Type".to_string(),
+                    description: None,
+                    mime_type: None,
+                    title: None,
+                    icons: None,
+                },
+                None,
+            ),
+        ]))
     }
 }
