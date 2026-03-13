@@ -31,7 +31,7 @@ rust_library(
         "@$(location :errno-dragonfly-manifest[env_flags])",
     ],
     visibility = ["PUBLIC"],
-    deps = ["//third-party/rust/crates/libc/0.2.182:libc"],
+    deps = ["//third-party/rust/crates/libc/0.2.183:libc"],
 )
 
 rust_binary(

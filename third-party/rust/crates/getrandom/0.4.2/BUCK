@@ -4,38 +4,39 @@ load("@buckal//:cargo_manifest.bzl", "cargo_manifest")
 load("@buckal//:wrapper.bzl", "buildscript_run", "rust_binary", "rust_library")
 
 http_archive(
-    name = "vendor",
+    name = "getrandom-vendor",
     urls = ["https://static.crates.io/crates/getrandom/getrandom-0.4.2.crate"],
     sha256 = "0de51e6874e94e7bf76d726fc5d13ba782deca734ff60d5bb2fb2607c7406555",
     type = "tar.gz",
     strip_prefix = "getrandom-0.4.2",
+    out = "vendor",
 )
 
 cargo_manifest(
-    name = "manifest",
-    vendor = ":vendor",
+    name = "getrandom-manifest",
+    vendor = ":getrandom-vendor",
 )
 
 rust_library(
     name = "getrandom",
-    srcs = [":vendor"],
+    srcs = [":getrandom-vendor"],
     crate = "getrandom",
     crate_root = "vendor/src/lib.rs",
     edition = "2024",
     env = {
-        "OUT_DIR": "$(location :build-script-run[out_dir])",
+        "OUT_DIR": "$(location :getrandom-build-script-run[out_dir])",
     },
     features = [
         "std",
         "sys_rng",
     ],
     rustc_flags = [
-        "@$(location :build-script-run[rustc_flags])",
-        "@$(location :manifest[env_flags])",
+        "@$(location :getrandom-build-script-run[rustc_flags])",
+        "@$(location :getrandom-manifest[env_flags])",
     ],
     os_deps = {
-        "linux": ["//third-party/rust/crates/libc/0.2.182:libc"],
-        "macos": ["//third-party/rust/crates/libc/0.2.182:libc"],
+        "linux": ["//third-party/rust/crates/libc/0.2.183:libc"],
+        "macos": ["//third-party/rust/crates/libc/0.2.183:libc"],
     },
     visibility = ["PUBLIC"],
     deps = [
@@ -46,8 +47,8 @@ rust_library(
 )
 
 rust_binary(
-    name = "build-script-build",
-    srcs = [":vendor"],
+    name = "getrandom-build-script-build",
+    srcs = [":getrandom-vendor"],
     crate = "build_script_build",
     crate_root = "vendor/build.rs",
     edition = "2024",
@@ -55,20 +56,20 @@ rust_binary(
         "std",
         "sys_rng",
     ],
-    rustc_flags = ["@$(location :manifest[env_flags])"],
+    rustc_flags = ["@$(location :getrandom-manifest[env_flags])"],
     visibility = [],
 )
 
 buildscript_run(
-    name = "build-script-run",
+    name = "getrandom-build-script-run",
     package_name = "getrandom",
-    buildscript_rule = ":build-script-build",
-    env_srcs = [":manifest[env_dict]"],
+    buildscript_rule = ":getrandom-build-script-build",
+    env_srcs = [":getrandom-manifest[env_dict]"],
     features = [
         "std",
         "sys_rng",
     ],
     version = "0.4.2",
-    manifest_dir = ":vendor",
+    manifest_dir = ":getrandom-vendor",
     visibility = ["PUBLIC"],
 )
