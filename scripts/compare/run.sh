@@ -235,7 +235,6 @@ run_case_internal() {
     done
 
     printf "\n"
-    register_label "$label"
 }
 
 run_case_here() {
