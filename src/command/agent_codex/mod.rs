@@ -178,7 +178,8 @@ pub async fn execute(args: AgentCodexArgs) {
     let responses_clone = responses.clone();
     let tx_clone = tx.clone();
     let approval_tx_clone = approval_tx.clone();
-    let approval_mode = args.approval.clone();
+    let approval_mode = Arc::new(Mutex::new(args.approval.clone()));
+    let approval_mode_clone = approval_mode.clone();
     let debug_mode = args.debug;
     let session_clone = session.clone();
     let mcp_server_clone = mcp_server.clone();
@@ -189,14 +190,24 @@ pub async fn execute(args: AgentCodexArgs) {
             match read.next().await {
                 Some(Ok(Message::Text(text))) => {
                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
-                        // Store response if has id
+                        // Distinguish response vs request: responses have result/error, requests have method
+                        // Both can have id, so we must check for result/error vs method
+                        let has_result_or_error =
+                            json.get("result").is_some() || json.get("error").is_some();
+                        let has_method = json.get("method").is_some();
+
+                        // Store response if has id AND (result OR error) - but NOT if it has method (that's a request)
                         if let Some(id_val) = json.get("id") {
                             if let Some(id) = id_val.as_u64() {
-                                let mut resp = responses_clone.lock().unwrap();
-                                resp.insert(id, json);
+                                // Only store as response if it has result/error but no method
+                                if has_result_or_error && !has_method {
+                                    let mut resp = responses_clone.lock().unwrap();
+                                    resp.insert(id, json);
+                                }
+                                // If it has method, it's a request (not a response) - skip storing
                             }
                         }
-                        // Handle notifications
+                        // Handle notifications (messages without id, or requests with method)
                         else if let Some(method) = json.get("method") {
                             let method_str = method.as_str().unwrap_or("");
 
@@ -225,11 +236,16 @@ pub async fn execute(args: AgentCodexArgs) {
                             if let Some(params) = json.get("params") {
                                 // Show hierarchical flow: Thread → Turn → Plan → Item → Detail
                                 if method_str.contains("thread/started") {
-                                    // params: { thread: { threadId, ... } }
+                                    // params: { thread: { threadId, ... } } or { threadId } or { thread_id }
+                                    // Fallback chain: thread.threadId -> params.threadId -> params.thread_id
                                     let thread_id = params
                                         .get("thread")
                                         .and_then(|t| t.get("threadId"))
                                         .and_then(|t| t.as_str())
+                                        .or_else(|| params.get("threadId").and_then(|t| t.as_str()))
+                                        .or_else(|| {
+                                            params.get("thread_id").and_then(|t| t.as_str())
+                                        })
                                         .unwrap_or("");
                                     println!(
                                         "\n=== New Thread: {} ===",
@@ -399,15 +415,36 @@ pub async fn execute(args: AgentCodexArgs) {
                                             &turn_id[..8.min(turn_id.len())]
                                         );
 
-                                        // Update run status in session
-                                        let mut session = session_clone.lock().unwrap();
-                                        if let Some(run) =
-                                            session.runs.iter_mut().find(|r| r.id == turn_id)
-                                        {
-                                            run.status = RunStatus::Completed;
-                                            run.completed_at = Some(Utc::now());
+                                        // Update run status in session and persist to MCP
+                                        let run_to_store = {
+                                            let mut session = session_clone.lock().unwrap();
+                                            if let Some(run) =
+                                                session.runs.iter_mut().find(|r| r.id == turn_id)
+                                            {
+                                                run.status = RunStatus::Completed;
+                                                run.completed_at = Some(Utc::now());
+                                                Some(run.clone())
+                                            } else {
+                                                None
+                                            }
+                                        };
+                                        session_clone.lock().unwrap().thread.updated_at =
+                                            Utc::now();
+
+                                        // Store updated run to MCP
+                                        if let Some(run) = run_to_store {
+                                            let run_id = run.id.clone();
+                                            let mcp_server_for_run = mcp_server_clone.clone();
+                                            tokio::spawn(async move {
+                                                store_to_mcp(
+                                                    &mcp_server_for_run,
+                                                    "run",
+                                                    &run_id,
+                                                    &run,
+                                                )
+                                                .await;
+                                            });
                                         }
-                                        session.thread.updated_at = Utc::now();
                                     } else {
                                         println!("--- Turn completed ---");
                                     }
@@ -1511,11 +1548,12 @@ pub async fn execute(args: AgentCodexArgs) {
                                         .await;
                                     });
 
-                                    let approved = if approval_mode == "accept" {
+                                    let current_mode = approval_mode.lock().unwrap().clone();
+                                    let approved = if current_mode == "accept" {
                                         // Auto-accept
                                         println!("[Auto-approved]");
                                         true
-                                    } else if approval_mode == "decline" {
+                                    } else if current_mode == "decline" {
                                         // Auto-decline
                                         println!("[Auto-declined]");
                                         false
@@ -1543,8 +1581,8 @@ pub async fn execute(args: AgentCodexArgs) {
                                         }
                                     };
 
-                                    // Update approval request with decision
-                                    {
+                                    // Update approval request with decision and persist to MCP
+                                    let approval_to_store = {
                                         let mut session = session_clone.lock().unwrap();
                                         if let Some(approval) = session
                                             .approval_requests
@@ -1553,7 +1591,25 @@ pub async fn execute(args: AgentCodexArgs) {
                                         {
                                             approval.decision = Some(approved);
                                             approval.resolved_at = Some(Utc::now());
+                                            Some(approval.clone())
+                                        } else {
+                                            None
                                         }
+                                    };
+
+                                    // Store updated approval to MCP
+                                    if let Some(approval) = approval_to_store {
+                                        let approval_id = approval.id.clone();
+                                        let mcp_server_for_approval = mcp_server_clone.clone();
+                                        tokio::spawn(async move {
+                                            store_to_mcp(
+                                                &mcp_server_for_approval,
+                                                "approval_request",
+                                                &approval_id,
+                                                &approval,
+                                            )
+                                            .await;
+                                        });
                                     }
 
                                     // Use the correct resolve method based on the request type
@@ -1657,6 +1713,10 @@ pub async fn execute(args: AgentCodexArgs) {
 
     // Channel for stdin
     let (stdin_tx, mut stdin_rx) = mpsc::channel::<String>(100);
+    // Flag to indicate we're waiting for approval input (vs chat input)
+    let waiting_for_approval = Arc::new(Mutex::new(false));
+    let waiting_for_approval_clone = waiting_for_approval.clone();
+
     tokio::spawn(async move {
         use std::io::{BufRead, BufReader};
         let stdin = BufReader::new(std::io::stdin());
@@ -1670,6 +1730,15 @@ pub async fn execute(args: AgentCodexArgs) {
         tokio::select! {
             msg = stdin_rx.recv() => {
                 if let Some(line) = msg {
+                    // Check if we're waiting for approval input
+                    let is_approval = *waiting_for_approval_clone.lock().unwrap();
+
+                    if is_approval {
+                        // This input goes to the approval handler - ignore for chat
+                        // The approval handler is waiting on a oneshot channel
+                        continue;
+                    }
+
                     if line.trim().is_empty() {
                         continue;
                     }
@@ -1685,6 +1754,9 @@ pub async fn execute(args: AgentCodexArgs) {
             }
             approval_req = approval_rx.recv() => {
                 if let Some((params, response_tx)) = approval_req {
+                    // Set flag to route stdin to approval
+                    *waiting_for_approval_clone.lock().unwrap() = true;
+
                     // Show approval request details
                     println!("\n⚠️  Approval Request:");
                     if let Some(approval_type) = params.get("type").and_then(|t| t.as_str()) {
@@ -1703,14 +1775,10 @@ pub async fn execute(args: AgentCodexArgs) {
 
                     println!("\n  [a]ccept / [d]ecline / [A]ccept All / [D]ecline All: ");
 
-                    // Read user input for approval
-                    use std::io::{BufRead, BufReader};
-                    let stdin = std::io::stdin();
-                    let mut reader = BufReader::new(stdin);
-                    let mut input = String::new();
-                    if reader.read_line(&mut input).is_ok() {
+                    // Read user input from the shared stdin channel instead of creating a new reader
+                    let approved = if let Some(input) = stdin_rx.recv().await {
                         let choice = input.trim().to_lowercase();
-                        let approved = match choice.as_str() {
+                        match choice.as_str() {
                             "a" | "accept" => {
                                 println!("  → Accepted");
                                 true
@@ -1719,24 +1787,31 @@ pub async fn execute(args: AgentCodexArgs) {
                                 println!("  → Declined");
                                 false
                             }
-                            "A" | "A" if choice == "A" || choice == "accept all" => {
+                            "aa" | "accept all" => {
                                 println!("  → Accepted (will auto-accept future)");
+                                *approval_mode_clone.lock().unwrap() = "accept".to_string();
                                 true
                             }
-                            "D" | "D" if choice == "D" || choice == "decline all" => {
+                            "dd" | "decline all" => {
                                 println!("  → Declined (will auto-decline future)");
+                                *approval_mode_clone.lock().unwrap() = "decline".to_string();
                                 false
                             }
                             _ => {
                                 println!("  → Default accept");
                                 true
                             }
-                        };
-                        let _ = response_tx.send(approved);
+                        }
                     } else {
-                        let _ = response_tx.send(true);
-                    }
+                        println!("  → Default accept (no input)");
+                        true
+                    };
+
+                    let _ = response_tx.send(approved);
                     println!();
+
+                    // Clear flag to resume chat input
+                    *waiting_for_approval_clone.lock().unwrap() = false;
                 }
             }
             _ = tokio::time::sleep(tokio::time::Duration::from_secs(1)) => {}
