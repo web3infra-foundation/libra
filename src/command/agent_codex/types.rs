@@ -295,7 +295,7 @@ pub struct AgentMessage {
 
 /// Complete session data that can be queried by MCP
 /// This is the main data container that MCP will query
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodexSession {
     pub thread: CodexThread,
     pub intents: Vec<Intent>,
@@ -308,6 +308,27 @@ pub struct CodexSession {
     pub approval_requests: Vec<ApprovalRequest>,
     pub agent_messages: Vec<AgentMessage>,
     pub token_usages: Vec<TurnTokenUsage>,
+    pub debug: bool,
+}
+
+#[allow(clippy::derivable_impls)]
+impl Default for CodexSession {
+    fn default() -> Self {
+        Self {
+            thread: CodexThread::default(),
+            intents: Vec::new(),
+            plans: Vec::new(),
+            tasks: Vec::new(),
+            runs: Vec::new(),
+            tool_invocations: Vec::new(),
+            reasonings: Vec::new(),
+            patchsets: Vec::new(),
+            approval_requests: Vec::new(),
+            agent_messages: Vec::new(),
+            token_usages: Vec::new(),
+            debug: false,
+        }
+    }
 }
 
 impl CodexSession {
@@ -381,93 +402,113 @@ impl CodexSession {
 
     /// Add a new intent
     pub fn add_intent(&mut self, intent: Intent) {
-        eprintln!(
-            "[DEBUG] Added Intent: {} - {}",
-            intent.id,
-            &intent.content[..intent.content.len().min(50)]
-        );
+        if self.debug {
+            eprintln!(
+                "[DEBUG] Added Intent: {} - {}",
+                intent.id,
+                &intent.content[..intent.content.len().min(50)]
+            );
+        }
         self.intents.push(intent);
     }
 
     /// Add a new plan
     pub fn add_plan(&mut self, plan: Plan) {
-        eprintln!(
-            "[DEBUG] Added Plan: {} - {} (status: {:?})",
-            plan.id,
-            &plan.text[..plan.text.len().min(30)],
-            plan.status
-        );
+        if self.debug {
+            eprintln!(
+                "[DEBUG] Added Plan: {} - {} (status: {:?})",
+                plan.id,
+                &plan.text[..plan.text.len().min(30)],
+                plan.status
+            );
+        }
         self.plans.push(plan);
     }
 
     /// Add a new task
     pub fn add_task(&mut self, task: Task) {
-        eprintln!("[DEBUG] Added Task: {}", task.id);
+        if self.debug {
+            eprintln!("[DEBUG] Added Task: {}", task.id);
+        }
         self.tasks.push(task);
     }
 
     /// Add a new run
     pub fn add_run(&mut self, run: Run) {
-        eprintln!("[DEBUG] Added Run: {} (status: {:?})", run.id, run.status);
+        if self.debug {
+            eprintln!("[DEBUG] Added Run: {} (status: {:?})", run.id, run.status);
+        }
         self.runs.push(run);
     }
 
     /// Add a new tool invocation
     pub fn add_tool_invocation(&mut self, invocation: ToolInvocation) {
-        eprintln!(
-            "[DEBUG] Added ToolInvocation: {} - {}",
-            invocation.id, invocation.tool_name
-        );
+        if self.debug {
+            eprintln!(
+                "[DEBUG] Added ToolInvocation: {} - {}",
+                invocation.id, invocation.tool_name
+            );
+        }
         self.tool_invocations.push(invocation);
     }
 
     /// Add a new reasoning
     pub fn add_reasoning(&mut self, reasoning: Reasoning) {
-        eprintln!(
-            "[DEBUG] Added Reasoning: {} (summary: {:?})",
-            reasoning.id,
-            reasoning.summary.first().map(|s| &s[..s.len().min(30)])
-        );
+        if self.debug {
+            eprintln!(
+                "[DEBUG] Added Reasoning: {} (summary: {:?})",
+                reasoning.id,
+                reasoning.summary.first().map(|s| &s[..s.len().min(30)])
+            );
+        }
         self.reasonings.push(reasoning);
     }
 
     /// Add a new patchset
     pub fn add_patchset(&mut self, patchset: PatchSet) {
-        eprintln!(
-            "[DEBUG] Added PatchSet: {} (status: {:?}, {} changes)",
-            patchset.id,
-            patchset.status,
-            patchset.changes.len()
-        );
+        if self.debug {
+            eprintln!(
+                "[DEBUG] Added PatchSet: {} (status: {:?}, {} changes)",
+                patchset.id,
+                patchset.status,
+                patchset.changes.len()
+            );
+        }
         self.patchsets.push(patchset);
     }
 
     /// Add a new approval request
     pub fn add_approval_request(&mut self, request: ApprovalRequest) {
-        eprintln!(
-            "[DEBUG] Added ApprovalRequest: {} - {:?}",
-            request.id, request.approval_type
-        );
+        if self.debug {
+            eprintln!(
+                "[DEBUG] Added ApprovalRequest: {} - {:?}",
+                request.id, request.approval_type
+            );
+        }
         self.approval_requests.push(request);
     }
 
     /// Add a new agent message
     pub fn add_agent_message(&mut self, message: AgentMessage) {
-        eprintln!(
-            "[DEBUG] Added AgentMessage: {} - {}",
-            message.id,
-            &message.content[..message.content.len().min(50)]
-        );
+        if self.debug {
+            eprintln!(
+                "[DEBUG] Added AgentMessage: {} - {}",
+                message.id,
+                &message.content[..message.content.len().min(50)]
+            );
+        }
         self.agent_messages.push(message);
     }
 
     /// Add token usage
     pub fn add_token_usage(&mut self, usage: TurnTokenUsage) {
-        eprintln!(
-            "[DEBUG] Added TokenUsage: turn={}, total={}",
-            usage.turn_id,
-            usage.total.total_tokens.unwrap_or(0)
-        );
+        if self.debug {
+            eprintln!(
+                "[DEBUG] Added TokenUsage: turn={}, total={}",
+                usage.turn_id,
+                usage.total.total_tokens.unwrap_or(0)
+            );
+        }
         self.token_usages.push(usage);
     }
 

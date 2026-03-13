@@ -8,6 +8,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use anyhow;
 use chrono::Utc;
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
@@ -16,7 +17,6 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 pub use types::*;
 
 use crate::{
-    cli_error,
     internal::{
         ai::{history::HistoryManager, mcp::server::LibraMcpServer},
         db,
@@ -124,7 +124,7 @@ async fn store_to_mcp<T: serde::Serialize + Send + Sync>(
     }
 }
 
-pub async fn execute(args: AgentCodexArgs) {
+pub async fn execute(args: AgentCodexArgs) -> anyhow::Result<()> {
     // Initialize MCP server first
     let working_dir = PathBuf::from(&args.cwd);
     let mcp_server = init_mcp_server(&working_dir).await;
@@ -132,13 +132,9 @@ pub async fn execute(args: AgentCodexArgs) {
 
     println!("Connecting to Codex at {}...", args.url);
 
-    let (ws_stream, _) = match connect_async(args.url.as_str()).await {
-        Ok(s) => s,
-        Err(e) => {
-            cli_error!(e, "error: failed to connect to Codex at {}", args.url);
-            return;
-        }
-    };
+    let (ws_stream, _) = connect_async(args.url.as_str())
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to connect to Codex at {}: {}", args.url, e))?;
 
     println!("Connected to Codex!");
     println!("Initializing...");
@@ -156,9 +152,12 @@ pub async fn execute(args: AgentCodexArgs) {
     let mut thread_id = String::new();
     let responses: Arc<Mutex<std::collections::HashMap<u64, serde_json::Value>>> =
         Arc::new(Mutex::new(std::collections::HashMap::new()));
+    let notifies: Arc<Mutex<std::collections::HashMap<u64, Arc<tokio::sync::Notify>>>> =
+        Arc::new(Mutex::new(std::collections::HashMap::new()));
 
     // Session data storage (for MCP query)
     let session: Arc<Mutex<CodexSession>> = Arc::new(Mutex::new(CodexSession::new()));
+    session.lock().unwrap().debug = args.debug;
 
     // Spawn writer task
     let _write_task = tokio::spawn(async move {
@@ -176,6 +175,7 @@ pub async fn execute(args: AgentCodexArgs) {
 
     // Spawn reader task
     let responses_clone = responses.clone();
+    let notifies_clone = notifies.clone();
     let tx_clone = tx.clone();
     let approval_tx_clone = approval_tx.clone();
     let approval_mode = Arc::new(Mutex::new(args.approval.clone()));
@@ -202,7 +202,11 @@ pub async fn execute(args: AgentCodexArgs) {
                                 // Only store as response if it has result/error but no method
                                 if has_result_or_error && !has_method {
                                     let mut resp = responses_clone.lock().unwrap();
-                                    resp.insert(id, json);
+                                    resp.insert(id, json.clone());
+                                    // Notify the waiter
+                                    if let Some(notify) = notifies_clone.lock().unwrap().get(&id) {
+                                        notify.notify_waiters();
+                                    }
                                 }
                                 // If it has method, it's a request (not a response) - skip storing
                             }
@@ -1649,6 +1653,7 @@ pub async fn execute(args: AgentCodexArgs) {
     async fn send_request(
         tx: &mpsc::Sender<String>,
         responses: &Arc<Mutex<std::collections::HashMap<u64, serde_json::Value>>>,
+        notifies: &Arc<Mutex<std::collections::HashMap<u64, Arc<tokio::sync::Notify>>>>,
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
@@ -1656,27 +1661,48 @@ pub async fn execute(args: AgentCodexArgs) {
         static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
         let id = REQUEST_ID.fetch_add(1, Ordering::Relaxed);
 
+        // Create a notify for this request
+        let notify = Arc::new(tokio::sync::Notify::new());
+        {
+            let mut notifs = notifies.lock().unwrap();
+            notifs.insert(id, notify.clone());
+        }
+
         let msg = CodexMessage::new_request(id, method, params);
         tx.send(msg.to_json()).await.map_err(|e| e.to_string())?;
 
-        // Wait for response
-        for _ in 0..300 {
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-            let mut resp = responses.lock().unwrap();
-            if let Some(response) = resp.remove(&id) {
-                if let Some(error_obj) = response.get("error") {
-                    return Err(format!("Error: {}", error_obj));
+        // Wait for response using Notify instead of busy polling
+        let timeout = tokio::time::timeout(tokio::time::Duration::from_secs(30), async {
+            notify.notified().await;
+        });
+
+        match timeout.await {
+            Ok(_) => {
+                // Response arrived, get it from the map
+                let mut resp = responses.lock().unwrap();
+                if let Some(response) = resp.remove(&id) {
+                    // Clean up the notify
+                    notifies.lock().unwrap().remove(&id);
+                    if let Some(error_obj) = response.get("error") {
+                        return Err(format!("Error: {}", error_obj));
+                    }
+                    return Ok(response.get("result").cloned().unwrap_or(response));
                 }
-                return Ok(response.get("result").cloned().unwrap_or(response));
+                Err("Response not found".to_string())
+            }
+            Err(_) => {
+                // Timeout - clean up
+                notifies.lock().unwrap().remove(&id);
+                Err("Timeout".to_string())
             }
         }
-        Err("Timeout".to_string())
     }
 
     // Initialize
     match send_request(
         &tx,
         &responses,
+        &notifies,
         "initialize",
         serde_json::json!({
             "protocolVersion": "1.0",
@@ -1689,12 +1715,20 @@ pub async fn execute(args: AgentCodexArgs) {
         Ok(_) => println!("Initialized"),
         Err(e) => {
             eprintln!("Init failed: {}", e);
-            return;
+            return Err(anyhow::anyhow!("initialization failed: {}", e));
         }
     }
 
     // Start thread
-    match send_request(&tx, &responses, "thread/start", serde_json::json!({})).await {
+    match send_request(
+        &tx,
+        &responses,
+        &notifies,
+        "thread/start",
+        serde_json::json!({}),
+    )
+    .await
+    {
         Ok(resp) => {
             if let Some(thread_obj) = resp.get("thread")
                 && let Some(id) = thread_obj.get("id").and_then(|v| v.as_str())
@@ -1705,7 +1739,7 @@ pub async fn execute(args: AgentCodexArgs) {
         }
         Err(e) => {
             eprintln!("Thread start failed: {}", e);
-            return;
+            return Err(anyhow::anyhow!("thread start failed: {}", e));
         }
     }
 
@@ -1743,7 +1777,7 @@ pub async fn execute(args: AgentCodexArgs) {
                         continue;
                     }
 
-                    match send_request(&tx, &responses, "turn/start", serde_json::json!({
+                    match send_request(&tx, &responses, &notifies, "turn/start", serde_json::json!({
                         "input": [{ "type": "text", "text": line }],
                         "threadId": thread_id
                     })).await {
@@ -1817,4 +1851,6 @@ pub async fn execute(args: AgentCodexArgs) {
             _ = tokio::time::sleep(tokio::time::Duration::from_secs(1)) => {}
         }
     }
+    #[allow(unreachable_code)]
+    Ok(())
 }
