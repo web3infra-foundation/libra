@@ -13,8 +13,7 @@
 //! `CARGO_MANIFEST_DIR`) can find the files.
 
 use std::{
-    env,
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     process::Command,
 };
