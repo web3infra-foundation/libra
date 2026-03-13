@@ -32,6 +32,16 @@ fn main() {
     // Under Buck2 the sandbox already contains web/out/ from the filegroup,
     // and Node.js tooling is not available. Skip the frontend build.
     if env::var_os("BUCK_SCRATCH_PATH").is_some() {
+        let web_out_index = web_dir.join("out").join("index.html");
+        if !web_out_index.exists() {
+            panic!(
+                "BUCK_SCRATCH_PATH is set, but `{}` does not exist.\n\
+                 Buck2 is expected to materialize `web/out/` (e.g. via a filegroup).\n\
+                 Ensure the Buck2 rule exports the pre-built frontend into `web/out/` \
+                 before running this build.",
+                web_out_index.display()
+            );
+        }
         return;
     }
 
