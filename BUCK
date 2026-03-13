@@ -229,7 +229,7 @@ buildscript_run(
     package_name = "libra",
     buildscript_rule = ":build-script-build",
     env_srcs = [
-        "//third-party/rust/crates/ring/0.17.14:build-script-run[metadata]",
+        "//third-party/rust/crates/ring/0.17.14:ring-build-script-run[metadata]",
         ":manifest[env_dict]",
     ],
     features = ["default"],
