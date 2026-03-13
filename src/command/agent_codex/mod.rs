@@ -1,6 +1,7 @@
 //! Agent Codex command - directly connect to Codex app-server via WebSocket.
 
-#![allow(clippy::all)]
+pub mod protocol;
+pub mod types;
 
 use std::{
     path::{Path, PathBuf},
@@ -10,7 +11,6 @@ use std::{
 use chrono::Utc;
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
-use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
@@ -23,10 +23,12 @@ use crate::{
     utils::{storage_ext::StorageExt, util::try_get_storage_path},
 };
 
+pub use types::*;
+
 const CODEX_WS_URL: &str = "ws://127.0.0.1:8080";
 
 /// Initialize MCP server for storing agent data
-async fn init_mcp_server(working_dir: &Path) -> Arc<LibraMcpServer> {
+pub async fn init_mcp_server(working_dir: &Path) -> Arc<LibraMcpServer> {
     let storage_dir = try_get_storage_path(Some(working_dir.to_path_buf()))
         .unwrap_or_else(|_| working_dir.join(".libra"));
     let (objects_dir, dot_libra) = (storage_dir.join("objects"), storage_dir);
@@ -94,468 +96,6 @@ pub struct AgentCodexArgs {
     /// Debug mode: print collected data
     #[arg(long, default_value = "false")]
     pub debug: bool,
-}
-
-/// Codex JSON-RPC message
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CodexMessage {
-    pub jsonrpc: String,
-    #[serde(default)]
-    pub id: Option<u64>,
-    pub method: Option<String>,
-    pub params: Option<serde_json::Value>,
-    pub result: Option<serde_json::Value>,
-    pub error: Option<serde_json::Value>,
-}
-
-impl CodexMessage {
-    pub fn new_request(id: u64, method: &str, params: serde_json::Value) -> Self {
-        Self {
-            jsonrpc: "2.0".to_string(),
-            id: Some(id),
-            method: Some(method.to_string()),
-            params: Some(params),
-            result: None,
-            error: None,
-        }
-    }
-
-    pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
-    }
-}
-
-// =============================================================================
-// Data Structures for Agent Storage
-// =============================================================================
-
-/// Thread status
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum ThreadStatus {
-    Pending,
-    Running,
-    Completed,
-    Archived,
-    Closed,
-}
-
-/// Run status
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum RunStatus {
-    Pending,
-    InProgress,
-    Completed,
-    Failed,
-}
-
-/// Task status
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum TaskStatus {
-    Pending,
-    InProgress,
-    Completed,
-    Failed,
-}
-
-/// Plan status
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum PlanStatus {
-    Pending,
-    InProgress,
-    Completed,
-}
-
-/// Tool invocation status
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum ToolStatus {
-    Pending,
-    InProgress,
-    Completed,
-    Failed,
-}
-
-/// Patch apply status
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum PatchStatus {
-    Pending,
-    InProgress,
-    Completed,
-    Failed,
-    Declined,
-}
-
-/// Approval type
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum ApprovalType {
-    CommandExecution,
-    FileChange,
-    ApplyPatch,
-    Unknown,
-}
-
-/// Thread - represents a conversation session
-/// Corresponds to: Thread[L] in agent-overview-zh.md
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CodexThread {
-    pub id: String,
-    pub status: ThreadStatus,
-    pub name: Option<String>,
-    pub current_turn_id: Option<String>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-}
-
-impl Default for CodexThread {
-    fn default() -> Self {
-        let now = chrono::Utc::now();
-        Self {
-            id: String::new(),
-            status: ThreadStatus::Pending,
-            name: None,
-            current_turn_id: None,
-            created_at: now,
-            updated_at: now,
-        }
-    }
-}
-
-/// Intent - user request snapshot
-/// Corresponds to: Intent[S] in agent-overview-zh.md
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Intent {
-    pub id: String,
-    pub content: String,
-    pub thread_id: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-}
-
-/// Plan - strategy and steps snapshot
-/// Corresponds to: Plan[S] in agent-overview-zh.md
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Plan {
-    pub id: String,
-    pub text: String,
-    pub intent_id: Option<String>,
-    pub thread_id: String,
-    pub turn_id: Option<String>,
-    pub status: PlanStatus,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-}
-
-/// Task - work unit definition
-/// Corresponds to: Task[S] in agent-overview-zh.md
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Task {
-    pub id: String,
-    pub tool_name: Option<String>,
-    pub plan_id: Option<String>,
-    pub thread_id: String,
-    pub turn_id: Option<String>,
-    pub status: TaskStatus,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-}
-
-/// Run - execution attempt
-/// Corresponds to: Run[S] in agent-overview-zh.md
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Run {
-    pub id: String,
-    pub thread_id: String,
-    pub status: RunStatus,
-    pub started_at: chrono::DateTime<chrono::Utc>,
-    pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-/// Token usage breakdown
-/// Corresponds to: RunUsage[E] in agent-overview-zh.md
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct TokenUsage {
-    pub cached_input_tokens: Option<i64>,
-    pub input_tokens: Option<i64>,
-    pub output_tokens: Option<i64>,
-    pub reasoning_output_tokens: Option<i64>,
-    pub total_tokens: Option<i64>,
-}
-
-/// Token usage for a turn
-/// Corresponds to: RunUsage[E] in agent-overview-zh.md
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TurnTokenUsage {
-    pub thread_id: String,
-    pub turn_id: String,
-    pub last: TokenUsage,
-    pub total: TokenUsage,
-    pub model_context_window: Option<i64>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-}
-
-/// ToolInvocation - tool call record
-/// Corresponds to: ToolInvocation[E] in agent-overview-zh.md
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolInvocation {
-    pub id: String,
-    pub run_id: String,
-    pub thread_id: String,
-    pub tool_name: String,
-    pub server: Option<String>,
-    pub arguments: Option<serde_json::Value>,
-    pub result: Option<serde_json::Value>,
-    pub error: Option<String>,
-    pub status: ToolStatus,
-    pub duration_ms: Option<i64>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-}
-
-/// Reasoning - agent reasoning process
-/// Corresponds to: reasoning items in Codex protocol
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Reasoning {
-    pub id: String,
-    pub run_id: String,
-    pub thread_id: String,
-    pub summary: Vec<String>,
-    pub text: Option<String>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-}
-
-/// FileChange - represents a file change
-/// Corresponds to: PatchSet[S] in agent-overview-zh.md
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FileChange {
-    pub path: String,
-    pub diff: String,
-    pub change_type: String, // add, delete, update
-}
-
-/// PatchSet - candidate patch snapshot
-/// Corresponds to: PatchSet[S] in agent-overview-zh.md
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PatchSet {
-    pub id: String,
-    pub run_id: String,
-    pub thread_id: String,
-    pub changes: Vec<FileChange>,
-    pub status: PatchStatus,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-}
-
-/// ApprovalRequest - approval request record
-/// Corresponds to: Decision[E] in agent-overview-zh.md (pre-decision)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ApprovalRequest {
-    pub id: String,
-    pub approval_type: ApprovalType,
-    pub item_id: String,
-    pub thread_id: String,
-    pub run_id: Option<String>,
-    pub command: Option<String>,
-    pub changes: Option<Vec<String>>,
-    pub description: Option<String>,
-    pub decision: Option<bool>,
-    pub requested_at: chrono::DateTime<chrono::Utc>,
-    pub resolved_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-/// AgentMessage - agent response content
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentMessage {
-    pub id: String,
-    pub run_id: String,
-    pub thread_id: String,
-    pub content: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-}
-
-/// Complete session data that can be queried by MCP
-/// This is the main data container that MCP will query
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CodexSession {
-    pub thread: CodexThread,
-    pub intents: Vec<Intent>,
-    pub plans: Vec<Plan>,
-    pub tasks: Vec<Task>,
-    pub runs: Vec<Run>,
-    pub tool_invocations: Vec<ToolInvocation>,
-    pub reasonings: Vec<Reasoning>,
-    pub patchsets: Vec<PatchSet>,
-    pub approval_requests: Vec<ApprovalRequest>,
-    pub agent_messages: Vec<AgentMessage>,
-    pub token_usages: Vec<TurnTokenUsage>,
-}
-
-impl CodexSession {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Print summary of current session (for debug)
-    pub fn print_summary(&self) {
-        eprintln!("\n========== SESSION DATA ==========");
-        eprintln!(
-            "Thread: id={}, status={:?}, name={:?}, current_turn={:?}",
-            self.thread.id, self.thread.status, self.thread.name, self.thread.current_turn_id
-        );
-        eprintln!("Intents: {}", self.intents.len());
-        for intent in &self.intents {
-            eprintln!(
-                "  - Intent: {} - {}",
-                intent.id,
-                &intent.content[..intent.content.len().min(50)]
-            );
-        }
-        eprintln!("Plans: {}", self.plans.len());
-        for plan in &self.plans {
-            eprintln!(
-                "  - Plan: {} - {} (status: {:?})",
-                plan.id,
-                &plan.text[..plan.text.len().min(30)],
-                plan.status
-            );
-        }
-        eprintln!("Runs: {}", self.runs.len());
-        for run in &self.runs {
-            eprintln!("  - Run: {} (status: {:?})", run.id, run.status);
-        }
-        eprintln!("ToolInvocations: {}", self.tool_invocations.len());
-        for inv in &self.tool_invocations {
-            eprintln!(
-                "  - Tool: {} - {} (status: {:?})",
-                inv.id, inv.tool_name, inv.status
-            );
-        }
-        eprintln!("Reasonings: {}", self.reasonings.len());
-        eprintln!("PatchSets: {}", self.patchsets.len());
-        for ps in &self.patchsets {
-            eprintln!(
-                "  - PatchSet: {} (status: {:?}, {} changes)",
-                ps.id,
-                ps.status,
-                ps.changes.len()
-            );
-        }
-        eprintln!("ApprovalRequests: {}", self.approval_requests.len());
-        for ar in &self.approval_requests {
-            eprintln!(
-                "  - Approval: {} - {:?} (decision: {:?})",
-                ar.id, ar.approval_type, ar.decision
-            );
-        }
-        eprintln!("AgentMessages: {}", self.agent_messages.len());
-        eprintln!("TokenUsages: {}", self.token_usages.len());
-        for usage in &self.token_usages {
-            eprintln!(
-                "  - TokenUsage: turn={}, total_tokens={}",
-                usage.turn_id,
-                usage.total.total_tokens.unwrap_or(0)
-            );
-        }
-        eprintln!("================================\n");
-    }
-
-    /// Add a new intent
-    pub fn add_intent(&mut self, intent: Intent) {
-        eprintln!(
-            "[DEBUG] Added Intent: {} - {}",
-            intent.id,
-            &intent.content[..intent.content.len().min(50)]
-        );
-        self.intents.push(intent);
-    }
-
-    /// Add a new plan
-    pub fn add_plan(&mut self, plan: Plan) {
-        eprintln!(
-            "[DEBUG] Added Plan: {} - {} (status: {:?})",
-            plan.id,
-            &plan.text[..plan.text.len().min(30)],
-            plan.status
-        );
-        self.plans.push(plan);
-    }
-
-    /// Add a new task
-    pub fn add_task(&mut self, task: Task) {
-        eprintln!("[DEBUG] Added Task: {}", task.id);
-        self.tasks.push(task);
-    }
-
-    /// Add a new run
-    pub fn add_run(&mut self, run: Run) {
-        eprintln!("[DEBUG] Added Run: {} (status: {:?})", run.id, run.status);
-        self.runs.push(run);
-    }
-
-    /// Add a new tool invocation
-    pub fn add_tool_invocation(&mut self, invocation: ToolInvocation) {
-        eprintln!(
-            "[DEBUG] Added ToolInvocation: {} - {}",
-            invocation.id, invocation.tool_name
-        );
-        self.tool_invocations.push(invocation);
-    }
-
-    /// Add a new reasoning
-    pub fn add_reasoning(&mut self, reasoning: Reasoning) {
-        eprintln!("[DEBUG] Added Reasoning: {}", reasoning.id);
-        self.reasonings.push(reasoning);
-    }
-
-    /// Add a new patchset
-    pub fn add_patchset(&mut self, patchset: PatchSet) {
-        eprintln!("[DEBUG] Added PatchSet: {}", patchset.id);
-        self.patchsets.push(patchset);
-    }
-
-    /// Add a new approval request
-    pub fn add_approval_request(&mut self, approval: ApprovalRequest) {
-        eprintln!(
-            "[DEBUG] Added ApprovalRequest: {} - {:?}",
-            approval.id, approval.approval_type
-        );
-        self.approval_requests.push(approval);
-    }
-
-    /// Add a new agent message
-    pub fn add_agent_message(&mut self, msg: AgentMessage) {
-        eprintln!("[DEBUG] Added AgentMessage: {}", msg.id);
-        self.agent_messages.push(msg);
-    }
-
-    /// Add token usage for a turn
-    pub fn add_token_usage(&mut self, usage: TurnTokenUsage) {
-        eprintln!(
-            "[DEBUG] Added TokenUsage: turn={}, total_tokens={}",
-            usage.turn_id,
-            usage.total.total_tokens.unwrap_or(0)
-        );
-        self.token_usages.push(usage);
-    }
-
-    /// Update thread status
-    pub fn update_thread(&mut self, thread: CodexThread) {
-        eprintln!(
-            "[DEBUG] Updated Thread: {} (status: {:?})",
-            thread.id, thread.status
-        );
-        self.thread = thread;
-    }
-
-    /// Get current active run
-    pub fn get_active_run(&self) -> Option<&Run> {
-        self.runs.iter().find(|r| r.status == RunStatus::InProgress)
-    }
-
-    /// Get current active turn
-    pub fn get_current_turn_id(&self) -> Option<&str> {
-        self.thread.current_turn_id.as_deref()
-    }
 }
 
 /// Store an object to MCP storage
@@ -640,11 +180,12 @@ pub async fn execute(args: AgentCodexArgs) {
     let tx_clone = tx.clone();
     let approval_tx_clone = approval_tx.clone();
     let approval_mode = args.approval.clone();
-    let _debug_mode = args.debug;
+    let debug_mode = args.debug;
     let session_clone = session.clone();
     let mcp_server_clone = mcp_server.clone();
     let _reader_task = tokio::spawn(async move {
         let mut read = read;
+        #[allow(clippy::while_let_loop)]
         loop {
             match read.next().await {
                 Some(Ok(Message::Text(text))) => {
@@ -738,7 +279,7 @@ pub async fn execute(args: AgentCodexArgs) {
                                         _ => ThreadStatus::Running,
                                     };
 
-                                    if args.debug {
+                                    if debug_mode {
                                         eprintln!(
                                             "[DEBUG] Thread status changed: {} -> {:?}",
                                             thread_id, new_status
@@ -759,7 +300,7 @@ pub async fn execute(args: AgentCodexArgs) {
                                         .and_then(|n| n.as_str())
                                         .map(String::from);
 
-                                    if args.debug {
+                                    if debug_mode {
                                         eprintln!(
                                             "[DEBUG] Thread name updated: {} -> {:?}",
                                             thread_id, name
@@ -776,7 +317,7 @@ pub async fn execute(args: AgentCodexArgs) {
                                         .and_then(|t| t.as_str())
                                         .unwrap_or("");
 
-                                    if args.debug {
+                                    if debug_mode {
                                         eprintln!("[DEBUG] Thread archived: {}", thread_id);
                                     }
 
@@ -790,7 +331,7 @@ pub async fn execute(args: AgentCodexArgs) {
                                         .and_then(|t| t.as_str())
                                         .unwrap_or("");
 
-                                    if args.debug {
+                                    if debug_mode {
                                         eprintln!("[DEBUG] Thread closed: {}", thread_id);
                                     }
 
@@ -926,7 +467,7 @@ pub async fn execute(args: AgentCodexArgs) {
                                     };
 
                                     // Debug output
-                                    if args.debug {
+                                    if debug_mode {
                                         eprintln!(
                                             "[DEBUG] TokenUsage: turn={}, total_tokens={}",
                                             turn_id,
@@ -1049,7 +590,7 @@ pub async fn execute(args: AgentCodexArgs) {
                                         plan_id: None,
                                         thread_id: thread_id.to_string(),
                                         turn_id: None,
-                                        status: crate::command::agent_codex::TaskStatus::InProgress,
+                                        status: TaskStatus::InProgress,
                                         created_at: Utc::now(),
                                     };
                                     let task_id_for_mcp = task_id.to_string();
@@ -1087,8 +628,8 @@ pub async fn execute(args: AgentCodexArgs) {
                                         params.get("turnId").and_then(|t| t.as_str()).unwrap_or("");
 
                                     // params.item.type contains the type
-                                    if let Some(item) = params.get("item") {
-                                        if let Some(item_type) =
+                                    if let Some(item) = params.get("item")
+                                        && let Some(item_type) =
                                             item.get("type").and_then(|t| t.as_str())
                                         {
                                             let item_id = item
@@ -1481,7 +1022,6 @@ pub async fn execute(args: AgentCodexArgs) {
                                                 println!("  Task: {} started", item_type);
                                             }
                                         }
-                                    }
                                 }
                                 // Handle item/completed notification
                                 else if method_str.contains("item/completed") {
@@ -1492,8 +1032,8 @@ pub async fn execute(args: AgentCodexArgs) {
                                     let _turn_id =
                                         params.get("turnId").and_then(|t| t.as_str()).unwrap_or("");
 
-                                    if let Some(item) = params.get("item") {
-                                        if let Some(item_type) =
+                                    if let Some(item) = params.get("item")
+                                        && let Some(item_type) =
                                             item.get("type").and_then(|t| t.as_str())
                                         {
                                             let item_id = item
@@ -1668,66 +1208,67 @@ pub async fn execute(args: AgentCodexArgs) {
                                                 let status = item
                                                     .get("status")
                                                     .and_then(|s| s.as_str())
-                                                    .unwrap_or("completed");
-                                                let changes =
-                                                    item.get("changes").and_then(|c| c.as_array());
+                                                    .unwrap_or("");
 
-                                                println!("  📝 File Change: {}", status);
-
-                                                // Parse and update PatchSet
-                                                let mut file_changes = vec![];
-                                                if let Some(changes) = changes {
-                                                    for change in changes.iter().take(5) {
-                                                        let path = change
-                                                            .get("path")
-                                                            .and_then(|p| p.as_str())
-                                                            .unwrap_or("?");
-                                                        let kind = change
-                                                            .get("kind")
-                                                            .and_then(|k| {
-                                                                if let Some(t) = k
-                                                                    .get("type")
-                                                                    .and_then(|t| t.as_str())
-                                                                {
-                                                                    Some(t)
-                                                                } else {
-                                                                    None
-                                                                }
-                                                            })
-                                                            .unwrap_or("update");
-                                                        let marker = match kind {
-                                                            "add" => "+",
-                                                            "delete" => "-",
-                                                            _ => "~",
-                                                        };
-                                                        println!("    {} {}", marker, path);
-                                                        // Show diff if available (full content)
-                                                        let diff = change
-                                                            .get("diff")
-                                                            .and_then(|d| d.as_str())
-                                                            .unwrap_or("");
-                                                        if !diff.is_empty() {
-                                                            for line in diff.lines() {
-                                                                println!("      {}", line);
-                                                            }
-                                                            file_changes.push(FileChange {
-                                                                path: path.to_string(),
-                                                                diff: diff.to_string(),
-                                                                change_type: kind.to_string(),
-                                                            });
-                                                        }
-                                                    }
-                                                    if changes.len() > 5 {
-                                                        println!(
-                                                            "    ... and {} more",
-                                                            changes.len() - 5
-                                                        );
-                                                    }
+                                                if debug_mode {
+                                                    eprintln!("[DEBUG] fileChange item: {:?}", item);
                                                 }
 
-                                                // Update PatchSet
-                                                let mut session = session_clone.lock().unwrap();
-                                                if let Some(patchset) = session
+                                                // Parse changes
+                                                let changes: Vec<FileChange> = item
+                                                    .get("changes")
+                                                    .and_then(|c| c.as_array())
+                                                    .map(|arr| {
+                                                        arr.iter()
+                                                            .filter_map(|change| {
+                                                                let path = change.get("path")?.as_str()?.to_string();
+                                                                let diff = change.get("diff").and_then(|d| d.as_str()).unwrap_or("").to_string();
+                                                                let change_type = change
+                                                                    .get("change_type")
+                                                                    .or_else(|| change.get("changeType"))
+                                                                    .or_else(|| change.get("kind").and_then(|k| k.get("type")))
+                                                                    .and_then(|c| c.as_str())
+                                                                    .unwrap_or("update")
+                                                                    .to_string();
+                                                                Some(FileChange {
+                                                                    path,
+                                                                    diff,
+                                                                    change_type,
+                                                                })
+                                                            })
+                                                            .collect()
+                                                    })
+                                                    .unwrap_or_default();
+
+                                                if debug_mode {
+                                                    eprintln!("[DEBUG] fileChange changes parsed: {} items", changes.len());
+                                                }
+
+                                                let file_count = changes.len();
+                                                println!("  📝 File Change {} ({} files)", status, file_count);
+
+                                                // Show first few files with diff
+                                                for change in changes.iter().take(3) {
+                                                    println!("    - {} ({})", change.path, change.change_type);
+                                                    // Show first few lines of diff
+                                                    if !change.diff.is_empty() {
+                                                        let diff_lines: Vec<&str> = change.diff.lines().take(10).collect();
+                                                        for line in diff_lines {
+                                                            println!("      {}", line);
+                                                        }
+                                                        if change.diff.lines().count() > 10 {
+                                                            println!("      ... ({} more lines)", change.diff.lines().count() - 10);
+                                                        }
+                                                    }
+                                                }
+                                                if file_count > 3 {
+                                                    println!("    ... and {} more files", file_count - 3);
+                                                }
+
+                                                // Update PatchSet status
+                                                if let Some(patchset) = session_clone
+                                                    .lock()
+                                                    .unwrap()
                                                     .patchsets
                                                     .iter_mut()
                                                     .find(|p| p.id == item_id)
@@ -1738,413 +1279,288 @@ pub async fn execute(args: AgentCodexArgs) {
                                                         "declined" => PatchStatus::Declined,
                                                         _ => PatchStatus::Completed,
                                                     };
-                                                    if !file_changes.is_empty() {
-                                                        patchset.changes = file_changes;
-                                                    }
+                                                    patchset.changes = changes;
                                                 }
-                                            } else if item_type == "dynamicToolCall" {
+
+                                                // Store to MCP in background
+                                                if let Some(patchset) = session_clone
+                                                    .lock()
+                                                    .unwrap()
+                                                    .patchsets
+                                                    .iter()
+                                                    .find(|p| p.id == item_id)
+                                                    .cloned()
+                                                {
+                                                    let mcp_server_for_ps = mcp_server_clone.clone();
+                                                    let ps_id = item_id.clone();
+                                                    tokio::spawn(async move {
+                                                        store_to_mcp(
+                                                            &mcp_server_for_ps,
+                                                            "patchset",
+                                                            &ps_id,
+                                                            &patchset,
+                                                        )
+                                                        .await;
+                                                    });
+                                                }
+                                            } else if item_type == "toolCall" {
                                                 let tool = item
-                                                    .get("tool")
+                                                    .get("name")
+                                                    .or_else(|| item.get("tool"))
                                                     .and_then(|t| t.as_str())
                                                     .unwrap_or("unknown");
                                                 let status = item
                                                     .get("status")
                                                     .and_then(|s| s.as_str())
                                                     .unwrap_or("completed");
+                                                let result = item.get("result").cloned();
+                                                let error = item
+                                                    .get("error")
+                                                    .and_then(|e| e.as_str())
+                                                    .map(String::from);
                                                 let duration_ms =
                                                     item.get("durationMs").and_then(|d| d.as_i64());
-                                                let success =
-                                                    item.get("success").and_then(|s| s.as_bool());
 
-                                                println!("  Dynamic Tool: {} - {}", tool, status);
+                                                print!("  Tool: {} - {}", tool, status);
+                                                if let Some(result) = item.get("result") {
+                                                    let result_str = result.to_string();
+                                                    if result_str.len() > 100 {
+                                                        println!(" | Result: {}...", &result_str[..100]);
+                                                    } else if !result_str.is_empty()
+                                                        && result_str != "null"
+                                                    {
+                                                        println!(" | Result: {}", result_str);
+                                                    } else {
+                                                        println!();
+                                                    }
+                                                } else {
+                                                    println!();
+                                                }
 
                                                 // Update ToolInvocation status
-                                                let mut session = session_clone.lock().unwrap();
-                                                if let Some(invocation) = session
+                                                if let Some(invocation) = session_clone
+                                                    .lock()
+                                                    .unwrap()
                                                     .tool_invocations
                                                     .iter_mut()
                                                     .find(|i| i.id == item_id)
                                                 {
-                                                    invocation.status = match (status, success) {
-                                                        ("completed", Some(true))
-                                                        | ("completed", None) => {
-                                                            ToolStatus::Completed
-                                                        }
-                                                        ("failed", _) | (_, Some(false)) => {
-                                                            ToolStatus::Failed
-                                                        }
+                                                    invocation.status = match status {
+                                                        "completed" => ToolStatus::Completed,
+                                                        "failed" => ToolStatus::Failed,
                                                         _ => ToolStatus::Completed,
                                                     };
+                                                    invocation.result = result;
+                                                    invocation.error = error;
                                                     invocation.duration_ms = duration_ms;
                                                 }
-                                            } else if item_type == "webSearch" {
-                                                let query = item
-                                                    .get("query")
-                                                    .and_then(|q| q.as_str())
-                                                    .unwrap_or("");
-                                                println!("  Web Search done: {}", query);
 
-                                                // Update ToolInvocation status
-                                                let mut session = session_clone.lock().unwrap();
-                                                if let Some(invocation) = session
+                                                // Store to MCP in background
+                                                if let Some(invocation) = session_clone
+                                                    .lock()
+                                                    .unwrap()
                                                     .tool_invocations
-                                                    .iter_mut()
+                                                    .iter()
                                                     .find(|i| i.id == item_id)
+                                                    .cloned()
                                                 {
-                                                    invocation.status = ToolStatus::Completed;
+                                                    let mcp_server_for_inv = mcp_server_clone.clone();
+                                                    let inv_id = item_id.clone();
+                                                    tokio::spawn(async move {
+                                                        store_to_mcp(
+                                                            &mcp_server_for_inv,
+                                                            "tool_invocation",
+                                                            &inv_id,
+                                                            &invocation,
+                                                        )
+                                                        .await;
+                                                    });
                                                 }
+                                            } else if item_type == "userMessage" {
+                                                // Update intent if needed
+                                                println!("  User message completed");
                                             } else if item_type == "agentMessage" {
-                                                println!("\n  ✅ Agent Response completed\n");
-
-                                                // Update AgentMessage content
+                                                // Update agent message content
+                                                if debug_mode {
+                                                    eprintln!("[DEBUG] agentMessage completed item: {:?}", item);
+                                                }
                                                 let content = item
                                                     .get("text")
                                                     .and_then(|t| t.as_str())
-                                                    .map(String::from)
-                                                    .unwrap_or_default();
-                                                let mut session = session_clone.lock().unwrap();
-                                                if let Some(msg) = session
+                                                    .unwrap_or("");
+                                                if let Some(msg) = session_clone
+                                                    .lock()
+                                                    .unwrap()
                                                     .agent_messages
                                                     .iter_mut()
                                                     .find(|m| m.id == item_id)
                                                 {
-                                                    msg.content = content;
+                                                    msg.content = content.to_string();
+                                                    if !msg.content.is_empty() {
+                                                        println!("\n  🤖 Agent: {}\n", msg.content);
+                                                    }
                                                 }
-                                            } else {
-                                                println!("  Task: {} completed", item_type);
+                                                println!("  🤖 Agent Response completed");
                                             }
                                         }
-                                    }
                                 }
-                                // Handle agent message delta - direct text output
-                                // Only handle specific delta types to avoid duplicates
-                                else if method_str.contains("agentMessage")
-                                    || method_str.contains("agent_message")
-                                {
-                                    // Only process agent_message_content_delta to avoid duplicates
-                                    // Codex sends the same content in multiple formats, we only need one
-                                    let msg_type = params
-                                        .get("type")
-                                        .or_else(|| params.get("msg").and_then(|m| m.get("type")))
-                                        .and_then(|t| t.as_str());
+                                // Handle approval request
+                                else if method_str.contains("requestApproval") {
+                                    // Get request ID
+                                    let request_id = params
+                                        .get("requestId")
+                                        .or_else(|| params.get("request_id"))
+                                        .and_then(|v| v.as_str())
+                                        .map(String::from)
+                                        .unwrap_or_else(|| format!("req_{}", Utc::now().timestamp_millis()));
+                                    let approval_params =
+                                        json.get("params").cloned().unwrap_or(serde_json::json!({}));
 
-                                    // Only handle content_delta types, skip others to avoid duplicates
-                                    if !msg_type
-                                        .map(|t| t.contains("content_delta"))
-                                        .unwrap_or(false)
+                                    // Determine approval type
+                                    let approval_type = if method_str.contains("commandExecution") {
+                                        ApprovalType::CommandExecution
+                                    } else if method_str.contains("fileChange") {
+                                        ApprovalType::FileChange
+                                    } else if method_str.contains("apply_patch") {
+                                        ApprovalType::ApplyPatch
+                                    } else {
+                                        ApprovalType::Unknown
+                                    };
+
+                                    // Get item_id if available
+                                    let item_id = approval_params
+                                        .get("itemId")
+                                        .or_else(|| approval_params.get("call_id"))
+                                        .and_then(|v| v.as_str())
+                                        .map(String::from)
+                                        .unwrap_or_default();
+
+                                    // Get thread_id if available
+                                    let thread_id = approval_params
+                                        .get("threadId")
+                                        .and_then(|v| v.as_str())
+                                        .map(String::from)
+                                        .unwrap_or_default();
+
+                                    // Get command or changes from approval_params
+                                    let command = approval_params
+                                        .get("command")
+                                        .and_then(|v| v.as_str())
+                                        .map(String::from);
+                                    let changes = approval_params
+                                        .get("changes")
+                                        .and_then(|c| c.as_array())
+                                        .map(|arr| {
+                                            arr.iter()
+                                                .filter_map(|v| v.as_str().map(String::from))
+                                                .collect()
+                                        });
+                                    let description: Option<String> = approval_params
+                                        .get("description")
+                                        .and_then(|v| v.as_str())
+                                        .map(String::from);
+
+                                    // Store approval request in session
+                                    let approval_request = ApprovalRequest {
+                                        id: request_id.clone(),
+                                        approval_type,
+                                        item_id,
+                                        thread_id: thread_id.clone(),
+                                        run_id: None,
+                                        command,
+                                        changes,
+                                        description,
+                                        decision: None,
+                                        requested_at: Utc::now(),
+                                        resolved_at: None,
+                                    };
+                                    let approval_id = request_id.clone();
+                                    let approval_for_mcp = approval_request.clone();
                                     {
-                                        continue;
+                                        let mut session = session_clone.lock().unwrap();
+                                        session.add_approval_request(approval_request);
                                     }
 
-                                    // Debug: print raw delta when debug mode is enabled
-                                    if args.debug {
-                                        eprintln!("[DEBUG] agentMessage delta: {:?}", params);
-                                    }
-
-                                    // Check for delta at different levels
-                                    let delta = params
-                                        .get("delta")
-                                        .or_else(|| params.get("msg").and_then(|m| m.get("delta")))
-                                        .or_else(|| params.get("text"))
-                                        .and_then(|d| d.as_str());
-
-                                    if let Some(text) = delta {
-                                        // Only print non-empty, non-whitespace-only text
-                                        if !text.trim().is_empty() {
-                                            // Stream text with proper handling
-                                            print!("{}", text);
-                                            use std::io::Write;
-                                            std::io::stdout().flush().ok();
-                                        }
-                                    }
-                                }
-                                // Handle plan delta
-                                else if method_str.contains("plan") {
-                                    if let Some(plan_val) =
-                                        params.get("plan").or_else(|| params.get("delta"))
-                                    {
-                                        // Try to parse as JSON array and format nicely
-                                        let plan_str = plan_val.to_string();
-                                        if let Ok(plan_array) =
-                                            serde_json::from_str::<Vec<serde_json::Value>>(
-                                                &plan_str,
-                                            )
-                                        {
-                                            println!("  Plan:");
-                                            for item in plan_array.iter() {
-                                                let status = item
-                                                    .get("status")
-                                                    .and_then(|s| s.as_str())
-                                                    .unwrap_or("unknown");
-                                                let step = item
-                                                    .get("step")
-                                                    .and_then(|s| s.as_str())
-                                                    .unwrap_or("");
-                                                let marker = match status {
-                                                    "completed" => "✓",
-                                                    "inProgress" => "▶",
-                                                    _ => "○",
-                                                };
-                                                println!("    {} {}", marker, step);
-                                            }
-                                        } else {
-                                            // Fallback: just print as string
-                                            println!("  Plan: {}", plan_val);
-                                        }
-                                    }
-                                }
-                                // Handle command output delta
-                                else if method_str.contains("commandExecution/outputDelta") {
-                                    if let Some(output) =
-                                        params.get("output").or_else(|| params.get("delta"))
-                                    {
-                                        let output_str = output.as_str().unwrap_or("");
-                                        if !output_str.trim().is_empty() {
-                                            print!("{}", output_str);
-                                            use std::io::Write;
-                                            std::io::stdout().flush().ok();
-                                        }
-                                    }
-                                }
-                                // Handle file change output delta (diff streaming)
-                                else if method_str.contains("fileChange/outputDelta")
-                                    || method_str.contains("filechange/outputDelta")
-                                {
-                                    if let Some(delta) =
-                                        params.get("delta").or_else(|| params.get("output"))
-                                    {
-                                        let delta_str = delta.as_str().unwrap_or("");
-                                        if !delta_str.trim().is_empty() {
-                                            print!("{}", delta_str);
-                                            use std::io::Write;
-                                            std::io::stdout().flush().ok();
-                                        }
-                                    }
-                                }
-                                // Handle reasoning/thinking process
-                                else if method_str.contains("reasoning") {
-                                    // Check for textDelta, summaryTextDelta, or delta
-                                    let reasoning_text = params
-                                        .get("delta")
-                                        .or_else(|| params.get("textDelta"))
-                                        .or_else(|| params.get("summaryTextDelta"))
-                                        .or_else(|| params.get("summary"))
-                                        .and_then(|d| d.as_str());
-
-                                    if let Some(text) = reasoning_text {
-                                        if !text.trim().is_empty() {
-                                            // Stream thinking directly
-                                            print!("{}", text);
-                                            use std::io::Write;
-                                            std::io::stdout().flush().ok();
-                                        }
-                                    }
-                                }
-                                // Handle MCP tool call progress
-                                else if method_str.contains("mcpToolCall")
-                                    || method_str.contains("tool")
-                                {
-                                    if let Some(name) = params.get("name") {
-                                        println!("  Tool: {}", name);
-                                    } else if let Some(tool_call) =
-                                        params.get("toolCall").or_else(|| params.get("tool"))
-                                    {
-                                        if let Some(name) = tool_call.get("name") {
-                                            println!("  Tool: {}", name);
-                                        }
-                                    }
-                                }
-                                // Handle turn completion
-                                else if method_str.contains("turn/completed")
-                                    || method_str.contains("turnCompleted")
-                                {
-                                    println!("\n[Turn completed]");
-                                }
-                                // Handle turn started
-                                else if method_str.contains("turn/started")
-                                    || method_str.contains("turnStarted")
-                                {
-                                    println!("[Turn started]");
-                                }
-                            }
-
-                            // Handle approval requests (as notification or request)
-                            // ServerRequest methods: item/commandExecution/requestApproval, item/fileChange/requestApproval
-                            // Also check for exec_approval_request, apply_patch_approval_request types
-                            let is_approval_request = method_str.contains("requestApproval")
-                                || method_str.contains("exec_approval_request")
-                                || method_str.contains("apply_patch_approval");
-
-                            if is_approval_request {
-                                // Check if it's a request (has id) or notification (no id)
-                                let is_request = json.get("id").is_some();
-                                if is_request {
-                                    println!("\n⚠️  Approval Request (requires response):");
-                                } else {
-                                    println!("\n⚠️  Approval Notification:");
-                                }
-                                println!("  Method: {}", method_str);
-
-                                // Get approval ID from different possible fields
-                                let request_id = json
-                                    .get("params")
-                                    .and_then(|p| p.get("requestId"))
-                                    .or_else(|| {
-                                        json.get("params").and_then(|p| p.get("approvalId"))
-                                    })
-                                    .or_else(|| json.get("params").and_then(|p| p.get("call_id")))
-                                    .cloned()
-                                    .and_then(|v| v.as_str().map(String::from))
-                                    .unwrap_or_else(|| {
-                                        format!("approval_{}", Utc::now().timestamp_millis())
-                                    });
-                                let approval_params =
-                                    json.get("params").cloned().unwrap_or(serde_json::json!({}));
-
-                                // Determine approval type
-                                let approval_type = if method_str.contains("commandExecution") {
-                                    ApprovalType::CommandExecution
-                                } else if method_str.contains("fileChange") {
-                                    ApprovalType::FileChange
-                                } else if method_str.contains("apply_patch") {
-                                    ApprovalType::ApplyPatch
-                                } else {
-                                    ApprovalType::Unknown
-                                };
-
-                                // Get item_id if available
-                                let item_id = approval_params
-                                    .get("itemId")
-                                    .or_else(|| approval_params.get("call_id"))
-                                    .and_then(|v| v.as_str())
-                                    .map(String::from)
-                                    .unwrap_or_default();
-
-                                // Get thread_id if available
-                                let thread_id = approval_params
-                                    .get("threadId")
-                                    .and_then(|v| v.as_str())
-                                    .map(String::from)
-                                    .unwrap_or_default();
-
-                                // Get command or changes from approval_params
-                                let command = approval_params
-                                    .get("command")
-                                    .and_then(|v| v.as_str())
-                                    .map(String::from);
-                                let changes = approval_params
-                                    .get("changes")
-                                    .and_then(|c| c.as_array())
-                                    .map(|arr| {
-                                        arr.iter()
-                                            .filter_map(|v| v.as_str().map(String::from))
-                                            .collect()
-                                    });
-                                let description: Option<String> = approval_params
-                                    .get("description")
-                                    .and_then(|v| v.as_str())
-                                    .map(String::from);
-
-                                // Store approval request in session
-                                let approval_request = ApprovalRequest {
-                                    id: request_id.clone(),
-                                    approval_type,
-                                    item_id,
-                                    thread_id: thread_id.clone(),
-                                    run_id: None,
-                                    command,
-                                    changes,
-                                    description,
-                                    decision: None,
-                                    requested_at: Utc::now(),
-                                    resolved_at: None,
-                                };
-                                let approval_id = request_id.clone();
-                                let approval_for_mcp = approval_request.clone();
-                                {
-                                    let mut session = session_clone.lock().unwrap();
-                                    session.add_approval_request(approval_request);
-                                }
-
-                                // Store to MCP in background
-                                let mcp_server_for_approval = mcp_server_clone.clone();
-                                tokio::spawn(async move {
-                                    store_to_mcp(
-                                        &mcp_server_for_approval,
-                                        "approval_request",
-                                        &approval_id,
-                                        &approval_for_mcp,
-                                    )
-                                    .await;
-                                });
-
-                                let approved = if approval_mode == "accept" {
-                                    // Auto-accept
-                                    println!("[Auto-approved]");
-                                    true
-                                } else if approval_mode == "decline" {
-                                    // Auto-decline
-                                    println!("[Auto-declined]");
-                                    false
-                                } else {
-                                    // Ask mode - send to main loop for interactive input
-                                    let (oneshot_tx, oneshot_rx) =
-                                        tokio::sync::oneshot::channel::<bool>();
-                                    let _ = approval_tx_clone
-                                        .send((approval_params.clone(), oneshot_tx))
+                                    // Store to MCP in background
+                                    let mcp_server_for_approval = mcp_server_clone.clone();
+                                    tokio::spawn(async move {
+                                        store_to_mcp(
+                                            &mcp_server_for_approval,
+                                            "approval_request",
+                                            &approval_id,
+                                            &approval_for_mcp,
+                                        )
                                         .await;
+                                    });
 
-                                    // Wait for user response
-                                    match oneshot_rx.await {
-                                        Ok(approved) => {
-                                            println!(
-                                                "[User {}]",
-                                                if approved { "approved" } else { "declined" }
-                                            );
-                                            approved
-                                        }
-                                        Err(_) => {
-                                            println!("[Timeout - auto-approved by default]");
-                                            true
-                                        }
-                                    }
-                                };
+                                    let approved = if approval_mode == "accept" {
+                                        // Auto-accept
+                                        println!("[Auto-approved]");
+                                        true
+                                    } else if approval_mode == "decline" {
+                                        // Auto-decline
+                                        println!("[Auto-declined]");
+                                        false
+                                    } else {
+                                        // Ask mode - send to main loop for interactive input
+                                        let (oneshot_tx, oneshot_rx) =
+                                            tokio::sync::oneshot::channel::<bool>();
+                                        let _ = approval_tx_clone
+                                            .send((approval_params.clone(), oneshot_tx))
+                                            .await;
 
-                                // Update approval request with decision
-                                {
-                                    let mut session = session_clone.lock().unwrap();
-                                    if let Some(approval) = session
-                                        .approval_requests
-                                        .iter_mut()
-                                        .find(|a| a.id == request_id)
+                                        // Wait for user response
+                                        match oneshot_rx.await {
+                                            Ok(approved) => {
+                                                println!(
+                                                    "[User {}]",
+                                                    if approved { "approved" } else { "declined" }
+                                                );
+                                                approved
+                                            }
+                                            Err(_) => {
+                                                println!("[Timeout - auto-approved by default]");
+                                                true
+                                            }
+                                        }
+                                    };
+
+                                    // Update approval request with decision
                                     {
-                                        approval.decision = Some(approved);
-                                        approval.resolved_at = Some(Utc::now());
+                                        let mut session = session_clone.lock().unwrap();
+                                        if let Some(approval) = session
+                                            .approval_requests
+                                            .iter_mut()
+                                            .find(|a| a.id == request_id)
+                                        {
+                                            approval.decision = Some(approved);
+                                            approval.resolved_at = Some(Utc::now());
+                                        }
                                     }
+
+                                    // Use the correct resolve method based on the request type
+                                    let resolve_method = if method_str.contains("commandExecution") {
+                                        "item/commandExecution/requestApproval/resolve"
+                                    } else if method_str.contains("fileChange") {
+                                        "item/fileChange/requestApproval/resolve"
+                                    } else if method_str.contains("exec_approval") {
+                                        "exec_approval_request/resolve"
+                                    } else if method_str.contains("apply_patch") {
+                                        "apply_patch_approval_request/resolve"
+                                    } else {
+                                        "requestApproval/resolve"
+                                    };
+
+                                    let approval_msg = CodexMessage::new_request(
+                                        0,
+                                        resolve_method,
+                                        serde_json::json!({
+                                            "requestId": request_id,
+                                            "approved": approved
+                                        }),
+                                    );
+                                    let _ = tx_clone.send(approval_msg.to_json()).await;
                                 }
-
-                                // Use the correct resolve method based on the request type
-                                let resolve_method = if method_str.contains("commandExecution") {
-                                    "item/commandExecution/requestApproval/resolve"
-                                } else if method_str.contains("fileChange") {
-                                    "item/fileChange/requestApproval/resolve"
-                                } else if method_str.contains("exec_approval") {
-                                    "exec_approval_request/resolve"
-                                } else if method_str.contains("apply_patch") {
-                                    "apply_patch_approval_request/resolve"
-                                } else {
-                                    "requestApproval/resolve"
-                                };
-
-                                let approval_msg = CodexMessage::new_request(
-                                    0,
-                                    resolve_method,
-                                    serde_json::json!({
-                                        "requestId": request_id,
-                                        "approved": approved
-                                    }),
-                                );
-                                let _ = tx_clone.send(approval_msg.to_json()).await;
                             }
                         }
                     }
@@ -2205,12 +1621,11 @@ pub async fn execute(args: AgentCodexArgs) {
     // Start thread
     match send_request(&tx, &responses, "thread/start", serde_json::json!({})).await {
         Ok(resp) => {
-            if let Some(thread_obj) = resp.get("thread") {
-                if let Some(id) = thread_obj.get("id").and_then(|v| v.as_str()) {
+            if let Some(thread_obj) = resp.get("thread")
+                && let Some(id) = thread_obj.get("id").and_then(|v| v.as_str()) {
                     thread_id = id.to_string();
                     println!("Thread: {}", id);
                 }
-            }
         }
         Err(e) => {
             eprintln!("Thread start failed: {}", e);
@@ -2225,10 +1640,8 @@ pub async fn execute(args: AgentCodexArgs) {
     tokio::spawn(async move {
         use std::io::{BufRead, BufReader};
         let stdin = BufReader::new(std::io::stdin());
-        for line in stdin.lines() {
-            if let Ok(line) = line {
-                let _ = stdin_tx.send(line).await;
-            }
+        for line in stdin.lines().map_while(Result::ok) {
+            let _ = stdin_tx.send(line).await;
         }
     });
 
