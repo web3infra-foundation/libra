@@ -1,11 +1,23 @@
 //! Build script: runs `pnpm run build` inside `web/` to produce the static
 //! export that `rust-embed` embeds into the binary.
 //!
-//! When built under Buck2 (`BUCK_SCRATCH_PATH` is set), the frontend build is
-//! skipped because Buck2's `filegroup` already includes the pre-built `web/out/`
-//! directory and its sandboxed PATH does not contain Node.js tooling.
+//! When built under Buck2 (`BUCK_SCRATCH_PATH` is set) and the pre-built
+//! `web/out/` directory is already present in the sandbox (materialized by the
+//! filegroup), the frontend build is skipped entirely.
+//!
+//! On a fresh clone, `web/out/` will not be present in the sandbox. In that
+//! case the script locates the real project root (by stripping the
+//! `buck-out/…` suffix from `CARGO_MANIFEST_DIR`), runs `pnpm run build`
+//! there, and copies the resulting `web/out/` tree into the sandbox so that
+//! `rust-embed`'s `#[folder = "web/out/"]` (which resolves relative to
+//! `CARGO_MANIFEST_DIR`) can find the files.
 
-use std::{env, path::Path, process::Command};
+use std::{
+    env,
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 fn main() {
     let manifest_dir = match env::var("CARGO_MANIFEST_DIR") {
@@ -29,28 +41,55 @@ fn main() {
     println!("cargo:rerun-if-changed=web/tsconfig.json");
     println!("cargo:rerun-if-changed=web/tailwind.config.ts");
 
-    // Under Buck2 the sandbox already contains web/out/ from the filegroup,
-    // and Node.js tooling is not available. Skip the frontend build.
     if env::var_os("BUCK_SCRATCH_PATH").is_some() {
-        let web_out_index = web_dir.join("out").join("index.html");
-        if !web_out_index.exists() {
-            panic!(
-                "BUCK_SCRATCH_PATH is set, but `{}` does not exist.\n\
-                 Buck2 is expected to materialize `web/out/` (e.g. via a filegroup).\n\
-                 Ensure the Buck2 rule exports the pre-built frontend into `web/out/` \
-                 before running this build.",
-                web_out_index.display()
-            );
+        // Under Buck2: if web/out/ was already materialized into the sandbox
+        // (because it existed in the source tree when the filegroup was
+        // analysed), there is nothing to do.
+        if web_dir.join("out").join("index.html").exists() {
+            return;
+        }
+
+        // web/out/ is absent (fresh clone or first build).
+        // CARGO_MANIFEST_DIR under Buck2 is a path inside buck-out/:
+        //   <project-root>/buck-out/…/__libra-build-script-run__/cwd
+        // Recover the real project root by truncating at "/buck-out/".
+        let project_web_dir: PathBuf = manifest_dir
+            .find("/buck-out/")
+            .map(|idx| Path::new(&manifest_dir[..idx]).join("web"))
+            .unwrap_or_else(|| web_dir.clone());
+
+        // Build the frontend in the real project source directory.
+        run_pnpm_build(&project_web_dir);
+
+        // Copy the freshly-built web/out/ into the sandbox so that
+        // rust-embed (which resolves #[folder = "web/out/"] relative to
+        // CARGO_MANIFEST_DIR) can embed the assets during this compilation.
+        if project_web_dir != web_dir {
+            let src = project_web_dir.join("out");
+            let dst = web_dir.join("out");
+            copy_dir_all(&src, &dst).unwrap_or_else(|err| {
+                panic!(
+                    "failed to copy `{}` → `{}`: {err}",
+                    src.display(),
+                    dst.display()
+                )
+            });
         }
         return;
     }
 
+    // Normal Cargo build: build the frontend directly inside web/.
+    run_pnpm_build(&web_dir);
+}
+
+/// Runs `pnpm install` (if needed) then `pnpm run build` inside `web_dir`.
+fn run_pnpm_build(web_dir: &Path) {
     // Install dependencies if node_modules is missing (e.g. fresh clone).
     if !web_dir.join("node_modules").exists() {
         let install = Command::new("pnpm")
             .arg("install")
             .arg("--frozen-lockfile")
-            .current_dir(&web_dir)
+            .current_dir(web_dir)
             .status()
             .expect("failed to execute `pnpm install` — is pnpm installed?");
 
@@ -62,11 +101,27 @@ fn main() {
     let status = Command::new("pnpm")
         .arg("run")
         .arg("build")
-        .current_dir(&web_dir)
+        .current_dir(web_dir)
         .status()
         .expect("failed to execute `pnpm run build` — is pnpm installed?");
 
     if !status.success() {
         panic!("frontend build failed (exit code {:?})", status.code());
     }
+}
+
+/// Recursively copies a directory tree from `src` to `dst`.
+fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let target = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_all(&entry.path(), &target)?;
+        } else {
+            fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
 }
