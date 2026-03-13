@@ -40,8 +40,7 @@ async fn set_local_hash_kind() -> CliResult<()> {
         "sha256" => HashKind::Sha256,
         _ => {
             return Err(CliError::fatal(format!(
-                "unsupported object format: '{}'",
-                object_format
+                "unsupported object format: '{object_format}'"
             )));
         }
     };
@@ -75,6 +74,8 @@ enum Commands {
     Clone(command::clone::CloneArgs),
     #[command(about = "Start Libra Code interactive TUI (with background web server)")]
     Code(command::code::CodeArgs),
+    #[command(about = "Connect to Codex app-server via WebSocket")]
+    AgentCodex(command::agent_codex::AgentCodexArgs),
     #[command(about = "Unified provider hook ingestion and setup")]
     Hooks(command::hooks::HooksCommand),
 
@@ -384,8 +385,7 @@ fn classify_parse_error(argv: &[String], err: &clap::Error) -> CliError {
     if let Some(cmd) = is_top_level_unknown_command(argv, err) {
         let (_, _, hints) = parse_error_components(err);
         let mut cli_error = CliError::unknown_command(format!(
-            "libra: '{}' is not a libra command. See 'libra --help'.",
-            cmd
+            "libra: '{cmd}' is not a libra command. See 'libra --help'."
         ));
         for hint in hints {
             cli_error = cli_error.with_hint(hint);
@@ -457,6 +457,9 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         }
         Commands::Clone(args) => command::clone::execute_safe(args).await?, //clone will use init internally,so we don't need to set hash kind here again
         Commands::Code(args) => command::code::execute(args).await,
+        Commands::AgentCodex(args) => command::agent_codex::execute(args)
+            .await
+            .map_err(|e| CliError::fatal(e.to_string()))?,
         Commands::Hooks(cmd) => command::hooks::execute(cmd)
             .await
             .map_err(|e| CliError::fatal(e.to_string()))?,
