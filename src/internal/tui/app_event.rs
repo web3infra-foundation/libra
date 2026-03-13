@@ -4,9 +4,14 @@
 //! Widgets emit events to request actions that must be handled at the app layer.
 
 use serde_json::Value;
+use uuid::Uuid;
 
 use super::history_cell::HistoryCell;
-use crate::internal::ai::{completion::Message, tools::ToolOutput};
+use crate::internal::ai::{
+    completion::Message,
+    orchestrator::types::{ExecutionPlanSpec, OrchestratorResult, TaskNodeStatus},
+    tools::ToolOutput,
+};
 
 /// Logical turn identifier for isolating async event streams.
 pub type TurnId = u64;
@@ -101,11 +106,29 @@ pub enum AppEvent {
         turn_id: TurnId,
         run_id: Option<String>,
     },
+    /// A compiled execution plan should be shown as a DAG in the transcript.
+    DagGraphBegin {
+        turn_id: TurnId,
+        plan: ExecutionPlanSpec,
+    },
+    /// A task node inside the DAG changed status.
+    DagTaskStatus {
+        turn_id: TurnId,
+        task_id: Uuid,
+        status: TaskNodeStatus,
+    },
+    /// DAG execution progress changed.
+    DagGraphProgress {
+        turn_id: TurnId,
+        completed: usize,
+        total: usize,
+    },
     /// Orchestrator workflow completed.
     ExecuteWorkflowComplete {
         turn_id: TurnId,
         text: String,
         new_history: Vec<Message>,
+        result: Option<Box<OrchestratorResult>>,
     },
 }
 
@@ -120,6 +143,9 @@ impl AppEvent {
             | AppEvent::ToolCallEnd { turn_id, .. }
             | AppEvent::AgentStatusUpdate { turn_id, .. }
             | AppEvent::McpTurnTrackingReady { turn_id, .. }
+            | AppEvent::DagGraphBegin { turn_id, .. }
+            | AppEvent::DagTaskStatus { turn_id, .. }
+            | AppEvent::DagGraphProgress { turn_id, .. }
             | AppEvent::ExecuteWorkflowComplete { turn_id, .. } => *turn_id,
         }
     }

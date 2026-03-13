@@ -27,8 +27,8 @@ use super::{
     chatwidget::ChatWidget,
     diff::FileChange,
     history_cell::{
-        AssistantHistoryCell, DiffHistoryCell, PlanUpdateHistoryCell, ToolCallHistoryCell,
-        UserHistoryCell,
+        AssistantHistoryCell, DagHistoryCell, DiffHistoryCell, HistoryCell,
+        OrchestratorResultHistoryCell, PlanUpdateHistoryCell, ToolCallHistoryCell, UserHistoryCell,
     },
     terminal::{TARGET_FRAME_INTERVAL, Tui, TuiEvent},
     welcome_shader::{self, WelcomeView},
@@ -1334,6 +1334,41 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 self.insert_before_streaming_assistant(cell);
                 self.schedule_draw();
             }
+            AppEvent::DagGraphBegin {
+                turn_id: _turn_id,
+                plan,
+            } => {
+                self.insert_before_streaming_assistant(Box::new(DagHistoryCell::new(plan)));
+                self.schedule_draw();
+            }
+            AppEvent::DagTaskStatus {
+                turn_id: _turn_id,
+                task_id,
+                status,
+            } => {
+                for cell in self.widget.cells.iter_mut().rev() {
+                    if let Some(dag_cell) = cell.as_any_mut().downcast_mut::<DagHistoryCell>()
+                        && dag_cell.contains_task(task_id)
+                    {
+                        dag_cell.update_task_status(task_id, status);
+                        break;
+                    }
+                }
+                self.schedule_draw();
+            }
+            AppEvent::DagGraphProgress {
+                turn_id: _turn_id,
+                completed,
+                total,
+            } => {
+                for cell in self.widget.cells.iter_mut().rev() {
+                    if let Some(dag_cell) = cell.as_any_mut().downcast_mut::<DagHistoryCell>() {
+                        dag_cell.update_progress(completed, total);
+                        break;
+                    }
+                }
+                self.schedule_draw();
+            }
             AppEvent::ToolCallBegin {
                 turn_id: _turn_id,
                 call_id,
@@ -1426,11 +1461,18 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 turn_id: _turn_id,
                 text,
                 new_history,
+                result,
             } => {
                 self.finish_turn_state();
                 self.history = new_history;
                 self.session.add_assistant_message(&text);
-                self.complete_streaming_assistant_cell(text);
+                if let Some(result) = result {
+                    self.replace_streaming_assistant_cell(Box::new(
+                        OrchestratorResultHistoryCell::new(*result),
+                    ));
+                } else {
+                    self.complete_streaming_assistant_cell(text);
+                }
                 self.set_idle_and_draw();
             }
         }
@@ -1670,13 +1712,6 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             }
 
             impl UiOrchestratorObserver {
-                fn send_note(&self, text: String) {
-                    let _ = self.tx.send(AppEvent::InsertHistoryCell {
-                        turn_id: self.turn_id,
-                        cell: Box::new(AssistantHistoryCell::new(text)),
-                    });
-                }
-
                 fn scoped_call_id(task: &TaskSpec, call_id: &str) -> String {
                     format!("{}:{call_id}", task.id())
                 }
@@ -1684,26 +1719,22 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
             impl OrchestratorObserver for UiOrchestratorObserver {
                 fn on_plan_compiled(&self, plan: &ExecutionPlanSpec) {
-                    self.send_note(format!(
-                        "Compiled execution plan rev {}: {}  \nTasks: {} | Parallel groups: {} | Checkpoints: {}",
-                        plan.revision,
-                        plan.summary_line(),
-                        plan.tasks.len(),
-                        plan.parallel_groups().len(),
-                        plan.checkpoints.len()
-                    ));
+                    let _ = self.tx.send(AppEvent::DagGraphBegin {
+                        turn_id: self.turn_id,
+                        plan: plan.clone(),
+                    });
                 }
 
                 fn on_task_started(&self, task: &TaskSpec) {
-                    let kind = match task.gate_stage {
-                        Some(ref stage) => format!("gate:{stage:?}"),
-                        None => "implementation".to_string(),
-                    };
                     let _ = self.tx.send(AppEvent::AgentStatusUpdate {
                         turn_id: self.turn_id,
                         status: AgentStatus::Thinking,
                     });
-                    self.send_note(format!("Starting [{kind}] {}", task.title()));
+                    let _ = self.tx.send(AppEvent::DagTaskStatus {
+                        turn_id: self.turn_id,
+                        task_id: task.id(),
+                        status: crate::internal::ai::orchestrator::types::TaskNodeStatus::Running,
+                    });
                 }
 
                 fn on_task_completed(
@@ -1711,23 +1742,14 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     task: &TaskSpec,
                     result: &crate::internal::ai::orchestrator::types::TaskResult,
                 ) {
-                    self.send_note(format!(
-                        "Finished {}  \nStatus: {:?} | Retries: {} | Tools: {} | Policy violations: {}",
-                        task.title(),
-                        result.status,
-                        result.retry_count,
-                        result.tool_calls.len(),
-                        result.policy_violations.len()
-                    ));
+                    let _ = self.tx.send(AppEvent::DagTaskStatus {
+                        turn_id: self.turn_id,
+                        task_id: task.id(),
+                        status: result.status.clone(),
+                    });
                 }
 
-                fn on_task_assistant_message(&self, task: &TaskSpec, text: &str) {
-                    let text = text.trim();
-                    if text.is_empty() {
-                        return;
-                    }
-                    self.send_note(format!("{}  \n{}", task.title(), text));
-                }
+                fn on_task_assistant_message(&self, _task: &TaskSpec, _text: &str) {}
 
                 fn on_tool_call_begin(
                     &self,
@@ -1759,79 +1781,43 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     });
                 }
 
-                fn on_reviewer_started(&self, task: &TaskSpec) {
-                    self.send_note(format!("Reviewer pass started for {}", task.title()));
-                }
+                fn on_reviewer_started(&self, _task: &TaskSpec) {}
 
                 fn on_reviewer_completed(
                     &self,
-                    task: &TaskSpec,
-                    review: Option<&crate::internal::ai::orchestrator::types::ReviewOutcome>,
+                    _task: &TaskSpec,
+                    _review: Option<&crate::internal::ai::orchestrator::types::ReviewOutcome>,
                 ) {
-                    let summary = review
-                        .map(|r| {
-                            format!(
-                                "{} | approved: {}",
-                                r.summary,
-                                if r.approved { "yes" } else { "no" }
-                            )
-                        })
-                        .unwrap_or_else(|| "no reviewer output".to_string());
-                    self.send_note(format!(
-                        "Reviewer pass finished for {}  \n{}",
-                        task.title(),
-                        summary
-                    ));
                 }
 
                 fn on_graph_progress(&self, completed: usize, total: usize) {
-                    if completed == total && total > 0 {
-                        self.send_note(format!(
-                            "dagrs graph finished: {completed}/{total} tasks reached terminal state"
-                        ));
-                    }
+                    let _ = self.tx.send(AppEvent::DagGraphProgress {
+                        turn_id: self.turn_id,
+                        completed,
+                        total,
+                    });
                 }
 
                 fn on_graph_checkpoint_saved(
                     &self,
-                    checkpoint_id: &str,
-                    pc: usize,
-                    completed_nodes: usize,
+                    _checkpoint_id: &str,
+                    _pc: usize,
+                    _completed_nodes: usize,
                 ) {
-                    self.send_note(format!(
-                        "dagrs checkpoint saved  \nid: {} | pc: {} | completed: {}",
-                        checkpoint_id, pc, completed_nodes
-                    ));
                 }
 
-                fn on_graph_checkpoint_restored(&self, checkpoint_id: &str, pc: usize) {
-                    self.send_note(format!(
-                        "dagrs checkpoint restored  \nid: {} | pc: {}",
-                        checkpoint_id, pc
-                    ));
-                }
+                fn on_graph_checkpoint_restored(&self, _checkpoint_id: &str, _pc: usize) {}
 
                 fn on_replan(
                     &self,
-                    current_revision: u32,
-                    next_revision: u32,
-                    reason: &str,
-                    diff_summary: &str,
+                    _current_revision: u32,
+                    _next_revision: u32,
+                    _reason: &str,
+                    _diff_summary: &str,
                 ) {
-                    self.send_note(format!(
-                        "Replan triggered  \nRevision {} -> {}  \nReason: {}  \n{}",
-                        current_revision, next_revision, reason, diff_summary
-                    ));
                 }
 
-                fn on_persistence_complete(&self, execution: &PersistedExecution) {
-                    self.send_note(format!(
-                        "Persisted execution  \nRun: {} | Plans: {} | Checkpoints: {}",
-                        execution.run_id,
-                        execution.plan_ids.len(),
-                        execution.checkpoints.len()
-                    ));
-                }
+                fn on_persistence_complete(&self, _execution: &PersistedExecution) {}
             }
 
             let observer: Arc<dyn OrchestratorObserver> = Arc::new(UiOrchestratorObserver {
@@ -1851,9 +1837,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
             let result = orchestrator.run(spec).await;
 
-            let summary = match &result {
-                Ok(r) => format_orchestrator_result(r),
-                Err(e) => format!("Orchestrator failed: {e}"),
+            let (summary, ui_result) = match &result {
+                Ok(r) => (format_orchestrator_result(r), Some(Box::new(r.clone()))),
+                Err(e) => (format!("Orchestrator failed: {e}"), None),
             };
 
             let mut new_history = history;
@@ -1863,6 +1849,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 turn_id,
                 text: summary,
                 new_history,
+                result: ui_result,
             });
         });
 
@@ -2378,6 +2365,20 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             .add_cell(Box::new(AssistantHistoryCell::new(content)));
     }
 
+    fn replace_streaming_assistant_cell(&mut self, replacement: Box<dyn HistoryCell>) {
+        for idx in (0..self.widget.cells.len()).rev() {
+            if let Some(assistant_cell) = self.widget.cells[idx]
+                .as_any()
+                .downcast_ref::<AssistantHistoryCell>()
+                && assistant_cell.is_streaming
+            {
+                self.widget.cells[idx] = replacement;
+                return;
+            }
+        }
+        self.widget.add_cell(replacement);
+    }
+
     fn complete_running_tool_cells_with_interrupt(&mut self) {
         for cell in self.widget.cells.iter_mut() {
             if let Some(tool_cell) = cell.as_any_mut().downcast_mut::<ToolCallHistoryCell>() {
@@ -2482,117 +2483,317 @@ fn append_to_last_tool_group_cell(
 fn format_orchestrator_result(
     result: &crate::internal::ai::orchestrator::types::OrchestratorResult,
 ) -> String {
-    use crate::internal::ai::orchestrator::types::{DecisionOutcome, TaskNodeStatus};
-
     let mut lines = Vec::new();
-    let decision_label = match result.decision {
-        DecisionOutcome::Commit => "Commit",
-        DecisionOutcome::HumanReviewRequired => "Human Review Required",
-        DecisionOutcome::Abandon => "Abandon",
-    };
-    lines.push(format!("## Orchestrator Result: {decision_label}"));
+    let decision_label = orchestrator_decision_label(&result.decision);
+    lines.push(format!("# Execution Result: {decision_label}"));
     lines.push(String::new());
+
+    lines.push("## Overview".to_string());
+    lines.push("| Field | Value |".to_string());
+    lines.push("| --- | --- |".to_string());
+    lines.push(format!("| Decision | {decision_label} |"));
     lines.push(format!(
-        "Plan: {} | Parallel groups: {} | Replans: {}",
-        result.execution_plan_spec.summary_line(),
-        result.execution_plan_spec.parallel_groups().len(),
-        result.replan_count
+        "| Revision | {} |",
+        result.execution_plan_spec.revision
+    ));
+    lines.push(format!(
+        "| Tasks | {} |",
+        result.execution_plan_spec.tasks.len()
+    ));
+    lines.push(format!(
+        "| Parallelism | {} |",
+        result.execution_plan_spec.max_parallel
+    ));
+    lines.push(format!(
+        "| Parallel groups | {} |",
+        result.execution_plan_spec.parallel_groups().len()
+    ));
+    lines.push(format!("| Replans | {} |", result.replan_count));
+    lines.push(format!(
+        "| Intent | `{}` |",
+        short_markdown_id(&result.intent_spec_id)
     ));
     if let Some(persistence) = &result.persistence {
         lines.push(format!(
-            "Persisted Run: {} | Decision: {} | Checkpoints: {} | Tasks with MCP artifacts: {}",
-            persistence.run_id,
-            persistence.decision_id.as_deref().unwrap_or("none"),
-            persistence.checkpoints.len(),
-            persistence.tasks.len()
+            "| Run | `{}` |",
+            short_markdown_id(&persistence.run_id)
         ));
-        if let Some(snapshot_id) = &persistence.initial_snapshot_id {
-            lines.push(format!("Initial Snapshot: {snapshot_id}"));
-        }
+        lines.push(format!("| Persisted tasks | {} |", persistence.tasks.len()));
+        lines.push(format!(
+            "| Checkpoints | {} |",
+            persistence.checkpoints.len()
+        ));
     }
     lines.push(String::new());
 
-    let task_titles: HashMap<_, _> = result
-        .execution_plan_spec
-        .tasks
-        .iter()
-        .map(|task| (task.id(), task.title()))
-        .collect();
+    lines.push("## Verification".to_string());
+    lines.push("| Check | Status | Notes |".to_string());
+    lines.push("| --- | --- | --- |".to_string());
+    lines.push(format!(
+        "| Integration | {} | {} |",
+        bool_label(result.system_report.integration.all_required_passed),
+        gate_report_summary(&result.system_report.integration)
+    ));
+    lines.push(format!(
+        "| Security | {} | {} |",
+        bool_label(result.system_report.security.all_required_passed),
+        gate_report_summary(&result.system_report.security)
+    ));
+    lines.push(format!(
+        "| Release | {} | {} |",
+        bool_label(result.system_report.release.all_required_passed),
+        gate_report_summary(&result.system_report.release)
+    ));
+    lines.push(format!(
+        "| Review | {} | {} |",
+        bool_label(result.system_report.review_passed),
+        if result.system_report.review_findings.is_empty() {
+            "No findings".to_string()
+        } else {
+            format!("{} findings", result.system_report.review_findings.len())
+        }
+    ));
+    lines.push(format!(
+        "| Artifacts | {} | {} |",
+        bool_label(result.system_report.artifacts_complete),
+        if result.system_report.missing_artifacts.is_empty() {
+            "Complete".to_string()
+        } else {
+            format!(
+                "Missing {}",
+                result.system_report.missing_artifacts.join(", ")
+            )
+        }
+    ));
 
-    for tr in &result.task_results {
-        let status_icon = match tr.status {
-            TaskNodeStatus::Completed => "✓",
-            TaskNodeStatus::Failed => "✗",
-            _ => "○",
-        };
-        let task_label = task_titles.get(&tr.task_id).copied().unwrap_or("unknown");
-        lines.push(format!(
-            "{} Task {} ({}) - {:?} (retries: {}, tools: {}, policy violations: {})",
-            status_icon,
-            tr.task_id,
-            task_label,
-            tr.status,
-            tr.retry_count,
-            tr.tool_calls.len(),
-            tr.policy_violations.len()
-        ));
-    }
-
-    if !result.system_report.overall_passed {
+    if !result.system_report.review_findings.is_empty() {
         lines.push(String::new());
-        lines.push("System verification: FAILED".to_string());
+        lines.push("### Review Findings".to_string());
+        for finding in &result.system_report.review_findings {
+            lines.push(format!("- {}", finding));
+        }
     }
-    if !result.system_report.review_passed {
-        lines.push(format!(
-            "Review findings: {}",
-            result.system_report.review_findings.join(" | ")
-        ));
+    if !result.system_report.missing_artifacts.is_empty() {
+        lines.push(String::new());
+        lines.push("### Missing Artifacts".to_string());
+        for artifact in &result.system_report.missing_artifacts {
+            lines.push(format!("- `{artifact}`"));
+        }
     }
-    if !result.system_report.artifacts_complete {
+
+    lines.push(String::new());
+    lines.push("## Tasks".to_string());
+    lines.push("| Task | Status | Retries | Tools | Violations |".to_string());
+    lines.push("| --- | --- | ---: | ---: | ---: |".to_string());
+    for (idx, task) in result.execution_plan_spec.tasks.iter().enumerate() {
+        let task_result = result
+            .task_results
+            .iter()
+            .find(|item| item.task_id == task.id());
+        let kind = match task.kind {
+            crate::internal::ai::orchestrator::types::TaskKind::Implementation => "I",
+            crate::internal::ai::orchestrator::types::TaskKind::Gate => "G",
+        };
+        let label = format!("{kind}{:02} {}", idx + 1, task.title());
+        let (status, retries, tools, violations) = if let Some(task_result) = task_result {
+            (
+                orchestrator_status_label(&task_result.status),
+                task_result.retry_count.to_string(),
+                task_result.tool_calls.len().to_string(),
+                task_result.policy_violations.len().to_string(),
+            )
+        } else {
+            ("pending", "0".to_string(), "0".to_string(), "0".to_string())
+        };
         lines.push(format!(
-            "Missing artifacts: {}",
-            result.system_report.missing_artifacts.join(", ")
+            "| {} | {} | {} | {} | {} |",
+            escape_markdown_cell(&label),
+            status,
+            retries,
+            tools,
+            violations
         ));
     }
 
     if let Some(persistence) = &result.persistence {
         lines.push(String::new());
-        lines.push("MCP Objects".to_string());
-        if let Some(provenance_id) = &persistence.provenance_id {
-            lines.push(format!("Provenance: {provenance_id}"));
-        }
-        for checkpoint in &persistence.checkpoints {
-            lines.push(format!(
-                "- Checkpoint rev {} | snapshot: {} | decision: {} | dagrs: {} | reason: {}",
-                checkpoint.revision,
-                checkpoint.snapshot_id.as_deref().unwrap_or("none"),
-                checkpoint.decision_id.as_deref().unwrap_or("none"),
-                checkpoint.dagrs_checkpoint_id.as_deref().unwrap_or("none"),
-                checkpoint.reason
-            ));
-        }
-        for task in &persistence.tasks {
-            lines.push(format!(
-                "- Task {} | tools: {} | patchset: {} | evidence: {}",
-                task.task_id,
-                task.tool_invocation_ids.len(),
-                task.patchset_id.as_deref().unwrap_or("none"),
-                task.evidence_ids.len()
-            ));
+        lines.push("## Persistence".to_string());
+        lines.push("| Object | Value |".to_string());
+        lines.push("| --- | --- |".to_string());
+        lines.push(format!(
+            "| Provenance | `{}` |",
+            persistence
+                .provenance_id
+                .as_deref()
+                .map(short_markdown_id)
+                .unwrap_or_else(|| "none".to_string())
+        ));
+        lines.push(format!(
+            "| Decision object | `{}` |",
+            persistence
+                .decision_id
+                .as_deref()
+                .map(short_markdown_id)
+                .unwrap_or_else(|| "none".to_string())
+        ));
+        lines.push(format!(
+            "| Initial snapshot | `{}` |",
+            persistence
+                .initial_snapshot_id
+                .as_deref()
+                .map(short_markdown_id)
+                .unwrap_or_else(|| "none".to_string())
+        ));
+        if !persistence.checkpoints.is_empty() {
+            lines.push(String::new());
+            lines.push("### Checkpoints".to_string());
+            lines.push("| Rev | Snapshot | Decision | Reason |".to_string());
+            lines.push("| --- | --- | --- | --- |".to_string());
+            for checkpoint in &persistence.checkpoints {
+                lines.push(format!(
+                    "| {} | `{}` | `{}` | {} |",
+                    checkpoint.revision,
+                    checkpoint
+                        .snapshot_id
+                        .as_deref()
+                        .map(short_markdown_id)
+                        .unwrap_or_else(|| "none".to_string()),
+                    checkpoint
+                        .decision_id
+                        .as_deref()
+                        .map(short_markdown_id)
+                        .unwrap_or_else(|| "none".to_string()),
+                    escape_markdown_cell(&checkpoint.reason)
+                ));
+            }
         }
     }
 
     lines.join("\n")
 }
 
+fn orchestrator_decision_label(
+    decision: &crate::internal::ai::orchestrator::types::DecisionOutcome,
+) -> &'static str {
+    match decision {
+        crate::internal::ai::orchestrator::types::DecisionOutcome::Commit => "Commit",
+        crate::internal::ai::orchestrator::types::DecisionOutcome::HumanReviewRequired => {
+            "Human Review Required"
+        }
+        crate::internal::ai::orchestrator::types::DecisionOutcome::Abandon => "Abandon",
+    }
+}
+
+fn orchestrator_status_label(
+    status: &crate::internal::ai::orchestrator::types::TaskNodeStatus,
+) -> &'static str {
+    match status {
+        crate::internal::ai::orchestrator::types::TaskNodeStatus::Pending => "pending",
+        crate::internal::ai::orchestrator::types::TaskNodeStatus::Running => "running",
+        crate::internal::ai::orchestrator::types::TaskNodeStatus::Completed => "done",
+        crate::internal::ai::orchestrator::types::TaskNodeStatus::Failed => "failed",
+        crate::internal::ai::orchestrator::types::TaskNodeStatus::Skipped => "skipped",
+    }
+}
+
+fn gate_report_summary(report: &crate::internal::ai::orchestrator::types::GateReport) -> String {
+    if report.results.is_empty() {
+        return "No checks".to_string();
+    }
+    let passed = report.results.iter().filter(|item| item.passed).count();
+    format!("{passed}/{} checks passed", report.results.len())
+}
+
+fn bool_label(value: bool) -> &'static str {
+    if value { "Pass" } else { "Fail" }
+}
+
+fn short_markdown_id(id: &str) -> String {
+    if id.len() <= 12 {
+        id.to_string()
+    } else {
+        format!("{}…", &id[..12])
+    }
+}
+
+fn escape_markdown_cell(text: &str) -> String {
+    text.replace('|', "\\|").replace('\n', " ")
+}
+
 #[cfg(test)]
 mod tests {
+    use git_internal::internal::object::{task::Task as GitTask, types::ActorRef};
     use serde_json::json;
 
-    use super::append_to_last_tool_group_cell;
-    use crate::internal::tui::history_cell::{
-        AssistantHistoryCell, HistoryCell, ToolCallHistoryCell,
+    use super::{append_to_last_tool_group_cell, format_orchestrator_result};
+    use crate::internal::{
+        ai::orchestrator::types::{
+            DecisionOutcome, ExecutionPlanSpec, GateReport, OrchestratorResult, SystemReport,
+            TaskContract, TaskKind, TaskNodeStatus, TaskResult, TaskSpec,
+        },
+        tui::history_cell::{AssistantHistoryCell, HistoryCell, ToolCallHistoryCell},
     };
+
+    fn make_task(title: &str, kind: TaskKind) -> TaskSpec {
+        let actor = ActorRef::agent("format-orchestrator-result").unwrap();
+        let task = GitTask::new(actor, title, None).unwrap();
+        TaskSpec {
+            step: git_internal::internal::object::plan::PlanStep::new(title),
+            task,
+            objective: title.to_string(),
+            kind,
+            gate_stage: None,
+            owner_role: None,
+            scope_in: vec![],
+            scope_out: vec![],
+            checks: vec![],
+            contract: TaskContract::default(),
+        }
+    }
+
+    fn orchestrator_fixture() -> OrchestratorResult {
+        let first = make_task("Inspect sources", TaskKind::Implementation);
+        let second = make_task("Run checks", TaskKind::Gate);
+        let plan = ExecutionPlanSpec {
+            intent_spec_id: "intent-1".into(),
+            revision: 4,
+            parent_revision: Some(3),
+            replan_reason: Some("task kept failing after retries".into()),
+            tasks: vec![first.clone(), second.clone()],
+            max_parallel: 1,
+            checkpoints: vec![],
+        };
+        OrchestratorResult {
+            decision: DecisionOutcome::Abandon,
+            execution_plan_spec: plan.clone(),
+            plan_revision_specs: vec![plan],
+            run_state: Default::default(),
+            task_results: vec![TaskResult {
+                task_id: first.id(),
+                status: TaskNodeStatus::Failed,
+                gate_report: None,
+                agent_output: None,
+                retry_count: 4,
+                tool_calls: vec![],
+                policy_violations: vec![],
+                review: None,
+            }],
+            system_report: SystemReport {
+                integration: GateReport::empty(),
+                security: GateReport::empty(),
+                release: GateReport::empty(),
+                review_passed: false,
+                review_findings: vec!["missing regression test".into()],
+                artifacts_complete: false,
+                missing_artifacts: vec!["patchset@per-task".into()],
+                overall_passed: false,
+            },
+            intent_spec_id: "019ce515-077c-7c12-8e90-755533e512e3".into(),
+            lifecycle_change_log: vec![],
+            replan_count: 3,
+            persistence: None,
+        }
+    }
 
     #[test]
     fn appends_to_last_matching_tool_group_before_streaming_cell() {
@@ -2638,6 +2839,18 @@ mod tests {
             "list_dir",
             json!({"dir_path":"src"}),
         ));
+    }
+
+    #[test]
+    fn orchestrator_result_markdown_uses_tables_and_sections() {
+        let rendered = format_orchestrator_result(&orchestrator_fixture());
+
+        assert!(rendered.contains("# Execution Result: Abandon"));
+        assert!(rendered.contains("## Overview"));
+        assert!(rendered.contains("| Field | Value |"));
+        assert!(rendered.contains("## Verification"));
+        assert!(rendered.contains("| Task | Status | Retries | Tools | Violations |"));
+        assert!(rendered.contains("### Missing Artifacts"));
     }
 }
 
