@@ -40,6 +40,11 @@ fn main() {
     println!("cargo:rerun-if-changed=web/tsconfig.json");
     println!("cargo:rerun-if-changed=web/tailwind.config.ts");
 
+    if should_skip_web_build() {
+        ensure_stub_web_out(&web_dir);
+        return;
+    }
+
     if env::var_os("BUCK_SCRATCH_PATH").is_some() {
         // Under Buck2: if web/out/ was already materialized into the sandbox
         // (because it existed in the source tree when the filegroup was
@@ -79,6 +84,37 @@ fn main() {
 
     // Normal Cargo build: build the frontend directly inside web/.
     run_pnpm_build(&web_dir);
+}
+
+fn should_skip_web_build() -> bool {
+    match env::var("LIBRA_SKIP_WEB_BUILD") {
+        Ok(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
+    }
+}
+
+fn ensure_stub_web_out(web_dir: &Path) {
+    let out_dir = web_dir.join("out");
+    if let Err(err) = fs::create_dir_all(&out_dir) {
+        panic!(
+            "failed to create fallback frontend output directory `{}`: {err}",
+            out_dir.display()
+        );
+    }
+
+    let index_html = out_dir.join("index.html");
+    if !index_html.exists() {
+        let fallback = "<!doctype html><html><body>libra web build skipped</body></html>";
+        if let Err(err) = fs::write(&index_html, fallback.as_bytes()) {
+            panic!(
+                "failed to write fallback frontend file `{}`: {err}",
+                index_html.display()
+            );
+        }
+    }
 }
 
 /// Runs `pnpm install` (if needed) then `pnpm run build` inside `web_dir`.
