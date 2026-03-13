@@ -151,7 +151,7 @@ mod tests {
         ResolveContext,
         draft::{DraftAcceptance, DraftCheck, DraftIntent, DraftRisk, IntentDraft},
         resolve_intentspec,
-        types::{ChangeType, CheckKind, RiskLevel},
+        types::{ChangeType, CheckKind, Objective, ObjectiveKind, RiskLevel},
         validate_intentspec,
     };
 
@@ -162,7 +162,10 @@ mod tests {
                 summary: "Compile hello world".to_string(),
                 problem_statement: "Ensure hello-world compiles".to_string(),
                 change_type: ChangeType::Feature,
-                objectives: vec!["hello-world builds".to_string()],
+                objectives: vec![Objective {
+                    title: "hello-world builds".to_string(),
+                    kind: ObjectiveKind::Implementation,
+                }],
                 in_scope: vec!["hello-world/".to_string()],
                 out_of_scope: vec![],
                 touch_hints: None,

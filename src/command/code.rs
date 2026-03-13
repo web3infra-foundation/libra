@@ -413,7 +413,6 @@ async fn run_tui_with_model<M>(
     let config = crate::internal::ai::agent::ToolLoopConfig {
         preamble: Some(params.preamble),
         temperature: params.temperature,
-        max_steps: None, // TUI mode: unlimited tool steps
         hook_runner,
         allowed_tools: None,
     };

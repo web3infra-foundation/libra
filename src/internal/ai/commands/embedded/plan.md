@@ -1,12 +1,12 @@
 ---
 name: plan
-description: Create a structured implementation plan before coding.
+description: Create a structured execution plan before coding.
 agent: planner
 ---
 
 ## /plan $ARGUMENTS
 
-Analyze the following request and create a structured implementation plan.
+Analyze the following request and create a structured execution plan.
 
 **Request:** $ARGUMENTS
 
@@ -30,6 +30,10 @@ Analyze the following request and create a structured implementation plan.
    - Each step should be specific and actionable
    - Include which files to modify/create
    - Note expected test changes
+   - Use `intent.objectives` as the task decomposition source
+   - Each objective must be an object with `title` and `kind`
+   - Use `kind=analysis` for read-only diagnosis, auditing, verification, and research
+   - Use `kind=implementation` only for tasks expected to modify code or produce patchsets
 
 5. **Present Plan and Wait**
 

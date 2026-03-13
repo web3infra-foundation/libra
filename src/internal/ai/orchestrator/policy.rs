@@ -339,7 +339,10 @@ mod tests {
                 summary: "summary".into(),
                 problem_statement: "problem".into(),
                 change_type: crate::internal::ai::intentspec::types::ChangeType::Feature,
-                objectives: vec!["obj".into()],
+                objectives: vec![crate::internal::ai::intentspec::types::Objective {
+                    title: "obj".into(),
+                    kind: crate::internal::ai::intentspec::types::ObjectiveKind::Implementation,
+                }],
                 in_scope: vec!["src/".into()],
                 out_of_scope: vec!["vendor/".into()],
                 touch_hints: Some(TouchHints {

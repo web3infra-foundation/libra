@@ -55,6 +55,7 @@ pub fn build_git_task(intent_id: Option<Uuid>, task: &TaskSpec) -> Result<GitTas
     let goal = task.task.goal().cloned().or(Some(match task.kind {
         TaskKind::Gate => GoalType::Test,
         TaskKind::Implementation => GoalType::Other("implementation".to_string()),
+        TaskKind::Analysis => GoalType::Other("analysis".to_string()),
     }));
 
     let mut git_task = GitTask::new(actor, task.title().to_string(), goal)

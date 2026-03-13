@@ -93,7 +93,7 @@ pub struct Intent {
     pub problem_statement: String,
     #[serde(rename = "changeType")]
     pub change_type: ChangeType,
-    pub objectives: Vec<String>,
+    pub objectives: Vec<Objective>,
     #[serde(rename = "inScope")]
     pub in_scope: Vec<String>,
     #[serde(rename = "outOfScope", default)]
@@ -104,6 +104,18 @@ pub struct Intent {
         skip_serializing_if = "Option::is_none"
     )]
     pub touch_hints: Option<TouchHints>,
+}
+
+impl Intent {
+    pub fn has_implementation_objectives(&self) -> bool {
+        self.objectives
+            .iter()
+            .any(|objective| objective.kind == ObjectiveKind::Implementation)
+    }
+
+    pub fn is_analysis_only(&self) -> bool {
+        !self.objectives.is_empty() && !self.has_implementation_objectives()
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -117,6 +129,20 @@ pub enum ChangeType {
     Docs,
     Chore,
     Unknown,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Objective {
+    pub title: String,
+    #[serde(rename = "kind")]
+    pub kind: ObjectiveKind,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ObjectiveKind {
+    Implementation,
+    Analysis,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

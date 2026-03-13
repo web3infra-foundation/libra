@@ -1556,9 +1556,18 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 }
 
                 fn on_task_started(&self, task: &TaskSpec) {
-                    let kind = match task.gate_stage {
-                        Some(ref stage) => format!("gate:{stage:?}"),
-                        None => "implementation".to_string(),
+                    let kind = match (&task.gate_stage, &task.kind) {
+                        (Some(stage), _) => format!("gate:{stage:?}"),
+                        (
+                            None,
+                            crate::internal::ai::orchestrator::types::TaskKind::Implementation,
+                        ) => "implementation".to_string(),
+                        (None, crate::internal::ai::orchestrator::types::TaskKind::Analysis) => {
+                            "analysis".to_string()
+                        }
+                        (None, crate::internal::ai::orchestrator::types::TaskKind::Gate) => {
+                            "gate".to_string()
+                        }
                     };
                     let _ = self.tx.send(AppEvent::AgentStatusUpdate {
                         turn_id: self.turn_id,
@@ -1572,14 +1581,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     task: &TaskSpec,
                     result: &crate::internal::ai::orchestrator::types::TaskResult,
                 ) {
-                    self.send_note(format!(
-                        "Finished {}  \nStatus: {:?} | Retries: {} | Tools: {} | Policy violations: {}",
-                        task.title(),
-                        result.status,
-                        result.retry_count,
-                        result.tool_calls.len(),
-                        result.policy_violations.len()
-                    ));
+                    self.send_note(format_task_completion_note(task.title(), result));
                 }
 
                 fn on_task_assistant_message(&self, task: &TaskSpec, text: &str) {
@@ -2495,9 +2497,15 @@ fn render_execution_plan_summary(plan: &ExecutionPlanSpec, plan_id: Option<&str>
     lines.push(String::new());
 
     for task in &plan.tasks {
-        let kind = match &task.gate_stage {
-            Some(stage) => format!("gate:{stage:?}"),
-            None => "implementation".to_string(),
+        let kind = match (&task.gate_stage, &task.kind) {
+            (Some(stage), _) => format!("gate:{stage:?}"),
+            (None, crate::internal::ai::orchestrator::types::TaskKind::Implementation) => {
+                "implementation".to_string()
+            }
+            (None, crate::internal::ai::orchestrator::types::TaskKind::Analysis) => {
+                "analysis".to_string()
+            }
+            (None, crate::internal::ai::orchestrator::types::TaskKind::Gate) => "gate".to_string(),
         };
         lines.push(format!("- [{}] {}", kind.to_lowercase(), task.title()));
         if !task.contract.touch_files.is_empty() {
@@ -2793,6 +2801,43 @@ fn summarize_turn_task_title(text: &str) -> String {
     format!("TUI: {title}")
 }
 
+fn format_task_completion_note(
+    title: &str,
+    result: &crate::internal::ai::orchestrator::types::TaskResult,
+) -> String {
+    let mut note = format!(
+        "Finished {}  \nStatus: {:?} | Retries: {} | Tools: {} | Policy violations: {}",
+        title,
+        result.status,
+        result.retry_count,
+        result.tool_calls.len(),
+        result.policy_violations.len()
+    );
+
+    if let Some(review) = result.review.as_ref() {
+        note.push_str(&format!(
+            "  \nReview: {} | approved: {}",
+            review.summary,
+            if review.approved { "yes" } else { "no" }
+        ));
+        if !review.issues.is_empty() {
+            note.push_str(&format!("  \nIssues: {}", review.issues.join("; ")));
+        }
+    } else if matches!(
+        result.status,
+        crate::internal::ai::orchestrator::types::TaskNodeStatus::Failed
+    ) && let Some(reason) = result
+        .agent_output
+        .as_deref()
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+    {
+        note.push_str(&format!("  \nReason: {}", reason));
+    }
+
+    note
+}
+
 async fn list_intent_object_ids(mcp: &Arc<LibraMcpServer>) -> Vec<String> {
     let mut ids = Vec::new();
     let resources = match mcp.read_resource_impl("libra://objects/intent").await {
@@ -2844,5 +2889,56 @@ fn extract_content_field(value: &serde_json::Value) -> Option<String> {
         }
         serde_json::Value::Array(items) => items.iter().find_map(extract_content_field),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use uuid::Uuid;
+
+    use super::format_task_completion_note;
+    use crate::internal::ai::orchestrator::types::{ReviewOutcome, TaskNodeStatus, TaskResult};
+
+    #[test]
+    fn failed_task_note_includes_review_summary() {
+        let note = format_task_completion_note(
+            "Analyze requested scope",
+            &TaskResult {
+                task_id: Uuid::new_v4(),
+                status: TaskNodeStatus::Failed,
+                gate_report: None,
+                agent_output: Some("partial analysis".into()),
+                retry_count: 4,
+                tool_calls: vec![],
+                policy_violations: vec![],
+                review: Some(ReviewOutcome {
+                    approved: false,
+                    summary: "response is incomplete".into(),
+                    issues: vec!["missing final diagnosis".into()],
+                }),
+            },
+        );
+
+        assert!(note.contains("Review: response is incomplete | approved: no"));
+        assert!(note.contains("Issues: missing final diagnosis"));
+    }
+
+    #[test]
+    fn failed_task_note_falls_back_to_failure_reason_when_review_is_missing() {
+        let note = format_task_completion_note(
+            "Analyze requested scope",
+            &TaskResult {
+                task_id: Uuid::new_v4(),
+                status: TaskNodeStatus::Failed,
+                gate_report: None,
+                agent_output: Some("reviewer pass failed: invalid reviewer JSON".into()),
+                retry_count: 4,
+                tool_calls: vec![],
+                policy_violations: vec![],
+                review: None,
+            },
+        );
+
+        assert!(note.contains("Reason: reviewer pass failed: invalid reviewer JSON"));
     }
 }

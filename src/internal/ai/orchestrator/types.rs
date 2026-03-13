@@ -46,6 +46,7 @@ pub enum TaskNodeStatus {
 #[serde(rename_all = "camelCase")]
 pub enum TaskKind {
     Implementation,
+    Analysis,
     Gate,
 }
 

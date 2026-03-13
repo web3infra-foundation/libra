@@ -349,7 +349,6 @@ async fn run_reviewer_pass<M: CompletionModel>(
     let review_config = ToolLoopConfig {
         preamble: Some(reviewer_preamble),
         allowed_tools: Some(allowed_tools),
-        max_steps: Some(6),
         ..config.tool_loop_config.clone()
     };
 
@@ -734,7 +733,11 @@ fn build_task_prompt(task: &TaskSpec, working_dir: &Path, allowed_tools: &[Strin
     }
 
     if !task.scope_in.is_empty() {
-        parts.push(format!("## Write Scope\n{}", task.scope_in.join(", ")));
+        let heading = match task.kind {
+            TaskKind::Analysis => "## Focus Scope",
+            _ => "## Write Scope",
+        };
+        parts.push(format!("{heading}\n{}", task.scope_in.join(", ")));
     }
 
     if !task.scope_out.is_empty() {
@@ -762,6 +765,13 @@ fn build_task_prompt(task: &TaskSpec, working_dir: &Path, allowed_tools: &[Strin
                 .collect::<Vec<_>>()
                 .join("\n")
         ));
+    }
+
+    if task.kind == TaskKind::Analysis {
+        parts.push(
+            "## Analysis Mode\nDo not modify repository files. Use read-only exploration and, if shell is allowed, only non-mutating inspection or verification commands."
+                .to_string(),
+        );
     }
 
     parts.join("\n\n")
@@ -824,7 +834,7 @@ fn allowed_tools_for_task(spec: &IntentSpec, task: &TaskSpec) -> Vec<String> {
         tools.push("apply_patch".to_string());
     }
 
-    if task.kind == TaskKind::Implementation
+    if matches!(task.kind, TaskKind::Implementation | TaskKind::Analysis)
         && acl_allows(&spec.security.tool_acl, "shell", "execute")
     {
         tools.push("shell".to_string());
@@ -999,7 +1009,10 @@ mod tests {
                 summary: "summary".into(),
                 problem_statement: "problem".into(),
                 change_type: ChangeType::Feature,
-                objectives: vec!["do thing".into()],
+                objectives: vec![Objective {
+                    title: "do thing".into(),
+                    kind: ObjectiveKind::Implementation,
+                }],
                 in_scope: vec!["src/".into()],
                 out_of_scope: vec![],
                 touch_hints: None,
@@ -1140,6 +1153,14 @@ mod tests {
         }
     }
 
+    fn analysis_task() -> TaskSpec {
+        TaskSpec {
+            kind: TaskKind::Analysis,
+            owner_role: Some("analyst".into()),
+            ..implementation_task()
+        }
+    }
+
     fn plan_for_tasks(tasks: Vec<TaskSpec>, max_parallel: u8) -> ExecutionPlanSpec {
         ExecutionPlanSpec {
             intent_spec_id: "test".into(),
@@ -1217,6 +1238,16 @@ mod tests {
         assert!(tools.contains(&"read_file".to_string()));
         assert!(tools.contains(&"apply_patch".to_string()));
         assert!(!tools.contains(&"shell".to_string()));
+    }
+
+    #[test]
+    fn analysis_tasks_do_not_get_apply_patch() {
+        let task = analysis_task();
+        let mut spec = (*spec()).clone();
+        spec.security = profiles::default_security();
+        let tools = allowed_tools_for_task(&spec, &task);
+        assert!(tools.contains(&"read_file".to_string()));
+        assert!(!tools.contains(&"apply_patch".to_string()));
     }
 
     #[tokio::test]

@@ -68,7 +68,7 @@ mod tests {
                         "summary": "Fix bug",
                         "problemStatement": "A bug exists",
                         "changeType": "bugfix",
-                        "objectives": ["fix it"],
+                        "objectives": [{"title": "fix it", "kind": "implementation"}],
                         "inScope": ["src/main.rs"],
                         "outOfScope": []
                     },

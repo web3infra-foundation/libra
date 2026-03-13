@@ -188,7 +188,20 @@ impl ToolSpec {
                                                 "type": "string",
                                                 "enum": ["bugfix","feature","refactor","performance","security","docs","chore","unknown"]
                                             },
-                                            "objectives": {"type": "array", "items": {"type": "string"}},
+                                            "objectives": {
+                                                "type": "array",
+                                                "items": {
+                                                    "type": "object",
+                                                    "required": ["title", "kind"],
+                                                    "properties": {
+                                                        "title": {"type": "string"},
+                                                        "kind": {
+                                                            "type": "string",
+                                                            "enum": ["implementation", "analysis"]
+                                                        }
+                                                    }
+                                                }
+                                            },
                                             "inScope": {"type": "array", "items": {"type": "string"}},
                                             "outOfScope": {"type": "array", "items": {"type": "string"}},
                                             "touchHints": {

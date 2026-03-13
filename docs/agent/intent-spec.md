@@ -1,5 +1,11 @@
 # IntentSpec Design
 
+> Local implementation note (2026-03-13)
+>
+> Libra currently accepts structured objectives in `intent.objectives[]`,
+> where each objective is `{ title, kind }` and `kind` is one of
+> `implementation` or `analysis`.
+
 **Version:** 1.0.0  
 **Spec foundations:** JSON Schema Draft 2020-12 · NIST SSDF · SLSA v1.0 · OWASP LLM Top 10 (2025)  
 **Execution layer:** Libra AI Object Model (`git-internal`)
@@ -21,7 +27,7 @@
 
 ## 1. Design Philosophy & Architecture Layers
 
-IntentSpec is a **machine-readable intent contract**. It transforms a natural-language request into a structured, verifiable input that an orchestrator can schedule, gate, and audit. It is not a prompt — it is a contract carrying:
+IntentSpec is a **machine-readable intent contract**. It transforms a natural-language request into a structured, verifiable input that a Scheduler can schedule, gate, and audit. It is not a prompt — it is a contract carrying:
 
 - **Intent** — what to do, what not to do, and what an acceptable outcome looks like
 - **Constraints** — hard boundaries around security, privacy, licensing, and resources
@@ -41,6 +47,10 @@ Libra: Intent → Plan → Task DAG → Run → PatchSet → Evidence → Decisi
 git commit + SBOM + attestation + Rekor proof
 ```
 
+In this document, the preferred runtime term is **Scheduler**. Existing
+schema and compatibility fields such as `orchestratorActorId` remain in
+place as legacy names until an explicit migration is introduced.
+
 ### Standard Alignment
 
 | Standard | How IntentSpec uses it |
@@ -58,7 +68,7 @@ git commit + SBOM + attestation + Rekor proof
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:libra:intentspec:v1",
   "title": "IntentSpec (Libra Edition)",
-  "description": "Machine-readable AI code-change intent contract. Drives the orchestrator to produce a Task DAG, execute verification gates, and bind provenance artifacts.",
+  "description": "Machine-readable AI code-change intent contract. Drives the Scheduler to produce a Task DAG, execute verification gates, and bind provenance artifacts.",
   "type": "object",
   "required": [
     "apiVersion", "kind", "metadata", "intent", "acceptance",
@@ -69,7 +79,7 @@ git commit + SBOM + attestation + Rekor proof
   "properties": {
     "apiVersion": {
       "type": "string",
-      "description": "IntentSpec API version, controls orchestrator compatibility routing. Bump the major version on breaking changes (v1→v2). Decoupled from lifecycle.schemaVersion: apiVersion routes, schemaVersion governs field evolution.",
+      "description": "IntentSpec API version, controls Scheduler compatibility routing. Bump the major version on breaking changes (v1→v2). Decoupled from lifecycle.schemaVersion: apiVersion routes, schemaVersion governs field evolution.",
       "pattern": "^intentspec\\.io/v[0-9]+(alpha[0-9]+|beta[0-9]+)?$",
       "default": "intentspec.io/v1alpha1"
     },
@@ -138,7 +148,7 @@ git commit + SBOM + attestation + Rekor proof
         },
         "target": {
           "type": "object",
-          "description": "Target repository and baseline. The orchestrator clones via repo.locator and resolves baseRef to a commit SHA written to Libra Run.commit.",
+          "description": "Target repository and baseline. The Scheduler clones via repo.locator and resolves baseRef to a commit SHA written to Libra Run.commit.",
           "required": ["repo", "baseRef"],
           "additionalProperties": false,
           "properties": {
@@ -172,7 +182,7 @@ git commit + SBOM + attestation + Rekor proof
 
     "Intent": {
       "type": "object",
-      "description": "Structured expression of user intent. The orchestrator derives the Task DAG from this field and enforces scope-creep detection throughout execution. Maps to Libra Intent.prompt/content.",
+      "description": "Structured expression of user intent. The Scheduler derives the Task DAG from this field and enforces scope-creep detection throughout execution. Maps to Libra Intent.prompt/content.",
       "required": ["summary", "problemStatement", "changeType", "objectives", "inScope", "outOfScope"],
       "additionalProperties": false,
       "properties": {
@@ -197,7 +207,7 @@ git commit + SBOM + attestation + Rekor proof
         },
         "inScope": {
           "type": "array", "minItems": 1,
-          "description": "Scope of allowed changes. Written to Libra Task.constraints (prefix 'in-scope:'). The orchestrator checks ToolInvocation io_footprint.paths_written against this list; violations trigger scope-creep replan or rejection.",
+          "description": "Scope of allowed changes. Written to Libra Task.constraints (prefix 'in-scope:'). The Scheduler checks ToolInvocation io_footprint.paths_written against this list; violations trigger scope-creep replan or rejection.",
           "items": { "type": "string", "minLength": 1, "maxLength": 2000 }
         },
         "outOfScope": {
@@ -207,17 +217,17 @@ git commit + SBOM + attestation + Rekor proof
         },
         "touchHints": {
           "type": "object",
-          "description": "Hints for touch-point localisation. files/symbols/apis are used by the orchestrator to perform static repository searches (ripgrep/ctags/LSP) and generate Libra ContextSnapshot.items[].",
+          "description": "Hints for touch-point localisation. files/symbols/apis are used by the Scheduler to perform static repository searches (ripgrep/ctags/LSP) and generate Libra ContextSnapshot.items[].",
           "additionalProperties": false, "default": {},
           "properties": {
             "files":   { "type": "array", "default": [],
                          "description": "File glob patterns (e.g. 'src/auth/**'). Matched files become ContextItem(File) entries; their blob hashes are used for SLSA resolvedDependencies.",
                          "items": { "type": "string", "minLength": 1, "maxLength": 512 } },
             "symbols": { "type": "array", "default": [],
-                         "description": "Code symbol names (functions, classes, methods). The orchestrator locates definitions/references via ctags/LSP and creates ContextItem(Snippet) frames.",
+                         "description": "Code symbol names (functions, classes, methods). The Scheduler locates definitions/references via ctags/LSP and creates ContextItem(Snippet) frames.",
                          "items": { "type": "string", "minLength": 1, "maxLength": 256 } },
             "apis":    { "type": "array", "default": [],
-                         "description": "API endpoint paths (e.g. '/v2/report'). The orchestrator looks up OpenAPI spec files and creates ContextItem(Url) frames, domain-checking against allowedDomains.",
+                         "description": "API endpoint paths (e.g. '/v2/report'). The Scheduler looks up OpenAPI spec files and creates ContextItem(Url) frames, domain-checking against allowedDomains.",
                          "items": { "type": "string", "minLength": 1, "maxLength": 512 } }
           }
         }
@@ -283,11 +293,11 @@ git commit + SBOM + attestation + Rekor proof
         "kind":    { "type": "string", "enum": ["command", "testSuite", "policy"], "default": "command",
                      "description": "Check type. command=run shell command and check exit code; testSuite=run test framework and parse results; policy=OPA/Rego rule or human-approval gate." },
         "command": { "type": "string", "minLength": 1, "maxLength": 2000,
-                     "description": "Command string. The orchestrator validates against security.toolAcl.allow before creating a ToolInvocation. $ENV_VAR references are resolved by the orchestrator, not read from the IntentSpec." },
+                     "description": "Command string. The Scheduler validates against security.toolAcl.allow before creating a ToolInvocation. $ENV_VAR references are resolved by the Scheduler, not read from the IntentSpec." },
         "timeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 86400, "default": 900,
                             "description": "Timeout in seconds. Exceeded → gate fail. Recommended: fastChecks<600, integrationChecks<3600, securityChecks<7200." },
         "expectedExitCode": { "type": "integer", "minimum": 0, "maximum": 255, "default": 0,
-                              "description": "Expected process exit code. The orchestrator compares Evidence.exit_code to this value." },
+                              "description": "Expected process exit code. The Scheduler compares Evidence.exit_code to this value." },
         "required": { "type": "boolean", "default": true,
                       "description": "true=failure fails the entire gate stage; false=failure is reported but does not block." },
         "artifactsProduced": {
@@ -311,7 +321,7 @@ git commit + SBOM + attestation + Rekor proof
           "properties": {
             "networkPolicy": {
               "type": "string", "enum": ["deny", "allow"], "default": "deny",
-              "description": "Network access policy. deny (default) = the orchestrator rejects any ToolInvocation involving external network access (curl, wget, direct npm install, etc.) unless explicitly white-listed in toolAcl with a stated reason."
+              "description": "Network access policy. deny (default) = the Scheduler rejects any ToolInvocation involving external network access (curl, wget, direct npm install, etc.) unless explicitly white-listed in toolAcl with a stated reason."
             },
             "dependencyPolicy": {
               "type": "string", "enum": ["no-new", "allow-with-review", "allow"], "default": "allow-with-review",
@@ -332,11 +342,11 @@ git commit + SBOM + attestation + Rekor proof
               "type": "array",
               "items": { "type": "string", "enum": ["public", "internal", "confidential", "pii", "phi", "secrets"] },
               "default": ["public"],
-              "description": "Allowed data classification levels during code generation, evidence collection, and logging. The orchestrator filters ContextSnapshot items and redacts any content exceeding these classes."
+              "description": "Allowed data classification levels during code generation, evidence collection, and logging. The Scheduler filters ContextSnapshot items and redacts any content exceeding these classes."
             },
             "redactionRequired": {
               "type": "boolean", "default": true,
-              "description": "true = the orchestrator applies a redaction pipeline before writing any ArtifactRef content."
+              "description": "true = the Scheduler applies a redaction pipeline before writing any ArtifactRef content."
             },
             "retentionDays": {
               "type": "integer", "minimum": 0, "maximum": 3650, "default": 30,
@@ -372,7 +382,7 @@ git commit + SBOM + attestation + Rekor proof
         },
         "resources": {
           "type": "object", "additionalProperties": false, "default": {},
-          "description": "Resource budget — both a cost control and a security control against Unbounded Consumption. The orchestrator must actively enforce these fields.",
+      "description": "Resource budget — both a cost control and a security control against Unbounded Consumption. The Scheduler must actively enforce these fields.",
           "properties": {
             "maxWallClockSeconds": {
               "type": "integer", "minimum": 1, "maximum": 604800, "default": 14400,
@@ -389,13 +399,13 @@ git commit + SBOM + attestation + Rekor proof
 
     "Risk": {
       "type": "object",
-      "description": "Risk classification and human-approval policy. risk.level is not just a label — it drives orchestrator behaviour. The orchestrator validates the consistency of level with humanInLoop in the semantic-validation step.",
+      "description": "Risk classification and human-approval policy. risk.level is not just a label — it drives Scheduler behaviour. The Scheduler validates the consistency of level with humanInLoop in the semantic-validation step.",
       "required": ["level", "rationale", "humanInLoop"],
       "additionalProperties": false,
       "properties": {
         "level": {
           "type": "string", "enum": ["low", "medium", "high"], "default": "medium",
-          "description": "Risk level. low=input validation, docs, side-effect-free chores; medium=new features, refactors, data-path changes; high=security fixes, auth/authz changes, crypto, release-blocking defects. Orchestrator rule: high requires humanInLoop.required=true and minApprovers>=2."
+          "description": "Risk level. low=input validation, docs, side-effect-free chores; medium=new features, refactors, data-path changes; high=security fixes, auth/authz changes, crypto, release-blocking defects. Scheduler rule: high requires humanInLoop.required=true and minApprovers>=2."
         },
         "rationale": {
           "type": "string", "minLength": 5, "maxLength": 4000,
@@ -403,7 +413,7 @@ git commit + SBOM + attestation + Rekor proof
         },
         "factors": {
           "type": "array", "default": [],
-          "description": "Specific risk factor tags (e.g. [\"authz\", \"cve\", \"release-blocking\"]). Orchestrators may use these to auto-configure additional checks.",
+          "description": "Specific risk factor tags (e.g. [\"authz\", \"cve\", \"release-blocking\"]). Schedulers may use these to auto-configure additional checks.",
           "items": { "type": "string", "maxLength": 256 }
         },
         "humanInLoop": {
@@ -413,7 +423,7 @@ git commit + SBOM + attestation + Rekor proof
           "properties": {
             "required": {
               "type": "boolean", "default": false,
-              "description": "true = the orchestrator must await a human-approval signal (PR approval, change-order approval, etc.) before Decision.Commit."
+              "description": "true = the Scheduler must await a human-approval signal (PR approval, change-order approval, etc.) before Decision.Commit."
             },
             "minApprovers": {
               "type": "integer", "minimum": 0, "maximum": 10, "default": 0,
@@ -426,7 +436,7 @@ git commit + SBOM + attestation + Rekor proof
 
     "EvidencePolicy": {
       "type": "object",
-      "description": "Evidence sourcing and trust policy. Controls where the orchestrator fetches information (repository, official docs, internet) and how much each source is trusted. The first line of defence against prompt injection: restricts external content to a controlled boundary.",
+      "description": "Evidence sourcing and trust policy. Controls where the Scheduler fetches information (repository, official docs, internet) and how much each source is trusted. The first line of defence against prompt injection: restricts external content to a controlled boundary.",
       "required": ["strategy", "trustTiers", "domainAllowlistMode"],
       "additionalProperties": false,
       "properties": {
@@ -438,7 +448,7 @@ git commit + SBOM + attestation + Rekor proof
           "type": "array", "minItems": 1,
           "items": { "type": "string", "enum": ["repo", "vendor-doc", "standards", "web", "user-provided"] },
           "default": ["repo", "standards", "vendor-doc"],
-          "description": "Allowed evidence trust tiers (descending priority). The orchestrator checks source trust tier when enqueuing ContextItems and tags each with tags[\"trust_tier\"]."
+          "description": "Allowed evidence trust tiers (descending priority). The Scheduler checks source trust tier when enqueuing ContextItems and tags each with tags[\"trust_tier\"]."
         },
         "domainAllowlistMode": {
           "type": "string", "enum": ["disabled", "allowlist-only"], "default": "allowlist-only",
@@ -473,7 +483,7 @@ git commit + SBOM + attestation + Rekor proof
           "type": "object",
           "required": ["allow"],
           "additionalProperties": false,
-          "description": "Tool Access Control List. The orchestrator checks ACL before creating each ToolInvocation: deny rules first (deny takes priority), then allow rules. Any tool call not in the allow list is rejected.",
+          "description": "Tool Access Control List. The Scheduler checks ACL before creating each ToolInvocation: deny rules first (deny takes priority), then allow rules. Any tool call not in the allow list is rejected.",
           "properties": {
             "allow": {
               "type": "array", "minItems": 1,
@@ -518,7 +528,7 @@ git commit + SBOM + attestation + Rekor proof
             },
             "enforceOutputSchema": {
               "type": "boolean", "default": true,
-              "description": "true = the orchestrator structurally validates every LLM response (PatchSet format, Evidence format, etc.). Invalid structure is treated as failure and triggers Retry rather than being used as-is."
+              "description": "true = the Scheduler structurally validates every LLM response (PatchSet format, Evidence format, etc.). Invalid structure is treated as failure and triggers Retry rather than being used as-is."
             },
             "disallowInstructionFromEvidence": {
               "type": "boolean", "default": true,
@@ -538,7 +548,7 @@ git commit + SBOM + attestation + Rekor proof
             },
             "noDirectEval": {
               "type": "boolean", "default": true,
-              "description": "true = the orchestrator performs AST-level scanning of all PatchSets to detect and reject eval(), exec(), subprocess(shell=True), os.system(), and equivalent patterns. Detected violations set PatchSet to Rejected and trigger Retry."
+              "description": "true = the Scheduler performs AST-level scanning of all PatchSets to detect and reject eval(), exec(), subprocess(shell=True), os.system(), and equivalent patterns. Detected violations set PatchSet to Rejected and trigger Retry."
             }
           }
         }
@@ -613,7 +623,7 @@ git commit + SBOM + attestation + Rekor proof
 
     "Artifacts": {
       "type": "object",
-      "description": "Required artifact manifest. The orchestrator checks for valid ArtifactRef entries in Evidence.report_artifacts at each gate stage. Any missing required artifact is a gate fail.",
+      "description": "Required artifact manifest. The Scheduler checks for valid ArtifactRef entries in Evidence.report_artifacts at each gate stage. Any missing required artifact is a gate fail.",
       "required": ["required"],
       "additionalProperties": false,
       "properties": {
@@ -665,7 +675,7 @@ git commit + SBOM + attestation + Rekor proof
       "properties": {
         "requireSlsaProvenance": {
           "type": "boolean", "default": true,
-          "description": "true = the orchestrator must generate an in-toto SLSA attestation after Decision.Commit. The attestation's externalParameters include intentspec_digest; internalParameters include the orchestrator version."
+          "description": "true = the Scheduler must generate an in-toto SLSA attestation after Decision.Commit. The attestation's externalParameters include intentspec_digest; internalParameters include the Scheduler version."
         },
         "requireSbom": {
           "type": "boolean", "default": true,
@@ -676,7 +686,7 @@ git commit + SBOM + attestation + Rekor proof
           "properties": {
             "mode": {
               "type": "string", "enum": ["none", "rekor", "internal-ledger"], "default": "rekor",
-              "description": "Transparency log mode. none=no log; rekor=Sigstore Rekor public transparency log (recommended for open-source); internal-ledger=private enterprise log. Using rekor: after Decision.Commit the orchestrator submits the attestation to Rekor and writes the inclusion proof to the transparency-proof ArtifactRef."
+              "description": "Transparency log mode. none=no log; rekor=Sigstore Rekor public transparency log (recommended for open-source); internal-ledger=private enterprise log. Using rekor: after Decision.Commit the Scheduler submits the attestation to Rekor and writes the inclusion proof to the transparency-proof ArtifactRef."
             }
           }
         },
@@ -710,13 +720,13 @@ git commit + SBOM + attestation + Rekor proof
         },
         "status": {
           "type": "string", "enum": ["draft", "active", "deprecated", "closed"], "default": "active",
-          "description": "IntentSpec status. draft=being edited; active=executing (Libra Intent.Active); deprecated=superseded; closed=execution complete or cancelled (Intent.Completed/Cancelled). Orchestrators only accept active IntentSpecs."
+          "description": "IntentSpec status. draft=being edited; active=executing (Libra Intent.Active); deprecated=superseded; closed=execution complete or cancelled (Intent.Completed/Cancelled). Schedulers only accept active IntentSpecs."
         },
         "changeLog": {
           "type": "array",
           "items": { "$ref": "#/$defs/ChangeLogEntry" },
           "default": [],
-          "description": "Append-only change history. The orchestrator appends one ChangeLogEntry per replan event, simultaneously writing to Libra Intent.statuses. Forms the complete decision chain from initial intent to final commit."
+          "description": "Append-only change history. The Scheduler appends one ChangeLogEntry per replan event, simultaneously writing to Libra Intent.statuses. Forms the complete decision chain from initial intent to final commit."
         }
       }
     },
@@ -816,7 +826,7 @@ git commit + SBOM + attestation + Rekor proof
         },
         "actorMapping": {
           "type": "object", "additionalProperties": false, "default": {},
-          "description": "Mapping from IntentSpec roles to Libra ActorRef identifiers.",
+          "description": "Mapping from IntentSpec roles to Libra ActorRef identifiers. `orchestratorActorId` is a legacy compatibility field name that maps to the Scheduler actor.",
           "properties": {
             "orchestratorActorId": { "type": "string", "default": "libra-orchestrator" },
             "coderActorId":        { "type": "string", "default": "libra-coder" },
@@ -855,21 +865,21 @@ git commit + SBOM + attestation + Rekor proof
 
 `metadata` is the immutable audit anchor. All fields are set at creation time and must not be mutated — modifications mean creating a new IntentSpec.
 
-**`metadata.id`** stores the globally unique identifier. The orchestrator writes it to `Libra Intent.external_ids["intentspec_id"]`. When `provenance.bindings.embedIntentSpecDigest=true`, the orchestrator freezes the canonical JSON (sorted keys, no whitespace), computes a SHA-256 digest, and embeds both the `id` and the digest in `Provenance.parameters.externalParameters`. This achieves **intent–artifact strong binding**: consumers can re-derive the digest from the IntentSpec file and compare it to the Provenance to verify nothing was tampered.
+**`metadata.id`** stores the globally unique identifier. The Scheduler writes it to `Libra Intent.external_ids["intentspec_id"]`. When `provenance.bindings.embedIntentSpecDigest=true`, the Scheduler freezes the canonical JSON (sorted keys, no whitespace), computes a SHA-256 digest, and embeds both the `id` and the digest in `Provenance.parameters.externalParameters`. This achieves **intent–artifact strong binding**: consumers can re-derive the digest from the IntentSpec file and compare it to the Provenance to verify nothing was tampered.
 
 **`metadata.createdBy.type`** governs which Libra `ActorRef` factory is used (`human`, `agent`, `system`). High-risk IntentSpecs should originate from `user` or an `agent` that has received human approval.
 
-**`metadata.target.baseRef`** is resolved by the orchestrator to a concrete commit SHA written to `Libra Run.commit`. Using a full SHA (rather than a floating branch name) gives better provenance fidelity for SLSA `resolvedDependencies`.
+**`metadata.target.baseRef`** is resolved by the Scheduler to a concrete commit SHA written to `Libra Run.commit`. Using a full SHA (rather than a floating branch name) gives better provenance fidelity for SLSA `resolvedDependencies`.
 
 ---
 
 ### 3.2 Intent
 
-`intent` is the most important section: it defines the work boundaries that the orchestrator enforces throughout execution.
+`intent` is the most important section: it defines the work boundaries that the Scheduler enforces throughout execution.
 
-**`intent.objectives[]`** maps one-to-one to Libra `PlanStep` entries and child `Task` objects. Each objective should express an independently observable success state. The orchestrator detects scope-creep by monitoring `ToolInvocation.io_footprint.paths_written` against `inScope`; any write outside the boundary triggers `scope-creep` replan or outright rejection.
+**`intent.objectives[]`** maps one-to-one to Libra `PlanStep` entries and child `Task` objects. Each objective should express an independently observable success state. The Scheduler detects scope-creep by monitoring `ToolInvocation.io_footprint.paths_written` against `inScope`; any write outside the boundary triggers `scope-creep` replan or outright rejection.
 
-**`intent.touchHints`** provides localisation signals: `files` (glob patterns) become `ContextItem(File)` entries; `symbols` are resolved via ctags/LSP into `ContextItem(Snippet)` frames; `apis` are looked up in OpenAPI specs as `ContextItem(Url)` frames. The orchestrator expands the initial match to a one-hop dependency radius using the import/build graph to avoid missed changes.
+**`intent.touchHints`** provides localisation signals: `files` (glob patterns) become `ContextItem(File)` entries; `symbols` are resolved via ctags/LSP into `ContextItem(Snippet)` frames; `apis` are looked up in OpenAPI specs as `ContextItem(Url)` frames. The Scheduler expands the initial match to a one-hop dependency radius using the import/build graph to avoid missed changes.
 
 ---
 
@@ -877,9 +887,9 @@ git commit + SBOM + attestation + Rekor proof
 
 `acceptance` converts "success" into objective, executable criteria.
 
-**`verificationPlan`** has four sequential stages. The orchestrator generates a dedicated gate `Task` for each stage when `libra.planGeneration.gateTaskPerStage=true`. Stage ordering is strict: `fastChecks` failures prevent `integrationChecks` from starting. This keeps feedback loops tight (seconds for unit tests) while ensuring expensive scans only run on already-validated code.
+**`verificationPlan`** has four sequential stages. The Scheduler generates a dedicated gate `Task` for each stage when `libra.planGeneration.gateTaskPerStage=true`. Stage ordering is strict: `fastChecks` failures prevent `integrationChecks` from starting. This keeps feedback loops tight (seconds for unit tests) while ensuring expensive scans only run on already-validated code.
 
-**`qualityGates.requireNewTestsWhenBugfix`** is a policy-level constraint the orchestrator enforces by diff-analysing the PatchSet: if no test file has changed, the gate fails. This prevents the anti-pattern of "fix code, skip tests".
+**`qualityGates.requireNewTestsWhenBugfix`** is a policy-level constraint the Scheduler enforces by diff-analysing the PatchSet: if no test file has changed, the gate fails. This prevents the anti-pattern of "fix code, skip tests".
 
 ---
 
@@ -887,19 +897,19 @@ git commit + SBOM + attestation + Rekor proof
 
 `constraints` encodes four hard boundaries: security/privacy/licensing/resources.
 
-**`constraints.security.networkPolicy=deny`** is the default and maps directly to ToolInvocation pre-flight ACL: the orchestrator rejects any tool call that would make external network contact unless `security.toolAcl.allow` contains an explicit whitelisted command with a stated reason. This is the "minimal network footprint" baseline (aligned with SLSA isolated-build requirements).
+**`constraints.security.networkPolicy=deny`** is the default and maps directly to ToolInvocation pre-flight ACL: the Scheduler rejects any tool call that would make external network contact unless `security.toolAcl.allow` contains an explicit whitelisted command with a stated reason. This is the "minimal network footprint" baseline (aligned with SLSA isolated-build requirements).
 
 **`constraints.security.dependencyPolicy`** drives SCA gate behaviour: `no-new` means the SCA report is scanned for any newly introduced package; any new package is a gate fail. `allow-with-review` permits additions but mandates an `sca-report` artifact for human review and a licence check against `allowedSpdx`.
 
-**`constraints.resources`** fields are enforced at runtime — not just recorded. `maxWallClockSeconds` sets the Run timeout; `maxCostUnits` caps `Provenance.token_usage.cost_usd` accumulation. When the cost cap is approached, the orchestrator reduces `maxParallelTasks` to 1 before deciding whether to continue or checkpoint. This directly addresses the OWASP "Unbounded Consumption" risk.
+**`constraints.resources`** fields are enforced at runtime — not just recorded. `maxWallClockSeconds` sets the Run timeout; `maxCostUnits` caps `Provenance.token_usage.cost_usd` accumulation. When the cost cap is approached, the Scheduler reduces `maxParallelTasks` to 1 before deciding whether to continue or checkpoint. This directly addresses the OWASP "Unbounded Consumption" risk.
 
 ---
 
 ### 3.5 Risk
 
-`risk.level` triggers orchestrator-enforced rules:
+`risk.level` triggers Scheduler-enforced rules:
 
-| Level | Enforced by orchestrator |
+| Level | Enforced by Scheduler |
 |---|---|
 | `low` | No special constraints beyond schema |
 | `medium` | Warns if `humanInLoop.required=false` and change touches security code |
@@ -911,17 +921,17 @@ git commit + SBOM + attestation + Rekor proof
 
 `evidence` is the first line of defence against prompt injection.
 
-**`strategy=repo-first`** means the orchestrator prioritises information from within the target repository (code, comments, README, existing tests). External network access is minimised. This reduces the attack surface for malicious content embedded in external documentation.
+**`strategy=repo-first`** means the Scheduler prioritises information from within the target repository (code, comments, README, existing tests). External network access is minimised. This reduces the attack surface for malicious content embedded in external documentation.
 
 **`domainAllowlistMode=allowlist-only`** with `blockedDomains=["*"]` is the strictest configuration: only domains explicitly listed in `allowedDomains` can be accessed. Evaluation order is: check `allowedDomains` first, then apply `blockedDomains` as a subtractive deny-list for any non-allowlisted domains. Url-type `ContextItem` enqueuing is pre-flight checked; blocked items are rejected without being added to the pipeline.
 
-**`minCitationsPerDecision`** forces the orchestrator to log evidence provenance for key decisions. When set to 3, the orchestrator refuses to select an algorithm or library without having at least 3 supporting sources in the ContextPipeline, which creates an auditable evidence chain.
+**`minCitationsPerDecision`** forces the Scheduler to log evidence provenance for key decisions. When set to 3, the Scheduler refuses to select an algorithm or library without having at least 3 supporting sources in the ContextPipeline, which creates an auditable evidence chain.
 
 ---
 
 ### 3.7 Security Policy
 
-**`security.toolAcl`** implements the "minimum privilege closure" principle. The `constraints` field on each `ToolRule` carries tool-specific limits: `writeRoots` for filesystem tools, `allowCommands` / `denySubstrings` for command tools, `maxOutputBytes` for any tool. The orchestrator checks these constraints before creating each `ToolInvocation` record.
+**`security.toolAcl`** implements the "minimum privilege closure" principle. The `constraints` field on each `ToolRule` carries tool-specific limits: `writeRoots` for filesystem tools, `allowCommands` / `denySubstrings` for command tools, `maxOutputBytes` for any tool. The Scheduler checks these constraints before creating each `ToolInvocation` record.
 
 **`security.secrets.policy=deny-all`** (default) means the Run execution environment receives no injected secrets — consistent with SLSA's requirement that signing material must not be visible to user build steps.
 
@@ -933,9 +943,7 @@ git commit + SBOM + attestation + Rekor proof
 
 **`execution.retry.maxRetries`** bounds the number of `Decision.Retry` events for a single Task. After exhaustion, `Decision.Abandon` is created. High-risk tasks should use lower values (2) to surface persistent failures to humans quickly.
 
-**`execution.replan.triggers`** specifies the conditions under which the orchestrator calls `Plan.new_revision()`. Before doing so, the orchestrator (when `libra.decisionPolicy.checkpointBeforeReplan=true`) creates `Decision.Checkpoint` to preserve intermediate progress. The old Plan version remains immutable in the revision chain, enabling complete replan history reconstruction.
-
-Implementation note (current as of 2026-03-09): runtime checkpoint objects are persisted and linked to replan decisions, but automatic DAG resume from a checkpoint ID is intentionally disabled until the userspace-fs change-tracking design is integrated.
+**`execution.replan.triggers`** specifies the conditions under which the Scheduler calls `Plan.new_revision()`. Before doing so, the Scheduler (when `libra.decisionPolicy.checkpointBeforeReplan=true`) creates `Decision.Checkpoint` to preserve intermediate progress. The old Plan version remains immutable in the revision chain, enabling complete replan history reconstruction.
 
 ---
 
@@ -960,13 +968,13 @@ Check.command executes
 
 `provenance` connects the IntentSpec to the SLSA supply-chain evidence model.
 
-When `requireSlsaProvenance=true`, the orchestrator generates a DSSE-enveloped in-toto attestation after `Decision.Commit`. The attestation contains:
+When `requireSlsaProvenance=true`, the Scheduler generates a DSSE-enveloped in-toto attestation after `Decision.Commit`. The attestation contains:
 - `externalParameters.intentspec_id` and `externalParameters.intentspec_digest` (from the frozen canonical JSON)
-- `internalParameters.orchestrator_version`
+- `internalParameters.scheduler_version`
 - `resolvedDependencies`: each `ContextSnapshot.item` contributes a `{uri, digest}` entry
 - `byproducts`: digests of all `Evidence.report_artifacts` when `embedEvidenceDigests=true`
 
-When `transparencyLog.mode=rekor`, the signed attestation is uploaded to Rekor after commit, and the Rekor inclusion proof is written back as the `transparency-proof` ArtifactRef. If the upload fails and `libra.decisionPolicy.rollbackOnProvenanceFail=true`, the orchestrator issues `Decision.Rollback` to revert the applied PatchSet, ensuring the repository never contains a commit without verifiable provenance.
+When `transparencyLog.mode=rekor`, the signed attestation is uploaded to Rekor after commit, and the Rekor inclusion proof is written back as the `transparency-proof` ArtifactRef. If the upload fails and `libra.decisionPolicy.rollbackOnProvenanceFail=true`, the Scheduler issues `Decision.Rollback` to revert the applied PatchSet, ensuring the repository never contains a commit without verifiable provenance.
 
 ---
 
@@ -975,7 +983,7 @@ When `transparencyLog.mode=rekor`, the signed attestation is uploaded to Rekor a
 `lifecycle.changeLog` is an append-only record of all replan events. Each entry captures:
 
 - `at`: when the replan was triggered
-- `by`: the actor (orchestrator ID or human approver)
+- `by`: the actor (Scheduler ID or human approver)
 - `reason`: the trigger condition
 - `diffSummary`: what changed in the IntentSpec relative to the previous version
 
@@ -989,7 +997,7 @@ This log, combined with `Libra Intent.statuses`, provides a complete audit trail
 
 **`libra.contextPipeline.maxFrames`** is a dual-purpose control: it limits both memory usage and prompt injection accumulation surface. The recommended formula is `min(128, maxWallClockSeconds / 300)` — approximately one frame per 5 minutes of execution. `IntentAnalysis` and `Checkpoint` frames are always protected from eviction.
 
-**`libra.decisionPolicy.rollbackOnProvenanceFail=true`** closes a critical gap: without it, a Rekor submission failure would leave a git commit without a transparency log entry. With it, the PatchSet is reverted and the orchestrator signals the failure for human intervention.
+**`libra.decisionPolicy.rollbackOnProvenanceFail=true`** closes a critical gap: without it, a Rekor submission failure would leave a git commit without a transparency log entry. With it, the PatchSet is reverted and the Scheduler signals the failure for human intervention.
 
 **`libra.actorMapping`** allows you to use specialised agent IDs for security-sensitive changes. For example, `coderActorId=libra-security-coder` and `reviewerActorId=libra-security-reviewer` enables the platform to route to agents with security-specific training and stricter tool restrictions.
 
@@ -999,7 +1007,7 @@ This log, combined with `Libra Intent.statuses`, provides a complete audit trail
 
 | Field Path | Type | Required | Default | Key Role | Related Fields |
 |---|---|---|---|---|---|
-| `apiVersion` | string | ✅ | `intentspec.io/v1alpha1` | Orchestrator compatibility routing | `lifecycle.schemaVersion` |
+| `apiVersion` | string | ✅ | `intentspec.io/v1alpha1` | Scheduler compatibility routing | `lifecycle.schemaVersion` |
 | `kind` | string(const) | ✅ | `IntentSpec` | Resource type | — |
 | `metadata.id` | string | ✅ | — | Global unique ID → Libra external_ids | `provenance.bindings.embedIntentSpecDigest` |
 | `metadata.createdAt` | date-time | ✅ | — | Provenance time anchor | — |

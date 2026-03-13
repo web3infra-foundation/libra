@@ -27,8 +27,9 @@ use crate::{
             resource::{
                 AgentInstanceParams, ContextItemParams, CreateContextSnapshotParams,
                 CreateDecisionParams, CreateEvidenceParams, CreatePatchSetParams, CreatePlanParams,
-                CreateProvenanceParams, CreateRunParams, CreateTaskParams,
-                CreateToolInvocationParams, IoFootprintParams, PlanStepParams, TouchedFileParams,
+                CreatePlanStepEventParams, CreateProvenanceParams, CreateRunParams,
+                CreateTaskParams, CreateToolInvocationParams, IoFootprintParams, PlanStepParams,
+                TouchedFileParams,
             },
             server::LibraMcpServer,
         },
@@ -182,6 +183,18 @@ pub async fn persist_execution(
         model_name: request.model_name,
     })
     .await?;
+    if let Some(plan_id) = plan_ids.last() {
+        create_plan_step_events(
+            request.mcp_server,
+            plan_id,
+            &run_id,
+            request.execution_plan_spec,
+            request.run_state,
+            &persisted_step_ids,
+            &persisted_task_ids,
+        )
+        .await?;
+    }
 
     let provenance_id = Some(
         create_provenance(
@@ -593,6 +606,7 @@ async fn create_compiled_task(
         .or_else(|| {
             Some(match request.task.kind {
                 TaskKind::Implementation => "implementation".to_string(),
+                TaskKind::Analysis => "analysis".to_string(),
                 TaskKind::Gate => "test".to_string(),
             })
         });
@@ -783,6 +797,72 @@ async fn create_provenance(
             OrchestratorError::ConfigError(format!("MCP create_provenance failed: {e:?}"))
         })?;
     parse_created_id("provenance", &result)
+}
+
+async fn create_plan_step_events(
+    mcp_server: &Arc<LibraMcpServer>,
+    plan_id: &str,
+    run_id: &str,
+    plan: &ExecutionPlanSpec,
+    run_state: &RunStateSnapshot,
+    persisted_step_ids: &HashMap<Uuid, Uuid>,
+    persisted_task_ids: &HashMap<Uuid, String>,
+) -> Result<(), OrchestratorError> {
+    for task in &plan.tasks {
+        let Some(step_id) = persisted_step_ids.get(&task.step_id()) else {
+            continue;
+        };
+        let Some(result) = run_state.result_for(task.id()) else {
+            continue;
+        };
+
+        let params = CreatePlanStepEventParams {
+            plan_id: plan_id.to_string(),
+            step_id: step_id.to_string(),
+            run_id: run_id.to_string(),
+            status: plan_step_event_status(&result.status).to_string(),
+            reason: match result.status {
+                super::types::TaskNodeStatus::Failed => result.agent_output.clone(),
+                _ => None,
+            },
+            consumed_frames: None,
+            produced_frames: None,
+            spawned_task_id: persisted_task_ids.get(&task.id()).cloned(),
+            outputs: Some(json!({
+                "taskTitle": task.title(),
+                "taskKind": format!("{:?}", task.kind).to_lowercase(),
+                "retryCount": result.retry_count,
+                "toolCalls": result.tool_calls.len(),
+                "policyViolations": result.policy_violations.len(),
+            })),
+            actor_kind: Some("system".to_string()),
+            actor_id: Some("libra-orchestrator".to_string()),
+        };
+
+        let actor = resolve_actor(
+            mcp_server,
+            params.actor_kind.as_deref(),
+            params.actor_id.as_deref(),
+        )?;
+        mcp_server
+            .create_plan_step_event_impl(params, actor)
+            .await
+            .map_err(|e| {
+                OrchestratorError::ConfigError(format!("MCP create_plan_step_event failed: {e:?}"))
+            })?;
+    }
+
+    Ok(())
+}
+
+fn plan_step_event_status(status: &super::types::TaskNodeStatus) -> &'static str {
+    match status {
+        super::types::TaskNodeStatus::Pending => "pending",
+        super::types::TaskNodeStatus::Running => "progressing",
+        super::types::TaskNodeStatus::Completed => "completed",
+        super::types::TaskNodeStatus::Failed => "failed",
+        super::types::TaskNodeStatus::Skipped => "skipped",
+    }
 }
 
 async fn create_tool_invocation(
@@ -1407,7 +1487,10 @@ mod tests {
                 summary: "Implement feature and verify it".into(),
                 problem_statement: "problem".into(),
                 change_type: ChangeType::Feature,
-                objectives: vec!["Update src/lib.rs".into()],
+                objectives: vec![Objective {
+                    title: "Update src/lib.rs".into(),
+                    kind: ObjectiveKind::Implementation,
+                }],
                 in_scope: vec!["src/".into()],
                 out_of_scope: vec![],
                 touch_hints: Some(TouchHints {
@@ -1700,6 +1783,10 @@ mod tests {
         assert_eq!(history.list_objects("decision").await.unwrap().len(), 2);
         assert_eq!(history.list_objects("provenance").await.unwrap().len(), 1);
         assert_eq!(history.list_objects("invocation").await.unwrap().len(), 1);
+        assert_eq!(
+            history.list_objects("plan_step_event").await.unwrap().len(),
+            2
+        );
         assert_eq!(history.list_objects("snapshot").await.unwrap().len(), 2);
 
         let storage = server.storage.as_ref().unwrap();
