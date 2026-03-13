@@ -36,3 +36,9 @@ buck-out/
 
 .libra
 /buck-out
+
+# Frontend
+web/node_modules/
+web/.next/
+web/out/
+web/.pnpm-store/

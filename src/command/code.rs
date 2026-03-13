@@ -7,7 +7,7 @@
 
 use std::{net::SocketAddr, sync::Arc};
 
-use axum::{Router, response::Html, routing::get};
+use axum::{Router, response::IntoResponse, routing::get};
 use clap::{Parser, ValueEnum};
 use tokio::sync::oneshot;
 use url::Url;
@@ -107,20 +107,61 @@ pub async fn execute(args: CodeArgs) {
     }
 }
 
-async fn root() -> Html<&'static str> {
-    Html(
-        r#"<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Libra Code</title>
-  </head>
-  <body>
-    <h1>Hello, Libra Code!</h1>
-  </body>
-</html>"#,
-    )
+/// Serve embedded static assets from the Next.js export (`web/out/`).
+///
+/// Lookup order:
+/// 1. Exact path match (e.g. `_next/static/chunks/main.js`)
+/// 2. Directory index (`path/index.html`) — works with `trailingSlash: true`
+/// 3. SPA fallback → `index.html`
+/// 4. 404
+async fn static_handler(uri: axum::http::Uri) -> impl IntoResponse {
+    use axum::http::{StatusCode, header};
+
+    use super::web_assets::WebAssets;
+
+    let path = uri.path().trim_start_matches('/');
+
+    // Try exact path, then directory index, then SPA fallback.
+    // Track the resolved filename so MIME detection uses the actual file extension.
+    let resolved = if WebAssets::get(path).is_some() {
+        Some(path.to_string())
+    } else {
+        let index_path = format!("{}/index.html", path.trim_end_matches('/'));
+        if WebAssets::get(&index_path).is_some() {
+            Some(index_path)
+        } else if WebAssets::get("index.html").is_some() {
+            Some("index.html".to_string())
+        } else {
+            None
+        }
+    };
+
+    match resolved {
+        Some(resolved_path) => {
+            let content = WebAssets::get(&resolved_path).unwrap();
+            let mime = mime_guess::from_path(&resolved_path).first_or_octet_stream();
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, mime.as_ref().to_string())],
+                content.data.to_vec(),
+            )
+                .into_response()
+        }
+        None => (StatusCode::NOT_FOUND, "404 Not Found").into_response(),
+    }
+}
+
+/// Placeholder API router — extend with endpoints as needed.
+fn api_router() -> Router {
+    Router::new().route("/health", get(|| async { "ok" }))
+}
+
+/// Build the web router: API routes under `/api`, everything else served from
+/// the embedded Next.js static export.
+fn build_web_router() -> Router {
+    Router::new()
+        .nest("/api", api_router())
+        .fallback(static_handler)
 }
 
 struct WebHandle {
@@ -140,7 +181,7 @@ async fn start_web_server(host: &str, port: u16) -> anyhow::Result<WebHandle> {
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
-    let app = Router::new().route("/", get(root));
+    let app = build_web_router();
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
     let join = tokio::spawn(async move {
@@ -218,7 +259,7 @@ async fn execute_web_only(args: CodeArgs) {
         }
     };
 
-    let app = Router::new().route("/", get(root));
+    let app = build_web_router();
     println!("Libra Code server running at http://{}", addr);
 
     // Prepare MCP server instance shared between the HTTP transport and TUI bridge

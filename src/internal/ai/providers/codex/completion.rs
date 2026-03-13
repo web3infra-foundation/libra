@@ -421,12 +421,11 @@ fn apply_file_change(change: &FileChange) -> Result<(), Box<dyn std::error::Erro
     }
 
     match change.operation.as_str() {
-        "delete" => {
-            if file_path.exists() {
-                std::fs::remove_file(&file_path)?;
-                // eprintln!("[Codex] Deleted file: {}", change.path);
-            }
+        "delete" if file_path.exists() => {
+            std::fs::remove_file(&file_path)?;
+            // eprintln!("[Codex] Deleted file: {}", change.path);
         }
+        "delete" => {}
         "add" | "update" => {
             // First try content field for new files
             if change.operation == "add"

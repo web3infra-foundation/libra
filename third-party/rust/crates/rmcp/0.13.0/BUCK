@@ -28,7 +28,6 @@ rust_library(
     },
     features = [
         "base64",
-        "client",
         "default",
         "macros",
         "server",
@@ -86,7 +85,6 @@ rust_binary(
     edition = "2024",
     features = [
         "base64",
-        "client",
         "default",
         "macros",
         "server",
@@ -110,7 +108,6 @@ buildscript_run(
     env_srcs = [":rmcp-manifest[env_dict]"],
     features = [
         "base64",
-        "client",
         "default",
         "macros",
         "server",

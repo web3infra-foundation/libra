@@ -24,10 +24,12 @@ rust_library(
     crate_root = "vendor/src/lib.rs",
     edition = "2021",
     features = [
+        "atomic",
         "default",
         "rng",
         "serde",
         "std",
+        "v1",
         "v4",
         "v7",
     ],
@@ -38,5 +40,8 @@ rust_library(
         "windows": ["//third-party/rust/crates/getrandom/0.4.2:getrandom"],
     },
     visibility = ["PUBLIC"],
-    deps = ["//third-party/rust/crates/serde_core/1.0.228:serde_core"],
+    deps = [
+        "//third-party/rust/crates/atomic/0.6.1:atomic",
+        "//third-party/rust/crates/serde_core/1.0.228:serde_core",
+    ],
 )
