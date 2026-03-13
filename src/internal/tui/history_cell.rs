@@ -824,8 +824,9 @@ pub struct PlanSummaryHistoryCell {
     artifact_count: usize,
     intent_id: Option<String>,
     plan_id: Option<String>,
-    parallelism: u8,
-    parallel_groups: usize,
+    max_parallelism: u8,
+    lane_count: usize,
+    layer_count: usize,
     checkpoint_count: usize,
     tasks: Vec<PlanTaskRow>,
     warnings: Vec<String>,
@@ -839,6 +840,7 @@ impl PlanSummaryHistoryCell {
         plan_id: Option<String>,
         warnings: Vec<String>,
     ) -> Self {
+        let (lane_count, layer_count) = parallel_layout_stats(&plan);
         let verification_count = spec.acceptance.verification_plan.fast_checks.len()
             + spec.acceptance.verification_plan.integration_checks.len()
             + spec.acceptance.verification_plan.security_checks.len()
@@ -876,8 +878,9 @@ impl PlanSummaryHistoryCell {
             artifact_count: spec.artifacts.required.len(),
             intent_id,
             plan_id,
-            parallelism: plan.max_parallel,
-            parallel_groups: plan.parallel_groups().len(),
+            max_parallelism: plan.max_parallel,
+            lane_count,
+            layer_count,
             checkpoint_count: plan.checkpoints.len(),
             tasks,
             warnings,
@@ -934,15 +937,12 @@ impl PlanSummaryHistoryCell {
             width,
             &[
                 (
-                    "parallel",
-                    self.parallelism.to_string(),
+                    "max",
+                    self.max_parallelism.to_string(),
                     theme::text::primary(),
                 ),
-                (
-                    "groups",
-                    self.parallel_groups.to_string(),
-                    theme::text::muted(),
-                ),
+                ("lanes", self.lane_count.to_string(), theme::text::primary()),
+                ("layers", self.layer_count.to_string(), theme::text::muted()),
                 (
                     "ckpt",
                     self.checkpoint_count.to_string(),
@@ -1109,8 +1109,9 @@ pub struct OrchestratorResultHistoryCell {
     decision: DecisionOutcome,
     revision: u32,
     task_count: usize,
-    parallelism: u8,
-    parallel_groups: usize,
+    max_parallelism: u8,
+    lane_count: usize,
+    layer_count: usize,
     replan_count: u32,
     intent_id: String,
     run_id: Option<String>,
@@ -1127,6 +1128,7 @@ pub struct OrchestratorResultHistoryCell {
 
 impl OrchestratorResultHistoryCell {
     pub fn new(result: OrchestratorResult) -> Self {
+        let (lane_count, layer_count) = parallel_layout_stats(&result.execution_plan_spec);
         let task_titles: HashMap<_, _> = result
             .execution_plan_spec
             .tasks
@@ -1214,8 +1216,9 @@ impl OrchestratorResultHistoryCell {
             decision: result.decision,
             revision: result.execution_plan_spec.revision,
             task_count: result.execution_plan_spec.tasks.len(),
-            parallelism: result.execution_plan_spec.max_parallel,
-            parallel_groups: result.execution_plan_spec.parallel_groups().len(),
+            max_parallelism: result.execution_plan_spec.max_parallel,
+            lane_count,
+            layer_count,
             replan_count: result.replan_count,
             intent_id: result.intent_spec_id,
             run_id,
@@ -1264,15 +1267,12 @@ impl OrchestratorResultHistoryCell {
                 ),
                 ("tasks", self.task_count.to_string(), theme::text::primary()),
                 (
-                    "parallel",
-                    self.parallelism.to_string(),
+                    "max",
+                    self.max_parallelism.to_string(),
                     theme::text::primary(),
                 ),
-                (
-                    "groups",
-                    self.parallel_groups.to_string(),
-                    theme::text::muted(),
-                ),
+                ("lanes", self.lane_count.to_string(), theme::text::primary()),
+                ("layers", self.layer_count.to_string(), theme::text::muted()),
                 (
                     "replans",
                     self.replan_count.to_string(),
@@ -1656,6 +1656,13 @@ fn task_status_style(status: &TaskNodeStatus) -> Style {
     }
 }
 
+fn parallel_layout_stats(plan: &ExecutionPlanSpec) -> (usize, usize) {
+    let groups = plan.parallel_groups();
+    let lane_count = groups.iter().map(Vec::len).max().unwrap_or(0);
+    let layer_count = groups.len();
+    (lane_count, layer_count)
+}
+
 fn pad_cell(text: &str, width: usize) -> String {
     let truncated = truncate_utf8(text, width);
     let pad = width.saturating_sub(truncated.chars().count());
@@ -1702,8 +1709,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        AssistantHistoryCell, CheckpointRow, HistoryCell, OrchestratorResultHistoryCell,
-        PlanSummaryHistoryCell, PlanUpdateHistoryCell, ToolCallHistoryCell, UserHistoryCell,
+        AssistantHistoryCell, HistoryCell, OrchestratorResultHistoryCell, PlanSummaryHistoryCell,
+        PlanUpdateHistoryCell, ToolCallHistoryCell, UserHistoryCell,
     };
     use crate::internal::ai::{
         intentspec::{
@@ -1877,6 +1884,9 @@ mod tests {
         assert!(joined.contains("Tasks"));
         assert!(joined.contains("Warnings"));
         assert!(joined.contains("I01 Inspect sources"));
+        assert!(joined.contains("[max 2]"));
+        assert!(joined.contains("[lanes 2]"));
+        assert!(joined.contains("[layers 2]"));
         assert!(!joined.contains("files:"));
         assert!(!joined.contains("depends on:"));
     }
@@ -1894,6 +1904,9 @@ mod tests {
         assert!(joined.contains("Tasks"));
         assert!(joined.contains("I01 Inspect sources"));
         assert!(joined.contains("I02 Render DAG"));
+        assert!(joined.contains("[max 2]"));
+        assert!(joined.contains("[lanes 2]"));
+        assert!(joined.contains("[layers 2]"));
         assert!(joined.contains("missing artifact"));
     }
 

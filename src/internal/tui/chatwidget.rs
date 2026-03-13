@@ -351,6 +351,8 @@ impl ChatWidget {
         } else {
             theme::interactive::title()
         };
+        let lane_count = panel.lane_count().max(1);
+        let depth_count = panel.depth_count().max(1);
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(theme::border::idle())
@@ -363,6 +365,10 @@ impl ChatWidget {
                     format!(" {} / {} ", panel.completed, panel.total),
                     theme::text::muted(),
                 ),
+                Span::styled(
+                    format!(" lanes {} ", lane_count),
+                    theme::text::subtle().add_modifier(Modifier::DIM),
+                ),
             ]))
             .title_alignment(Alignment::Center);
         let inner = block.inner(area);
@@ -372,8 +378,6 @@ impl ChatWidget {
             return;
         }
 
-        let lane_count = panel.lane_count().max(1);
-        let depth_count = panel.depth_count().max(1);
         let graph_top = inner.y.saturating_add(1);
         let graph_height = inner.height.saturating_sub(4) as usize;
         if graph_height == 0 {
@@ -479,7 +483,9 @@ impl ChatWidget {
 
         let summary_y = inner.bottom().saturating_sub(2);
         let summary = format!(
-            "● impl  ■ gate  run {}  fail {}",
+            "● impl  ■ gate  lanes {}  layers {}  run {}  fail {}",
+            lane_count,
+            depth_count,
             panel.running_count(),
             panel.failed_count()
         );
@@ -713,6 +719,7 @@ mod tests {
             .join("\n");
 
         assert!(rendered.contains("Workflow r1"));
+        assert!(rendered.contains("lanes 1"));
         assert!(rendered.contains('●'));
         assert!(rendered.contains('□'));
         assert!(rendered.contains('│') || rendered.contains('─'));

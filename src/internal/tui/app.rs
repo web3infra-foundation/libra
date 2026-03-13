@@ -2510,6 +2510,9 @@ fn format_orchestrator_result(
 ) -> String {
     let mut lines = Vec::new();
     let decision_label = orchestrator_decision_label(&result.decision);
+    let groups = result.execution_plan_spec.parallel_groups();
+    let lane_count = groups.iter().map(Vec::len).max().unwrap_or(0);
+    let layer_count = groups.len();
     lines.push(format!("# Execution Result: {decision_label}"));
     lines.push(String::new());
 
@@ -2526,13 +2529,11 @@ fn format_orchestrator_result(
         result.execution_plan_spec.tasks.len()
     ));
     lines.push(format!(
-        "| Parallelism | {} |",
+        "| Max parallel | {} |",
         result.execution_plan_spec.max_parallel
     ));
-    lines.push(format!(
-        "| Parallel groups | {} |",
-        result.execution_plan_spec.parallel_groups().len()
-    ));
+    lines.push(format!("| Active lanes | {} |", lane_count));
+    lines.push(format!("| Layers | {} |", layer_count));
     lines.push(format!("| Replans | {} |", result.replan_count));
     lines.push(format!(
         "| Intent | `{}` |",
