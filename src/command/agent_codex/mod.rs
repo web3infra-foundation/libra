@@ -164,7 +164,7 @@ pub async fn execute(args: AgentCodexArgs) -> anyhow::Result<()> {
         loop {
             tokio::select! {
                 Some(msg) = rx.recv() => {
-                    if write.send(Message::Text(msg)).await.is_err() {
+                    if write.send(Message::Text(msg.into())).await.is_err() {
                         break;
                     }
                 }

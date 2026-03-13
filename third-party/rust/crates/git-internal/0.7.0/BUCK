@@ -61,7 +61,7 @@ rust_library(
         "//third-party/rust/crates/sha1/0.10.6:sha1",
         "//third-party/rust/crates/sha2/0.10.9:sha2",
         "//third-party/rust/crates/similar/2.7.0:similar",
-        "//third-party/rust/crates/tempfile/3.26.0:tempfile",
+        "//third-party/rust/crates/tempfile/3.27.0:tempfile",
         "//third-party/rust/crates/thiserror/2.0.18:thiserror",
         "//third-party/rust/crates/threadpool/1.8.1:threadpool",
         "//third-party/rust/crates/tokio-stream/0.1.18:tokio-stream",

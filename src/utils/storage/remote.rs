@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt;
 use git_internal::{errors::GitError, hash::ObjectHash, internal::object::types::ObjectType};
-use object_store::{ObjectStore, path::Path as ObjectPath};
+use object_store::{ObjectStore, ObjectStoreExt, path::Path as ObjectPath};
 
 use super::Storage;
 

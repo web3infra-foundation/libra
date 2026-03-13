@@ -15,7 +15,7 @@ use regex::Regex;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue};
 use ring::digest::{Context, SHA256};
 use url::Url;
-use wax::Pattern;
+use wax::Program;
 
 use crate::utils::{path, path_ext::PathExt, util};
 
