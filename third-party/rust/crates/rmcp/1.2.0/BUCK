@@ -4,27 +4,26 @@ load("@buckal//:cargo_manifest.bzl", "cargo_manifest")
 load("@buckal//:wrapper.bzl", "buildscript_run", "rust_binary", "rust_library")
 
 http_archive(
-    name = "rmcp-vendor",
-    urls = ["https://static.crates.io/crates/rmcp/rmcp-0.13.0.crate"],
-    sha256 = "d1815dbc06c414d720f8bc1951eccd66bc99efc6376331f1e7093a119b3eb508",
+    name = "vendor",
+    urls = ["https://static.crates.io/crates/rmcp/rmcp-1.2.0.crate"],
+    sha256 = "ba6b9d2f0efe2258b23767f1f9e0054cfbcac9c2d6f81a031214143096d7864f",
     type = "tar.gz",
-    strip_prefix = "rmcp-0.13.0",
-    out = "vendor",
+    strip_prefix = "rmcp-1.2.0",
 )
 
 cargo_manifest(
-    name = "rmcp-manifest",
-    vendor = ":rmcp-vendor",
+    name = "manifest",
+    vendor = ":vendor",
 )
 
 rust_library(
     name = "rmcp",
-    srcs = [":rmcp-vendor"],
+    srcs = [":vendor"],
     crate = "rmcp",
     crate_root = "vendor/src/lib.rs",
     edition = "2024",
     env = {
-        "OUT_DIR": "$(location :rmcp-build-script-run[out_dir])",
+        "OUT_DIR": "$(location :build-script-run[out_dir])",
     },
     features = [
         "base64",
@@ -41,8 +40,8 @@ rust_library(
         "uuid",
     ],
     rustc_flags = [
-        "@$(location :rmcp-build-script-run[rustc_flags])",
-        "@$(location :rmcp-manifest[env_flags])",
+        "@$(location :build-script-run[rustc_flags])",
+        "@$(location :manifest[env_flags])",
     ],
     os_deps = {
         "linux": ["//third-party/rust/crates/chrono/0.4.44:chrono"],
@@ -52,7 +51,6 @@ rust_library(
     visibility = ["PUBLIC"],
     deps = [
         "//third-party/rust/crates/async-trait/0.1.89:async-trait",
-        "//third-party/rust/crates/axum/0.8.8:axum",
         "//third-party/rust/crates/base64/0.22.1:base64",
         "//third-party/rust/crates/bytes/1.11.1:bytes",
         "//third-party/rust/crates/futures/0.3.32:futures",
@@ -61,8 +59,8 @@ rust_library(
         "//third-party/rust/crates/http/1.4.0:http",
         "//third-party/rust/crates/pastey/0.2.1:pastey",
         "//third-party/rust/crates/pin-project-lite/0.2.17:pin-project-lite",
-        "//third-party/rust/crates/rand/0.9.2:rand",
-        "//third-party/rust/crates/rmcp-macros/0.13.0:rmcp-macros",
+        "//third-party/rust/crates/rand/0.10.0:rand",
+        "//third-party/rust/crates/rmcp-macros/1.2.0:rmcp-macros",
         "//third-party/rust/crates/schemars/1.2.1:schemars",
         "//third-party/rust/crates/serde/1.0.228:serde",
         "//third-party/rust/crates/serde_json/1.0.149:serde_json",
@@ -78,8 +76,8 @@ rust_library(
 )
 
 rust_binary(
-    name = "rmcp-build-script-build",
-    srcs = [":rmcp-vendor"],
+    name = "build-script-build",
+    srcs = [":vendor"],
     crate = "build_script_build",
     crate_root = "vendor/build.rs",
     edition = "2024",
@@ -97,15 +95,15 @@ rust_binary(
         "transport-worker",
         "uuid",
     ],
-    rustc_flags = ["@$(location :rmcp-manifest[env_flags])"],
+    rustc_flags = ["@$(location :manifest[env_flags])"],
     visibility = [],
 )
 
 buildscript_run(
-    name = "rmcp-build-script-run",
+    name = "build-script-run",
     package_name = "rmcp",
-    buildscript_rule = ":rmcp-build-script-build",
-    env_srcs = [":rmcp-manifest[env_dict]"],
+    buildscript_rule = ":build-script-build",
+    env_srcs = [":manifest[env_dict]"],
     features = [
         "base64",
         "default",
@@ -120,7 +118,7 @@ buildscript_run(
         "transport-worker",
         "uuid",
     ],
-    version = "0.13.0",
-    manifest_dir = ":rmcp-vendor",
+    version = "1.2.0",
+    manifest_dir = ":vendor",
     visibility = ["PUBLIC"],
 )

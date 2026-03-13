@@ -4,43 +4,42 @@ load("@buckal//:cargo_manifest.bzl", "cargo_manifest")
 load("@buckal//:wrapper.bzl", "buildscript_run", "rust_binary", "rust_library")
 
 filegroup(
-    name = "libra-vendor",
+    name = "vendor",
     srcs = glob(["**/**"]),
-    out = "vendor",
 )
 
 cargo_manifest(
-    name = "libra-manifest",
-    vendor = ":libra-vendor",
+    name = "manifest",
+    vendor = ":vendor",
 )
 
 rust_binary(
     name = "libra",
-    srcs = [":libra-vendor"],
+    srcs = [":vendor"],
     crate = "libra",
     crate_root = "vendor/src/main.rs",
     edition = "2024",
     env = {
-        "OUT_DIR": "$(location :libra-build-script-run[out_dir])",
+        "OUT_DIR": "$(location :build-script-run[out_dir])",
     },
     features = ["default"],
     rustc_flags = [
-        "@$(location :libra-build-script-run[rustc_flags])",
-        "@$(location :libra-manifest[env_flags])",
+        "@$(location :build-script-run[rustc_flags])",
+        "@$(location :manifest[env_flags])",
     ] + select({
         "prelude//os/constraints:windows": select({
             "prelude//abi/constraints:gnu": [
-                "@$(location //third-party/rust/crates/windows_x86_64_gnu/0.42.2:windows_x86_64_gnu-build-script-run[rustc_flags])",
-                "@$(location //third-party/rust/crates/windows_x86_64_gnu/0.48.5:windows_x86_64_gnu-build-script-run[rustc_flags])",
-                "@$(location //third-party/rust/crates/windows_x86_64_gnu/0.52.6:windows_x86_64_gnu-build-script-run[rustc_flags])",
-                "@$(location //third-party/rust/crates/windows_x86_64_gnu/0.53.1:windows_x86_64_gnu-build-script-run[rustc_flags])",
-                "@$(location //third-party/rust/crates/winapi-x86_64-pc-windows-gnu/0.4.0:winapi-x86_64-pc-windows-gnu-build-script-run[rustc_flags])",
+                "@$(location //third-party/rust/crates/windows_x86_64_gnu/0.42.2:build-script-run[rustc_flags])",
+                "@$(location //third-party/rust/crates/windows_x86_64_gnu/0.48.5:build-script-run[rustc_flags])",
+                "@$(location //third-party/rust/crates/windows_x86_64_gnu/0.52.6:build-script-run[rustc_flags])",
+                "@$(location //third-party/rust/crates/windows_x86_64_gnu/0.53.1:build-script-run[rustc_flags])",
+                "@$(location //third-party/rust/crates/winapi-x86_64-pc-windows-gnu/0.4.0:build-script-run[rustc_flags])",
             ],
             "DEFAULT": [
-                "@$(location //third-party/rust/crates/windows_x86_64_msvc/0.42.2:windows_x86_64_msvc-build-script-run[rustc_flags])",
-                "@$(location //third-party/rust/crates/windows_x86_64_msvc/0.48.5:windows_x86_64_msvc-build-script-run[rustc_flags])",
-                "@$(location //third-party/rust/crates/windows_x86_64_msvc/0.52.6:windows_x86_64_msvc-build-script-run[rustc_flags])",
-                "@$(location //third-party/rust/crates/windows_x86_64_msvc/0.53.1:windows_x86_64_msvc-build-script-run[rustc_flags])",
+                "@$(location //third-party/rust/crates/windows_x86_64_msvc/0.42.2:build-script-run[rustc_flags])",
+                "@$(location //third-party/rust/crates/windows_x86_64_msvc/0.48.5:build-script-run[rustc_flags])",
+                "@$(location //third-party/rust/crates/windows_x86_64_msvc/0.52.6:build-script-run[rustc_flags])",
+                "@$(location //third-party/rust/crates/windows_x86_64_msvc/0.53.1:build-script-run[rustc_flags])",
             ],
         }),
         "DEFAULT": [],
@@ -96,7 +95,7 @@ rust_binary(
         "//third-party/rust/crates/regex/1.12.3:regex",
         "//third-party/rust/crates/reqwest/0.12.28:reqwest",
         "//third-party/rust/crates/ring/0.17.14:ring",
-        "//third-party/rust/crates/rmcp/0.13.0:rmcp",
+        "//third-party/rust/crates/rmcp/1.2.0:rmcp",
         "//third-party/rust/crates/rpassword/7.4.0:rpassword",
         "//third-party/rust/crates/rust-embed/8.11.0:rust-embed",
         "//third-party/rust/crates/scopeguard/1.2.0:scopeguard",
@@ -125,17 +124,17 @@ rust_binary(
 
 rust_library(
     name = "libra-lib",
-    srcs = [":libra-vendor"],
+    srcs = [":vendor"],
     crate = "libra",
     crate_root = "vendor/src/lib.rs",
     edition = "2024",
     env = {
-        "OUT_DIR": "$(location :libra-build-script-run[out_dir])",
+        "OUT_DIR": "$(location :build-script-run[out_dir])",
     },
     features = ["default"],
     rustc_flags = [
-        "@$(location :libra-build-script-run[rustc_flags])",
-        "@$(location :libra-manifest[env_flags])",
+        "@$(location :build-script-run[rustc_flags])",
+        "@$(location :manifest[env_flags])",
     ],
     named_deps = {
         "rig": "//third-party/rust/crates/rig-core/0.32.0:rig-core",
@@ -188,7 +187,7 @@ rust_library(
         "//third-party/rust/crates/regex/1.12.3:regex",
         "//third-party/rust/crates/reqwest/0.12.28:reqwest",
         "//third-party/rust/crates/ring/0.17.14:ring",
-        "//third-party/rust/crates/rmcp/0.13.0:rmcp",
+        "//third-party/rust/crates/rmcp/1.2.0:rmcp",
         "//third-party/rust/crates/rpassword/7.4.0:rpassword",
         "//third-party/rust/crates/rust-embed/8.11.0:rust-embed",
         "//third-party/rust/crates/scopeguard/1.2.0:scopeguard",
@@ -215,26 +214,26 @@ rust_library(
 )
 
 rust_binary(
-    name = "libra-build-script-build",
-    srcs = [":libra-vendor"],
+    name = "build-script-build",
+    srcs = [":vendor"],
     crate = "build_script_build",
     crate_root = "vendor/build.rs",
     edition = "2024",
     features = ["default"],
-    rustc_flags = ["@$(location :libra-manifest[env_flags])"],
+    rustc_flags = ["@$(location :manifest[env_flags])"],
     visibility = [],
 )
 
 buildscript_run(
-    name = "libra-build-script-run",
+    name = "build-script-run",
     package_name = "libra",
-    buildscript_rule = ":libra-build-script-build",
+    buildscript_rule = ":build-script-build",
     env_srcs = [
-        "//third-party/rust/crates/ring/0.17.14:ring-build-script-run[metadata]",
-        ":libra-manifest[env_dict]",
+        "//third-party/rust/crates/ring/0.17.14:build-script-run[metadata]",
+        ":manifest[env_dict]",
     ],
     features = ["default"],
     version = "0.1.0",
-    manifest_dir = ":libra-vendor",
+    manifest_dir = ":vendor",
     visibility = ["PUBLIC"],
 )
