@@ -27,8 +27,8 @@ use super::{
     chatwidget::ChatWidget,
     diff::FileChange,
     history_cell::{
-        AssistantHistoryCell, DagHistoryCell, DiffHistoryCell, HistoryCell,
-        OrchestratorResultHistoryCell, PlanUpdateHistoryCell, ToolCallHistoryCell, UserHistoryCell,
+        AssistantHistoryCell, DiffHistoryCell, HistoryCell, OrchestratorResultHistoryCell,
+        PlanSummaryHistoryCell, PlanUpdateHistoryCell, ToolCallHistoryCell, UserHistoryCell,
     },
     terminal::{TARGET_FRAME_INTERVAL, Tui, TuiEvent},
     welcome_shader::{self, WelcomeView},
@@ -1287,6 +1287,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 intent_id,
                 plan_id,
                 spec_json,
+                spec,
+                plan,
+                warnings,
             } => {
                 self.finish_turn_state();
                 self.history = new_history;
@@ -1295,10 +1298,10 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     LATEST_INTENTSPEC_JSON.to_string(),
                     serde_json::Value::String(spec_json.clone()),
                 );
-                if let Some(id) = intent_id {
+                if let Some(ref id) = intent_id {
                     self.session.metadata.insert(
                         LATEST_INTENTSPEC_INTENT_ID.to_string(),
-                        serde_json::Value::String(id),
+                        serde_json::Value::String(id.clone()),
                     );
                 } else {
                     self.session.metadata.remove(LATEST_INTENTSPEC_INTENT_ID);
@@ -1314,7 +1317,13 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     self.mcp_plan_id = None;
                 }
 
-                self.complete_streaming_assistant_cell(text);
+                self.replace_streaming_assistant_cell(Box::new(PlanSummaryHistoryCell::new(
+                    *spec,
+                    *plan,
+                    intent_id.clone(),
+                    plan_id.clone(),
+                    warnings,
+                )));
 
                 // Show post-plan dialog instead of returning to Idle
                 self.pending_post_plan = Some(PendingPostPlan {
@@ -1338,7 +1347,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 turn_id: _turn_id,
                 plan,
             } => {
-                self.insert_before_streaming_assistant(Box::new(DagHistoryCell::new(plan)));
+                self.widget.show_dag_panel(plan);
                 self.schedule_draw();
             }
             AppEvent::DagTaskStatus {
@@ -1346,14 +1355,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 task_id,
                 status,
             } => {
-                for cell in self.widget.cells.iter_mut().rev() {
-                    if let Some(dag_cell) = cell.as_any_mut().downcast_mut::<DagHistoryCell>()
-                        && dag_cell.contains_task(task_id)
-                    {
-                        dag_cell.update_task_status(task_id, status);
-                        break;
-                    }
-                }
+                self.widget.update_dag_task_status(task_id, status);
                 self.schedule_draw();
             }
             AppEvent::DagGraphProgress {
@@ -1361,12 +1363,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 completed,
                 total,
             } => {
-                for cell in self.widget.cells.iter_mut().rev() {
-                    if let Some(dag_cell) = cell.as_any_mut().downcast_mut::<DagHistoryCell>() {
-                        dag_cell.update_progress(completed, total);
-                        break;
-                    }
-                }
+                self.widget.update_dag_progress(completed, total);
                 self.schedule_draw();
             }
             AppEvent::ToolCallBegin {
@@ -1404,6 +1401,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 tool_name,
                 result,
             } => {
+                let should_hide_failure = should_hide_tool_failure(&tool_name, &result);
                 // For successful apply_patch, insert a visual diff cell.
                 if tool_name == "apply_patch"
                     && let Ok(ref output) = result
@@ -1425,14 +1423,26 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     }
                 }
                 if !found {
-                    for cell in self.widget.cells.iter_mut().rev() {
-                        if let Some(tool_cell) =
-                            cell.as_any_mut().downcast_mut::<ToolCallHistoryCell>()
-                            && tool_cell.contains_call_id(&call_id)
-                        {
-                            tool_cell.complete_call(&call_id, result);
-                            break;
+                    let mut pending_result = Some(result);
+                    for idx in (0..self.widget.cells.len()).rev() {
+                        let Some(tool_cell) = self.widget.cells[idx]
+                            .as_any_mut()
+                            .downcast_mut::<ToolCallHistoryCell>()
+                        else {
+                            continue;
+                        };
+                        if !tool_cell.contains_call_id(&call_id) {
+                            continue;
                         }
+                        if should_hide_failure && tool_cell.hides_failed_calls() {
+                            tool_cell.remove_call(&call_id);
+                            if tool_cell.is_empty() {
+                                self.widget.cells.remove(idx);
+                            }
+                        } else if let Some(result) = pending_result.take() {
+                            tool_cell.complete_call(&call_id, result);
+                        }
+                        break;
                     }
                 }
                 self.running_tool_calls = self.running_tool_calls.saturating_sub(1);
@@ -1511,6 +1521,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             effective_text
         };
 
+        self.widget.clear_dag_panel();
         let turn_id = self.begin_turn();
         let _ = self.app_event_tx.send(AppEvent::SubmitUserMessage {
             turn_id,
@@ -1683,6 +1694,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             }
         };
 
+        self.widget.clear_dag_panel();
         self.widget
             .add_cell(Box::new(AssistantHistoryCell::streaming()));
         self.widget.bottom_pane.set_status(AgentStatus::Thinking);
@@ -1872,6 +1884,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         self.session.add_user_message(&user_text);
         self.widget
             .add_cell(Box::new(UserHistoryCell::new(user_text.clone())));
+        self.widget.clear_dag_panel();
         self.widget
             .add_cell(Box::new(AssistantHistoryCell::streaming()));
         self.widget.bottom_pane.set_status(AgentStatus::Thinking);
@@ -2183,16 +2196,18 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 None
             };
 
-            if let Some(warn) = persistence_warning {
+            if let Some(ref warn) = persistence_warning {
                 summary.push_str(&format!("\nWarning: {warn}"));
             }
-            if let Some(warn) = plan_warning {
+            if let Some(ref warn) = plan_warning {
                 summary.push_str(&format!("\nWarning: {warn}"));
             }
+            summary.push_str("\n\nExecution plan ready. Review the workflow card and choose Execute / Modify / Cancel below.");
 
-            let plan_summary = render_execution_plan_summary(&execution_plan, plan_id.as_deref());
-            summary.push_str("\n\n");
-            summary.push_str(&plan_summary);
+            let warnings = [persistence_warning, plan_warning]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
 
             let mut new_history = turn.map(|turn| turn.history).unwrap_or(fallback_history);
             new_history.push(Message::assistant(summary.clone()));
@@ -2204,6 +2219,9 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 intent_id,
                 plan_id,
                 spec_json: pretty_json,
+                spec: Box::new(spec),
+                plan: Box::new(execution_plan),
+                warnings,
             });
         });
 
@@ -2480,6 +2498,13 @@ fn append_to_last_tool_group_cell(
     true
 }
 
+fn should_hide_tool_failure(tool_name: &str, result: &Result<ToolOutput, String>) -> bool {
+    matches!(
+        tool_name,
+        "read_file" | "list_dir" | "grep_files" | "apply_patch"
+    ) && !matches!(result, Ok(output) if output.is_success())
+}
+
 fn format_orchestrator_result(
     result: &crate::internal::ai::orchestrator::types::OrchestratorResult,
 ) -> String {
@@ -2725,11 +2750,16 @@ mod tests {
     use git_internal::internal::object::{task::Task as GitTask, types::ActorRef};
     use serde_json::json;
 
-    use super::{append_to_last_tool_group_cell, format_orchestrator_result};
+    use super::{
+        append_to_last_tool_group_cell, format_orchestrator_result, should_hide_tool_failure,
+    };
     use crate::internal::{
-        ai::orchestrator::types::{
-            DecisionOutcome, ExecutionPlanSpec, GateReport, OrchestratorResult, SystemReport,
-            TaskContract, TaskKind, TaskNodeStatus, TaskResult, TaskSpec,
+        ai::{
+            orchestrator::types::{
+                DecisionOutcome, ExecutionPlanSpec, GateReport, OrchestratorResult, SystemReport,
+                TaskContract, TaskKind, TaskNodeStatus, TaskResult, TaskSpec,
+            },
+            tools::ToolOutput,
         },
         tui::history_cell::{AssistantHistoryCell, HistoryCell, ToolCallHistoryCell},
     };
@@ -2852,6 +2882,30 @@ mod tests {
         assert!(rendered.contains("| Task | Status | Retries | Tools | Violations |"));
         assert!(rendered.contains("### Missing Artifacts"));
     }
+
+    #[test]
+    fn hides_failed_explore_and_edit_calls() {
+        assert!(should_hide_tool_failure(
+            "read_file",
+            &Err("file not found".to_string())
+        ));
+        assert!(should_hide_tool_failure(
+            "apply_patch",
+            &Err("context mismatch".to_string())
+        ));
+    }
+
+    #[test]
+    fn keeps_failed_shell_calls_visible() {
+        assert!(!should_hide_tool_failure(
+            "shell",
+            &Err("command exited with status 1".to_string())
+        ));
+        assert!(!should_hide_tool_failure(
+            "read_file",
+            &Ok(ToolOutput::success("ok"))
+        ));
+    }
 }
 
 fn summarize_retry_error(error: &str) -> String {
@@ -2934,40 +2988,6 @@ fn summarize_tool_output(output: &ToolOutput) -> String {
         truncated.push_str("...");
         truncated
     }
-}
-
-fn render_execution_plan_summary(plan: &ExecutionPlanSpec, plan_id: Option<&str>) -> String {
-    let mut lines = Vec::new();
-    lines.push("## Execution Plan".to_string());
-    if let Some(id) = plan_id {
-        lines.push(format!("Plan ID: {id}"));
-    }
-    lines.push(plan.summary_line());
-    lines.push(format!(
-        "Parallel groups: {} | Checkpoints: {}",
-        plan.parallel_groups().len(),
-        plan.checkpoints.len()
-    ));
-    lines.push(String::new());
-
-    for task in &plan.tasks {
-        let kind = match &task.gate_stage {
-            Some(stage) => format!("gate:{stage:?}"),
-            None => "implementation".to_string(),
-        };
-        lines.push(format!("- [{}] {}", kind.to_lowercase(), task.title()));
-        if !task.contract.touch_files.is_empty() {
-            lines.push(format!("  files: {}", task.contract.touch_files.join(", ")));
-        }
-        if !task.dependencies().is_empty() {
-            lines.push(format!("  depends on: {}", task.dependencies().len()));
-        }
-        if !task.checks.is_empty() {
-            lines.push(format!("  checks: {}", task.checks.len()));
-        }
-    }
-
-    lines.join("\n")
 }
 
 async fn persist_execution_plan(

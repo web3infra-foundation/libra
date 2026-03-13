@@ -5,7 +5,7 @@
 
 use std::{
     any::Any,
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     fmt::Debug,
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
@@ -21,6 +21,7 @@ use super::{
     theme,
 };
 use crate::internal::ai::{
+    intentspec::types::IntentSpec,
     orchestrator::types::{
         DecisionOutcome, ExecutionPlanSpec, GateReport, OrchestratorResult, PersistedExecution,
         TaskKind, TaskNodeStatus,
@@ -283,6 +284,10 @@ impl ToolCallGroup {
             Self::Other(_) => theme::text::subtle(),
         }
     }
+
+    fn hide_failed_calls(&self) -> bool {
+        matches!(self, Self::Explore | Self::Edit)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -297,6 +302,13 @@ struct ToolCallEntry {
     call_id: String,
     summary: String,
     status: ToolCallEntryStatus,
+}
+
+#[derive(Debug)]
+struct ToolEntryRun<'a> {
+    action: &'a str,
+    details: Vec<&'a str>,
+    failures: Vec<&'a str>,
 }
 
 #[derive(Debug, Clone)]
@@ -332,6 +344,18 @@ impl ToolCallHistoryCell {
 
     pub fn contains_call_id(&self, call_id: &str) -> bool {
         self.entries.iter().any(|entry| entry.call_id == call_id)
+    }
+
+    pub fn remove_call(&mut self, call_id: &str) {
+        self.entries.retain(|entry| entry.call_id != call_id);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn hides_failed_calls(&self) -> bool {
+        self.group.hide_failed_calls()
     }
 
     /// Complete a single tool call inside the group.
@@ -413,20 +437,26 @@ impl HistoryCell for ToolCallHistoryCell {
             ));
         }
 
-        for (idx, entry) in self.entries.iter().enumerate() {
-            let prefix = if idx + 1 == self.entries.len() {
+        let grouped_entries = group_tool_entries(&self.entries);
+        for (idx, entry) in grouped_entries.iter().enumerate() {
+            let prefix = if idx + 1 == grouped_entries.len() {
                 "  └ "
             } else {
                 "  ├ "
             };
+            let summary = if entry.details.is_empty() {
+                entry.action.to_string()
+            } else {
+                format!("{} {}", entry.action, entry.details.join("  •  "))
+            };
             lines.extend(wrap_tool_entry(
-                &entry.summary,
+                &summary,
                 prefix,
                 width,
                 self.group.action_style(),
             ));
 
-            if let ToolCallEntryStatus::Failed(error) = &entry.status {
+            for error in &entry.failures {
                 lines.extend(wrap_text(
                     &truncate_utf8(error.trim(), 180),
                     "    ",
@@ -529,15 +559,55 @@ fn argument_string<'a>(arguments: &'a Value, key: &str) -> Option<&'a str> {
     arguments.get(key).and_then(Value::as_str)
 }
 
+fn group_tool_entries(entries: &[ToolCallEntry]) -> Vec<ToolEntryRun<'_>> {
+    let mut grouped: Vec<ToolEntryRun<'_>> = Vec::new();
+
+    for entry in entries {
+        let (action, detail) = split_tool_summary(&entry.summary);
+        let failure = match &entry.status {
+            ToolCallEntryStatus::Failed(error) => Some(error.as_str()),
+            ToolCallEntryStatus::Running | ToolCallEntryStatus::Success => None,
+        };
+
+        if let Some(last) = grouped.last_mut()
+            && last.action == action
+        {
+            if !detail.is_empty() {
+                last.details.push(detail);
+            }
+            if let Some(error) = failure {
+                last.failures.push(error);
+            }
+            continue;
+        }
+
+        grouped.push(ToolEntryRun {
+            action,
+            details: if detail.is_empty() {
+                Vec::new()
+            } else {
+                vec![detail]
+            },
+            failures: failure.into_iter().collect(),
+        });
+    }
+
+    grouped
+}
+
+fn split_tool_summary(summary: &str) -> (&str, &str) {
+    summary
+        .split_once(' ')
+        .map_or((summary, ""), |(action, detail)| (action, detail))
+}
+
 fn wrap_tool_entry(
     summary: &str,
     prefix: &str,
     width: u16,
     action_style: Style,
 ) -> Vec<Line<'static>> {
-    let (action, detail) = summary
-        .split_once(' ')
-        .map_or((summary, ""), |(action, detail)| (action, detail));
+    let (action, detail) = split_tool_summary(summary);
 
     if detail.is_empty() {
         return vec![Line::from(vec![
@@ -736,281 +806,267 @@ impl HistoryCell for PlanUpdateHistoryCell {
 }
 
 #[derive(Debug, Clone)]
-struct DagNodeEntry {
-    task_id: Uuid,
-    title: String,
-    kind: TaskKind,
-    dependencies: Vec<Uuid>,
-    lane: usize,
-    depth: usize,
-    ordinal: usize,
-    status: TaskNodeStatus,
-}
-
-#[derive(Debug, Clone, Default)]
-struct DagGridCell {
-    mask: u8,
-    animated: bool,
+struct PlanTaskRow {
+    label: String,
+    kind: String,
+    dependencies: usize,
+    files: usize,
+    checks: usize,
 }
 
 #[derive(Debug, Clone)]
-pub struct DagHistoryCell {
-    revision: u32,
+pub struct PlanSummaryHistoryCell {
     summary: String,
-    nodes: Vec<DagNodeEntry>,
-    completed: usize,
-    total: usize,
+    risk: String,
+    change_type: String,
+    objective_count: usize,
+    verification_count: usize,
+    artifact_count: usize,
+    intent_id: Option<String>,
+    plan_id: Option<String>,
+    parallelism: u8,
+    parallel_groups: usize,
+    checkpoint_count: usize,
+    tasks: Vec<PlanTaskRow>,
+    warnings: Vec<String>,
 }
 
-impl DagHistoryCell {
-    pub fn new(plan: ExecutionPlanSpec) -> Self {
-        let groups = plan.parallel_groups();
-        let mut id_to_depth = HashMap::new();
-        let mut id_to_lane = HashMap::new();
-        for (depth, group) in groups.iter().enumerate() {
-            for (lane, id) in group.iter().enumerate() {
-                id_to_depth.insert(*id, depth);
-                id_to_lane.insert(*id, lane);
-            }
-        }
-
-        let nodes = plan
+impl PlanSummaryHistoryCell {
+    pub fn new(
+        spec: IntentSpec,
+        plan: ExecutionPlanSpec,
+        intent_id: Option<String>,
+        plan_id: Option<String>,
+        warnings: Vec<String>,
+    ) -> Self {
+        let verification_count = spec.acceptance.verification_plan.fast_checks.len()
+            + spec.acceptance.verification_plan.integration_checks.len()
+            + spec.acceptance.verification_plan.security_checks.len()
+            + spec.acceptance.verification_plan.release_checks.len();
+        let tasks = plan
             .tasks
             .iter()
             .enumerate()
-            .map(|(idx, task)| DagNodeEntry {
-                task_id: task.id(),
-                title: task.title().to_string(),
-                kind: task.kind.clone(),
-                dependencies: task.dependencies().to_vec(),
-                lane: id_to_lane.get(&task.id()).copied().unwrap_or_default(),
-                depth: id_to_depth.get(&task.id()).copied().unwrap_or_default(),
-                ordinal: idx + 1,
-                status: TaskNodeStatus::Pending,
+            .map(|(idx, task)| PlanTaskRow {
+                label: format!(
+                    "{}{:02} {}",
+                    match task.kind {
+                        TaskKind::Implementation => "I",
+                        TaskKind::Gate => "G",
+                    },
+                    idx + 1,
+                    task.title()
+                ),
+                kind: match task.gate_stage.as_ref() {
+                    Some(stage) => format!("{stage:?}").to_lowercase(),
+                    None => "impl".to_string(),
+                },
+                dependencies: task.dependencies().len(),
+                files: task.contract.touch_files.len(),
+                checks: task.checks.len(),
             })
             .collect::<Vec<_>>();
 
         Self {
-            revision: plan.revision,
-            summary: plan.summary_line(),
-            total: plan.tasks.len(),
-            completed: 0,
-            nodes,
+            summary: spec.intent.summary,
+            risk: format!("{:?}", spec.risk.level),
+            change_type: format!("{:?}", spec.intent.change_type).to_lowercase(),
+            objective_count: spec.intent.objectives.len(),
+            verification_count,
+            artifact_count: spec.artifacts.required.len(),
+            intent_id,
+            plan_id,
+            parallelism: plan.max_parallel,
+            parallel_groups: plan.parallel_groups().len(),
+            checkpoint_count: plan.checkpoints.len(),
+            tasks,
+            warnings,
         }
     }
 
-    pub fn contains_task(&self, task_id: Uuid) -> bool {
-        self.nodes.iter().any(|node| node.task_id == task_id)
+    fn render_header(&self) -> Vec<Line<'static>> {
+        vec![
+            Line::from(vec![
+                Span::styled("● ", theme::text::primary().add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Plan Ready",
+                    theme::interactive::title().add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::styled(
+                "  Workflow graph is shown in the side panel.",
+                theme::text::muted().add_modifier(Modifier::DIM),
+            ),
+        ]
     }
 
-    pub fn update_task_status(&mut self, task_id: Uuid, status: TaskNodeStatus) {
-        if let Some(node) = self.nodes.iter_mut().find(|node| node.task_id == task_id) {
-            node.status = status;
-        }
-    }
-
-    pub fn update_progress(&mut self, completed: usize, total: usize) {
-        self.completed = completed.min(total);
-        self.total = total.max(self.total);
-    }
-
-    fn has_running_nodes(&self) -> bool {
-        self.nodes
-            .iter()
-            .any(|node| node.status == TaskNodeStatus::Running)
-    }
-
-    fn column_count(&self) -> usize {
-        self.nodes
-            .iter()
-            .map(|node| node.lane)
-            .max()
-            .map(|max| max + 1)
-            .unwrap_or(0)
-    }
-
-    fn row_count(&self) -> usize {
-        self.nodes
-            .iter()
-            .map(|node| node.depth)
-            .max()
-            .map(|max| max + 1)
-            .unwrap_or(0)
-    }
-
-    fn fallback_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let mut lines = self.header_lines(width);
-        for node in &self.nodes {
-            let status = match node.status {
-                TaskNodeStatus::Pending => "○",
-                TaskNodeStatus::Running => "◉",
-                TaskNodeStatus::Completed => "●",
-                TaskNodeStatus::Failed => "✕",
-                TaskNodeStatus::Skipped => "◌",
-            };
-            let label = format!(
-                "{} {}",
-                status,
-                truncate_utf8(
-                    &format!("{:02} {}", node.ordinal, node_display_label(node)),
-                    width.saturating_sub(4) as usize,
-                )
-            );
-            lines.push(Line::styled(label, node_style(&node.status)));
-        }
-        lines.push(Line::raw(""));
-        lines
-    }
-
-    fn header_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let mut lines = Vec::new();
-        let summary = format!(
-            "● DAG rev {}  {}/{}",
-            self.revision, self.completed, self.total
-        );
-        if self.has_running_nodes() {
-            lines.push(gradient_line(
-                &summary,
-                &theme::animation::executing_gradient(),
-                animation_phase(100),
-                true,
-            ));
-        } else {
-            let color = if self
-                .nodes
-                .iter()
-                .any(|node| node.status == TaskNodeStatus::Failed)
-            {
-                theme::status::danger_color()
-            } else if self.completed > 0 && self.completed == self.total {
-                theme::status::success_color()
-            } else {
-                theme::interactive::accent()
-                    .fg
-                    .unwrap_or(theme::text::primary().fg.unwrap_or(Color::Reset))
-            };
-            lines.push(Line::styled(
-                summary,
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            ));
-        }
+    fn render_overview(&self, width: u16) -> Vec<Line<'static>> {
+        let mut lines = section_header("Overview");
         lines.extend(wrap_text(
             &self.summary,
             "  ",
             width,
-            theme::text::muted().add_modifier(Modifier::DIM),
+            theme::text::primary().add_modifier(Modifier::BOLD),
         ));
+        lines.extend(render_metric_lines(
+            width,
+            &[
+                ("risk", self.risk.clone(), theme::status::warning()),
+                ("type", self.change_type.clone(), theme::text::primary()),
+                (
+                    "goals",
+                    self.objective_count.to_string(),
+                    theme::text::primary(),
+                ),
+                (
+                    "checks",
+                    self.verification_count.to_string(),
+                    theme::text::primary(),
+                ),
+                (
+                    "artifacts",
+                    self.artifact_count.to_string(),
+                    theme::text::primary(),
+                ),
+            ],
+        ));
+        lines.extend(render_metric_lines(
+            width,
+            &[
+                (
+                    "parallel",
+                    self.parallelism.to_string(),
+                    theme::text::primary(),
+                ),
+                (
+                    "groups",
+                    self.parallel_groups.to_string(),
+                    theme::text::muted(),
+                ),
+                (
+                    "ckpt",
+                    self.checkpoint_count.to_string(),
+                    theme::text::muted(),
+                ),
+                (
+                    "intent",
+                    self.intent_id
+                        .as_deref()
+                        .map(short_object_id)
+                        .unwrap_or_else(|| "none".to_string()),
+                    theme::badge::workspace(),
+                ),
+                (
+                    "plan",
+                    self.plan_id
+                        .as_deref()
+                        .map(short_object_id)
+                        .unwrap_or_else(|| "none".to_string()),
+                    theme::badge::workspace(),
+                ),
+            ],
+        ));
+        lines
+    }
+
+    fn render_tasks(&self, width: u16) -> Vec<Line<'static>> {
+        let mut lines = section_header("Tasks");
+        let label_width = width.saturating_sub(24) as usize;
+        if width >= 68 {
+            lines.push(Line::from(vec![
+                Span::styled("  ", theme::text::primary()),
+                Span::styled(
+                    pad_cell("Task", label_width.max(18)),
+                    theme::text::subtle().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    pad_cell("Type", 9),
+                    theme::text::subtle().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    pad_cell("Deps", 4),
+                    theme::text::subtle().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    pad_cell("Files", 5),
+                    theme::text::subtle().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    pad_cell("Checks", 6),
+                    theme::text::subtle().add_modifier(Modifier::BOLD),
+                ),
+            ]));
+            lines.push(Line::styled(
+                format!("  {}", "─".repeat(width.saturating_sub(4) as usize)),
+                theme::text::subtle(),
+            ));
+            for row in &self.tasks {
+                lines.push(Line::from(vec![
+                    Span::styled("  ", theme::text::primary()),
+                    Span::styled(
+                        pad_cell(
+                            &truncate_utf8(&row.label, label_width.max(18)),
+                            label_width.max(18),
+                        ),
+                        theme::text::primary(),
+                    ),
+                    Span::raw(" "),
+                    Span::styled(pad_cell(&row.kind, 9), theme::text::muted()),
+                    Span::raw(" "),
+                    Span::styled(
+                        pad_cell(&row.dependencies.to_string(), 4),
+                        theme::text::muted(),
+                    ),
+                    Span::raw(" "),
+                    Span::styled(pad_cell(&row.files.to_string(), 5), theme::text::muted()),
+                    Span::raw(" "),
+                    Span::styled(pad_cell(&row.checks.to_string(), 6), theme::text::muted()),
+                ]));
+            }
+        } else {
+            for row in &self.tasks {
+                lines.extend(wrap_text(
+                    &format!(
+                        "{} | {} | deps {} | files {} | checks {}",
+                        row.label, row.kind, row.dependencies, row.files, row.checks
+                    ),
+                    "  • ",
+                    width,
+                    theme::text::primary(),
+                ));
+            }
+        }
+        lines
+    }
+
+    fn render_warnings(&self, width: u16) -> Vec<Line<'static>> {
+        if self.warnings.is_empty() {
+            return Vec::new();
+        }
+        let mut lines = section_header("Warnings");
+        for warning in &self.warnings {
+            lines.extend(wrap_text(warning, "  ! ", width, theme::status::warning()));
+        }
         lines
     }
 }
 
-impl HistoryCell for DagHistoryCell {
+impl HistoryCell for PlanSummaryHistoryCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let mut lines = self.header_lines(width);
-        let lane_count = self.column_count();
-        let depth_count = self.row_count();
-        if lane_count == 0 || depth_count == 0 {
+        let mut lines = self.render_header();
+        lines.push(Line::raw(""));
+        lines.extend(self.render_overview(width));
+        lines.push(Line::raw(""));
+        lines.extend(self.render_tasks(width));
+        let warnings = self.render_warnings(width);
+        if !warnings.is_empty() {
             lines.push(Line::raw(""));
-            return lines;
+            lines.extend(warnings);
         }
-
-        let gap_width = 5usize;
-        let available_width = width as usize;
-        let min_node_width = 18usize;
-        let node_width = available_width
-            .saturating_sub(gap_width.saturating_mul(lane_count.saturating_sub(1)))
-            .checked_div(lane_count)
-            .unwrap_or(0)
-            .min(30);
-        if node_width < min_node_width {
-            return self.fallback_lines(width);
-        }
-
-        let total_width =
-            lane_count * node_width + gap_width.saturating_mul(lane_count.saturating_sub(1));
-        let grid_height = depth_count.saturating_mul(2).saturating_sub(1).max(1);
-        let mut grid = vec![vec![DagGridCell::default(); total_width]; grid_height];
-
-        let node_positions = self
-            .nodes
-            .iter()
-            .map(|node| {
-                let x = node.lane * (node_width + gap_width);
-                let y = node.depth * 2;
-                (node.task_id, (x, y, x + node_width / 2))
-            })
-            .collect::<BTreeMap<_, _>>();
-
-        for node in &self.nodes {
-            let Some(&(_target_x, target_y, target_center)) = node_positions.get(&node.task_id)
-            else {
-                continue;
-            };
-            for dependency in &node.dependencies {
-                let Some(&(_dep_x, dep_y, dep_center)) = node_positions.get(dependency) else {
-                    continue;
-                };
-                let animated = matches!(node.status, TaskNodeStatus::Running)
-                    || matches!(
-                        self.nodes
-                            .iter()
-                            .find(|candidate| candidate.task_id == *dependency)
-                            .map(|candidate| &candidate.status),
-                        Some(TaskNodeStatus::Running)
-                    );
-                let connector_y = target_y.saturating_sub(1);
-                if dep_y + 1 < connector_y {
-                    draw_vertical_segment(&mut grid, dep_center, dep_y + 1, connector_y, animated);
-                }
-                draw_horizontal_segment(
-                    &mut grid,
-                    connector_y,
-                    dep_center,
-                    target_center,
-                    animated,
-                );
-            }
-        }
-
-        let phase = animation_phase(110);
-        let mut graph_lines = Vec::new();
-        for y in 0..grid_height {
-            let mut cells = Vec::with_capacity(total_width);
-            for x in 0..total_width {
-                let edge = &grid[y][x];
-                let style = if edge.mask == 0 {
-                    Style::default()
-                } else if edge.animated {
-                    Style::default().fg(theme::animation::executing_gradient()
-                        [(x + y + phase) % theme::animation::executing_gradient().len()])
-                } else {
-                    theme::text::subtle().add_modifier(Modifier::DIM)
-                };
-                let ch = edge_glyph(edge.mask);
-                cells.push((ch, style));
-            }
-
-            for node in &self.nodes {
-                let Some(&(node_x, node_y, _)) = node_positions.get(&node.task_id) else {
-                    continue;
-                };
-                if node_y != y {
-                    continue;
-                }
-                let rendered = node_box_text(node, node_width);
-                let style = node_style(&node.status);
-                for (offset, ch) in rendered.chars().enumerate() {
-                    if node_x + offset >= total_width {
-                        break;
-                    }
-                    cells[node_x + offset] = (ch, style);
-                }
-            }
-
-            graph_lines.push(line_from_cells(cells, "  "));
-        }
-
-        lines.extend(graph_lines);
         lines.push(Line::raw(""));
         lines
     }
@@ -1021,171 +1077,6 @@ impl HistoryCell for DagHistoryCell {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
-    }
-}
-
-fn draw_horizontal_segment(
-    grid: &mut [Vec<DagGridCell>],
-    y: usize,
-    start_x: usize,
-    end_x: usize,
-    animated: bool,
-) {
-    let Some(row) = grid.get_mut(y) else {
-        return;
-    };
-    let (from, to) = if start_x <= end_x {
-        (start_x, end_x)
-    } else {
-        (end_x, start_x)
-    };
-    if from == to {
-        if let Some(cell) = row.get_mut(from) {
-            cell.mask |= 0b1010;
-            cell.animated |= animated;
-        }
-        return;
-    }
-    for x in from..=to {
-        if let Some(cell) = row.get_mut(x) {
-            if x > from {
-                cell.mask |= 0b1000;
-            }
-            if x < to {
-                cell.mask |= 0b0010;
-            }
-            cell.animated |= animated;
-        }
-    }
-}
-
-fn draw_vertical_segment(
-    grid: &mut [Vec<DagGridCell>],
-    x: usize,
-    start_y: usize,
-    end_y: usize,
-    animated: bool,
-) {
-    let (from, to) = if start_y <= end_y {
-        (start_y, end_y)
-    } else {
-        (end_y, start_y)
-    };
-    if from == to {
-        if let Some(row) = grid.get_mut(from)
-            && let Some(cell) = row.get_mut(x)
-        {
-            cell.mask |= 0b0101;
-            cell.animated |= animated;
-        }
-        return;
-    }
-    for y in from..=to {
-        let Some(row) = grid.get_mut(y) else {
-            continue;
-        };
-        let Some(cell) = row.get_mut(x) else {
-            continue;
-        };
-        if y > from {
-            cell.mask |= 0b0001;
-        }
-        if y < to {
-            cell.mask |= 0b0100;
-        }
-        cell.animated |= animated;
-    }
-}
-
-fn edge_glyph(mask: u8) -> char {
-    match mask {
-        0 => ' ',
-        0b0010 | 0b1000 | 0b1010 => '─',
-        0b0001 | 0b0100 | 0b0101 => '│',
-        0b0110 => '┌',
-        0b1100 => '┐',
-        0b0011 => '└',
-        0b1001 => '┘',
-        0b0111 => '├',
-        0b1101 => '┤',
-        0b1110 => '┬',
-        0b1011 => '┴',
-        0b1111 => '┼',
-        _ => '•',
-    }
-}
-
-fn line_from_cells(cells: Vec<(char, Style)>, prefix: &str) -> Line<'static> {
-    let mut spans = vec![Span::raw(prefix.to_string())];
-    let mut current_style = None;
-    let mut current_text = String::new();
-
-    for (ch, style) in cells {
-        if current_style == Some(style) {
-            current_text.push(ch);
-            continue;
-        }
-        if !current_text.is_empty() {
-            spans.push(Span::styled(
-                std::mem::take(&mut current_text),
-                current_style.unwrap_or_default(),
-            ));
-        }
-        current_style = Some(style);
-        current_text.push(ch);
-    }
-
-    if !current_text.is_empty() {
-        spans.push(Span::styled(
-            current_text,
-            current_style.unwrap_or_default(),
-        ));
-    }
-
-    Line::from(spans)
-}
-
-fn node_display_label(node: &DagNodeEntry) -> String {
-    let prefix = match node.kind {
-        TaskKind::Implementation => "I",
-        TaskKind::Gate => "G",
-    };
-    format!("{prefix}{:02} {}", node.ordinal, node.title)
-}
-
-fn node_box_text(node: &DagNodeEntry, width: usize) -> String {
-    let inner_width = width.saturating_sub(2);
-    let label = fit_label(&node_display_label(node), inner_width);
-    format!("[{label}]")
-}
-
-fn fit_label(text: &str, width: usize) -> String {
-    if width == 0 {
-        return String::new();
-    }
-    let text = if text.chars().count() > width {
-        if width <= 1 {
-            "…".to_string()
-        } else {
-            let keep = width.saturating_sub(1);
-            let mut out = text.chars().take(keep).collect::<String>();
-            out.push('…');
-            out
-        }
-    } else {
-        text.to_string()
-    };
-    let padding = width.saturating_sub(text.chars().count());
-    format!("{text}{}", " ".repeat(padding))
-}
-
-fn node_style(status: &TaskNodeStatus) -> Style {
-    match status {
-        TaskNodeStatus::Pending => theme::text::subtle(),
-        TaskNodeStatus::Running => theme::interactive::in_progress(),
-        TaskNodeStatus::Completed => theme::status::success(),
-        TaskNodeStatus::Failed => theme::status::danger().add_modifier(Modifier::BOLD),
-        TaskNodeStatus::Skipped => theme::text::muted().add_modifier(Modifier::DIM),
     }
 }
 
@@ -1771,16 +1662,16 @@ fn pad_cell(text: &str, width: usize) -> String {
     format!("{truncated}{}", " ".repeat(pad))
 }
 
-fn persistence_summary(
-    persistence: Option<&PersistedExecution>,
-) -> (
+type PersistenceSummary = (
     Option<String>,
     Option<String>,
     Option<String>,
     Option<String>,
     usize,
     Vec<CheckpointRow>,
-) {
+);
+
+fn persistence_summary(persistence: Option<&PersistedExecution>) -> PersistenceSummary {
     let Some(persistence) = persistence else {
         return (None, None, None, None, 0, Vec::new());
     };
@@ -1811,10 +1702,16 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        AssistantHistoryCell, DagHistoryCell, HistoryCell, OrchestratorResultHistoryCell,
-        PlanUpdateHistoryCell, ToolCallHistoryCell, UserHistoryCell,
+        AssistantHistoryCell, CheckpointRow, HistoryCell, OrchestratorResultHistoryCell,
+        PlanSummaryHistoryCell, PlanUpdateHistoryCell, ToolCallHistoryCell, UserHistoryCell,
     };
     use crate::internal::ai::{
+        intentspec::{
+            ResolveContext,
+            draft::{DraftAcceptance, DraftIntent, DraftRisk, IntentDraft},
+            resolve_intentspec,
+            types::{ChangeType, IntentSpec, RiskLevel},
+        },
         orchestrator::types::{
             DecisionOutcome, ExecutionPlanSpec, OrchestratorResult, SystemReport, TaskContract,
             TaskKind, TaskNodeStatus, TaskResult, TaskSpec,
@@ -1860,25 +1757,6 @@ mod tests {
             replan_reason: None,
             tasks: vec![first, second, final_task],
             max_parallel: 2,
-            checkpoints: vec![],
-        }
-    }
-
-    fn serial_dag_plan() -> ExecutionPlanSpec {
-        let first = make_task("Inventory todos", TaskKind::Implementation, vec![]);
-        let second = make_task(
-            "Assess test coverage",
-            TaskKind::Implementation,
-            vec![first.id()],
-        );
-        let third = make_task("Summarize findings", TaskKind::Gate, vec![second.id()]);
-        ExecutionPlanSpec {
-            intent_spec_id: "intent-serial".into(),
-            revision: 1,
-            parent_revision: None,
-            replan_reason: None,
-            tasks: vec![first, second, third],
-            max_parallel: 1,
             checkpoints: vec![],
         }
     }
@@ -1929,6 +1807,43 @@ mod tests {
         }
     }
 
+    fn intentspec_fixture() -> IntentSpec {
+        resolve_intentspec(
+            IntentDraft {
+                intent: DraftIntent {
+                    summary: "Refine TUI workflow presentation".to_string(),
+                    problem_statement: "Plan summary is too verbose".to_string(),
+                    change_type: ChangeType::Refactor,
+                    objectives: vec![
+                        "compact plan summary".to_string(),
+                        "show dag in side panel".to_string(),
+                    ],
+                    in_scope: vec!["src/internal/tui".to_string()],
+                    out_of_scope: vec![],
+                    touch_hints: None,
+                },
+                acceptance: DraftAcceptance {
+                    success_criteria: vec!["ui is readable".to_string()],
+                    fast_checks: vec![],
+                    integration_checks: vec![],
+                    security_checks: vec![],
+                    release_checks: vec![],
+                },
+                risk: DraftRisk {
+                    rationale: "ui-only".to_string(),
+                    factors: vec![],
+                    level: Some(RiskLevel::Low),
+                },
+            },
+            RiskLevel::Low,
+            ResolveContext {
+                working_dir: ".".to_string(),
+                base_ref: "HEAD".to_string(),
+                created_by_id: "tester".to_string(),
+            },
+        )
+    }
+
     #[test]
     fn user_cell_uses_vertical_bar_and_no_user_label() {
         let cell = UserHistoryCell::new("hello".to_string());
@@ -1946,44 +1861,24 @@ mod tests {
     }
 
     #[test]
-    fn dag_cell_renders_dependency_graph() {
-        let plan = dag_plan();
-        let mut cell = DagHistoryCell::new(plan.clone());
-        cell.update_task_status(plan.tasks[0].id(), TaskNodeStatus::Completed);
-        cell.update_task_status(plan.tasks[1].id(), TaskNodeStatus::Running);
-        cell.update_progress(1, plan.tasks.len());
-
-        let rendered = to_strings(cell.display_lines(120));
-        assert!(rendered.iter().any(|line| line.contains("DAG rev 2")));
-        assert!(rendered.iter().any(|line| line.contains("Inspect sources")));
-        assert!(rendered.iter().any(|line| line.contains("Render DAG")));
-        assert!(rendered.iter().any(|line| line.contains("Run checks")));
-        assert!(
-            rendered
-                .iter()
-                .any(|line| line.contains('─') || line.contains('│'))
+    fn plan_summary_cell_renders_compact_sections() {
+        let cell = PlanSummaryHistoryCell::new(
+            intentspec_fixture(),
+            dag_plan(),
+            Some("019ce52e-18c8-7530-9472-92599ad7bcd0".to_string()),
+            Some("019ce52e-18d5-7910-b999-a6782e91666e".to_string()),
+            vec!["execution plan not persisted".to_string()],
         );
-    }
-
-    #[test]
-    fn dag_cell_falls_back_on_narrow_width() {
-        let cell = DagHistoryCell::new(dag_plan());
-        let rendered = to_strings(cell.display_lines(28));
-        assert!(rendered.iter().any(|line| line.contains("○")));
-        assert!(!rendered.iter().any(|line| line.contains("[impl")));
-    }
-
-    #[test]
-    fn dag_cell_keeps_serial_plans_vertical() {
-        let plan = serial_dag_plan();
-        let cell = DagHistoryCell::new(plan);
         let rendered = to_strings(cell.display_lines(100));
         let joined = rendered.join("\n");
 
-        assert!(joined.contains("Inventory todos"));
-        assert!(joined.contains("Assess test coverage"));
-        assert!(joined.contains("Summarize findings"));
-        assert!(!rendered.iter().any(|line| line.starts_with("○   ○")));
+        assert!(joined.contains("Plan Ready"));
+        assert!(joined.contains("Overview"));
+        assert!(joined.contains("Tasks"));
+        assert!(joined.contains("Warnings"));
+        assert!(joined.contains("I01 Inspect sources"));
+        assert!(!joined.contains("files:"));
+        assert!(!joined.contains("depends on:"));
     }
 
     #[test]
@@ -2058,6 +1953,52 @@ mod tests {
         assert!(joined.contains("Explored"));
         assert!(joined.contains("Search cwd|pwd in src"));
         assert!(joined.contains("List src"));
+    }
+
+    #[test]
+    fn tool_cell_compacts_consecutive_same_action_into_single_line() {
+        let mut cell = ToolCallHistoryCell::new(
+            "1".to_string(),
+            "read_file".to_string(),
+            json!({"file_path":"README.md"}),
+        );
+        cell.append_call(
+            "2".to_string(),
+            "read_file".to_string(),
+            json!({"file_path":"CLAUDE.md"}),
+        );
+        cell.append_call(
+            "3".to_string(),
+            "read_file".to_string(),
+            json!({"file_path":"Cargo.toml"}),
+        );
+        cell.complete_call("1", Ok(ToolOutput::success("ok")));
+        cell.complete_call("2", Ok(ToolOutput::success("ok")));
+        cell.complete_call("3", Ok(ToolOutput::success("ok")));
+
+        let rendered = to_strings(cell.display_lines(100));
+        let read_lines = rendered
+            .iter()
+            .filter(|line| line.contains("Read "))
+            .collect::<Vec<_>>();
+
+        assert_eq!(read_lines.len(), 1);
+        assert!(read_lines[0].contains("README.md"));
+        assert!(read_lines[0].contains("CLAUDE.md"));
+        assert!(read_lines[0].contains("Cargo.toml"));
+    }
+
+    #[test]
+    fn explore_cell_can_drop_failed_call_entries() {
+        let mut cell = ToolCallHistoryCell::new(
+            "1".to_string(),
+            "read_file".to_string(),
+            json!({"file_path":"CONTRIBUTING.md"}),
+        );
+
+        assert!(cell.hides_failed_calls());
+        cell.remove_call("1");
+        assert!(cell.is_empty());
     }
 
     #[test]

@@ -9,6 +9,7 @@ use uuid::Uuid;
 use super::history_cell::HistoryCell;
 use crate::internal::ai::{
     completion::Message,
+    intentspec::types::IntentSpec,
     orchestrator::types::{ExecutionPlanSpec, OrchestratorResult, TaskNodeStatus},
     tools::ToolOutput,
 };
@@ -76,6 +77,9 @@ pub enum AppEvent {
         intent_id: Option<String>,
         plan_id: Option<String>,
         spec_json: String,
+        spec: Box<IntentSpec>,
+        plan: Box<ExecutionPlanSpec>,
+        warnings: Vec<String>,
     },
     /// Insert a history cell into the chat.
     InsertHistoryCell {

@@ -353,7 +353,7 @@ impl Renderer {
         self.flush_line(false);
         let depth = self.list_stack.len().max(1);
         let marker = if let Some(last) = self.list_stack.last_mut() {
-            if let Some(index) = last {
+            let marker = if let Some(index) = last {
                 let marker = format!("{}. ", *index);
                 *index += 1;
                 PendingListItem {
@@ -367,7 +367,8 @@ impl Renderer {
                     marker: "• ".to_string(),
                     style: self.styles.bullet,
                 }
-            }
+            };
+            marker
         } else {
             PendingListItem {
                 indent: 2,
@@ -860,7 +861,7 @@ fn render_table_row(
             let cell_line = cell_lines
                 .get(line_idx)
                 .cloned()
-                .unwrap_or_else(|| Line::default());
+                .unwrap_or_else(Line::default);
             let aligned = align_table_cell_line(cell_line, *width, *alignment);
             spans.extend(aligned.spans);
             spans.push(Span::raw(" "));
