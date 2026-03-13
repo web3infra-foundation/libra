@@ -13,6 +13,7 @@ use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+pub use types::*;
 
 use crate::{
     cli_error,
@@ -22,8 +23,6 @@ use crate::{
     },
     utils::{storage_ext::StorageExt, util::try_get_storage_path},
 };
-
-pub use types::*;
 
 const CODEX_WS_URL: &str = "ws://127.0.0.1:8080";
 
@@ -631,397 +630,381 @@ pub async fn execute(args: AgentCodexArgs) {
                                     if let Some(item) = params.get("item")
                                         && let Some(item_type) =
                                             item.get("type").and_then(|t| t.as_str())
-                                        {
-                                            let item_id = item
-                                                .get("id")
-                                                .and_then(|i| i.as_str())
-                                                .unwrap_or("")
-                                                .to_string();
+                                    {
+                                        let item_id = item
+                                            .get("id")
+                                            .and_then(|i| i.as_str())
+                                            .unwrap_or("")
+                                            .to_string();
 
-                                            // Get current run_id
-                                            let run_id = turn_id.to_string();
+                                        // Get current run_id
+                                        let run_id = turn_id.to_string();
 
-                                            // Get tool name if it's a tool call
-                                            if item_type == "mcpToolCall" {
-                                                let tool = item
-                                                    .get("tool")
-                                                    .and_then(|t| t.as_str())
-                                                    .unwrap_or("unknown");
-                                                let server = item
-                                                    .get("server")
-                                                    .and_then(|s| s.as_str())
-                                                    .unwrap_or("");
-                                                let args = item.get("arguments").cloned();
-                                                print!("  MCP Tool: {}", tool);
-                                                if !server.is_empty() {
-                                                    print!(" (server: {})", server);
-                                                }
-                                                println!(" started");
-                                                // Show arguments if available
-                                                if let Some(arguments) = &args {
-                                                    let args_str = arguments.to_string();
-                                                    if args_str.len() > 200 {
-                                                        println!(
-                                                            "    Args: {}...",
-                                                            &args_str[..200]
-                                                        );
-                                                    } else {
-                                                        println!("    Args: {}", args_str);
-                                                    }
-                                                }
-
-                                                // Store ToolInvocation
-                                                let invocation = ToolInvocation {
-                                                    id: item_id.clone(),
-                                                    run_id: run_id.clone(),
-                                                    thread_id: thread_id.to_string(),
-                                                    tool_name: tool.to_string(),
-                                                    server: Some(server.to_string()),
-                                                    arguments: args,
-                                                    result: None,
-                                                    error: None,
-                                                    status: ToolStatus::InProgress,
-                                                    duration_ms: None,
-                                                    created_at: Utc::now(),
-                                                };
-                                                session_clone
-                                                    .lock()
-                                                    .unwrap()
-                                                    .add_tool_invocation(invocation);
-                                            } else if item_type == "toolCall" {
-                                                let tool = item
-                                                    .get("name")
-                                                    .or_else(|| item.get("tool"))
-                                                    .and_then(|t| t.as_str())
-                                                    .unwrap_or("unknown");
-                                                let args = item.get("arguments").cloned();
-                                                println!("  Tool: {} started", tool);
-
-                                                // Store ToolInvocation
-                                                let invocation = ToolInvocation {
-                                                    id: item_id.clone(),
-                                                    run_id: run_id.clone(),
-                                                    thread_id: thread_id.to_string(),
-                                                    tool_name: tool.to_string(),
-                                                    server: None,
-                                                    arguments: args,
-                                                    result: None,
-                                                    error: None,
-                                                    status: ToolStatus::InProgress,
-                                                    duration_ms: None,
-                                                    created_at: Utc::now(),
-                                                };
-                                                let tool_id = item_id.clone();
-                                                let tool_for_mcp = invocation.clone();
-                                                session_clone
-                                                    .lock()
-                                                    .unwrap()
-                                                    .add_tool_invocation(invocation);
-
-                                                // Store to MCP in background
-                                                let mcp_server_for_tool = mcp_server_clone.clone();
-                                                tokio::spawn(async move {
-                                                    store_to_mcp(
-                                                        &mcp_server_for_tool,
-                                                        "tool_invocation",
-                                                        &tool_id,
-                                                        &tool_for_mcp,
-                                                    )
-                                                    .await;
-                                                });
-                                            } else if item_type == "commandExecution" {
-                                                let cmd = item
-                                                    .get("command")
-                                                    .and_then(|c| c.as_str())
-                                                    .unwrap_or("");
-                                                println!("  Command: {} started", cmd);
-
-                                                // Store ToolInvocation
-                                                let invocation = ToolInvocation {
-                                                    id: item_id.clone(),
-                                                    run_id: run_id.clone(),
-                                                    thread_id: thread_id.to_string(),
-                                                    tool_name: "commandExecution".to_string(),
-                                                    server: None,
-                                                    arguments: Some(
-                                                        serde_json::json!({ "command": cmd }),
-                                                    ),
-                                                    result: None,
-                                                    error: None,
-                                                    status: ToolStatus::InProgress,
-                                                    duration_ms: item
-                                                        .get("durationMs")
-                                                        .and_then(|d| d.as_i64()),
-                                                    created_at: Utc::now(),
-                                                };
-                                                let cmd_id = item_id.clone();
-                                                let cmd_for_mcp = invocation.clone();
-                                                session_clone
-                                                    .lock()
-                                                    .unwrap()
-                                                    .add_tool_invocation(invocation);
-
-                                                // Store to MCP in background
-                                                let mcp_server_for_cmd = mcp_server_clone.clone();
-                                                tokio::spawn(async move {
-                                                    store_to_mcp(
-                                                        &mcp_server_for_cmd,
-                                                        "tool_invocation",
-                                                        &cmd_id,
-                                                        &cmd_for_mcp,
-                                                    )
-                                                    .await;
-                                                });
-                                            } else if item_type == "reasoning" {
-                                                println!("  Thinking started");
-
-                                                // Store Reasoning
-                                                let reasoning = Reasoning {
-                                                    id: item_id.clone(),
-                                                    run_id: run_id.clone(),
-                                                    thread_id: thread_id.to_string(),
-                                                    summary: vec![],
-                                                    text: None,
-                                                    created_at: Utc::now(),
-                                                };
-                                                let reasoning_id = item_id.clone();
-                                                let reasoning_for_mcp = reasoning.clone();
-                                                session_clone
-                                                    .lock()
-                                                    .unwrap()
-                                                    .add_reasoning(reasoning);
-
-                                                // Store to MCP in background
-                                                let mcp_server_for_reasoning =
-                                                    mcp_server_clone.clone();
-                                                tokio::spawn(async move {
-                                                    store_to_mcp(
-                                                        &mcp_server_for_reasoning,
-                                                        "reasoning",
-                                                        &reasoning_id,
-                                                        &reasoning_for_mcp,
-                                                    )
-                                                    .await;
-                                                });
-                                            } else if item_type == "plan" {
-                                                // Plan item - show the plan text
-                                                let text = item
-                                                    .get("text")
-                                                    .and_then(|t| t.as_str())
-                                                    .unwrap_or("");
-                                                if !text.is_empty() {
-                                                    println!("  Plan started: {}", text);
-                                                } else {
-                                                    println!("  Plan started");
-                                                }
-
-                                                // Store Plan
-                                                let plan = Plan {
-                                                    id: item_id.clone(),
-                                                    text: text.to_string(),
-                                                    intent_id: None,
-                                                    thread_id: thread_id.to_string(),
-                                                    turn_id: Some(turn_id.to_string()),
-                                                    status: PlanStatus::InProgress,
-                                                    created_at: Utc::now(),
-                                                };
-                                                let plan_id_2 = item_id.clone();
-                                                let plan_for_mcp_2 = plan.clone();
-                                                session_clone.lock().unwrap().add_plan(plan);
-
-                                                // Store to MCP in background
-                                                let mcp_server_for_plan_2 =
-                                                    mcp_server_clone.clone();
-                                                tokio::spawn(async move {
-                                                    store_to_mcp(
-                                                        &mcp_server_for_plan_2,
-                                                        "plan",
-                                                        &plan_id_2,
-                                                        &plan_for_mcp_2,
-                                                    )
-                                                    .await;
-                                                });
-                                            } else if item_type == "fileChange" {
-                                                // File change - at item/started, changes may not be available yet
-                                                // Just show that file change has started
-                                                println!("  📝 File Change started");
-
-                                                // Store PatchSet (empty for now, will be filled on complete)
-                                                let patchset = PatchSet {
-                                                    id: item_id.clone(),
-                                                    run_id: run_id.clone(),
-                                                    thread_id: thread_id.to_string(),
-                                                    changes: vec![],
-                                                    status: PatchStatus::InProgress,
-                                                    created_at: Utc::now(),
-                                                };
-                                                let patchset_id = item_id.clone();
-                                                let patchset_for_mcp = patchset.clone();
-                                                session_clone
-                                                    .lock()
-                                                    .unwrap()
-                                                    .add_patchset(patchset);
-
-                                                // Store to MCP in background
-                                                let mcp_server_for_patchset =
-                                                    mcp_server_clone.clone();
-                                                tokio::spawn(async move {
-                                                    store_to_mcp(
-                                                        &mcp_server_for_patchset,
-                                                        "patchset",
-                                                        &patchset_id,
-                                                        &patchset_for_mcp,
-                                                    )
-                                                    .await;
-                                                });
-                                            } else if item_type == "dynamicToolCall" {
-                                                // Dynamic tool call
-                                                let tool = item
-                                                    .get("tool")
-                                                    .and_then(|t| t.as_str())
-                                                    .unwrap_or("unknown");
-                                                let args = item.get("arguments").cloned();
-                                                println!("  Dynamic Tool: {} started", tool);
-
-                                                // Store ToolInvocation
-                                                let invocation = ToolInvocation {
-                                                    id: item_id.clone(),
-                                                    run_id: run_id.clone(),
-                                                    thread_id: thread_id.to_string(),
-                                                    tool_name: tool.to_string(),
-                                                    server: None,
-                                                    arguments: args,
-                                                    result: None,
-                                                    error: None,
-                                                    status: ToolStatus::InProgress,
-                                                    duration_ms: item
-                                                        .get("durationMs")
-                                                        .and_then(|d| d.as_i64()),
-                                                    created_at: Utc::now(),
-                                                };
-                                                let dyn_tool_id = item_id.clone();
-                                                let dyn_tool_for_mcp = invocation.clone();
-                                                session_clone
-                                                    .lock()
-                                                    .unwrap()
-                                                    .add_tool_invocation(invocation);
-
-                                                // Store to MCP in background
-                                                let mcp_server_for_dyn = mcp_server_clone.clone();
-                                                tokio::spawn(async move {
-                                                    store_to_mcp(
-                                                        &mcp_server_for_dyn,
-                                                        "tool_invocation",
-                                                        &dyn_tool_id,
-                                                        &dyn_tool_for_mcp,
-                                                    )
-                                                    .await;
-                                                });
-                                            } else if item_type == "webSearch" {
-                                                // Web search
-                                                let query = item
-                                                    .get("query")
-                                                    .and_then(|q| q.as_str())
-                                                    .unwrap_or("");
-                                                println!("  Web Search: {}", query);
-
-                                                // Store ToolInvocation
-                                                let invocation = ToolInvocation {
-                                                    id: item_id.clone(),
-                                                    run_id: run_id.clone(),
-                                                    thread_id: thread_id.to_string(),
-                                                    tool_name: "webSearch".to_string(),
-                                                    server: None,
-                                                    arguments: Some(
-                                                        serde_json::json!({ "query": query }),
-                                                    ),
-                                                    result: None,
-                                                    error: None,
-                                                    status: ToolStatus::InProgress,
-                                                    duration_ms: None,
-                                                    created_at: Utc::now(),
-                                                };
-                                                let ws_id = item_id.clone();
-                                                let ws_for_mcp = invocation.clone();
-                                                session_clone
-                                                    .lock()
-                                                    .unwrap()
-                                                    .add_tool_invocation(invocation);
-
-                                                // Store to MCP in background
-                                                let mcp_server_for_ws = mcp_server_clone.clone();
-                                                tokio::spawn(async move {
-                                                    store_to_mcp(
-                                                        &mcp_server_for_ws,
-                                                        "tool_invocation",
-                                                        &ws_id,
-                                                        &ws_for_mcp,
-                                                    )
-                                                    .await;
-                                                });
-                                            } else if item_type == "userMessage" {
-                                                // User message -> Intent
-                                                let content = item
-                                                    .get("content")
-                                                    .and_then(|c| c.as_array())
-                                                    .and_then(|arr| arr.first())
-                                                    .and_then(|first| first.get("text"))
-                                                    .and_then(|t| t.as_str())
-                                                    .unwrap_or("");
-                                                let truncated = if content.len() > 50 {
-                                                    &content[..50]
-                                                } else {
-                                                    content
-                                                };
-                                                println!("  User: {}", truncated);
-
-                                                // Store Intent
-                                                let intent = Intent {
-                                                    id: item_id.clone(),
-                                                    content: content.to_string(),
-                                                    thread_id: thread_id.to_string(),
-                                                    created_at: Utc::now(),
-                                                };
-                                                let intent_id = item_id.clone();
-                                                let intent_for_mcp = intent.clone();
-                                                session_clone.lock().unwrap().add_intent(intent);
-
-                                                // Store to MCP in background
-                                                let mcp_server_for_intent =
-                                                    mcp_server_clone.clone();
-                                                tokio::spawn(async move {
-                                                    store_to_mcp(
-                                                        &mcp_server_for_intent,
-                                                        "intent",
-                                                        &intent_id,
-                                                        &intent_for_mcp,
-                                                    )
-                                                    .await;
-                                                });
-                                            } else if item_type == "agentMessage" {
-                                                // Agent message - will stream
-                                                let content = item
-                                                    .get("text")
-                                                    .and_then(|t| t.as_str())
-                                                    .unwrap_or("");
-                                                println!("\n  🤖 Agent Response started\n");
-
-                                                // Store AgentMessage
-                                                let msg = AgentMessage {
-                                                    id: item_id.clone(),
-                                                    run_id: run_id.clone(),
-                                                    thread_id: thread_id.to_string(),
-                                                    content: content.to_string(),
-                                                    created_at: Utc::now(),
-                                                };
-                                                session_clone
-                                                    .lock()
-                                                    .unwrap()
-                                                    .add_agent_message(msg);
-                                            } else {
-                                                println!("  Task: {} started", item_type);
+                                        // Get tool name if it's a tool call
+                                        if item_type == "mcpToolCall" {
+                                            let tool = item
+                                                .get("tool")
+                                                .and_then(|t| t.as_str())
+                                                .unwrap_or("unknown");
+                                            let server = item
+                                                .get("server")
+                                                .and_then(|s| s.as_str())
+                                                .unwrap_or("");
+                                            let args = item.get("arguments").cloned();
+                                            print!("  MCP Tool: {}", tool);
+                                            if !server.is_empty() {
+                                                print!(" (server: {})", server);
                                             }
+                                            println!(" started");
+                                            // Show arguments if available
+                                            if let Some(arguments) = &args {
+                                                let args_str = arguments.to_string();
+                                                if args_str.len() > 200 {
+                                                    println!("    Args: {}...", &args_str[..200]);
+                                                } else {
+                                                    println!("    Args: {}", args_str);
+                                                }
+                                            }
+
+                                            // Store ToolInvocation
+                                            let invocation = ToolInvocation {
+                                                id: item_id.clone(),
+                                                run_id: run_id.clone(),
+                                                thread_id: thread_id.to_string(),
+                                                tool_name: tool.to_string(),
+                                                server: Some(server.to_string()),
+                                                arguments: args,
+                                                result: None,
+                                                error: None,
+                                                status: ToolStatus::InProgress,
+                                                duration_ms: None,
+                                                created_at: Utc::now(),
+                                            };
+                                            session_clone
+                                                .lock()
+                                                .unwrap()
+                                                .add_tool_invocation(invocation);
+                                        } else if item_type == "toolCall" {
+                                            let tool = item
+                                                .get("name")
+                                                .or_else(|| item.get("tool"))
+                                                .and_then(|t| t.as_str())
+                                                .unwrap_or("unknown");
+                                            let args = item.get("arguments").cloned();
+                                            println!("  Tool: {} started", tool);
+
+                                            // Store ToolInvocation
+                                            let invocation = ToolInvocation {
+                                                id: item_id.clone(),
+                                                run_id: run_id.clone(),
+                                                thread_id: thread_id.to_string(),
+                                                tool_name: tool.to_string(),
+                                                server: None,
+                                                arguments: args,
+                                                result: None,
+                                                error: None,
+                                                status: ToolStatus::InProgress,
+                                                duration_ms: None,
+                                                created_at: Utc::now(),
+                                            };
+                                            let tool_id = item_id.clone();
+                                            let tool_for_mcp = invocation.clone();
+                                            session_clone
+                                                .lock()
+                                                .unwrap()
+                                                .add_tool_invocation(invocation);
+
+                                            // Store to MCP in background
+                                            let mcp_server_for_tool = mcp_server_clone.clone();
+                                            tokio::spawn(async move {
+                                                store_to_mcp(
+                                                    &mcp_server_for_tool,
+                                                    "tool_invocation",
+                                                    &tool_id,
+                                                    &tool_for_mcp,
+                                                )
+                                                .await;
+                                            });
+                                        } else if item_type == "commandExecution" {
+                                            let cmd = item
+                                                .get("command")
+                                                .and_then(|c| c.as_str())
+                                                .unwrap_or("");
+                                            println!("  Command: {} started", cmd);
+
+                                            // Store ToolInvocation
+                                            let invocation = ToolInvocation {
+                                                id: item_id.clone(),
+                                                run_id: run_id.clone(),
+                                                thread_id: thread_id.to_string(),
+                                                tool_name: "commandExecution".to_string(),
+                                                server: None,
+                                                arguments: Some(
+                                                    serde_json::json!({ "command": cmd }),
+                                                ),
+                                                result: None,
+                                                error: None,
+                                                status: ToolStatus::InProgress,
+                                                duration_ms: item
+                                                    .get("durationMs")
+                                                    .and_then(|d| d.as_i64()),
+                                                created_at: Utc::now(),
+                                            };
+                                            let cmd_id = item_id.clone();
+                                            let cmd_for_mcp = invocation.clone();
+                                            session_clone
+                                                .lock()
+                                                .unwrap()
+                                                .add_tool_invocation(invocation);
+
+                                            // Store to MCP in background
+                                            let mcp_server_for_cmd = mcp_server_clone.clone();
+                                            tokio::spawn(async move {
+                                                store_to_mcp(
+                                                    &mcp_server_for_cmd,
+                                                    "tool_invocation",
+                                                    &cmd_id,
+                                                    &cmd_for_mcp,
+                                                )
+                                                .await;
+                                            });
+                                        } else if item_type == "reasoning" {
+                                            println!("  Thinking started");
+
+                                            // Store Reasoning
+                                            let reasoning = Reasoning {
+                                                id: item_id.clone(),
+                                                run_id: run_id.clone(),
+                                                thread_id: thread_id.to_string(),
+                                                summary: vec![],
+                                                text: None,
+                                                created_at: Utc::now(),
+                                            };
+                                            let reasoning_id = item_id.clone();
+                                            let reasoning_for_mcp = reasoning.clone();
+                                            session_clone.lock().unwrap().add_reasoning(reasoning);
+
+                                            // Store to MCP in background
+                                            let mcp_server_for_reasoning = mcp_server_clone.clone();
+                                            tokio::spawn(async move {
+                                                store_to_mcp(
+                                                    &mcp_server_for_reasoning,
+                                                    "reasoning",
+                                                    &reasoning_id,
+                                                    &reasoning_for_mcp,
+                                                )
+                                                .await;
+                                            });
+                                        } else if item_type == "plan" {
+                                            // Plan item - show the plan text
+                                            let text = item
+                                                .get("text")
+                                                .and_then(|t| t.as_str())
+                                                .unwrap_or("");
+                                            if !text.is_empty() {
+                                                println!("  Plan started: {}", text);
+                                            } else {
+                                                println!("  Plan started");
+                                            }
+
+                                            // Store Plan
+                                            let plan = Plan {
+                                                id: item_id.clone(),
+                                                text: text.to_string(),
+                                                intent_id: None,
+                                                thread_id: thread_id.to_string(),
+                                                turn_id: Some(turn_id.to_string()),
+                                                status: PlanStatus::InProgress,
+                                                created_at: Utc::now(),
+                                            };
+                                            let plan_id_2 = item_id.clone();
+                                            let plan_for_mcp_2 = plan.clone();
+                                            session_clone.lock().unwrap().add_plan(plan);
+
+                                            // Store to MCP in background
+                                            let mcp_server_for_plan_2 = mcp_server_clone.clone();
+                                            tokio::spawn(async move {
+                                                store_to_mcp(
+                                                    &mcp_server_for_plan_2,
+                                                    "plan",
+                                                    &plan_id_2,
+                                                    &plan_for_mcp_2,
+                                                )
+                                                .await;
+                                            });
+                                        } else if item_type == "fileChange" {
+                                            // File change - at item/started, changes may not be available yet
+                                            // Just show that file change has started
+                                            println!("  📝 File Change started");
+
+                                            // Store PatchSet (empty for now, will be filled on complete)
+                                            let patchset = PatchSet {
+                                                id: item_id.clone(),
+                                                run_id: run_id.clone(),
+                                                thread_id: thread_id.to_string(),
+                                                changes: vec![],
+                                                status: PatchStatus::InProgress,
+                                                created_at: Utc::now(),
+                                            };
+                                            let patchset_id = item_id.clone();
+                                            let patchset_for_mcp = patchset.clone();
+                                            session_clone.lock().unwrap().add_patchset(patchset);
+
+                                            // Store to MCP in background
+                                            let mcp_server_for_patchset = mcp_server_clone.clone();
+                                            tokio::spawn(async move {
+                                                store_to_mcp(
+                                                    &mcp_server_for_patchset,
+                                                    "patchset",
+                                                    &patchset_id,
+                                                    &patchset_for_mcp,
+                                                )
+                                                .await;
+                                            });
+                                        } else if item_type == "dynamicToolCall" {
+                                            // Dynamic tool call
+                                            let tool = item
+                                                .get("tool")
+                                                .and_then(|t| t.as_str())
+                                                .unwrap_or("unknown");
+                                            let args = item.get("arguments").cloned();
+                                            println!("  Dynamic Tool: {} started", tool);
+
+                                            // Store ToolInvocation
+                                            let invocation = ToolInvocation {
+                                                id: item_id.clone(),
+                                                run_id: run_id.clone(),
+                                                thread_id: thread_id.to_string(),
+                                                tool_name: tool.to_string(),
+                                                server: None,
+                                                arguments: args,
+                                                result: None,
+                                                error: None,
+                                                status: ToolStatus::InProgress,
+                                                duration_ms: item
+                                                    .get("durationMs")
+                                                    .and_then(|d| d.as_i64()),
+                                                created_at: Utc::now(),
+                                            };
+                                            let dyn_tool_id = item_id.clone();
+                                            let dyn_tool_for_mcp = invocation.clone();
+                                            session_clone
+                                                .lock()
+                                                .unwrap()
+                                                .add_tool_invocation(invocation);
+
+                                            // Store to MCP in background
+                                            let mcp_server_for_dyn = mcp_server_clone.clone();
+                                            tokio::spawn(async move {
+                                                store_to_mcp(
+                                                    &mcp_server_for_dyn,
+                                                    "tool_invocation",
+                                                    &dyn_tool_id,
+                                                    &dyn_tool_for_mcp,
+                                                )
+                                                .await;
+                                            });
+                                        } else if item_type == "webSearch" {
+                                            // Web search
+                                            let query = item
+                                                .get("query")
+                                                .and_then(|q| q.as_str())
+                                                .unwrap_or("");
+                                            println!("  Web Search: {}", query);
+
+                                            // Store ToolInvocation
+                                            let invocation = ToolInvocation {
+                                                id: item_id.clone(),
+                                                run_id: run_id.clone(),
+                                                thread_id: thread_id.to_string(),
+                                                tool_name: "webSearch".to_string(),
+                                                server: None,
+                                                arguments: Some(
+                                                    serde_json::json!({ "query": query }),
+                                                ),
+                                                result: None,
+                                                error: None,
+                                                status: ToolStatus::InProgress,
+                                                duration_ms: None,
+                                                created_at: Utc::now(),
+                                            };
+                                            let ws_id = item_id.clone();
+                                            let ws_for_mcp = invocation.clone();
+                                            session_clone
+                                                .lock()
+                                                .unwrap()
+                                                .add_tool_invocation(invocation);
+
+                                            // Store to MCP in background
+                                            let mcp_server_for_ws = mcp_server_clone.clone();
+                                            tokio::spawn(async move {
+                                                store_to_mcp(
+                                                    &mcp_server_for_ws,
+                                                    "tool_invocation",
+                                                    &ws_id,
+                                                    &ws_for_mcp,
+                                                )
+                                                .await;
+                                            });
+                                        } else if item_type == "userMessage" {
+                                            // User message -> Intent
+                                            let content = item
+                                                .get("content")
+                                                .and_then(|c| c.as_array())
+                                                .and_then(|arr| arr.first())
+                                                .and_then(|first| first.get("text"))
+                                                .and_then(|t| t.as_str())
+                                                .unwrap_or("");
+                                            let truncated = if content.len() > 50 {
+                                                &content[..50]
+                                            } else {
+                                                content
+                                            };
+                                            println!("  User: {}", truncated);
+
+                                            // Store Intent
+                                            let intent = Intent {
+                                                id: item_id.clone(),
+                                                content: content.to_string(),
+                                                thread_id: thread_id.to_string(),
+                                                created_at: Utc::now(),
+                                            };
+                                            let intent_id = item_id.clone();
+                                            let intent_for_mcp = intent.clone();
+                                            session_clone.lock().unwrap().add_intent(intent);
+
+                                            // Store to MCP in background
+                                            let mcp_server_for_intent = mcp_server_clone.clone();
+                                            tokio::spawn(async move {
+                                                store_to_mcp(
+                                                    &mcp_server_for_intent,
+                                                    "intent",
+                                                    &intent_id,
+                                                    &intent_for_mcp,
+                                                )
+                                                .await;
+                                            });
+                                        } else if item_type == "agentMessage" {
+                                            // Agent message - will stream
+                                            let content = item
+                                                .get("text")
+                                                .and_then(|t| t.as_str())
+                                                .unwrap_or("");
+                                            println!("\n  🤖 Agent Response started\n");
+
+                                            // Store AgentMessage
+                                            let msg = AgentMessage {
+                                                id: item_id.clone(),
+                                                run_id: run_id.clone(),
+                                                thread_id: thread_id.to_string(),
+                                                content: content.to_string(),
+                                                created_at: Utc::now(),
+                                            };
+                                            session_clone.lock().unwrap().add_agent_message(msg);
+                                        } else {
+                                            println!("  Task: {} started", item_type);
                                         }
+                                    }
                                 }
                                 // Handle item/completed notification
                                 else if method_str.contains("item/completed") {
@@ -1035,374 +1018,405 @@ pub async fn execute(args: AgentCodexArgs) {
                                     if let Some(item) = params.get("item")
                                         && let Some(item_type) =
                                             item.get("type").and_then(|t| t.as_str())
-                                        {
-                                            let item_id = item
-                                                .get("id")
-                                                .and_then(|i| i.as_str())
-                                                .unwrap_or("")
-                                                .to_string();
+                                    {
+                                        let item_id = item
+                                            .get("id")
+                                            .and_then(|i| i.as_str())
+                                            .unwrap_or("")
+                                            .to_string();
 
-                                            if item_type == "mcpToolCall" {
-                                                let tool = item
-                                                    .get("tool")
-                                                    .and_then(|t| t.as_str())
-                                                    .unwrap_or("unknown");
-                                                let status = item
-                                                    .get("status")
-                                                    .and_then(|s| s.as_str())
-                                                    .unwrap_or("completed");
-                                                let result = item.get("result").cloned();
-                                                let error = item
-                                                    .get("error")
-                                                    .and_then(|e| e.as_str())
-                                                    .map(|s| s.to_string());
-                                                let duration_ms =
-                                                    item.get("durationMs").and_then(|d| d.as_i64());
+                                        if item_type == "mcpToolCall" {
+                                            let tool = item
+                                                .get("tool")
+                                                .and_then(|t| t.as_str())
+                                                .unwrap_or("unknown");
+                                            let status = item
+                                                .get("status")
+                                                .and_then(|s| s.as_str())
+                                                .unwrap_or("completed");
+                                            let result = item.get("result").cloned();
+                                            let error = item
+                                                .get("error")
+                                                .and_then(|e| e.as_str())
+                                                .map(|s| s.to_string());
+                                            let duration_ms =
+                                                item.get("durationMs").and_then(|d| d.as_i64());
 
-                                                print!("  MCP Tool: {} - {}", tool, status);
-                                                // Show result if available
-                                                if let Some(result) = item.get("result") {
-                                                    let result_str = result.to_string();
-                                                    if result_str.len() > 100 {
-                                                        println!(
-                                                            " | Result: {}...",
-                                                            &result_str[..100]
-                                                        );
-                                                    } else if !result_str.is_empty()
-                                                        && result_str != "null"
-                                                    {
-                                                        println!(" | Result: {}", result_str);
-                                                    } else {
-                                                        println!();
-                                                    }
-                                                } else if let Some(error) = item.get("error") {
-                                                    println!(" | Error: {}", error);
-                                                } else {
-                                                    println!();
-                                                }
-
-                                                // Update ToolInvocation status
-                                                let mut session = session_clone.lock().unwrap();
-                                                if let Some(invocation) = session
-                                                    .tool_invocations
-                                                    .iter_mut()
-                                                    .find(|i| i.id == item_id)
-                                                {
-                                                    invocation.status = match status {
-                                                        "completed" => ToolStatus::Completed,
-                                                        "failed" => ToolStatus::Failed,
-                                                        _ => ToolStatus::Completed,
-                                                    };
-                                                    invocation.result = result;
-                                                    invocation.error = error;
-                                                    invocation.duration_ms = duration_ms;
-                                                }
-                                            } else if item_type == "commandExecution" {
-                                                let cmd = item
-                                                    .get("command")
-                                                    .and_then(|c| c.as_str())
-                                                    .unwrap_or("");
-                                                let exit_code =
-                                                    item.get("exitCode").and_then(|c| c.as_i64());
-                                                let duration_ms =
-                                                    item.get("durationMs").and_then(|d| d.as_i64());
-                                                let output = item
-                                                    .get("aggregatedOutput")
-                                                    .and_then(|o| o.as_str());
-
-                                                println!("  Command: {} exit={:?}", cmd, exit_code);
-
-                                                // Update ToolInvocation status
-                                                let mut session = session_clone.lock().unwrap();
-                                                let updated_invocation = if let Some(invocation) =
-                                                    session
-                                                        .tool_invocations
-                                                        .iter_mut()
-                                                        .find(|i| i.id == item_id)
-                                                {
-                                                    invocation.status = match exit_code {
-                                                        Some(0) => ToolStatus::Completed,
-                                                        Some(_) => ToolStatus::Failed,
-                                                        None => ToolStatus::Completed,
-                                                    };
-                                                    invocation.result = output.map(
-                                                        |o| serde_json::json!({ "output": o }),
+                                            print!("  MCP Tool: {} - {}", tool, status);
+                                            // Show result if available
+                                            if let Some(result) = item.get("result") {
+                                                let result_str = result.to_string();
+                                                if result_str.len() > 100 {
+                                                    println!(
+                                                        " | Result: {}...",
+                                                        &result_str[..100]
                                                     );
-                                                    invocation.duration_ms = duration_ms;
-                                                    Some(invocation.clone())
-                                                } else {
-                                                    None
-                                                };
-                                                drop(session);
-
-                                                // Store updated tool invocation to MCP
-                                                if let Some(inv) = updated_invocation {
-                                                    let mcp_server_for_inv =
-                                                        mcp_server_clone.clone();
-                                                    let inv_id = item_id.clone();
-                                                    tokio::spawn(async move {
-                                                        store_to_mcp(
-                                                            &mcp_server_for_inv,
-                                                            "tool_invocation",
-                                                            &inv_id,
-                                                            &inv,
-                                                        )
-                                                        .await;
-                                                    });
-                                                }
-                                            } else if item_type == "reasoning" {
-                                                println!("  Thinking completed");
-
-                                                // Update Reasoning
-                                                let summary = item
-                                                    .get("summary")
-                                                    .and_then(|s| s.as_array())
-                                                    .map(|arr| {
-                                                        arr.iter()
-                                                            .filter_map(|v| {
-                                                                v.as_str().map(String::from)
-                                                            })
-                                                            .collect()
-                                                    })
-                                                    .unwrap_or_default();
-                                                let text = item
-                                                    .get("text")
-                                                    .and_then(|t| t.as_str())
-                                                    .map(String::from);
-
-                                                let mut session = session_clone.lock().unwrap();
-                                                if let Some(reasoning) = session
-                                                    .reasonings
-                                                    .iter_mut()
-                                                    .find(|r| r.id == item_id)
+                                                } else if !result_str.is_empty()
+                                                    && result_str != "null"
                                                 {
-                                                    reasoning.summary = summary;
-                                                    reasoning.text = text;
-                                                }
-                                            } else if item_type == "plan" {
-                                                // Plan item - show the plan text
-                                                let text = item
-                                                    .get("text")
-                                                    .and_then(|t| t.as_str())
-                                                    .unwrap_or("");
-                                                if !text.is_empty() {
-                                                    println!("  Plan completed: {}", text);
-                                                } else {
-                                                    println!("  Plan completed");
-                                                }
-
-                                                // Update Plan status
-                                                let mut session = session_clone.lock().unwrap();
-                                                if let Some(plan) = session
-                                                    .plans
-                                                    .iter_mut()
-                                                    .find(|p| p.id == item_id)
-                                                {
-                                                    plan.status = PlanStatus::Completed;
-                                                    if !text.is_empty() {
-                                                        plan.text = text.to_string();
-                                                    }
-                                                }
-                                            } else if item_type == "fileChange" {
-                                                // File change - show files and diff
-                                                let status = item
-                                                    .get("status")
-                                                    .and_then(|s| s.as_str())
-                                                    .unwrap_or("");
-
-                                                if debug_mode {
-                                                    eprintln!("[DEBUG] fileChange item: {:?}", item);
-                                                }
-
-                                                // Parse changes
-                                                let changes: Vec<FileChange> = item
-                                                    .get("changes")
-                                                    .and_then(|c| c.as_array())
-                                                    .map(|arr| {
-                                                        arr.iter()
-                                                            .filter_map(|change| {
-                                                                let path = change.get("path")?.as_str()?.to_string();
-                                                                let diff = change.get("diff").and_then(|d| d.as_str()).unwrap_or("").to_string();
-                                                                let change_type = change
-                                                                    .get("change_type")
-                                                                    .or_else(|| change.get("changeType"))
-                                                                    .or_else(|| change.get("kind").and_then(|k| k.get("type")))
-                                                                    .and_then(|c| c.as_str())
-                                                                    .unwrap_or("update")
-                                                                    .to_string();
-                                                                Some(FileChange {
-                                                                    path,
-                                                                    diff,
-                                                                    change_type,
-                                                                })
-                                                            })
-                                                            .collect()
-                                                    })
-                                                    .unwrap_or_default();
-
-                                                if debug_mode {
-                                                    eprintln!("[DEBUG] fileChange changes parsed: {} items", changes.len());
-                                                }
-
-                                                let file_count = changes.len();
-                                                println!("  📝 File Change {} ({} files)", status, file_count);
-
-                                                // Show first few files with diff
-                                                for change in changes.iter().take(3) {
-                                                    println!("    - {} ({})", change.path, change.change_type);
-                                                    // Show first few lines of diff
-                                                    if !change.diff.is_empty() {
-                                                        let diff_lines: Vec<&str> = change.diff.lines().take(10).collect();
-                                                        for line in diff_lines {
-                                                            println!("      {}", line);
-                                                        }
-                                                        if change.diff.lines().count() > 10 {
-                                                            println!("      ... ({} more lines)", change.diff.lines().count() - 10);
-                                                        }
-                                                    }
-                                                }
-                                                if file_count > 3 {
-                                                    println!("    ... and {} more files", file_count - 3);
-                                                }
-
-                                                // Update PatchSet status
-                                                if let Some(patchset) = session_clone
-                                                    .lock()
-                                                    .unwrap()
-                                                    .patchsets
-                                                    .iter_mut()
-                                                    .find(|p| p.id == item_id)
-                                                {
-                                                    patchset.status = match status {
-                                                        "completed" => PatchStatus::Completed,
-                                                        "failed" => PatchStatus::Failed,
-                                                        "declined" => PatchStatus::Declined,
-                                                        _ => PatchStatus::Completed,
-                                                    };
-                                                    patchset.changes = changes;
-                                                }
-
-                                                // Store to MCP in background
-                                                if let Some(patchset) = session_clone
-                                                    .lock()
-                                                    .unwrap()
-                                                    .patchsets
-                                                    .iter()
-                                                    .find(|p| p.id == item_id)
-                                                    .cloned()
-                                                {
-                                                    let mcp_server_for_ps = mcp_server_clone.clone();
-                                                    let ps_id = item_id.clone();
-                                                    tokio::spawn(async move {
-                                                        store_to_mcp(
-                                                            &mcp_server_for_ps,
-                                                            "patchset",
-                                                            &ps_id,
-                                                            &patchset,
-                                                        )
-                                                        .await;
-                                                    });
-                                                }
-                                            } else if item_type == "toolCall" {
-                                                let tool = item
-                                                    .get("name")
-                                                    .or_else(|| item.get("tool"))
-                                                    .and_then(|t| t.as_str())
-                                                    .unwrap_or("unknown");
-                                                let status = item
-                                                    .get("status")
-                                                    .and_then(|s| s.as_str())
-                                                    .unwrap_or("completed");
-                                                let result = item.get("result").cloned();
-                                                let error = item
-                                                    .get("error")
-                                                    .and_then(|e| e.as_str())
-                                                    .map(String::from);
-                                                let duration_ms =
-                                                    item.get("durationMs").and_then(|d| d.as_i64());
-
-                                                print!("  Tool: {} - {}", tool, status);
-                                                if let Some(result) = item.get("result") {
-                                                    let result_str = result.to_string();
-                                                    if result_str.len() > 100 {
-                                                        println!(" | Result: {}...", &result_str[..100]);
-                                                    } else if !result_str.is_empty()
-                                                        && result_str != "null"
-                                                    {
-                                                        println!(" | Result: {}", result_str);
-                                                    } else {
-                                                        println!();
-                                                    }
+                                                    println!(" | Result: {}", result_str);
                                                 } else {
                                                     println!();
                                                 }
+                                            } else if let Some(error) = item.get("error") {
+                                                println!(" | Error: {}", error);
+                                            } else {
+                                                println!();
+                                            }
 
-                                                // Update ToolInvocation status
-                                                if let Some(invocation) = session_clone
-                                                    .lock()
-                                                    .unwrap()
+                                            // Update ToolInvocation status
+                                            let mut session = session_clone.lock().unwrap();
+                                            if let Some(invocation) = session
+                                                .tool_invocations
+                                                .iter_mut()
+                                                .find(|i| i.id == item_id)
+                                            {
+                                                invocation.status = match status {
+                                                    "completed" => ToolStatus::Completed,
+                                                    "failed" => ToolStatus::Failed,
+                                                    _ => ToolStatus::Completed,
+                                                };
+                                                invocation.result = result;
+                                                invocation.error = error;
+                                                invocation.duration_ms = duration_ms;
+                                            }
+                                        } else if item_type == "commandExecution" {
+                                            let cmd = item
+                                                .get("command")
+                                                .and_then(|c| c.as_str())
+                                                .unwrap_or("");
+                                            let exit_code =
+                                                item.get("exitCode").and_then(|c| c.as_i64());
+                                            let duration_ms =
+                                                item.get("durationMs").and_then(|d| d.as_i64());
+                                            let output = item
+                                                .get("aggregatedOutput")
+                                                .and_then(|o| o.as_str());
+
+                                            println!("  Command: {} exit={:?}", cmd, exit_code);
+
+                                            // Update ToolInvocation status
+                                            let mut session = session_clone.lock().unwrap();
+                                            let updated_invocation = if let Some(invocation) =
+                                                session
                                                     .tool_invocations
                                                     .iter_mut()
                                                     .find(|i| i.id == item_id)
-                                                {
-                                                    invocation.status = match status {
-                                                        "completed" => ToolStatus::Completed,
-                                                        "failed" => ToolStatus::Failed,
-                                                        _ => ToolStatus::Completed,
-                                                    };
-                                                    invocation.result = result;
-                                                    invocation.error = error;
-                                                    invocation.duration_ms = duration_ms;
-                                                }
+                                            {
+                                                invocation.status = match exit_code {
+                                                    Some(0) => ToolStatus::Completed,
+                                                    Some(_) => ToolStatus::Failed,
+                                                    None => ToolStatus::Completed,
+                                                };
+                                                invocation.result = output
+                                                    .map(|o| serde_json::json!({ "output": o }));
+                                                invocation.duration_ms = duration_ms;
+                                                Some(invocation.clone())
+                                            } else {
+                                                None
+                                            };
+                                            drop(session);
 
-                                                // Store to MCP in background
-                                                if let Some(invocation) = session_clone
-                                                    .lock()
-                                                    .unwrap()
-                                                    .tool_invocations
-                                                    .iter()
-                                                    .find(|i| i.id == item_id)
-                                                    .cloned()
-                                                {
-                                                    let mcp_server_for_inv = mcp_server_clone.clone();
-                                                    let inv_id = item_id.clone();
-                                                    tokio::spawn(async move {
-                                                        store_to_mcp(
-                                                            &mcp_server_for_inv,
-                                                            "tool_invocation",
-                                                            &inv_id,
-                                                            &invocation,
-                                                        )
-                                                        .await;
-                                                    });
+                                            // Store updated tool invocation to MCP
+                                            if let Some(inv) = updated_invocation {
+                                                let mcp_server_for_inv = mcp_server_clone.clone();
+                                                let inv_id = item_id.clone();
+                                                tokio::spawn(async move {
+                                                    store_to_mcp(
+                                                        &mcp_server_for_inv,
+                                                        "tool_invocation",
+                                                        &inv_id,
+                                                        &inv,
+                                                    )
+                                                    .await;
+                                                });
+                                            }
+                                        } else if item_type == "reasoning" {
+                                            println!("  Thinking completed");
+
+                                            // Update Reasoning
+                                            let summary = item
+                                                .get("summary")
+                                                .and_then(|s| s.as_array())
+                                                .map(|arr| {
+                                                    arr.iter()
+                                                        .filter_map(|v| {
+                                                            v.as_str().map(String::from)
+                                                        })
+                                                        .collect()
+                                                })
+                                                .unwrap_or_default();
+                                            let text = item
+                                                .get("text")
+                                                .and_then(|t| t.as_str())
+                                                .map(String::from);
+
+                                            let mut session = session_clone.lock().unwrap();
+                                            if let Some(reasoning) = session
+                                                .reasonings
+                                                .iter_mut()
+                                                .find(|r| r.id == item_id)
+                                            {
+                                                reasoning.summary = summary;
+                                                reasoning.text = text;
+                                            }
+                                        } else if item_type == "plan" {
+                                            // Plan item - show the plan text
+                                            let text = item
+                                                .get("text")
+                                                .and_then(|t| t.as_str())
+                                                .unwrap_or("");
+                                            if !text.is_empty() {
+                                                println!("  Plan completed: {}", text);
+                                            } else {
+                                                println!("  Plan completed");
+                                            }
+
+                                            // Update Plan status
+                                            let mut session = session_clone.lock().unwrap();
+                                            if let Some(plan) =
+                                                session.plans.iter_mut().find(|p| p.id == item_id)
+                                            {
+                                                plan.status = PlanStatus::Completed;
+                                                if !text.is_empty() {
+                                                    plan.text = text.to_string();
                                                 }
-                                            } else if item_type == "userMessage" {
-                                                // Update intent if needed
-                                                println!("  User message completed");
-                                            } else if item_type == "agentMessage" {
-                                                // Update agent message content
-                                                if debug_mode {
-                                                    eprintln!("[DEBUG] agentMessage completed item: {:?}", item);
-                                                }
-                                                let content = item
-                                                    .get("text")
-                                                    .and_then(|t| t.as_str())
-                                                    .unwrap_or("");
-                                                if let Some(msg) = session_clone
-                                                    .lock()
-                                                    .unwrap()
-                                                    .agent_messages
-                                                    .iter_mut()
-                                                    .find(|m| m.id == item_id)
-                                                {
-                                                    msg.content = content.to_string();
-                                                    if !msg.content.is_empty() {
-                                                        println!("\n  🤖 Agent: {}\n", msg.content);
+                                            }
+                                        } else if item_type == "fileChange" {
+                                            // File change - show files and diff
+                                            let status = item
+                                                .get("status")
+                                                .and_then(|s| s.as_str())
+                                                .unwrap_or("");
+
+                                            if debug_mode {
+                                                eprintln!("[DEBUG] fileChange item: {:?}", item);
+                                            }
+
+                                            // Parse changes
+                                            let changes: Vec<FileChange> = item
+                                                .get("changes")
+                                                .and_then(|c| c.as_array())
+                                                .map(|arr| {
+                                                    arr.iter()
+                                                        .filter_map(|change| {
+                                                            let path = change
+                                                                .get("path")?
+                                                                .as_str()?
+                                                                .to_string();
+                                                            let diff = change
+                                                                .get("diff")
+                                                                .and_then(|d| d.as_str())
+                                                                .unwrap_or("")
+                                                                .to_string();
+                                                            let change_type = change
+                                                                .get("change_type")
+                                                                .or_else(|| {
+                                                                    change.get("changeType")
+                                                                })
+                                                                .or_else(|| {
+                                                                    change
+                                                                        .get("kind")
+                                                                        .and_then(|k| k.get("type"))
+                                                                })
+                                                                .and_then(|c| c.as_str())
+                                                                .unwrap_or("update")
+                                                                .to_string();
+                                                            Some(FileChange {
+                                                                path,
+                                                                diff,
+                                                                change_type,
+                                                            })
+                                                        })
+                                                        .collect()
+                                                })
+                                                .unwrap_or_default();
+
+                                            if debug_mode {
+                                                eprintln!(
+                                                    "[DEBUG] fileChange changes parsed: {} items",
+                                                    changes.len()
+                                                );
+                                            }
+
+                                            let file_count = changes.len();
+                                            println!(
+                                                "  📝 File Change {} ({} files)",
+                                                status, file_count
+                                            );
+
+                                            // Show first few files with diff
+                                            for change in changes.iter().take(3) {
+                                                println!(
+                                                    "    - {} ({})",
+                                                    change.path, change.change_type
+                                                );
+                                                // Show first few lines of diff
+                                                if !change.diff.is_empty() {
+                                                    let diff_lines: Vec<&str> =
+                                                        change.diff.lines().take(10).collect();
+                                                    for line in diff_lines {
+                                                        println!("      {}", line);
+                                                    }
+                                                    if change.diff.lines().count() > 10 {
+                                                        println!(
+                                                            "      ... ({} more lines)",
+                                                            change.diff.lines().count() - 10
+                                                        );
                                                     }
                                                 }
-                                                println!("  🤖 Agent Response completed");
                                             }
+                                            if file_count > 3 {
+                                                println!(
+                                                    "    ... and {} more files",
+                                                    file_count - 3
+                                                );
+                                            }
+
+                                            // Update PatchSet status
+                                            if let Some(patchset) = session_clone
+                                                .lock()
+                                                .unwrap()
+                                                .patchsets
+                                                .iter_mut()
+                                                .find(|p| p.id == item_id)
+                                            {
+                                                patchset.status = match status {
+                                                    "completed" => PatchStatus::Completed,
+                                                    "failed" => PatchStatus::Failed,
+                                                    "declined" => PatchStatus::Declined,
+                                                    _ => PatchStatus::Completed,
+                                                };
+                                                patchset.changes = changes;
+                                            }
+
+                                            // Store to MCP in background
+                                            if let Some(patchset) = session_clone
+                                                .lock()
+                                                .unwrap()
+                                                .patchsets
+                                                .iter()
+                                                .find(|p| p.id == item_id)
+                                                .cloned()
+                                            {
+                                                let mcp_server_for_ps = mcp_server_clone.clone();
+                                                let ps_id = item_id.clone();
+                                                tokio::spawn(async move {
+                                                    store_to_mcp(
+                                                        &mcp_server_for_ps,
+                                                        "patchset",
+                                                        &ps_id,
+                                                        &patchset,
+                                                    )
+                                                    .await;
+                                                });
+                                            }
+                                        } else if item_type == "toolCall" {
+                                            let tool = item
+                                                .get("name")
+                                                .or_else(|| item.get("tool"))
+                                                .and_then(|t| t.as_str())
+                                                .unwrap_or("unknown");
+                                            let status = item
+                                                .get("status")
+                                                .and_then(|s| s.as_str())
+                                                .unwrap_or("completed");
+                                            let result = item.get("result").cloned();
+                                            let error = item
+                                                .get("error")
+                                                .and_then(|e| e.as_str())
+                                                .map(String::from);
+                                            let duration_ms =
+                                                item.get("durationMs").and_then(|d| d.as_i64());
+
+                                            print!("  Tool: {} - {}", tool, status);
+                                            if let Some(result) = item.get("result") {
+                                                let result_str = result.to_string();
+                                                if result_str.len() > 100 {
+                                                    println!(
+                                                        " | Result: {}...",
+                                                        &result_str[..100]
+                                                    );
+                                                } else if !result_str.is_empty()
+                                                    && result_str != "null"
+                                                {
+                                                    println!(" | Result: {}", result_str);
+                                                } else {
+                                                    println!();
+                                                }
+                                            } else {
+                                                println!();
+                                            }
+
+                                            // Update ToolInvocation status
+                                            if let Some(invocation) = session_clone
+                                                .lock()
+                                                .unwrap()
+                                                .tool_invocations
+                                                .iter_mut()
+                                                .find(|i| i.id == item_id)
+                                            {
+                                                invocation.status = match status {
+                                                    "completed" => ToolStatus::Completed,
+                                                    "failed" => ToolStatus::Failed,
+                                                    _ => ToolStatus::Completed,
+                                                };
+                                                invocation.result = result;
+                                                invocation.error = error;
+                                                invocation.duration_ms = duration_ms;
+                                            }
+
+                                            // Store to MCP in background
+                                            if let Some(invocation) = session_clone
+                                                .lock()
+                                                .unwrap()
+                                                .tool_invocations
+                                                .iter()
+                                                .find(|i| i.id == item_id)
+                                                .cloned()
+                                            {
+                                                let mcp_server_for_inv = mcp_server_clone.clone();
+                                                let inv_id = item_id.clone();
+                                                tokio::spawn(async move {
+                                                    store_to_mcp(
+                                                        &mcp_server_for_inv,
+                                                        "tool_invocation",
+                                                        &inv_id,
+                                                        &invocation,
+                                                    )
+                                                    .await;
+                                                });
+                                            }
+                                        } else if item_type == "userMessage" {
+                                            // Update intent if needed
+                                            println!("  User message completed");
+                                        } else if item_type == "agentMessage" {
+                                            // Update agent message content
+                                            if debug_mode {
+                                                eprintln!(
+                                                    "[DEBUG] agentMessage completed item: {:?}",
+                                                    item
+                                                );
+                                            }
+                                            let content = item
+                                                .get("text")
+                                                .and_then(|t| t.as_str())
+                                                .unwrap_or("");
+                                            if let Some(msg) = session_clone
+                                                .lock()
+                                                .unwrap()
+                                                .agent_messages
+                                                .iter_mut()
+                                                .find(|m| m.id == item_id)
+                                            {
+                                                msg.content = content.to_string();
+                                                if !msg.content.is_empty() {
+                                                    println!("\n  🤖 Agent: {}\n", msg.content);
+                                                }
+                                            }
+                                            println!("  🤖 Agent Response completed");
                                         }
+                                    }
                                 }
                                 // Handle approval request
                                 else if method_str.contains("requestApproval") {
@@ -1412,9 +1426,13 @@ pub async fn execute(args: AgentCodexArgs) {
                                         .or_else(|| params.get("request_id"))
                                         .and_then(|v| v.as_str())
                                         .map(String::from)
-                                        .unwrap_or_else(|| format!("req_{}", Utc::now().timestamp_millis()));
-                                    let approval_params =
-                                        json.get("params").cloned().unwrap_or(serde_json::json!({}));
+                                        .unwrap_or_else(|| {
+                                            format!("req_{}", Utc::now().timestamp_millis())
+                                        });
+                                    let approval_params = json
+                                        .get("params")
+                                        .cloned()
+                                        .unwrap_or(serde_json::json!({}));
 
                                     // Determine approval type
                                     let approval_type = if method_str.contains("commandExecution") {
@@ -1539,7 +1557,8 @@ pub async fn execute(args: AgentCodexArgs) {
                                     }
 
                                     // Use the correct resolve method based on the request type
-                                    let resolve_method = if method_str.contains("commandExecution") {
+                                    let resolve_method = if method_str.contains("commandExecution")
+                                    {
                                         "item/commandExecution/requestApproval/resolve"
                                     } else if method_str.contains("fileChange") {
                                         "item/fileChange/requestApproval/resolve"
@@ -1622,10 +1641,11 @@ pub async fn execute(args: AgentCodexArgs) {
     match send_request(&tx, &responses, "thread/start", serde_json::json!({})).await {
         Ok(resp) => {
             if let Some(thread_obj) = resp.get("thread")
-                && let Some(id) = thread_obj.get("id").and_then(|v| v.as_str()) {
-                    thread_id = id.to_string();
-                    println!("Thread: {}", id);
-                }
+                && let Some(id) = thread_obj.get("id").and_then(|v| v.as_str())
+            {
+                thread_id = id.to_string();
+                println!("Thread: {}", id);
+            }
         }
         Err(e) => {
             eprintln!("Thread start failed: {}", e);
