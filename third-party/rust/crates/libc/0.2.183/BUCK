@@ -5,10 +5,10 @@ load("@buckal//:wrapper.bzl", "buildscript_run", "rust_binary", "rust_library")
 
 http_archive(
     name = "libc-vendor",
-    urls = ["https://static.crates.io/crates/libc/libc-0.2.182.crate"],
-    sha256 = "6800badb6cb2082ffd7b6a67e6125bb39f18782f793520caee8cb8846be06112",
+    urls = ["https://static.crates.io/crates/libc/libc-0.2.183.crate"],
+    sha256 = "b5b646652bf6661599e1da8901b3b9522896f01e736bad5f723fe7a3a27f899d",
     type = "tar.gz",
-    strip_prefix = "libc-0.2.182",
+    strip_prefix = "libc-0.2.183",
     out = "vendor",
 )
 
@@ -63,7 +63,7 @@ buildscript_run(
         "extra_traits",
         "std",
     ],
-    version = "0.2.182",
+    version = "0.2.183",
     manifest_dir = ":libc-vendor",
     visibility = ["PUBLIC"],
 )

@@ -70,7 +70,7 @@ rust_library(
         "//third-party/rust/crates/ipnetwork/0.17.0:ipnetwork",
         "//third-party/rust/crates/itertools/0.14.0:itertools",
         "//third-party/rust/crates/lazy_static/1.5.0:lazy_static",
-        "//third-party/rust/crates/libc/0.2.182:libc",
+        "//third-party/rust/crates/libc/0.2.183:libc",
         "//third-party/rust/crates/lockfile/0.4.0:lockfile",
         "//third-party/rust/crates/log/0.4.29:log",
         "//third-party/rust/crates/openssl-sys/0.9.112:openssl-sys",

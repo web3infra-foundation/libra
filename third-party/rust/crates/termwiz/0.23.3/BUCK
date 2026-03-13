@@ -48,7 +48,7 @@ rust_library(
         "//third-party/rust/crates/fixedbitset/0.4.2:fixedbitset",
         "//third-party/rust/crates/hex/0.4.3:hex",
         "//third-party/rust/crates/lazy_static/1.5.0:lazy_static",
-        "//third-party/rust/crates/libc/0.2.182:libc",
+        "//third-party/rust/crates/libc/0.2.183:libc",
         "//third-party/rust/crates/log/0.4.29:log",
         "//third-party/rust/crates/memmem/0.1.1:memmem",
         "//third-party/rust/crates/num-derive/0.4.2:num-derive",
