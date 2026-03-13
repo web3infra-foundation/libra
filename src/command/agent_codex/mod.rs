@@ -1730,9 +1730,15 @@ pub async fn execute(args: AgentCodexArgs) -> anyhow::Result<()> {
     .await
     {
         Ok(resp) => {
-            if let Some(thread_obj) = resp.get("thread")
-                && let Some(id) = thread_obj.get("id").and_then(|v| v.as_str())
-            {
+            // Fallback chain: thread.id -> resp.threadId -> resp.thread_id
+            let thread_id_from_response = resp
+                .get("thread")
+                .and_then(|t| t.get("id"))
+                .and_then(|v| v.as_str())
+                .or_else(|| resp.get("threadId").and_then(|v| v.as_str()))
+                .or_else(|| resp.get("thread_id").and_then(|v| v.as_str()));
+
+            if let Some(id) = thread_id_from_response {
                 thread_id = id.to_string();
                 println!("Thread: {}", id);
             }
