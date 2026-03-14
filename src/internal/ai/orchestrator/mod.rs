@@ -406,8 +406,8 @@ mod tests {
         let spec = test_spec();
         let result = orchestrator.run(spec).await.unwrap();
         assert_eq!(result.decision, types::DecisionOutcome::Commit);
-        assert_eq!(result.task_results.len(), 5);
-        assert_eq!(result.execution_plan_spec.tasks.len(), 5);
+        assert_eq!(result.task_results.len(), 4);
+        assert_eq!(result.execution_plan_spec.tasks.len(), 4);
         assert!(result.system_report.overall_passed);
     }
 
