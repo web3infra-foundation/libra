@@ -114,7 +114,7 @@ mod tests {
         };
 
         let path = truncate_middle(&view.cwd.display().to_string(), 32);
-        let lines = vec![
+        let lines = [
             Line::styled("L I B R A   C O D E", theme::interactive::title()),
             Line::styled("interactive agent console", theme::text::subtle()),
             kv_line("provider", view.provider_name, theme::text::primary()),

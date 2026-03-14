@@ -279,7 +279,10 @@ mod tests {
                 summary: "test orchestration".into(),
                 problem_statement: "test".into(),
                 change_type: ChangeType::Feature,
-                objectives: vec!["implement feature".into()],
+                objectives: vec![Objective {
+                    title: "implement feature".into(),
+                    kind: ObjectiveKind::Implementation,
+                }],
                 in_scope: vec!["src/".into()],
                 out_of_scope: vec![],
                 touch_hints: None,
@@ -411,8 +414,8 @@ mod tests {
         let spec = test_spec();
         let result = orchestrator.run(spec).await.unwrap();
         assert_eq!(result.decision, types::DecisionOutcome::Commit);
-        assert_eq!(result.task_results.len(), 5);
-        assert_eq!(result.execution_plan_spec.tasks.len(), 5);
+        assert_eq!(result.task_results.len(), 4);
+        assert_eq!(result.execution_plan_spec.tasks.len(), 4);
         assert!(result.system_report.overall_passed);
     }
 
@@ -466,6 +469,57 @@ mod tests {
         spec.risk.human_in_loop.min_approvers = 2;
         let result = orchestrator.run(spec).await.unwrap();
         assert_eq!(result.decision, types::DecisionOutcome::HumanReviewRequired);
+    }
+
+    #[tokio::test]
+    async fn test_orchestrator_analysis_only_pipeline_commits_without_patchset_or_gates() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = MockOrchestratorModel;
+        let registry = Arc::new(ToolRegistry::new());
+        let config = OrchestratorConfig {
+            working_dir: dir.path().to_path_buf(),
+            base_commit: None,
+            dagrs_resume_checkpoint_id: None,
+            coder_preamble: None,
+            reviewer_preamble: None,
+            mcp_server: None,
+            observer: None,
+        };
+        let orchestrator = Orchestrator::new(model, registry, config);
+        let mut spec = test_spec();
+        spec.intent.change_type = ChangeType::Unknown;
+        spec.intent.objectives = vec![
+            Objective {
+                title: "Analyze repository structure".into(),
+                kind: ObjectiveKind::Analysis,
+            },
+            Objective {
+                title: "Summarize technical debt hotspots".into(),
+                kind: ObjectiveKind::Analysis,
+            },
+        ];
+        spec.artifacts.required.clear();
+        spec.acceptance.verification_plan.fast_checks.clear();
+        spec.acceptance.verification_plan.integration_checks.clear();
+        spec.acceptance.verification_plan.security_checks.clear();
+        spec.acceptance.verification_plan.release_checks.clear();
+
+        let result = orchestrator.run(spec).await.unwrap();
+        assert_eq!(result.decision, types::DecisionOutcome::Commit);
+        assert!(
+            result
+                .execution_plan_spec
+                .tasks
+                .iter()
+                .all(|task| task.kind == types::TaskKind::Analysis)
+        );
+        assert!(result.system_report.overall_passed);
+        assert!(
+            result
+                .task_results
+                .iter()
+                .all(|task| task.status == types::TaskNodeStatus::Completed)
+        );
     }
 
     #[tokio::test]

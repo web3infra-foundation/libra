@@ -60,7 +60,7 @@ fn review_report(plan: &ExecutionPlanSpec, run_state: &RunStateSnapshot) -> (boo
     let implementation_ids = plan
         .tasks
         .iter()
-        .filter(|task| task.kind == TaskKind::Implementation)
+        .filter(|task| task.kind != TaskKind::Gate)
         .map(|task| task.id())
         .collect::<BTreeSet<_>>();
 
@@ -212,15 +212,15 @@ mod tests {
     use super::*;
     use crate::internal::ai::{
         intentspec::types::{
-            Acceptance, Artifacts, ChangeLogEntry, ChangeType, Check, CheckKind, ConcurrencyPolicy,
-            ConstraintLicensing, ConstraintPlatform, ConstraintPrivacy, ConstraintResources,
-            ConstraintSecurity, Constraints, CreatedBy, CreatorType, DataClass, DependencyPolicy,
-            DomainAllowlistMode, EncodingPolicy, EvidencePolicy, EvidenceStrategy, ExecutionPolicy,
-            HumanInLoop, Intent, Lifecycle, LifecycleStatus, Metadata, NetworkPolicy,
-            OutputHandlingPolicy, PromptInjectionPolicy, ProvenanceBindings, ProvenancePolicy,
-            RepoTarget, RepoType, RetryPolicy, Risk, RiskLevel, SecretAccessPolicy, SecretPolicy,
-            SecurityPolicy, Target, ToolAcl, TransparencyLogPolicy, TransparencyMode, TrustTier,
-            VerificationPlan,
+            Acceptance, ArtifactName, Artifacts, ChangeLogEntry, ChangeType, Check, CheckKind,
+            ConcurrencyPolicy, ConstraintLicensing, ConstraintPlatform, ConstraintPrivacy,
+            ConstraintResources, ConstraintSecurity, Constraints, CreatedBy, CreatorType,
+            DataClass, DependencyPolicy, DomainAllowlistMode, EncodingPolicy, EvidencePolicy,
+            EvidenceStrategy, ExecutionPolicy, HumanInLoop, Intent, Lifecycle, LifecycleStatus,
+            Metadata, NetworkPolicy, Objective, ObjectiveKind, OutputHandlingPolicy,
+            PromptInjectionPolicy, ProvenanceBindings, ProvenancePolicy, RepoTarget, RepoType,
+            RetryPolicy, Risk, RiskLevel, SecretAccessPolicy, SecretPolicy, SecurityPolicy, Target,
+            ToolAcl, TransparencyLogPolicy, TransparencyMode, TrustTier, VerificationPlan,
         },
         orchestrator::{
             run_state::{RunStateSnapshot, TaskStatusSnapshot},
@@ -257,7 +257,10 @@ mod tests {
                 summary: "summary".into(),
                 problem_statement: "problem".into(),
                 change_type: ChangeType::Feature,
-                objectives: vec!["ship".into()],
+                objectives: vec![Objective {
+                    title: "ship".into(),
+                    kind: ObjectiveKind::Implementation,
+                }],
                 in_scope: vec!["src/".into()],
                 out_of_scope: vec![],
                 touch_hints: None,
@@ -585,5 +588,79 @@ mod tests {
                 .iter()
                 .any(|name| name == "test-log@release")
         );
+    }
+
+    #[test]
+    fn test_analysis_only_completed_task_does_not_require_patchset() {
+        let mut spec = spec_with_required_artifacts();
+        spec.intent.change_type = ChangeType::Unknown;
+        spec.intent.objectives = vec![Objective {
+            title: "Diagnose repository state".into(),
+            kind: ObjectiveKind::Analysis,
+        }];
+        spec.artifacts.required.clear();
+
+        let analysis_task = {
+            let actor = ActorRef::agent("analysis").unwrap();
+            let git_task = GitTask::new(actor, "Diagnose repo", None).unwrap();
+            TaskSpec {
+                step: git_internal::internal::object::plan::PlanStep::new("Diagnose repo"),
+                task: git_task,
+                objective: "Diagnose repository".into(),
+                kind: TaskKind::Analysis,
+                gate_stage: None,
+                owner_role: Some("analyst".into()),
+                scope_in: vec!["src/".into()],
+                scope_out: vec![],
+                checks: vec![],
+                contract: TaskContract::default(),
+            }
+        };
+        let task_id = analysis_task.id();
+        let plan = ExecutionPlanSpec {
+            intent_spec_id: "intent".into(),
+            revision: 1,
+            parent_revision: None,
+            replan_reason: None,
+            tasks: vec![analysis_task],
+            max_parallel: 1,
+            checkpoints: vec![],
+        };
+        let results = vec![TaskResult {
+            task_id,
+            status: TaskNodeStatus::Completed,
+            gate_report: None,
+            agent_output: Some("analysis complete".into()),
+            retry_count: 0,
+            tool_calls: vec![],
+            policy_violations: vec![],
+            review: Some(ReviewOutcome {
+                approved: true,
+                summary: "looks good".into(),
+                issues: vec![],
+            }),
+        }];
+        let run_state = RunStateSnapshot {
+            intent_spec_id: plan.intent_spec_id.clone(),
+            revision: plan.revision,
+            task_statuses: results
+                .iter()
+                .map(|result| TaskStatusSnapshot {
+                    task_id: result.task_id,
+                    status: result.status.clone(),
+                })
+                .collect(),
+            task_results: results,
+            dagrs_runtime: Default::default(),
+        };
+
+        let report = build_system_report(&spec, &plan, &run_state);
+        assert!(report.artifacts_complete);
+        assert!(
+            report.missing_artifacts.is_empty(),
+            "{:?}",
+            report.missing_artifacts
+        );
+        assert!(report.review_passed);
     }
 }

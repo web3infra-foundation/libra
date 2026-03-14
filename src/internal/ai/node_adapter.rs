@@ -134,7 +134,7 @@ impl<M: CompletionModel> Action for AgentAction<M> {
 ///
 /// Unlike [`AgentAction`], which performs a single prompt-response cycle, this adapter
 /// invokes [`run_tool_loop`], allowing the agent to call tools repeatedly in a loop
-/// until it produces a final answer or reaches the maximum number of steps.
+/// until it produces a final answer.
 ///
 /// # Type Parameters
 ///
@@ -144,7 +144,7 @@ impl<M: CompletionModel> Action for AgentAction<M> {
 ///
 /// * `model` - The language model used for generating completions.
 /// * `registry` - The registry of tools available to the agent during the loop.
-/// * `config` - Configuration for the tool loop (preamble, temperature, max steps, etc.).
+/// * `config` - Configuration for the tool loop (preamble, temperature, hooks, etc.).
 pub struct ToolLoopAction<M: CompletionModel + 'static> {
     /// The language model used for generating completions.
     model: M,
@@ -163,13 +163,11 @@ impl<M: CompletionModel> ToolLoopAction<M> {
     /// * `registry` - The tool registry containing all available tools.
     /// * `preamble` - An optional system preamble prepended to every prompt.
     /// * `temperature` - An optional temperature value controlling response randomness.
-    /// * `max_steps` - An optional limit on the number of tool-calling iterations.
     pub fn new(
         model: M,
         registry: ToolRegistry,
         preamble: Option<String>,
         temperature: Option<f64>,
-        max_steps: Option<usize>,
     ) -> Self {
         Self {
             model,
@@ -177,7 +175,6 @@ impl<M: CompletionModel> ToolLoopAction<M> {
             config: ToolLoopConfig {
                 preamble,
                 temperature,
-                max_steps,
                 hook_runner: None,
                 allowed_tools: None,
                 runtime_context: None,

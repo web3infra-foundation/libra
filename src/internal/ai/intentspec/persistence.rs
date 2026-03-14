@@ -91,7 +91,10 @@ fn parse_created_id(result: &CallToolResult) -> Option<String> {
 mod tests {
     use super::*;
     use crate::internal::ai::intentspec::{
-        IntentDraft, ResolveContext, RiskLevel, draft::*, resolve_intentspec, types::ChangeType,
+        IntentDraft, ResolveContext, RiskLevel,
+        draft::*,
+        resolve_intentspec,
+        types::{ChangeType, Objective, ObjectiveKind},
     };
 
     fn create_dummy_spec() -> IntentSpec {
@@ -101,7 +104,10 @@ mod tests {
                     summary: "Test Spec".to_string(),
                     problem_statement: "Testing persistence".to_string(),
                     change_type: ChangeType::Bugfix,
-                    objectives: vec!["Test".to_string()],
+                    objectives: vec![Objective {
+                        title: "Test".to_string(),
+                        kind: ObjectiveKind::Implementation,
+                    }],
                     in_scope: vec!["src".to_string()],
                     out_of_scope: vec![],
                     touch_hints: None,

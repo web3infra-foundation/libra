@@ -46,6 +46,7 @@ pub enum TaskNodeStatus {
 #[serde(rename_all = "camelCase")]
 pub enum TaskKind {
     Implementation,
+    Analysis,
     Gate,
 }
 
@@ -414,6 +415,21 @@ pub trait OrchestratorObserver: Send + Sync {
     fn on_reviewer_started(&self, _task: &TaskSpec) {}
 
     fn on_reviewer_completed(&self, _task: &TaskSpec, _review: Option<&ReviewOutcome>) {}
+
+    fn on_gate_check_started(
+        &self,
+        _task: &TaskSpec,
+        _check: &crate::internal::ai::intentspec::types::Check,
+    ) {
+    }
+
+    fn on_gate_check_completed(
+        &self,
+        _task: &TaskSpec,
+        _check: &crate::internal::ai::intentspec::types::Check,
+        _result: &GateResult,
+    ) {
+    }
 
     fn on_graph_progress(&self, _completed: usize, _total: usize) {}
 

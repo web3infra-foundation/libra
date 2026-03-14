@@ -12,10 +12,6 @@ use dagrs::{
 };
 use libra::internal::ai::{
     agent::AgentBuilder,
-    completion::{
-        CompletionError, CompletionModel, CompletionRequest, CompletionResponse,
-        message::{AssistantContent, Function, ToolCall},
-    },
     node_adapter::AgentAction,
     providers::gemini::Client,
     tools::{Tool, ToolDefinition, ToolSet},
@@ -231,78 +227,4 @@ fn test_gemini_agent_with_tools() {
         "Tool call not triggered and response did not look like a weather answer: {}",
         content
     );
-}
-
-#[cfg(test)]
-mod error_tests {
-    use super::*;
-
-    #[derive(Clone)]
-    struct MockLoopModel;
-
-    impl CompletionModel for MockLoopModel {
-        type Response = ();
-        async fn completion(
-            &self,
-            _req: CompletionRequest,
-        ) -> Result<CompletionResponse<()>, CompletionError> {
-            // Always return a tool call to trigger infinite loop if not stopped
-            Ok(CompletionResponse {
-                content: vec![AssistantContent::ToolCall(ToolCall {
-                    id: "test-id".into(),
-                    name: "infinite_tool".into(),
-                    function: Function {
-                        name: "infinite_tool".into(),
-                        arguments: json!({}),
-                    },
-                })],
-                raw_response: (),
-            })
-        }
-    }
-
-    struct MockTool;
-    impl Tool for MockTool {
-        fn definition(&self) -> ToolDefinition {
-            ToolDefinition {
-                name: "infinite_tool".into(),
-                description: "loop".into(),
-                parameters: json!({"type": "object"}),
-            }
-        }
-        fn call(
-            &self,
-            _args: serde_json::Value,
-        ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
-            Ok(json!({"result": "ok"}))
-        }
-    }
-
-    #[tokio::test]
-    async fn test_max_steps_exceeded() {
-        let mut tools = ToolSet::default();
-        tools.tools.push(std::sync::Arc::new(MockTool));
-
-        let agent = AgentBuilder::new(MockLoopModel)
-            .tools(tools)
-            .max_steps(2) // Set low limit
-            .build();
-
-        use libra::internal::ai::completion::Chat;
-
-        let result = agent.chat("test", vec![]).await;
-
-        assert!(result.is_err());
-        let err = result.err().unwrap();
-        match err {
-            CompletionError::ResponseError(msg) => {
-                assert!(
-                    msg.contains("exceeded max steps"),
-                    "Unexpected error message: {}",
-                    msg
-                );
-            }
-            _ => panic!("Unexpected error type: {:?}", err),
-        }
-    }
 }

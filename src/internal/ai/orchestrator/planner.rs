@@ -13,7 +13,7 @@ use super::types::{
 use crate::internal::ai::{
     intentspec::types::{
         ChangeType, ConflictResolution, DecompositionMode, DependencyPolicy, IntentSpec,
-        LibraBinding, NetworkPolicy, PlanGenerationConfig, RiskLevel, TouchHints,
+        LibraBinding, NetworkPolicy, ObjectiveKind, PlanGenerationConfig, RiskLevel, TouchHints,
     },
     workflow_objects::planner_actor,
 };
@@ -37,9 +37,11 @@ pub fn compile_execution_plan_spec(
     let max_parallel = effective_max_parallel(spec);
     let common_constraints = build_common_constraints(spec);
     let common_contract = build_common_contract(spec);
+    let objectives = classify_objectives(spec);
 
-    let implementation_tasks = build_implementation_tasks(
+    let implementation_tasks = build_work_tasks(
         spec,
+        &objectives,
         &plan_config,
         max_parallel,
         &common_constraints,
@@ -47,20 +49,88 @@ pub fn compile_execution_plan_spec(
     )?;
     let mut tasks = apply_conflict_resolution(implementation_tasks, &plan_config)?;
 
-    if should_force_serial(&plan_config, max_parallel) {
+    if should_force_serial(
+        &plan_config,
+        max_parallel,
+        contains_implementation_tasks(&tasks),
+    ) {
         make_sequential(&mut tasks);
     }
+    let serial_implementation_flow = should_force_serial(
+        &plan_config,
+        max_parallel,
+        contains_implementation_tasks(&tasks),
+    );
 
-    let implementation_ids: Vec<Uuid> = tasks.iter().map(TaskSpec::id).collect();
+    let has_implementation_work = contains_implementation_tasks(&tasks);
+    let work_task_ids: Vec<Uuid> = tasks
+        .iter()
+        .filter(|task| task.kind != TaskKind::Gate)
+        .map(TaskSpec::id)
+        .collect();
     let mut checkpoints = Vec::new();
 
     if plan_config.gate_task_per_stage {
+        let mut upstream_gate_ids = work_task_ids.clone();
+
+        if has_implementation_work && !spec.acceptance.verification_plan.fast_checks.is_empty() {
+            let fast_gate_checks = spec.acceptance.verification_plan.fast_checks.clone();
+            let mut fast_gate_ids = Vec::new();
+            let work_tasks = tasks
+                .iter()
+                .filter(|task| task.kind == TaskKind::Implementation)
+                .cloned()
+                .collect::<Vec<_>>();
+
+            for (index, task) in work_tasks.iter().enumerate() {
+                let task_title = task.title().to_string();
+                let fast_gate = task_spec(
+                    git_task(
+                        format!("Fast gate: {task_title}"),
+                        Some(format!(
+                            "Run fast verification checks for {} before downstream stages continue.",
+                            task.title()
+                        )),
+                        Some(GoalType::Test),
+                        common_constraints.clone(),
+                        spec.acceptance.success_criteria.clone(),
+                        vec![task.id()],
+                    )?,
+                    TaskSpecMeta {
+                        objective: format!("Run fast verification checks for {}", task.objective),
+                        kind: TaskKind::Gate,
+                        gate_stage: Some(GateStage::Fast),
+                        owner_role: Some("verifier".to_string()),
+                        scope_in: task.scope_in.clone(),
+                        scope_out: task.scope_out.clone(),
+                        checks: fast_gate_checks.clone(),
+                        contract: task.contract.clone(),
+                    },
+                );
+                let gate_id = fast_gate.id();
+                fast_gate_ids.push(gate_id);
+                checkpoints.push(ExecutionCheckpoint {
+                    label: format!("after-fast-{}", gate_id.as_simple()),
+                    after_tasks: vec![gate_id],
+                    reason: format!("fast gate boundary for {}", task.title()),
+                });
+                if serial_implementation_flow
+                    && task.kind == TaskKind::Implementation
+                    && let Some(next_task_id) = work_tasks.get(index + 1).map(TaskSpec::id)
+                    && let Some(next_task) = tasks
+                        .iter_mut()
+                        .find(|candidate| candidate.id() == next_task_id)
+                    && !next_task.dependencies().contains(&gate_id)
+                {
+                    next_task.task.add_dependency(gate_id);
+                }
+                tasks.push(fast_gate);
+            }
+
+            upstream_gate_ids = fast_gate_ids;
+        }
+
         let gate_chain = vec![
-            (
-                GateStage::Fast,
-                "Fast gate",
-                spec.acceptance.verification_plan.fast_checks.clone(),
-            ),
             (
                 GateStage::Integration,
                 "Integration gate",
@@ -80,9 +150,12 @@ pub fn compile_execution_plan_spec(
 
         let mut previous_gate: Option<Uuid> = None;
         for (stage, title, checks) in gate_chain {
+            if !has_implementation_work && checks.is_empty() {
+                continue;
+            }
             let dependencies = previous_gate
                 .map(|id| vec![id])
-                .unwrap_or_else(|| implementation_ids.clone());
+                .unwrap_or_else(|| upstream_gate_ids.clone());
             let label = format!("after-{}", stage_label(&stage));
             let task = task_spec(
                 git_task(
@@ -188,46 +261,74 @@ fn build_common_contract(spec: &IntentSpec) -> TaskContract {
     }
 }
 
-fn build_implementation_tasks(
+fn build_work_tasks(
     spec: &IntentSpec,
+    objectives: &[(String, ObjectiveKind)],
     plan_config: &PlanGenerationConfig,
     max_parallel: u8,
     common_constraints: &[String],
     common_contract: &TaskContract,
 ) -> Result<Vec<TaskSpec>, OrchestratorError> {
+    if objectives.is_empty() {
+        return Err(OrchestratorError::PlanningFailed(
+            "intent.objectives must contain at least one planned task".to_string(),
+        ));
+    }
+
     match plan_config.decomposition_mode {
-        DecompositionMode::SingleTask => Ok(vec![implementation_task(
-            "Implement requested change".to_string(),
-            spec.intent.objectives.join("\n"),
-            Some(spec.intent.problem_statement.clone()),
-            common_constraints.to_vec(),
-            common_contract.clone(),
-        )?]),
+        DecompositionMode::SingleTask => {
+            let merged_kind = merged_objective_kind(objectives);
+            let title = match merged_kind {
+                TaskKind::Implementation => "Implement requested change".to_string(),
+                TaskKind::Analysis => "Analyze requested scope".to_string(),
+                TaskKind::Gate => unreachable!("work items cannot be gate tasks"),
+            };
+            Ok(vec![work_task(
+                title,
+                objectives
+                    .iter()
+                    .map(|(objective, _)| objective.clone())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                Some(spec.intent.problem_statement.clone()),
+                goal_for_work_item(&merged_kind, &spec.intent.change_type),
+                merged_kind,
+                common_constraints.to_vec(),
+                common_contract.clone(),
+            )?])
+        }
         DecompositionMode::PerObjective => {
-            let sequential = should_force_serial(plan_config, max_parallel);
-            let mut tasks = Vec::with_capacity(spec.intent.objectives.len());
+            let sequential = should_force_serial(
+                plan_config,
+                max_parallel,
+                objectives
+                    .iter()
+                    .any(|(_, kind)| *kind == ObjectiveKind::Implementation),
+            );
+            let mut tasks = Vec::with_capacity(objectives.len());
             let mut previous: Option<Uuid> = None;
 
-            for objective in &spec.intent.objectives {
+            for (objective, objective_kind) in objectives {
                 let dependencies = if sequential {
                     previous.into_iter().collect()
                 } else {
                     Vec::new()
                 };
+                let work_kind = task_kind_for_objective(*objective_kind);
                 let task = task_spec(
                     git_task(
                         objective.clone(),
                         Some(spec.intent.problem_statement.clone()),
-                        Some(goal_type(&spec.intent.change_type)),
+                        goal_for_work_item(&work_kind, &spec.intent.change_type),
                         common_constraints.to_vec(),
                         spec.acceptance.success_criteria.clone(),
                         dependencies,
                     )?,
                     TaskSpecMeta {
                         objective: objective.clone(),
-                        kind: TaskKind::Implementation,
+                        kind: work_kind.clone(),
                         gate_stage: None,
-                        owner_role: Some("coder".to_string()),
+                        owner_role: Some(owner_role_for_kind(&work_kind).to_string()),
                         scope_in: spec.intent.in_scope.clone(),
                         scope_out: spec.intent.out_of_scope.clone(),
                         checks: Vec::new(),
@@ -240,6 +341,15 @@ fn build_implementation_tasks(
             Ok(tasks)
         }
         DecompositionMode::PerFileCluster => {
+            if objectives
+                .iter()
+                .any(|(_, kind)| *kind != ObjectiveKind::Implementation)
+            {
+                return Err(OrchestratorError::PlanningFailed(
+                    "perFileCluster decomposition only supports implementation objectives"
+                        .to_string(),
+                ));
+            }
             let hints = spec.intent.touch_hints.clone().unwrap_or(TouchHints {
                 files: Vec::new(),
                 symbols: Vec::new(),
@@ -247,8 +357,9 @@ fn build_implementation_tasks(
             });
 
             if hints.files.is_empty() {
-                return build_implementation_tasks(
+                return build_work_tasks(
                     spec,
+                    objectives,
                     &PlanGenerationConfig {
                         decomposition_mode: DecompositionMode::PerObjective,
                         ..plan_config.clone()
@@ -259,7 +370,7 @@ fn build_implementation_tasks(
                 );
             }
 
-            let sequential = should_force_serial(plan_config, max_parallel);
+            let sequential = should_force_serial(plan_config, max_parallel, true);
             let mut tasks = Vec::with_capacity(hints.files.len());
             let mut previous: Option<Uuid> = None;
 
@@ -288,7 +399,9 @@ fn build_implementation_tasks(
                         objective: format!("Implement changes touching {file_hint}"),
                         kind: TaskKind::Implementation,
                         gate_stage: None,
-                        owner_role: Some("coder".to_string()),
+                        owner_role: Some(
+                            owner_role_for_kind(&TaskKind::Implementation).to_string(),
+                        ),
                         scope_in: spec.intent.in_scope.clone(),
                         scope_out: spec.intent.out_of_scope.clone(),
                         checks: Vec::new(),
@@ -304,10 +417,46 @@ fn build_implementation_tasks(
     }
 }
 
-fn implementation_task(
+fn classify_objectives(spec: &IntentSpec) -> Vec<(String, ObjectiveKind)> {
+    spec.intent
+        .objectives
+        .iter()
+        .map(|objective| (objective.title.clone(), objective.kind))
+        .collect()
+}
+
+fn task_kind_for_objective(kind: ObjectiveKind) -> TaskKind {
+    match kind {
+        ObjectiveKind::Implementation => TaskKind::Implementation,
+        ObjectiveKind::Analysis => TaskKind::Analysis,
+    }
+}
+
+fn merged_objective_kind(items: &[(String, ObjectiveKind)]) -> TaskKind {
+    if items
+        .iter()
+        .any(|(_, kind)| *kind == ObjectiveKind::Implementation)
+    {
+        TaskKind::Implementation
+    } else {
+        TaskKind::Analysis
+    }
+}
+
+fn goal_for_work_item(kind: &TaskKind, change_type: &ChangeType) -> Option<GoalType> {
+    Some(match kind {
+        TaskKind::Implementation => goal_type(change_type),
+        TaskKind::Analysis => GoalType::Other("analysis".to_string()),
+        TaskKind::Gate => GoalType::Test,
+    })
+}
+
+fn work_task(
     title: String,
     objective: String,
     description: Option<String>,
+    goal: Option<GoalType>,
+    kind: TaskKind,
     constraints: Vec<String>,
     contract: TaskContract,
 ) -> Result<TaskSpec, OrchestratorError> {
@@ -315,16 +464,16 @@ fn implementation_task(
         git_task(
             title,
             description,
-            Some(GoalType::Other("implementation".to_string())),
+            goal,
             constraints,
             contract.expected_outputs.clone(),
             Vec::new(),
         )?,
         TaskSpecMeta {
             objective,
-            kind: TaskKind::Implementation,
+            kind: kind.clone(),
             gate_stage: None,
-            owner_role: Some("coder".to_string()),
+            owner_role: Some(owner_role_for_kind(&kind).to_string()),
             scope_in: contract.write_scope.clone(),
             scope_out: contract.forbidden_scope.clone(),
             checks: Vec::new(),
@@ -348,6 +497,10 @@ fn apply_conflict_resolution(
             Ok(tasks)
         }
         ConflictResolution::MergeTasks => {
+            let merged_kind = tasks
+                .first()
+                .map(|task| task.kind.clone())
+                .unwrap_or(TaskKind::Implementation);
             let merged_objective = tasks
                 .iter()
                 .map(|n| n.objective.clone())
@@ -404,16 +557,20 @@ fn apply_conflict_resolution(
                 git_task(
                     merged_title,
                     Some(merged_description),
-                    Some(GoalType::Other("implementation".to_string())),
+                    Some(match &merged_kind {
+                        TaskKind::Implementation => GoalType::Other("implementation".to_string()),
+                        TaskKind::Analysis => GoalType::Other("analysis".to_string()),
+                        TaskKind::Gate => GoalType::Test,
+                    }),
                     constraints.into_iter().collect(),
                     acceptance.into_iter().collect(),
                     Vec::new(),
                 )?,
                 TaskSpecMeta {
                     objective: merged_objective,
-                    kind: TaskKind::Implementation,
+                    kind: merged_kind.clone(),
                     gate_stage: None,
-                    owner_role: Some("coder".into()),
+                    owner_role: Some(owner_role_for_kind(&merged_kind).into()),
                     scope_in: scope_in.into_iter().collect(),
                     scope_out: scope_out.into_iter().collect(),
                     checks: Vec::new(),
@@ -432,7 +589,10 @@ fn find_overlaps(nodes: &[TaskSpec]) -> Vec<String> {
     let mut seen: HashMap<&str, usize> = HashMap::new();
     let mut overlaps = Vec::new();
 
-    for node in nodes {
+    for node in nodes
+        .iter()
+        .filter(|node| node.kind == TaskKind::Implementation)
+    {
         for path in &node.contract.touch_files {
             let count = seen.entry(path.as_str()).or_default();
             *count += 1;
@@ -457,8 +617,29 @@ fn make_sequential(nodes: &mut [TaskSpec]) {
     }
 }
 
-fn should_force_serial(plan_config: &PlanGenerationConfig, max_parallel: u8) -> bool {
-    max_parallel <= 1 || plan_config.conflict_resolution == ConflictResolution::ForceSerial
+fn contains_implementation_tasks(tasks: &[TaskSpec]) -> bool {
+    tasks
+        .iter()
+        .any(|task| task.kind == TaskKind::Implementation)
+}
+
+fn should_force_serial(
+    _plan_config: &PlanGenerationConfig,
+    max_parallel: u8,
+    has_implementation_tasks: bool,
+) -> bool {
+    // TODO(worktree): docs/agent/agent-workflow.md requires task-specific sandbox/worktree
+    // state for concurrent code-changing tasks. Until that execution model exists, keep
+    // implementation work serial even if max_parallel > 1.
+    max_parallel <= 1 || has_implementation_tasks
+}
+
+fn owner_role_for_kind(kind: &TaskKind) -> &'static str {
+    match kind {
+        TaskKind::Implementation => "coder",
+        TaskKind::Analysis => "analyst",
+        TaskKind::Gate => "verifier",
+    }
 }
 
 fn git_task(
@@ -586,7 +767,16 @@ mod tests {
                 summary: "Implement auth flow".into(),
                 problem_statement: "Need login and logout changes".into(),
                 change_type: ChangeType::Feature,
-                objectives: vec!["Add login flow".into(), "Add logout flow".into()],
+                objectives: vec![
+                    Objective {
+                        title: "Add login flow".into(),
+                        kind: ObjectiveKind::Implementation,
+                    },
+                    Objective {
+                        title: "Add logout flow".into(),
+                        kind: ObjectiveKind::Implementation,
+                    },
+                ],
                 in_scope: vec!["src/".into()],
                 out_of_scope: vec!["vendor/".into()],
                 touch_hints: Some(TouchHints {
@@ -722,8 +912,8 @@ mod tests {
     #[test]
     fn test_compile_execution_plan_builds_gate_tasks() {
         let plan = compile_execution_plan_spec(&minimal_spec()).unwrap();
-        assert_eq!(plan.tasks.len(), 6);
-        assert_eq!(plan.parallel_groups().len(), 6);
+        assert_eq!(plan.tasks.len(), 7);
+        assert_eq!(plan.parallel_groups().len(), 7);
         assert!(
             plan.tasks
                 .iter()
@@ -734,7 +924,7 @@ mod tests {
     #[test]
     fn test_compile_execution_plan_spec_tracks_dependencies_without_runtime_plan() {
         let plan_spec = compile_execution_plan_spec(&minimal_spec()).unwrap();
-        assert_eq!(plan_spec.tasks.len(), 6);
+        assert_eq!(plan_spec.tasks.len(), 7);
         assert_eq!(plan_spec.max_parallel, 2);
         assert!(
             plan_spec
@@ -742,7 +932,7 @@ mod tests {
                 .iter()
                 .any(|task| task.gate_stage == Some(GateStage::Fast))
         );
-        assert_eq!(plan_spec.parallel_groups().len(), 6);
+        assert_eq!(plan_spec.parallel_groups().len(), 7);
     }
 
     #[test]
@@ -788,5 +978,96 @@ mod tests {
 
         let err = compile_execution_plan_spec(&spec).unwrap_err();
         assert!(matches!(err, OrchestratorError::PlanningFailed(_)));
+    }
+
+    #[test]
+    fn test_compile_execution_plan_analysis_only_uses_analysis_tasks() {
+        let mut spec = minimal_spec();
+        spec.intent.change_type = ChangeType::Unknown;
+        spec.intent.objectives = vec![
+            Objective {
+                title: "Analyze repository structure".into(),
+                kind: ObjectiveKind::Analysis,
+            },
+            Objective {
+                title: "Inventory technical debt hotspots".into(),
+                kind: ObjectiveKind::Analysis,
+            },
+        ];
+        spec.acceptance.verification_plan.fast_checks.clear();
+        spec.libra
+            .as_mut()
+            .unwrap()
+            .plan_generation
+            .as_mut()
+            .unwrap()
+            .conflict_resolution = ConflictResolution::MergeTasks;
+
+        let plan = compile_execution_plan_spec(&spec).unwrap();
+        assert!(
+            plan.tasks
+                .iter()
+                .any(|task| task.kind == TaskKind::Analysis),
+            "{:?}",
+            plan.tasks
+                .iter()
+                .map(|task| format!("{:?}", task.kind))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_analysis_only_plan_omits_empty_global_gates_and_keeps_parallel_lanes() {
+        let mut spec = minimal_spec();
+        spec.intent.change_type = ChangeType::Unknown;
+        spec.execution.concurrency.max_parallel_tasks = 4;
+        spec.intent.touch_hints = Some(TouchHints {
+            files: vec!["src/shared.rs".into()],
+            symbols: vec![],
+            apis: vec![],
+        });
+        spec.intent.objectives = vec![
+            Objective {
+                title: "Analyze repository structure".into(),
+                kind: ObjectiveKind::Analysis,
+            },
+            Objective {
+                title: "Inventory technical debt hotspots".into(),
+                kind: ObjectiveKind::Analysis,
+            },
+        ];
+        spec.acceptance.verification_plan.fast_checks.clear();
+        spec.acceptance.verification_plan.integration_checks.clear();
+        spec.acceptance.verification_plan.security_checks.clear();
+        spec.acceptance.verification_plan.release_checks.clear();
+
+        let plan = compile_execution_plan_spec(&spec).unwrap();
+        assert!(
+            plan.tasks
+                .iter()
+                .all(|task| task.kind == TaskKind::Analysis)
+        );
+
+        let groups = plan.parallel_groups();
+        assert_eq!(groups.len(), 1, "{groups:?}");
+        assert_eq!(groups[0].len(), 2, "{groups:?}");
+    }
+
+    #[test]
+    fn test_analysis_only_plan_ignores_fast_checks_and_emits_no_gates() {
+        let mut spec = minimal_spec();
+        spec.intent.change_type = ChangeType::Unknown;
+        spec.intent.objectives = vec![Objective {
+            title: "Analyze repository structure".into(),
+            kind: ObjectiveKind::Analysis,
+        }];
+
+        let plan = compile_execution_plan_spec(&spec).unwrap();
+        assert!(
+            plan.tasks
+                .iter()
+                .all(|task| task.kind == TaskKind::Analysis)
+        );
+        assert!(plan.tasks.iter().all(|task| task.gate_stage.is_none()));
     }
 }

@@ -854,6 +854,7 @@ impl PlanSummaryHistoryCell {
                     "{}{:02} {}",
                     match task.kind {
                         TaskKind::Implementation => "I",
+                        TaskKind::Analysis => "A",
                         TaskKind::Gate => "G",
                     },
                     idx + 1,
@@ -861,7 +862,11 @@ impl PlanSummaryHistoryCell {
                 ),
                 kind: match task.gate_stage.as_ref() {
                     Some(stage) => format!("{stage:?}").to_lowercase(),
-                    None => "impl".to_string(),
+                    None => match task.kind {
+                        TaskKind::Implementation => "impl".to_string(),
+                        TaskKind::Analysis => "analysis".to_string(),
+                        TaskKind::Gate => "gate".to_string(),
+                    },
                 },
                 dependencies: task.dependencies().len(),
                 files: task.contract.touch_files.len(),
@@ -1137,6 +1142,7 @@ impl OrchestratorResultHistoryCell {
             .map(|(idx, task)| {
                 let prefix = match task.kind {
                     TaskKind::Implementation => "I",
+                    TaskKind::Analysis => "A",
                     TaskKind::Gate => "G",
                 };
                 (
@@ -1717,7 +1723,7 @@ mod tests {
             ResolveContext,
             draft::{DraftAcceptance, DraftIntent, DraftRisk, IntentDraft},
             resolve_intentspec,
-            types::{ChangeType, IntentSpec, RiskLevel},
+            types::{ChangeType, IntentSpec, Objective, ObjectiveKind, RiskLevel},
         },
         orchestrator::types::{
             DecisionOutcome, ExecutionPlanSpec, OrchestratorResult, SystemReport, TaskContract,
@@ -1822,8 +1828,14 @@ mod tests {
                     problem_statement: "Plan summary is too verbose".to_string(),
                     change_type: ChangeType::Refactor,
                     objectives: vec![
-                        "compact plan summary".to_string(),
-                        "show dag in side panel".to_string(),
+                        Objective {
+                            title: "compact plan summary".to_string(),
+                            kind: ObjectiveKind::Analysis,
+                        },
+                        Objective {
+                            title: "show dag in side panel".to_string(),
+                            kind: ObjectiveKind::Analysis,
+                        },
                     ],
                     in_scope: vec!["src/internal/tui".to_string()],
                     out_of_scope: vec![],

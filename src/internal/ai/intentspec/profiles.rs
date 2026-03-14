@@ -146,23 +146,25 @@ pub fn default_execution(risk_level: RiskLevel) -> ExecutionPolicy {
     }
 }
 
-pub fn default_artifacts(risk_level: RiskLevel) -> Artifacts {
-    let mut required = vec![
-        ArtifactReq {
+pub fn default_artifacts(risk_level: RiskLevel, has_implementation_work: bool) -> Artifacts {
+    let mut required = Vec::new();
+
+    if has_implementation_work {
+        required.push(ArtifactReq {
             name: ArtifactName::Patchset,
             stage: ArtifactStage::PerTask,
             required: true,
             format: "git-diff".to_string(),
-        },
-        ArtifactReq {
+        });
+        required.push(ArtifactReq {
             name: ArtifactName::TestLog,
             stage: ArtifactStage::PerTask,
             required: true,
             format: "text".to_string(),
-        },
-    ];
+        });
+    }
 
-    if matches!(risk_level, RiskLevel::Medium | RiskLevel::High) {
+    if has_implementation_work && matches!(risk_level, RiskLevel::Medium | RiskLevel::High) {
         required.push(ArtifactReq {
             name: ArtifactName::SastReport,
             stage: ArtifactStage::Security,
@@ -183,7 +185,7 @@ pub fn default_artifacts(risk_level: RiskLevel) -> Artifacts {
         });
     }
 
-    if matches!(risk_level, RiskLevel::High) {
+    if has_implementation_work && matches!(risk_level, RiskLevel::High) {
         required.push(ArtifactReq {
             name: ArtifactName::ProvenanceAttestation,
             stage: ArtifactStage::Release,
@@ -210,10 +212,14 @@ pub fn default_artifacts(risk_level: RiskLevel) -> Artifacts {
     }
 }
 
-pub fn default_provenance(risk_level: RiskLevel) -> ProvenancePolicy {
-    let require_provenance = !matches!(risk_level, RiskLevel::Low);
-    let require_sbom = matches!(risk_level, RiskLevel::Medium | RiskLevel::High);
-    let mode = if matches!(risk_level, RiskLevel::Low) {
+pub fn default_provenance(
+    risk_level: RiskLevel,
+    has_implementation_work: bool,
+) -> ProvenancePolicy {
+    let require_provenance = has_implementation_work && !matches!(risk_level, RiskLevel::Low);
+    let require_sbom =
+        has_implementation_work && matches!(risk_level, RiskLevel::Medium | RiskLevel::High);
+    let mode = if !has_implementation_work || matches!(risk_level, RiskLevel::Low) {
         TransparencyMode::None
     } else {
         TransparencyMode::Rekor
@@ -226,5 +232,50 @@ pub fn default_provenance(risk_level: RiskLevel) -> ProvenancePolicy {
             embed_intent_spec_digest: true,
             embed_evidence_digests: true,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn analysis_only_defaults_do_not_require_patchset() {
+        let artifacts = default_artifacts(RiskLevel::Low, false);
+        assert!(
+            !artifacts
+                .required
+                .iter()
+                .any(|req| req.name == ArtifactName::Patchset),
+            "{:?}",
+            artifacts.required
+        );
+    }
+
+    #[test]
+    fn implementation_defaults_require_patchset() {
+        let artifacts = default_artifacts(RiskLevel::Low, true);
+        assert!(
+            artifacts
+                .required
+                .iter()
+                .any(|req| req.name == ArtifactName::Patchset),
+            "{:?}",
+            artifacts.required
+        );
+    }
+
+    #[test]
+    fn analysis_only_medium_risk_defaults_do_not_require_security_artifacts() {
+        let artifacts = default_artifacts(RiskLevel::Medium, false);
+        assert!(artifacts.required.is_empty(), "{:?}", artifacts.required);
+    }
+
+    #[test]
+    fn analysis_only_defaults_disable_provenance_requirements() {
+        let provenance = default_provenance(RiskLevel::High, false);
+        assert!(!provenance.require_slsa_provenance);
+        assert!(!provenance.require_sbom);
+        assert_eq!(provenance.transparency_log.mode, TransparencyMode::None);
     }
 }

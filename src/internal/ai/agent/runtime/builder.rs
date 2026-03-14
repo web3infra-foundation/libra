@@ -11,7 +11,6 @@ pub struct AgentBuilder<M: CompletionModel> {
     model: M,
     preamble: Option<String>,
     temperature: Option<f64>,
-    max_steps: Option<usize>,
     tools: ToolSet,
 }
 
@@ -22,7 +21,6 @@ impl<M: CompletionModel> AgentBuilder<M> {
             model,
             preamble: None,
             temperature: None,
-            max_steps: None,
             tools: ToolSet::default(),
         }
     }
@@ -30,16 +28,6 @@ impl<M: CompletionModel> AgentBuilder<M> {
     /// Sets the preamble (system prompt) for the agent.
     pub fn preamble(mut self, preamble: impl Into<String>) -> Self {
         self.preamble = Some(preamble.into());
-        self
-    }
-
-    /// Sets the maximum number of tool-call steps for tool execution loops.
-    /// Defaults to 4 if not set.
-    ///
-    /// A value of `0` prevents tool calls from being executed. If the agent
-    /// encounters a tool call when `max_steps` is already reached, it returns an error.
-    pub fn max_steps(mut self, max_steps: usize) -> Self {
-        self.max_steps = Some(max_steps);
         self
     }
 
@@ -81,7 +69,6 @@ impl<M: CompletionModel> AgentBuilder<M> {
             model: Arc::new(self.model),
             preamble: self.preamble,
             temperature: self.temperature,
-            max_steps: self.max_steps.or(Some(4)),
             tools: self.tools,
         }
     }

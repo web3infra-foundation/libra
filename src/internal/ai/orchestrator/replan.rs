@@ -2,7 +2,7 @@ use chrono::Utc;
 
 use super::{
     run_state::RunStateSnapshot,
-    types::{ExecutionPlanSpec, SystemReport, TaskNodeStatus},
+    types::{ExecutionPlanSpec, SystemReport, TaskKind, TaskNodeStatus},
 };
 use crate::internal::ai::intentspec::types::{
     ChangeLogEntry, ConflictResolution, DecompositionMode, IntentSpec, LibraBinding,
@@ -26,7 +26,7 @@ pub fn max_replans(spec: &IntentSpec) -> u32 {
 
 pub fn detect_replan(
     spec: &IntentSpec,
-    _plan: &ExecutionPlanSpec,
+    plan: &ExecutionPlanSpec,
     run_state: &RunStateSnapshot,
     system_report: &SystemReport,
 ) -> Option<ReplanDirective> {
@@ -61,6 +61,10 @@ pub fn detect_replan(
     if trigger_enabled(spec, ReplanTrigger::RepeatedTestFail)
         && run_state.ordered_task_results().iter().any(|result| {
             result.status == TaskNodeStatus::Failed
+                && matches!(
+                    task_kind_for_result(plan, result.task_id),
+                    Some(TaskKind::Implementation | TaskKind::Gate)
+                )
                 && result.retry_count >= spec.execution.retry.max_retries
         })
     {
@@ -131,6 +135,13 @@ fn trigger_enabled(spec: &IntentSpec, trigger: ReplanTrigger) -> bool {
     spec.execution.replan.triggers.contains(&trigger)
 }
 
+fn task_kind_for_result(plan: &ExecutionPlanSpec, task_id: uuid::Uuid) -> Option<TaskKind> {
+    plan.tasks
+        .iter()
+        .find(|task| task.id() == task_id)
+        .map(|task| task.kind.clone())
+}
+
 fn empty_libra_binding() -> LibraBinding {
     LibraBinding {
         object_store: None,
@@ -146,6 +157,7 @@ fn empty_libra_binding() -> LibraBinding {
 mod tests {
     use std::collections::BTreeMap;
 
+    use git_internal::internal::object::{plan::PlanStep, task::Task as GitTask, types::ActorRef};
     use uuid::Uuid;
 
     use super::*;
@@ -153,7 +165,7 @@ mod tests {
         intentspec::types::*,
         orchestrator::{
             run_state::{RunStateSnapshot, TaskStatusSnapshot},
-            types::{ExecutionPlanSpec, GateReport, TaskResult},
+            types::{ExecutionPlanSpec, GateReport, TaskContract, TaskResult, TaskSpec},
         },
     };
 
@@ -183,7 +195,10 @@ mod tests {
                 summary: "summary".into(),
                 problem_statement: "problem".into(),
                 change_type: ChangeType::Feature,
-                objectives: vec!["ship".into()],
+                objectives: vec![Objective {
+                    title: "ship".into(),
+                    kind: ObjectiveKind::Implementation,
+                }],
                 in_scope: vec!["src/".into()],
                 out_of_scope: vec![],
                 touch_hints: None,
@@ -311,6 +326,23 @@ mod tests {
         }
     }
 
+    fn task_spec(kind: TaskKind, title: &str) -> TaskSpec {
+        let actor = ActorRef::agent("planner").unwrap();
+        let task = GitTask::new(actor, title.to_string(), None).unwrap();
+        TaskSpec {
+            step: PlanStep::new(title),
+            task,
+            objective: title.to_string(),
+            kind,
+            gate_stage: None,
+            owner_role: None,
+            scope_in: vec![],
+            scope_out: vec![],
+            checks: vec![],
+            contract: TaskContract::default(),
+        }
+    }
+
     #[test]
     fn test_apply_replan_reduces_parallelism_and_logs_change() {
         let mut spec = spec_with_triggers();
@@ -374,5 +406,91 @@ mod tests {
             },
         );
         assert!(directive.is_some());
+    }
+
+    #[test]
+    fn test_detect_replan_from_repeated_failure_for_implementation_task() {
+        let mut spec = spec_with_triggers();
+        spec.execution.replan.triggers = vec![ReplanTrigger::RepeatedTestFail];
+
+        let task = task_spec(TaskKind::Implementation, "impl");
+        let task_id = task.id();
+        let plan = ExecutionPlanSpec {
+            intent_spec_id: "test".into(),
+            revision: 1,
+            parent_revision: None,
+            replan_reason: None,
+            tasks: vec![task],
+            max_parallel: 1,
+            checkpoints: vec![],
+        };
+        let directive = detect_replan(
+            &spec,
+            &plan,
+            &run_state(vec![TaskResult {
+                task_id,
+                status: TaskNodeStatus::Failed,
+                gate_report: None,
+                agent_output: None,
+                retry_count: 1,
+                tool_calls: vec![],
+                policy_violations: vec![],
+                review: None,
+            }]),
+            &SystemReport {
+                integration: GateReport::empty(),
+                security: GateReport::empty(),
+                release: GateReport::empty(),
+                review_passed: true,
+                review_findings: vec![],
+                artifacts_complete: true,
+                missing_artifacts: vec![],
+                overall_passed: false,
+            },
+        );
+        assert!(directive.is_some());
+    }
+
+    #[test]
+    fn test_detect_replan_ignores_repeated_failure_for_analysis_task() {
+        let mut spec = spec_with_triggers();
+        spec.execution.replan.triggers = vec![ReplanTrigger::RepeatedTestFail];
+
+        let task = task_spec(TaskKind::Analysis, "analysis");
+        let task_id = task.id();
+        let plan = ExecutionPlanSpec {
+            intent_spec_id: "test".into(),
+            revision: 1,
+            parent_revision: None,
+            replan_reason: None,
+            tasks: vec![task],
+            max_parallel: 1,
+            checkpoints: vec![],
+        };
+        let directive = detect_replan(
+            &spec,
+            &plan,
+            &run_state(vec![TaskResult {
+                task_id,
+                status: TaskNodeStatus::Failed,
+                gate_report: None,
+                agent_output: None,
+                retry_count: 1,
+                tool_calls: vec![],
+                policy_violations: vec![],
+                review: None,
+            }]),
+            &SystemReport {
+                integration: GateReport::empty(),
+                security: GateReport::empty(),
+                release: GateReport::empty(),
+                review_passed: true,
+                review_findings: vec![],
+                artifacts_complete: true,
+                missing_artifacts: vec![],
+                overall_passed: false,
+            },
+        );
+        assert!(directive.is_none());
     }
 }

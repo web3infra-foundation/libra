@@ -352,23 +352,14 @@ impl Renderer {
     fn start_list_item(&mut self) {
         self.flush_line(false);
         let depth = self.list_stack.len().max(1);
-        let marker = if let Some(last) = self.list_stack.last_mut() {
-            let marker = if let Some(index) = last {
-                let marker = format!("{}. ", *index);
-                *index += 1;
-                PendingListItem {
-                    indent: marker.width(),
-                    marker,
-                    style: self.styles.ordered,
-                }
-            } else {
-                PendingListItem {
-                    indent: 2,
-                    marker: "• ".to_string(),
-                    style: self.styles.bullet,
-                }
-            };
-            marker
+        let marker = if let Some(Some(index)) = self.list_stack.last_mut() {
+            let marker = format!("{}. ", *index);
+            *index += 1;
+            PendingListItem {
+                indent: marker.width(),
+                marker,
+                style: self.styles.ordered,
+            }
         } else {
             PendingListItem {
                 indent: 2,

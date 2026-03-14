@@ -63,6 +63,14 @@ fn validate_non_empty_fields(spec: &IntentSpec, issues: &mut Vec<ValidationIssue
             "must include at least one objective",
         ));
     }
+    for (idx, objective) in spec.intent.objectives.iter().enumerate() {
+        if objective.title.trim().is_empty() {
+            issues.push(ValidationIssue::new(
+                format!("intent.objectives[{idx}].title"),
+                "must not be empty",
+            ));
+        }
+    }
     if spec.intent.in_scope.is_empty() {
         issues.push(ValidationIssue::new(
             "intent.inScope",
@@ -273,7 +281,7 @@ mod tests {
         ResolveContext,
         draft::{DraftAcceptance, DraftIntent, DraftRisk, IntentDraft},
         resolve_intentspec,
-        types::{ChangeType, CheckKind, RiskLevel},
+        types::{ChangeType, CheckKind, Objective, ObjectiveKind, RiskLevel},
     };
 
     fn sample_spec() -> IntentSpec {
@@ -283,7 +291,10 @@ mod tests {
                     summary: "Fix bug".to_string(),
                     problem_statement: "Bug".to_string(),
                     change_type: ChangeType::Bugfix,
-                    objectives: vec!["fix".to_string()],
+                    objectives: vec![Objective {
+                        title: "fix".to_string(),
+                        kind: ObjectiveKind::Implementation,
+                    }],
                     in_scope: vec!["src".to_string()],
                     out_of_scope: vec![],
                     touch_hints: None,
