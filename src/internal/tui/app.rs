@@ -1541,6 +1541,24 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 fn scoped_call_id(task: &TaskSpec, call_id: &str) -> String {
                     format!("{}:{call_id}", task.id())
                 }
+
+                fn summarize_gate_check(
+                    check: &crate::internal::ai::intentspec::types::Check,
+                ) -> String {
+                    match check.kind {
+                        crate::internal::ai::intentspec::types::CheckKind::Policy => {
+                            format!("policy {}", check.id)
+                        }
+                        crate::internal::ai::intentspec::types::CheckKind::Command
+                        | crate::internal::ai::intentspec::types::CheckKind::TestSuite => check
+                            .command
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|command| !command.is_empty())
+                            .map(|command| command.to_string())
+                            .unwrap_or_else(|| check.id.clone()),
+                    }
+                }
             }
 
             impl OrchestratorObserver for UiOrchestratorObserver {
@@ -1644,6 +1662,41 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         "Reviewer pass finished for {}  \n{}",
                         task.title(),
                         summary
+                    ));
+                }
+
+                fn on_gate_check_started(
+                    &self,
+                    task: &TaskSpec,
+                    check: &crate::internal::ai::intentspec::types::Check,
+                ) {
+                    let summary = Self::summarize_gate_check(check);
+                    self.send_note(format!(
+                        "Running gate check for {}  \n{}",
+                        task.title(),
+                        summary
+                    ));
+                }
+
+                fn on_gate_check_completed(
+                    &self,
+                    task: &TaskSpec,
+                    check: &crate::internal::ai::intentspec::types::Check,
+                    result: &crate::internal::ai::orchestrator::types::GateResult,
+                ) {
+                    let summary = Self::summarize_gate_check(check);
+                    let outcome = if result.passed { "passed" } else { "failed" };
+                    let detail = if result.timed_out {
+                        "timed out".to_string()
+                    } else {
+                        format!("exit {}", result.exit_code)
+                    };
+                    self.send_note(format!(
+                        "Gate check {outcome} for {}  \n{} | {} ms | {}",
+                        task.title(),
+                        summary,
+                        result.duration_ms,
+                        detail
                     ));
                 }
 
@@ -2351,6 +2404,25 @@ fn format_orchestrator_result(
             tr.tool_calls.len(),
             tr.policy_violations.len()
         ));
+        if let Some(review) = &tr.review {
+            lines.push(format!(
+                "  Review: {} | approved: {}",
+                review.summary,
+                if review.approved { "yes" } else { "no" }
+            ));
+            if !review.issues.is_empty() {
+                lines.push(format!("  Issues: {}", review.issues.join("; ")));
+            }
+        } else if tr.status == TaskNodeStatus::Failed
+            && let Some(reason) = tr.agent_output.as_deref().map(str::trim)
+            && !reason.is_empty()
+        {
+            lines.push(format!("  Reason: {reason}"));
+        } else if tr.status == TaskNodeStatus::Failed
+            && let Some(reason) = summarize_failed_gate_report(tr.gate_report.as_ref())
+        {
+            lines.push(format!("  Reason: {reason}"));
+        }
     }
 
     if !result.system_report.overall_passed {
@@ -2833,9 +2905,59 @@ fn format_task_completion_note(
         .filter(|reason| !reason.is_empty())
     {
         note.push_str(&format!("  \nReason: {}", reason));
+    } else if matches!(
+        result.status,
+        crate::internal::ai::orchestrator::types::TaskNodeStatus::Failed
+    ) && let Some(reason) = summarize_failed_gate_report(result.gate_report.as_ref())
+    {
+        note.push_str(&format!("  \nReason: {}", reason));
     }
 
     note
+}
+
+fn summarize_failed_gate_report(
+    gate_report: Option<&crate::internal::ai::orchestrator::types::GateReport>,
+) -> Option<String> {
+    let report = gate_report?;
+    let failed_checks: Vec<_> = report
+        .results
+        .iter()
+        .filter(|result| !result.passed)
+        .collect();
+    if failed_checks.is_empty() {
+        return None;
+    }
+
+    let summary = failed_checks
+        .iter()
+        .take(2)
+        .map(|result| {
+            let outcome = if result.timed_out {
+                "timed out".to_string()
+            } else {
+                format!("exit {}", result.exit_code)
+            };
+            let detail = result
+                .stderr
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .or_else(|| result.stdout.lines().find(|line| !line.trim().is_empty()))
+                .map(str::trim)
+                .filter(|detail| !detail.is_empty())
+                .map(|detail| format!(": {detail}"))
+                .unwrap_or_default();
+            format!("{} ({outcome}{detail})", result.check_id)
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    let remainder = failed_checks.len().saturating_sub(2);
+    if remainder > 0 {
+        Some(format!("{summary}; +{remainder} more failed checks"))
+    } else {
+        Some(summary)
+    }
 }
 
 async fn list_intent_object_ids(mcp: &Arc<LibraMcpServer>) -> Vec<String> {
@@ -2894,10 +3016,35 @@ fn extract_content_field(value: &serde_json::Value) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use git_internal::internal::object::{plan::PlanStep, task::Task as GitTask, types::ActorRef};
     use uuid::Uuid;
 
-    use super::format_task_completion_note;
-    use crate::internal::ai::orchestrator::types::{ReviewOutcome, TaskNodeStatus, TaskResult};
+    use super::{format_orchestrator_result, format_task_completion_note};
+    use crate::internal::ai::orchestrator::{
+        run_state::RunStateSnapshot,
+        types::{
+            DecisionOutcome, ExecutionPlanSpec, GateReport, GateResult, OrchestratorResult,
+            ReviewOutcome, SystemReport, TaskContract, TaskKind, TaskNodeStatus, TaskResult,
+            TaskSpec,
+        },
+    };
+
+    fn test_task_spec(title: &str, kind: TaskKind) -> TaskSpec {
+        let actor = ActorRef::agent("test-tui").unwrap();
+        let task = GitTask::new(actor, title, None).unwrap();
+        TaskSpec {
+            step: PlanStep::new(title),
+            task,
+            objective: title.into(),
+            kind,
+            gate_stage: None,
+            owner_role: Some("coder".into()),
+            scope_in: vec![],
+            scope_out: vec![],
+            checks: vec![],
+            contract: TaskContract::default(),
+        }
+    }
 
     #[test]
     fn failed_task_note_includes_review_summary() {
@@ -2940,5 +3087,165 @@ mod tests {
         );
 
         assert!(note.contains("Reason: reviewer pass failed: invalid reviewer JSON"));
+    }
+
+    #[test]
+    fn failed_gate_note_includes_gate_failure_reason() {
+        let note = format_task_completion_note(
+            "Integration gate",
+            &TaskResult {
+                task_id: Uuid::new_v4(),
+                status: TaskNodeStatus::Failed,
+                gate_report: Some(GateReport {
+                    results: vec![GateResult {
+                        check_id: "cargo-test".into(),
+                        kind: "command".into(),
+                        passed: false,
+                        exit_code: 101,
+                        stdout: String::new(),
+                        stderr: "tests failed".into(),
+                        duration_ms: 1234,
+                        timed_out: false,
+                    }],
+                    all_required_passed: false,
+                }),
+                agent_output: None,
+                retry_count: 0,
+                tool_calls: vec![],
+                policy_violations: vec![],
+                review: None,
+            },
+        );
+
+        assert!(note.contains("Reason: cargo-test (exit 101: tests failed)"));
+    }
+
+    #[test]
+    fn orchestrator_result_includes_task_review_and_failure_reason() {
+        let reviewed_task = test_task_spec("Summarize findings", TaskKind::Analysis);
+        let failed_task = test_task_spec("Count Rust modules", TaskKind::Analysis);
+        let result = OrchestratorResult {
+            decision: DecisionOutcome::Abandon,
+            execution_plan_spec: ExecutionPlanSpec {
+                intent_spec_id: "intent-1".into(),
+                revision: 1,
+                parent_revision: None,
+                replan_reason: None,
+                tasks: vec![reviewed_task.clone(), failed_task.clone()],
+                max_parallel: 2,
+                checkpoints: vec![],
+            },
+            plan_revision_specs: vec![],
+            run_state: RunStateSnapshot::default(),
+            task_results: vec![
+                TaskResult {
+                    task_id: reviewed_task.id(),
+                    status: TaskNodeStatus::Completed,
+                    gate_report: None,
+                    agent_output: Some("done".into()),
+                    retry_count: 0,
+                    tool_calls: vec![],
+                    policy_violations: vec![],
+                    review: Some(ReviewOutcome {
+                        approved: true,
+                        summary: "analysis is complete".into(),
+                        issues: vec![],
+                    }),
+                },
+                TaskResult {
+                    task_id: failed_task.id(),
+                    status: TaskNodeStatus::Failed,
+                    gate_report: None,
+                    agent_output: Some(
+                        "Agent reached final response without covering all objectives".into(),
+                    ),
+                    retry_count: 4,
+                    tool_calls: vec![],
+                    policy_violations: vec![],
+                    review: None,
+                },
+            ],
+            system_report: SystemReport {
+                integration: GateReport::empty(),
+                security: GateReport::empty(),
+                release: GateReport::empty(),
+                review_passed: true,
+                review_findings: vec![],
+                artifacts_complete: true,
+                missing_artifacts: vec![],
+                overall_passed: true,
+            },
+            intent_spec_id: "intent-1".into(),
+            lifecycle_change_log: vec![],
+            replan_count: 0,
+            persistence: None,
+        };
+
+        let rendered = format_orchestrator_result(&result);
+
+        assert!(rendered.contains("Review: analysis is complete | approved: yes"));
+        assert!(
+            rendered
+                .contains("Reason: Agent reached final response without covering all objectives")
+        );
+    }
+
+    #[test]
+    fn orchestrator_result_includes_gate_failure_reason() {
+        let gate_task = test_task_spec("Integration gate", TaskKind::Gate);
+        let result = OrchestratorResult {
+            decision: DecisionOutcome::Abandon,
+            execution_plan_spec: ExecutionPlanSpec {
+                intent_spec_id: "intent-2".into(),
+                revision: 1,
+                parent_revision: None,
+                replan_reason: None,
+                tasks: vec![gate_task.clone()],
+                max_parallel: 1,
+                checkpoints: vec![],
+            },
+            plan_revision_specs: vec![],
+            run_state: RunStateSnapshot::default(),
+            task_results: vec![TaskResult {
+                task_id: gate_task.id(),
+                status: TaskNodeStatus::Failed,
+                gate_report: Some(GateReport {
+                    results: vec![GateResult {
+                        check_id: "clippy".into(),
+                        kind: "command".into(),
+                        passed: false,
+                        exit_code: 101,
+                        stdout: String::new(),
+                        stderr: "lint failed".into(),
+                        duration_ms: 900,
+                        timed_out: false,
+                    }],
+                    all_required_passed: false,
+                }),
+                agent_output: None,
+                retry_count: 0,
+                tool_calls: vec![],
+                policy_violations: vec![],
+                review: None,
+            }],
+            system_report: SystemReport {
+                integration: GateReport::empty(),
+                security: GateReport::empty(),
+                release: GateReport::empty(),
+                review_passed: true,
+                review_findings: vec![],
+                artifacts_complete: true,
+                missing_artifacts: vec![],
+                overall_passed: false,
+            },
+            intent_spec_id: "intent-2".into(),
+            lifecycle_change_log: vec![],
+            replan_count: 0,
+            persistence: None,
+        };
+
+        let rendered = format_orchestrator_result(&result);
+
+        assert!(rendered.contains("Reason: clippy (exit 101: lint failed)"));
     }
 }

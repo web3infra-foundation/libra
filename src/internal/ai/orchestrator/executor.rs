@@ -157,7 +157,7 @@ pub async fn execute_task<M: CompletionModel>(
     config: &ExecutorConfig,
 ) -> TaskResult {
     if task.kind == TaskKind::Gate {
-        return execute_gate_task(task, &config.working_dir).await;
+        return execute_gate_task(task, &config.working_dir, config.observer.as_ref()).await;
     }
 
     let allowed_tools = allowed_tools_for_task(&config.spec, task);
@@ -303,11 +303,38 @@ pub async fn execute_task<M: CompletionModel>(
     }
 }
 
-async fn execute_gate_task(task: &TaskSpec, working_dir: &Path) -> TaskResult {
+async fn execute_gate_task(
+    task: &TaskSpec,
+    working_dir: &Path,
+    observer: Option<&Arc<dyn OrchestratorObserver>>,
+) -> TaskResult {
     let gate_report = if task.checks.is_empty() {
         GateReport::empty()
     } else {
-        gate::run_gates(&task.checks, working_dir).await
+        let mut results = Vec::with_capacity(task.checks.len());
+        let mut all_required_passed = true;
+
+        for check in &task.checks {
+            if let Some(observer) = observer {
+                observer.on_gate_check_started(task, check);
+            }
+
+            let result = gate::run_check(check, working_dir).await;
+
+            if let Some(observer) = observer {
+                observer.on_gate_check_completed(task, check, &result);
+            }
+
+            if !result.passed && check.required {
+                all_required_passed = false;
+            }
+            results.push(result);
+        }
+
+        GateReport {
+            results,
+            all_required_passed,
+        }
     };
 
     TaskResult {
@@ -895,7 +922,7 @@ mod tests {
             message::{AssistantContent, Message, Text, UserContent},
         },
         intentspec::{profiles, types::*},
-        orchestrator::types::{ExecutionPlanSpec, TaskContract, TaskKind, TaskSpec},
+        orchestrator::types::{ExecutionPlanSpec, GateResult, TaskContract, TaskKind, TaskSpec},
         tools::registry::ToolRegistry,
     };
 
@@ -980,6 +1007,22 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("done:{}", task.title()));
+        }
+
+        fn on_gate_check_started(&self, task: &TaskSpec, check: &Check) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("gate-start:{}:{}", task.title(), check.id));
+        }
+
+        fn on_gate_check_completed(&self, task: &TaskSpec, check: &Check, result: &GateResult) {
+            self.events.lock().unwrap().push(format!(
+                "gate-done:{}:{}:{}",
+                task.title(),
+                check.id,
+                if result.passed { "pass" } else { "fail" }
+            ));
         }
     }
 
@@ -1190,9 +1233,39 @@ mod tests {
             ..implementation_task()
         };
         let dir = tempfile::tempdir().unwrap();
-        let result = execute_gate_task(&task, dir.path()).await;
+        let result = execute_gate_task(&task, dir.path(), None).await;
         assert_eq!(result.status, TaskNodeStatus::Completed);
         assert!(result.gate_report.unwrap().all_required_passed);
+    }
+
+    #[tokio::test]
+    async fn test_execute_gate_task_emits_check_progress_events() {
+        let task = TaskSpec {
+            kind: TaskKind::Gate,
+            gate_stage: Some(super::super::types::GateStage::Fast),
+            checks: vec![Check {
+                id: "fmt".into(),
+                kind: CheckKind::Command,
+                command: Some("true".into()),
+                timeout_seconds: Some(10),
+                expected_exit_code: Some(0),
+                required: true,
+                artifacts_produced: vec![],
+            }],
+            ..implementation_task()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let observer: Arc<dyn OrchestratorObserver> = Arc::new(RecordingObserver {
+            events: Arc::clone(&events),
+        });
+
+        let result = execute_gate_task(&task, dir.path(), Some(&observer)).await;
+
+        assert_eq!(result.status, TaskNodeStatus::Completed);
+        let recorded = events.lock().unwrap();
+        assert!(recorded.contains(&"gate-start:Do thing:fmt".to_string()));
+        assert!(recorded.contains(&"gate-done:Do thing:fmt:pass".to_string()));
     }
 
     #[tokio::test]
