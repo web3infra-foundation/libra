@@ -39,7 +39,7 @@ rust_library(
         "@$(location :quinn-manifest[env_flags])",
     ],
     named_deps = {
-        "proto": "//third-party/rust/crates/quinn-proto/0.11.13:quinn-proto",
+        "proto": "//third-party/rust/crates/quinn-proto/0.11.14:quinn-proto",
         "udp": "//third-party/rust/crates/quinn-udp/0.5.14:quinn-udp",
     },
     os_deps = {
