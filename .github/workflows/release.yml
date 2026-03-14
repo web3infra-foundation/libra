@@ -30,14 +30,21 @@ jobs:
           toolchain: stable
           target: ${{ matrix.target.rust }}
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Enable pnpm
+        run: corepack enable
+
+      - name: Install web dependencies
+        run: pnpm --dir web install --frozen-lockfile
+
       - name: Install Linux dependencies
         if: matrix.target.os == 'linux'
         run: |
           sudo apt-get update
-
-      - name: Install macOS dependencies
-        if: matrix.target.os == 'darwin'
-        run: |
 
       - name: Cache cargo registry
         uses: actions/cache@v4
