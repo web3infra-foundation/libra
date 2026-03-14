@@ -202,6 +202,7 @@ impl ToolSpec {
                                             "problemStatement": {"type": "string"},
                                             "changeType": {
                                                 "type": "string",
+                                                "description": "High-level code-change category. Do not use 'analysis' here. For read-only plans, use 'unknown' and set objectives[*].kind='analysis'.",
                                                 "enum": ["bugfix","feature","refactor","performance","security","docs","chore","unknown"]
                                             },
                                             "objectives": {
@@ -213,6 +214,7 @@ impl ToolSpec {
                                                         "title": {"type": "string"},
                                                         "kind": {
                                                             "type": "string",
+                                                            "description": "Use 'analysis' for read-only work and 'implementation' for code-changing work.",
                                                             "enum": ["implementation", "analysis"]
                                                         }
                                                     }

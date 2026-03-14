@@ -21,7 +21,6 @@ struct DagPanelNode {
     task_id: Uuid,
     kind: TaskKind,
     depth: usize,
-    lane: usize,
     ordinal: usize,
     status: TaskNodeStatus,
 }
@@ -51,11 +50,9 @@ impl DagPanelState {
     fn new(plan: ExecutionPlanSpec) -> Self {
         let groups = plan.parallel_groups();
         let mut id_to_depth = std::collections::HashMap::new();
-        let mut id_to_lane = std::collections::HashMap::new();
         for (depth, group) in groups.iter().enumerate() {
-            for (lane, id) in group.iter().enumerate() {
+            for id in group {
                 id_to_depth.insert(*id, depth);
-                id_to_lane.insert(*id, lane);
             }
         }
 
@@ -67,7 +64,6 @@ impl DagPanelState {
                 task_id: task.id(),
                 kind: task.kind.clone(),
                 depth: id_to_depth.get(&task.id()).copied().unwrap_or_default(),
-                lane: id_to_lane.get(&task.id()).copied().unwrap_or_default(),
                 ordinal: idx + 1,
                 status: TaskNodeStatus::Pending,
             })
@@ -93,12 +89,11 @@ impl DagPanelState {
     }
 
     fn lane_count(&self) -> usize {
-        self.nodes
-            .iter()
-            .map(|node| node.lane)
-            .max()
-            .map(|max| max + 1)
-            .unwrap_or(0)
+        let mut per_depth = std::collections::HashMap::<usize, usize>::new();
+        for node in &self.nodes {
+            *per_depth.entry(node.depth).or_default() += 1;
+        }
+        per_depth.into_values().max().unwrap_or(0)
     }
 
     fn depth_count(&self) -> usize {
@@ -387,17 +382,24 @@ impl ChatWidget {
         let usable_width = inner.width.saturating_sub(2) as usize;
         let lane_span = usable_width.saturating_sub(1);
 
-        let mut node_positions = BTreeMap::new();
+        let mut layer_nodes = BTreeMap::<usize, Vec<&DagPanelNode>>::new();
         for node in &panel.nodes {
-            let x = inner.x as usize
-                + 1
-                + if lane_count <= 1 {
-                    lane_span / 2
-                } else {
-                    node.lane * lane_span / lane_count.saturating_sub(1)
-                };
-            let y = layout.graph_top as usize + node.depth * layout.row_step;
-            node_positions.insert(node.task_id, (x, y));
+            layer_nodes.entry(node.depth).or_default().push(node);
+        }
+
+        let mut node_positions = BTreeMap::new();
+        for (depth, nodes) in &layer_nodes {
+            for (index, node) in nodes.iter().enumerate() {
+                let x = inner.x as usize
+                    + 1
+                    + if nodes.len() <= 1 {
+                        lane_span / 2
+                    } else {
+                        index * lane_span / nodes.len().saturating_sub(1)
+                    };
+                let y = layout.graph_top as usize + depth * layout.row_step;
+                node_positions.insert(node.task_id, (x, y));
+            }
         }
 
         let phase = animation_phase(110);
@@ -405,14 +407,9 @@ impl ChatWidget {
         let spine_x = inner.x as usize + 1 + lane_span / 2;
 
         for depth in 0..depth_count {
-            let layer_nodes = panel
-                .nodes
-                .iter()
-                .filter(|node| node.depth == depth)
-                .collect::<Vec<_>>();
-            if layer_nodes.is_empty() {
+            let Some(layer_nodes) = layer_nodes.get(&depth) else {
                 continue;
-            }
+            };
 
             let layer_y = layout.graph_top as usize + depth * layout.row_step;
             let min_x = layer_nodes
@@ -533,15 +530,13 @@ fn dag_graph_layout(inner: Rect, depth_count: usize) -> DagGraphLayout {
     } else {
         let max_fit_step =
             available_height.saturating_sub(1) / depth_count.saturating_sub(1).max(1);
-        let target_fill = available_height.saturating_mul(2) / 3;
-        let ideal_step = target_fill.saturating_sub(1) / depth_count.saturating_sub(1).max(1);
-        let row_step = ideal_step.clamp(3, max_fit_step.max(1));
+        let row_step = max_fit_step.clamp(3, 6);
         let used_height = depth_count.saturating_sub(1) * row_step + 1;
         (row_step, used_height)
     };
     let graph_top = inner
         .y
-        .saturating_add(1 + available_height.saturating_sub(used_height) as u16 / 3);
+        .saturating_add(1 + available_height.saturating_sub(used_height) as u16 / 2);
     let summary_y = (graph_top as usize + used_height + 1)
         .min(inner.bottom().saturating_sub(2) as usize) as u16;
 
@@ -780,7 +775,44 @@ mod tests {
     fn dag_graph_layout_stays_compact_in_tall_panel() {
         let layout = dag_graph_layout(Rect::new(0, 0, 40, 40), 3);
 
-        assert!(layout.row_step >= 8);
-        assert!(layout.summary_y > 20);
+        assert!((3..=6).contains(&layout.row_step));
+        assert!(layout.summary_y > layout.graph_top);
+    }
+
+    #[test]
+    fn single_node_layer_is_centered_instead_of_left_aligned() {
+        let first = make_task("A1", TaskKind::Analysis, vec![]);
+        let second = make_task("A2", TaskKind::Analysis, vec![]);
+        let third = make_task("Gate", TaskKind::Gate, vec![first.id(), second.id()]);
+        let plan = ExecutionPlanSpec {
+            intent_spec_id: "intent-1".into(),
+            revision: 1,
+            parent_revision: None,
+            replan_reason: None,
+            tasks: vec![first, second, third],
+            max_parallel: 2,
+            checkpoints: vec![],
+        };
+
+        let mut widget = ChatWidget::new();
+        widget.show_dag_panel(plan);
+
+        let area = Rect::new(0, 0, 120, 24);
+        let mut buf = Buffer::empty(area);
+        widget.render_chat_area(area, &mut buf);
+
+        let rendered = (0..area.height)
+            .map(|y| row_text(&buf, y, area.width))
+            .collect::<Vec<_>>();
+        let gate_row = rendered
+            .iter()
+            .find(|line| line.contains("03"))
+            .expect("gate row with label 03 should exist");
+        let label_idx = gate_row.find("03").expect("gate label position");
+
+        assert!(
+            label_idx > 95,
+            "single lower-layer node should be centered in panel, got index {label_idx}"
+        );
     }
 }
