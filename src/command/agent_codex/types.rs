@@ -91,6 +91,18 @@ pub enum ToolStatus {
     Failed,
 }
 
+impl std::fmt::Display for ToolStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            ToolStatus::Pending => "pending",
+            ToolStatus::InProgress => "in_progress",
+            ToolStatus::Completed => "completed",
+            ToolStatus::Failed => "failed",
+        };
+        write!(f, "{s}")
+    }
+}
+
 /// Patch apply status
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]

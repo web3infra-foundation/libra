@@ -31,5 +31,5 @@ rust_library(
         ],
     },
     visibility = ["PUBLIC"],
-    deps = ["//third-party/rust/crates/anstyle/1.0.13:anstyle"],
+    deps = ["//third-party/rust/crates/anstyle/1.0.14:anstyle"],
 )
