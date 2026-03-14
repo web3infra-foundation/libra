@@ -57,7 +57,7 @@ pub struct CodeArgs {
     pub web_only: bool,
 
     /// Port to listen on (web server)
-    #[arg(short, long, default_value = "3000")]
+    #[arg(short, long, default_value = "17654")]
     pub port: u16,
 
     /// Host address to bind to (web server)
