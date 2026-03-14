@@ -25,5 +25,5 @@ rust_library(
     edition = "2021",
     rustc_flags = ["@$(location :path-dedot-manifest[env_flags])"],
     visibility = ["PUBLIC"],
-    deps = ["//third-party/rust/crates/once_cell/1.21.3:once_cell"],
+    deps = ["//third-party/rust/crates/once_cell/1.21.4:once_cell"],
 )

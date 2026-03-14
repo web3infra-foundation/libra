@@ -37,9 +37,9 @@ rust_library(
         "@$(location :ahash-manifest[env_flags])",
     ],
     os_deps = {
-        "linux": ["//third-party/rust/crates/once_cell/1.21.3:once_cell"],
-        "macos": ["//third-party/rust/crates/once_cell/1.21.3:once_cell"],
-        "windows": ["//third-party/rust/crates/once_cell/1.21.3:once_cell"],
+        "linux": ["//third-party/rust/crates/once_cell/1.21.4:once_cell"],
+        "macos": ["//third-party/rust/crates/once_cell/1.21.4:once_cell"],
+        "windows": ["//third-party/rust/crates/once_cell/1.21.4:once_cell"],
     },
     visibility = ["PUBLIC"],
     deps = [

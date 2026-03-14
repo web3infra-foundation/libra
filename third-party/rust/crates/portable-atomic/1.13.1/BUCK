@@ -30,6 +30,7 @@ rust_library(
         "default",
         "fallback",
         "require-cas",
+        "std",
     ],
     rustc_flags = [
         "@$(location :portable-atomic-build-script-run[rustc_flags])",
@@ -48,6 +49,7 @@ rust_binary(
         "default",
         "fallback",
         "require-cas",
+        "std",
     ],
     rustc_flags = ["@$(location :portable-atomic-manifest[env_flags])"],
     visibility = [],
@@ -62,6 +64,7 @@ buildscript_run(
         "default",
         "fallback",
         "require-cas",
+        "std",
     ],
     version = "1.13.1",
     manifest_dir = ":portable-atomic-vendor",

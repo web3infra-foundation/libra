@@ -179,7 +179,9 @@ impl CodexWebSocket {
                                         if let Some(ref sender) = *sender_for_approval.lock().await
                                         {
                                             // eprintln!("[Codex] Sending auto-approval");
-                                            let _ = sender.send(Message::Text(msg.to_json())).await;
+                                            let _ = sender
+                                                .send(Message::Text(msg.to_json().into()))
+                                                .await;
                                         }
                                     }
                                 }
@@ -260,7 +262,7 @@ impl CodexWebSocket {
 
         let sender = self.sender.lock().await;
         if let Some(ref tx) = *sender {
-            tx.send(Message::Text(json)).await?;
+            tx.send(Message::Text(json.into())).await?;
         } else {
             return Err("WebSocket not connected".into());
         }

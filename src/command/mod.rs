@@ -43,6 +43,7 @@ pub mod worktree;
 pub mod stash;
 pub mod status;
 pub mod switch;
+pub mod web_assets;
 
 use std::{io, io::Write, path::Path};
 

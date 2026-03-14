@@ -23,6 +23,10 @@ rust_library(
     crate = "ordered_float",
     crate_root = "vendor/src/lib.rs",
     edition = "2021",
+    features = [
+        "default",
+        "std",
+    ],
     rustc_flags = ["@$(location :ordered-float-manifest[env_flags])"],
     visibility = ["PUBLIC"],
     deps = ["//third-party/rust/crates/num-traits/0.2.19:num-traits"],
