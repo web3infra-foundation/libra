@@ -976,12 +976,14 @@ impl PlanSummaryHistoryCell {
 
     fn render_tasks(&self, width: u16) -> Vec<Line<'static>> {
         let mut lines = section_header("Tasks");
-        let label_width = width.saturating_sub(24) as usize;
+        let side_columns_width = 9 + 1 + 4 + 1 + 5 + 1 + 6;
+        let label_width =
+            (width.saturating_sub((side_columns_width + 4) as u16) as usize).clamp(18, 72);
         if width >= 68 {
             lines.push(Line::from(vec![
                 Span::styled("  ", theme::text::primary()),
                 Span::styled(
-                    pad_cell("Task", label_width.max(18)),
+                    pad_cell("Task", label_width),
                     theme::text::subtle().add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(" "),
@@ -1006,17 +1008,14 @@ impl PlanSummaryHistoryCell {
                 ),
             ]));
             lines.push(Line::styled(
-                format!("  {}", "─".repeat(width.saturating_sub(4) as usize)),
+                format!("  {}", "─".repeat(label_width + side_columns_width)),
                 theme::text::subtle(),
             ));
             for row in &self.tasks {
                 lines.push(Line::from(vec![
                     Span::styled("  ", theme::text::primary()),
                     Span::styled(
-                        pad_cell(
-                            &truncate_utf8(&row.label, label_width.max(18)),
-                            label_width.max(18),
-                        ),
+                        pad_cell(&truncate_utf8(&row.label, label_width), label_width),
                         theme::text::primary(),
                     ),
                     Span::raw(" "),
@@ -1901,6 +1900,27 @@ mod tests {
         assert!(joined.contains("[layers 2]"));
         assert!(!joined.contains("files:"));
         assert!(!joined.contains("depends on:"));
+    }
+
+    #[test]
+    fn plan_summary_task_columns_stay_compact_on_wide_width() {
+        let cell = PlanSummaryHistoryCell::new(
+            intentspec_fixture(),
+            dag_plan(),
+            Some("019ce52e-18c8-7530-9472-92599ad7bcd0".to_string()),
+            Some("019ce52e-18d5-7910-b999-a6782e91666e".to_string()),
+            Vec::new(),
+        );
+        let rendered = to_strings(cell.display_lines(180));
+        let header = rendered
+            .iter()
+            .find(|line| line.contains("Task") && line.contains("Type"))
+            .expect("expected task header");
+        let type_index = header.find("Type").expect("expected type column");
+        assert!(
+            type_index < 90,
+            "type column drifted too far right: {type_index}"
+        );
     }
 
     #[test]

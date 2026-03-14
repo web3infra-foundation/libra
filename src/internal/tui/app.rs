@@ -1835,7 +1835,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 ) {
                     let summary = Self::summarize_gate_check(check);
                     self.send_note(format!(
-                        "Running gate check for {}  \n{}",
+                        "Gate Check · {}  \nrunning · {}",
                         task.title(),
                         summary
                     ));
@@ -1854,12 +1854,15 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     } else {
                         format!("exit {}", result.exit_code)
                     };
+                    let mut metrics = vec![outcome.to_string(), summary];
+                    if result.duration_ms > 0 {
+                        metrics.push(format!("{} ms", result.duration_ms));
+                    }
+                    metrics.push(detail);
                     self.send_note(format!(
-                        "Gate check {outcome} for {}  \n{} | {} ms | {}",
+                        "Gate Check · {}  \n{}",
                         task.title(),
-                        summary,
-                        result.duration_ms,
-                        detail
+                        metrics.join(" · ")
                     ));
                 }
 
@@ -3406,23 +3409,35 @@ fn format_task_completion_note(
     title: &str,
     result: &crate::internal::ai::orchestrator::types::TaskResult,
 ) -> String {
-    let mut note = format!(
-        "Finished {}  \nStatus: {:?} | Retries: {} | Tools: {} | Policy violations: {}",
-        title,
-        result.status,
-        result.retry_count,
-        result.tool_calls.len(),
-        result.policy_violations.len()
-    );
+    let mut note = format!("{} · {}", task_status_heading(&result.status), title.trim());
+
+    let mut metrics = Vec::new();
+    if !result.tool_calls.is_empty() {
+        metrics.push(format!("{} tools", result.tool_calls.len()));
+    }
+    if result.retry_count > 0 {
+        metrics.push(format!("{} retries", result.retry_count));
+    }
+    if !result.policy_violations.is_empty() {
+        let count = result.policy_violations.len();
+        metrics.push(format!(
+            "{} policy violation{}",
+            count,
+            if count == 1 { "" } else { "s" }
+        ));
+    }
+    if !metrics.is_empty() {
+        note.push_str(&format!("  \n{}", metrics.join(" · ")));
+    }
 
     if let Some(review) = result.review.as_ref() {
         note.push_str(&format!(
-            "  \nReview: {} | approved: {}",
+            "  \nreview · {} · approved {}",
             review.summary,
             if review.approved { "yes" } else { "no" }
         ));
         if !review.issues.is_empty() {
-            note.push_str(&format!("  \nIssues: {}", review.issues.join("; ")));
+            note.push_str(&format!("  \nissues · {}", review.issues.join("; ")));
         }
     } else if matches!(
         result.status,
@@ -3433,16 +3448,28 @@ fn format_task_completion_note(
         .map(str::trim)
         .filter(|reason| !reason.is_empty())
     {
-        note.push_str(&format!("  \nReason: {}", reason));
+        note.push_str(&format!("  \nreason · {}", reason));
     } else if matches!(
         result.status,
         crate::internal::ai::orchestrator::types::TaskNodeStatus::Failed
     ) && let Some(reason) = summarize_failed_gate_report(result.gate_report.as_ref())
     {
-        note.push_str(&format!("  \nReason: {}", reason));
+        note.push_str(&format!("  \nreason · {}", reason));
     }
 
     note
+}
+
+fn task_status_heading(
+    status: &crate::internal::ai::orchestrator::types::TaskNodeStatus,
+) -> &'static str {
+    match status {
+        crate::internal::ai::orchestrator::types::TaskNodeStatus::Pending => "Pending",
+        crate::internal::ai::orchestrator::types::TaskNodeStatus::Running => "Running",
+        crate::internal::ai::orchestrator::types::TaskNodeStatus::Completed => "Completed",
+        crate::internal::ai::orchestrator::types::TaskNodeStatus::Failed => "Failed",
+        crate::internal::ai::orchestrator::types::TaskNodeStatus::Skipped => "Skipped",
+    }
 }
 
 fn summarize_failed_gate_report(
@@ -3595,8 +3622,8 @@ mod orchestrator_result_tests {
             },
         );
 
-        assert!(note.contains("Review: response is incomplete | approved: no"));
-        assert!(note.contains("Issues: missing final diagnosis"));
+        assert!(note.contains("review · response is incomplete · approved no"));
+        assert!(note.contains("issues · missing final diagnosis"));
     }
 
     #[test]
@@ -3615,7 +3642,7 @@ mod orchestrator_result_tests {
             },
         );
 
-        assert!(note.contains("Reason: reviewer pass failed: invalid reviewer JSON"));
+        assert!(note.contains("reason · reviewer pass failed: invalid reviewer JSON"));
     }
 
     #[test]
@@ -3646,7 +3673,7 @@ mod orchestrator_result_tests {
             },
         );
 
-        assert!(note.contains("Reason: cargo-test (exit 101: tests failed)"));
+        assert!(note.contains("reason · cargo-test (exit 101: tests failed)"));
     }
 
     #[test]

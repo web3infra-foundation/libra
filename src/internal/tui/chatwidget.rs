@@ -20,7 +20,6 @@ use crate::internal::ai::orchestrator::types::{ExecutionPlanSpec, TaskKind, Task
 struct DagPanelNode {
     task_id: Uuid,
     kind: TaskKind,
-    dependencies: Vec<Uuid>,
     depth: usize,
     lane: usize,
     ordinal: usize,
@@ -39,6 +38,13 @@ struct DagPanelState {
     completed: usize,
     total: usize,
     nodes: Vec<DagPanelNode>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DagGraphLayout {
+    graph_top: u16,
+    row_step: usize,
+    summary_y: u16,
 }
 
 impl DagPanelState {
@@ -60,7 +66,6 @@ impl DagPanelState {
             .map(|(idx, task)| DagPanelNode {
                 task_id: task.id(),
                 kind: task.kind.clone(),
-                dependencies: task.dependencies().to_vec(),
                 depth: id_to_depth.get(&task.id()).copied().unwrap_or_default(),
                 lane: id_to_lane.get(&task.id()).copied().unwrap_or_default(),
                 ordinal: idx + 1,
@@ -378,17 +383,7 @@ impl ChatWidget {
             return;
         }
 
-        let graph_top = inner.y.saturating_add(1);
-        let graph_height = inner.height.saturating_sub(4) as usize;
-        if graph_height == 0 {
-            return;
-        }
-        let row_step = if depth_count <= 1 {
-            1usize
-        } else {
-            graph_height.saturating_sub(1) / depth_count.saturating_sub(1).max(1)
-        }
-        .max(1);
+        let layout = dag_graph_layout(inner, depth_count);
         let usable_width = inner.width.saturating_sub(2) as usize;
         let lane_span = usable_width.saturating_sub(1);
 
@@ -401,36 +396,60 @@ impl ChatWidget {
                 } else {
                     node.lane * lane_span / lane_count.saturating_sub(1)
                 };
-            let y = graph_top as usize + node.depth * row_step;
+            let y = layout.graph_top as usize + node.depth * layout.row_step;
             node_positions.insert(node.task_id, (x, y));
         }
 
         let phase = animation_phase(110);
         let mut edge_cells: BTreeMap<(usize, usize), DagPanelCell> = BTreeMap::new();
+        let spine_x = inner.x as usize + 1 + lane_span / 2;
 
-        for node in &panel.nodes {
-            let Some(&(target_x, target_y)) = node_positions.get(&node.task_id) else {
+        for depth in 0..depth_count {
+            let layer_nodes = panel
+                .nodes
+                .iter()
+                .filter(|node| node.depth == depth)
+                .collect::<Vec<_>>();
+            if layer_nodes.is_empty() {
                 continue;
-            };
-            let connector_y = target_y.saturating_sub(1);
-            for dependency_id in &node.dependencies {
-                let Some(&(source_x, source_y)) = node_positions.get(dependency_id) else {
-                    continue;
-                };
-                let animated = node.status == TaskNodeStatus::Running
-                    || panel
-                        .nodes
-                        .iter()
-                        .find(|candidate| candidate.task_id == *dependency_id)
-                        .is_some_and(|candidate| candidate.status == TaskNodeStatus::Running);
+            }
+
+            let layer_y = layout.graph_top as usize + depth * layout.row_step;
+            let min_x = layer_nodes
+                .iter()
+                .filter_map(|node| node_positions.get(&node.task_id).map(|(x, _)| *x))
+                .min()
+                .unwrap_or(spine_x);
+            let max_x = layer_nodes
+                .iter()
+                .filter_map(|node| node_positions.get(&node.task_id).map(|(x, _)| *x))
+                .max()
+                .unwrap_or(spine_x);
+            let animated = layer_nodes
+                .iter()
+                .any(|node| node.status == TaskNodeStatus::Running);
+
+            draw_horizontal_edge(
+                &mut edge_cells,
+                layer_y,
+                min_x.min(spine_x),
+                max_x.max(spine_x),
+                animated,
+            );
+
+            if depth + 1 < depth_count {
+                let next_y = layout.graph_top as usize + (depth + 1) * layout.row_step;
+                let next_layer_running = panel
+                    .nodes
+                    .iter()
+                    .any(|node| node.depth == depth + 1 && node.status == TaskNodeStatus::Running);
                 draw_vertical_edge(
                     &mut edge_cells,
-                    source_x,
-                    source_y.saturating_add(1),
-                    connector_y,
-                    animated,
+                    spine_x,
+                    layer_y,
+                    next_y,
+                    animated || next_layer_running,
                 );
-                draw_horizontal_edge(&mut edge_cells, connector_y, source_x, target_x, animated);
             }
         }
 
@@ -481,7 +500,6 @@ impl ChatWidget {
             }
         }
 
-        let summary_y = inner.bottom().saturating_sub(2);
         let summary = format!(
             "● impl  ■ gate  lanes {}  layers {}  run {}  fail {}",
             lane_count,
@@ -501,10 +519,36 @@ impl ChatWidget {
                 '●' | '■' => theme::text::primary().add_modifier(Modifier::BOLD),
                 _ => theme::text::muted(),
             };
-            buf[(x, summary_y)]
+            buf[(x, layout.summary_y)]
                 .set_symbol(ch.encode_utf8(&mut [0; 4]))
                 .set_style(style);
         }
+    }
+}
+
+fn dag_graph_layout(inner: Rect, depth_count: usize) -> DagGraphLayout {
+    let available_height = inner.height.saturating_sub(4) as usize;
+    let (row_step, used_height) = if depth_count <= 1 {
+        (1usize, 1usize)
+    } else {
+        let max_fit_step =
+            available_height.saturating_sub(1) / depth_count.saturating_sub(1).max(1);
+        let target_fill = available_height.saturating_mul(2) / 3;
+        let ideal_step = target_fill.saturating_sub(1) / depth_count.saturating_sub(1).max(1);
+        let row_step = ideal_step.clamp(3, max_fit_step.max(1));
+        let used_height = depth_count.saturating_sub(1) * row_step + 1;
+        (row_step, used_height)
+    };
+    let graph_top = inner
+        .y
+        .saturating_add(1 + available_height.saturating_sub(used_height) as u16 / 3);
+    let summary_y = (graph_top as usize + used_height + 1)
+        .min(inner.bottom().saturating_sub(2) as usize) as u16;
+
+    DagGraphLayout {
+        graph_top,
+        row_step,
+        summary_y,
     }
 }
 
@@ -631,7 +675,7 @@ mod tests {
     use git_internal::internal::object::{task::Task as GitTask, types::ActorRef};
     use ratatui::{buffer::Buffer, layout::Rect};
 
-    use super::ChatWidget;
+    use super::{ChatWidget, dag_graph_layout};
     use crate::internal::ai::orchestrator::types::{
         ExecutionPlanSpec, TaskContract, TaskKind, TaskNodeStatus, TaskSpec,
     };
@@ -730,5 +774,13 @@ mod tests {
         assert!(rendered.contains('│') || rendered.contains('─'));
         assert!(!rendered.contains("Analyze repository structure"));
         assert!(!rendered.contains("Fast gate"));
+    }
+
+    #[test]
+    fn dag_graph_layout_stays_compact_in_tall_panel() {
+        let layout = dag_graph_layout(Rect::new(0, 0, 40, 40), 3);
+
+        assert!(layout.row_step >= 8);
+        assert!(layout.summary_y > 20);
     }
 }
