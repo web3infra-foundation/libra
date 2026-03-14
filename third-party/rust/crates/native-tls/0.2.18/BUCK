@@ -44,7 +44,7 @@ rust_library(
             "//third-party/rust/crates/security-framework/3.7.0:security-framework",
             "//third-party/rust/crates/tempfile/3.27.0:tempfile",
         ],
-        "windows": ["//third-party/rust/crates/schannel/0.1.28:schannel"],
+        "windows": ["//third-party/rust/crates/schannel/0.1.29:schannel"],
     },
     visibility = ["PUBLIC"],
 )

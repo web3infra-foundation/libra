@@ -4,26 +4,27 @@ load("@buckal//:cargo_manifest.bzl", "cargo_manifest")
 load("@buckal//:wrapper.bzl", "buildscript_run", "rust_binary", "rust_library")
 
 http_archive(
-    name = "vendor",
+    name = "rmcp-vendor",
     urls = ["https://static.crates.io/crates/rmcp/rmcp-1.2.0.crate"],
     sha256 = "ba6b9d2f0efe2258b23767f1f9e0054cfbcac9c2d6f81a031214143096d7864f",
     type = "tar.gz",
     strip_prefix = "rmcp-1.2.0",
+    out = "vendor",
 )
 
 cargo_manifest(
-    name = "manifest",
-    vendor = ":vendor",
+    name = "rmcp-manifest",
+    vendor = ":rmcp-vendor",
 )
 
 rust_library(
     name = "rmcp",
-    srcs = [":vendor"],
+    srcs = [":rmcp-vendor"],
     crate = "rmcp",
     crate_root = "vendor/src/lib.rs",
     edition = "2024",
     env = {
-        "OUT_DIR": "$(location :build-script-run[out_dir])",
+        "OUT_DIR": "$(location :rmcp-build-script-run[out_dir])",
     },
     features = [
         "base64",
@@ -40,8 +41,8 @@ rust_library(
         "uuid",
     ],
     rustc_flags = [
-        "@$(location :build-script-run[rustc_flags])",
-        "@$(location :manifest[env_flags])",
+        "@$(location :rmcp-build-script-run[rustc_flags])",
+        "@$(location :rmcp-manifest[env_flags])",
     ],
     os_deps = {
         "linux": ["//third-party/rust/crates/chrono/0.4.44:chrono"],
@@ -76,8 +77,8 @@ rust_library(
 )
 
 rust_binary(
-    name = "build-script-build",
-    srcs = [":vendor"],
+    name = "rmcp-build-script-build",
+    srcs = [":rmcp-vendor"],
     crate = "build_script_build",
     crate_root = "vendor/build.rs",
     edition = "2024",
@@ -95,15 +96,15 @@ rust_binary(
         "transport-worker",
         "uuid",
     ],
-    rustc_flags = ["@$(location :manifest[env_flags])"],
+    rustc_flags = ["@$(location :rmcp-manifest[env_flags])"],
     visibility = [],
 )
 
 buildscript_run(
-    name = "build-script-run",
+    name = "rmcp-build-script-run",
     package_name = "rmcp",
-    buildscript_rule = ":build-script-build",
-    env_srcs = [":manifest[env_dict]"],
+    buildscript_rule = ":rmcp-build-script-build",
+    env_srcs = [":rmcp-manifest[env_dict]"],
     features = [
         "base64",
         "default",
@@ -119,6 +120,6 @@ buildscript_run(
         "uuid",
     ],
     version = "1.2.0",
-    manifest_dir = ":vendor",
+    manifest_dir = ":rmcp-vendor",
     visibility = ["PUBLIC"],
 )
