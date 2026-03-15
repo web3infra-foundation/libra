@@ -26,6 +26,10 @@ fn main() {
     println!("cargo:rerun-if-changed=web/tsconfig.json");
     println!("cargo:rerun-if-changed=web/tailwind.config.ts");
 
+    // Re-run this build script when relevant environment variables change.
+    println!("cargo:rerun-if-env-changed=LIBRA_PNPM");
+    println!("cargo:rerun-if-env-changed=LIBRA_SKIP_WEB_BUILD");
+
     if should_skip_web_build() {
         ensure_stub_web_out(&web_dir);
         return;
@@ -33,6 +37,21 @@ fn main() {
 
     // Normal Cargo build: build the frontend directly inside web/.
     run_pnpm_build(&web_dir);
+}
+
+fn pnpm_executable() -> String {
+    if let Ok(value) = env::var("LIBRA_PNPM") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+
+    if cfg!(windows) {
+        "pnpm.cmd".to_string()
+    } else {
+        "pnpm".to_string()
+    }
 }
 
 fn should_skip_web_build() -> bool {
@@ -68,9 +87,11 @@ fn ensure_stub_web_out(web_dir: &Path) {
 
 /// Runs `pnpm install` (if needed) then `pnpm run build` inside `web_dir`.
 fn run_pnpm_build(web_dir: &Path) {
+    let pnpm = pnpm_executable();
+
     // Install dependencies if node_modules is missing (e.g. fresh clone).
     if !web_dir.join("node_modules").exists() {
-        let install = Command::new("pnpm")
+        let install = Command::new(&pnpm)
             .arg("install")
             .arg("--frozen-lockfile")
             .current_dir(web_dir)
@@ -82,7 +103,7 @@ fn run_pnpm_build(web_dir: &Path) {
         }
     }
 
-    let status = Command::new("pnpm")
+    let status = Command::new(&pnpm)
         .arg("run")
         .arg("build")
         .current_dir(web_dir)
