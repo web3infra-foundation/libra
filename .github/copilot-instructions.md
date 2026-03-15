@@ -17,8 +17,6 @@ When generating code or design suggestions, assume this context: high concurrenc
 ## Build & run
 
 - Local iterative workflow: cargo build -p <crate>, cargo test -p <crate>, cargo bench -p <crate>.
-- Integrated build (monorepo context): support for Buck2 or Bazel is expected in the broader org; when prompting for build files, include Buck2 macro snippet.
-- For CI/integration: assume buck2 build //libra/... and buck2 test //libra/... as canonical commands.
 
 ## Repository architecture & major components
 
@@ -89,7 +87,6 @@ When generating code or design suggestions, assume this context: high concurrenc
 
 ## How Copilot should assist
 
-- When the user asks for code: produce Rust snippet first; if build rule required, add Buck2 macro snippet after.
 - When user asks for design or architecture advice: list multiple options, each with trade-offs (performance, memory, compatibility, complexity).
 - When user asks for tests or benchmarks: include criterion example or proptest snippet.
 - When user asks for CLI tool suggestions: include sample clap-derived argument parsing code + usage message + example invocation.
