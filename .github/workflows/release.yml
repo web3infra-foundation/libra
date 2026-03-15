@@ -93,7 +93,7 @@ jobs:
 
           Write-Output "Building $binaryName for target ${{ matrix.target.rust }}..."
 
-          $env:RUSTFLAGS = "-C strip=symbols"
+          $env:RUSTFLAGS = "-C strip=symbols link-args=/STACK:0x800000"
           cargo build --locked --release --target ${{ matrix.target.rust }}
 
           # Create build directory and copy binary
