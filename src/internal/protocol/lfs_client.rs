@@ -718,4 +718,50 @@ mod tests {
 
         // temp_dir automatically cleans up when dropped
     }
+
+    /// Verify that a batch response with a 404 object error triggers the
+    /// pointer-file fallback and returns `Ok`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_download_object_404_writes_pointer_file() {
+        use axum::{Router, routing::post};
+
+        let test_oid = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
+        let test_size: u64 = 1024;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/objects/batch",
+            post(|| async {
+                r#"{"objects":[{"oid":"abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890","size":1024,"error":{"code":404,"message":"Object does not exist on the server"}}]}"#
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let base_url = format!("http://{addr}/");
+        let client = LFSClient {
+            batch_url: Url::parse(&format!("{base_url}objects/batch")).unwrap(),
+            lfs_url: Url::parse(&base_url).unwrap(),
+            client: Client::builder().no_proxy().build().unwrap(),
+        };
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let out_path = tmp_dir.path().join("test_lfs_file");
+
+        let result = client
+            .download_object(test_oid, test_size, &out_path, None)
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "download_object should return Ok on 404, got: {:?}",
+            result.unwrap_err()
+        );
+
+        let contents = tokio::fs::read_to_string(&out_path).await.unwrap();
+        let expected = lfs::format_pointer_string(test_oid, test_size);
+        assert_eq!(contents, expected, "file should contain the LFS pointer");
+    }
 }
