@@ -481,32 +481,3 @@ If the formatting check fails, you can automatically fix formatting issues by ru
 ```bash
 cargo +nightly fmt --all
 ```
-
-### Buck2 Build Requirements
-
-This project builds with Buck2. Please install both Buck2 and `cargo-buckal` before development:
-
-```bash
-# Install buck2: download the latest release tarball from
-# https://github.com/facebook/buck2/releases, extract the binary,
-# and place it in ~/.cargo/bin (ensure ~/.cargo/bin is on PATH).
-# Example (replace <tag> and <platform> with the latest for your OS):
-wget https://github.com/facebook/buck2/releases/download/<tag>/buck2-<platform>.tar.gz
-tar -xzf buck2-<platform>.tar.gz
-mv buck2 ~/.cargo/bin/
-
-# Install cargo-buckal (requires Rust toolchain)
-cargo install --git https://github.com/buck2hub/cargo-buckal.git
-```
-
-Pull Requests must also pass the Buck2 build:
-
-```bash
-cargo buckal build
-```
-
-When you update dependencies in `Cargo.toml`, regenerate Buck metadata and third-party lockfiles:
-
-```bash
-cargo buckal migrate
-```

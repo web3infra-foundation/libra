@@ -1,7 +1,0 @@
-target/
-web/node_modules/
-web/.next/
-web/.pnpm-store/
-.idea/
-.vscode/
-.claude/
