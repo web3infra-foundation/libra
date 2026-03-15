@@ -363,6 +363,10 @@ impl LFSClient {
             // 404 means the object doesn't exist on the LFS server.
             // Gracefully fall back to writing a pointer file, matching git behavior.
             if err.code == 404 {
+                eprintln!(
+                    "warning: LFS object {oid} not found on server, keeping pointer file. \
+                     Run `libra lfs pull` to retry."
+                );
                 tracing::warn!("LFS object {oid} not found on server (404), keeping pointer file.");
                 let pointer = lfs::format_pointer_string(oid, size);
                 tokio::fs::write(path.as_ref(), pointer.as_bytes()).await?;
