@@ -84,40 +84,6 @@ jobs:
             exit 0
           fi
 
-  build:
-    name: Buck2 Build
-
-    runs-on: [self-hosted]
-
-    env:
-      CARGO_TERM_COLOR: always
-      RUSTUP_TOOLCHAIN: stable
-    
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v5
-        with:
-          submodules: recursive
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v5
-        with:
-          node-version: "22"
-
-      - name: Enable pnpm
-        run: corepack enable
-
-      - name: Install web dependencies
-        run: pnpm --dir web install --frozen-lockfile
-
-      - name: Build with Buck2
-        run: buck2 build //:libra
-
-      - name: Clean Buck2 artifacts
-        run: buck2 clean
-        if: always()
-        continue-on-error: true
-
   test:
     name: Run Tests
 

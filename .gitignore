@@ -27,15 +27,10 @@ target
 .agent/
 .agents/
 
-# Buck2
-buck-out/
-.buckal/
-
 # Generated when moving Windows files to WSL
 *:Zone.Identifier
 
 .libra
-/buck-out
 
 # Frontend
 web/node_modules/
