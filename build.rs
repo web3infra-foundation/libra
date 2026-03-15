@@ -4,7 +4,7 @@
 
 use std::{
     env, fs,
-    path::{Path, PathBuf},
+    path::Path,
     process::Command,
 };
 
@@ -96,20 +96,4 @@ fn run_pnpm_build(web_dir: &Path) {
     if !status.success() {
         panic!("frontend build failed (exit code {:?})", status.code());
     }
-}
-
-/// Recursively copies a directory tree from `src` to `dst`.
-fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        let target = dst.join(entry.file_name());
-        if ty.is_dir() {
-            copy_dir_all(&entry.path(), &target)?;
-        } else {
-            fs::copy(entry.path(), target)?;
-        }
-    }
-    Ok(())
 }
