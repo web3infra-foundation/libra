@@ -2,11 +2,7 @@
 //! export that `rust-embed` embeds into the binary.
 //!
 
-use std::{
-    env, fs,
-    path::Path,
-    process::Command,
-};
+use std::{env, fs, path::Path, process::Command};
 
 fn main() {
     let manifest_dir = match env::var("CARGO_MANIFEST_DIR") {
