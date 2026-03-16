@@ -8,9 +8,13 @@ use std::{
 
 use git_internal::internal::object::intent::Intent;
 use libra::{
-    internal::ai::history::HistoryManager,
+    internal::{
+        ai::history::{AI_REF, HistoryManager},
+        model::reference::{self, ConfigKind},
+    },
     utils::{storage::local::LocalStorage, storage_ext::StorageExt, test},
 };
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde_json::{Value, json};
 use serial_test::serial;
 use tempfile::tempdir;
@@ -46,6 +50,24 @@ fn read_json_file(path: &Path) -> Value {
         .unwrap_or_else(|err| panic!("failed to read JSON file '{}': {err}", path.display()));
     serde_json::from_str(&body)
         .unwrap_or_else(|err| panic!("failed to parse JSON file '{}': {err}", path.display()))
+}
+
+async fn read_history_head(repo: &Path, history: &HistoryManager) -> String {
+    assert_eq!(history.ref_name(), AI_REF);
+    let db_path = repo.join(".libra/libra.db");
+    let db_conn = libra::internal::db::establish_connection(
+        db_path.to_str().expect("db path should be valid UTF-8"),
+    )
+    .await
+    .expect("failed to connect test database");
+    let row = reference::Entity::find()
+        .filter(reference::Column::Name.eq(AI_REF))
+        .filter(reference::Column::Kind.eq(ConfigKind::Branch))
+        .one(&db_conn)
+        .await
+        .expect("failed to query AI history ref")
+        .expect("AI history ref should exist");
+    row.commit.expect("AI history ref should point to a commit")
 }
 
 fn write_shell_helper(path: &Path, artifact_path: &Path) {
@@ -725,6 +747,67 @@ async fn test_claude_sdk_sync_sessions_preserves_existing_message_sync() {
 
 #[tokio::test]
 #[serial]
+async fn test_claude_sdk_sync_sessions_skips_history_append_when_snapshot_is_unchanged() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let response_path = repo.path().join("session-catalog.json");
+    fs::write(
+        &response_path,
+        serde_json::to_vec_pretty(&json!([
+            {
+                "sessionId": "session-a",
+                "summary": "Claude session A",
+                "lastModified": 1742025600000i64,
+                "cwd": repo.path().to_string_lossy().to_string()
+            }
+        ]))
+        .expect("serialize session catalog"),
+    )
+    .expect("write session catalog response");
+
+    let request_path = repo.path().join("session-catalog-request.json");
+    let helper_path = repo.path().join("fake-session-helper.sh");
+    write_json_response_capture_shell_helper(&helper_path, &response_path, &request_path);
+
+    let first = run_libra_command(
+        &[
+            "claude-sdk",
+            "sync-sessions",
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+            "--node-binary",
+            "/bin/sh",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&first, "initial sync-sessions should succeed");
+
+    let (_, history) = load_intent_history(repo.path()).await;
+    let first_head = read_history_head(repo.path(), &history).await;
+
+    let second = run_libra_command(
+        &[
+            "claude-sdk",
+            "sync-sessions",
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+            "--node-binary",
+            "/bin/sh",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&second, "repeat sync-sessions should succeed");
+
+    let second_head = read_history_head(repo.path(), &history).await;
+    assert_eq!(
+        second_head, first_head,
+        "unchanged sync-sessions runs should not append a new AI history commit"
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_claude_sdk_sync_sessions_keeps_history_in_current_repo_when_cwd_is_overridden() {
     let repo = tempdir().expect("failed to create repo root");
     let external_project = tempdir().expect("failed to create external project root");
@@ -1115,6 +1198,13 @@ async fn test_claude_sdk_build_evidence_input_from_provider_session_messages() {
                 }
             },
             {
+                "type": "system",
+                "subtype": "task_progress",
+                "session_id": "session-a",
+                "uuid": "msg-task-1",
+                "description": "Reading provider runtime facts"
+            },
+            {
                 "type": "tool_progress",
                 "tool_use_id": "tool-1",
                 "tool_name": "Read",
@@ -1201,7 +1291,7 @@ async fn test_claude_sdk_build_evidence_input_from_provider_session_messages() {
         build_json["objectId"],
         json!("claude_evidence_input__session-a")
     );
-    assert_eq!(build_json["messageCount"], json!(5));
+    assert_eq!(build_json["messageCount"], json!(6));
 
     let evidence_path = PathBuf::from(
         build_json["artifactPath"]
@@ -1217,7 +1307,7 @@ async fn test_claude_sdk_build_evidence_input_from_provider_session_messages() {
         evidence["providerSessionObjectId"],
         json!("claude_provider_session__session-a")
     );
-    assert_eq!(evidence["messageOverview"]["messageCount"], json!(5));
+    assert_eq!(evidence["messageOverview"]["messageCount"], json!(6));
     assert_eq!(
         evidence["contentOverview"]["assistantMessageCount"],
         json!(1)
@@ -1232,6 +1322,7 @@ async fn test_claude_sdk_build_evidence_input_from_provider_session_messages() {
         json!("src/lib.rs")
     );
     assert_eq!(evidence["runtimeSignals"]["toolRuntimeCount"], json!(1));
+    assert_eq!(evidence["runtimeSignals"]["taskRuntimeCount"], json!(1));
     assert_eq!(evidence["runtimeSignals"]["resultMessageCount"], json!(1));
     assert_eq!(
         evidence["runtimeSignals"]["hasStructuredOutput"],
@@ -1266,11 +1357,204 @@ async fn test_claude_sdk_build_evidence_input_from_provider_session_messages() {
     let ai_pretty_stdout = String::from_utf8_lossy(&ai_pretty.stdout);
     assert!(ai_pretty_stdout.contains("type: evidence_input"));
     assert!(ai_pretty_stdout.contains("schema: libra.evidence_input.v1"));
-    assert!(ai_pretty_stdout.contains("message_count: 5"));
+    assert!(ai_pretty_stdout.contains("message_count: 6"));
     assert!(ai_pretty_stdout.contains("has_structured_output: true"));
 
     let helper_request = read_json_file(&messages_request_path);
     assert_eq!(helper_request["mode"], json!("getSessionMessages"));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_build_evidence_input_skips_history_append_when_artifact_is_unchanged() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let catalog_response_path = repo.path().join("session-catalog.json");
+    fs::write(
+        &catalog_response_path,
+        serde_json::to_vec_pretty(&json!([
+            {
+                "sessionId": "session-a",
+                "summary": "Claude session A",
+                "lastModified": 1742025600000i64,
+                "cwd": repo.path().to_string_lossy().to_string()
+            }
+        ]))
+        .expect("serialize session catalog"),
+    )
+    .expect("write session catalog response");
+    let catalog_request_path = repo.path().join("session-catalog-request.json");
+    let catalog_helper_path = repo.path().join("fake-session-catalog-helper.sh");
+    write_json_response_capture_shell_helper(
+        &catalog_helper_path,
+        &catalog_response_path,
+        &catalog_request_path,
+    );
+
+    let sync = run_libra_command(
+        &[
+            "claude-sdk",
+            "sync-sessions",
+            "--helper-path",
+            catalog_helper_path
+                .to_str()
+                .expect("catalog helper path utf-8"),
+            "--node-binary",
+            "/bin/sh",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &sync,
+        "sync-sessions should succeed before evidence-input build",
+    );
+
+    let messages_response_path = repo.path().join("session-messages.json");
+    fs::write(
+        &messages_response_path,
+        serde_json::to_vec_pretty(&json!([
+            {
+                "type": "system",
+                "subtype": "init",
+                "session_id": "session-a",
+                "uuid": "msg-1"
+            },
+            {
+                "type": "assistant",
+                "session_id": "session-a",
+                "uuid": "msg-2",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Read",
+                            "input": {
+                                "file_path": "src/lib.rs"
+                            }
+                        }
+                    ]
+                }
+            },
+            {
+                "type": "result",
+                "subtype": "success",
+                "session_id": "session-a",
+                "uuid": "msg-3",
+                "stop_reason": "end_turn",
+                "structured_output": {
+                    "summary": "Bridge runtime facts"
+                }
+            }
+        ]))
+        .expect("serialize session messages"),
+    )
+    .expect("write session messages response");
+    let messages_request_path = repo.path().join("session-messages-request.json");
+    let messages_helper_path = repo.path().join("fake-session-messages-helper.sh");
+    write_json_response_capture_shell_helper(
+        &messages_helper_path,
+        &messages_response_path,
+        &messages_request_path,
+    );
+
+    let hydrate = run_libra_command(
+        &[
+            "claude-sdk",
+            "hydrate-session",
+            "--provider-session-id",
+            "session-a",
+            "--helper-path",
+            messages_helper_path
+                .to_str()
+                .expect("messages helper path utf-8"),
+            "--node-binary",
+            "/bin/sh",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &hydrate,
+        "hydrate-session should succeed before evidence-input build",
+    );
+
+    let first = run_libra_command(
+        &[
+            "claude-sdk",
+            "build-evidence-input",
+            "--provider-session-id",
+            "session-a",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&first, "initial build-evidence-input should succeed");
+
+    let (_, history) = load_intent_history(repo.path()).await;
+    let first_head = read_history_head(repo.path(), &history).await;
+
+    let second = run_libra_command(
+        &[
+            "claude-sdk",
+            "build-evidence-input",
+            "--provider-session-id",
+            "session-a",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&second, "repeat build-evidence-input should succeed");
+
+    let second_head = read_history_head(repo.path(), &history).await;
+    assert_eq!(
+        second_head, first_head,
+        "unchanged evidence-input builds should not append a new AI history commit"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_sync_sessions_rejects_invalid_provider_session_id() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let response_path = repo.path().join("session-catalog.json");
+    fs::write(
+        &response_path,
+        serde_json::to_vec_pretty(&json!([
+            {
+                "sessionId": "../session-a",
+                "summary": "Claude session A",
+                "lastModified": 1742025600000i64,
+                "cwd": repo.path().to_string_lossy().to_string()
+            }
+        ]))
+        .expect("serialize session catalog"),
+    )
+    .expect("write session catalog response");
+
+    let request_path = repo.path().join("session-catalog-request.json");
+    let helper_path = repo.path().join("fake-session-helper.sh");
+    write_json_response_capture_shell_helper(&helper_path, &response_path, &request_path);
+
+    let sync = run_libra_command(
+        &[
+            "claude-sdk",
+            "sync-sessions",
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+            "--node-binary",
+            "/bin/sh",
+        ],
+        repo.path(),
+    );
+    assert!(
+        !sync.status.success(),
+        "sync-sessions should reject invalid provider session ids"
+    );
+    assert!(
+        String::from_utf8_lossy(&sync.stderr).contains("invalid provider session id"),
+        "expected invalid provider session id error, got: {}",
+        String::from_utf8_lossy(&sync.stderr)
+    );
 }
 
 #[tokio::test]

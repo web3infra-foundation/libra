@@ -2,16 +2,16 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    fs,
     path::{Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio::{fs, io::AsyncWriteExt};
 
 use crate::{
     internal::{
@@ -528,7 +528,7 @@ pub async fn persist_managed_artifact(
     let provider_session_id = bundle.provider_session_id.clone();
 
     let objects_dir = storage_path.join("objects");
-    fs::create_dir_all(&objects_dir).with_context(|| {
+    fs::create_dir_all(&objects_dir).await.with_context(|| {
         format!(
             "failed to create objects directory '{}'",
             objects_dir.display()
@@ -568,19 +568,22 @@ pub async fn persist_managed_artifact(
         &storage_path.join(MANAGED_ARTIFACTS_DIR),
         &ai_session_id,
         artifact,
-    )?;
+    )
+    .await?;
     let audit_bundle_path = write_pretty_json_artifact(
         &storage_path.join(AUDIT_BUNDLES_DIR),
         &ai_session_id,
         &bundle,
-    )?;
+    )
+    .await?;
     let intent_extraction_path = match &bundle.bridge.intent_extraction_artifact {
         Some(intent_extraction_artifact) => Some(
             write_pretty_json_artifact(
                 &storage_path.join(INTENT_EXTRACTIONS_DIR),
                 &ai_session_id,
                 intent_extraction_artifact,
-            )?
+            )
+            .await?
             .to_string_lossy()
             .to_string(),
         ),
@@ -588,7 +591,8 @@ pub async fn persist_managed_artifact(
             delete_generated_artifact_if_exists(
                 &storage_path.join(INTENT_EXTRACTIONS_DIR),
                 &ai_session_id,
-            )?;
+            )
+            .await?;
             None
         }
     };
@@ -672,6 +676,7 @@ fn extract_system_init(artifact: &ClaudeManagedArtifact) -> Result<ManagedSystem
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| anyhow!("system init message is missing session_id"))?
         .to_string();
+    validate_managed_session_id(&session_id)?;
     let cwd = message
         .get("cwd")
         .and_then(Value::as_str)
@@ -773,6 +778,19 @@ fn extract_system_init(artifact: &ClaudeManagedArtifact) -> Result<ManagedSystem
         plugins,
         fast_mode_state,
     })
+}
+
+fn validate_managed_session_id(session_id: &str) -> Result<()> {
+    if session_id.len() > 128 {
+        bail!("invalid managed session_id: exceeds 128 characters");
+    }
+    if !session_id
+        .chars()
+        .all(|char| char.is_ascii_alphanumeric() || matches!(char, '.' | '_' | '-'))
+    {
+        bail!("invalid managed session_id: only [A-Za-z0-9._-] is allowed");
+    }
+    Ok(())
 }
 
 fn append_raw_hook_events(session: &mut SessionState, hook_events: &[ClaudeManagedHookEvent]) {
@@ -2152,11 +2170,15 @@ impl PersistedManagedIntentExtraction {
     }
 }
 
-fn write_pretty_json_artifact<T>(directory: &Path, artifact_id: &str, value: &T) -> Result<PathBuf>
+async fn write_pretty_json_artifact<T>(
+    directory: &Path,
+    artifact_id: &str,
+    value: &T,
+) -> Result<PathBuf>
 where
     T: Serialize,
 {
-    fs::create_dir_all(directory).with_context(|| {
+    fs::create_dir_all(directory).await.with_context(|| {
         format!(
             "failed to create managed artifact directory '{}'",
             directory.display()
@@ -2165,13 +2187,13 @@ where
     let destination = directory.join(format!("{artifact_id}.json"));
     let payload =
         serde_json::to_vec_pretty(value).context("failed to serialize managed JSON artifact")?;
-    write_atomic_file(&destination, &payload)?;
+    write_atomic_file(&destination, &payload).await?;
     Ok(destination)
 }
 
-fn delete_generated_artifact_if_exists(directory: &Path, artifact_id: &str) -> Result<()> {
+async fn delete_generated_artifact_if_exists(directory: &Path, artifact_id: &str) -> Result<()> {
     let destination = directory.join(format!("{artifact_id}.json"));
-    match fs::remove_file(&destination) {
+    match fs::remove_file(&destination).await {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(err).with_context(|| {
@@ -2183,7 +2205,7 @@ fn delete_generated_artifact_if_exists(directory: &Path, artifact_id: &str) -> R
     }
 }
 
-fn write_atomic_file(destination: &Path, data: &[u8]) -> Result<()> {
+async fn write_atomic_file(destination: &Path, data: &[u8]) -> Result<()> {
     let parent = destination.parent().ok_or_else(|| {
         anyhow!(
             "managed artifact path '{}' does not have a parent directory",
@@ -2191,6 +2213,7 @@ fn write_atomic_file(destination: &Path, data: &[u8]) -> Result<()> {
         )
     })?;
     fs::create_dir_all(parent)
+        .await
         .with_context(|| format!("failed to create parent directory '{}'", parent.display()))?;
 
     let file_name = destination
@@ -2212,7 +2235,18 @@ fn write_atomic_file(destination: &Path, data: &[u8]) -> Result<()> {
     );
     let temp_path = parent.join(format!(".{file_name}.{unique_suffix}.tmp"));
 
-    fs::write(&temp_path, data).with_context(|| {
+    let mut temp_file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to create temporary managed artifact '{}'",
+                temp_path.display()
+            )
+        })?;
+    temp_file.write_all(data).await.with_context(|| {
         format!(
             "failed to write temporary managed artifact '{}'",
             temp_path.display()
@@ -2221,12 +2255,12 @@ fn write_atomic_file(destination: &Path, data: &[u8]) -> Result<()> {
 
     #[cfg(windows)]
     {
-        if destination.exists() {
-            match fs::remove_file(destination) {
+        if fs::try_exists(destination).await.unwrap_or(false) {
+            match fs::remove_file(destination).await {
                 Ok(()) => {}
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
                 Err(err) => {
-                    let _ = fs::remove_file(&temp_path);
+                    let _ = fs::remove_file(&temp_path).await;
                     return Err(err).with_context(|| {
                         format!(
                             "failed to replace existing managed artifact '{}'",
@@ -2238,17 +2272,16 @@ fn write_atomic_file(destination: &Path, data: &[u8]) -> Result<()> {
         }
     }
 
-    fs::rename(&temp_path, destination)
-        .inspect_err(|_err| {
-            let _ = fs::remove_file(&temp_path);
-        })
-        .with_context(|| {
+    if let Err(err) = fs::rename(&temp_path, destination).await {
+        let _ = fs::remove_file(&temp_path).await;
+        return Err(err).with_context(|| {
             format!(
                 "failed to finalize managed artifact '{}' -> '{}'",
                 temp_path.display(),
                 destination.display()
             )
-        })?;
+        });
+    }
 
     Ok(())
 }
@@ -2782,6 +2815,38 @@ mod tests {
                 entry.field_path == "usage.durationMs" && entry.value == json!(3479)
             }),
             "expected duration provenance from result payload"
+        );
+    }
+
+    #[test]
+    fn build_managed_audit_bundle_rejects_invalid_session_id() {
+        let artifact: ClaudeManagedArtifact = serde_json::from_value(json!({
+            "cwd": "/repo",
+            "hookEvents": [],
+            "messages": [
+                {
+                    "type": "system",
+                    "subtype": "init",
+                    "cwd": "/repo",
+                    "session_id": "../escape",
+                    "tools": ["Read"],
+                    "model": "claude-sonnet-4-5-20250929",
+                    "permissionMode": "default"
+                }
+            ],
+            "resultMessage": {
+                "type": "result",
+                "subtype": "success",
+                "session_id": "../escape",
+                "stop_reason": "end_turn"
+            }
+        }))
+        .expect("fixture should deserialize");
+
+        let err = build_managed_audit_bundle(&artifact).expect_err("bundle should reject");
+        assert!(
+            err.to_string().contains("invalid managed session_id"),
+            "unexpected error: {err:#}"
         );
     }
 

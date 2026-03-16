@@ -5,7 +5,6 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -13,6 +12,7 @@ use chrono::Utc;
 use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tempfile::TempDir;
 use tokio::{fs, io::AsyncWriteExt, process::Command};
 
 use crate::{
@@ -480,7 +480,7 @@ struct PersistedProviderSessionSnapshot {
     message_sync: Option<ProviderSessionMessageSync>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct ProviderSessionMessageSync {
     #[serde(rename = "artifactPath")]
     artifact_path: String,
@@ -522,7 +522,7 @@ struct ProviderSessionMessagesArtifact {
     messages: Vec<Value>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedEvidenceInputArtifact {
     schema: String,
     object_type: String,
@@ -548,7 +548,7 @@ struct PersistedEvidenceInputArtifact {
     captured_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct EvidenceInputSourceArtifacts {
     #[serde(rename = "providerSessionPath")]
     provider_session_path: String,
@@ -556,7 +556,7 @@ struct EvidenceInputSourceArtifacts {
     messages_path: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct EvidenceInputMessageOverview {
     #[serde(rename = "messageCount")]
     message_count: usize,
@@ -568,7 +568,7 @@ struct EvidenceInputMessageOverview {
     last_message_kind: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct EvidenceInputContentOverview {
     #[serde(rename = "assistantMessageCount")]
     assistant_message_count: usize,
@@ -582,7 +582,7 @@ struct EvidenceInputContentOverview {
     assistant_text_previews: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct EvidenceInputRuntimeSignals {
     #[serde(rename = "resultMessageCount")]
     result_message_count: usize,
@@ -598,7 +598,7 @@ struct EvidenceInputRuntimeSignals {
     has_permission_denials: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct EvidenceInputLatestResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     subtype: Option<String>,
@@ -742,21 +742,7 @@ struct PersistedIntentInputBindingArtifact {
 
 #[derive(Debug)]
 struct EmbeddedHelperDir {
-    path: PathBuf,
-}
-
-impl Drop for EmbeddedHelperDir {
-    fn drop(&mut self) {
-        if let Err(err) = std::fs::remove_dir_all(&self.path)
-            && err.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::warn!(
-                path = %self.path.display(),
-                error = %err,
-                "failed to remove temporary Claude SDK helper directory"
-            );
-        }
-    }
+    _temp_dir: TempDir,
 }
 
 pub async fn execute(args: ClaudeSdkArgs) -> Result<()> {
@@ -841,11 +827,7 @@ async fn sync_sessions(args: SyncSessionsArgs) -> Result<()> {
 
     let mut synced = Vec::new();
     for session in filtered_sessions {
-        synced.push(
-            persist_provider_session_snapshot(&storage_path, session)
-                .await
-                .context("failed to persist Claude provider session snapshot")?,
-        );
+        synced.push(persist_provider_session_snapshot(&storage_path, session).await?);
     }
 
     println!(
@@ -868,7 +850,7 @@ async fn hydrate_session(args: HydrateSessionArgs) -> Result<()> {
     let cwd = args
         .cwd
         .unwrap_or(std::env::current_dir().context("failed to read current directory")?);
-    let object_id = build_provider_session_object_id(&args.provider_session_id);
+    let object_id = build_provider_session_object_id(&args.provider_session_id)?;
     let artifact_path = provider_session_artifact_path(&storage_path, &object_id);
     let mut snapshot = read_persisted_provider_session_snapshot(&artifact_path)
         .await
@@ -942,7 +924,7 @@ async fn hydrate_session(args: HydrateSessionArgs) -> Result<()> {
 async fn build_evidence_input(args: BuildEvidenceInputArgs) -> Result<()> {
     let storage_path = util::try_get_storage_path(None)
         .context("claude-sdk commands must be run inside a Libra repository")?;
-    let provider_session_object_id = build_provider_session_object_id(&args.provider_session_id);
+    let provider_session_object_id = build_provider_session_object_id(&args.provider_session_id)?;
     let provider_session_path =
         provider_session_artifact_path(&storage_path, &provider_session_object_id);
     let snapshot = read_persisted_provider_session_snapshot(&provider_session_path)
@@ -971,19 +953,23 @@ async fn build_evidence_input(args: BuildEvidenceInputArgs) -> Result<()> {
             )
         })?;
 
-    let object_id = build_evidence_input_object_id(&args.provider_session_id);
-    let captured_at = Utc::now().to_rfc3339();
-    let artifact = build_evidence_input_artifact(
+    let object_id = build_evidence_input_object_id(&args.provider_session_id)?;
+    let default_artifact_path = evidence_input_artifact_path(&storage_path, &object_id);
+    let comparison_path = args.output.as_deref().unwrap_or(&default_artifact_path);
+    let mut artifact = build_evidence_input_artifact(
         &snapshot,
         &provider_session_path,
         &messages_artifact,
         &messages_path,
         object_id,
-        captured_at,
+        Utc::now().to_rfc3339(),
     );
-    let artifact_path = args
-        .output
-        .unwrap_or_else(|| evidence_input_artifact_path(&storage_path, &artifact.object_id));
+    if let Some(existing_artifact) = read_existing_evidence_input_artifact(comparison_path).await?
+        && evidence_input_artifact_matches(&existing_artifact, &artifact)
+    {
+        artifact.captured_at = existing_artifact.captured_at;
+    }
+    let artifact_path = args.output.unwrap_or(default_artifact_path);
     let record = persist_evidence_input_artifact(&storage_path, &artifact_path, &artifact).await?;
 
     println!(
@@ -1291,8 +1277,22 @@ where
         .with_context(|| format!("failed to write JSON artifact '{}'", path.display()))
 }
 
-fn build_provider_session_object_id(provider_session_id: &str) -> String {
-    format!("claude_provider_session__{provider_session_id}")
+fn validate_provider_session_id(provider_session_id: &str) -> Result<()> {
+    if provider_session_id.len() > 128 {
+        bail!("invalid provider session id: exceeds 128 characters");
+    }
+    if !provider_session_id
+        .chars()
+        .all(|char| char.is_ascii_alphanumeric() || matches!(char, '.' | '_' | '-'))
+    {
+        bail!("invalid provider session id: only [A-Za-z0-9._-] is allowed");
+    }
+    Ok(())
+}
+
+fn build_provider_session_object_id(provider_session_id: &str) -> Result<String> {
+    validate_provider_session_id(provider_session_id)?;
+    Ok(format!("claude_provider_session__{provider_session_id}"))
 }
 
 fn provider_session_artifact_path(storage_path: &Path, object_id: &str) -> PathBuf {
@@ -1307,8 +1307,9 @@ fn provider_session_messages_artifact_path(storage_path: &Path, object_id: &str)
         .join(format!("{object_id}.messages.json"))
 }
 
-fn build_evidence_input_object_id(provider_session_id: &str) -> String {
-    format!("claude_evidence_input__{provider_session_id}")
+fn build_evidence_input_object_id(provider_session_id: &str) -> Result<String> {
+    validate_provider_session_id(provider_session_id)?;
+    Ok(format!("claude_evidence_input__{provider_session_id}"))
 }
 
 fn evidence_input_artifact_path(storage_path: &Path, object_id: &str) -> PathBuf {
@@ -1332,6 +1333,46 @@ async fn read_persisted_provider_session_snapshot(
             path.display()
         )
     })
+}
+
+async fn read_existing_evidence_input_artifact(
+    path: &Path,
+) -> Result<Option<PersistedEvidenceInputArtifact>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let content = fs::read_to_string(path).await.with_context(|| {
+        format!(
+            "failed to read evidence input artifact '{}'",
+            path.display()
+        )
+    })?;
+    let artifact = serde_json::from_str(&content).with_context(|| {
+        format!(
+            "failed to parse evidence input artifact '{}'",
+            path.display()
+        )
+    })?;
+    Ok(Some(artifact))
+}
+
+fn evidence_input_artifact_matches(
+    existing: &PersistedEvidenceInputArtifact,
+    candidate: &PersistedEvidenceInputArtifact,
+) -> bool {
+    existing.schema == candidate.schema
+        && existing.object_type == candidate.object_type
+        && existing.provider == candidate.provider
+        && existing.object_id == candidate.object_id
+        && existing.provider_session_id == candidate.provider_session_id
+        && existing.provider_session_object_id == candidate.provider_session_object_id
+        && existing.summary == candidate.summary
+        && existing.source_artifacts == candidate.source_artifacts
+        && existing.message_overview == candidate.message_overview
+        && existing.content_overview == candidate.content_overview
+        && existing.runtime_signals == candidate.runtime_signals
+        && existing.latest_result == candidate.latest_result
 }
 
 async fn read_provider_session_messages_artifact(
@@ -1458,7 +1499,11 @@ fn build_evidence_input_artifact(
                     *observed_tools.entry(tool_name.to_string()).or_insert(0) += 1;
                 }
             }
-            Some("task_started" | "task_progress" | "task_notification") => {
+            _ if matches!(
+                message.get("subtype").and_then(Value::as_str),
+                Some("task_started" | "task_progress" | "task_notification")
+            ) =>
+            {
                 task_runtime_count += 1;
             }
             Some("stream_event") => {
@@ -1603,13 +1648,14 @@ async fn persist_provider_session_snapshot(
     storage_path: &Path,
     session: ClaudeSdkSessionInfo,
 ) -> Result<SyncSessionRecord> {
-    let existing_message_sync =
-        read_existing_provider_session_message_sync(storage_path, &session.session_id).await?;
-    let snapshot = PersistedProviderSessionSnapshot {
+    let existing_snapshot =
+        read_existing_provider_session_snapshot(storage_path, &session.session_id).await?;
+    let object_id = build_provider_session_object_id(&session.session_id)?;
+    let mut snapshot = PersistedProviderSessionSnapshot {
         schema: "libra.provider_session.v3".to_string(),
         object_type: "provider_session".to_string(),
         provider: "claude".to_string(),
-        object_id: build_provider_session_object_id(&session.session_id),
+        object_id,
         provider_session_id: session.session_id,
         summary: session.summary,
         custom_title: session.custom_title,
@@ -1621,8 +1667,15 @@ async fn persist_provider_session_snapshot(
         last_modified: session.last_modified,
         file_size: session.file_size,
         captured_at: Utc::now().to_rfc3339(),
-        message_sync: existing_message_sync,
+        message_sync: existing_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.message_sync.clone()),
     };
+    if let Some(existing_snapshot) = &existing_snapshot
+        && provider_session_snapshot_matches(existing_snapshot, &snapshot)
+    {
+        snapshot.captured_at = existing_snapshot.captured_at.clone();
+    }
 
     upsert_provider_session_snapshot(storage_path, &snapshot).await
 }
@@ -1650,10 +1703,16 @@ async fn upsert_provider_session_snapshot(
         .intent_history_manager
         .as_ref()
         .ok_or_else(|| anyhow!("local MCP history manager is unavailable"))?;
-    history
-        .append("provider_session", &snapshot.object_id, object_hash)
+    let existing_hash = history
+        .get_object_hash("provider_session", &snapshot.object_id)
         .await
-        .context("failed to append provider session snapshot to history")?;
+        .context("failed to inspect existing provider session history")?;
+    if existing_hash != Some(object_hash) {
+        history
+            .append("provider_session", &snapshot.object_id, object_hash)
+            .await
+            .context("failed to append provider session snapshot to history")?;
+    }
 
     Ok(SyncSessionRecord {
         provider_session_id: snapshot.provider_session_id.clone(),
@@ -1686,10 +1745,16 @@ async fn persist_evidence_input_artifact(
         .intent_history_manager
         .as_ref()
         .ok_or_else(|| anyhow!("local MCP history manager is unavailable"))?;
-    history
-        .append("evidence_input", &artifact.object_id, object_hash)
+    let existing_hash = history
+        .get_object_hash("evidence_input", &artifact.object_id)
         .await
-        .context("failed to append evidence input to history")?;
+        .context("failed to inspect existing evidence input history")?;
+    if existing_hash != Some(object_hash) {
+        history
+            .append("evidence_input", &artifact.object_id, object_hash)
+            .await
+            .context("failed to append evidence input to history")?;
+    }
 
     Ok(SyncSessionRecord {
         provider_session_id: artifact.provider_session_id.clone(),
@@ -1699,11 +1764,11 @@ async fn persist_evidence_input_artifact(
     })
 }
 
-async fn read_existing_provider_session_message_sync(
+async fn read_existing_provider_session_snapshot(
     storage_path: &Path,
     provider_session_id: &str,
-) -> Result<Option<ProviderSessionMessageSync>> {
-    let object_id = build_provider_session_object_id(provider_session_id);
+) -> Result<Option<PersistedProviderSessionSnapshot>> {
+    let object_id = build_provider_session_object_id(provider_session_id)?;
     let artifact_path = provider_session_artifact_path(storage_path, &object_id);
     if !artifact_path.exists() {
         return Ok(None);
@@ -1717,7 +1782,28 @@ async fn read_existing_provider_session_message_sync(
                 artifact_path.display()
             )
         })?;
-    Ok(snapshot.message_sync)
+    Ok(Some(snapshot))
+}
+
+fn provider_session_snapshot_matches(
+    existing: &PersistedProviderSessionSnapshot,
+    candidate: &PersistedProviderSessionSnapshot,
+) -> bool {
+    existing.schema == candidate.schema
+        && existing.object_type == candidate.object_type
+        && existing.provider == candidate.provider
+        && existing.provider_session_id == candidate.provider_session_id
+        && existing.object_id == candidate.object_id
+        && existing.summary == candidate.summary
+        && existing.custom_title == candidate.custom_title
+        && existing.first_prompt == candidate.first_prompt
+        && existing.git_branch == candidate.git_branch
+        && existing.cwd == candidate.cwd
+        && existing.tag == candidate.tag
+        && existing.created_at == candidate.created_at
+        && existing.last_modified == candidate.last_modified
+        && existing.file_size == candidate.file_size
+        && existing.message_sync == candidate.message_sync
 }
 
 async fn materialize_helper(
@@ -1727,29 +1813,25 @@ async fn materialize_helper(
         return Ok((None, path.to_path_buf()));
     }
 
-    let unique_suffix = format!(
-        "{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    );
-    let temp_dir_path =
-        std::env::temp_dir().join(format!("libra-claude-sdk-helper-{unique_suffix}"));
-    fs::create_dir_all(&temp_dir_path).await.with_context(|| {
-        format!(
-            "failed to create temporary helper directory '{}'",
-            temp_dir_path.display()
-        )
-    })?;
+    let temp_dir = tempfile::Builder::new()
+        .prefix("libra-claude-sdk-helper-")
+        .tempdir()
+        .context("failed to create temporary helper directory")?;
+    let temp_dir_path = temp_dir.path().to_path_buf();
     let helper_path = temp_dir_path.join("libra-claude-managed-helper.cjs");
-    fs::write(&helper_path, EMBEDDED_HELPER_SOURCE)
+    let mut helper_file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&helper_path)
+        .await
+        .with_context(|| format!("failed to create helper '{}'", helper_path.display()))?;
+    helper_file
+        .write_all(EMBEDDED_HELPER_SOURCE.as_bytes())
         .await
         .with_context(|| format!("failed to write helper '{}'", helper_path.display()))?;
     Ok((
         Some(EmbeddedHelperDir {
-            path: temp_dir_path,
+            _temp_dir: temp_dir,
         }),
         helper_path,
     ))

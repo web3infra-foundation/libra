@@ -104,6 +104,7 @@ mod branch_test;
 mod cat_file_test;
 mod checkout_test;
 mod cherry_pick_test;
+#[cfg(unix)]
 mod claude_sdk_test;
 mod clean_test;
 mod cli_error_test;
