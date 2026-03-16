@@ -371,7 +371,7 @@ struct StructuredIntentExtractionOutput {
     problem_statement: String,
     #[serde(rename = "changeType")]
     change_type: ChangeType,
-    objectives: Vec<String>,
+    objectives: Vec<StructuredObjective>,
     #[serde(rename = "inScope", default)]
     in_scope: Vec<String>,
     #[serde(rename = "outOfScope", default)]
@@ -394,6 +394,34 @@ struct StructuredIntentExtractionOutput {
     risk_factors: Vec<String>,
     #[serde(rename = "riskLevel", default)]
     risk_level: Option<RiskLevel>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum StructuredObjective {
+    Title(String),
+    Detailed(StructuredObjectiveEntry),
+}
+
+impl StructuredObjective {
+    fn into_objective(self) -> Objective {
+        match self {
+            StructuredObjective::Title(title) => Objective {
+                title,
+                kind: ObjectiveKind::Implementation,
+            },
+            StructuredObjective::Detailed(entry) => Objective {
+                title: entry.title,
+                kind: entry.kind,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct StructuredObjectiveEntry {
+    title: String,
+    kind: ObjectiveKind,
 }
 
 #[derive(Debug, Clone)]
@@ -1592,10 +1620,7 @@ fn extract_intent_extraction_outcome(
                     objectives: output
                         .objectives
                         .into_iter()
-                        .map(|title| Objective {
-                            title,
-                            kind: ObjectiveKind::Implementation,
-                        })
+                        .map(StructuredObjective::into_objective)
                         .collect(),
                     in_scope: output.in_scope,
                     out_of_scope: output.out_of_scope,
@@ -2569,6 +2594,51 @@ mod tests {
         );
         assert!(extraction.intent.in_scope.is_empty());
         assert!(extraction.intent.out_of_scope.is_empty());
+    }
+
+    #[test]
+    fn structured_output_preserves_objective_kinds_when_present() {
+        let result = ClaudeManagedResultMessage {
+            r#type: Some("result".to_string()),
+            subtype: Some("success".to_string()),
+            is_error: Some(false),
+            session_id: Some("sdk-session-4".to_string()),
+            stop_reason: Some("end_turn".to_string()),
+            duration_ms: Some(10),
+            duration_api_ms: Some(8),
+            num_turns: Some(1),
+            result: Some("ok".to_string()),
+            total_cost_usd: Some(0.001),
+            usage: Some(json!({"input_tokens": 1, "output_tokens": 1})),
+            model_usage: None,
+            permission_denials: None,
+            structured_output: Some(json!({
+                "summary": "Investigate retry behavior",
+                "problemStatement": "Need to understand retry backoff before changing execution policy",
+                "changeType": "unknown",
+                "objectives": [
+                    {"title": "Analyze retry timing across providers", "kind": "analysis"}
+                ],
+                "successCriteria": ["Produce a recommendation memo"],
+                "riskRationale": "Low risk because this turn is analysis-only"
+            })),
+            fast_mode_state: None,
+            uuid: None,
+        };
+
+        let extraction = extract_intent_extraction_from_result(Some(&result))
+            .expect("extraction should succeed")
+            .expect("extraction should exist");
+
+        assert_eq!(extraction.intent.objectives.len(), 1);
+        assert_eq!(
+            extraction.intent.objectives[0],
+            Objective {
+                title: "Analyze retry timing across providers".to_string(),
+                kind: ObjectiveKind::Analysis,
+            }
+        );
+        assert!(!extraction.intent.has_implementation_objectives());
     }
 
     #[test]
