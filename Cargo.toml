@@ -97,6 +97,7 @@ pulldown-cmark = "0.12"
 
 # Unicode handling
 unicode-width = "0.2"
+scorpiofs = "0.2.1"
 
 [target.'cfg(unix)'.dependencies] # only on Unix
 pager = "0.16.1"
