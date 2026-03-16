@@ -605,6 +605,185 @@ async fn test_claude_sdk_sync_sessions_persists_provider_session_snapshots() {
 
 #[tokio::test]
 #[serial]
+async fn test_claude_sdk_sync_sessions_preserves_existing_message_sync() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let catalog_response_path = repo.path().join("session-catalog.json");
+    fs::write(
+        &catalog_response_path,
+        serde_json::to_vec_pretty(&json!([
+            {
+                "sessionId": "session-a",
+                "summary": "Claude session A",
+                "lastModified": 1742025600000i64,
+                "cwd": repo.path().to_string_lossy().to_string()
+            }
+        ]))
+        .expect("serialize session catalog"),
+    )
+    .expect("write session catalog response");
+    let catalog_request_path = repo.path().join("session-catalog-request.json");
+    let catalog_helper_path = repo.path().join("fake-session-catalog-helper.sh");
+    write_json_response_capture_shell_helper(
+        &catalog_helper_path,
+        &catalog_response_path,
+        &catalog_request_path,
+    );
+
+    let sync = run_libra_command(
+        &[
+            "claude-sdk",
+            "sync-sessions",
+            "--helper-path",
+            catalog_helper_path
+                .to_str()
+                .expect("catalog helper path utf-8"),
+            "--node-binary",
+            "/bin/sh",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&sync, "initial claude-sdk sync-sessions should succeed");
+
+    let messages_response_path = repo.path().join("session-messages.json");
+    fs::write(
+        &messages_response_path,
+        serde_json::to_vec_pretty(&json!([
+            {"type": "user", "session_id": "session-a"},
+            {"type": "assistant", "session_id": "session-a"},
+            {"type": "result", "subtype": "success", "session_id": "session-a"}
+        ]))
+        .expect("serialize session messages"),
+    )
+    .expect("write session messages response");
+    let messages_request_path = repo.path().join("session-messages-request.json");
+    let messages_helper_path = repo.path().join("fake-session-messages-helper.sh");
+    write_json_response_capture_shell_helper(
+        &messages_helper_path,
+        &messages_response_path,
+        &messages_request_path,
+    );
+
+    let hydrate = run_libra_command(
+        &[
+            "claude-sdk",
+            "hydrate-session",
+            "--provider-session-id",
+            "session-a",
+            "--helper-path",
+            messages_helper_path
+                .to_str()
+                .expect("messages helper path utf-8"),
+            "--node-binary",
+            "/bin/sh",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&hydrate, "claude-sdk hydrate-session should succeed");
+
+    let resync = run_libra_command(
+        &[
+            "claude-sdk",
+            "sync-sessions",
+            "--helper-path",
+            catalog_helper_path
+                .to_str()
+                .expect("catalog helper path utf-8"),
+            "--node-binary",
+            "/bin/sh",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&resync, "repeat claude-sdk sync-sessions should succeed");
+
+    let build = run_libra_command(
+        &[
+            "claude-sdk",
+            "build-evidence-input",
+            "--provider-session-id",
+            "session-a",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &build,
+        "build-evidence-input should still succeed after re-syncing a hydrated session",
+    );
+
+    let snapshot_path = repo
+        .path()
+        .join(".libra/provider-sessions/claude_provider_session__session-a.json");
+    let snapshot = read_json_file(&snapshot_path);
+    assert_eq!(snapshot["messageSync"]["messageCount"], json!(3));
+    assert_eq!(
+        snapshot["messageSync"]["lastMessageKind"],
+        json!("result:success")
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_sync_sessions_keeps_history_in_current_repo_when_cwd_is_overridden() {
+    let repo = tempdir().expect("failed to create repo root");
+    let external_project = tempdir().expect("failed to create external project root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let response_path = repo.path().join("session-catalog.json");
+    fs::write(
+        &response_path,
+        serde_json::to_vec_pretty(&json!([
+            {
+                "sessionId": "session-a",
+                "summary": "Claude session A",
+                "lastModified": 1742025600000i64,
+                "cwd": external_project.path().to_string_lossy().to_string()
+            }
+        ]))
+        .expect("serialize session catalog"),
+    )
+    .expect("write session catalog response");
+
+    let request_path = repo.path().join("session-catalog-request.json");
+    let helper_path = repo.path().join("fake-session-helper.sh");
+    write_json_response_capture_shell_helper(&helper_path, &response_path, &request_path);
+
+    let sync = run_libra_command(
+        &[
+            "claude-sdk",
+            "sync-sessions",
+            "--cwd",
+            external_project
+                .path()
+                .to_str()
+                .expect("external cwd utf-8"),
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+            "--node-binary",
+            "/bin/sh",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &sync,
+        "claude-sdk sync-sessions should persist into the current repo even with --cwd override",
+    );
+
+    let (_, history) = load_intent_history(repo.path()).await;
+    let sessions = history
+        .list_objects("provider_session")
+        .await
+        .expect("should list provider_session objects from current repo");
+    assert_eq!(sessions.len(), 1);
+
+    assert!(
+        !external_project.path().join(".libra/libra.db").exists(),
+        "sync-sessions should not create a shadow Libra repo under the overridden cwd"
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_claude_sdk_hydrate_session_updates_provider_session_with_messages() {
     let repo = tempdir().expect("failed to create repo root");
     test::setup_with_new_libra_in(repo.path()).await;

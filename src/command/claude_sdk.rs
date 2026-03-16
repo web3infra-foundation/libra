@@ -842,7 +842,7 @@ async fn sync_sessions(args: SyncSessionsArgs) -> Result<()> {
     let mut synced = Vec::new();
     for session in filtered_sessions {
         synced.push(
-            persist_provider_session_snapshot(&storage_path, &cwd, session)
+            persist_provider_session_snapshot(&storage_path, session)
                 .await
                 .context("failed to persist Claude provider session snapshot")?,
         );
@@ -920,7 +920,7 @@ async fn hydrate_session(args: HydrateSessionArgs) -> Result<()> {
         args.limit,
         captured_at,
     ));
-    let sync_record = upsert_provider_session_snapshot(&storage_path, &cwd, &snapshot).await?;
+    let sync_record = upsert_provider_session_snapshot(&storage_path, &snapshot).await?;
 
     println!(
         "{}",
@@ -942,8 +942,6 @@ async fn hydrate_session(args: HydrateSessionArgs) -> Result<()> {
 async fn build_evidence_input(args: BuildEvidenceInputArgs) -> Result<()> {
     let storage_path = util::try_get_storage_path(None)
         .context("claude-sdk commands must be run inside a Libra repository")?;
-    let working_dir =
-        util::try_working_dir().context("failed to resolve repository working directory")?;
     let provider_session_object_id = build_provider_session_object_id(&args.provider_session_id);
     let provider_session_path =
         provider_session_artifact_path(&storage_path, &provider_session_object_id);
@@ -986,7 +984,7 @@ async fn build_evidence_input(args: BuildEvidenceInputArgs) -> Result<()> {
     let artifact_path = args
         .output
         .unwrap_or_else(|| evidence_input_artifact_path(&storage_path, &artifact.object_id));
-    let record = persist_evidence_input_artifact(&artifact_path, &working_dir, &artifact).await?;
+    let record = persist_evidence_input_artifact(&storage_path, &artifact_path, &artifact).await?;
 
     println!(
         "{}",
@@ -1102,9 +1100,7 @@ async fn persist_intent(args: PersistIntentArgs) -> Result<()> {
         );
     }
 
-    let working_dir =
-        util::try_working_dir().context("failed to resolve repository working directory")?;
-    let mcp_server = init_local_mcp_server(&working_dir).await?;
+    let mcp_server = init_local_mcp_server(&storage_path).await?;
     let intent_id = persist_intentspec(&resolved.intentspec, mcp_server.as_ref()).await?;
 
     let binding_artifact = PersistedIntentInputBindingArtifact {
@@ -1240,9 +1236,7 @@ async fn current_head_sha() -> String {
         .unwrap_or_else(|| "HEAD".to_string())
 }
 
-async fn init_local_mcp_server(working_dir: &Path) -> Result<Arc<LibraMcpServer>> {
-    let storage_dir = util::try_get_storage_path(Some(working_dir.to_path_buf()))
-        .unwrap_or_else(|_| working_dir.join(".libra"));
+async fn init_local_mcp_server(storage_dir: &Path) -> Result<Arc<LibraMcpServer>> {
     let objects_dir = storage_dir.join("objects");
 
     fs::create_dir_all(&objects_dir).await.with_context(|| {
@@ -1267,7 +1261,11 @@ async fn init_local_mcp_server(working_dir: &Path) -> Result<Arc<LibraMcpServer>
             .with_context(|| format!("failed to connect to database '{}'", db_path.display()))?,
     );
     let storage = Arc::new(LocalStorage::new(objects_dir));
-    let history_manager = Arc::new(HistoryManager::new(storage.clone(), storage_dir, db_conn));
+    let history_manager = Arc::new(HistoryManager::new(
+        storage.clone(),
+        storage_dir.to_path_buf(),
+        db_conn,
+    ));
 
     Ok(Arc::new(LibraMcpServer::new(
         Some(history_manager),
@@ -1603,9 +1601,10 @@ fn normalize_text_preview(text: &str) -> String {
 
 async fn persist_provider_session_snapshot(
     storage_path: &Path,
-    working_dir: &Path,
     session: ClaudeSdkSessionInfo,
 ) -> Result<SyncSessionRecord> {
+    let existing_message_sync =
+        read_existing_provider_session_message_sync(storage_path, &session.session_id).await?;
     let snapshot = PersistedProviderSessionSnapshot {
         schema: "libra.provider_session.v3".to_string(),
         object_type: "provider_session".to_string(),
@@ -1622,15 +1621,14 @@ async fn persist_provider_session_snapshot(
         last_modified: session.last_modified,
         file_size: session.file_size,
         captured_at: Utc::now().to_rfc3339(),
-        message_sync: None,
+        message_sync: existing_message_sync,
     };
 
-    upsert_provider_session_snapshot(storage_path, working_dir, &snapshot).await
+    upsert_provider_session_snapshot(storage_path, &snapshot).await
 }
 
 async fn upsert_provider_session_snapshot(
     storage_path: &Path,
-    working_dir: &Path,
     snapshot: &PersistedProviderSessionSnapshot,
 ) -> Result<SyncSessionRecord> {
     let artifact_path = provider_session_artifact_path(storage_path, &snapshot.object_id);
@@ -1647,7 +1645,7 @@ async fn upsert_provider_session_snapshot(
         .context("failed to serialize provider session snapshot")?;
     let object_hash = write_git_object(storage_path, "blob", &payload)
         .context("failed to write provider session snapshot object")?;
-    let mcp_server = init_local_mcp_server(working_dir).await?;
+    let mcp_server = init_local_mcp_server(storage_path).await?;
     let history = mcp_server
         .intent_history_manager
         .as_ref()
@@ -1666,8 +1664,8 @@ async fn upsert_provider_session_snapshot(
 }
 
 async fn persist_evidence_input_artifact(
+    storage_path: &Path,
     artifact_path: &Path,
-    working_dir: &Path,
     artifact: &PersistedEvidenceInputArtifact,
 ) -> Result<SyncSessionRecord> {
     write_pretty_json_file(artifact_path, artifact)
@@ -1681,13 +1679,9 @@ async fn persist_evidence_input_artifact(
 
     let payload = serde_json::to_vec_pretty(artifact)
         .context("failed to serialize evidence input artifact")?;
-    let object_hash = write_git_object(
-        &util::try_get_storage_path(Some(working_dir.to_path_buf()))?,
-        "blob",
-        &payload,
-    )
-    .context("failed to write evidence input object")?;
-    let mcp_server = init_local_mcp_server(working_dir).await?;
+    let object_hash = write_git_object(storage_path, "blob", &payload)
+        .context("failed to write evidence input object")?;
+    let mcp_server = init_local_mcp_server(storage_path).await?;
     let history = mcp_server
         .intent_history_manager
         .as_ref()
@@ -1703,6 +1697,27 @@ async fn persist_evidence_input_artifact(
         artifact_path: artifact_path.to_string_lossy().to_string(),
         object_hash: object_hash.to_string(),
     })
+}
+
+async fn read_existing_provider_session_message_sync(
+    storage_path: &Path,
+    provider_session_id: &str,
+) -> Result<Option<ProviderSessionMessageSync>> {
+    let object_id = build_provider_session_object_id(provider_session_id);
+    let artifact_path = provider_session_artifact_path(storage_path, &object_id);
+    if !artifact_path.exists() {
+        return Ok(None);
+    }
+
+    let snapshot = read_persisted_provider_session_snapshot(&artifact_path)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to refresh provider session snapshot '{}'",
+                artifact_path.display()
+            )
+        })?;
+    Ok(snapshot.message_sync)
 }
 
 async fn materialize_helper(
