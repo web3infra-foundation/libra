@@ -20,7 +20,7 @@ fn init_temp_repo() -> TempDir {
     // Using env!("CARGO_BIN_EXE_libra") to get the path to the libra executable
     let output = Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(temp_path)
-        .arg("init")
+        .args(["init"])
         .output()
         .expect("Failed to execute libra binary");
 

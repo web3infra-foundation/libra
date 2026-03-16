@@ -24,6 +24,7 @@ async fn test_init_with_separate_git_dir_creates_link_and_uses_storage() {
         ref_format: None,
         from_git_repository: None,
         separate_libra_dir: Some(storage.to_str().unwrap().to_string()),
+        vault: false,
     };
 
     init(args).await.unwrap();
@@ -61,6 +62,7 @@ async fn test_repository_detection_with_separate_git_dir() {
         ref_format: None,
         from_git_repository: None,
         separate_libra_dir: Some(storage.to_str().unwrap().to_string()),
+        vault: false,
     };
 
     init(args).await.unwrap();
@@ -100,6 +102,7 @@ async fn test_init_rejects_bare_with_separate_git_dir() {
         ref_format: None,
         from_git_repository: None,
         separate_libra_dir: Some(dir.join("storage").to_str().unwrap().to_string()),
+        vault: false,
     };
 
     let res: Result<_, _> = init(args).await;
@@ -120,8 +123,7 @@ fn test_init_warns_on_separate_git_dir_alias() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(&workdir)
-        .arg("init")
-        .arg("--separate-git-dir")
+        .args(["init", "--separate-git-dir"])
         .arg(storage.to_str().unwrap())
         .output()
         .expect("Failed to execute libra binary");

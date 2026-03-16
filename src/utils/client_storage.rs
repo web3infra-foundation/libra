@@ -1,6 +1,6 @@
 use std::{
     io::{self, Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -18,7 +18,7 @@ use git_internal::{
 };
 use once_cell::sync::Lazy;
 use regex::Regex;
-use sea_orm::{ActiveModelTrait, Set};
+use sea_orm::{ActiveModelTrait, DatabaseConnection, Set};
 use tokio::{
     runtime::Runtime,
     sync::mpsc::{Sender, channel, error::TrySendError},
@@ -27,7 +27,13 @@ use uuid::Uuid;
 
 use crate::{
     command::load_object,
-    internal::{branch::Branch, config::Config, db, head::Head, model::object_index},
+    internal::{
+        branch::Branch,
+        config::Config,
+        db,
+        head::Head,
+        model::{config as config_model, object_index},
+    },
     utils::storage::{Storage, local::LocalStorage, remote::RemoteStorage, tiered::TieredStorage},
 };
 
@@ -40,11 +46,11 @@ static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
 });
 
 // Index update message
-#[derive(Clone)]
 struct IndexUpdateMsg {
     hash: String,
     obj_type: String,
     size: i64,
+    db_path: PathBuf,
 }
 
 // Helper guard to ensure PENDING_TASKS is decremented even if task panics
@@ -69,7 +75,9 @@ static INDEX_UPDATE_CHANNEL: Lazy<Sender<IndexUpdateMsg>> = Lazy::new(|| {
             // Wrap in AssertUnwindSafe to catch panics from DB operations
             // This prevents the consumer loop from dying if one update fails hard
             let future = async {
-                if let Err(e) = update_object_index(&msg.hash, &msg.obj_type, msg.size).await {
+                if let Err(e) =
+                    update_object_index(&msg.db_path, &msg.hash, &msg.obj_type, msg.size).await
+                {
                     tracing::warn!("Failed to update object index for {}: {}", msg.hash, e);
                 }
             };
@@ -266,35 +274,38 @@ impl ClientStorage {
 
         // Update object index asynchronously (via sequential queue)
         // This ensures CLI commands don't block on indexing, and avoids DB lock contention.
-        if let Ok(storage_path) = crate::utils::util::try_get_storage_path(None) {
-            let db_path = storage_path.join(crate::utils::util::DATABASE);
-            if db_path.exists() {
-                let hash_str = hash_str.clone();
-                let type_str = type_str.clone();
+        if let Some(db_path) = Self::index_db_path_from_base(&self.base_path)
+            && db_path.exists()
+        {
+            let hash_str = hash_str.clone();
+            let type_str = type_str.clone();
 
-                PENDING_TASKS.fetch_add(1, Ordering::Relaxed);
+            PENDING_TASKS.fetch_add(1, Ordering::Relaxed);
 
-                // Send to global channel
-                // If channel is closed (runtime shutting down), we can't do much, but that's unlikely in normal CLI flow.
-                let msg = IndexUpdateMsg {
-                    hash: hash_str,
-                    obj_type: type_str,
-                    size: data_len as i64,
-                };
+            // Send to global channel
+            // If channel is closed (runtime shutting down), we can't do much, but that's unlikely in normal CLI flow.
+            let msg = IndexUpdateMsg {
+                hash: hash_str,
+                obj_type: type_str,
+                size: data_len as i64,
+                db_path,
+            };
 
-                loop {
-                    match INDEX_UPDATE_CHANNEL.try_send(msg.clone()) {
-                        Ok(_) => break,
-                        Err(TrySendError::Full(_)) => {
-                            // Channel full, wait a bit and retry (backpressure)
-                            std::thread::sleep(Duration::from_millis(10));
-                        }
-                        Err(TrySendError::Closed(_)) => {
+            match INDEX_UPDATE_CHANNEL.try_send(msg) {
+                Ok(_) => {}
+                Err(TrySendError::Full(msg)) => {
+                    // Avoid blocking the caller thread if the bounded queue is
+                    // full; wait for capacity on the dedicated storage runtime.
+                    RUNTIME.spawn(async move {
+                        if INDEX_UPDATE_CHANNEL.send(msg).await.is_err() {
                             PENDING_TASKS.fetch_sub(1, Ordering::Relaxed);
                             tracing::warn!("Failed to queue object index update: channel closed");
-                            break;
                         }
-                    }
+                    });
+                }
+                Err(TrySendError::Closed(_)) => {
+                    PENDING_TASKS.fetch_sub(1, Ordering::Relaxed);
+                    tracing::warn!("Failed to queue object index update: channel closed");
                 }
             }
         }
@@ -472,6 +483,12 @@ impl ClientStorage {
         decoder.read_to_end(&mut decompressed_data)?;
         Ok(decompressed_data)
     }
+
+    fn index_db_path_from_base(base_path: &Path) -> Option<PathBuf> {
+        base_path
+            .parent()
+            .map(|storage_path| storage_path.join(crate::utils::util::DATABASE))
+    }
 }
 
 fn get_or_create_repo_id_for_prefix() -> Option<String> {
@@ -499,21 +516,91 @@ fn get_or_create_repo_id_for_prefix() -> Option<String> {
     rx.recv().ok().flatten()
 }
 
-/// Get the repository ID from config, or return a default if not found
-async fn get_repo_id() -> String {
-    crate::internal::config::Config::get("libra", None, "repoid")
+/// Resolve repository ID for object-index rows.
+///
+/// Best effort only: if config cannot be read (e.g. temp repo already removed),
+/// use a stable fallback to avoid panicking background tasks.
+async fn resolve_repo_id_for_index(db_conn: &DatabaseConnection) -> String {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    match config_model::Entity::find()
+        .filter(config_model::Column::Configuration.eq("libra"))
+        .filter(config_model::Column::Name.is_null())
+        .filter(config_model::Column::Key.eq("repoid"))
+        .one(db_conn)
         .await
-        .unwrap_or_else(|| "unknown-repo".to_string())
+    {
+        Ok(Some(row)) if !row.value.trim().is_empty() => row.value,
+        Ok(_) => "unknown-repo".to_string(),
+        Err(err) => {
+            tracing::debug!("Failed to resolve repo id for object index update: {}", err);
+            "unknown-repo".to_string()
+        }
+    }
 }
 
-/// Update object_index table for cloud backup tracking
-async fn update_object_index(o_id: &str, o_type: &str, o_size: i64) -> Result<(), String> {
-    // Note: Caller should ensure we're in a valid repo context before calling this
-    let repo_id = get_repo_id().await;
-    let created_at = chrono::Utc::now().timestamp();
+async fn update_object_index(
+    db_path: &Path,
+    o_id: &str,
+    o_type: &str,
+    o_size: i64,
+) -> Result<(), String> {
+    match update_object_index_once(db_path, o_id, o_type, o_size).await {
+        Ok(()) => Ok(()),
+        Err(_err) if !db_path.exists() => Ok(()),
+        Err(first_err) => {
+            tracing::debug!(
+                db_path = %db_path.display(),
+                object_id = o_id,
+                error = %first_err,
+                "Retrying object index update after transient failure"
+            );
+            match update_object_index_once(db_path, o_id, o_type, o_size).await {
+                Ok(()) => Ok(()),
+                Err(_err) if !db_path.exists() => Ok(()),
+                Err(err) => Err(err),
+            }
+        }
+    }
+}
 
-    // Get database connection
-    let db_conn = db::get_db_conn_instance().await;
+/// Update object_index table for cloud backup tracking.
+async fn update_object_index_once(
+    db_path: &Path,
+    o_id: &str,
+    o_type: &str,
+    o_size: i64,
+) -> Result<(), String> {
+    if !db_path.exists() {
+        return Ok(());
+    }
+
+    let db_path_str = db_path.to_str().ok_or_else(|| {
+        format!(
+            "database path is not valid UTF-8 for object index update: {}",
+            db_path.display()
+        )
+    })?;
+
+    // Background indexing is best-effort. Use a short busy timeout so foreground
+    // repo mutations (commit/reflog/etc.) are not blocked by index updates.
+    let db_conn =
+        match db::establish_connection_with_busy_timeout(db_path_str, Duration::from_millis(200))
+            .await
+        {
+            Ok(conn) => conn,
+            Err(err) if err.kind() == io::ErrorKind::NotFound || !db_path.exists() => return Ok(()),
+            Err(err) => {
+                return Err(format!(
+                    "Failed to connect to object index database {}: {}",
+                    db_path.display(),
+                    err
+                ));
+            }
+        };
+
+    let repo_id = resolve_repo_id_for_index(&db_conn).await;
+    let created_at = chrono::Utc::now().timestamp();
 
     // Check if object already exists
     // With multi-repo support, we must check (o_id, repo_id)
@@ -521,9 +608,18 @@ async fn update_object_index(o_id: &str, o_type: &str, o_size: i64) -> Result<()
     let existing = object_index::Entity::find()
         .filter(object_index::Column::OId.eq(o_id))
         .filter(object_index::Column::RepoId.eq(&repo_id))
-        .one(db_conn)
-        .await
-        .map_err(|e| format!("Database query failed: {}", e))?;
+        .one(&db_conn)
+        .await;
+
+    let existing = match existing {
+        Ok(existing) => existing,
+        Err(err) => {
+            if !db_path.exists() {
+                return Ok(());
+            }
+            return Err(format!("Database query failed: {}", err));
+        }
+    };
 
     if existing.is_some() {
         return Ok(());
@@ -540,10 +636,12 @@ async fn update_object_index(o_id: &str, o_type: &str, o_size: i64) -> Result<()
         ..Default::default()
     };
 
-    entry
-        .insert(db_conn)
-        .await
-        .map_err(|e| format!("Failed to insert object index: {}", e))?;
+    if let Err(err) = entry.insert(&db_conn).await {
+        if !db_path.exists() {
+            return Ok(());
+        }
+        return Err(format!("Failed to insert object index: {}", err));
+    }
 
     Ok(())
 }
@@ -565,11 +663,16 @@ mod tests {
             pack::{encode::PackEncoder, entry::Entry},
         },
     };
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
     use serial_test::serial;
     use tempfile::tempdir;
     use tokio::sync::mpsc;
 
-    use super::ClientStorage;
+    use super::{ClientStorage, update_object_index};
+    use crate::{
+        internal::{config::Config, db, model::object_index},
+        utils::test::ChangeDirGuard,
+    };
 
     // Helper to build packs (copied from previous version for tests)
     async fn encode_entries_to_pack_bytes(entries: Vec<Entry>) -> Result<Vec<u8>, GitError> {
@@ -705,5 +808,46 @@ mod tests {
         let compressed_data = ClientStorage::compress_zlib(data).unwrap();
         let decompressed_data = ClientStorage::decompress_zlib(&compressed_data).unwrap();
         assert_eq!(decompressed_data, data);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn background_index_update_uses_storage_database_instead_of_cwd() {
+        let storage_root = tempdir().unwrap();
+        let unrelated_dir = tempdir().unwrap();
+        let storage_path = storage_root.path();
+        let objects_dir = storage_path.join("objects");
+        fs::create_dir_all(&objects_dir).unwrap();
+
+        let db_path = storage_path.join(crate::utils::util::DATABASE);
+        let db_conn = db::create_database(db_path.to_str().unwrap())
+            .await
+            .unwrap();
+        Config::insert_with_conn(&db_conn, "libra", None, "repoid", "repo-from-storage").await;
+
+        let _guard = ChangeDirGuard::new(unrelated_dir.path());
+
+        let blob = Blob::from_content("index from explicit storage db");
+        let storage = ClientStorage::init(objects_dir);
+        storage.put(&blob.id, &blob.data, blob.get_type()).unwrap();
+        ClientStorage::wait_for_background_tasks();
+
+        let row = object_index::Entity::find()
+            .filter(object_index::Column::OId.eq(blob.id.to_string()))
+            .filter(object_index::Column::RepoId.eq("repo-from-storage"))
+            .one(&db_conn)
+            .await
+            .unwrap();
+        assert!(row.is_some());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn update_object_index_skips_missing_database_without_error() {
+        let missing_root = tempdir().unwrap();
+        let missing_db = missing_root.path().join(crate::utils::util::DATABASE);
+
+        let result = update_object_index(&missing_db, "deadbeef", "blob", 12).await;
+        assert!(result.is_ok());
     }
 }

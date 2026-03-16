@@ -11,3 +11,4 @@ pub mod protocol;
 pub mod reflog;
 pub mod tag;
 pub mod tui;
+pub mod vault;

@@ -18,6 +18,7 @@ pub mod git_client; // to support git server protocol (git://) over TCP
 pub mod https_client;
 pub mod lfs_client;
 pub mod local_client;
+pub mod ssh_client; // to support SSH transport (ssh:// and git@host:path)
 
 #[allow(dead_code)] // todo: unimplemented
 pub trait ProtocolClient {

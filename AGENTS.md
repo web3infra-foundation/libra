@@ -87,14 +87,12 @@ Do not dismiss an issue only because:
 ## Project Structure & Module Organization
 - `src/` holds the Rust crate: CLI entry in `src/main.rs`, crate root in `src/lib.rs`, subcommands under `src/command/`, shared primitives in `src/internal/`, utilities in `src/utils/`.
 - Integration tests live in `tests/command/` with fixtures in `tests/data/`; `tests/command/mod.rs` re-exports helpers.
-- Community docs in `docs/`; schema bootstrap `sql/sqlite_20240331_init.sql`; hooks/templates in `template/`.
-- Buck2/Buckal metadata is in `third-party/`; prefer Cargo and regenerate BUCK files when dependencies change.
+- Community docs in `docs/`; schema bootstrap `sql/sqlite_20260309_init.sql`; hooks/templates in `template/`.
 
 ## Build, Test, and Development Commands
 - `cargo +nightly fmt --all` then `cargo clippy --all-targets --all-features` keep formatting and linting aligned (`rustfmt.toml` groups imports by crate). **All `cargo clippy` warnings must be resolved before committing; treat clippy warnings as errors.**
 - `cargo build` or `cargo check` for quick compile checks; `cargo run -- <cmd>` exercises the CLI (e.g., `cargo run -- status` in a temp repo).
 - `cargo test` runs the suite; filter with `cargo test command::init_test` or `cargo test add_test`. Integration cases rely on temp dirs; run serial if flaky.
-- After editing `Cargo.toml` deps, run `cargo buckal migrate` to sync Buck2 files (see `third-party/README.md`).
 
 ## Coding Style & Naming Conventions
 - Rust 2024; 4-space indent; snake_case for modules/functions, PascalCase for types, SCREAMING_SNAKE for consts.

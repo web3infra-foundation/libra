@@ -1,11 +1,13 @@
 //! Branch store utilities to find/create/update/delete branch refs in the database with transaction-safe helpers and commit resolution.
 
-use std::str::FromStr;
+use std::{str::FromStr, time::Duration};
 
 use git_internal::hash::ObjectHash;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter,
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DbErr, EntityTrait,
+    QueryFilter,
 };
+use tokio::time::sleep;
 
 use crate::internal::{db::get_db_conn_instance, model::reference};
 
@@ -28,7 +30,7 @@ async fn query_reference_with_conn<C>(
     db: &C,
     branch_name: &str,
     remote: Option<&str>,
-) -> Option<reference::Model>
+) -> Result<Option<reference::Model>, DbErr>
 where
     C: ConnectionTrait,
 {
@@ -41,7 +43,14 @@ where
         })
         .one(db)
         .await
-        .unwrap()
+}
+
+const SQLITE_BUSY_MAX_RETRIES: usize = 15;
+const SQLITE_BUSY_RETRY_BASE_MS: u64 = 100;
+
+fn is_sqlite_busy(err: &DbErr) -> bool {
+    let message = err.to_string();
+    message.contains("database is locked") || message.contains("database schema is locked")
 }
 
 /*
@@ -99,7 +108,7 @@ impl Branch {
     /// list all remote branches
     pub async fn list_branches(remote: Option<&str>) -> Vec<Self> {
         let db_conn = get_db_conn_instance().await;
-        Self::list_branches_with_conn(db_conn, remote).await
+        Self::list_branches_with_conn(&db_conn, remote).await
     }
 
     //  `_with_conn` version for `exists`
@@ -114,7 +123,7 @@ impl Branch {
     /// is the branch exists
     pub async fn exists(branch_name: &str) -> bool {
         let db_conn = get_db_conn_instance().await;
-        Self::exists_with_conn(db_conn, branch_name).await
+        Self::exists_with_conn(&db_conn, branch_name).await
     }
 
     //  `_with_conn` version for `find_branch`
@@ -126,7 +135,13 @@ impl Branch {
     where
         C: ConnectionTrait,
     {
-        let branch = query_reference_with_conn(db, branch_name, remote).await;
+        let branch = match query_reference_with_conn(db, branch_name, remote).await {
+            Ok(branch) => branch,
+            Err(err) => {
+                eprintln!("fatal: failed to query branch '{branch_name}': {err}");
+                return None;
+            }
+        };
         match branch {
             Some(branch) => {
                 // Return None if commit is None (unborn/placeholder)
@@ -144,7 +159,7 @@ impl Branch {
     /// get the branch by name
     pub async fn find_branch(branch_name: &str, remote: Option<&str>) -> Option<Self> {
         let db_conn = get_db_conn_instance().await;
-        Self::find_branch_with_conn(db_conn, branch_name, remote).await
+        Self::find_branch_with_conn(&db_conn, branch_name, remote).await
     }
 
     //  `_with_conn` version for `search_branch`
@@ -180,7 +195,7 @@ impl Branch {
     /// so we need to search all possible branches
     pub async fn search_branch(branch_name: &str) -> Vec<Self> {
         let db_conn = get_db_conn_instance().await;
-        Self::search_branch_with_conn(db_conn, branch_name).await
+        Self::search_branch_with_conn(&db_conn, branch_name).await
     }
 
     //  `_with_conn` version for `update_branch`
@@ -189,19 +204,30 @@ impl Branch {
         branch_name: &str,
         commit_hash: &str,
         remote: Option<&str>,
-    ) where
+    ) -> Result<(), DbErr>
+    where
         C: ConnectionTrait,
     {
-        let branch = query_reference_with_conn(db, branch_name, remote).await;
+        for attempt in 0..=SQLITE_BUSY_MAX_RETRIES {
+            let branch = match query_reference_with_conn(db, branch_name, remote).await {
+                Ok(branch) => branch,
+                Err(err) if is_sqlite_busy(&err) && attempt < SQLITE_BUSY_MAX_RETRIES => {
+                    sleep(Duration::from_millis(
+                        SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
+                    ))
+                    .await;
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
 
-        match branch {
-            Some(branch) => {
-                let mut branch: reference::ActiveModel = branch.into();
-                branch.commit = Set(Some(commit_hash.to_owned()));
-                branch.update(db).await.unwrap();
-            }
-            None => {
-                reference::ActiveModel {
+            let write_result = match branch {
+                Some(branch) => {
+                    let mut branch: reference::ActiveModel = branch.into();
+                    branch.commit = Set(Some(commit_hash.to_owned()));
+                    branch.update(db).await.map(|_| ())
+                }
+                None => reference::ActiveModel {
                     name: Set(Some(branch_name.to_owned())),
                     kind: Set(reference::ConfigKind::Branch),
                     commit: Set(Some(commit_hash.to_owned())),
@@ -210,14 +236,30 @@ impl Branch {
                 }
                 .insert(db)
                 .await
-                .unwrap();
+                .map(|_| ()),
+            };
+
+            match write_result {
+                Ok(()) => return Ok(()),
+                Err(err) if is_sqlite_busy(&err) && attempt < SQLITE_BUSY_MAX_RETRIES => {
+                    sleep(Duration::from_millis(
+                        SQLITE_BUSY_RETRY_BASE_MS * (attempt as u64 + 1),
+                    ))
+                    .await;
+                }
+                Err(err) => return Err(err),
             }
         }
+        unreachable!("sqlite retry loop must return")
     }
 
-    pub async fn update_branch(branch_name: &str, commit_hash: &str, remote: Option<&str>) {
+    pub async fn update_branch(
+        branch_name: &str,
+        commit_hash: &str,
+        remote: Option<&str>,
+    ) -> Result<(), DbErr> {
         let db_conn = get_db_conn_instance().await;
-        Self::update_branch_with_conn(db_conn, branch_name, commit_hash, remote).await
+        Self::update_branch_with_conn(&db_conn, branch_name, commit_hash, remote).await
     }
 
     // `_with_conn` version for `delete_branch`
@@ -225,16 +267,26 @@ impl Branch {
     where
         C: ConnectionTrait,
     {
-        let branch: reference::ActiveModel = query_reference_with_conn(db, branch_name, remote)
-            .await
-            .unwrap()
-            .into();
-        branch.delete(db).await.unwrap();
+        let branch = match query_reference_with_conn(db, branch_name, remote).await {
+            Ok(branch) => branch,
+            Err(err) => {
+                eprintln!("fatal: failed to query branch '{branch_name}': {err}");
+                return;
+            }
+        };
+        let Some(branch) = branch else {
+            eprintln!("fatal: branch '{branch_name}' not found");
+            return;
+        };
+        let branch: reference::ActiveModel = branch.into();
+        if let Err(err) = branch.delete(db).await {
+            eprintln!("fatal: failed to delete branch '{branch_name}': {err}");
+        }
     }
 
     pub async fn delete_branch(branch_name: &str, remote: Option<&str>) {
         let db_conn = get_db_conn_instance().await;
-        Self::delete_branch_with_conn(db_conn, branch_name, remote).await
+        Self::delete_branch_with_conn(&db_conn, branch_name, remote).await
     }
 }
 
@@ -256,10 +308,18 @@ mod tests {
         let _guard = test::ChangeDirGuard::new(temp_path.path());
 
         let commit_hash = ObjectHash::zero_str(get_hash_kind()).to_string();
-        Branch::update_branch("upstream/origin/master", &commit_hash, None).await; // should match
-        Branch::update_branch("origin/master", &commit_hash, Some("upstream")).await; // should match
-        Branch::update_branch("master", &commit_hash, Some("upstream/origin")).await; // should match
-        Branch::update_branch("feature", &commit_hash, Some("upstream/origin/master")).await; // should not match
+        Branch::update_branch("upstream/origin/master", &commit_hash, None)
+            .await
+            .unwrap(); // should match
+        Branch::update_branch("origin/master", &commit_hash, Some("upstream"))
+            .await
+            .unwrap(); // should match
+        Branch::update_branch("master", &commit_hash, Some("upstream/origin"))
+            .await
+            .unwrap(); // should match
+        Branch::update_branch("feature", &commit_hash, Some("upstream/origin/master"))
+            .await
+            .unwrap(); // should not match
 
         let branches = Branch::search_branch("upstream/origin/master").await;
         assert_eq!(branches.len(), 3);

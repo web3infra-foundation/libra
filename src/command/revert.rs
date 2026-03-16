@@ -62,10 +62,13 @@ pub async fn execute_safe(args: RevertArgs) -> CliResult<()> {
         ));
     }
 
-    // Resolve the commit reference to a ObjectHash hash
+    // Resolve the commit reference to an ObjectHash.
+    // `resolve_commit` returns legacy `"fatal: ..."` prefixed strings, so
+    // `from_legacy_string` strips the prefix before wrapping in `CliError`
+    // to avoid a double `"fatal: fatal: ..."` message in rendered output.
     let commit_id = resolve_commit(&args.commit)
         .await
-        .map_err(CliError::fatal)?;
+        .map_err(CliError::from_legacy_string)?;
 
     // Perform the actual revert operation
     match revert_single_commit(&commit_id, &args).await {
@@ -359,7 +362,7 @@ async fn create_revert_commit(
 
     // Save the commit object and update HEAD
     save_object(&commit, &commit.id).map_err(|e| format!("failed to save commit: {e}"))?;
-    update_head(&commit.id.to_string()).await;
+    update_head(&commit.id.to_string()).await?;
     Ok(commit.id)
 }
 
@@ -378,7 +381,7 @@ async fn create_empty_revert_commit(parent_id: &ObjectHash) -> Result<ObjectHash
 
     // Save commit and update HEAD
     save_object(&commit, &commit.id).map_err(|e| format!("failed to save commit: {e}"))?;
-    update_head(&commit.id.to_string()).await;
+    update_head(&commit.id.to_string()).await?;
     Ok(commit.id)
 }
 
@@ -396,8 +399,11 @@ async fn resolve_commit(reference: &str) -> Result<ObjectHash, String> {
 }
 
 /// Update the HEAD reference to point to the new commit
-async fn update_head(commit_id: &str) {
+async fn update_head(commit_id: &str) -> Result<(), String> {
     if let Head::Branch(name) = Head::current().await {
-        Branch::update_branch(&name, commit_id, None).await;
+        Branch::update_branch(&name, commit_id, None)
+            .await
+            .map_err(|e| format!("failed to update branch '{name}': {e}"))?;
     }
+    Ok(())
 }

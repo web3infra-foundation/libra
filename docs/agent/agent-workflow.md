@@ -6,6 +6,7 @@
 > `analysis`). Until task-specific worktree / staging support is added,
 > code-changing objectives are intentionally scheduled serially.
 
+
 This document defines the runtime workflow after the snapshot / event /
 Libra split described in `docs/agent.md`.
 

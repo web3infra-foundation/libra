@@ -177,7 +177,12 @@ async fn switch_to_tracked_remote_branch(target: String) -> CliResult<()> {
         &remote_tracking_branch.commit.to_string(),
         None,
     )
-    .await;
+    .await
+    .map_err(|e| {
+        CliError::fatal(format!(
+            "failed to create branch '{remote_branch_name}': {e}"
+        ))
+    })?;
     branch::set_upstream(
         &remote_branch_name,
         &format!("{remote_name}/{remote_branch_name}"),
@@ -190,12 +195,12 @@ async fn switch_to_tracked_remote_branch(target: String) -> CliResult<()> {
 async fn switch_to_commit(commit_hash: ObjectHash) -> CliResult<()> {
     let db = get_db_conn_instance().await;
 
-    let old_oid = Head::current_commit_with_conn(db)
+    let old_oid = Head::current_commit_with_conn(&db)
         .await
         .map(|oid| oid.to_string())
         .unwrap_or_else(|| ObjectHash::zero_str(get_hash_kind()).to_string());
 
-    let from_ref_name = match Head::current_with_conn(db).await {
+    let from_ref_name = match Head::current_with_conn(&db).await {
         Head::Branch(name) => name,
         Head::Detached(hash) => hash.to_string()[..7].to_string(), // Use short hash for detached HEAD
     };
@@ -240,7 +245,7 @@ async fn switch_to_branch(branch_name: String) -> CliResult<()> {
     }
     let db = get_db_conn_instance().await;
 
-    let target_branch = match Branch::find_branch_with_conn(db, &branch_name, None).await {
+    let target_branch = match Branch::find_branch_with_conn(&db, &branch_name, None).await {
         Some(b) => b,
         None => {
             if !Branch::search_branch(&branch_name).await.is_empty() {
@@ -257,12 +262,12 @@ async fn switch_to_branch(branch_name: String) -> CliResult<()> {
     };
     let target_commit_id = target_branch.commit;
 
-    let old_oid = Head::current_commit_with_conn(db)
+    let old_oid = Head::current_commit_with_conn(&db)
         .await
         .map(|oid| oid.to_string())
         .unwrap_or_else(|| ObjectHash::zero_str(get_hash_kind()).to_string());
 
-    let from_ref_name = match Head::current_with_conn(db).await {
+    let from_ref_name = match Head::current_with_conn(&db).await {
         Head::Branch(name) => name,
         Head::Detached(hash) => hash.to_string()[..7].to_string(),
     };

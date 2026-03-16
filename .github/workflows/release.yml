@@ -1,150 +1,145 @@
-name: Release
+name: Build and Release to R2
 
 on:
-  workflow_dispatch:
-  release:
-    types:
-      - created
-      - edited
-
-permissions:
-  contents: write
-
-concurrency:
-  group: release-${{ github.event.release.tag_name || github.ref_name }}
-  cancel-in-progress: true
-
-env:
-  CARGO_TERM_COLOR: always
-  BIN_NAME: libra
+  push:
+    tags:
+      - 'v*' # Trigger when pushing tags starting with v, e.g., v1.0.0
 
 jobs:
-  build:
-    name: Build ${{ matrix.target }}
-    if: github.event_name == 'workflow_dispatch' || github.event.release.draft == true
+  build-and-upload:
+    runs-on: ${{ matrix.target.runner }}
     strategy:
-      fail-fast: false
+      fail-fast: true # if it is set to true, then one job failed the other jobs will be cancelled  together.
       matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            archive_ext: tar.gz
-            bin_ext: ""
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            archive_ext: tar.gz
-            bin_ext: ""
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            archive_ext: zip
-            bin_ext: .exe
-
-    runs-on: ${{ matrix.os }}
+        component: [libra]
+        target:
+          - { rust: x86_64-unknown-linux-gnu, os: linux, arch: amd64, runner: ubuntu-latest }
+          - { rust: aarch64-unknown-linux-gnu, os: linux, arch: arm64, runner: ubuntu-24.04-arm }
+          - { rust: aarch64-apple-darwin, os: darwin, arch: arm64, runner: macos-latest }
+          - { rust: x86_64-pc-windows-msvc, os: windows, arch: amd64, runner: windows-latest }
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v5
         with:
           submodules: recursive
 
-      - name: Resolve tag
-        id: meta
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.target.rust }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Enable pnpm
+        run: corepack enable
+
+      - name: Install web dependencies
+        run: pnpm --dir web install --frozen-lockfile
+
+      - name: Install Linux dependencies
+        if: matrix.target.os == 'linux'
+        run: |
+          sudo apt-get update
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v5
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ matrix.target.rust }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build Binary (Unix)
+        if: matrix.target.os != 'windows'
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "release" ]; then
-            echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-          fi
+          VERSION=${GITHUB_REF_NAME}
+          BINARY_NAME="${{ matrix.component }}-${{ matrix.target.os }}-${{ matrix.target.arch }}"
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+          echo "Building $BINARY_NAME for target ${{ matrix.target.rust }}..."
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
+          RUSTFLAGS="-C strip=symbols" cargo build --locked --release --target ${{ matrix.target.rust }}
 
-      - name: Build
-        shell: bash
-        run: cargo build --locked --release --target ${{ matrix.target }}
+          # Create build directory and copy binary
+          mkdir -p build
+          cp target/${{ matrix.target.rust }}/release/${{ matrix.component }} build/$BINARY_NAME
 
-      - name: Prepare package (Unix)
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          set -euxo pipefail
+          # Make binary executable
+          chmod +x build/$BINARY_NAME
 
-          TAG="${{ steps.meta.outputs.tag }}"
-          PKG="${BIN_NAME}_${TAG}_${{ matrix.target }}"
-          mkdir -p dist/$PKG
+          echo "Built binary: $BINARY_NAME"
 
-          cp "target/${{ matrix.target }}/release/${BIN_NAME}" "dist/$PKG/${BIN_NAME}"
-          cp README.md "dist/$PKG/" || true
-          cp LICENSE* "dist/$PKG/" 2>/dev/null || true
-
-          tar -C dist -czf "dist/${PKG}.tar.gz" "$PKG"
-          shasum -a 256 "dist/${PKG}.tar.gz" > "dist/${PKG}.tar.gz.sha256"
-
-      - name: Prepare package (Windows)
-        if: runner.os == 'Windows'
+      - name: Build Binary (Windows)
+        if: matrix.target.os == 'windows'
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
+          $version = $env:GITHUB_REF_NAME
+          $binaryName = "${{ matrix.component }}-${{ matrix.target.os }}-${{ matrix.target.arch }}"
 
-          $tag = "${{ steps.meta.outputs.tag }}"
-          $pkg = "${env:BIN_NAME}_${tag}_${{ matrix.target }}"
-          New-Item -ItemType Directory -Force -Path "dist\$pkg" | Out-Null
+          Write-Output "Building $binaryName for target ${{ matrix.target.rust }}..."
 
-          Copy-Item "target\${{ matrix.target }}\release\${env:BIN_NAME}${{ matrix.bin_ext }}" "dist\$pkg\${env:BIN_NAME}${{ matrix.bin_ext }}"
-          if (Test-Path "README.md") { Copy-Item "README.md" "dist\$pkg\" }
-          Get-ChildItem "LICENSE*" -ErrorAction SilentlyContinue | ForEach-Object {
-            Copy-Item $_.FullName "dist\$pkg\"
-          }
+          $env:RUSTFLAGS = "-C strip=symbols link-args=/STACK:0x1000000" 
+          cargo build --locked --release --target ${{ matrix.target.rust }}
 
-          Compress-Archive -Path "dist\$pkg\*" -DestinationPath "dist\$pkg.zip" -Force
+          # Create build directory and copy binary
+          New-Item -ItemType Directory -Force -Path "build" | Out-Null
+          Copy-Item "target\${{ matrix.target.rust }}\release\${{ matrix.component }}.exe" "build\$binaryName.exe"
 
-          $hash = (Get-FileHash "dist\$pkg.zip" -Algorithm SHA256).Hash.ToLower()
-          "$hash  $pkg.zip" | Out-File -Encoding ascii "dist\$pkg.zip.sha256"
+          Write-Output "Built binary: $binaryName"
 
-      - name: Upload packaged artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: package-${{ matrix.target }}
-          path: dist/*
-          if-no-files-found: error
-          retention-days: 7
-
-  publish-draft-assets:
-    name: Upload assets to draft release
-    needs: build
-    runs-on: ubuntu-latest
-    if: github.event_name == 'release' && github.event.release.draft == true
-
-    steps:
-      - name: Download all build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Merge checksums
+      - name: Upload to Cloudflare R2 (Unix)
+        if: matrix.target.os != 'windows'
         shell: bash
-        run: |
-          set -euxo pipefail
-          find artifacts -type f -name '*.sha256' -print0 | sort -z | xargs -0 cat > checksums.txt
-          ls -R artifacts
-          cat checksums.txt
-
-      - name: Upload assets to GitHub Draft Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.release.tag_name }}
-          overwrite_files: true
-          fail_on_unmatched_files: true
-          files: |
-            artifacts/**/*
-            checksums.txt
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RCLONE_CONFIG_R2_TYPE: s3
+          RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+          RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          RCLONE_CONFIG_R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          RCLONE_CONFIG_R2_ACL: private
+        run: |
+          # Install rclone
+          if [[ "${{ matrix.target.os }}" == "darwin" ]]; then
+            brew install rclone
+          else
+            curl https://rclone.org/install.sh | sudo bash
+          fi
+
+          # Upload binaries to R2
+          rclone copy ./build/ r2:${{ secrets.R2_BUCKET_NAME }}/libra/releases/${{ github.ref_name }}/ -v
+
+          echo "Upload completed for ${{ matrix.component }}-${{ matrix.target.os }}-${{ matrix.target.arch }}"
+
+      - name: Upload to Cloudflare R2 (Windows)
+        if: matrix.target.os == 'windows'
+        shell: pwsh
+        env:
+          RCLONE_CONFIG_R2_TYPE: s3
+          RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+          RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          RCLONE_CONFIG_R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          RCLONE_CONFIG_R2_ACL: private
+        run: |
+          # Install rclone via choco
+          choco install rclone -y
+
+          # Upload binaries to R2
+          rclone copy ./build/ r2:${{ secrets.R2_BUCKET_NAME }}/libra/releases/${{ github.ref_name }}/ -v
+
+          Write-Output "Upload completed for ${{ matrix.component }}-${{ matrix.target.os }}-${{ matrix.target.arch }}"

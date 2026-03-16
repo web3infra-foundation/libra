@@ -22,13 +22,18 @@ target
 .vscode/
 .claude/
 .qwen/
-
-# Buck2
-buck-out/
-.buckal/
+.trellis/
+.cursor/
+.agent/
+.agents/
 
 # Generated when moving Windows files to WSL
 *:Zone.Identifier
 
 .libra
-/buck-out
+
+# Frontend
+web/node_modules/
+web/.next/
+web/out/
+web/.pnpm-store/

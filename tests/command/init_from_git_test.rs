@@ -61,6 +61,20 @@ fn create_simple_git_repo() -> (tempfile::TempDir, std::path::PathBuf) {
     (temp_root, git_dir)
 }
 
+fn libra_command(cwd: &Path) -> Command {
+    let home = cwd.join(".libra-test-home");
+    let config_home = home.join(".config");
+    fs::create_dir_all(&config_home).expect("failed to create isolated HOME for CLI test");
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_libra"));
+    cmd.current_dir(cwd)
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", &config_home);
+    #[cfg(windows)]
+    cmd.env("USERPROFILE", &home);
+    cmd
+}
+
 #[tokio::test]
 #[serial]
 async fn test_init_from_git_repository_converts_repo() {
@@ -68,8 +82,7 @@ async fn test_init_from_git_repository_converts_repo() {
     let libra_dir = temp_root.path().join("libra-repo");
     fs::create_dir_all(&libra_dir).unwrap();
 
-    let status = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(&libra_dir)
+    let status = libra_command(&libra_dir)
         .args(["init", "--from-git-repository", git_dir.to_str().unwrap()])
         .status()
         .expect("failed to execute libra init");
@@ -105,8 +118,7 @@ async fn test_init_from_git_repository_missing_source_fails() {
 
     let missing = temp_root.path().join("missing-git");
 
-    let status = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(&libra_dir)
+    let status = libra_command(&libra_dir)
         .args(["init", "--from-git-repository", missing.to_str().unwrap()])
         .status()
         .expect("failed to execute libra init");
@@ -126,8 +138,7 @@ async fn test_init_from_git_repository_non_git_path_fails() {
     let libra_dir = temp_root.path().join("libra-repo");
     fs::create_dir_all(&libra_dir).unwrap();
 
-    let status = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(&libra_dir)
+    let status = libra_command(&libra_dir)
         .args([
             "init",
             "--from-git-repository",
@@ -159,8 +170,7 @@ async fn test_init_from_git_repository_empty_git_repo_fails() {
     let libra_dir = temp_root.path().join("libra-repo");
     fs::create_dir_all(&libra_dir).unwrap();
 
-    let status = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(&libra_dir)
+    let status = libra_command(&libra_dir)
         .args(["init", "--from-git-repository", git_dir.to_str().unwrap()])
         .status()
         .expect("failed to execute libra init");
@@ -267,8 +277,7 @@ async fn test_init_from_git_repository_multiple_branches() {
     let libra_dir = temp_root.path().join("libra-repo");
     fs::create_dir_all(&libra_dir).unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(&libra_dir)
+    let output = libra_command(&libra_dir)
         .args(["init", "--from-git-repository", git_dir.to_str().unwrap()])
         .output()
         .expect("failed to execute libra init");
@@ -277,9 +286,13 @@ async fn test_init_from_git_repository_multiple_branches() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         panic!("libra init failed: {stderr}");
     }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Unsupported ref type during fetch: HEAD"),
+        "fetch should skip symbolic HEAD without warning, got stderr: {stderr}"
+    );
 
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(&libra_dir)
+    let output = libra_command(&libra_dir)
         .args(["branch", "-r"])
         .output()
         .expect("failed to execute libra branch");
@@ -291,6 +304,173 @@ async fn test_init_from_git_repository_multiple_branches() {
         .filter(|l| !l.is_empty())
         .collect();
     assert!(remote_branches.len() >= 2);
+    assert!(
+        remote_branches.contains(&"origin/main"),
+        "expected origin/main in remote branches, got: {remote_branches:?}"
+    );
+    assert!(
+        remote_branches.contains(&"origin/feature"),
+        "expected origin/feature in remote branches, got: {remote_branches:?}"
+    );
+    assert!(
+        remote_branches.iter().all(|b| !b.contains("refs/remotes/")),
+        "remote branch output should not expose internal refs/remotes paths: {remote_branches:?}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_init_from_git_repository_with_gitlink_entry_succeeds() {
+    let temp_root = tempdir().unwrap();
+    let git_dir = temp_root.path().join("git-src");
+    let sub_repo = temp_root.path().join("sub-src");
+    let libra_dir = temp_root.path().join("libra-repo");
+    fs::create_dir_all(&git_dir).unwrap();
+    fs::create_dir_all(&sub_repo).unwrap();
+    fs::create_dir_all(&libra_dir).unwrap();
+
+    // Build a sub-repository commit that will be referenced as a gitlink.
+    assert!(
+        Command::new("git")
+            .args(["init", "-b", "master", sub_repo.to_str().unwrap()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&sub_repo)
+            .args(["config", "user.name", "Libra Tester"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&sub_repo)
+            .args(["config", "user.email", "tester@example.com"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::write(sub_repo.join("sub.txt"), "submodule content").unwrap();
+    assert!(
+        Command::new("git")
+            .current_dir(&sub_repo)
+            .args(["add", "sub.txt"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&sub_repo)
+            .args(["commit", "-m", "submodule commit"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let sub_head = String::from_utf8(
+        Command::new("git")
+            .current_dir(&sub_repo)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+
+    // Build the source repo with a gitlink entry (mode 160000).
+    assert!(
+        Command::new("git")
+            .args(["init", "-b", "master", git_dir.to_str().unwrap()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&git_dir)
+            .args(["config", "user.name", "Libra Tester"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&git_dir)
+            .args(["config", "user.email", "tester@example.com"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::write(git_dir.join("README.md"), "root repo").unwrap();
+    assert!(
+        Command::new("git")
+            .current_dir(&git_dir)
+            .args(["add", "README.md"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&git_dir)
+            .args(["commit", "-m", "initial"])
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    fs::write(
+        git_dir.join(".gitmodules"),
+        "[submodule \"vendor/sub\"]\n\tpath = vendor/sub\n\turl = ../sub-src\n",
+    )
+    .unwrap();
+    assert!(
+        Command::new("git")
+            .current_dir(&git_dir)
+            .args(["add", ".gitmodules"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&git_dir)
+            .args([
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                "160000",
+                &sub_head,
+                "vendor/sub",
+            ])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&git_dir)
+            .args(["commit", "-m", "add gitlink entry"])
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    let output = libra_command(&libra_dir)
+        .args(["init", "--from-git-repository", git_dir.to_str().unwrap()])
+        .output()
+        .expect("failed to execute libra init");
+
+    assert!(
+        output.status.success(),
+        "libra init should succeed for source repos with gitlink entries; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[tokio::test]
@@ -314,8 +494,7 @@ async fn test_init_from_git_repository_bare_source_repo() {
     let libra_dir = temp_root.path().join("libra-repo");
     fs::create_dir_all(&libra_dir).unwrap();
 
-    let status = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(&libra_dir)
+    let status = libra_command(&libra_dir)
         .args(["init", "--from-git-repository", git_dir.to_str().unwrap()])
         .status()
         .expect("failed to execute libra init");
@@ -334,8 +513,7 @@ async fn test_init_from_git_repository_bare_target_repo() {
     let libra_dir = temp_root.path().join("libra-repo-bare");
     fs::create_dir_all(&libra_dir).unwrap();
 
-    let status = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(&libra_dir)
+    let status = libra_command(&libra_dir)
         .args([
             "init",
             "--bare",

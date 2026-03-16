@@ -20,7 +20,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: recursive
       
@@ -41,12 +41,21 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       RUSTUP_TOOLCHAIN: stable
+      LIBRA_SKIP_WEB_BUILD: "1"
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: recursive
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Enable pnpm
+        run: corepack enable
 
       - name: Run cargo clippy
         run: cargo clippy -- -D warnings
@@ -57,7 +66,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: recursive
 
@@ -75,29 +84,6 @@ jobs:
             exit 0
           fi
 
-  build:
-    name: Buck2 Build
-
-    runs-on: [self-hosted]
-
-    env:
-      CARGO_TERM_COLOR: always
-      RUSTUP_TOOLCHAIN: stable
-    
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Build with Buck2
-        run: buck2 build //:libra
-
-      - name: Clean Buck2 artifacts
-        run: buck2 clean
-        if: always()
-        continue-on-error: true
-
   test:
     name: Run Tests
 
@@ -106,12 +92,21 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       RUSTUP_TOOLCHAIN: stable
+      LIBRA_SKIP_WEB_BUILD: "1"
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: recursive
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Enable pnpm
+        run: corepack enable
 
       - name: Run tests
         run: cargo test --all

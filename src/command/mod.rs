@@ -1,12 +1,12 @@
 //! Command module hub exporting all subcommands plus shared helpers for loading/saving objects and prompting for authentication.
 
 pub mod add;
+pub mod agent_codex;
 pub mod blame;
 pub mod branch;
 pub mod cat_file;
 pub mod checkout;
 pub mod cherry_pick;
-pub mod claude_code;
 pub mod clean;
 pub mod clone;
 pub mod cloud;
@@ -16,6 +16,7 @@ pub mod config;
 pub mod describe;
 pub mod diff;
 pub mod fetch;
+pub mod hooks;
 pub mod index_pack;
 pub mod init;
 pub mod lfs;
@@ -36,11 +37,13 @@ pub mod shortlog;
 pub mod show;
 pub mod show_ref;
 pub mod tag;
+pub mod vault;
 pub mod worktree;
 
 pub mod stash;
 pub mod status;
 pub mod switch;
+pub mod web_assets;
 
 use std::{io, io::Write, path::Path};
 

@@ -46,9 +46,15 @@ fn r2_storage_from_env(repo_id: &str) -> RemoteStorage {
 
 fn init_repo() -> tempfile::TempDir {
     let dir = tempdir().unwrap();
+    let home = dir.path().join(".home");
+    let config_home = home.join(".config");
+    std::fs::create_dir_all(&config_home).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(dir.path())
         .args(["init"])
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("USERPROFILE", &home)
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -144,11 +150,16 @@ async fn mock_remote_search() {
 #[test]
 fn cloud_sync_fails_without_r2_env() {
     let dir = init_repo();
+    let home = dir.path().join(".home");
+    let config_home = home.join(".config");
     let output = Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(dir.path())
         .args(["cloud", "sync"])
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("USERPROFILE", &home)
         .env("LIBRA_D1_ACCOUNT_ID", "test-account")
         .env("LIBRA_D1_API_TOKEN", "test-token")
         .env("LIBRA_D1_DATABASE_ID", "test-db")
@@ -164,11 +175,16 @@ fn cloud_sync_fails_without_r2_env() {
 #[test]
 fn cloud_restore_fails_without_r2_env() {
     let dir = init_repo();
+    let home = dir.path().join(".home");
+    let config_home = home.join(".config");
     let output = Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(dir.path())
         .args(["cloud", "restore", "--repo-id", "test-repo"])
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("USERPROFILE", &home)
         .env("LIBRA_D1_ACCOUNT_ID", "test-account")
         .env("LIBRA_D1_API_TOKEN", "test-token")
         .env("LIBRA_D1_DATABASE_ID", "test-db")
@@ -184,11 +200,16 @@ fn cloud_restore_fails_without_r2_env() {
 #[test]
 fn cloud_sync_fails_without_d1_env() {
     let dir = init_repo();
+    let home = dir.path().join(".home");
+    let config_home = home.join(".config");
     let output = Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(dir.path())
         .args(["cloud", "sync"])
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("USERPROFILE", &home)
         .env("LIBRA_STORAGE_ENDPOINT", "https://example.invalid")
         .env("LIBRA_STORAGE_BUCKET", "test-bucket")
         .env("LIBRA_STORAGE_ACCESS_KEY", "test-access")
@@ -332,8 +353,16 @@ async fn cloud_full_workflow_end_to_end() {
 
     // Helper to run libra command
     let run_libra = |dir: &std::path::Path, args: &[&str]| {
+        let home = dir.join(".home");
+        let config_home = home.join(".config");
+        std::fs::create_dir_all(&config_home).expect("failed to create isolated HOME");
+
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_libra"));
-        cmd.current_dir(dir).args(args);
+        cmd.current_dir(dir)
+            .args(args)
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", &config_home)
+            .env("USERPROFILE", &home);
         for (k, v) in &envs {
             cmd.env(k, v);
         }
@@ -445,15 +474,25 @@ async fn cloud_full_workflow_end_to_end() {
     let restore_path_a = restore_dir_a.path();
 
     // Init empty
+    let restore_home_a = restore_path_a.join(".home");
+    let restore_config_a = restore_home_a.join(".config");
+    std::fs::create_dir_all(&restore_config_a).unwrap();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_libra"));
-    cmd.current_dir(restore_path_a).arg("init");
+    cmd.current_dir(restore_path_a)
+        .args(["init"])
+        .env("HOME", &restore_home_a)
+        .env("XDG_CONFIG_HOME", &restore_config_a)
+        .env("USERPROFILE", &restore_home_a);
     cmd.output().unwrap();
 
     // Restore from Cloud using Repo A's ID
     let mut restore_cmd = Command::new(env!("CARGO_BIN_EXE_libra"));
     restore_cmd
         .current_dir(restore_path_a)
-        .args(["cloud", "restore", "--repo-id", &repo_id_a]);
+        .args(["cloud", "restore", "--repo-id", &repo_id_a])
+        .env("HOME", &restore_home_a)
+        .env("XDG_CONFIG_HOME", &restore_config_a)
+        .env("USERPROFILE", &restore_home_a);
     for (k, v) in &envs {
         restore_cmd.env(k, v);
     }
@@ -494,15 +533,25 @@ async fn cloud_full_workflow_end_to_end() {
     let restore_path_b = restore_dir_b.path();
 
     // Init empty
+    let restore_home_b = restore_path_b.join(".home");
+    let restore_config_b = restore_home_b.join(".config");
+    std::fs::create_dir_all(&restore_config_b).unwrap();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_libra"));
-    cmd.current_dir(restore_path_b).arg("init");
+    cmd.current_dir(restore_path_b)
+        .args(["init"])
+        .env("HOME", &restore_home_b)
+        .env("XDG_CONFIG_HOME", &restore_config_b)
+        .env("USERPROFILE", &restore_home_b);
     cmd.output().unwrap();
 
     // Restore from Cloud using Repo B's Name
     let mut restore_cmd_b = Command::new(env!("CARGO_BIN_EXE_libra"));
     restore_cmd_b
         .current_dir(restore_path_b)
-        .args(["cloud", "restore", "--name", &name_b]);
+        .args(["cloud", "restore", "--name", &name_b])
+        .env("HOME", &restore_home_b)
+        .env("XDG_CONFIG_HOME", &restore_config_b)
+        .env("USERPROFILE", &restore_home_b);
     for (k, v) in &envs {
         restore_cmd_b.env(k, v);
     }
@@ -588,8 +637,16 @@ async fn cloud_sync_name_conflict() {
 }
 
 fn run_libra_cmd(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
+    let home = dir.join(".home");
+    let config_home = home.join(".config");
+    std::fs::create_dir_all(&config_home).expect("failed to create isolated HOME");
+
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_libra"));
-    cmd.current_dir(dir).args(args);
+    cmd.current_dir(dir)
+        .args(args)
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("USERPROFILE", &home);
 
     let env_vars = [
         "LIBRA_D1_ACCOUNT_ID",

@@ -33,6 +33,7 @@ pub mod intentspec;
 pub mod mcp;
 pub mod node_adapter;
 pub mod orchestrator;
+pub mod projection;
 pub mod prompt;
 pub mod providers;
 pub mod sandbox;

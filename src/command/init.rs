@@ -3,7 +3,7 @@
 use std::{
     env, fs,
     io::{self, ErrorKind},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use clap::{Parser, ValueEnum};
@@ -187,6 +187,16 @@ pub struct InitArgs {
     /// `origin` after the basic Libra layout and database are created.
     #[clap(long = "from-git-repository", value_name = "path", required = false)]
     pub from_git_repository: Option<String>,
+
+    /// Enable libvault for PGP commit signing (enabled by default).
+    ///
+    /// A vault database is created inside `.libra/` and a PGP key pair is
+    /// generated automatically. Subsequent `libra commit` calls will detect
+    /// the vault and sign commits with the generated key.
+    ///
+    /// Use `--vault false` to skip vault initialisation.
+    #[clap(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub vault: bool,
 }
 
 /// Execute the init function
@@ -201,6 +211,8 @@ pub async fn execute(args: InitArgs) {
 pub async fn execute_safe(args: InitArgs) -> CliResult<()> {
     let from_git = args.from_git_repository.clone();
     let is_bare = args.bare;
+    let enable_vault = args.vault;
+    let separate_libra_dir = args.separate_libra_dir.clone();
 
     let used_separate_git_dir = std::env::args()
         .any(|arg| arg == "--separate-git-dir" || arg.starts_with("--separate-git-dir="));
@@ -244,6 +256,34 @@ pub async fn execute_safe(args: InitArgs) -> CliResult<()> {
         // wrong directory.
         let _ = env::set_current_dir(&current_dir);
         return Err(CliError::fatal(e.to_string()));
+    }
+
+    // Initialize vault for PGP signing if requested
+    if enable_vault {
+        // Resolve the actual storage root. After chdir to target_path, a relative
+        // --separate-libra-dir would resolve incorrectly, so we use the canonical
+        // storage path that init() already created on disk.
+        let vault_root = if is_bare {
+            target_path.clone()
+        } else if separate_libra_dir.is_some() {
+            // The init() function already created and canonicalized the storage dir;
+            // read the gitdir link to get the real path.
+            let link_path = target_path.join(ROOT_DIR);
+            if link_path.is_file() {
+                let content = std::fs::read_to_string(&link_path).unwrap_or_default();
+                let gitdir = content.trim_start_matches("gitdir:").trim();
+                PathBuf::from(gitdir)
+            } else {
+                target_path.join(ROOT_DIR)
+            }
+        } else {
+            target_path.join(ROOT_DIR)
+        };
+        if let Err(e) = init_vault_for_repo(&vault_root).await {
+            // Keep process-local cwd stable for in-process callers.
+            let _ = env::set_current_dir(&current_dir);
+            return Err(CliError::fatal(e.to_string()));
+        }
     }
 
     Ok(())
@@ -794,4 +834,66 @@ fn set_dir_hidden(dir: &str) -> io::Result<()> {
 fn set_dir_hidden(_dir: &str) -> io::Result<()> {
     // on unix-like systems, dotfiles are hidden by default
     Ok(())
+}
+
+/// Initialize a libvault instance for PGP commit signing.
+///
+/// `root_dir` is the resolved storage root (e.g. `.libra/`, the bare repo dir,
+/// or the separate-libra-dir path). The vault database and credentials are
+/// created inside this directory.
+async fn init_vault_for_repo(root_dir: &Path) -> anyhow::Result<()> {
+    use crate::internal::{config::Config as UserConfig, vault};
+
+    // Get user name/email from config (or defaults)
+    let user_name = UserConfig::get("user", None, "name")
+        .await
+        .unwrap_or_else(|| "Libra User".to_string());
+    let user_email = UserConfig::get("user", None, "email")
+        .await
+        .unwrap_or_else(|| "user@libra.local".to_string());
+
+    // Initialize vault (creates vault.db, seals after setup)
+    let (unseal_key, enc_token) = vault::init_vault(root_dir).await?;
+
+    // Persist credentials needed for follow-up signing operations.
+    if let Err(err) = vault::store_credentials(&unseal_key, &enc_token).await {
+        rollback_failed_vault_init(root_dir).await;
+        return Err(err.context("failed to persist vault credentials"));
+    }
+
+    // Generate PGP key for commit signing — only enable signing on success.
+    // If key generation fails, roll back the persisted vault credentials so the
+    // repo is not left in a half-configured state.
+    if let Err(e) = vault::generate_pgp_key(root_dir, &unseal_key, &user_name, &user_email).await {
+        // Roll back both credentials and vault.db so init remains atomic.
+        rollback_failed_vault_init(root_dir).await;
+        return Err(e);
+    }
+
+    // Only mark signing as enabled after key generation succeeded
+    UserConfig::insert("vault", None, "signing", "true").await;
+
+    Ok(())
+}
+
+/// Best-effort cleanup when vault initialization fails before credentials are persisted.
+///
+/// This avoids leaving an unrecoverable `vault.db` without a stored unseal key.
+async fn rollback_failed_vault_init(root_dir: &Path) {
+    use crate::internal::vault;
+
+    vault::remove_credentials().await;
+
+    for suffix in ["", "-wal", "-shm"] {
+        let path = root_dir.join(format!("vault.db{suffix}"));
+        if let Err(err) = std::fs::remove_file(&path)
+            && err.kind() != io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                "failed to remove partially initialized vault database '{}': {}",
+                path.display(),
+                err
+            );
+        }
+    }
 }

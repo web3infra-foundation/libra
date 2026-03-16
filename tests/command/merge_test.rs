@@ -113,7 +113,9 @@ async fn test_merge_remote_branch() {
     let feature_commit = Head::current_commit()
         .await
         .expect("feature branch should have a tip");
-    Branch::update_branch("feature", &feature_commit.to_string(), Some("origin")).await;
+    Branch::update_branch("feature", &feature_commit.to_string(), Some("origin"))
+        .await
+        .unwrap();
 
     Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(temp_path)
@@ -133,85 +135,64 @@ async fn test_merge_remote_branch() {
     );
 }
 
-#[tokio::test]
+#[test]
+#[serial]
 /// Test merging diverged branches without fast-forward support.
-async fn test_merge_diverged_branch_returns_fatal_128() {
+fn test_merge_diverged_branch_returns_fatal_128() {
     let temp_repo = create_committed_repo_via_cli();
     let temp_path = temp_repo.path();
 
-    Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
-        .args(["branch", "branch1"])
-        .output()
-        .expect("Failed to create branch");
+    let output = run_libra_command(&["branch", "branch1"], temp_path);
+    assert!(output.status.success(), "Failed to create branch1");
 
-    Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
-        .args(["checkout", "branch1"])
-        .output()
-        .expect("Failed to checkout branch");
+    let output = run_libra_command(&["checkout", "branch1"], temp_path);
+    assert!(output.status.success(), "Failed to checkout branch1");
 
     // Commit changes on branch1
-    let branch1_file = temp_path.join("branch1.txt");
-    std::fs::write(&branch1_file, "Branch1 content").expect("Failed to write file");
+    std::fs::write(temp_path.join("branch1.txt"), "Branch1 content").expect("Failed to write file");
 
-    Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
-        .args(["add", "."])
-        .output()
-        .expect("Failed to add file");
+    let output = run_libra_command(&["add", "."], temp_path);
+    assert!(output.status.success(), "Failed to add files");
 
-    Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
-        .args(["commit", "-m", "Add branch1 content"])
-        .output()
-        .expect("Failed to commit");
+    let output = run_libra_command(
+        &["commit", "-m", "Add branch1 content", "--no-verify"],
+        temp_path,
+    );
+    assert!(
+        output.status.success(),
+        "Failed to commit on branch1: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
-    Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
-        .args(["checkout", "main"])
-        .output()
-        .expect("Failed to checkout main branch");
+    let output = run_libra_command(&["checkout", "main"], temp_path);
+    assert!(output.status.success(), "Failed to checkout main");
 
-    Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
-        .args(["branch", "branch2"])
-        .output()
-        .expect("Failed to create branch");
+    let output = run_libra_command(&["branch", "branch2"], temp_path);
+    assert!(output.status.success(), "Failed to create branch2");
 
-    Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
-        .args(["checkout", "branch2"])
-        .output()
-        .expect("Failed to checkout branch");
+    let output = run_libra_command(&["checkout", "branch2"], temp_path);
+    assert!(output.status.success(), "Failed to checkout branch2");
 
     // Commit changes on branch2
-    let branch2_file = temp_path.join("branch2.txt");
-    std::fs::write(&branch2_file, "Branch2 content").expect("Failed to write file");
+    std::fs::write(temp_path.join("branch2.txt"), "Branch2 content").expect("Failed to write file");
 
-    Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
-        .args(["add", "."])
-        .output()
-        .expect("Failed to add file");
+    let output = run_libra_command(&["add", "."], temp_path);
+    assert!(output.status.success(), "Failed to add files");
 
-    Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
-        .args(["commit", "-m", "Add branch2 content"])
-        .output()
-        .expect("Failed to commit");
+    let output = run_libra_command(
+        &["commit", "-m", "Add branch2 content", "--no-verify"],
+        temp_path,
+    );
+    assert!(
+        output.status.success(),
+        "Failed to commit on branch2: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
-    Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
-        .args(["checkout", "branch1"])
-        .output()
-        .expect("Failed to checkout branch1");
+    let output = run_libra_command(&["checkout", "branch1"], temp_path);
+    assert!(output.status.success(), "Failed to checkout branch1");
 
-    let merge_output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
-        .args(["merge", "branch2"])
-        .output()
-        .expect("Failed to merge branch");
+    let merge_output = run_libra_command(&["merge", "branch2"], temp_path);
     assert_eq!(merge_output.status.code(), Some(128));
     assert!(
         String::from_utf8_lossy(&merge_output.stderr)

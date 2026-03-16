@@ -45,6 +45,7 @@ Commands:
   remote       Manage set of tracked repositories
   open         Open the repository in the browser
   config       Manage repository configurations
+  vault        Manage vault-backed signing and SSH keys
   reflog       Manage the log of reference changes (e.g., HEAD, branches)
   worktree     Manage multiple working trees attached to this repository
   cloud        Cloud backup and restore operations (D1/R2)
@@ -115,34 +116,67 @@ Update your `claude_desktop_config.json` as follows:
 > **Note**: The `cwd` (current working directory) must be set to the root of a valid Libra repository.
 > If `libra code` is launched outside of a repository, it will exit with an error.
 
-#### Claude Code Hook Forwarding
+#### AI Hook Forwarding
 
-Libra can ingest Claude Code hook events and persist them as AI session history.
-Instead of manually editing `.claude/settings.json`, run:
+Libra can record Claude Code and Gemini CLI sessions as `ai_session` history
+objects. The recommended setup is to install Libra's hook forwarding once in
+your project, then use your AI CLI normally.
+
+Claude Code:
 
 ```bash
-libra claude-code install-hooks
+libra hooks claude install
 ```
 
-This installs forwarding entries for:
-
-- `SessionStart` → `libra claude-code session-start`
-- `UserPromptSubmit` → `libra claude-code prompt`
-- `PostToolUse` → `libra claude-code tool-use`
-- `Stop` → `libra claude-code stop`
-- `SessionEnd` → `libra claude-code session-end`
-
-The generated entries omit Claude's `matcher` field so the hooks run for the
-real runtime queries Claude emits for session lifecycle and tool events.
-
-Advanced usage:
+Gemini CLI:
 
 ```bash
-# Use a custom command prefix (for local dev wrappers)
-libra claude-code install-hooks --command-prefix "go run ./cmd/libra/main.go"
+libra hooks gemini install
+```
 
-# Customize hook timeout seconds written into settings.json
-libra claude-code install-hooks --timeout 15
+After installation, Libra writes hook settings into the provider's project
+config:
+
+- Claude Code: `.claude/settings.json`
+- Gemini CLI: `.gemini/settings.json`
+
+Those generated entries call the resolved Libra binary with provider lifecycle
+subcommands such as `hooks claude <event>` and `hooks gemini <event>`.
+
+Useful follow-up commands:
+
+```bash
+# Check whether hooks are installed
+libra hooks claude is-installed
+libra hooks gemini is-installed
+
+# Remove Libra-managed hooks
+libra hooks claude uninstall
+libra hooks gemini uninstall
+```
+
+By default, install writes the absolute path of the current `libra` binary into
+provider hook settings. If you want hooks to call a different local binary, pass
+an explicit binary path:
+
+```bash
+libra hooks claude install --binary-path "/absolute/path/to/libra"
+libra hooks gemini install --binary-path "/absolute/path/to/libra"
+```
+
+Provider-specific notes:
+
+- Claude Code supports `--timeout`, for example:
+  `libra hooks claude install --timeout 15`
+- Gemini CLI does **not** support `--timeout`
+- Install / uninstall / is-installed must be run inside a Libra repository
+
+Once installed, use Claude Code or Gemini CLI as usual. When a session ends,
+Libra persists it as an `ai_session` object that you can inspect later with:
+
+```bash
+libra cat-file --ai-list ai_session
+libra cat-file --ai <ai_session_id>
 ```
 
 ### AI Provider Selection
@@ -215,6 +249,99 @@ This allows Libra to interact seamlessly with Git servers (for example, `push` a
 While maintaining compatibility with Git, Libra intentionally diverges in some areas:
 
 - Uses an **SQLite** database to manage loosely structured files such as `config`, `HEAD`, and `refs`, providing unified and transactional management instead of plain-text files.
+
+---
+
+## Vault-Backed Signing
+
+Libra supports repository-local vault initialization for commit signing:
+
+```bash
+libra init [--separate-libra-dir <dir>] [<repo_directory>]
+```
+
+Vault is enabled by default for all `libra init` invocations — no extra flag is needed.
+
+When vault is enabled:
+
+- A vault database (`vault.db`) is created in the repository storage directory (`.libra/` or the directory passed via `--separate-libra-dir`).
+- Libra generates a signing key and enables `vault.signing=true`.
+- The vault unseal key is stored outside the repository at `~/.libra/vault-keys/<repoid>`.
+- The encrypted root token is stored in repository config (`vault.roottoken_enc`).
+
+Security note:
+
+- Libra no longer falls back to storing the unseal key inside repository config.
+- If the home directory is not writable/usable, `libra init` fails with a fatal error.
+
+Troubleshooting:
+
+- Ensure `HOME` (or `USERPROFILE` on Windows) points to a writable directory.
+- In container/CI environments, explicitly set `HOME` to a writable path before running `libra init`.
+
+Key management commands:
+
+```bash
+# Print current vault GPG public key (for GitHub GPG key settings)
+libra vault gpg-public-key
+
+# Generate an SSH key in vault and print public key (for GitHub SSH key settings)
+libra vault generate-ssh-key [--name <user>]
+
+# Print current vault SSH public key
+libra vault ssh-public-key
+
+# Generate (or rotate) vault GPG signing key and print public key
+libra vault generate-gpg-key [--name <user>] [--email <mail>]
+```
+
+### GitHub End-to-End Verification (libvault + Git conversion)
+
+The following flow validates:
+
+- `libvault` integration with Libra storage (`.libra/vault.db` + config metadata in SQLite)
+- Conversion from Git repository format to Libra repository format
+- Vault-backed GPG signing on commit
+- SSH push from Libra to GitHub
+
+```bash
+# 1) Clone an existing GitHub repository locally with Git (SSH).
+#    (This step can use your existing SSH credential.)
+git clone git@github.com:<owner>/<repo>.git /tmp/<repo>-git
+
+# 2) Convert the cloned Git repository into a Libra repository and
+#    initialize vault in the same command.
+mkdir -p /tmp/<repo>-libra
+cd /tmp/<repo>-libra
+libra init --from-git-repository /tmp/<repo>-git
+
+# 3) Export vault public keys and register them in GitHub settings:
+#    - GPG key: GitHub -> Settings -> SSH and GPG keys -> New GPG key
+#    - SSH key: GitHub -> Settings -> SSH and GPG keys -> New SSH key
+libra vault gpg-public-key
+libra vault generate-ssh-key --name "<github-username>"
+libra vault ssh-public-key
+
+# 4) Make sure origin points to GitHub SSH URL in Libra config.
+libra remote set-url origin git@github.com:<owner>/<repo>.git
+
+# 5) Create a signed commit and push through SSH.
+echo "vault e2e" > vault-e2e.txt
+libra add vault-e2e.txt
+libra commit -m "feat(vault): verify signed commit to GitHub"
+libra push origin master
+```
+
+Verification points:
+
+- `libra commit` should produce a commit object containing `gpgsig`.
+- `libra push` should succeed over SSH (`git@github.com:...`).
+- The commit should appear in GitHub with signature metadata.
+
+Note:
+
+- For the very first `git clone` in step 1, Git may still use your existing SSH credentials.
+  After step 3, Libra fetch/push uses the vault-generated key for this repository.
 
 ---
 
@@ -353,33 +480,4 @@ If the formatting check fails, you can automatically fix formatting issues by ru
 
 ```bash
 cargo +nightly fmt --all
-```
-
-### Buck2 Build Requirements
-
-This project builds with Buck2. Please install both Buck2 and `cargo-buckal` before development:
-
-```bash
-# Install buck2: download the latest release tarball from
-# https://github.com/facebook/buck2/releases, extract the binary,
-# and place it in ~/.cargo/bin (ensure ~/.cargo/bin is on PATH).
-# Example (replace <tag> and <platform> with the latest for your OS):
-wget https://github.com/facebook/buck2/releases/download/<tag>/buck2-<platform>.tar.gz
-tar -xzf buck2-<platform>.tar.gz
-mv buck2 ~/.cargo/bin/
-
-# Install cargo-buckal (requires Rust toolchain)
-cargo install --git https://github.com/buck2hub/cargo-buckal.git
-```
-
-Pull Requests must also pass the Buck2 build:
-
-```bash
-cargo buckal build
-```
-
-When you update dependencies in `Cargo.toml`, regenerate Buck metadata and third-party lockfiles:
-
-```bash
-cargo buckal migrate
 ```

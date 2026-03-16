@@ -489,10 +489,8 @@ fn parse_response(response: &AnthropicResponse) -> Vec<AssistantContent> {
 
     for block in &response.content {
         match block {
-            AnthropicContentBlock::Text { text } => {
-                if !text.trim().is_empty() {
-                    parts.push(AssistantContent::Text(Text { text: text.clone() }));
-                }
+            AnthropicContentBlock::Text { text } if !text.trim().is_empty() => {
+                parts.push(AssistantContent::Text(Text { text: text.clone() }));
             }
             AnthropicContentBlock::ToolUse { id, name, input } => {
                 parts.push(AssistantContent::ToolCall(ToolCall {
@@ -504,6 +502,7 @@ fn parse_response(response: &AnthropicResponse) -> Vec<AssistantContent> {
                     },
                 }));
             }
+            AnthropicContentBlock::Text { .. } => {}
             // Image and ToolResult blocks are only used in requests, so
             // they should never appear in an assistant response.
             _ => {}

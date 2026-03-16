@@ -115,8 +115,8 @@ async fn merge_ff(target_commit: Commit, target_branch_name: &str) -> CliResult<
     println!("Fast-forward");
     let db = get_db_conn_instance().await;
 
-    let old_oid_opt = Head::current_commit_with_conn(db).await;
-    let current_head_state = Head::current_with_conn(db).await;
+    let old_oid_opt = Head::current_commit_with_conn(&db).await;
+    let current_head_state = Head::current_with_conn(&db).await;
 
     let action = ReflogAction::Merge {
         branch: target_branch_name.to_string(),
@@ -145,7 +145,7 @@ async fn merge_ff(target_commit: Commit, target_branch_name: &str) -> CliResult<
                             &target_commit.id.to_string(),
                             None,
                         )
-                        .await;
+                        .await?;
                     }
                     Head::Detached(_) => {
                         // Merging into a detached HEAD is unusual but possible. We just move HEAD.

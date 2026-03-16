@@ -87,6 +87,9 @@ async fn test_e2e_mcp_flow() {
     // ── 1. Setup ───────────────────────────────────────────────────────────────
     let temp_dir = tempfile::tempdir().unwrap();
     let repo_path = temp_dir.path();
+    let home_dir = repo_path.join(".home");
+    let config_home = home_dir.join(".config");
+    std::fs::create_dir_all(&config_home).expect("failed to create isolated HOME");
 
     println!("Test Repo Path: {:?}", repo_path);
 
@@ -104,6 +107,9 @@ async fn test_e2e_mcp_flow() {
     let status = Command::new(&libra_bin)
         .args(["init"])
         .current_dir(repo_path)
+        .env("HOME", &home_dir)
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("USERPROFILE", &home_dir)
         .status()
         .expect("Failed to init repo");
     assert!(status.success(), "libra init failed");
@@ -125,6 +131,9 @@ async fn test_e2e_mcp_flow() {
             &web_port.to_string(),
         ])
         .current_dir(repo_path)
+        .env("HOME", &home_dir)
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("USERPROFILE", &home_dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()

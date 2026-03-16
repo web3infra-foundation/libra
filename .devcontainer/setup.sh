@@ -29,10 +29,3 @@ source /root/.cargo/env
 
 ## Init git-lfs
 git lfs install
-
-## Install Buck2
-wget https://github.com/facebook/buck2/releases/download/latest/buck2-x86_64-unknown-linux-gnu.zst
-zstd -d /home/buck2-x86_64-unknown-linux-gnu.zst
-mv /home/buck2-x86_64-unknown-linux-gnu /home/buck2
-chmod +x /home/buck2
-mv /home/buck2 /usr/local/bin/buck2

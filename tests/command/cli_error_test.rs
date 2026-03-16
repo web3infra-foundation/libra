@@ -5,9 +5,16 @@ use std::{path::Path, process::Command};
 use tempfile::tempdir;
 
 fn run_libra(args: &[&str], cwd: &Path) -> std::process::Output {
+    let home = cwd.join(".libra-test-home");
+    let config_home = home.join(".config");
+    std::fs::create_dir_all(&config_home).unwrap();
+
     Command::new(env!("CARGO_BIN_EXE_libra"))
         .args(args)
         .current_dir(cwd)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("XDG_CONFIG_HOME", &config_home)
         .env_remove("RUST_LOG")
         .env_remove("LIBRA_LOG")
         .output()

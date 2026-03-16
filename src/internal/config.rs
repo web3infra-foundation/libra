@@ -3,8 +3,8 @@
 use std::{collections::HashSet, mem::swap};
 
 use sea_orm::{
-    ActiveValue::Set, ColumnTrait, ConnectionTrait, EntityTrait, ModelTrait, QueryFilter,
-    entity::ActiveModelTrait,
+    ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, ModelTrait,
+    QueryFilter, entity::ActiveModelTrait,
 };
 
 use crate::internal::{
@@ -14,6 +14,22 @@ use crate::internal::{
 };
 
 pub struct Config;
+
+trait DatabaseConnectionRef {
+    fn as_db_conn_ref(&self) -> &DatabaseConnection;
+}
+
+impl DatabaseConnectionRef for DatabaseConnection {
+    fn as_db_conn_ref(&self) -> &DatabaseConnection {
+        self
+    }
+}
+
+impl DatabaseConnectionRef for &DatabaseConnection {
+    fn as_db_conn_ref(&self) -> &DatabaseConnection {
+        self
+    }
+}
 
 #[derive(Clone)]
 pub struct RemoteConfig {
@@ -197,23 +213,26 @@ impl Config {
         key: &str,
         valuepattern: Option<&str>,
         delete_all: bool,
-    ) {
+    ) -> Result<(), sea_orm::DbErr> {
         let entries: Vec<Model> = Self::query_with_conn(db, configuration, name, key).await;
         for e in entries {
-            let _res = match valuepattern {
+            match valuepattern {
                 Some(vp) => {
                     if e.value.contains(vp) {
-                        e.delete(db).await
+                        e.delete(db).await?;
                     } else {
                         continue;
                     }
                 }
-                None => e.delete(db).await,
+                None => {
+                    e.delete(db).await?;
+                }
             };
             if !delete_all {
                 break;
             }
         }
+        Ok(())
     }
 
     // _with_conn version for remove_remote
@@ -372,57 +391,57 @@ impl Config {
 
     pub async fn insert(configuration: &str, name: Option<&str>, key: &str, value: &str) {
         let db = get_db_conn_instance().await;
-        Self::insert_with_conn(db, configuration, name, key, value).await;
+        Self::insert_with_conn(&db, configuration, name, key, value).await;
     }
 
     // Update one configuration entry in database using given configuration, name, key and value
     pub async fn update(configuration: &str, name: Option<&str>, key: &str, value: &str) -> Model {
         let db = get_db_conn_instance().await;
-        Self::update_with_conn(db, configuration, name, key, value).await
+        Self::update_with_conn(&db, configuration, name, key, value).await
     }
 
     /// Get one configuration value
     pub async fn get(configuration: &str, name: Option<&str>, key: &str) -> Option<String> {
         let db = get_db_conn_instance().await;
-        Self::get_with_conn(db, configuration, name, key).await
+        Self::get_with_conn(&db, configuration, name, key).await
     }
 
     /// Get remote repo name by branch name
     /// - You may need to `[branch::set-upstream]` if return `None`
     pub async fn get_remote(branch: &str) -> Option<String> {
         let db = get_db_conn_instance().await;
-        Self::get_remote_with_conn(db, branch).await
+        Self::get_remote_with_conn(&db, branch).await
     }
 
     /// Get remote repo name of current branch
     /// - `Error` if `HEAD` is detached
     pub async fn get_current_remote() -> Result<Option<String>, ()> {
         let db = get_db_conn_instance().await;
-        Self::get_current_remote_with_conn(db).await
+        Self::get_current_remote_with_conn(&db).await
     }
 
     pub async fn get_remote_url(remote: &str) -> String {
         let db = get_db_conn_instance().await;
-        Self::get_remote_url_with_conn(db, remote).await
+        Self::get_remote_url_with_conn(&db, remote).await
     }
 
     /// return `None` if no remote is set
     pub async fn get_current_remote_url() -> Option<String> {
         let db = get_db_conn_instance().await;
-        Self::get_current_remote_url_with_conn(db).await
+        Self::get_current_remote_url_with_conn(&db).await
     }
 
     /// Get all configuration values
     /// - e.g. remote.origin.url can be multiple
     pub async fn get_all(configuration: &str, name: Option<&str>, key: &str) -> Vec<String> {
         let db = get_db_conn_instance().await;
-        Self::get_all_with_conn(db, configuration, name, key).await
+        Self::get_all_with_conn(&db, configuration, name, key).await
     }
 
     /// Get literally all the entries in database without any filtering
     pub async fn list_all() -> Vec<(String, String)> {
         let db = get_db_conn_instance().await;
-        Self::list_all_with_conn(db).await
+        Self::list_all_with_conn(&db).await
     }
 
     /// Delete one or all configuration using given key and value pattern
@@ -432,9 +451,26 @@ impl Config {
         key: &str,
         valuepattern: Option<&str>,
         delete_all: bool,
-    ) {
+    ) -> Result<(), sea_orm::DbErr> {
         let db = get_db_conn_instance().await;
-        Self::remove_config_with_conn(db, configuration, name, key, valuepattern, delete_all).await;
+        Self::remove_config_with_conn(
+            db.as_db_conn_ref(),
+            configuration,
+            name,
+            key,
+            valuepattern,
+            delete_all,
+        )
+        .await
+    }
+
+    /// Remove all entries matching the given configuration/name/key triple.
+    pub async fn remove(
+        configuration: &str,
+        name: Option<&str>,
+        key: &str,
+    ) -> Result<(), sea_orm::DbErr> {
+        Self::remove_config(configuration, name, key, None, true).await
     }
 
     /// Delete all the configuration entries using given configuration field (--remove-section)
@@ -443,26 +479,26 @@ impl Config {
     // }
     pub async fn remove_remote(name: &str) -> Result<(), String> {
         let db = get_db_conn_instance().await;
-        Self::remove_remote_with_conn(db, name).await
+        Self::remove_remote_with_conn(&db, name).await
     }
 
     pub async fn rename_remote(old: &str, new: &str) -> Result<(), String> {
         let db = get_db_conn_instance().await;
-        Self::rename_remote_with_conn(db, old, new).await
+        Self::rename_remote_with_conn(&db, old, new).await
     }
 
     pub async fn all_remote_configs() -> Vec<RemoteConfig> {
         let db = get_db_conn_instance().await;
-        Self::all_remote_configs_with_conn(db).await
+        Self::all_remote_configs_with_conn(&db).await
     }
 
     pub async fn remote_config(name: &str) -> Option<RemoteConfig> {
         let db = get_db_conn_instance().await;
-        Self::remote_config_with_conn(db, name).await
+        Self::remote_config_with_conn(&db, name).await
     }
 
     pub async fn branch_config(name: &str) -> Option<BranchConfig> {
         let db = get_db_conn_instance().await;
-        Self::branch_config_with_conn(db, name).await
+        Self::branch_config_with_conn(&db, name).await
     }
 }

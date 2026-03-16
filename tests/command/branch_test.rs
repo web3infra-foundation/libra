@@ -168,7 +168,9 @@ async fn test_create_branch_from_remote() {
     };
     commit::execute(args).await;
     let hash = Head::current_commit().await.unwrap();
-    Branch::update_branch("main", &hash.to_string(), Some("origin")).await; // create remote branch
+    Branch::update_branch("main", &hash.to_string(), Some("origin"))
+        .await
+        .unwrap(); // create remote branch
     assert!(get_target_commit("origin/main").await.is_ok());
 
     let args = BranchArgs {
@@ -522,7 +524,9 @@ async fn test_list_all_branches() {
 
     // Create remote branch
     let hash = Head::current_commit().await.unwrap();
-    Branch::update_branch("remote_branch", &hash.to_string(), Some("origin")).await;
+    Branch::update_branch("remote_branch", &hash.to_string(), Some("origin"))
+        .await
+        .unwrap();
 
     // Test -a parameter - just call execute, don't try to capture output
     let args = BranchArgs {
@@ -665,7 +669,9 @@ async fn test_branch_delete_safe() {
 
     // Fast-forward merge (just update master to feature's commit)
     let feature_commit = Branch::find_branch("feature", None).await.unwrap().commit;
-    Branch::update_branch("main", &feature_commit.to_string(), None).await;
+    Branch::update_branch("main", &feature_commit.to_string(), None)
+        .await
+        .unwrap();
 
     // Now try -d again (should succeed - fully merged)
     execute(BranchArgs {
@@ -991,6 +997,10 @@ fn test_filter_branches_propagates_error_for_corrupt_commit() {
 
     use git_internal::hash::ObjectHash;
     use libra::internal::branch::Branch;
+
+    let temp_path = tempdir().unwrap();
+    init_repo_via_cli(temp_path.path());
+    let _guard = ChangeDirGuard::new(temp_path.path());
 
     // Fabricate a branch whose commit hash does not exist in any storage.
     let bogus_hash =

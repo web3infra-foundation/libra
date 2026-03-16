@@ -66,10 +66,8 @@ tests/
 └── storage_r2_test.rs           # R2 storage tests
 
 docs/                            # Community docs, contributing guide, agent specs
-sql/sqlite_20240331_init.sql     # SQLite schema bootstrap
+sql/sqlite_20260309_init.sql     # SQLite schema bootstrap
 template/                        # Git hook templates (pre-commit, exclude)
-third-party/                     # Buck2/Buckal vendored crate metadata (generated)
-platforms/, toolchains/          # Buck2 platform & toolchain configs
 ```
 
 ## Build & Development Commands
@@ -98,22 +96,13 @@ cargo test add_test
 cargo run -- <command>          # e.g. cargo run -- status
 ```
 
-### Buck2 Build (also required for CI)
-
-```bash
-cargo buckal build               # Build with Buck2
-buck2 build //:libra             # Direct Buck2 invocation
-cargo buckal migrate             # Regenerate Buck metadata after Cargo.toml changes
-```
-
 ### CI Pipeline (`.github/workflows/base.yml`)
 
 All PRs must pass these checks:
 1. `cargo +nightly fmt --all --check` — formatting
 2. `cargo clippy --all-targets --all-features -- -D warnings` — linting (zero warnings)
 3. Redundancy check on `third-party/rust/crates`
-4. `buck2 build //:libra` — Buck2 build
-5. `cargo test --all` — full test suite
+4. `cargo test --all` — full test suite
 
 ## Coding Conventions
 
@@ -171,7 +160,7 @@ docs(readme): update provider table
 
 ### PR Requirements
 
-- All CI checks pass (format, clippy zero-warnings, Buck2 build, tests)
+- All CI checks pass (format, clippy zero-warnings, tests)
 - State intent, linked issues, and tests run
 - Include repro steps or sample CLI output for user-visible changes
 - Keep changes small and cohesive
@@ -197,7 +186,7 @@ docs(readme): update provider table
 
 ## Database Schema
 
-SQLite database at `.libra/libra.db` with tables: `config`, `reference`, `reflog`, `rebase_state`, `object_index`. Schema bootstrap in `sql/sqlite_20240331_init.sql`.
+SQLite database at `.libra/libra.db` with tables: `config`, `reference`, `reflog`, `rebase_state`, `object_index`. Schema bootstrap in `sql/sqlite_20260309_init.sql`.
 
 ## Environment Variables
 

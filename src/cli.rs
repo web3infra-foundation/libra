@@ -40,8 +40,7 @@ async fn set_local_hash_kind() -> CliResult<()> {
         "sha256" => HashKind::Sha256,
         _ => {
             return Err(CliError::fatal(format!(
-                "unsupported object format: '{}'",
-                object_format
+                "unsupported object format: '{object_format}'"
             )));
         }
     };
@@ -75,8 +74,10 @@ enum Commands {
     Clone(command::clone::CloneArgs),
     #[command(about = "Start Libra Code interactive TUI (with background web server)")]
     Code(command::code::CodeArgs),
-    #[command(subcommand, about = "Handle Claude Code hook events")]
-    ClaudeCode(command::claude_code::ClaudeCodeCommand),
+    #[command(about = "Connect to Codex app-server via WebSocket")]
+    AgentCodex(command::agent_codex::AgentCodexArgs),
+    #[command(about = "Unified provider hook ingestion and setup")]
+    Hooks(command::hooks::HooksCommand),
 
     // The rest of the commands require a repository to be present
     #[command(about = "Add file contents to the index")]
@@ -152,6 +153,8 @@ enum Commands {
     Open(command::open::OpenArgs),
     #[command(about = "Manage repository configurations", alias = "cfg")]
     Config(command::config::ConfigArgs),
+    #[command(about = "Manage vault-backed signing and SSH keys")]
+    Vault(command::vault::VaultArgs),
     #[command(about = "Manage the log of reference changes (e.g., HEAD, branches)")]
     Reflog(command::reflog::ReflogArgs),
     #[command(
@@ -382,8 +385,7 @@ fn classify_parse_error(argv: &[String], err: &clap::Error) -> CliError {
     if let Some(cmd) = is_top_level_unknown_command(argv, err) {
         let (_, _, hints) = parse_error_components(err);
         let mut cli_error = CliError::unknown_command(format!(
-            "libra: '{}' is not a libra command. See 'libra --help'.",
-            cmd
+            "libra: '{cmd}' is not a libra command. See 'libra --help'."
         ));
         for hint in hints {
             cli_error = cli_error.with_hint(hint);
@@ -431,7 +433,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         },
     };
     match &args.command {
-        Commands::Init(_) | Commands::Clone(_) | Commands::ClaudeCode(_) => {}
+        Commands::Init(_) | Commands::Clone(_) | Commands::Hooks(_) => {}
         // Config global/system scopes don't require a repository
         Commands::Config(cfg) if cfg.global || cfg.system => {}
         _ => {
@@ -455,7 +457,10 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         }
         Commands::Clone(args) => command::clone::execute_safe(args).await?, //clone will use init internally,so we don't need to set hash kind here again
         Commands::Code(args) => command::code::execute(args).await,
-        Commands::ClaudeCode(cmd) => command::claude_code::execute(cmd)
+        Commands::AgentCodex(args) => command::agent_codex::execute(args)
+            .await
+            .map_err(|e| CliError::fatal(e.to_string()))?,
+        Commands::Hooks(cmd) => command::hooks::execute(cmd)
             .await
             .map_err(|e| CliError::fatal(e.to_string()))?,
         Commands::Add(args) => command::add::execute_safe(args).await?,
@@ -490,6 +495,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Open(args) => command::open::execute_safe(args).await?,
         Commands::Pull(args) => command::pull::execute_safe(args).await?,
         Commands::Config(args) => command::config::execute_safe(args).await?,
+        Commands::Vault(args) => command::vault::execute_safe(args).await?,
         Commands::Checkout(args) => command::checkout::execute_safe(args).await?,
         Commands::Reflog(args) => command::reflog::execute_safe(args).await?,
         Commands::Worktree(args) => command::worktree::execute_safe(args).await?,
