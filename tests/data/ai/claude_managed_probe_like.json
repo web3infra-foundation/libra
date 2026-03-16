@@ -1,0 +1,211 @@
+{
+  "cwd": "/private/tmp/claude-agent-sdk-probe",
+  "prompt": "Inspect the current working directory and return a structured summary.\nRequirements:\n- Use read-only tools if needed.\n- Mention at least one real file observed in this directory.\n- Keep the response concise.",
+  "hookEvents": [
+    {
+      "hook": "UserPromptSubmit",
+      "input": {
+        "session_id": "6dcf708f-88f2-4e9d-be07-1fbb1ab1b5a8",
+        "transcript_path": "/Users/anduin9527/.claude/projects/-private-tmp-claude-agent-sdk-probe/6dcf708f-88f2-4e9d-be07-1fbb1ab1b5a8.jsonl",
+        "cwd": "/private/tmp/claude-agent-sdk-probe",
+        "permission_mode": "default",
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "Inspect the current working directory and return a structured summary.\nRequirements:\n- Use read-only tools if needed.\n- Mention at least one real file observed in this directory.\n- Keep the response concise."
+      }
+    },
+    {
+      "hook": "PreToolUse",
+      "input": {
+        "session_id": "6dcf708f-88f2-4e9d-be07-1fbb1ab1b5a8",
+        "transcript_path": "/Users/anduin9527/.claude/projects/-private-tmp-claude-agent-sdk-probe/6dcf708f-88f2-4e9d-be07-1fbb1ab1b5a8.jsonl",
+        "cwd": "/private/tmp/claude-agent-sdk-probe",
+        "permission_mode": "default",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Glob",
+        "tool_input": {
+          "pattern": "*.*",
+          "path": "/private/tmp/claude-agent-sdk-probe"
+        },
+        "tool_use_id": "tooluse_Gti4jp4kMPu0No5yVW7Iez"
+      }
+    },
+    {
+      "hook": "PostToolUse",
+      "input": {
+        "session_id": "6dcf708f-88f2-4e9d-be07-1fbb1ab1b5a8",
+        "transcript_path": "/Users/anduin9527/.claude/projects/-private-tmp-claude-agent-sdk-probe/6dcf708f-88f2-4e9d-be07-1fbb1ab1b5a8.jsonl",
+        "cwd": "/private/tmp/claude-agent-sdk-probe",
+        "permission_mode": "default",
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Glob",
+        "tool_input": {
+          "pattern": "*.*",
+          "path": "/private/tmp/claude-agent-sdk-probe"
+        },
+        "tool_response": {
+          "filenames": [
+            "/private/tmp/claude-agent-sdk-probe/package.json",
+            "/private/tmp/claude-agent-sdk-probe/query_tool_probe.js",
+            "/private/tmp/claude-agent-sdk-probe/session_probe.js"
+          ],
+          "durationMs": 10,
+          "numFiles": 3,
+          "truncated": false
+        },
+        "tool_use_id": "tooluse_Gti4jp4kMPu0No5yVW7Iez"
+      }
+    },
+    {
+      "hook": "PreToolUse",
+      "input": {
+        "session_id": "6dcf708f-88f2-4e9d-be07-1fbb1ab1b5a8",
+        "transcript_path": "/Users/anduin9527/.claude/projects/-private-tmp-claude-agent-sdk-probe/6dcf708f-88f2-4e9d-be07-1fbb1ab1b5a8.jsonl",
+        "cwd": "/private/tmp/claude-agent-sdk-probe",
+        "permission_mode": "default",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Read",
+        "tool_input": {
+          "file_path": "/private/tmp/claude-agent-sdk-probe/package.json"
+        },
+        "tool_use_id": "tooluse_dw5ZECTKdk5Z8wuIdR10I8"
+      }
+    },
+    {
+      "hook": "PostToolUse",
+      "input": {
+        "session_id": "6dcf708f-88f2-4e9d-be07-1fbb1ab1b5a8",
+        "transcript_path": "/Users/anduin9527/.claude/projects/-private-tmp-claude-agent-sdk-probe/6dcf708f-88f2-4e9d-be07-1fbb1ab1b5a8.jsonl",
+        "cwd": "/private/tmp/claude-agent-sdk-probe",
+        "permission_mode": "default",
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Read",
+        "tool_input": {
+          "file_path": "/private/tmp/claude-agent-sdk-probe/package.json"
+        },
+        "tool_response": {
+          "type": "text",
+          "file": {
+            "filePath": "/private/tmp/claude-agent-sdk-probe/package.json",
+            "content": "{\n  \"name\": \"claude-agent-sdk-probe\",\n  \"version\": \"1.0.0\"\n}\n",
+            "numLines": 3,
+            "startLine": 1,
+            "totalLines": 3
+          }
+        },
+        "tool_use_id": "tooluse_dw5ZECTKdk5Z8wuIdR10I8"
+      }
+    },
+    {
+      "hook": "PreToolUse",
+      "input": {
+        "session_id": "6dcf708f-88f2-4e9d-be07-1fbb1ab1b5a8",
+        "transcript_path": "/Users/anduin9527/.claude/projects/-private-tmp-claude-agent-sdk-probe/6dcf708f-88f2-4e9d-be07-1fbb1ab1b5a8.jsonl",
+        "cwd": "/private/tmp/claude-agent-sdk-probe",
+        "permission_mode": "default",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "StructuredOutput",
+        "tool_input": {
+          "summary": "pending"
+        },
+        "tool_use_id": "tooluse_structured_output"
+      }
+    },
+    {
+      "hook": "PostToolUse",
+      "input": {
+        "session_id": "6dcf708f-88f2-4e9d-be07-1fbb1ab1b5a8",
+        "transcript_path": "/Users/anduin9527/.claude/projects/-private-tmp-claude-agent-sdk-probe/6dcf708f-88f2-4e9d-be07-1fbb1ab1b5a8.jsonl",
+        "cwd": "/private/tmp/claude-agent-sdk-probe",
+        "permission_mode": "default",
+        "hook_event_name": "PostToolUse",
+        "tool_name": "StructuredOutput",
+        "tool_input": {
+          "summary": "pending"
+        },
+        "tool_response": {
+          "ok": true
+        },
+        "tool_use_id": "tooluse_structured_output"
+      }
+    },
+    {
+      "hook": "Stop",
+      "input": {
+        "session_id": "6dcf708f-88f2-4e9d-be07-1fbb1ab1b5a8",
+        "transcript_path": "/Users/anduin9527/.claude/projects/-private-tmp-claude-agent-sdk-probe/6dcf708f-88f2-4e9d-be07-1fbb1ab1b5a8.jsonl",
+        "cwd": "/private/tmp/claude-agent-sdk-probe",
+        "hook_event_name": "Stop"
+      }
+    }
+  ],
+  "messages": [
+    {
+      "type": "system",
+      "subtype": "init",
+      "cwd": "/private/tmp/claude-agent-sdk-probe",
+      "session_id": "6dcf708f-88f2-4e9d-be07-1fbb1ab1b5a8",
+      "tools": [
+        "Glob",
+        "Read",
+        "StructuredOutput"
+      ],
+      "model": "claude-sonnet-4-5-20250929",
+      "permissionMode": "default"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "I inspected the directory and found probe scripts plus a package.json file."
+          }
+        ]
+      }
+    }
+  ],
+  "resultMessage": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "duration_ms": 3479,
+    "duration_api_ms": 2900,
+    "num_turns": 1,
+    "result": "ok",
+    "stop_reason": "end_turn",
+    "session_id": "6dcf708f-88f2-4e9d-be07-1fbb1ab1b5a8",
+    "total_cost_usd": 0.01877775,
+    "usage": {
+      "input_tokens": 2010,
+      "cache_creation_input_tokens": 140,
+      "cache_read_input_tokens": 17859,
+      "output_tokens": 250,
+      "server_tool_use": {
+        "web_search_requests": 0
+      },
+      "service_tier": "standard"
+    },
+    "modelUsage": {
+      "claude-sonnet-4-5-20250929": {
+        "inputTokens": 2010,
+        "outputTokens": 250,
+        "cacheReadInputTokens": 17859,
+        "cacheCreationInputTokens": 140
+      }
+    },
+    "permission_denials": [],
+    "structured_output": {
+      "summary": "This is a Node.js test project for the Claude Agent SDK (version 0.2.74). The directory contains probe scripts that test SDK functionality including query tools, session management, and managed mode. Test artifacts are stored in JSON format in the artifacts directory.",
+      "observedFiles": [
+        "/private/tmp/claude-agent-sdk-probe/package.json",
+        "/private/tmp/claude-agent-sdk-probe/query_tool_probe.js",
+        "/private/tmp/claude-agent-sdk-probe/session_probe.js",
+        "/private/tmp/claude-agent-sdk-probe/managed_mode_probe.js"
+      ],
+      "riskRationale": "Low risk - this is a testing/development project with probe scripts that exercise Claude Agent SDK features. The code uses read-only tools (Read, Glob, Grep) and writes test artifacts to a local directory. No malicious patterns detected."
+    },
+    "fast_mode_state": null,
+    "uuid": "result-actual-like"
+  }
+}

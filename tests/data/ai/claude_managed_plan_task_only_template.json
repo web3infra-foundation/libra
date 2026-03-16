@@ -1,0 +1,288 @@
+{
+  "cwd": "__CWD__",
+  "prompt": "__PROMPT__",
+  "hookEvents": [
+    {
+      "hook": "UserPromptSubmit",
+      "input": {
+        "session_id": "plan-session-1",
+        "transcript_path": "/tmp/plan-session-1.jsonl",
+        "cwd": "__CWD__",
+        "permission_mode": "default",
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "__PROMPT__"
+      }
+    },
+    {
+      "hook": "PreToolUse",
+      "input": {
+        "session_id": "plan-session-1",
+        "transcript_path": "/tmp/plan-session-1.jsonl",
+        "cwd": "__CWD__",
+        "permission_mode": "default",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Read",
+        "tool_input": {
+          "file_path": "__TOUCHED_FILE__"
+        },
+        "tool_use_id": "tool-read-1"
+      }
+    },
+    {
+      "hook": "PostToolUse",
+      "input": {
+        "session_id": "plan-session-1",
+        "transcript_path": "/tmp/plan-session-1.jsonl",
+        "cwd": "__CWD__",
+        "permission_mode": "default",
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Read",
+        "tool_input": {
+          "file_path": "__TOUCHED_FILE__"
+        },
+        "tool_response": {
+          "file": {
+            "filePath": "__TOUCHED_FILE__"
+          }
+        },
+        "tool_use_id": "tool-read-1"
+      }
+    },
+    {
+      "hook": "PreToolUse",
+      "input": {
+        "session_id": "plan-session-1",
+        "transcript_path": "/tmp/plan-session-1.jsonl",
+        "cwd": "__CWD__",
+        "permission_mode": "default",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Grep",
+        "tool_input": {
+          "pattern": "provider_runtime",
+          "path": "__CWD__"
+        },
+        "tool_use_id": "tool-grep-1"
+      }
+    },
+    {
+      "hook": "PostToolUseFailure",
+      "input": {
+        "session_id": "plan-session-1",
+        "transcript_path": "/tmp/plan-session-1.jsonl",
+        "cwd": "__CWD__",
+        "permission_mode": "default",
+        "hook_event_name": "PostToolUseFailure",
+        "tool_name": "Grep",
+        "tool_input": {
+          "pattern": "provider_runtime",
+          "path": "__CWD__"
+        },
+        "tool_response": {
+          "error": "No matches found"
+        },
+        "tool_use_id": "tool-grep-1"
+      }
+    },
+    {
+      "hook": "SubagentStart",
+      "input": {
+        "session_id": "plan-session-1",
+        "transcript_path": "/tmp/plan-session-1.jsonl",
+        "cwd": "__CWD__",
+        "hook_event_name": "SubagentStart",
+        "agent_id": "subagent-1",
+        "agent_type": "Explore"
+      }
+    },
+    {
+      "hook": "SubagentStop",
+      "input": {
+        "session_id": "plan-session-1",
+        "transcript_path": "/tmp/plan-session-1.jsonl",
+        "cwd": "__CWD__",
+        "hook_event_name": "SubagentStop",
+        "agent_id": "subagent-1",
+        "agent_type": "Explore",
+        "agent_transcript_path": "/tmp/subagent-1.jsonl",
+        "last_assistant_message": "Exploration complete. Provider runtime facts are separated from the structured intent output.",
+        "permission_mode": "default",
+        "stop_hook_active": false
+      }
+    },
+    {
+      "hook": "Stop",
+      "input": {
+        "session_id": "plan-session-1",
+        "transcript_path": "/tmp/plan-session-1.jsonl",
+        "cwd": "__CWD__",
+        "hook_event_name": "Stop"
+      }
+    }
+  ],
+  "messages": [
+    {
+      "type": "system",
+      "subtype": "init",
+      "cwd": "__CWD__",
+      "session_id": "plan-session-1",
+      "apiKeySource": "none",
+      "claude_code_version": "2.1.76",
+      "tools": [
+        "Task",
+        "Grep",
+        "Read",
+        "StructuredOutput"
+      ],
+      "model": "claude-sonnet-4-5-20250929",
+      "permissionMode": "default",
+      "output_style": "default",
+      "agents": [
+        "general-purpose",
+        "statusline-setup",
+        "Explore",
+        "Plan"
+      ],
+      "skills": [
+        "context7",
+        "exa-search",
+        "find-skills"
+      ],
+      "slash_commands": [
+        "context7",
+        "review",
+        "insights"
+      ],
+      "mcp_servers": [],
+      "plugins": [],
+      "fast_mode_state": "off"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "I'll audit this Claude SDK to Libra semantic-agent bridge experiment and produce a structured intent extraction. Here's my plan:\n\n**3-Step Plan:**\n1. Inspect the managed bridge and its tests to understand the provider/runtime split.\n2. Use task-level exploration to validate what runtime facts are exposed natively.\n3. Produce a structured extraction with risk and validation checks."
+          }
+        ]
+      }
+    },
+    {
+      "type": "system",
+      "subtype": "task_started",
+      "session_id": "plan-session-1",
+      "task_id": "subagent-1",
+      "description": "Explore runtime event patterns",
+      "task_type": "local_agent",
+      "prompt": "Explore runtime event patterns"
+    },
+    {
+      "type": "system",
+      "subtype": "task_progress",
+      "session_id": "plan-session-1",
+      "task_id": "subagent-1",
+      "description": "Reading managed bridge source",
+      "last_tool_name": "Read",
+      "usage": {
+        "duration_ms": 4200,
+        "tool_uses": 1,
+        "total_tokens": 5800
+      }
+    },
+    {
+      "type": "system",
+      "subtype": "task_progress",
+      "session_id": "plan-session-1",
+      "task_id": "subagent-1",
+      "description": "Searching for provider_runtime metadata handling",
+      "last_tool_name": "Grep",
+      "usage": {
+        "duration_ms": 8100,
+        "tool_uses": 2,
+        "total_tokens": 9100
+      }
+    },
+    {
+      "type": "system",
+      "subtype": "task_notification",
+      "session_id": "plan-session-1",
+      "task_id": "subagent-1",
+      "status": "completed",
+      "output_file": "",
+      "summary": "Explore runtime event patterns"
+    }
+  ],
+  "resultMessage": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "session_id": "plan-session-1",
+    "stop_reason": "end_turn",
+    "duration_ms": 142759,
+    "duration_api_ms": 139813,
+    "num_turns": 6,
+    "result": "ok",
+    "total_cost_usd": 0.7018920000000001,
+    "usage": {
+      "input_tokens": 79705,
+      "output_tokens": 3983
+    },
+    "structured_output": {
+      "summary": "Refactor Claude SDK bridge to separate provider-native runtime facts from semantic-layer candidates",
+      "problemStatement": "The current Claude SDK to Libra semantic-agent bridge implementation intermingles provider-native runtime facts with semantic-layer candidates, which makes the provider/runtime boundary harder to reason about and test.",
+      "changeType": "refactor",
+      "objectives": [
+        "Preserve provider-native runtime facts as auditable artifacts",
+        "Keep semantic extraction focused on intent-understanding fields",
+        "Stabilize the Claude SDK path around plan-plus-task scenarios"
+      ],
+      "inScope": [
+        "src/internal/ai/providers/claude_sdk/managed.rs",
+        "tests/command/claude_sdk_test.rs"
+      ],
+      "outOfScope": [
+        "Legacy hook-only provider ingestion"
+      ],
+      "touchHints": {
+        "files": [
+          "samples/managed.rs",
+          "tests/command/claude_sdk_test.rs"
+        ],
+        "symbols": [
+          "ManagedProviderInitSnapshot",
+          "ManagedSemanticRuntimeEvent"
+        ],
+        "apis": [
+          "persist_managed_artifact"
+        ]
+      },
+      "successCriteria": [
+        "Plan text remains visible in raw transcript evidence",
+        "Task runtime events are persisted without needing prompt injection",
+        "Structured output covers risk and implementation intent"
+      ],
+      "fastChecks": [
+        {
+          "id": "claude-sdk-tests",
+          "kind": "command",
+          "command": "cargo test claude_sdk",
+          "required": true,
+          "artifactsProduced": [
+            "test-output"
+          ]
+        }
+      ],
+      "integrationChecks": [],
+      "securityChecks": [],
+      "releaseChecks": [],
+      "riskRationale": "Medium risk because the bridge touches runtime event normalization, but the scenario remains observable through raw artifacts and audit bundles.",
+      "riskFactors": [
+        "Task/runtime fact routing must remain stable",
+        "Structured output still needs to align with semantic extraction"
+      ],
+      "riskLevel": "medium"
+    },
+    "fast_mode_state": "off"
+  }
+}

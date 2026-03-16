@@ -1,0 +1,383 @@
+{
+  "cwd": "__CWD__",
+  "prompt": "__PROMPT__",
+  "hookEvents": [
+    {
+      "hook": "UserPromptSubmit",
+      "input": {
+        "session_id": "sdk-run-session-1",
+        "transcript_path": "/tmp/sdk-run-session-1.jsonl",
+        "cwd": "__CWD__",
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "__PROMPT__"
+      }
+    },
+    {
+      "hook": "PreToolUse",
+      "input": {
+        "session_id": "sdk-run-session-1",
+        "transcript_path": "/tmp/sdk-run-session-1.jsonl",
+        "cwd": "__CWD__",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Read",
+        "tool_input": {
+          "file_path": "__TOUCHED_FILE__"
+        },
+        "tool_use_id": "tool-read-1"
+      }
+    },
+    {
+      "hook": "PostToolUse",
+      "input": {
+        "session_id": "sdk-run-session-1",
+        "transcript_path": "/tmp/sdk-run-session-1.jsonl",
+        "cwd": "__CWD__",
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Read",
+        "tool_input": {
+          "file_path": "__TOUCHED_FILE__"
+        },
+        "tool_response": {
+          "file": {
+            "filePath": "__TOUCHED_FILE__"
+          }
+        },
+        "tool_use_id": "tool-read-1"
+      }
+    },
+    {
+      "hook": "PermissionRequest",
+      "input": {
+        "session_id": "sdk-run-session-1",
+        "transcript_path": "/tmp/sdk-run-session-1.jsonl",
+        "cwd": "__CWD__",
+        "hook_event_name": "PermissionRequest",
+        "tool_name": "Bash",
+        "tool_input": {
+          "command": "cargo test"
+        },
+        "permission_suggestions": []
+      }
+    },
+    {
+      "hook": "Elicitation",
+      "input": {
+        "session_id": "sdk-run-session-1",
+        "transcript_path": "/tmp/sdk-run-session-1.jsonl",
+        "cwd": "__CWD__",
+        "hook_event_name": "Elicitation",
+        "mcp_server_name": "review-gate",
+        "message": "Approve release checks?",
+        "mode": "form",
+        "elicitation_id": "elic-1",
+        "requested_schema": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "hook": "ElicitationResult",
+      "input": {
+        "session_id": "sdk-run-session-1",
+        "transcript_path": "/tmp/sdk-run-session-1.jsonl",
+        "cwd": "__CWD__",
+        "hook_event_name": "ElicitationResult",
+        "mcp_server_name": "review-gate",
+        "mode": "form",
+        "elicitation_id": "elic-1",
+        "action": "accept",
+        "content": {
+          "approved": true
+        }
+      }
+    },
+    {
+      "hook": "InstructionsLoaded",
+      "input": {
+        "session_id": "sdk-run-session-1",
+        "transcript_path": "/tmp/sdk-run-session-1.jsonl",
+        "cwd": "__CWD__",
+        "hook_event_name": "InstructionsLoaded",
+        "file_path": ".claude/CLAUDE.md",
+        "memory_type": "Project",
+        "load_reason": "session_start"
+      }
+    },
+    {
+      "hook": "ConfigChange",
+      "input": {
+        "session_id": "sdk-run-session-1",
+        "transcript_path": "/tmp/sdk-run-session-1.jsonl",
+        "cwd": "__CWD__",
+        "hook_event_name": "ConfigChange",
+        "source": "project_settings",
+        "file_path": ".claude/settings.json"
+      }
+    },
+    {
+      "hook": "TaskCompleted",
+      "input": {
+        "session_id": "sdk-run-session-1",
+        "transcript_path": "/tmp/sdk-run-session-1.jsonl",
+        "cwd": "__CWD__",
+        "hook_event_name": "TaskCompleted",
+        "task_id": "task-1",
+        "task_subject": "inspect managed bridge"
+      }
+    },
+    {
+      "hook": "Stop",
+      "input": {
+        "session_id": "sdk-run-session-1",
+        "transcript_path": "/tmp/sdk-run-session-1.jsonl",
+        "cwd": "__CWD__",
+        "hook_event_name": "Stop"
+      }
+    }
+  ],
+  "messages": [
+    {
+      "type": "system",
+      "subtype": "init",
+      "cwd": "__CWD__",
+      "session_id": "sdk-run-session-1",
+      "apiKeySource": "oauth",
+      "claude_code_version": "2.1.76",
+      "tools": [
+        "Read",
+        "StructuredOutput"
+      ],
+      "model": "claude-sonnet-4-5-20250929",
+      "permissionMode": "default",
+      "output_style": "default",
+      "agents": [
+        "general-purpose",
+        "Plan"
+      ],
+      "skills": [
+        "context7",
+        "exa-search"
+      ],
+      "slash_commands": [
+        "context7",
+        "review"
+      ],
+      "mcp_servers": [
+        {
+          "name": "review-gate",
+          "status": "connected"
+        }
+      ],
+      "plugins": [
+        {
+          "name": "team-plugin",
+          "path": "/plugins/team-plugin"
+        }
+      ],
+      "fast_mode_state": "off"
+    },
+    {
+      "type": "system",
+      "subtype": "task_started",
+      "session_id": "sdk-run-session-1",
+      "task_id": "task-1",
+      "description": "Inspect managed bridge",
+      "task_type": "subagent",
+      "prompt": "Inspect managed bridge"
+    },
+    {
+      "type": "system",
+      "subtype": "task_progress",
+      "session_id": "sdk-run-session-1",
+      "task_id": "task-1",
+      "description": "Reading source files",
+      "usage": {
+        "total_tokens": 120,
+        "tool_uses": 1,
+        "duration_ms": 800
+      },
+      "summary": "Reading source files"
+    },
+    {
+      "type": "system",
+      "subtype": "task_notification",
+      "session_id": "sdk-run-session-1",
+      "task_id": "task-1",
+      "status": "completed",
+      "output_file": "/tmp/task-1.out",
+      "summary": "Inspection complete"
+    },
+    {
+      "type": "system",
+      "subtype": "status",
+      "session_id": "sdk-run-session-1",
+      "status": "compacting",
+      "permissionMode": "default"
+    },
+    {
+      "type": "system",
+      "subtype": "compact_boundary",
+      "session_id": "sdk-run-session-1",
+      "compact_metadata": {
+        "trigger": "auto",
+        "pre_tokens": 4096
+      }
+    },
+    {
+      "type": "rate_limit_event",
+      "session_id": "sdk-run-session-1",
+      "rate_limit_info": {
+        "status": "allowed_warning",
+        "utilization": 0.75
+      }
+    },
+    {
+      "type": "tool_progress",
+      "session_id": "sdk-run-session-1",
+      "uuid": "tool-progress-1",
+      "tool_use_id": "tool-read-1",
+      "tool_name": "Read",
+      "parent_tool_use_id": null,
+      "elapsed_time_seconds": 1.2
+    },
+    {
+      "type": "tool_use_summary",
+      "session_id": "sdk-run-session-1",
+      "uuid": "tool-summary-1",
+      "summary": "Read completed for source inspection",
+      "preceding_tool_use_ids": [
+        "tool-read-1"
+      ]
+    },
+    {
+      "type": "prompt_suggestion",
+      "session_id": "sdk-run-session-1",
+      "suggestion": "Generate a resolver checklist"
+    },
+    {
+      "type": "system",
+      "subtype": "files_persisted",
+      "session_id": "sdk-run-session-1",
+      "files": [
+        {
+          "filename": "src/lib.rs",
+          "file_id": "file-1"
+        }
+      ],
+      "failed": [],
+      "processed_at": "2026-03-15T00:00:00Z"
+    },
+    {
+      "type": "stream_event",
+      "session_id": "sdk-run-session-1",
+      "uuid": "stream-1",
+      "parent_tool_use_id": null,
+      "event": {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+          "type": "text",
+          "text": ""
+        }
+      }
+    },
+    {
+      "type": "stream_event",
+      "session_id": "sdk-run-session-1",
+      "uuid": "stream-2",
+      "parent_tool_use_id": null,
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": "I inspected the repository"
+        }
+      }
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "I inspected the repository and prepared a structured draft."
+          }
+        ]
+      }
+    }
+  ],
+  "resultMessage": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "session_id": "sdk-run-session-1",
+    "stop_reason": "end_turn",
+    "duration_ms": 1800,
+    "duration_api_ms": 1400,
+    "num_turns": 1,
+    "result": "ok",
+    "total_cost_usd": 0.015,
+    "usage": {
+      "input_tokens": 321,
+      "output_tokens": 123
+    },
+    "permission_denials": [
+      {
+        "tool_name": "Bash",
+        "tool_use_id": "tool-bash-1",
+        "tool_input": {
+          "command": "cargo test"
+        }
+      }
+    ],
+    "structured_output": {
+      "summary": "Persist the Claude SDK managed bridge",
+      "problemStatement": "Libra needs a stable SDK-first ingestion path for Claude sessions.",
+      "changeType": "feature",
+      "objectives": [
+        "Persist ai_session.v2",
+        "Emit raw artifact and audit bundle"
+      ],
+      "inScope": [
+        "src/command/claude_sdk.rs",
+        "src/internal/ai/providers/claude_sdk/managed.rs"
+      ],
+      "outOfScope": [
+        "scheduler objects"
+      ],
+      "touchHints": {
+        "files": [
+          "src/lib.rs"
+        ],
+        "symbols": [],
+        "apis": []
+      },
+      "successCriteria": [
+        "Import path persists ai_session",
+        "Run path materializes intent extraction"
+      ],
+      "fastChecks": [
+        {
+          "id": "managed-import",
+          "kind": "command",
+          "command": "cargo test claude_sdk",
+          "required": true,
+          "artifactsProduced": [
+            "test-log"
+          ]
+        }
+      ],
+      "integrationChecks": [],
+      "securityChecks": [],
+      "releaseChecks": [],
+      "riskRationale": "Low risk because the path is additive and emits auditable artifacts.",
+      "riskFactors": [
+        "new SDK bridge"
+      ],
+      "riskLevel": "low"
+    },
+    "fast_mode_state": "off"
+  }
+}
