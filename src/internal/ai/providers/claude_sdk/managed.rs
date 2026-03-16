@@ -2743,19 +2743,13 @@ mod tests {
 
         let bundle = build_managed_audit_bundle(&artifact).expect("bundle should build");
 
-        assert_eq!(
-            bundle.provider_session_id,
-            "6dcf708f-88f2-4e9d-be07-1fbb1ab1b5a8"
-        );
-        assert_eq!(
-            bundle.ai_session_id,
-            "claude__6dcf708f-88f2-4e9d-be07-1fbb1ab1b5a8"
-        );
+        assert_eq!(bundle.provider_session_id, "fixture-probe-session");
+        assert_eq!(bundle.ai_session_id, "claude__fixture-probe-session");
         assert_eq!(bundle.bridge.intent_extraction.status, "invalid");
         assert!(bundle.bridge.intent_extraction_artifact.is_none());
         assert_eq!(
             bundle.bridge.object_candidates.run_snapshot.id,
-            "claude__6dcf708f-88f2-4e9d-be07-1fbb1ab1b5a8::run"
+            "claude__fixture-probe-session::run"
         );
         assert_eq!(
             bundle.bridge.object_candidates.run_event.status,

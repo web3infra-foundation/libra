@@ -5,8 +5,8 @@
     {
       "hook": "UserPromptSubmit",
       "input": {
-        "session_id": "plan-session-1",
-        "transcript_path": "/tmp/plan-session-1.jsonl",
+        "session_id": "fixture-plan-session",
+        "transcript_path": "/tmp/libra-fixtures/fixture-plan-session.jsonl",
         "cwd": "__CWD__",
         "permission_mode": "default",
         "hook_event_name": "UserPromptSubmit",
@@ -16,8 +16,8 @@
     {
       "hook": "PreToolUse",
       "input": {
-        "session_id": "plan-session-1",
-        "transcript_path": "/tmp/plan-session-1.jsonl",
+        "session_id": "fixture-plan-session",
+        "transcript_path": "/tmp/libra-fixtures/fixture-plan-session.jsonl",
         "cwd": "__CWD__",
         "permission_mode": "default",
         "hook_event_name": "PreToolUse",
@@ -25,14 +25,14 @@
         "tool_input": {
           "file_path": "__TOUCHED_FILE__"
         },
-        "tool_use_id": "tool-read-1"
+        "tool_use_id": "tool-read-fixture"
       }
     },
     {
       "hook": "PostToolUse",
       "input": {
-        "session_id": "plan-session-1",
-        "transcript_path": "/tmp/plan-session-1.jsonl",
+        "session_id": "fixture-plan-session",
+        "transcript_path": "/tmp/libra-fixtures/fixture-plan-session.jsonl",
         "cwd": "__CWD__",
         "permission_mode": "default",
         "hook_event_name": "PostToolUse",
@@ -45,14 +45,14 @@
             "filePath": "__TOUCHED_FILE__"
           }
         },
-        "tool_use_id": "tool-read-1"
+        "tool_use_id": "tool-read-fixture"
       }
     },
     {
       "hook": "PreToolUse",
       "input": {
-        "session_id": "plan-session-1",
-        "transcript_path": "/tmp/plan-session-1.jsonl",
+        "session_id": "fixture-plan-session",
+        "transcript_path": "/tmp/libra-fixtures/fixture-plan-session.jsonl",
         "cwd": "__CWD__",
         "permission_mode": "default",
         "hook_event_name": "PreToolUse",
@@ -61,14 +61,14 @@
           "pattern": "provider_runtime",
           "path": "__CWD__"
         },
-        "tool_use_id": "tool-grep-1"
+        "tool_use_id": "tool-grep-fixture"
       }
     },
     {
       "hook": "PostToolUseFailure",
       "input": {
-        "session_id": "plan-session-1",
-        "transcript_path": "/tmp/plan-session-1.jsonl",
+        "session_id": "fixture-plan-session",
+        "transcript_path": "/tmp/libra-fixtures/fixture-plan-session.jsonl",
         "cwd": "__CWD__",
         "permission_mode": "default",
         "hook_event_name": "PostToolUseFailure",
@@ -80,30 +80,30 @@
         "tool_response": {
           "error": "No matches found"
         },
-        "tool_use_id": "tool-grep-1"
+        "tool_use_id": "tool-grep-fixture"
       }
     },
     {
       "hook": "SubagentStart",
       "input": {
-        "session_id": "plan-session-1",
-        "transcript_path": "/tmp/plan-session-1.jsonl",
+        "session_id": "fixture-plan-session",
+        "transcript_path": "/tmp/libra-fixtures/fixture-plan-session.jsonl",
         "cwd": "__CWD__",
         "hook_event_name": "SubagentStart",
-        "agent_id": "subagent-1",
+        "agent_id": "fixture-subagent-plan",
         "agent_type": "Explore"
       }
     },
     {
       "hook": "SubagentStop",
       "input": {
-        "session_id": "plan-session-1",
-        "transcript_path": "/tmp/plan-session-1.jsonl",
+        "session_id": "fixture-plan-session",
+        "transcript_path": "/tmp/libra-fixtures/fixture-plan-session.jsonl",
         "cwd": "__CWD__",
         "hook_event_name": "SubagentStop",
-        "agent_id": "subagent-1",
+        "agent_id": "fixture-subagent-plan",
         "agent_type": "Explore",
-        "agent_transcript_path": "/tmp/subagent-1.jsonl",
+        "agent_transcript_path": "/tmp/libra-fixtures/fixture-subagent-plan.jsonl",
         "last_assistant_message": "Exploration complete. Provider runtime facts are separated from the structured intent output.",
         "permission_mode": "default",
         "stop_hook_active": false
@@ -112,8 +112,8 @@
     {
       "hook": "Stop",
       "input": {
-        "session_id": "plan-session-1",
-        "transcript_path": "/tmp/plan-session-1.jsonl",
+        "session_id": "fixture-plan-session",
+        "transcript_path": "/tmp/libra-fixtures/fixture-plan-session.jsonl",
         "cwd": "__CWD__",
         "hook_event_name": "Stop"
       }
@@ -124,7 +124,7 @@
       "type": "system",
       "subtype": "init",
       "cwd": "__CWD__",
-      "session_id": "plan-session-1",
+      "session_id": "fixture-plan-session",
       "apiKeySource": "none",
       "claude_code_version": "2.1.76",
       "tools": [
@@ -171,8 +171,8 @@
     {
       "type": "system",
       "subtype": "task_started",
-      "session_id": "plan-session-1",
-      "task_id": "subagent-1",
+      "session_id": "fixture-plan-session",
+      "task_id": "fixture-subagent-plan",
       "description": "Explore runtime event patterns",
       "task_type": "local_agent",
       "prompt": "Explore runtime event patterns"
@@ -180,8 +180,8 @@
     {
       "type": "system",
       "subtype": "task_progress",
-      "session_id": "plan-session-1",
-      "task_id": "subagent-1",
+      "session_id": "fixture-plan-session",
+      "task_id": "fixture-subagent-plan",
       "description": "Reading managed bridge source",
       "last_tool_name": "Read",
       "usage": {
@@ -193,8 +193,8 @@
     {
       "type": "system",
       "subtype": "task_progress",
-      "session_id": "plan-session-1",
-      "task_id": "subagent-1",
+      "session_id": "fixture-plan-session",
+      "task_id": "fixture-subagent-plan",
       "description": "Searching for provider_runtime metadata handling",
       "last_tool_name": "Grep",
       "usage": {
@@ -206,8 +206,8 @@
     {
       "type": "system",
       "subtype": "task_notification",
-      "session_id": "plan-session-1",
-      "task_id": "subagent-1",
+      "session_id": "fixture-plan-session",
+      "task_id": "fixture-subagent-plan",
       "status": "completed",
       "output_file": "",
       "summary": "Explore runtime event patterns"
@@ -217,7 +217,7 @@
     "type": "result",
     "subtype": "success",
     "is_error": false,
-    "session_id": "plan-session-1",
+    "session_id": "fixture-plan-session",
     "stop_reason": "end_turn",
     "duration_ms": 142759,
     "duration_api_ms": 139813,
