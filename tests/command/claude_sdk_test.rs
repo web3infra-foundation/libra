@@ -1,7 +1,8 @@
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
-    process::Output,
+    process::{Output, Stdio},
     sync::Arc,
 };
 
@@ -780,6 +781,63 @@ async fn test_claude_sdk_sync_sessions_keeps_history_in_current_repo_when_cwd_is
         !external_project.path().join(".libra/libra.db").exists(),
         "sync-sessions should not create a shadow Libra repo under the overridden cwd"
     );
+}
+
+#[test]
+fn test_claude_sdk_helper_resolves_project_local_sdk_from_relative_cwd() {
+    let repo = tempdir().expect("failed to create repo root");
+    let module_dir = repo
+        .path()
+        .join("node_modules")
+        .join("@anthropic-ai")
+        .join("claude-agent-sdk");
+    fs::create_dir_all(&module_dir).expect("failed to create fake sdk module directory");
+    fs::write(
+        module_dir.join("index.js"),
+        r#"exports.query = async function* () {};
+exports.listSessions = async () => ([{
+  sessionId: "session-relative",
+  summary: "Relative cwd session",
+  lastModified: 1742025600000,
+  cwd: process.cwd()
+}]);"#,
+    )
+    .expect("failed to write fake sdk module");
+
+    let helper_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("internal")
+        .join("ai")
+        .join("providers")
+        .join("claude_sdk")
+        .join("helper.cjs");
+    let mut child = std::process::Command::new("node")
+        .arg(&helper_path)
+        .current_dir(repo.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn helper with node");
+
+    let request = br#"{"mode":"listSessions","cwd":".","offset":0,"includeWorktrees":true}"#;
+    child
+        .stdin
+        .as_mut()
+        .expect("child stdin should exist")
+        .write_all(request)
+        .expect("failed to send request to helper");
+    let output = child.wait_with_output().expect("failed to wait on helper");
+    assert!(
+        output.status.success(),
+        "helper should resolve project-local sdk from relative cwd: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let sync_json: Value =
+        serde_json::from_slice(&output.stdout).expect("helper stdout should be valid JSON");
+    assert_eq!(sync_json.as_array().map(Vec::len), Some(1));
+    assert_eq!(sync_json[0]["sessionId"], json!("session-relative"));
 }
 
 #[tokio::test]

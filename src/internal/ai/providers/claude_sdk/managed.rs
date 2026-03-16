@@ -1734,15 +1734,26 @@ fn extract_file_candidates(tool: &ManagedToolInvocation) -> Vec<String> {
 
 fn normalize_hint_path(path: &str, cwd: &str) -> String {
     let trimmed = path.trim();
-    if trimmed.is_empty() || trimmed == cwd {
+    if trimmed.is_empty() {
         return String::new();
     }
 
-    if let Some(relative) = trimmed.strip_prefix(cwd) {
-        return relative.trim_start_matches('/').to_string();
+    let normalized_path = trimmed.replace('\\', "/").trim_end_matches('/').to_string();
+    let normalized_cwd = cwd
+        .trim()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_string();
+    if normalized_path.is_empty() || normalized_path == normalized_cwd {
+        return String::new();
     }
 
-    trimmed.to_string()
+    let cwd_prefix = format!("{normalized_cwd}/");
+    if let Some(relative) = normalized_path.strip_prefix(&cwd_prefix) {
+        return relative.to_string();
+    }
+
+    normalized_path
 }
 
 fn build_field_provenance(
@@ -3045,6 +3056,22 @@ mod tests {
                 .iter()
                 .any(|entry| entry.field_path == "runtime.contextEvents"),
             "expected context runtime provenance"
+        );
+    }
+
+    #[test]
+    fn normalize_hint_path_respects_path_boundaries() {
+        assert_eq!(
+            normalize_hint_path("/repo/src/lib.rs", "/repo"),
+            "src/lib.rs"
+        );
+        assert_eq!(
+            normalize_hint_path("/repo2/src/lib.rs", "/repo"),
+            "/repo2/src/lib.rs"
+        );
+        assert_eq!(
+            normalize_hint_path("C:\\repo\\src\\lib.rs", "C:\\repo"),
+            "src/lib.rs"
         );
     }
 }
