@@ -1,0 +1,7 @@
+Audit the Claude SDK to Libra semantic-agent bridge and produce a structured intent extraction.
+
+Requirements:
+- Start by giving a concise 3-step plan.
+- Use task-style exploration to inspect provider-native runtime facts versus semantic candidates.
+- Focus on how provider init, task runtime events, and structured extraction relate to each other.
+- Keep the final extraction grounded in observable runtime evidence.

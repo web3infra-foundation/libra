@@ -1,5 +1,4 @@
 //! Claude Code lifecycle hook provider facade.
-
 mod parser;
 mod settings;
 

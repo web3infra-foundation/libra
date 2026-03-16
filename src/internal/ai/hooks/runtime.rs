@@ -71,6 +71,7 @@ fn redact_session_id(session_id: &str) -> String {
 }
 
 pub async fn process_hook_event_from_stdin(
+    command: super::provider::ProviderHookCommand,
     expected_kind: LifecycleEventKind,
     provider: &dyn HookProvider,
 ) -> Result<()> {
@@ -114,6 +115,7 @@ pub async fn process_hook_event_from_stdin(
         crate::internal::ai::session::SessionStore::from_storage_path(&storage_path);
 
     let ai_session_id = build_ai_session_id(provider.provider_name(), &envelope.session_id);
+    let recovered_from_out_of_order = event.kind != LifecycleEventKind::SessionStart;
     let _session_lock = session_store
         .lock_session(&ai_session_id)
         .with_context(|| {
@@ -129,9 +131,11 @@ pub async fn process_hook_event_from_stdin(
             let mut recovered = SessionState::new(&process_cwd_str);
             recovered.id = ai_session_id.clone();
             recovered.working_dir = process_cwd_str.clone();
-            recovered
-                .metadata
-                .insert("recovered_from_out_of_order".to_string(), json!(true));
+            if recovered_from_out_of_order {
+                recovered
+                    .metadata
+                    .insert("recovered_from_out_of_order".to_string(), json!(true));
+            }
             recovered
         }
         Err(err) if err.kind() == std::io::ErrorKind::InvalidData => {
@@ -209,6 +213,9 @@ pub async fn process_hook_event_from_stdin(
     }
 
     apply_hook_event(&mut session, &envelope, &event, provider.provider_name());
+    provider
+        .post_process_event(command, &storage_path, &mut session, &envelope, &event)
+        .context("provider hook post-processing failed")?;
     if let Some(event_key) = dedup_key {
         append_processed_event_key(&mut session, event_key);
     }

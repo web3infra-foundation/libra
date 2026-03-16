@@ -76,7 +76,6 @@ pub(super) fn install_claude_hooks(options: &ProviderInstallOptions) -> Result<(
             settings_path.display()
         );
     }
-
     Ok(())
 }
 
