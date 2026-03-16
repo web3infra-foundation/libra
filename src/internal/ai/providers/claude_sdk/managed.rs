@@ -2845,7 +2845,8 @@ mod tests {
 
         let err = build_managed_audit_bundle(&artifact).expect_err("bundle should reject");
         assert!(
-            err.to_string().contains("invalid managed session_id"),
+            err.chain()
+                .any(|cause| cause.to_string().contains("invalid managed session_id")),
             "unexpected error: {err:#}"
         );
     }
