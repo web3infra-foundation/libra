@@ -469,6 +469,12 @@ mod tests {
                 .unwrap()
                 .success()
         );
+        assert!(
+            run_git(Some(&work_path), ["config", "commit.gpgsign", "false"])
+                .status()
+                .unwrap()
+                .success()
+        );
         std::fs::write(work_path.join("README.md"), "hello world").unwrap();
         assert!(
             run_git(Some(&work_path), ["add", "README.md"])

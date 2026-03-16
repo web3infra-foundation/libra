@@ -35,12 +35,7 @@ async fn test_ai_flow_local() {
     let objects_dir = libra_dir.join("objects");
 
     let storage = Arc::new(LocalStorage::new(objects_dir));
-    let db_path = libra_dir.join("libra.db");
-    let db_conn = Arc::new(
-        libra::internal::db::establish_connection(db_path.to_str().unwrap())
-            .await
-            .unwrap(),
-    );
+    let db_conn = Arc::new(libra::internal::db::get_db_conn_instance().await);
     let history_manager = HistoryManager::new(storage.clone(), libra_dir.clone(), db_conn);
 
     // 2. User creates a Task

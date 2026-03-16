@@ -64,11 +64,6 @@ impl SessionStore {
     pub fn save(&self, session: &SessionState) -> io::Result<()> {
         self.ensure_dir()?;
         let path = self.session_path(&session.id);
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let tmp_path = self.sessions_dir.join(format!("{}.{}.tmp", session.id, ts));
         let json = serde_json::to_string_pretty(session)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         self.write_atomic(&path, json.as_bytes())

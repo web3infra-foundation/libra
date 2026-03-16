@@ -327,7 +327,7 @@ async fn execute_gate_task(
     inherited_runtime: Option<&ToolRuntimeContext>,
     observer: Option<&Arc<dyn OrchestratorObserver>>,
 ) -> TaskResult {
-    let runtime_context = runtime_context_for_task(spec, task, working_dir, inherited_runtime);
+    let runtime_context = runtime_context_for_gate_task(spec, inherited_runtime);
     let gate_report = if task.checks.is_empty() {
         GateReport::empty()
     } else {
@@ -1052,6 +1052,30 @@ fn runtime_context_for_task(
     }
 }
 
+fn runtime_context_for_gate_task(
+    spec: &IntentSpec,
+    inherited_runtime: Option<&ToolRuntimeContext>,
+) -> ToolRuntimeContext {
+    let network_access = if matches!(
+        spec.constraints.security.network_policy,
+        NetworkPolicy::Allow
+    ) {
+        crate::internal::ai::sandbox::NetworkAccess::Enabled
+    } else {
+        crate::internal::ai::sandbox::NetworkAccess::Restricted
+    };
+
+    ToolRuntimeContext {
+        sandbox: Some(ToolSandboxContext {
+            policy: SandboxPolicy::ExternalSandbox { network_access },
+            permissions: SandboxPermissions::UseDefault,
+        }),
+        sandbox_runtime: inherited_runtime.and_then(|ctx| ctx.sandbox_runtime.clone()),
+        approval: inherited_runtime.and_then(|ctx| ctx.approval.clone()),
+        max_output_bytes: max_output_limit(&spec.security.tool_acl, "shell", "execute"),
+    }
+}
+
 fn runtime_context_for_reviewer(
     spec: &IntentSpec,
     inherited_runtime: Option<&ToolRuntimeContext>,
@@ -1477,7 +1501,7 @@ mod tests {
             checks: vec![Check {
                 id: "ok".into(),
                 kind: CheckKind::Command,
-                command: Some("true".into()),
+                command: Some(":".into()),
                 timeout_seconds: Some(10),
                 expected_exit_code: Some(0),
                 required: true,
@@ -1499,7 +1523,7 @@ mod tests {
             checks: vec![Check {
                 id: "fmt".into(),
                 kind: CheckKind::Command,
-                command: Some("true".into()),
+                command: Some(":".into()),
                 timeout_seconds: Some(10),
                 expected_exit_code: Some(0),
                 required: true,
