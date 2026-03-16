@@ -44,7 +44,7 @@ pub fn build_git_plan(intent_id: Uuid, plan_spec: &ExecutionPlanSpec) -> Result<
         .context("Failed to construct git-internal Plan")?;
 
     for task in &plan_spec.tasks {
-        plan.add_step(task_to_plan_step(task));
+        plan.add_step(task_to_plan_step(task)?);
     }
 
     Ok(plan)
@@ -86,7 +86,7 @@ pub fn parse_object_id(value: &str) -> Result<Uuid> {
     Uuid::parse_str(trimmed).with_context(|| format!("Invalid object UUID: {value}"))
 }
 
-fn task_to_plan_step(task: &TaskSpec) -> PlanStep {
+fn task_to_plan_step(task: &TaskSpec) -> Result<PlanStep> {
     let mut step = task.step.clone();
     step.set_inputs(Some(json!({
         "taskId": task.id(),
@@ -106,10 +106,16 @@ fn task_to_plan_step(task: &TaskSpec) -> PlanStep {
     let checks = if task.checks.is_empty() {
         None
     } else {
-        Some(serde_json::to_value(&task.checks).unwrap_or_else(|_| json!([])))
+        Some(serde_json::to_value(&task.checks).with_context(|| {
+            format!(
+                "Failed to serialize checks for task '{}' ({})",
+                task.title(),
+                task.id()
+            )
+        })?)
     };
     step.set_checks(checks);
-    step
+    Ok(step)
 }
 
 #[cfg(test)]

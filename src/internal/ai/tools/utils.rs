@@ -2,7 +2,7 @@
 
 use std::{
     ffi::OsString,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use crate::{
@@ -19,15 +19,21 @@ pub fn validate_path(path: &Path, working_dir: &Path) -> ToolResult<()> {
         return Err(ToolError::PathNotAbsolute(path.to_path_buf()));
     }
 
-    let working_dir_canonical = canonicalize_for_boundary(working_dir)?;
-    let path_canonical = canonicalize_for_boundary(path)?;
-
-    // Check if path is within canonicalized working directory boundaries.
-    if !utils::util::is_sub_path(&path_canonical, &working_dir_canonical) {
+    if !is_within_working_dir(path, working_dir)? {
         return Err(ToolError::PathOutsideWorkingDir(path.to_path_buf()));
     }
 
     Ok(())
+}
+
+/// Returns true if `path` stays inside `working_dir` after boundary canonicalization.
+pub fn is_within_working_dir(path: &Path, working_dir: &Path) -> ToolResult<bool> {
+    let working_dir_canonical = canonicalize_for_boundary(working_dir)?;
+    let path_canonical = canonicalize_for_boundary(path)?;
+    Ok(utils::util::is_sub_path(
+        &path_canonical,
+        &working_dir_canonical,
+    ))
 }
 
 /// Resolve an absolute or relative path inside the working directory.
@@ -71,7 +77,28 @@ fn canonicalize_for_boundary(path: &Path) -> ToolResult<PathBuf> {
     for part in suffix.iter().rev() {
         canonical.push(part);
     }
-    Ok(canonical)
+    Ok(normalize_lexical_absolute(&canonical))
+}
+
+fn normalize_lexical_absolute(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(Path::new(component.as_os_str())),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(
+                    normalized.components().next_back(),
+                    Some(Component::Normal(_))
+                ) {
+                    normalized.pop();
+                }
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    normalized
 }
 
 #[cfg(test)]

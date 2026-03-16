@@ -181,8 +181,8 @@ impl SandboxManager {
         command.extend(spec.args.clone());
 
         let sandbox = self.select_initial(policy, spec.sandbox_permissions);
-        let (command, arg0) = match sandbox {
-            SandboxType::None => (command, None),
+        let (command, arg0, effective_sandbox) = match sandbox {
+            SandboxType::None => (command, None, SandboxType::None),
             SandboxType::MacosSeatbelt => {
                 #[cfg(target_os = "macos")]
                 {
@@ -192,7 +192,7 @@ impl SandboxManager {
                     let mut full = Vec::with_capacity(1 + seatbelt_args.len());
                     full.push(MACOS_PATH_TO_SEATBELT_EXECUTABLE.to_string());
                     full.append(&mut seatbelt_args);
-                    (full, None)
+                    (full, None, SandboxType::MacosSeatbelt)
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
@@ -203,18 +203,27 @@ impl SandboxManager {
                 #[cfg(target_os = "linux")]
                 {
                     let policy = policy.ok_or(SandboxTransformError::UnsupportedPlatform)?;
-                    let linux_sandbox_exe = linux_sandbox_exe
-                        .ok_or(SandboxTransformError::MissingLinuxSandboxExecutable)?;
-                    let mut sandbox_args = create_linux_sandbox_command_args(
-                        command,
-                        policy,
-                        sandbox_policy_cwd,
-                        use_linux_sandbox_bwrap,
-                    )?;
-                    let mut full = Vec::with_capacity(1 + sandbox_args.len());
-                    full.push(linux_sandbox_exe.to_string_lossy().to_string());
-                    full.append(&mut sandbox_args);
-                    (full, Some("libra-linux-sandbox".to_string()))
+                    if let Some(linux_sandbox_exe) = linux_sandbox_exe {
+                        let mut sandbox_args = create_linux_sandbox_command_args(
+                            command,
+                            policy,
+                            sandbox_policy_cwd,
+                            use_linux_sandbox_bwrap,
+                        )?;
+                        let mut full = Vec::with_capacity(1 + sandbox_args.len());
+                        full.push(linux_sandbox_exe.to_string_lossy().to_string());
+                        full.append(&mut sandbox_args);
+                        (
+                            full,
+                            Some("libra-linux-sandbox".to_string()),
+                            SandboxType::LinuxSeccomp,
+                        )
+                    } else {
+                        tracing::warn!(
+                            "linux sandbox executable not configured; running command without linux sandbox"
+                        );
+                        (command, None, SandboxType::None)
+                    }
                 }
                 #[cfg(not(target_os = "linux"))]
                 {
@@ -238,7 +247,7 @@ impl SandboxManager {
             cwd: spec.cwd,
             env,
             timeout_ms: spec.timeout_ms,
-            sandbox,
+            sandbox: effective_sandbox,
             sandbox_permissions: spec.sandbox_permissions,
             justification: spec.justification,
             arg0,
@@ -428,7 +437,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn transform_linux_seccomp_requires_helper_executable() {
+    fn transform_linux_seccomp_falls_back_when_helper_is_missing() {
         let manager = SandboxManager::new();
         let cwd = std::env::temp_dir();
         let request = SandboxTransformRequest {
@@ -450,10 +459,11 @@ mod tests {
             use_linux_sandbox_bwrap: false,
         };
 
-        assert!(matches!(
-            manager.transform(request),
-            Err(SandboxTransformError::MissingLinuxSandboxExecutable)
-        ));
+        let transformed = manager
+            .transform(request)
+            .expect("transform should fallback");
+        assert_eq!(transformed.sandbox, SandboxType::None);
+        assert!(!transformed.command.is_empty());
     }
 
     #[test]

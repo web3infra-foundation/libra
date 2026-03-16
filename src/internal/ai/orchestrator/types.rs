@@ -1,4 +1,8 @@
-use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use git_internal::internal::object::{plan::PlanStep, task::Task as GitTask};
 use serde::{Deserialize, Serialize};
@@ -172,27 +176,37 @@ impl ExecutionPlanSpec {
     }
 
     pub fn parallel_groups(&self) -> Vec<Vec<Uuid>> {
-        let mut remaining = self.tasks.clone();
+        let mut remaining: BTreeSet<Uuid> = self.tasks.iter().map(TaskSpec::id).collect();
+        let task_by_id: BTreeMap<Uuid, &TaskSpec> =
+            self.tasks.iter().map(|task| (task.id(), task)).collect();
         let mut completed = BTreeSet::new();
         let mut groups = Vec::new();
 
         while !remaining.is_empty() {
             let ready: Vec<Uuid> = remaining
                 .iter()
-                .filter(|task| {
-                    task.dependencies()
-                        .iter()
-                        .all(|dep| completed.contains(dep))
+                .filter(|task_id| {
+                    task_by_id.get(task_id).is_some_and(|task| {
+                        task.dependencies()
+                            .iter()
+                            .all(|dep| completed.contains(dep))
+                    })
                 })
-                .map(TaskSpec::id)
+                .copied()
                 .collect();
             if ready.is_empty() {
+                tracing::warn!(
+                    unresolved_tasks = remaining.len(),
+                    "unable to compute full task parallel groups due to unresolved dependencies"
+                );
+                groups.push(remaining.iter().copied().collect());
                 break;
             }
+            let ready_set: BTreeSet<Uuid> = ready.iter().copied().collect();
             for id in &ready {
                 completed.insert(*id);
             }
-            remaining.retain(|task| !ready.contains(&task.id()));
+            remaining.retain(|task_id| !ready_set.contains(task_id));
             groups.push(ready);
         }
 
@@ -541,6 +555,55 @@ mod tests {
         assert_eq!(spec.tasks.len(), 2);
         assert_eq!(spec.tasks[1].dependencies(), &[a]);
         assert_eq!(spec.parallel_groups(), vec![vec![a], vec![b]]);
+    }
+
+    #[test]
+    fn test_parallel_groups_keeps_unresolved_tasks_visible() {
+        let actor = ActorRef::agent("test-planner").unwrap();
+        let mut task_a = GitTask::new(actor.clone(), "a", None).unwrap();
+        let mut task_b = GitTask::new(actor, "b", None).unwrap();
+        let id_a = task_a.header().object_id();
+        let id_b = task_b.header().object_id();
+        task_a.add_dependency(id_b);
+        task_b.add_dependency(id_a);
+
+        let spec = ExecutionPlanSpec {
+            intent_spec_id: "spec-cycle".into(),
+            revision: 1,
+            parent_revision: None,
+            replan_reason: None,
+            tasks: vec![
+                TaskSpec {
+                    step: PlanStep::new("a"),
+                    task: task_a,
+                    objective: "a".into(),
+                    kind: TaskKind::Implementation,
+                    gate_stage: None,
+                    owner_role: Some("coder".into()),
+                    scope_in: vec![],
+                    scope_out: vec![],
+                    checks: vec![],
+                    contract: TaskContract::default(),
+                },
+                TaskSpec {
+                    step: PlanStep::new("b"),
+                    task: task_b,
+                    objective: "b".into(),
+                    kind: TaskKind::Implementation,
+                    gate_stage: None,
+                    owner_role: Some("coder".into()),
+                    scope_in: vec![],
+                    scope_out: vec![],
+                    checks: vec![],
+                    contract: TaskContract::default(),
+                },
+            ],
+            max_parallel: 2,
+            checkpoints: vec![],
+        };
+
+        let grouped: BTreeSet<Uuid> = spec.parallel_groups().into_iter().flatten().collect();
+        assert_eq!(grouped, BTreeSet::from([id_a, id_b]));
     }
 
     #[test]

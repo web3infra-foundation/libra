@@ -170,10 +170,7 @@ fn push_root_unique(roots: &mut Vec<PathBuf>, root: PathBuf) {
 fn protected_subpaths(root: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     for subdir in [".git", ".libra", ".codex", ".agents"] {
-        let candidate = root.join(subdir);
-        if candidate.exists() {
-            paths.push(candidate);
-        }
+        paths.push(root.join(subdir));
     }
     paths
 }

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use serde_json::Value;
 
@@ -62,6 +62,8 @@ pub struct ToolLoopConfig {
     pub allowed_tools: Option<Vec<String>>,
     /// Optional runtime constraints injected into every tool invocation.
     pub runtime_context: Option<ToolRuntimeContext>,
+    /// Hard cap for model turns in one tool loop run.
+    pub max_turns: Option<usize>,
 }
 
 impl Default for ToolLoopConfig {
@@ -72,9 +74,13 @@ impl Default for ToolLoopConfig {
             hook_runner: None,
             allowed_tools: None,
             runtime_context: None,
+            max_turns: None,
         }
     }
 }
+
+const DEFAULT_MAX_TOOL_LOOP_TURNS: usize = 64;
+const MAX_IDENTICAL_BLOCKED_TOOL_CALLS: usize = 3;
 
 /// Run a prompt through a completion model, allowing iterative tool calls.
 pub async fn run_tool_loop<M: CompletionModel>(
@@ -108,6 +114,14 @@ pub async fn run_tool_loop_with_history_and_observer<M: CompletionModel, O: Tool
 ) -> Result<ToolLoopTurn, CompletionError> {
     existing_history.push(Message::user(prompt.into()));
     let mut history = existing_history;
+    let max_turns = config.max_turns.unwrap_or(DEFAULT_MAX_TOOL_LOOP_TURNS);
+    if max_turns == 0 {
+        return Err(CompletionError::ResponseError(
+            "Tool loop max_turns must be greater than 0".to_string(),
+        ));
+    }
+    let mut turn_count = 0usize;
+    let mut blocked_signatures: HashMap<String, usize> = HashMap::new();
 
     let mut tools = registry_tool_definitions(registry);
 
@@ -117,6 +131,13 @@ pub async fn run_tool_loop_with_history_and_observer<M: CompletionModel, O: Tool
     }
 
     loop {
+        if turn_count >= max_turns {
+            return Err(CompletionError::ResponseError(format!(
+                "Tool loop exceeded maximum turns ({max_turns})"
+            )));
+        }
+        turn_count += 1;
+
         let request = CompletionRequest {
             preamble: config.preamble.clone(),
             chat_history: history.clone(),
@@ -174,10 +195,20 @@ pub async fn run_tool_loop_with_history_and_observer<M: CompletionModel, O: Tool
                     history.push(Message::User {
                         content: OneOrMany::One(UserContent::ToolResult(ToolResult {
                             id: call.id,
-                            name: call.function.name,
+                            name: call.function.name.clone(),
                             result: result_json,
                         })),
                     });
+                    let signature =
+                        blocked_tool_call_signature(&call.function.name, &call.function.arguments);
+                    if increment_blocked_count(&mut blocked_signatures, &signature)
+                        >= MAX_IDENTICAL_BLOCKED_TOOL_CALLS
+                    {
+                        return Err(CompletionError::ResponseError(format!(
+                            "Tool loop aborted after repeated blocked calls to '{}' with identical arguments",
+                            call.function.name
+                        )));
+                    }
                     continue;
                 }
 
@@ -197,10 +228,22 @@ pub async fn run_tool_loop_with_history_and_observer<M: CompletionModel, O: Tool
                         history.push(Message::User {
                             content: OneOrMany::One(UserContent::ToolResult(ToolResult {
                                 id: call.id,
-                                name: call.function.name,
+                                name: call.function.name.clone(),
                                 result: result_json,
                             })),
                         });
+                        let signature = blocked_tool_call_signature(
+                            &call.function.name,
+                            &call.function.arguments,
+                        );
+                        if increment_blocked_count(&mut blocked_signatures, &signature)
+                            >= MAX_IDENTICAL_BLOCKED_TOOL_CALLS
+                        {
+                            return Err(CompletionError::ResponseError(format!(
+                                "Tool loop aborted after repeated blocked calls to '{}' with identical arguments",
+                                call.function.name
+                            )));
+                        }
                         continue;
                     }
                 }
@@ -221,10 +264,20 @@ pub async fn run_tool_loop_with_history_and_observer<M: CompletionModel, O: Tool
                     history.push(Message::User {
                         content: OneOrMany::One(UserContent::ToolResult(ToolResult {
                             id: call.id,
-                            name: call.function.name,
+                            name: call.function.name.clone(),
                             result: result_json,
                         })),
                     });
+                    let signature =
+                        blocked_tool_call_signature(&call.function.name, &call.function.arguments);
+                    if increment_blocked_count(&mut blocked_signatures, &signature)
+                        >= MAX_IDENTICAL_BLOCKED_TOOL_CALLS
+                    {
+                        return Err(CompletionError::ResponseError(format!(
+                            "Tool loop aborted after repeated blocked calls to '{}' with identical arguments",
+                            call.function.name
+                        )));
+                    }
                     continue;
                 }
 
@@ -245,6 +298,7 @@ pub async fn run_tool_loop_with_history_and_observer<M: CompletionModel, O: Tool
                         Ok(output) => Ok(output),
                         Err(err) => Err(format!("Tool '{}' failed: {}", call.function.name, err)),
                     };
+                blocked_signatures.clear();
 
                 observer.on_tool_call_end(&call.id, &call.function.name, &tool_result);
 
@@ -315,6 +369,19 @@ fn tool_arguments_json(arguments: &Value) -> String {
         }
         _ => arguments.to_string(),
     }
+}
+
+fn blocked_tool_call_signature(tool_name: &str, arguments: &Value) -> String {
+    format!("{tool_name}|{}", arguments)
+}
+
+fn increment_blocked_count(
+    blocked_signatures: &mut HashMap<String, usize>,
+    signature: &str,
+) -> usize {
+    let count = blocked_signatures.entry(signature.to_string()).or_insert(0);
+    *count += 1;
+    *count
 }
 
 fn registry_tool_definitions(registry: &ToolRegistry) -> Vec<ToolDefinition> {
@@ -464,6 +531,7 @@ mod tests {
                 hook_runner: None,
                 allowed_tools: None,
                 runtime_context: None,
+                max_turns: None,
             },
             &mut observer,
         )
@@ -630,6 +698,7 @@ mod tests {
                 hook_runner: None,
                 allowed_tools: None,
                 runtime_context: None,
+                max_turns: None,
             },
             &mut observer,
         )
@@ -698,6 +767,7 @@ mod tests {
                 hook_runner: None,
                 allowed_tools: Some(vec!["other_tool".to_string()]),
                 runtime_context: None,
+                max_turns: None,
             },
             &mut observer,
         )
@@ -715,6 +785,118 @@ mod tests {
         assert!(
             !observer.ends[0].2,
             "blocked tool call should report as not successful"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_loop_stops_when_max_turns_is_reached() {
+        #[derive(Clone)]
+        struct EndlessToolCallModel;
+
+        impl CompletionModel for EndlessToolCallModel {
+            type Response = ();
+
+            async fn completion(
+                &self,
+                _request: CompletionRequest,
+            ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+                Ok(CompletionResponse {
+                    content: vec![AssistantContent::ToolCall(ToolCall {
+                        id: "call_loop".to_string(),
+                        name: "mock_tool".to_string(),
+                        function: Function {
+                            name: "mock_tool".to_string(),
+                            arguments: json!({"value": 1}),
+                        },
+                    })],
+                    raw_response: (),
+                })
+            }
+        }
+
+        let temp_dir = TempDir::new().unwrap();
+        let mut registry = ToolRegistry::with_working_dir(temp_dir.path().to_path_buf());
+        registry.register("mock_tool", Arc::new(MockHandler));
+
+        let err = run_tool_loop_with_history_and_observer(
+            &EndlessToolCallModel,
+            Vec::new(),
+            "loop",
+            &registry,
+            ToolLoopConfig {
+                max_turns: Some(3),
+                ..Default::default()
+            },
+            &mut RecordingObserver::default(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(err, CompletionError::ResponseError(msg) if msg.contains("maximum turns"))
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_loop_stops_on_repeated_blocked_identical_calls() {
+        #[derive(Clone)]
+        struct BlockedLoopModel;
+
+        impl CompletionModel for BlockedLoopModel {
+            type Response = ();
+
+            async fn completion(
+                &self,
+                _request: CompletionRequest,
+            ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+                Ok(CompletionResponse {
+                    content: vec![AssistantContent::ToolCall(ToolCall {
+                        id: "call_blocked".to_string(),
+                        name: "mock_tool".to_string(),
+                        function: Function {
+                            name: "mock_tool".to_string(),
+                            arguments: json!({"value": 7}),
+                        },
+                    })],
+                    raw_response: (),
+                })
+            }
+        }
+
+        #[derive(Default)]
+        struct AlwaysBlockPreflightObserver;
+
+        impl ToolLoopObserver for AlwaysBlockPreflightObserver {
+            fn on_tool_call_preflight(
+                &mut self,
+                _call_id: &str,
+                _tool_name: &str,
+                _arguments: &Value,
+            ) -> Result<(), String> {
+                Err("blocked by test".to_string())
+            }
+        }
+
+        let temp_dir = TempDir::new().unwrap();
+        let mut registry = ToolRegistry::with_working_dir(temp_dir.path().to_path_buf());
+        registry.register("mock_tool", Arc::new(MockHandler));
+
+        let err = run_tool_loop_with_history_and_observer(
+            &BlockedLoopModel,
+            Vec::new(),
+            "loop",
+            &registry,
+            ToolLoopConfig {
+                max_turns: Some(20),
+                ..Default::default()
+            },
+            &mut AlwaysBlockPreflightObserver,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(err, CompletionError::ResponseError(msg) if msg.contains("repeated blocked calls"))
         );
     }
 }

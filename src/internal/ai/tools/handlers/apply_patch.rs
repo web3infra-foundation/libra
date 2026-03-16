@@ -10,7 +10,7 @@ use crate::internal::ai::tools::{
     error::ToolError,
     registry::ToolHandler,
     spec::ToolSpec,
-    utils::validate_path,
+    utils::{is_within_working_dir, validate_path},
 };
 
 /// Handler for applying patches to files.
@@ -57,9 +57,10 @@ impl ToolHandler for ApplyPatchHandler {
                 touched_paths.insert(path);
             }
         }
-        let constrained_to_workspace = touched_paths
-            .iter()
-            .all(|path| path.starts_with(&working_dir));
+        let mut constrained_to_workspace = true;
+        for path in &touched_paths {
+            constrained_to_workspace &= is_within_working_dir(path, &working_dir)?;
+        }
 
         if let Some(approval_ctx) = runtime_context
             .as_ref()

@@ -178,6 +178,7 @@ impl<M: CompletionModel> ToolLoopAction<M> {
                 hook_runner: None,
                 allowed_tools: None,
                 runtime_context: None,
+                max_turns: None,
             },
         }
     }

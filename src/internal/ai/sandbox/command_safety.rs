@@ -26,12 +26,12 @@ pub fn shell_command_might_be_dangerous(command: &str) -> bool {
     }
 
     if contains_shell_metacharacters(command) {
-        return false;
+        return true;
     }
 
     shlex_split(command)
         .map(|parts| !parts.is_empty() && is_dangerous_to_call_with_exec(&parts))
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 fn contains_shell_metacharacters(command: &str) -> bool {
@@ -487,6 +487,7 @@ mod tests {
         assert!(shell_command_might_be_dangerous(
             "echo hi && git push --force"
         ));
+        assert!(shell_command_might_be_dangerous("echo $(cat /etc/passwd)"));
     }
 
     #[test]
