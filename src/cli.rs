@@ -72,12 +72,15 @@ enum Commands {
     Init(command::init::InitArgs),
     #[command(about = "Clone a repository into a new directory")]
     Clone(command::clone::CloneArgs),
+    #[command(
+        name = "claude-sdk",
+        about = "Run or import Claude Agent SDK managed sessions"
+    )]
+    ClaudeSdk(command::claude_sdk::ClaudeSdkArgs),
     #[command(about = "Start Libra Code interactive TUI (with background web server)")]
     Code(command::code::CodeArgs),
     #[command(about = "Connect to Codex app-server via WebSocket")]
     AgentCodex(command::agent_codex::AgentCodexArgs),
-    #[command(about = "Unified provider hook ingestion and setup")]
-    Hooks(command::hooks::HooksCommand),
 
     // The rest of the commands require a repository to be present
     #[command(about = "Add file contents to the index")]
@@ -433,7 +436,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         },
     };
     match &args.command {
-        Commands::Init(_) | Commands::Clone(_) | Commands::Hooks(_) => {}
+        Commands::Init(_) | Commands::Clone(_) => {}
         // Config global/system scopes don't require a repository
         Commands::Config(cfg) if cfg.global || cfg.system => {}
         _ => {
@@ -456,13 +459,13 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
             })?; // restore working directory as original_dir
         }
         Commands::Clone(args) => command::clone::execute_safe(args).await?, //clone will use init internally,so we don't need to set hash kind here again
-        Commands::Code(args) => command::code::execute(args).await,
         Commands::AgentCodex(args) => command::agent_codex::execute(args)
             .await
             .map_err(|e| CliError::fatal(e.to_string()))?,
-        Commands::Hooks(cmd) => command::hooks::execute(cmd)
+        Commands::ClaudeSdk(args) => command::claude_sdk::execute(args)
             .await
             .map_err(|e| CliError::fatal(e.to_string()))?,
+        Commands::Code(args) => command::code::execute(args).await,
         Commands::Add(args) => command::add::execute_safe(args).await?,
         Commands::Rm(args) => command::remove::execute_safe(args).await?,
         Commands::Restore(args) => command::restore::execute_safe(args).await?,

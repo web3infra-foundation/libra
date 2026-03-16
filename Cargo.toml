@@ -81,6 +81,7 @@ tower = "0.5.3"
 tower-http = { version = "0.6.8", features = ["fs"] }
 rust-embed = { version = "8.11.0", features = ["mime-guess"] }
 mime_guess = "2.0.5"
+tempfile = "3.27.0"
 
 # TUI
 ratatui = "0.30.0"
@@ -108,7 +109,6 @@ base64 = "0.22.1"
 pager = "0.16.1"
 
 [dev-dependencies]
-tempfile = "3.27.0"
 serial_test = "3.4.0"
 tokio = { version = "1.50.0", features = [
     "rt-multi-thread",

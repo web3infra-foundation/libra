@@ -118,61 +118,27 @@ Update your `claude_desktop_config.json` as follows:
 
 #### AI Hook Forwarding
 
-Libra can record Claude Code and Gemini CLI sessions as `ai_session` history
-objects. The recommended setup is to install Libra's hook forwarding once in
-your project, then use your AI CLI normally.
+Libra can import Claude Agent SDK managed sessions and provider-side replay
+artifacts through the `claude-sdk` command group.
 
-Claude Code:
-
-```bash
-libra hooks claude install
-```
-
-Gemini CLI:
+Run a managed session through the bundled helper:
 
 ```bash
-libra hooks gemini install
+libra claude-sdk run --prompt "Inspect src/lib.rs and summarize the bridge state"
 ```
 
-After installation, Libra writes hook settings into the provider's project
-config:
-
-- Claude Code: `.claude/settings.json`
-- Gemini CLI: `.gemini/settings.json`
-
-Those generated entries call the resolved Libra binary with provider lifecycle
-subcommands such as `hooks claude <event>` and `hooks gemini <event>`.
-
-Useful follow-up commands:
+Sync Claude provider session metadata into Libra snapshots:
 
 ```bash
-# Check whether hooks are installed
-libra hooks claude is-installed
-libra hooks gemini is-installed
-
-# Remove Libra-managed hooks
-libra hooks claude uninstall
-libra hooks gemini uninstall
+libra claude-sdk sync-sessions
+libra claude-sdk hydrate-session --provider-session-id session-a
+libra claude-sdk build-evidence-input --provider-session-id session-a
 ```
 
-By default, install writes the absolute path of the current `libra` binary into
-provider hook settings. If you want hooks to call a different local binary, pass
-an explicit binary path:
+The `--cwd` flag controls which project directory Claude SDK queries, but all
+artifacts and history are persisted into the current Libra repository.
 
-```bash
-libra hooks claude install --binary-path "/absolute/path/to/libra"
-libra hooks gemini install --binary-path "/absolute/path/to/libra"
-```
-
-Provider-specific notes:
-
-- Claude Code supports `--timeout`, for example:
-  `libra hooks claude install --timeout 15`
-- Gemini CLI does **not** support `--timeout`
-- Install / uninstall / is-installed must be run inside a Libra repository
-
-Once installed, use Claude Code or Gemini CLI as usual. When a session ends,
-Libra persists it as an `ai_session` object that you can inspect later with:
+Persisted provider session and evidence artifacts are inspectable with:
 
 ```bash
 libra cat-file --ai-list ai_session
