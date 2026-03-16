@@ -32,6 +32,7 @@
 //! | `codex`     | OpenAI Codex     | Bearer token             | `http://localhost:8080` |
 
 pub mod anthropic;
+pub mod claude_sdk;
 pub mod codex;
 pub mod deepseek;
 pub mod gemini;

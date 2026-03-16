@@ -117,6 +117,8 @@ const AI_OBJECT_TYPES: &[&str] = &[
     "decision",
     "snapshot",
     "ai_session",
+    "provider_session",
+    "evidence_input",
 ];
 const TAG_REF_PREFIX: &str = "refs/tags/";
 
@@ -502,6 +504,10 @@ async fn ai_pretty_print(uuid: &str) {
             println!("hash: {}", hash);
             if type_name == "ai_session" {
                 print_ai_session_summary(&value);
+            } else if type_name == "provider_session" {
+                print_provider_session_summary(&value);
+            } else if type_name == "evidence_input" {
+                print_evidence_input_summary(&value);
             }
             println!("---");
             println!(
@@ -522,6 +528,18 @@ async fn ai_pretty_print(uuid: &str) {
 
 fn print_ai_session_summary(value: &serde_json::Value) {
     for line in ai_session_summary_lines(value) {
+        println!("{line}");
+    }
+}
+
+fn print_provider_session_summary(value: &serde_json::Value) {
+    for line in provider_session_summary_lines(value) {
+        println!("{line}");
+    }
+}
+
+fn print_evidence_input_summary(value: &serde_json::Value) {
+    for line in evidence_input_summary_lines(value) {
         println!("{line}");
     }
 }
@@ -599,6 +617,108 @@ fn ai_session_summary_lines(value: &serde_json::Value) -> Vec<String> {
         {
             lines.push(format!("transcript_raw_event_count: {raw_event_count}"));
         }
+    }
+
+    lines
+}
+
+fn provider_session_summary_lines(value: &serde_json::Value) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    if let Some(schema) = value.get("schema").and_then(serde_json::Value::as_str) {
+        lines.push(format!("schema: {schema}"));
+    }
+    if let Some(provider) = value.get("provider").and_then(serde_json::Value::as_str) {
+        lines.push(format!("provider: {provider}"));
+    }
+    if let Some(object_id) = value.get("objectId").and_then(serde_json::Value::as_str) {
+        lines.push(format!("object_id: {object_id}"));
+    }
+    if let Some(provider_session_id) = value
+        .get("providerSessionId")
+        .and_then(serde_json::Value::as_str)
+    {
+        lines.push(format!("provider_session_id: {provider_session_id}"));
+    }
+    if let Some(summary) = value.get("summary").and_then(serde_json::Value::as_str) {
+        lines.push(format!("summary: {summary}"));
+    }
+    if let Some(cwd) = value.get("cwd").and_then(serde_json::Value::as_str) {
+        lines.push(format!("cwd: {cwd}"));
+    }
+    if let Some(message_sync) = value.get("messageSync") {
+        if let Some(message_count) = message_sync
+            .get("messageCount")
+            .and_then(serde_json::Value::as_u64)
+        {
+            lines.push(format!("message_count: {message_count}"));
+        }
+        if let Some(first_kind) = message_sync
+            .get("firstMessageKind")
+            .and_then(serde_json::Value::as_str)
+        {
+            lines.push(format!("first_message_kind: {first_kind}"));
+        }
+        if let Some(last_kind) = message_sync
+            .get("lastMessageKind")
+            .and_then(serde_json::Value::as_str)
+        {
+            lines.push(format!("last_message_kind: {last_kind}"));
+        }
+    }
+
+    lines
+}
+
+fn evidence_input_summary_lines(value: &serde_json::Value) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    if let Some(schema) = value.get("schema").and_then(serde_json::Value::as_str) {
+        lines.push(format!("schema: {schema}"));
+    }
+    if let Some(provider) = value.get("provider").and_then(serde_json::Value::as_str) {
+        lines.push(format!("provider: {provider}"));
+    }
+    if let Some(object_id) = value.get("objectId").and_then(serde_json::Value::as_str) {
+        lines.push(format!("object_id: {object_id}"));
+    }
+    if let Some(provider_session_id) = value
+        .get("providerSessionId")
+        .and_then(serde_json::Value::as_str)
+    {
+        lines.push(format!("provider_session_id: {provider_session_id}"));
+    }
+    if let Some(summary) = value.get("summary").and_then(serde_json::Value::as_str) {
+        lines.push(format!("summary: {summary}"));
+    }
+    if let Some(message_count) = value
+        .get("messageOverview")
+        .and_then(|overview| overview.get("messageCount"))
+        .and_then(serde_json::Value::as_u64)
+    {
+        lines.push(format!("message_count: {message_count}"));
+    }
+    if let Some(assistant_count) = value
+        .get("contentOverview")
+        .and_then(|overview| overview.get("assistantMessageCount"))
+        .and_then(serde_json::Value::as_u64)
+    {
+        lines.push(format!("assistant_message_count: {assistant_count}"));
+    }
+    if let Some(tool_count) = value
+        .get("contentOverview")
+        .and_then(|overview| overview.get("observedTools"))
+        .and_then(serde_json::Value::as_object)
+        .map(|tools| tools.len())
+    {
+        lines.push(format!("observed_tool_count: {tool_count}"));
+    }
+    if let Some(has_structured_output) = value
+        .get("runtimeSignals")
+        .and_then(|signals| signals.get("hasStructuredOutput"))
+        .and_then(serde_json::Value::as_bool)
+    {
+        lines.push(format!("has_structured_output: {has_structured_output}"));
     }
 
     lines

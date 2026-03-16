@@ -1,10 +1,12 @@
 //! Provider contracts for lifecycle hook ingestion and setup.
 
-use std::fmt;
+use std::{fmt, path::Path};
 
 use anyhow::Result;
+use serde_json::Value;
 
 use super::lifecycle::{LifecycleEvent, LifecycleEventKind, SessionHookEnvelope};
+use crate::internal::ai::session::SessionState;
 
 pub const CANONICAL_DEDUP_IDENTITY_KEYS: &[&str] = &[
     "event_id",
@@ -76,6 +78,19 @@ pub trait HookProvider: Sync {
     ) -> Result<LifecycleEvent>;
     fn dedup_identity_keys(&self) -> &'static [&'static str];
     fn lifecycle_fallback_events(&self) -> &'static [&'static str];
+    fn command_output(&self, _command: ProviderHookCommand) -> Option<Value> {
+        None
+    }
+    fn post_process_event(
+        &self,
+        _command: ProviderHookCommand,
+        _storage_path: &Path,
+        _session: &mut SessionState,
+        _envelope: &SessionHookEnvelope,
+        _event: &LifecycleEvent,
+    ) -> Result<()> {
+        Ok(())
+    }
     fn install_hooks(&self, options: &ProviderInstallOptions) -> Result<()>;
     fn uninstall_hooks(&self) -> Result<()>;
     fn hooks_are_installed(&self) -> Result<bool>;
