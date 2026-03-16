@@ -108,5 +108,38 @@ jobs:
       - name: Enable pnpm
         run: corepack enable
 
+      - name: Ensure ripgrep is available
+        shell: bash
+        run: |
+          if command -v rg >/dev/null 2>&1; then
+            rg --version
+            exit 0
+          fi
+
+          if [ "$(id -u)" -eq 0 ]; then
+            SUDO=""
+          elif command -v sudo >/dev/null 2>&1; then
+            SUDO="sudo"
+          else
+            SUDO=""
+          fi
+
+          if command -v apt-get >/dev/null 2>&1; then
+            $SUDO apt-get update
+            $SUDO apt-get install -y ripgrep
+          elif command -v dnf >/dev/null 2>&1; then
+            $SUDO dnf install -y ripgrep
+          elif command -v yum >/dev/null 2>&1; then
+            $SUDO yum install -y ripgrep
+          elif command -v brew >/dev/null 2>&1; then
+            brew install ripgrep
+          else
+            cargo install ripgrep --locked
+            echo "${HOME}/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+
+          command -v rg
+          rg --version
+
       - name: Run tests
         run: cargo test --all

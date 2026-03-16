@@ -411,12 +411,10 @@ impl HistoryCell for ToolCallHistoryCell {
         // Tool state summary line
         let summary = if self.has_running() {
             running_label
+        } else if self.has_failure() {
+            failed_label
         } else {
-            if self.has_failure() {
-                failed_label
-            } else {
-                done_label
-            }
+            done_label
         };
         if self.has_running() {
             lines.push(gradient_line(
