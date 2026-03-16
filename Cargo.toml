@@ -101,7 +101,6 @@ pulldown-cmark = "0.13.1"
 
 # Unicode handling
 unicode-width = "0.2.2"
-scorpiofs = "0.2.1"
 libvault = { version = "0.2.2", features = ["storage_sqlite"] }
 base64 = "0.22.1"
 

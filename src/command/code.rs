@@ -486,29 +486,13 @@ async fn execute_tui(args: CodeArgs) {
             let mut model = crate::internal::ai::providers::codex::Model::new(
                 ws_client,
                 &model_name,
-                Some(mcp_server.clone()),
+                Some(launch_config.mcp_server.clone()),
             );
             if let Err(e) = model.connect().await {
                 eprintln!("error: Failed to connect to Codex WebSocket: {}", e);
                 return;
             }
-            run_tui_with_model(
-                model,
-                TuiParams {
-                    host: args.host,
-                    port: args.port,
-                    mcp_port: args.mcp_port,
-                    registry: registry.clone(),
-                    preamble,
-                    temperature,
-                    resume,
-                    user_input_rx,
-                    mcp_server,
-                    model_name,
-                    provider_name,
-                },
-            )
-            .await;
+            run_tui_with_model(model, launch_config, model_name, provider_name).await;
         }
     }
 }

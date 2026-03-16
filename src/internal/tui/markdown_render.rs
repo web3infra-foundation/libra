@@ -236,6 +236,7 @@ impl Renderer {
                 self.active_link_dest = Some(dest_url.to_string());
                 self.push_style(self.styles.link);
             }
+            Tag::Superscript | Tag::Subscript => {}
             Tag::HtmlBlock
             | Tag::FootnoteDefinition(_)
             | Tag::DefinitionList
@@ -292,6 +293,7 @@ impl Renderer {
                     self.push_inline(")", Style::default());
                 }
             }
+            TagEnd::Superscript | TagEnd::Subscript => {}
             TagEnd::HtmlBlock
             | TagEnd::FootnoteDefinition
             | TagEnd::DefinitionList

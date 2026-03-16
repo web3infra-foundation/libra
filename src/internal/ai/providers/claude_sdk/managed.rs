@@ -23,7 +23,7 @@ use crate::{
             },
             intentspec::{
                 DraftAcceptance, DraftCheck, DraftIntent, DraftRisk, IntentDraft, RiskLevel,
-                types::{ChangeType, TouchHints},
+                types::{ChangeType, Objective, ObjectiveKind, TouchHints},
             },
             session::SessionState,
         },
@@ -1589,7 +1589,14 @@ fn extract_intent_extraction_outcome(
                     summary: output.summary,
                     problem_statement: output.problem_statement,
                     change_type: output.change_type,
-                    objectives: output.objectives,
+                    objectives: output
+                        .objectives
+                        .into_iter()
+                        .map(|title| Objective {
+                            title,
+                            kind: ObjectiveKind::Implementation,
+                        })
+                        .collect(),
                     in_scope: output.in_scope,
                     out_of_scope: output.out_of_scope,
                     touch_hints: output.touch_hints,
