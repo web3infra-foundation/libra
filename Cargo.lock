@@ -5961,7 +5961,6 @@ checksum = "911bd979bf1070a3f3aa7b691a3b3e9968f339ceeec89e08c280a8a22207a32f"
 dependencies = [
  "futures-executor",
  "futures-util",
- "log",
  "once_cell",
  "parking_lot",
  "scc",
