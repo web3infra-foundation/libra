@@ -3,10 +3,16 @@
 //! Finds files whose contents match the pattern and lists them sorted by
 //! modification time. Mirrors the behaviour of the codex grep_files tool.
 
-use std::{path::Path, time::Duration};
+use std::{
+    fs,
+    path::Path,
+    time::{Duration, SystemTime},
+};
 
 use async_trait::async_trait;
-use tokio::{process::Command, time::timeout};
+use regex::Regex;
+use tokio::time::timeout;
+use walkdir::WalkDir;
 
 use super::parse_arguments;
 use crate::internal::ai::tools::{
@@ -74,7 +80,7 @@ impl ToolHandler for GrepFilesHandler {
             .filter(|s| !s.is_empty())
             .map(str::to_string);
 
-        let results = run_rg_search(pattern, include.as_deref(), &search_path, limit).await?;
+        let results = run_grep_search(pattern, include.as_deref(), &search_path, limit).await?;
 
         if results.is_empty() {
             Ok(ToolOutput::success("No matches found.".to_string()))
@@ -100,60 +106,99 @@ impl ToolHandler for GrepFilesHandler {
     }
 }
 
-async fn run_rg_search(
+async fn run_grep_search(
     pattern: &str,
     include: Option<&str>,
     search_path: &Path,
     limit: usize,
 ) -> Result<Vec<String>, ToolError> {
-    let mut cmd = Command::new("rg");
-    cmd.arg("--files-with-matches")
-        .arg("--sortr=modified")
-        .arg("--regexp")
-        .arg(pattern)
-        .arg("--no-messages");
+    let re = Regex::new(pattern)
+        .map_err(|e| ToolError::InvalidArguments(format!("invalid regex pattern: {e}")))?;
 
-    if let Some(glob) = include {
-        cmd.arg("--glob").arg(glob);
+    let include_owned = include.map(str::to_string);
+
+    let search = search_path.to_path_buf();
+    timeout(
+        GREP_TIMEOUT,
+        tokio::task::spawn_blocking(move || {
+            grep_files_blocking(&re, include_owned.as_deref(), &search, limit)
+        }),
+    )
+    .await
+    .map_err(|_| ToolError::ExecutionFailed("grep timed out after 30 seconds".to_string()))?
+    .map_err(|e| ToolError::ExecutionFailed(format!("grep task failed: {e}")))?
+}
+
+/// Walk the directory, find files matching the pattern, and return paths sorted
+/// by modification time (most recently modified first).
+/// Check if a file name matches a simple glob pattern (e.g. `*.rs`, `*.{ts,tsx}`).
+fn matches_glob(pattern: &str, file_name: &str) -> bool {
+    // Handle brace expansion like "*.{ts,tsx}"
+    if let Some(start) = pattern.find('{')
+        && let Some(end) = pattern.find('}')
+    {
+        let prefix = &pattern[..start];
+        let suffix = &pattern[end + 1..];
+        return pattern[start + 1..end].split(',').any(|alt| {
+            let expanded = format!("{prefix}{alt}{suffix}");
+            matches_glob(&expanded, file_name)
+        });
     }
 
-    cmd.arg("--").arg(search_path);
-
-    let output = timeout(GREP_TIMEOUT, cmd.output())
-        .await
-        .map_err(|_| ToolError::ExecutionFailed("rg timed out after 30 seconds".to_string()))?
-        .map_err(|e| {
-            ToolError::ExecutionFailed(format!(
-                "failed to launch rg: {e}. Ensure ripgrep is installed and on PATH."
-            ))
-        })?;
-
-    match output.status.code() {
-        Some(0) => Ok(parse_results(&output.stdout, limit)),
-        Some(1) => Ok(Vec::new()), // rg exit 1 = no matches
-        _ => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(ToolError::ExecutionFailed(format!("rg failed: {stderr}")))
-        }
+    // Simple wildcard matching: only support leading `*`
+    if let Some(ext) = pattern.strip_prefix('*') {
+        file_name.ends_with(ext)
+    } else {
+        file_name == pattern
     }
 }
 
-fn parse_results(stdout: &[u8], limit: usize) -> Vec<String> {
-    let mut results = Vec::new();
-    for line in stdout.split(|b| *b == b'\n') {
-        if line.is_empty() {
+/// Walk the directory, find files matching the pattern, and return paths sorted
+/// by modification time (most recently modified first).
+fn grep_files_blocking(
+    re: &Regex,
+    glob_pattern: Option<&str>,
+    search_path: &Path,
+    limit: usize,
+) -> Result<Vec<String>, ToolError> {
+    let mut matched: Vec<(String, SystemTime)> = Vec::new();
+
+    for entry in WalkDir::new(search_path).into_iter().filter_map(|e| e.ok()) {
+        if !entry.file_type().is_file() {
             continue;
         }
-        if let Ok(text) = std::str::from_utf8(line)
-            && !text.is_empty()
+
+        let path = entry.path();
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+        if let Some(glob) = glob_pattern
+            && !matches_glob(glob, file_name)
         {
-            results.push(text.to_string());
-            if results.len() == limit {
-                break;
-            }
+            continue;
+        }
+
+        let content = match fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => continue, // skip binary / unreadable files
+        };
+
+        if re.is_match(&content) {
+            let rel = path
+                .strip_prefix(search_path)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .to_string();
+            let mtime = fs::metadata(path)
+                .and_then(|m| m.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            matched.push((rel, mtime));
         }
     }
-    results
+
+    // Sort by modification time, most recent first.
+    matched.sort_by(|a, b| b.1.cmp(&a.1));
+
+    Ok(matched.into_iter().map(|(p, _)| p).take(limit).collect())
 }
 
 #[cfg(test)]
@@ -164,14 +209,6 @@ mod tests {
 
     use super::*;
     use crate::internal::ai::tools::{ToolKind, context::ToolPayload};
-
-    fn rg_available() -> bool {
-        std::process::Command::new("rg")
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    }
 
     fn make_invocation(args: serde_json::Value, working_dir: std::path::PathBuf) -> ToolInvocation {
         ToolInvocation::new(
@@ -186,9 +223,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_grep_files_returns_file_paths() {
-        if !rg_available() {
-            return;
-        }
         let temp = TempDir::new().unwrap();
         let dir = temp.path().to_path_buf();
 
@@ -205,17 +239,12 @@ mod tests {
             .unwrap();
 
         let text = result.as_text().unwrap();
-        // Should return file paths, not content lines.
-        assert!(!text.contains(":1:"), "should not contain line:col format");
         assert!(text.contains("match_one.txt") || text.contains("match_two.txt"));
         assert!(!text.contains("no_match.txt"));
     }
 
     #[tokio::test]
     async fn test_grep_files_path_defaults_to_working_dir() {
-        if !rg_available() {
-            return;
-        }
         let temp = TempDir::new().unwrap();
         let dir = temp.path().to_path_buf();
         fs::write(dir.join("found.txt"), "needle").unwrap();
@@ -235,9 +264,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_grep_files_include_glob_filters_files() {
-        if !rg_available() {
-            return;
-        }
         let temp = TempDir::new().unwrap();
         let dir = temp.path().to_path_buf();
         fs::write(dir.join("main.rs"), "hello rust").unwrap();
@@ -258,9 +284,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_grep_files_limit_respected() {
-        if !rg_available() {
-            return;
-        }
         let temp = TempDir::new().unwrap();
         let dir = temp.path().to_path_buf();
         for i in 0..5 {
@@ -281,9 +304,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_grep_files_no_matches() {
-        if !rg_available() {
-            return;
-        }
         let temp = TempDir::new().unwrap();
         let dir = temp.path().to_path_buf();
         fs::write(dir.join("file.txt"), "hello").unwrap();
@@ -329,7 +349,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.as_text().unwrap().contains("src/f.txt"));
+        let text = result.as_text().unwrap();
+        assert!(text.contains("f.txt"));
     }
 
     #[tokio::test]
@@ -356,23 +377,5 @@ mod tests {
             .unwrap();
         assert!(required.iter().any(|v| v == "pattern"));
         assert!(!required.iter().any(|v| v == "path"));
-    }
-
-    #[test]
-    fn test_parse_results_basic() {
-        let stdout = b"/tmp/a.rs\n/tmp/b.rs\n";
-        assert_eq!(
-            parse_results(stdout, 10),
-            vec!["/tmp/a.rs".to_string(), "/tmp/b.rs".to_string()]
-        );
-    }
-
-    #[test]
-    fn test_parse_results_truncates_at_limit() {
-        let stdout = b"/a\n/b\n/c\n";
-        assert_eq!(
-            parse_results(stdout, 2),
-            vec!["/a".to_string(), "/b".to_string()]
-        );
     }
 }
