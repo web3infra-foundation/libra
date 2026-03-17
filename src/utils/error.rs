@@ -5,13 +5,19 @@
 //! [`CliError`] with an explicit stable code, exit code, and hint set instead
 //! of printing raw internal causes to stderr.
 
-use std::{collections::BTreeMap, fmt};
+use std::{
+    collections::BTreeMap,
+    env, fmt,
+    io::{self, IsTerminal},
+};
 
 use serde::{Serialize, Serializer};
 use serde_json::Value;
 
 /// Shared CLI result type.
 pub type CliResult<T = ()> = Result<T, CliError>;
+
+pub const LIBRA_ERROR_JSON_ENV: &str = "LIBRA_ERROR_JSON";
 
 /// High-level CLI error classes used to decide prefixes and parse semantics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,7 +39,7 @@ pub enum ErrorLevel {
 /// Coarse process exit codes for shell and CI automation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[repr(i32)]
-pub enum ExitCode {
+pub enum CliExitCode {
     Usage = 2,
     Repo = 3,
     Conflict = 4,
@@ -43,11 +49,13 @@ pub enum ExitCode {
     Internal = 8,
 }
 
-impl ExitCode {
+impl CliExitCode {
     pub const fn as_i32(self) -> i32 {
         self as i32
     }
 }
+
+pub type ExitCode = CliExitCode;
 
 /// Stable error categories for machine classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -142,15 +150,15 @@ impl StableErrorCode {
         }
     }
 
-    pub const fn exit_code(self) -> ExitCode {
+    pub const fn exit_code(self) -> CliExitCode {
         match self.category() {
-            CliErrorCategory::Cli => ExitCode::Usage,
-            CliErrorCategory::Repo => ExitCode::Repo,
-            CliErrorCategory::Conflict => ExitCode::Conflict,
-            CliErrorCategory::Network => ExitCode::Network,
-            CliErrorCategory::Auth => ExitCode::Auth,
-            CliErrorCategory::Io => ExitCode::Io,
-            CliErrorCategory::Internal => ExitCode::Internal,
+            CliErrorCategory::Cli => CliExitCode::Usage,
+            CliErrorCategory::Repo => CliExitCode::Repo,
+            CliErrorCategory::Conflict => CliExitCode::Conflict,
+            CliErrorCategory::Network => CliExitCode::Network,
+            CliErrorCategory::Auth => CliExitCode::Auth,
+            CliErrorCategory::Io => CliExitCode::Io,
+            CliErrorCategory::Internal => CliExitCode::Internal,
         }
     }
 
@@ -399,36 +407,22 @@ impl CliError {
     }
 
     pub fn render(&self) -> String {
-        let mut lines = Vec::new();
-        match self.kind {
-            CliErrorKind::UnknownCommand => lines.push(self.message.clone()),
-            CliErrorKind::ParseUsage | CliErrorKind::CommandUsage | CliErrorKind::Failure => {
-                lines.push(format!("error: {}", self.message));
-            }
-            CliErrorKind::Fatal => lines.push(format!("fatal: {}", self.message)),
-        }
-
-        lines.push(format!("Error-Code: {}", self.stable_code.as_str()));
-
-        if let Some(usage) = &self.usage
-            && !usage.trim().is_empty()
-        {
-            lines.push(usage.trim_end().to_string());
-        }
-
-        for hint in &self.hints {
-            lines.extend(render_hint(hint.as_str()));
-        }
-
-        lines.join("\n")
+        self.render_human(false)
     }
 
     pub fn render_report(&self) -> String {
-        format!("{}\n{}", self.render(), self.render_json())
+        format!("{}\n{}", self.render_human(true), self.render_json())
+    }
+
+    pub fn render_for_stderr(&self) -> String {
+        match stderr_render_mode() {
+            StderrRenderMode::Human => self.render(),
+            StderrRenderMode::Structured => self.render_report(),
+        }
     }
 
     pub fn print_stderr(&self) {
-        eprintln!("{}", self.render_report());
+        eprintln!("{}", self.render_for_stderr());
     }
 
     fn severity(&self) -> &'static str {
@@ -458,6 +452,33 @@ impl CliError {
             details: self.details.clone(),
         }
     }
+
+    fn render_human(&self, include_error_code: bool) -> String {
+        let mut lines = Vec::new();
+        match self.kind {
+            CliErrorKind::UnknownCommand => lines.push(self.message.clone()),
+            CliErrorKind::ParseUsage | CliErrorKind::CommandUsage | CliErrorKind::Failure => {
+                lines.push(format!("error: {}", self.message));
+            }
+            CliErrorKind::Fatal => lines.push(format!("fatal: {}", self.message)),
+        }
+
+        if include_error_code {
+            lines.push(format!("Error-Code: {}", self.stable_code.as_str()));
+        }
+
+        if let Some(usage) = &self.usage
+            && !usage.trim().is_empty()
+        {
+            lines.push(usage.trim_end().to_string());
+        }
+
+        for hint in &self.hints {
+            lines.extend(render_hint(hint.as_str()));
+        }
+
+        lines.join("\n")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -474,6 +495,43 @@ struct CliErrorReport {
     hints: Vec<String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     details: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StructuredStderrMode {
+    Auto,
+    Always,
+}
+
+impl StructuredStderrMode {
+    fn from_env() -> Self {
+        match env::var(LIBRA_ERROR_JSON_ENV) {
+            Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" | "always" => Self::Always,
+                _ => Self::Auto,
+            },
+            Err(_) => Self::Auto,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StderrRenderMode {
+    Human,
+    Structured,
+}
+
+fn stderr_render_mode() -> StderrRenderMode {
+    match StructuredStderrMode::from_env() {
+        StructuredStderrMode::Always => StderrRenderMode::Structured,
+        StructuredStderrMode::Auto => {
+            if io::stderr().is_terminal() {
+                StderrRenderMode::Human
+            } else {
+                StderrRenderMode::Structured
+            }
+        }
+    }
 }
 
 fn normalize_hint_text(text: String) -> String {
@@ -765,6 +823,9 @@ fn is_network_unavailable_error(lower: &str) -> bool {
             "ssl",
             "could not resolve host",
             "network error",
+            "connection closed unexpectedly",
+            "connection reset by peer",
+            "remote end hung up unexpectedly",
             "failed to start mcp server",
             "failed to start web server",
         ],
@@ -888,25 +949,24 @@ fn is_io_write_error(lower: &str) -> bool {
 }
 
 fn is_internal_error(lower: &str) -> bool {
-    contains_any(
-        lower,
-        &["internal error", "panic", "invariant", "unexpectedly"],
-    )
+    contains_any(lower, &["internal error", "panic", "invariant"])
 }
 
 #[cfg(test)]
 mod tests {
     use serde_json::Value;
+    use serial_test::serial;
 
-    use super::{CliError, CliErrorKind, StableErrorCode};
+    use super::{
+        CliError, CliErrorKind, LIBRA_ERROR_JSON_ENV, StableErrorCode, StderrRenderMode,
+        StructuredStderrMode, stderr_render_mode,
+    };
+    use crate::utils::test::ScopedEnvVar;
 
     #[test]
     fn fatal_render_uses_git_style_prefix() {
         let rendered = CliError::fatal("failed to open index").render();
-        assert_eq!(
-            rendered,
-            "fatal: failed to open index\nError-Code: LBR-IO-001"
-        );
+        assert_eq!(rendered, "fatal: failed to open index");
     }
 
     #[test]
@@ -914,7 +974,7 @@ mod tests {
         let rendered = CliError::repo_not_found().render();
         assert_eq!(
             rendered,
-            "fatal: not a libra repository (or any of the parent directories): .libra\nError-Code: LBR-REPO-001\nHint: run 'libra init' to create a repository in the current directory."
+            "fatal: not a libra repository (or any of the parent directories): .libra\nHint: run 'libra init' to create a repository in the current directory."
         );
     }
 
@@ -926,7 +986,7 @@ mod tests {
             .render();
         assert_eq!(
             rendered,
-            "error: unexpected argument '--bad'\nError-Code: LBR-CLI-002\nUsage: libra add [OPTIONS] [PATHSPEC]...\nHint: use '--help' to see available options."
+            "error: unexpected argument '--bad'\nUsage: libra add [OPTIONS] [PATHSPEC]...\nHint: use '--help' to see available options."
         );
     }
 
@@ -939,7 +999,7 @@ mod tests {
             .render();
         assert_eq!(
             rendered,
-            "error: name and email are not configured\nError-Code: LBR-AUTH-001\nHint: to configure, run:\nHint:   libra config --global user.name \"Some One\"\nHint:   libra config --global user.email \"someone@example.com\""
+            "error: name and email are not configured\nHint: to configure, run:\nHint:   libra config --global user.name \"Some One\"\nHint:   libra config --global user.email \"someone@example.com\""
         );
     }
 
@@ -950,7 +1010,7 @@ mod tests {
         assert_eq!(err.kind(), CliErrorKind::UnknownCommand);
         assert_eq!(
             err.render(),
-            "libra: 'wat' is not a libra command. See 'libra --help'.\nError-Code: LBR-CLI-001"
+            "libra: 'wat' is not a libra command. See 'libra --help'."
         );
         assert_eq!(err.exit_code(), 2);
     }
@@ -962,20 +1022,14 @@ mod tests {
             .with_hint("Hint: second")
             .with_hint("third")
             .render();
-        assert_eq!(
-            rendered,
-            "error: bad\nError-Code: LBR-INTERNAL-001\nHint: first\nHint: second"
-        );
+        assert_eq!(rendered, "error: bad\nHint: first\nHint: second");
     }
 
     #[test]
     fn from_legacy_string_strips_warning_prefix() {
         let err = CliError::from_legacy_string("warning: something off");
         assert_eq!(err.kind(), CliErrorKind::Failure);
-        assert_eq!(
-            err.render(),
-            "error: something off\nError-Code: LBR-INTERNAL-001"
-        );
+        assert_eq!(err.render(), "error: something off");
     }
 
     #[test]
@@ -1059,8 +1113,15 @@ mod tests {
     }
 
     #[test]
+    fn legacy_inference_routes_connection_closed_unexpectedly_to_network() {
+        let err = CliError::fatal("connection closed unexpectedly by remote peer");
+        assert_eq!(err.stable_code(), StableErrorCode::NetworkUnavailable);
+    }
+
+    #[test]
     fn render_report_appends_json_payload() {
         let rendered = CliError::repo_not_found().render_report();
+        assert!(rendered.contains("Error-Code: LBR-REPO-001"));
         let json_line = rendered
             .lines()
             .last()
@@ -1081,5 +1142,23 @@ mod tests {
         let json_line = rendered.lines().last().unwrap();
         let payload: Value = serde_json::from_str(json_line).unwrap();
         assert_eq!(payload["details"]["object"], "HEAD");
+    }
+
+    #[test]
+    #[serial]
+    fn stderr_render_mode_env_defaults_to_auto_for_falsey_values() {
+        let _guard = ScopedEnvVar::set(LIBRA_ERROR_JSON_ENV, "0");
+        assert_eq!(StructuredStderrMode::from_env(), StructuredStderrMode::Auto);
+    }
+
+    #[test]
+    #[serial]
+    fn stderr_render_mode_env_can_force_structured_output() {
+        let _guard = ScopedEnvVar::set(LIBRA_ERROR_JSON_ENV, "1");
+        assert_eq!(
+            StructuredStderrMode::from_env(),
+            StructuredStderrMode::Always
+        );
+        assert_eq!(stderr_render_mode(), StderrRenderMode::Structured);
     }
 }

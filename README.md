@@ -60,7 +60,7 @@ Options:
 
 ## Error Reporting
 
-CLI failures use stable exit codes, stable error codes, and a trailing JSON stderr report for agents and wrappers.
+CLI failures use stable exit codes and stable error codes. When `stderr` is not a TTY, Libra also appends a JSON stderr report for agents and wrappers. Set `LIBRA_ERROR_JSON=1` to force that structured report in interactive terminals.
 Run `libra help error-codes` for the built-in CLI reference.
 See [docs/error-codes.md](docs/error-codes.md).
 

@@ -7,17 +7,27 @@ Libra now exposes failures through a stable three-layer contract:
 2. `stable error code`
    A machine-stable identifier for agents, wrappers, and higher-level UX.
 3. `structured JSON report`
-   The last stderr line is JSON and carries category, message, hints, and details.
+   When structured mode is enabled, the last stderr line is JSON and carries category, message, hints, and details.
 
 This contract is implemented in [`src/utils/error.rs`](../src/utils/error.rs).
 
 ## Output Contract
 
-On failure, Libra writes:
+On failure, Libra always writes a human-readable error block to `stderr`.
 
-1. A human-readable error block to `stderr`
-2. An `Error-Code: ...` line
-3. A final JSON line with the structured report
+When `stderr` is **not** a TTY, Libra additionally writes:
+
+1. An `Error-Code: ...` line
+2. A final JSON line with the structured report
+
+This keeps interactive terminal output readable while preserving structured data
+for shell pipelines, CI, and wrappers that capture `stderr`.
+
+To force structured output even in an interactive terminal, set:
+
+```bash
+LIBRA_ERROR_JSON=1
+```
 
 Example:
 
@@ -62,7 +72,8 @@ exit codes plus a stable symbolic code.
 
 If you have existing scripts that branch on `1`, `128`, or `129`, update them to branch
 on the stable exit-code table above. For precise automation, prefer the final JSON stderr
-line and inspect `error_code` in addition to `exit_code`.
+line and inspect `error_code` in addition to `exit_code`. If your automation allocates a
+TTY, set `LIBRA_ERROR_JSON=1` so the structured report is always present.
 
 ## Complete Stable Code Table
 
@@ -174,6 +185,9 @@ json_line="$(printf '%s\n' "$stderr" | tail -n 1)"
 printf '%s\n' "$json_line" | jq '.error_code, .message, .hints'
 ```
 
+If the wrapper runs Libra under a pseudo-terminal, export `LIBRA_ERROR_JSON=1`
+to force the structured report.
+
 ### Interactive Discovery
 
 Libra exposes the table directly through help:
@@ -254,7 +268,8 @@ When adding or changing a code:
 
 ## Testing
 
-Integration tests parse the final JSON stderr line and assert both:
+Integration tests run Libra with captured `stderr`, so structured mode is enabled by default.
+They parse the final JSON stderr line and assert both:
 
 - human-readable text still makes sense
 - machine-readable fields are stable

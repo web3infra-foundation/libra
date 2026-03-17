@@ -6,6 +6,7 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
+    sync::Once,
 };
 
 use tracing::level_filters::LevelFilter;
@@ -14,6 +15,8 @@ use crate::{
     command,
     utils::{pager::LIBRA_TEST_ENV, util},
 };
+
+static MARK_TEST_NON_INTERACTIVE: Once = Once::new();
 
 pub struct ScopedEnvVar {
     key: String,
@@ -143,10 +146,12 @@ pub fn setup_clean_testing_env_in(temp_path: impl AsRef<Path>) {
 }
 
 fn mark_test_process_non_interactive() {
-    // SAFETY: command tests set a stable process-wide default before executing CLI code.
-    unsafe {
-        env::set_var(LIBRA_TEST_ENV, "1");
-    }
+    MARK_TEST_NON_INTERACTIVE.call_once(|| {
+        // SAFETY: this process-wide default is set exactly once for the test process.
+        unsafe {
+            env::set_var(LIBRA_TEST_ENV, "1");
+        }
+    });
 }
 
 /// switch to test dir and create a new .libra

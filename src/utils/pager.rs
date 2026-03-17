@@ -41,6 +41,7 @@ enum OutputTarget {
     Stdout(io::Stdout),
     #[cfg(unix)]
     Pager(Child),
+    Finished,
 }
 
 /// Writer that targets either stdout or a pager process.
@@ -105,25 +106,32 @@ impl Pager {
     }
 
     pub fn finish(mut self) -> CliResult<()> {
+        let target = std::mem::replace(&mut self.target, OutputTarget::Finished);
+
         if self.closed {
             #[cfg(unix)]
-            if let OutputTarget::Pager(child) = &mut self.target {
+            if let OutputTarget::Pager(mut child) = target {
+                let _ = child.stdin.take();
                 let _ = child.wait();
             }
             return Ok(());
         }
 
-        match &mut self.target {
-            OutputTarget::Stdout(stdout) => match stdout.flush() {
+        match target {
+            OutputTarget::Stdout(mut stdout) => match stdout.flush() {
                 Ok(()) => Ok(()),
                 Err(err) if err.kind() == io::ErrorKind::BrokenPipe => Ok(()),
                 Err(err) => Err(pager_io_error("flush stdout", err)),
             },
             #[cfg(unix)]
-            OutputTarget::Pager(child) => child
-                .wait()
-                .map(|_| ())
-                .map_err(|err| pager_io_error("wait for pager", err)),
+            OutputTarget::Pager(mut child) => {
+                let _ = child.stdin.take();
+                child
+                    .wait()
+                    .map(|_| ())
+                    .map_err(|err| pager_io_error("wait for pager", err))
+            }
+            OutputTarget::Finished => Ok(()),
         }
     }
 
@@ -142,6 +150,7 @@ impl Pager {
                     .ok_or_else(|| CliError::fatal("failed to capture pager stdin"))?;
                 stdin.write_all(bytes)
             }
+            OutputTarget::Finished => Ok(()),
         };
 
         match result {
@@ -156,6 +165,9 @@ impl Pager {
 }
 
 fn should_use_pager() -> bool {
+    // This terminal check runs before we spawn the pager process. Once paging is
+    // enabled, the command writes to the pager's stdin pipe instead of directly
+    // to the user's terminal.
     io::stdout().is_terminal() && env::var_os(LIBRA_TEST_ENV).is_none()
 }
 
@@ -167,6 +179,16 @@ fn pager_spawn_error(err: io::Error) -> CliError {
 fn pager_io_error(action: &str, err: io::Error) -> CliError {
     CliError::fatal(format!("failed to {action}: {err}"))
         .with_stable_code(StableErrorCode::IoWriteFailed)
+}
+
+impl Drop for Pager {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let OutputTarget::Pager(child) = &mut self.target {
+            let _ = child.stdin.take();
+            let _ = child.wait();
+        }
+    }
 }
 
 #[cfg(test)]

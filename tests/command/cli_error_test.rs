@@ -19,6 +19,7 @@ fn run_libra(args: &[&str], cwd: &Path) -> std::process::Output {
         .env("XDG_CONFIG_HOME", &config_home)
         .env_remove("RUST_LOG")
         .env_remove("LIBRA_LOG")
+        .env_remove("LIBRA_ERROR_JSON")
         .output()
         .unwrap()
 }
