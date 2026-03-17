@@ -48,7 +48,7 @@ struct LineBlame {
 
 pub async fn execute(args: BlameArgs) {
     if let Err(e) = execute_safe(args).await {
-        eprintln!("{}", e.render());
+        e.print_stderr();
     }
 }
 

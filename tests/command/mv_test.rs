@@ -12,7 +12,7 @@ use super::*;
 fn test_mv_cli_outside_repository_returns_fatal_128() {
     let temp = tempdir().unwrap();
     let output = run_libra_command(&["mv", "a.txt", "b.txt"], temp.path());
-    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(output.status.code(), Some(3));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("fatal: not a libra repository"),
@@ -271,9 +271,6 @@ async fn test_mv_dry_run_output_matches_command_text() {
 #[tokio::test]
 #[serial]
 /// Prints usage text when `mv` is called without enough arguments.
-/// TODO: `mv` still uses the legacy string-error path, so these exit-code
-/// assertions are coupled to the current CLI compatibility shim until `mv`
-/// migrates to `CliError`.
 async fn test_mv_usage_output_matches_command_text() {
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
@@ -284,8 +281,10 @@ async fn test_mv_usage_output_matches_command_text() {
         .output()
         .expect("failed to execute libra mv");
 
-    assert_eq!(output.status.code(), Some(129));
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2));
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert_eq!(report.exit_code, 2);
     assert!(stderr.contains("usage: libra mv [<options>] <source>... <destination>"));
     assert!(stderr.contains("-v, --verbose    be verbose"));
     assert!(stderr.contains("-n, --dry-run    dry run"));
@@ -305,8 +304,9 @@ async fn test_mv_bad_source_output_matches_command_text() {
         .output()
         .expect("failed to execute libra mv bad source case");
 
-    assert_eq!(output.status.code(), Some(128));
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2));
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-003");
     assert!(
         stderr.contains("fatal: bad source, source=11, destination=22"),
         "unexpected stderr: {stderr}"
@@ -333,8 +333,9 @@ async fn test_mv_rejects_source_path_outside_workdir() {
         .output()
         .expect("failed to execute libra mv outside-source case");
 
-    assert_eq!(output.status.code(), Some(128));
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2));
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-003");
     assert!(
         stderr.contains("is outside of the repository at"),
         "unexpected stderr: {stderr}"
@@ -366,8 +367,9 @@ async fn test_mv_rejects_destination_path_outside_workdir() {
         .output()
         .expect("failed to execute libra mv outside-destination case");
 
-    assert_eq!(output.status.code(), Some(128));
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2));
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-003");
     assert!(
         stderr.contains("is outside of the repository at"),
         "unexpected stderr: {stderr}"
@@ -391,8 +393,9 @@ async fn test_mv_rejects_untracked_source() {
         .output()
         .expect("failed to execute libra mv untracked case");
 
-    assert_eq!(output.status.code(), Some(128));
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(4));
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CONFLICT-002");
     assert!(
         stderr.contains(
             "fatal: not under version control, source=untracked.txt, destination=renamed.txt"
@@ -441,8 +444,9 @@ async fn test_mv_rejects_conflicted_source_file() {
         .output()
         .expect("failed to execute libra mv conflict case");
 
-    assert_eq!(output.status.code(), Some(128));
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(4));
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CONFLICT-001");
     assert!(
         stderr.contains("fatal: conflicted, source=conflict.txt, destination=renamed.txt"),
         "unexpected stderr: {stderr}"
@@ -468,8 +472,9 @@ async fn test_mv_rejects_multiple_sources_with_same_target_name() {
         .output()
         .expect("failed to execute libra mv duplicate target case");
 
-    assert_eq!(output.status.code(), Some(128));
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(4));
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CONFLICT-002");
     assert!(
         stderr.contains(
             "fatal: multiple sources moving to the same target path, source=b/same.txt, destination=dest"
@@ -556,8 +561,9 @@ async fn test_mv_rejects_directory_to_non_directory_destination() {
         .output()
         .expect("failed to execute libra mv directory->file case");
 
-    assert_eq!(output.status.code(), Some(128));
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2));
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-003");
     assert!(
         stderr.contains("fatal: destination 'dest_file.txt' is not a directory"),
         "unexpected stderr: {stderr}"
@@ -582,8 +588,9 @@ async fn test_mv_rejects_same_source_and_destination_path() {
         .output()
         .expect("failed to execute libra mv same-path case");
 
-    assert_eq!(output.status.code(), Some(128));
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2));
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-003");
     assert!(
         stderr.contains(
             "fatal: can not move directory into itself, source=same.txt, destination=same.txt"
@@ -608,8 +615,9 @@ async fn test_mv_rejects_moving_directory_into_subdirectory() {
         .output()
         .expect("failed to execute libra mv directory-into-subdirectory case");
 
-    assert_eq!(output.status.code(), Some(128));
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2));
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-003");
     assert!(
         stderr
             .contains("fatal: can not move directory into itself, source=dir, destination=dir/sub"),

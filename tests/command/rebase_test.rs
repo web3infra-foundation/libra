@@ -17,7 +17,7 @@ use super::*;
 fn test_rebase_cli_outside_repository_returns_fatal_128() {
     let temp = tempdir().unwrap();
     let output = run_libra_command(&["rebase", "main"], temp.path());
-    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(output.status.code(), Some(3));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("fatal: not a libra repository"),
@@ -30,8 +30,9 @@ fn test_rebase_cli_outside_repository_returns_fatal_128() {
 fn test_rebase_cli_missing_upstream_returns_usage_129() {
     let repo = create_committed_repo_via_cli();
     let output = run_libra_command(&["rebase"], repo.path());
-    assert_eq!(output.status.code(), Some(129));
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2));
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-002");
     assert!(stderr.contains("Usage:"), "unexpected stderr: {stderr}");
 }
 
@@ -40,8 +41,9 @@ fn test_rebase_cli_missing_upstream_returns_usage_129() {
 fn test_rebase_cli_invalid_upstream_returns_fatal_128() {
     let repo = create_committed_repo_via_cli();
     let output = run_libra_command(&["rebase", "nonexistent-upstream"], repo.path());
-    assert_eq!(output.status.code(), Some(128));
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2));
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-003");
     assert!(
         stderr.contains("fatal:"),
         "expected fatal error for invalid upstream, got: {stderr}"

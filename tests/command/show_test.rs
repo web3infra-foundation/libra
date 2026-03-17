@@ -125,16 +125,17 @@ fn create_annotated_tag(temp_path: &std::path::Path, tag_name: &str, message: &s
 
 #[test]
 #[serial]
-fn test_show_cli_badref_returns_fatal_128() {
+fn test_show_cli_badref_returns_cli_exit_code() {
     let repo = create_committed_repo_via_cli();
 
     let output = run_libra_command(&["show", "badref"], repo.path());
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(output.status.code(), Some(2));
     assert!(stderr.contains(
         "fatal: ambiguous argument 'badref': unknown revision or path not in the working tree."
     ));
+    assert!(stderr.contains("Error-Code: LBR-CLI-003"));
     assert!(stderr.contains("Hint: use '--' to separate paths from revisions"));
 }
 
@@ -347,9 +348,10 @@ async fn test_show_execute_safe_bad_ref_returns_cli_error() {
     let err = result.unwrap_err();
     assert_eq!(
         err.exit_code(),
-        128,
-        "bad revision should be fatal (exit 128)"
+        2,
+        "bad revision should map to the invalid-target exit code"
     );
+    assert_eq!(err.stable_code().as_str(), "LBR-CLI-003");
     assert!(
         err.message().contains("bad revision") || err.message().contains("unknown revision"),
         "error should mention bad revision, got: {}",

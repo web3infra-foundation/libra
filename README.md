@@ -58,6 +58,13 @@ Options:
 
 ---
 
+## Error Reporting
+
+CLI failures use stable exit codes, stable error codes, and a trailing JSON stderr report for agents and wrappers.
+See [docs/error-codes.md](/Volumes/Data/GitMono/libra/docs/error-codes.md).
+
+---
+
 ## Libra Code Modes
 
 Libra Code supports three operation modes, each designed for different use cases.

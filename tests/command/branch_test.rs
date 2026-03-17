@@ -12,14 +12,15 @@ use super::*;
 
 #[test]
 #[serial]
-fn test_branch_cli_invalid_start_point_returns_fatal_128() {
+fn test_branch_cli_invalid_start_point_returns_cli_exit_code() {
     let repo = create_committed_repo_via_cli();
 
     let output = run_libra_command(&["branch", "new", "badref"], repo.path());
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(output.status.code(), Some(2));
     assert!(stderr.contains("fatal: not a valid object name: 'badref'"));
+    assert!(stderr.contains("Error-Code: LBR-CLI-003"));
 }
 
 #[tokio::test]

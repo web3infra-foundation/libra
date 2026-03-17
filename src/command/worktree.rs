@@ -119,7 +119,7 @@ impl Drop for DirGuard {
 /// returned from handlers is formatted as a `fatal:` message on stderr.
 pub async fn execute(args: WorktreeArgs) {
     if let Err(e) = execute_safe(args).await {
-        eprintln!("{}", e.render());
+        e.print_stderr();
     }
 }
 

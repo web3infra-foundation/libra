@@ -18,7 +18,7 @@ fn test_log_cli_outside_repository_returns_fatal_128() {
     let temp = tempdir().unwrap();
 
     let output = run_libra_command(&["log", "--oneline"], temp.path());
-    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(output.status.code(), Some(3));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("fatal: not a libra repository"),
@@ -33,13 +33,17 @@ fn test_log_cli_empty_repository_returns_fatal_128() {
     init_repo_via_cli(repo.path());
 
     let output = run_libra_command(&["log", "--oneline"], repo.path());
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(128));
-    assert!(!stderr.contains("thread 'main'"));
+    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(report.error_code, "LBR-REPO-003");
+    assert_eq!(
+        report.message,
+        "your current branch 'main' does not have any commits yet"
+    );
     assert_eq!(
         stderr,
-        "fatal: your current branch 'main' does not have any commits yet\n"
+        "fatal: your current branch 'main' does not have any commits yet\nError-Code: LBR-REPO-003"
     );
 }
 

@@ -96,7 +96,7 @@ fn contains_initialized_repo(metadata_root: &Path) -> bool {
 
 pub async fn execute(args: CloneArgs) {
     if let Err(err) = execute_safe(args).await {
-        eprintln!("{}", err.render());
+        err.print_stderr();
     }
 }
 

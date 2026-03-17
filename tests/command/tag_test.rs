@@ -171,7 +171,7 @@ async fn setup_repo_with_commit_with(
 
 #[test]
 #[serial]
-fn test_tag_cli_duplicate_tag_returns_fatal_128_without_stdout() {
+fn test_tag_cli_duplicate_tag_returns_conflict_exit_code_without_stdout() {
     let repo = create_committed_repo_via_cli();
 
     let output = run_libra_command(&["tag", "v1"], repo.path());
@@ -181,9 +181,10 @@ fn test_tag_cli_duplicate_tag_returns_fatal_128_without_stdout() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(output.status.code(), Some(4));
     assert!(stdout.trim().is_empty(), "unexpected stdout: {stdout}");
     assert!(stderr.contains("fatal: tag 'v1' already exists"));
+    assert!(stderr.contains("Error-Code: LBR-CONFLICT-002"));
 }
 
 // Test cases

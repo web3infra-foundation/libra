@@ -311,7 +311,7 @@ struct Reference {
 
 pub async fn execute(args: LogArgs) {
     if let Err(err) = execute_safe(args).await {
-        eprintln!("{}", err.render());
+        err.print_stderr();
     }
 }
 

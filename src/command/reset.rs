@@ -68,7 +68,7 @@ enum ResetMode {
 /// - Hard: Moves HEAD, resets index and working directory
 pub async fn execute(args: ResetArgs) {
     if let Err(e) = execute_safe(args).await {
-        eprintln!("{}", e.render());
+        e.print_stderr();
     }
 }
 

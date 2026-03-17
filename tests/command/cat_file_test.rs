@@ -5,6 +5,8 @@ use std::process::Command;
 
 use serial_test::serial;
 
+use super::parse_cli_error_stderr;
+
 /// Initialize a temporary repository using CLI.
 fn init_temp_repo() -> tempfile::TempDir {
     let temp_dir = tempfile::tempdir().expect("Failed to create temporary directory");
@@ -317,7 +319,7 @@ async fn test_cat_file_panic_handling() {
     let temp_dir = init_temp_repo();
     let temp_path = temp_dir.path();
 
-    // Test that the command reports an error (exit 128) rather than panicking
+    // Test that the command reports a structured invalid-target error rather than panicking
     // when accessing a non-existent object in a valid repository.
     let output = Command::new(env!("CARGO_BIN_EXE_libra"))
         .current_dir(temp_path)
@@ -326,8 +328,9 @@ async fn test_cat_file_panic_handling() {
         .expect("Failed to execute cat-file");
 
     assert!(!output.status.success());
-    assert_eq!(output.status.code(), Some(128));
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2));
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-CLI-003");
     assert!(stderr.contains("fatal:"));
 }
 
@@ -621,8 +624,9 @@ fn test_cat_file_cli_outside_repository_returns_fatal_128() {
         .output()
         .expect("Failed to execute cat-file");
 
-    assert_eq!(output.status.code(), Some(128));
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(3));
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-REPO-001");
     assert!(
         stderr.contains("fatal: not a libra repository"),
         "unexpected stderr: {stderr}"

@@ -13,7 +13,9 @@ use std::{
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use git_internal::{hash::ObjectHash, internal::object::commit::Commit};
-use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait, sqlx::types::chrono};
+use sea_orm::{
+    ConnectionTrait, DbBackend, DbErr, Statement, TransactionTrait, sqlx::types::chrono,
+};
 
 use crate::{
     command::load_object,
@@ -77,7 +79,7 @@ enum Subcommands {
 
 pub async fn execute(args: ReflogArgs) {
     if let Err(e) = execute_safe(args).await {
-        eprintln!("{}", e.render());
+        e.print_stderr();
     }
 }
 
@@ -282,7 +284,10 @@ async fn delete_single_group(group: &[(&str, usize)]) -> CliResult<()> {
                     .await?;
                     continue;
                 }
-                eprintln!("fatal: reflog entry `{ref_name}@{{{index}}}` not found")
+                return Err(DbErr::Custom(format!(
+                    "reflog entry `{ref_name}@{{{index}}}` not found"
+                ))
+                .into());
             }
 
             Ok::<_, ReflogError>(())

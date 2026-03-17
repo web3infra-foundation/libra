@@ -4,6 +4,8 @@ use std::{path::Path, process::Command};
 
 use tempfile::tempdir;
 
+use super::parse_cli_error_stderr;
+
 fn run_libra(args: &[&str], cwd: &Path) -> std::process::Output {
     let home = cwd.join(".libra-test-home");
     let config_home = home.join(".config");
@@ -22,16 +24,19 @@ fn run_libra(args: &[&str], cwd: &Path) -> std::process::Output {
 }
 
 #[test]
-fn unknown_command_uses_git_style_exit_code() {
+fn unknown_command_uses_cli_exit_code_and_json_report() {
     let temp = tempdir().unwrap();
     let output = run_libra(&["wat"], temp.path());
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(2));
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
     assert_eq!(
         stderr,
-        "libra: 'wat' is not a libra command. See 'libra --help'.\n"
+        "libra: 'wat' is not a libra command. See 'libra --help'.\nError-Code: LBR-CLI-001"
     );
+    assert_eq!(report.error_code, "LBR-CLI-001");
+    assert_eq!(report.category, "cli");
+    assert_eq!(report.exit_code, 2);
 }
 
 #[test]
@@ -64,13 +69,17 @@ fn global_parse_error_uses_exit_code_2() {
     let output = run_libra(&["--bad"], temp.path());
     assert_eq!(output.status.code(), Some(2));
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
     assert!(stderr.starts_with("error: unexpected argument '--bad' found"));
+    assert!(stderr.contains("Error-Code: LBR-CLI-002"));
     assert!(stderr.contains("Usage: libra <COMMAND>"));
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert_eq!(report.category, "cli");
+    assert_eq!(report.exit_code, 2);
 }
 
 #[test]
-fn command_usage_error_uses_exit_code_129() {
+fn command_usage_error_uses_cli_exit_code_and_json_report() {
     let temp = tempdir().unwrap();
     let repo = temp.path().join("repo");
     std::fs::create_dir_all(&repo).unwrap();
@@ -78,26 +87,34 @@ fn command_usage_error_uses_exit_code_129() {
     assert!(init.status.success());
 
     let output = run_libra(&["add", "--bad"], &repo);
-    assert_eq!(output.status.code(), Some(129));
+    assert_eq!(output.status.code(), Some(2));
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
     assert!(stderr.starts_with("error: unexpected argument '--bad' found"));
+    assert!(stderr.contains("Error-Code: LBR-CLI-002"));
     assert!(stderr.contains("Usage: libra add [OPTIONS] [PATHSPEC]..."));
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert_eq!(report.category, "cli");
+    assert_eq!(report.exit_code, 2);
 }
 
 #[test]
-fn runtime_fatal_uses_exit_code_128() {
+fn runtime_repo_error_uses_repo_exit_code_and_json_report() {
     let temp = tempdir().unwrap();
     let output = run_libra(&["add", "good.txt"], temp.path());
-    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(output.status.code(), Some(3));
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
     assert!(
         stderr.contains("fatal: not a libra repository"),
         "unexpected stderr: {stderr}"
     );
+    assert!(stderr.contains("Error-Code: LBR-REPO-001"));
     assert!(
         stderr.contains("Hint: run 'libra init'"),
         "missing init hint in stderr: {stderr}"
     );
+    assert_eq!(report.error_code, "LBR-REPO-001");
+    assert_eq!(report.category, "repo");
+    assert_eq!(report.exit_code, 3);
 }

@@ -20,7 +20,7 @@ fn main() {
     }
 
     if let Err(err) = cli::parse(None) {
-        eprintln!("{}", err.render());
+        err.print_stderr();
         std::process::exit(err.exit_code());
     }
 }

@@ -8,7 +8,7 @@ use libra::{
 };
 use serial_test::serial;
 
-use super::{create_committed_repo_via_cli, run_libra_command};
+use super::{create_committed_repo_via_cli, parse_cli_error_stderr, run_libra_command};
 
 #[test]
 #[serial]
@@ -16,9 +16,10 @@ fn test_merge_cli_missing_branch_returns_error_1() {
     let repo = create_committed_repo_via_cli();
 
     let output = run_libra_command(&["merge", "no-such"], repo.path());
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(report.error_code, "LBR-CLI-003");
     assert!(stderr.contains("error: no-such - not something we can merge"));
 }
 
@@ -193,9 +194,8 @@ fn test_merge_diverged_branch_returns_fatal_128() {
     assert!(output.status.success(), "Failed to checkout branch1");
 
     let merge_output = run_libra_command(&["merge", "branch2"], temp_path);
-    assert_eq!(merge_output.status.code(), Some(128));
-    assert!(
-        String::from_utf8_lossy(&merge_output.stderr)
-            .contains("fatal: Not possible to fast-forward merge")
-    );
+    assert_eq!(merge_output.status.code(), Some(4));
+    let (stderr, report) = parse_cli_error_stderr(&merge_output.stderr);
+    assert_eq!(report.error_code, "LBR-CONFLICT-002");
+    assert!(stderr.contains("fatal: Not possible to fast-forward merge"));
 }

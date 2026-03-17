@@ -59,7 +59,7 @@ pub struct CherryPickArgs {
 ///    without resolving any conflicts, and it will not take the state of the staging area into account.
 pub async fn execute(args: CherryPickArgs) {
     if let Err(e) = execute_safe(args).await {
-        eprintln!("{}", e.render());
+        e.print_stderr();
     }
 }
 

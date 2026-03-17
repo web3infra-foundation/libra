@@ -2,15 +2,18 @@
 //!
 //! The CLI uses [`CliError`] as the single user-visible error type at the
 //! process boundary. Domain errors inside commands should be mapped into
-//! [`CliError`] with an explicit exit code and hint set instead of printing raw
-//! internal causes to stderr.
+//! [`CliError`] with an explicit stable code, exit code, and hint set instead
+//! of printing raw internal causes to stderr.
 
-use std::fmt;
+use std::{collections::BTreeMap, fmt};
+
+use serde::Serialize;
+use serde_json::Value;
 
 /// Shared CLI result type.
 pub type CliResult<T = ()> = Result<T, CliError>;
 
-/// High-level CLI error classes used to decide prefixes and exit codes.
+/// High-level CLI error classes used to decide prefixes and parse semantics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CliErrorKind {
     UnknownCommand,
@@ -25,6 +28,154 @@ pub enum CliErrorKind {
 pub enum ErrorLevel {
     Fatal,
     Error,
+}
+
+/// Coarse process exit codes for shell and CI automation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[repr(i32)]
+pub enum ExitCode {
+    Usage = 2,
+    Repo = 3,
+    Conflict = 4,
+    Network = 5,
+    Auth = 6,
+    Io = 7,
+    Internal = 8,
+}
+
+impl ExitCode {
+    pub const fn as_i32(self) -> i32 {
+        self as i32
+    }
+}
+
+/// Stable error categories for machine classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CliErrorCategory {
+    Cli,
+    Repo,
+    Conflict,
+    Network,
+    Auth,
+    Io,
+    Internal,
+}
+
+impl CliErrorCategory {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cli => "cli",
+            Self::Repo => "repo",
+            Self::Conflict => "conflict",
+            Self::Network => "network",
+            Self::Auth => "auth",
+            Self::Io => "io",
+            Self::Internal => "internal",
+        }
+    }
+}
+
+/// Stable Libra CLI error codes for agents and structured tooling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StableErrorCode {
+    CliUnknownCommand,
+    CliInvalidArguments,
+    CliInvalidTarget,
+    RepoNotFound,
+    RepoCorrupt,
+    RepoStateInvalid,
+    ConflictUnresolved,
+    ConflictOperationBlocked,
+    NetworkUnavailable,
+    NetworkProtocol,
+    AuthMissingCredentials,
+    AuthPermissionDenied,
+    IoReadFailed,
+    IoWriteFailed,
+    InternalInvariant,
+}
+
+impl StableErrorCode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CliUnknownCommand => "LBR-CLI-001",
+            Self::CliInvalidArguments => "LBR-CLI-002",
+            Self::CliInvalidTarget => "LBR-CLI-003",
+            Self::RepoNotFound => "LBR-REPO-001",
+            Self::RepoCorrupt => "LBR-REPO-002",
+            Self::RepoStateInvalid => "LBR-REPO-003",
+            Self::ConflictUnresolved => "LBR-CONFLICT-001",
+            Self::ConflictOperationBlocked => "LBR-CONFLICT-002",
+            Self::NetworkUnavailable => "LBR-NET-001",
+            Self::NetworkProtocol => "LBR-NET-002",
+            Self::AuthMissingCredentials => "LBR-AUTH-001",
+            Self::AuthPermissionDenied => "LBR-AUTH-002",
+            Self::IoReadFailed => "LBR-IO-001",
+            Self::IoWriteFailed => "LBR-IO-002",
+            Self::InternalInvariant => "LBR-INTERNAL-001",
+        }
+    }
+
+    pub const fn category(self) -> CliErrorCategory {
+        match self {
+            Self::CliUnknownCommand | Self::CliInvalidArguments | Self::CliInvalidTarget => {
+                CliErrorCategory::Cli
+            }
+            Self::RepoNotFound | Self::RepoCorrupt | Self::RepoStateInvalid => {
+                CliErrorCategory::Repo
+            }
+            Self::ConflictUnresolved | Self::ConflictOperationBlocked => CliErrorCategory::Conflict,
+            Self::NetworkUnavailable | Self::NetworkProtocol => CliErrorCategory::Network,
+            Self::AuthMissingCredentials | Self::AuthPermissionDenied => CliErrorCategory::Auth,
+            Self::IoReadFailed | Self::IoWriteFailed => CliErrorCategory::Io,
+            Self::InternalInvariant => CliErrorCategory::Internal,
+        }
+    }
+
+    pub const fn exit_code(self) -> ExitCode {
+        match self.category() {
+            CliErrorCategory::Cli => ExitCode::Usage,
+            CliErrorCategory::Repo => ExitCode::Repo,
+            CliErrorCategory::Conflict => ExitCode::Conflict,
+            CliErrorCategory::Network => ExitCode::Network,
+            CliErrorCategory::Auth => ExitCode::Auth,
+            CliErrorCategory::Io => ExitCode::Io,
+            CliErrorCategory::Internal => ExitCode::Internal,
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::CliUnknownCommand => "Unknown command or unsupported top-level invocation.",
+            Self::CliInvalidArguments => "Invalid or missing CLI arguments.",
+            Self::CliInvalidTarget => "Invalid object, revision, pathspec, or command target.",
+            Self::RepoNotFound => "Current directory is not a Libra repository.",
+            Self::RepoCorrupt => "Repository metadata is missing, incompatible, or corrupt.",
+            Self::RepoStateInvalid => {
+                "Repository state prevents the requested operation from proceeding."
+            }
+            Self::ConflictUnresolved => {
+                "Operation stopped because unresolved conflicts are present."
+            }
+            Self::ConflictOperationBlocked => {
+                "Operation was blocked to avoid overwriting local or remote state."
+            }
+            Self::NetworkUnavailable => "Remote transport, connectivity, or reachability failure.",
+            Self::NetworkProtocol => "Remote protocol, sideband, or pack negotiation failure.",
+            Self::AuthMissingCredentials => {
+                "Required credentials, identity, key material, or tokens are missing."
+            }
+            Self::AuthPermissionDenied => {
+                "Credentials were present but the operation is not permitted."
+            }
+            Self::IoReadFailed => "Filesystem or storage read failed.",
+            Self::IoWriteFailed => "Filesystem or storage write failed.",
+            Self::InternalInvariant => {
+                "Unexpected internal failure or broken invariant. This should be reported."
+            }
+        }
+    }
 }
 
 /// Structured hint text rendered after the main error line.
@@ -57,60 +208,74 @@ impl From<String> for Hint {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CliError {
     kind: CliErrorKind,
+    stable_code: StableErrorCode,
     message: String,
     hints: Vec<Hint>,
     usage: Option<String>,
+    details: BTreeMap<String, Value>,
 }
 
 impl CliError {
+    fn new(kind: CliErrorKind, message: impl Into<String>) -> Self {
+        let message = message.into();
+        let stable_code = infer_stable_error_code(kind, &message);
+        Self {
+            kind,
+            stable_code,
+            message,
+            hints: Vec::new(),
+            usage: None,
+            details: BTreeMap::new(),
+        }
+    }
+
     pub fn repo_not_found() -> Self {
         Self::fatal("not a libra repository (or any of the parent directories): .libra")
+            .with_stable_code(StableErrorCode::RepoNotFound)
             .with_hint("run 'libra init' to create a repository in the current directory.")
     }
 
     pub fn unknown_command(message: impl Into<String>) -> Self {
-        Self {
-            kind: CliErrorKind::UnknownCommand,
-            message: message.into(),
-            hints: Vec::new(),
-            usage: None,
-        }
+        Self::new(CliErrorKind::UnknownCommand, message)
+            .with_stable_code(StableErrorCode::CliUnknownCommand)
     }
 
     pub fn parse_usage(message: impl Into<String>) -> Self {
-        Self {
-            kind: CliErrorKind::ParseUsage,
-            message: message.into(),
-            hints: Vec::new(),
-            usage: None,
-        }
+        Self::new(CliErrorKind::ParseUsage, message)
+            .with_stable_code(StableErrorCode::CliInvalidArguments)
     }
 
     pub fn command_usage(message: impl Into<String>) -> Self {
-        Self {
-            kind: CliErrorKind::CommandUsage,
-            message: message.into(),
-            hints: Vec::new(),
-            usage: None,
-        }
+        Self::new(CliErrorKind::CommandUsage, message)
+            .with_stable_code(StableErrorCode::CliInvalidArguments)
     }
 
     pub fn fatal(message: impl Into<String>) -> Self {
-        Self {
-            kind: CliErrorKind::Fatal,
-            message: message.into(),
-            hints: Vec::new(),
-            usage: None,
-        }
+        Self::new(CliErrorKind::Fatal, message)
     }
 
     pub fn failure(message: impl Into<String>) -> Self {
-        Self {
-            kind: CliErrorKind::Failure,
-            message: message.into(),
-            hints: Vec::new(),
-            usage: None,
-        }
+        Self::new(CliErrorKind::Failure, message)
+    }
+
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self::fatal(message).with_stable_code(StableErrorCode::ConflictOperationBlocked)
+    }
+
+    pub fn network(message: impl Into<String>) -> Self {
+        Self::fatal(message).with_stable_code(StableErrorCode::NetworkUnavailable)
+    }
+
+    pub fn auth(message: impl Into<String>) -> Self {
+        Self::fatal(message).with_stable_code(StableErrorCode::AuthMissingCredentials)
+    }
+
+    pub fn io(message: impl Into<String>) -> Self {
+        Self::fatal(message).with_stable_code(StableErrorCode::IoReadFailed)
+    }
+
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::fatal(message).with_stable_code(StableErrorCode::InternalInvariant)
     }
 
     /// Convert a legacy prefixed error string (e.g. `"fatal: ..."` or
@@ -126,7 +291,6 @@ impl CliError {
         } else if let Some(rest) = trimmed.strip_prefix("error: ") {
             Self::failure(rest.to_string())
         } else if let Some(rest) = trimmed.strip_prefix("warning: ") {
-            // Strip the prefix so rendering doesn't produce "error: warning: …"
             Self::failure(rest.to_string())
         } else if let Some(rest) = trimmed.strip_prefix("usage: ") {
             Self::command_usage("invalid arguments").with_usage(format!("usage: {rest}"))
@@ -137,6 +301,14 @@ impl CliError {
 
     pub fn kind(&self) -> CliErrorKind {
         self.kind
+    }
+
+    pub fn stable_code(&self) -> StableErrorCode {
+        self.stable_code
+    }
+
+    pub fn category(&self) -> CliErrorCategory {
+        self.stable_code.category()
     }
 
     pub fn level(&self) -> Option<ErrorLevel> {
@@ -161,6 +333,15 @@ impl CliError {
         &self.hints
     }
 
+    pub fn details(&self) -> &BTreeMap<String, Value> {
+        &self.details
+    }
+
+    pub fn with_stable_code(mut self, stable_code: StableErrorCode) -> Self {
+        self.stable_code = stable_code;
+        self
+    }
+
     pub fn with_hint(mut self, hint: impl Into<Hint>) -> Self {
         if self.hints.len() >= 2 {
             return self;
@@ -175,6 +356,11 @@ impl CliError {
         self
     }
 
+    pub fn with_detail(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
+        self.details.insert(key.into(), value.into());
+        self
+    }
+
     pub fn with_usage(mut self, usage: impl Into<String>) -> Self {
         let usage = usage.into();
         if !usage.trim().is_empty() {
@@ -184,13 +370,15 @@ impl CliError {
     }
 
     pub fn exit_code(&self) -> i32 {
-        match self.kind {
-            CliErrorKind::UnknownCommand => 1,
-            CliErrorKind::ParseUsage => 2,
-            CliErrorKind::CommandUsage => 129,
-            CliErrorKind::Fatal => 128,
-            CliErrorKind::Failure => 1,
-        }
+        self.stable_code.exit_code().as_i32()
+    }
+
+    pub fn render_json(&self) -> String {
+        serde_json::to_string(&self.report()).unwrap_or_else(|_| {
+            "{\"ok\":false,\"error_code\":\"LBR-INTERNAL-001\",\"category\":\"internal\",\
+\"exit_code\":8,\"severity\":\"fatal\",\"message\":\"failed to serialize CLI error report\"}"
+                .to_string()
+        })
     }
 
     pub fn render(&self) -> String {
@@ -202,6 +390,8 @@ impl CliError {
             }
             CliErrorKind::Fatal => lines.push(format!("fatal: {}", self.message)),
         }
+
+        lines.push(format!("Error-Code: {}", self.stable_code.as_str()));
 
         if let Some(usage) = &self.usage
             && !usage.trim().is_empty()
@@ -215,6 +405,58 @@ impl CliError {
 
         lines.join("\n")
     }
+
+    pub fn render_report(&self) -> String {
+        format!("{}\n{}", self.render(), self.render_json())
+    }
+
+    pub fn print_stderr(&self) {
+        eprintln!("{}", self.render_report());
+    }
+
+    fn severity(&self) -> &'static str {
+        match self.kind {
+            CliErrorKind::Fatal => "fatal",
+            CliErrorKind::UnknownCommand
+            | CliErrorKind::ParseUsage
+            | CliErrorKind::CommandUsage
+            | CliErrorKind::Failure => "error",
+        }
+    }
+
+    fn report(&self) -> CliErrorReport {
+        CliErrorReport {
+            ok: false,
+            error_code: self.stable_code.as_str(),
+            category: self.category(),
+            exit_code: self.exit_code(),
+            severity: self.severity(),
+            message: self.message.clone(),
+            usage: self.usage.clone(),
+            hints: self
+                .hints
+                .iter()
+                .map(|hint| hint.as_str().to_string())
+                .collect(),
+            details: self.details.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct CliErrorReport {
+    ok: bool,
+    error_code: &'static str,
+    category: CliErrorCategory,
+    exit_code: i32,
+    severity: &'static str,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    hints: Vec<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    details: BTreeMap<String, Value>,
 }
 
 fn normalize_hint_text(text: String) -> String {
@@ -249,6 +491,26 @@ impl fmt::Display for CliError {
 
 impl std::error::Error for CliError {}
 
+/// Emit a legacy CLI message to stderr, converting fatal/error lines into the
+/// structured [`CliError`] report format.
+pub fn emit_legacy_stderr(message: impl Into<String>) {
+    let message = message.into();
+    if let Some(text) = message.trim().strip_prefix("warning: ") {
+        eprintln!("warning: {}", text);
+        return;
+    }
+
+    CliError::from_legacy_string(message).print_stderr();
+}
+
+/// Emit a legacy CLI message to stderr and terminate the process with the
+/// inferred exit code.
+pub fn exit_with_legacy_stderr(message: impl Into<String>) -> ! {
+    let err = CliError::from_legacy_string(message.into());
+    err.print_stderr();
+    std::process::exit(err.exit_code());
+}
+
 /// Print a user-facing error to stderr.
 ///
 /// New command code should prefer returning [`CliError`] instead of printing
@@ -256,22 +518,369 @@ impl std::error::Error for CliError {}
 #[macro_export]
 macro_rules! cli_error {
     ($prefix:expr => $err:expr) => {{
-        eprintln!("{}: {}", $prefix, $err);
+        $crate::utils::error::emit_legacy_stderr(format!("{}: {}", $prefix, $err));
     }};
     ($err:expr, $($arg:tt)+) => {{
-        eprint!($($arg)+);
-        eprintln!(": {}", $err);
+        let prefix = format!($($arg)+);
+        $crate::utils::error::emit_legacy_stderr(format!("{prefix}: {}", $err));
     }};
+}
+
+fn infer_stable_error_code(kind: CliErrorKind, message: &str) -> StableErrorCode {
+    let lower = message.to_ascii_lowercase();
+
+    match kind {
+        CliErrorKind::UnknownCommand => StableErrorCode::CliUnknownCommand,
+        CliErrorKind::ParseUsage | CliErrorKind::CommandUsage => {
+            if is_invalid_target_error(&lower) {
+                StableErrorCode::CliInvalidTarget
+            } else {
+                StableErrorCode::CliInvalidArguments
+            }
+        }
+        CliErrorKind::Fatal | CliErrorKind::Failure => infer_runtime_error_code(&lower),
+    }
+}
+
+fn infer_runtime_error_code(lower: &str) -> StableErrorCode {
+    if is_internal_error(lower) {
+        return StableErrorCode::InternalInvariant;
+    }
+    if is_auth_permission_error(lower) {
+        return StableErrorCode::AuthPermissionDenied;
+    }
+    if is_auth_missing_error(lower) {
+        return StableErrorCode::AuthMissingCredentials;
+    }
+    if is_conflict_unresolved_error(lower) {
+        return StableErrorCode::ConflictUnresolved;
+    }
+    if is_conflict_blocked_error(lower) {
+        return StableErrorCode::ConflictOperationBlocked;
+    }
+    if is_repo_not_found_error(lower) {
+        return StableErrorCode::RepoNotFound;
+    }
+    if is_repo_corrupt_error(lower) {
+        return StableErrorCode::RepoCorrupt;
+    }
+    if is_repo_state_error(lower) {
+        return StableErrorCode::RepoStateInvalid;
+    }
+    if is_network_protocol_error(lower) {
+        return StableErrorCode::NetworkProtocol;
+    }
+    if is_network_unavailable_error(lower) {
+        return StableErrorCode::NetworkUnavailable;
+    }
+    if is_io_write_error(lower) {
+        return StableErrorCode::IoWriteFailed;
+    }
+    if is_io_read_error(lower) {
+        return StableErrorCode::IoReadFailed;
+    }
+    if is_invalid_target_error(lower) {
+        return StableErrorCode::CliInvalidTarget;
+    }
+    if is_usage_error(lower) {
+        return StableErrorCode::CliInvalidArguments;
+    }
+
+    StableErrorCode::InternalInvariant
+}
+
+fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| haystack.contains(needle))
+}
+
+fn is_usage_error(lower: &str) -> bool {
+    contains_any(
+        lower,
+        &[
+            "unexpected argument",
+            "invalid arguments",
+            "invalid argument",
+            "missing required",
+            "requires a value",
+            "conflicts with",
+            "required when",
+            "please specify the destination path explicitly",
+            "branch name is required",
+            "too many arguments",
+            "expected format",
+            "clean requires -f or -n",
+            "must use http or https",
+            "is not a valid url",
+            "one of '-t', '-s', '-p', '-e' or an --ai* flag is required",
+        ],
+    )
+}
+
+fn is_invalid_target_error(lower: &str) -> bool {
+    contains_any(
+        lower,
+        &[
+            "pathspec",
+            "not a valid object name",
+            "invalid reference",
+            "invalid upstream",
+            "invalid remote branch",
+            "invalid object",
+            "invalid revision",
+            "ambiguous argument",
+            "<object> is required",
+            "outside of the repository",
+            "outside repository",
+            "not something we can merge",
+            "is not a valid stash reference",
+            "bad source",
+            "is not a directory",
+            "can not move directory into itself",
+        ],
+    )
+}
+
+fn is_repo_not_found_error(lower: &str) -> bool {
+    lower.contains("not a libra repository")
+        || lower.contains("does not appear to be a libra repository")
+        || (lower.contains("repository '") && lower.contains("does not exist"))
+}
+
+fn is_repo_corrupt_error(lower: &str) -> bool {
+    contains_any(
+        lower,
+        &[
+            "repository database not found",
+            "unsupported object format",
+            "storage broken",
+            "corrupted",
+            "invalid tag object encoding",
+            "failed to load tag object",
+            "object storage error",
+            "repository broken",
+        ],
+    )
+}
+
+fn is_repo_state_error(lower: &str) -> bool {
+    contains_any(
+        lower,
+        &[
+            "head is detached",
+            "detached head",
+            "no configured remote",
+            "no remote configured",
+            "no upstream specified",
+            "no rebase in progress",
+            "not on a branch",
+            "current branch",
+            "your current branch",
+            "no configured push destination",
+            "no commit at head",
+            "no such remote",
+            "refusing to merge unrelated histories",
+            "no names found, cannot describe anything",
+            "stash does not exist",
+            "reflog entry",
+        ],
+    ) || ((lower.contains("branch") || lower.contains("tag") || lower.contains("remote"))
+        && lower.contains("not found"))
+}
+
+fn is_conflict_unresolved_error(lower: &str) -> bool {
+    contains_any(
+        lower,
+        &[
+            "resolve all conflicts",
+            "unresolved conflict",
+            "merge conflict",
+            "on conflict",
+            "conflicted",
+            "conflict:",
+        ],
+    ) || (lower.contains("conflict") && !lower.contains("argument conflict"))
+}
+
+fn is_conflict_blocked_error(lower: &str) -> bool {
+    contains_any(
+        lower,
+        &[
+            "already exists",
+            "already in progress",
+            "would be overwritten",
+            "working tree not clean",
+            "unstaged changes",
+            "uncommitted changes",
+            "untracked working tree file would be overwritten",
+            "cannot overwrite",
+            "non-fast-forward",
+            "not possible to fast-forward",
+            "destination path",
+            "ignored by one of your",
+            "address already in use",
+            "multiple root commits",
+            "multiple sources moving to the same target path",
+            "not under version control",
+        ],
+    )
+}
+
+fn is_network_unavailable_error(lower: &str) -> bool {
+    contains_any(
+        lower,
+        &[
+            "failed to discover references",
+            "failed to fetch objects",
+            "failed to send request",
+            "failed to send pack data",
+            "failed to read server response",
+            "host key verification failed",
+            "connection refused",
+            "timed out",
+            "timeout",
+            "tls",
+            "ssl",
+            "could not resolve host",
+            "network error",
+            "failed to start mcp server",
+            "failed to start web server",
+        ],
+    )
+}
+
+fn is_network_protocol_error(lower: &str) -> bool {
+    contains_any(
+        lower,
+        &[
+            "protocol",
+            "packet",
+            "pkt",
+            "sideband",
+            "checksum mismatch",
+            "content-type",
+            "object format mismatch",
+            "unpack failed",
+            "ref update failed",
+            "send_pack failed",
+            "pack encoding failed",
+            "failed to build pack index",
+        ],
+    )
+}
+
+fn is_auth_missing_error(lower: &str) -> bool {
+    contains_any(
+        lower,
+        &[
+            "_api_key is not set",
+            "api key is not set",
+            "credential",
+            "authentication required",
+            "author identity unknown",
+            "name and email are not configured",
+            "unseal key not found",
+            "username or password",
+            "no ssh public key found",
+            "missing token",
+        ],
+    )
+}
+
+fn is_auth_permission_error(lower: &str) -> bool {
+    if lower.contains("permission denied")
+        && contains_any(
+            lower,
+            &[
+                "failed to remove",
+                "failed to write",
+                "failed to save",
+                "failed to update",
+                "failed to restore",
+                "failed to create",
+                "failed to open",
+                "could not open",
+                "failed to load",
+                "failed to read",
+            ],
+        )
+    {
+        return false;
+    }
+
+    contains_any(
+        lower,
+        &[
+            "forbidden",
+            "permission denied",
+            "access denied",
+            "push access",
+            "insufficient scope",
+            "unauthorized",
+            "not authorized",
+            "authentication failed",
+        ],
+    )
+}
+
+fn is_io_read_error(lower: &str) -> bool {
+    contains_any(
+        lower,
+        &[
+            "failed to read",
+            "unable to read",
+            "could not open",
+            "failed to open",
+            "failed to load",
+            "could not read",
+            "failed to determine working directory",
+            "failed to list",
+            "invalid path encoding",
+            "unable to read index",
+        ],
+    )
+}
+
+fn is_io_write_error(lower: &str) -> bool {
+    contains_any(
+        lower,
+        &[
+            "failed to write",
+            "failed to save",
+            "write error",
+            "failed to create",
+            "could not create",
+            "failed to remove",
+            "failed to restore",
+            "failed to persist",
+            "failed to update",
+            "failed to delete",
+            "failed to reset working directory",
+            "failed to move",
+            "unable to write index",
+        ],
+    )
+}
+
+fn is_internal_error(lower: &str) -> bool {
+    contains_any(
+        lower,
+        &["internal error", "panic", "invariant", "unexpectedly"],
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CliError, CliErrorKind};
+    use serde_json::Value;
+
+    use super::{CliError, CliErrorKind, StableErrorCode};
 
     #[test]
     fn fatal_render_uses_git_style_prefix() {
         let rendered = CliError::fatal("failed to open index").render();
-        assert_eq!(rendered, "fatal: failed to open index");
+        assert_eq!(
+            rendered,
+            "fatal: failed to open index\nError-Code: LBR-IO-001"
+        );
     }
 
     #[test]
@@ -279,7 +888,7 @@ mod tests {
         let rendered = CliError::repo_not_found().render();
         assert_eq!(
             rendered,
-            "fatal: not a libra repository (or any of the parent directories): .libra\nHint: run 'libra init' to create a repository in the current directory."
+            "fatal: not a libra repository (or any of the parent directories): .libra\nError-Code: LBR-REPO-001\nHint: run 'libra init' to create a repository in the current directory."
         );
     }
 
@@ -291,7 +900,7 @@ mod tests {
             .render();
         assert_eq!(
             rendered,
-            "error: unexpected argument '--bad'\nUsage: libra add [OPTIONS] [PATHSPEC]...\nHint: use '--help' to see available options."
+            "error: unexpected argument '--bad'\nError-Code: LBR-CLI-002\nUsage: libra add [OPTIONS] [PATHSPEC]...\nHint: use '--help' to see available options."
         );
     }
 
@@ -304,7 +913,7 @@ mod tests {
             .render();
         assert_eq!(
             rendered,
-            "error: name and email are not configured\nHint: to configure, run:\nHint:   libra config --global user.name \"Some One\"\nHint:   libra config --global user.email \"someone@example.com\""
+            "error: name and email are not configured\nError-Code: LBR-AUTH-001\nHint: to configure, run:\nHint:   libra config --global user.name \"Some One\"\nHint:   libra config --global user.email \"someone@example.com\""
         );
     }
 
@@ -315,9 +924,9 @@ mod tests {
         assert_eq!(err.kind(), CliErrorKind::UnknownCommand);
         assert_eq!(
             err.render(),
-            "libra: 'wat' is not a libra command. See 'libra --help'."
+            "libra: 'wat' is not a libra command. See 'libra --help'.\nError-Code: LBR-CLI-001"
         );
-        assert_eq!(err.exit_code(), 1);
+        assert_eq!(err.exit_code(), 2);
     }
 
     #[test]
@@ -327,14 +936,20 @@ mod tests {
             .with_hint("Hint: second")
             .with_hint("third")
             .render();
-        assert_eq!(rendered, "error: bad\nHint: first\nHint: second");
+        assert_eq!(
+            rendered,
+            "error: bad\nError-Code: LBR-INTERNAL-001\nHint: first\nHint: second"
+        );
     }
 
     #[test]
     fn from_legacy_string_strips_warning_prefix() {
         let err = CliError::from_legacy_string("warning: something off");
         assert_eq!(err.kind(), CliErrorKind::Failure);
-        assert_eq!(err.render(), "error: something off");
+        assert_eq!(
+            err.render(),
+            "error: something off\nError-Code: LBR-INTERNAL-001"
+        );
     }
 
     #[test]
@@ -342,5 +957,51 @@ mod tests {
         let err = CliError::from_legacy_string("usage: libra mv <source> <dest>");
         assert_eq!(err.kind(), CliErrorKind::CommandUsage);
         assert!(err.render().contains("usage: libra mv <source> <dest>"));
+    }
+
+    #[test]
+    fn stable_code_maps_repo_not_found_to_exit_code_3() {
+        let err = CliError::repo_not_found();
+        assert_eq!(err.stable_code(), StableErrorCode::RepoNotFound);
+        assert_eq!(err.exit_code(), 3);
+    }
+
+    #[test]
+    fn stable_code_infers_auth_missing() {
+        let err = CliError::fatal("OPENAI_API_KEY is not set");
+        assert_eq!(err.stable_code(), StableErrorCode::AuthMissingCredentials);
+        assert_eq!(err.exit_code(), 6);
+    }
+
+    #[test]
+    fn stable_code_infers_conflict() {
+        let err = CliError::fatal("rebase already in progress");
+        assert_eq!(err.stable_code(), StableErrorCode::ConflictOperationBlocked);
+        assert_eq!(err.exit_code(), 4);
+    }
+
+    #[test]
+    fn render_report_appends_json_payload() {
+        let rendered = CliError::repo_not_found().render_report();
+        let json_line = rendered
+            .lines()
+            .last()
+            .expect("error report should include a JSON line");
+        let payload: Value =
+            serde_json::from_str(json_line).expect("last line should be valid JSON");
+        assert_eq!(payload["error_code"], "LBR-REPO-001");
+        assert_eq!(payload["category"], "repo");
+        assert_eq!(payload["exit_code"], 3);
+    }
+
+    #[test]
+    fn render_report_includes_structured_details() {
+        let rendered = CliError::fatal("failed to read object")
+            .with_stable_code(StableErrorCode::IoReadFailed)
+            .with_detail("object", "HEAD")
+            .render_report();
+        let json_line = rendered.lines().last().unwrap();
+        let payload: Value = serde_json::from_str(json_line).unwrap();
+        assert_eq!(payload["details"]["object"], "HEAD");
     }
 }

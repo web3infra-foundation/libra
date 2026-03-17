@@ -105,19 +105,14 @@ impl AuthorStats {
     }
 }
 
-pub async fn execute_to(args: ShortlogArgs, writer: &mut impl Write) -> std::io::Result<()> {
-    if !crate::utils::util::check_repo_exist() {
-        return Ok(());
-    }
+pub async fn execute_to(args: ShortlogArgs, writer: &mut impl Write) -> CliResult<()> {
+    crate::utils::util::require_repo().map_err(|_| CliError::repo_not_found())?;
 
     // Validate date arguments before processing
     let since_ts = if let Some(ref since_str) = args.since {
         match parse_date(since_str) {
             Ok(ts) => Some(ts),
-            Err(e) => {
-                eprintln!("fatal: {}", e);
-                return Ok(());
-            }
+            Err(e) => return Err(CliError::fatal(e.to_string())),
         }
     } else {
         None
@@ -126,10 +121,7 @@ pub async fn execute_to(args: ShortlogArgs, writer: &mut impl Write) -> std::io:
     let until_ts = if let Some(ref until_str) = args.until {
         match parse_date(until_str) {
             Ok(ts) => Some(ts),
-            Err(e) => {
-                eprintln!("fatal: {}", e);
-                return Ok(());
-            }
+            Err(e) => return Err(CliError::fatal(e.to_string())),
         }
     } else {
         None
@@ -137,7 +129,7 @@ pub async fn execute_to(args: ShortlogArgs, writer: &mut impl Write) -> std::io:
 
     let commits = get_commits_for_shortlog(&args, since_ts, until_ts)
         .await
-        .map_err(|e| std::io::Error::other(e.message().to_string()))?;
+        .map_err(|e| CliError::fatal(e.message().to_string()))?;
 
     let mut author_map: HashMap<String, AuthorStats> = HashMap::new();
 
@@ -194,7 +186,8 @@ pub async fn execute_to(args: ShortlogArgs, writer: &mut impl Write) -> std::io:
                 stats.name,
                 stats.email,
                 width = width
-            )?;
+            )
+            .map_err(|e| CliError::fatal(format!("shortlog output error: {e}")))?;
         } else {
             writeln!(
                 writer,
@@ -202,11 +195,13 @@ pub async fn execute_to(args: ShortlogArgs, writer: &mut impl Write) -> std::io:
                 stats.count,
                 stats.name,
                 width = width
-            )?;
+            )
+            .map_err(|e| CliError::fatal(format!("shortlog output error: {e}")))?;
         }
         if !args.summary {
             for subject in &stats.subjects {
-                writeln!(writer, "      {}", subject)?;
+                writeln!(writer, "      {}", subject)
+                    .map_err(|e| CliError::fatal(format!("shortlog output error: {e}")))?;
             }
         }
     }
@@ -216,7 +211,7 @@ pub async fn execute_to(args: ShortlogArgs, writer: &mut impl Write) -> std::io:
 
 pub async fn execute(args: ShortlogArgs) {
     if let Err(e) = execute_safe(args).await {
-        eprintln!("{}", e.render());
+        e.print_stderr();
     }
 }
 
@@ -224,12 +219,7 @@ pub async fn execute(args: ShortlogArgs) {
 /// errors and exiting. Summarises commit history by author, delegating to
 /// [`execute_to`] for formatted output.
 pub async fn execute_safe(args: ShortlogArgs) -> CliResult<()> {
-    crate::utils::util::require_repo().map_err(|_| CliError::repo_not_found())?;
-    match execute_to(args, &mut std::io::stdout()).await {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
-        Err(e) => Err(CliError::fatal(format!("shortlog output error: {e}"))),
-    }
+    execute_to(args, &mut std::io::stdout()).await
 }
 
 async fn get_commits_for_shortlog(

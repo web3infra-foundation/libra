@@ -465,7 +465,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::ClaudeSdk(args) => command::claude_sdk::execute(args)
             .await
             .map_err(|e| CliError::fatal(e.to_string()))?,
-        Commands::Code(args) => command::code::execute(args).await,
+        Commands::Code(args) => command::code::execute(args).await?,
         Commands::Add(args) => command::add::execute_safe(args).await?,
         Commands::Rm(args) => command::remove::execute_safe(args).await?,
         Commands::Restore(args) => command::restore::execute_safe(args).await?,

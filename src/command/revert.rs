@@ -43,7 +43,7 @@ pub struct RevertArgs {
 /// and creating a new commit that undoes the original commit
 pub async fn execute(args: RevertArgs) {
     if let Err(e) = execute_safe(args).await {
-        eprintln!("{}", e.render());
+        e.print_stderr();
     }
 }
 

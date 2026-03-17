@@ -79,7 +79,7 @@ struct DiffStatus {
 
 pub async fn execute(args: RemoveArgs) {
     if let Err(err) = execute_safe(args).await {
-        eprintln!("{}", err.render());
+        err.print_stderr();
     }
 }
 

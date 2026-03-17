@@ -38,7 +38,7 @@ pub struct TagArgs {
 
 pub async fn execute(args: TagArgs) {
     if let Err(err) = execute_safe(args).await {
-        eprintln!("{}", err.render());
+        err.print_stderr();
     }
 }
 
@@ -76,7 +76,7 @@ pub async fn execute_safe(args: TagArgs) -> CliResult<()> {
 #[cfg(test)]
 async fn create_tag(tag_name: &str, message: Option<String>, force: bool) {
     if let Err(err) = create_tag_safe(tag_name, message, force).await {
-        eprintln!("{}", err.render());
+        err.print_stderr();
     }
 }
 
@@ -143,7 +143,7 @@ pub async fn render_tags(show_lines: usize) -> Result<String, anyhow::Error> {
 #[cfg(test)]
 async fn delete_tag(tag_name: &str) {
     if let Err(err) = delete_tag_safe(tag_name).await {
-        eprintln!("{}", err.render());
+        err.print_stderr();
     }
 }
 

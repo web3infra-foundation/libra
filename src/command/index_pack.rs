@@ -45,7 +45,7 @@ pub struct IndexPackArgs {
 
 pub fn execute(args: IndexPackArgs) {
     if let Err(err) = execute_safe(args) {
-        eprintln!("{}", err.render());
+        err.print_stderr();
     }
 }
 
