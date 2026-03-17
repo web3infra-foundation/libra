@@ -8,7 +8,7 @@ use git_internal::{
     hash::ObjectHash,
     internal::object::{blob::Blob, commit::Commit, tree::Tree},
 };
-use libra::utils::{object_ext::TreeExt, util};
+use libra::utils::{object_ext::TreeExt, pager::LIBRA_PAGER_ENV, util};
 
 use super::*;
 
@@ -311,17 +311,11 @@ async fn test_log_patch_no_pathspec() {
         // Set PATH and run
         let old_path = std::env::var("PATH").unwrap_or_default();
         let new_path = format!("{}:{}", bin_dir.display(), old_path);
-        unsafe {
-            std::env::set_var("PATH", &new_path);
-        }
+        let _path = test::ScopedEnvVar::set("PATH", &new_path);
+        let _pager = test::ScopedEnvVar::set(LIBRA_PAGER_ENV, "always");
 
         let args = LogArgs::try_parse_from(["libra", "--number", "2", "-p"]).unwrap();
         libra::command::log::execute(args).await;
-
-        unsafe {
-            // Restore PATH
-            std::env::set_var("PATH", old_path);
-        }
 
         let combined_out = std::fs::read_to_string(&out_file).unwrap_or_default();
         assert!(
@@ -405,16 +399,11 @@ async fn test_log_patch_with_pathspec() {
 
         let old_path = std::env::var("PATH").unwrap_or_default();
         let new_path = format!("{}:{}", bin_dir.display(), old_path);
-        unsafe {
-            std::env::set_var("PATH", &new_path);
-        }
+        let _path = test::ScopedEnvVar::set("PATH", &new_path);
+        let _pager = test::ScopedEnvVar::set(LIBRA_PAGER_ENV, "always");
 
         let args = LogArgs::try_parse_from(["libra", "-p", "A.txt"]).unwrap();
         libra::command::log::execute(args).await;
-
-        unsafe {
-            std::env::set_var("PATH", old_path);
-        }
 
         let out = std::fs::read_to_string(out_file).unwrap_or_default();
         assert!(

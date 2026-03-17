@@ -1,14 +1,49 @@
 //! Test support utilities including change-dir guards, repository setup/cleanup helpers, fixture copying, and isolated command execution helpers.
 
 use std::{
-    env, fs,
+    env,
+    ffi::{OsStr, OsString},
+    fs,
     io::Write,
     path::{Path, PathBuf},
 };
 
 use tracing::level_filters::LevelFilter;
 
-use crate::{command, utils::util};
+use crate::{
+    command,
+    utils::{pager::LIBRA_TEST_ENV, util},
+};
+
+pub struct ScopedEnvVar {
+    key: String,
+    previous: Option<OsString>,
+}
+
+impl ScopedEnvVar {
+    pub fn set(key: impl Into<String>, value: impl AsRef<OsStr>) -> Self {
+        let key = key.into();
+        let previous = env::var_os(&key);
+        // SAFETY: command tests mutate process env only in controlled test flows.
+        unsafe {
+            env::set_var(&key, value.as_ref());
+        }
+        Self { key, previous }
+    }
+}
+
+impl Drop for ScopedEnvVar {
+    fn drop(&mut self) {
+        // SAFETY: this restores the exact previous value for the same process env key.
+        unsafe {
+            if let Some(value) = &self.previous {
+                env::set_var(&self.key, value);
+            } else {
+                env::remove_var(&self.key);
+            }
+        }
+    }
+}
 
 pub struct ChangeDirGuard {
     old_dir: PathBuf,
@@ -80,6 +115,8 @@ pub fn find_cargo_dir() -> PathBuf {
 /// Then, it checks if the Libra root directory (`.libra`) exists in the current directory.
 /// If it does, the function removes the entire `.libra` directory.
 pub fn setup_clean_testing_env_in(temp_path: impl AsRef<Path>) {
+    mark_test_process_non_interactive();
+
     assert!(temp_path.as_ref().exists(), "temp_path does not exist");
     assert!(temp_path.as_ref().is_dir(), "temp_path is not a directory");
     assert!(
@@ -102,6 +139,13 @@ pub fn setup_clean_testing_env_in(temp_path: impl AsRef<Path>) {
             // Remove the file if it exists
             fs::remove_file(&bare_repo_path).unwrap();
         }
+    }
+}
+
+fn mark_test_process_non_interactive() {
+    // SAFETY: command tests set a stable process-wide default before executing CLI code.
+    unsafe {
+        env::set_var(LIBRA_TEST_ENV, "1");
     }
 }
 

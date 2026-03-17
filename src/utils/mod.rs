@@ -9,6 +9,7 @@ pub mod ignore;
 pub mod lfs;
 pub mod object;
 pub mod object_ext;
+pub mod pager;
 pub mod path;
 pub mod path_ext;
 pub mod storage;

@@ -30,7 +30,7 @@ use crate::{
     internal::{ai::history::HistoryManager, db, model::reference},
     utils::{
         client_storage::ClientStorage,
-        error::{CliError, CliResult, StableErrorCode, exit_with_legacy_stderr},
+        error::{CliError, CliResult, exit_with_legacy_stderr},
         path,
         storage::local::LocalStorage,
         util,
@@ -246,14 +246,10 @@ async fn resolve_tag_object_ref(object_ref: &str) -> Option<ObjectHash> {
     ObjectHash::from_str(&target_hash).ok()
 }
 
-/// Exit with 0 if the object exists, 1 otherwise.
+/// Exit with 0 if the object exists, 1 otherwise, without printing diagnostics.
 fn check_object_exists(hash: &ObjectHash, storage: &ClientStorage) {
     if !storage.exist(hash) {
-        let err = CliError::fatal(format!("object {} not found", hash))
-            .with_stable_code(StableErrorCode::CliInvalidTarget)
-            .with_detail("object", hash.to_string());
-        err.print_stderr();
-        std::process::exit(err.exit_code());
+        std::process::exit(1);
     }
 }
 

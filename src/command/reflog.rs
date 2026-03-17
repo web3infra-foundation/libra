@@ -1,9 +1,5 @@
 //! Reads and displays reflog entries for HEAD or branches with filtering and timestamp formatting options.
 
-#[cfg(unix)]
-use std::io::Write;
-#[cfg(unix)]
-use std::process::{Command, Stdio};
 use std::{
     collections::HashMap,
     fmt::{Display, Formatter},
@@ -25,7 +21,10 @@ use crate::{
         model::reflog::Model,
         reflog::{HEAD, Reflog, ReflogError},
     },
-    utils::error::{CliError, CliResult},
+    utils::{
+        error::{CliError, CliResult},
+        pager::Pager,
+    },
 };
 
 #[derive(Parser, Debug)]
@@ -172,30 +171,9 @@ async fn handle_show(ref_name: &str, options: ReflogShowOptions) -> CliResult<()
         stat: options.stat,
     };
 
-    #[cfg(unix)]
-    let mut less = Command::new("less") // create a pipe to less
-        .arg("-R") // raw control characters
-        .arg("-F")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::inherit())
-        .spawn()
-        .map_err(|e| CliError::fatal(format!("failed to start pager: {e}")))?;
-
-    #[cfg(unix)]
-    if let Some(ref mut stdin) = less.stdin {
-        writeln!(stdin, "{}", formatter)
-            .map_err(|e| CliError::fatal(format!("failed to write to pager: {e}")))?;
-    } else {
-        return Err(CliError::fatal("failed to capture pager stdin"));
-    }
-
-    #[cfg(unix)]
-    let _ = less
-        .wait()
-        .map_err(|e| CliError::fatal(format!("pager exited with error: {e}")))?;
-
-    #[cfg(not(unix))]
-    println!("{formatter}");
+    let mut pager = Pager::new()?;
+    pager.write_line(&formatter.to_string())?;
+    pager.finish()?;
 
     Ok(())
 }

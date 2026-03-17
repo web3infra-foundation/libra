@@ -334,7 +334,7 @@ async fn test_cat_file_panic_handling() {
     assert!(stderr.contains("fatal:"));
 }
 
-/// Test `cat-file -e` exits 0 for existing objects and non-zero for missing objects.
+/// Test `cat-file -e` preserves Git-compatible silent status-only semantics.
 #[tokio::test]
 #[serial]
 async fn test_cat_file_exist_check() {
@@ -354,6 +354,11 @@ async fn test_cat_file_exist_check() {
         output.status.success(),
         "cat-file -e HEAD should succeed for existing object"
     );
+    assert!(
+        output.stderr.is_empty(),
+        "cat-file -e HEAD should not print stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Non-existent hash
     let output = Command::new(env!("CARGO_BIN_EXE_libra"))
@@ -361,9 +366,11 @@ async fn test_cat_file_exist_check() {
         .args(["cat-file", "-e", "0000000000000000000000000000000000000000"])
         .output()
         .expect("Failed to execute cat-file -e");
+    assert_eq!(output.status.code(), Some(1));
     assert!(
-        !output.status.success(),
-        "cat-file -e should fail for non-existent object"
+        output.stderr.is_empty(),
+        "cat-file -e missing object should stay silent: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 

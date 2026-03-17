@@ -9,7 +9,7 @@ Libra now exposes failures through a stable three-layer contract:
 3. `structured JSON report`
    The last stderr line is JSON and carries category, message, hints, and details.
 
-This contract is implemented in [src/utils/error.rs](/Volumes/Data/GitMono/libra/src/utils/error.rs).
+This contract is implemented in [`src/utils/error.rs`](../src/utils/error.rs).
 
 ## Output Contract
 
@@ -30,6 +30,10 @@ Hint: run 'libra init' to create a repository in the current directory.
 
 Warnings and progress messages remain plain text. Only failures participate in this contract.
 
+Status-only probes are an explicit exception. `libra cat-file -e` preserves Git-compatible
+silent `0`/`1` behavior and does not emit the human-readable block or trailing JSON report
+when the object is missing.
+
 ## Exit Codes
 
 | Exit | Meaning | Primary automation use |
@@ -42,6 +46,23 @@ Warnings and progress messages remain plain text. Only failures participate in t
 | `6` | Authentication / authorization | Configure identity or credentials |
 | `7` | Filesystem / storage I/O | Inspect files, permissions, locks |
 | `8` | Internal / invariant | Report bug or unexpected failure |
+
+## Migration From Legacy Exit Codes
+
+Earlier Libra CLI paths often collapsed failures into a few generic process exits.
+The stable contract keeps success at `0`, but normalizes failures into category-specific
+exit codes plus a stable symbolic code.
+
+| Legacy behavior | Historical exit | Stable contract |
+| --- | --- | --- |
+| Unknown command | `1` | `2` + `LBR-CLI-001` |
+| Parse or command usage error | `129` | `2` + `LBR-CLI-002` or `LBR-CLI-003` |
+| Generic `fatal:` runtime error | `128` | `3`, `4`, `5`, `6`, `7`, or `8` depending on the primary failure mode |
+| `cat-file -e` missing object probe | `1` | Still `1` with no stderr output |
+
+If you have existing scripts that branch on `1`, `128`, or `129`, update them to branch
+on the stable exit-code table above. For precise automation, prefer the final JSON stderr
+line and inspect `error_code` in addition to `exit_code`.
 
 ## Complete Stable Code Table
 
@@ -214,7 +235,7 @@ Stable codes are part of Libra's public CLI contract. Changing them requires com
 
 When adding or changing a code:
 
-1. Update [src/utils/error.rs](/Volumes/Data/GitMono/libra/src/utils/error.rs):
+1. Update [`src/utils/error.rs`](../src/utils/error.rs):
    add the `StableErrorCode` variant, its string, category, exit-code mapping, and description.
 2. Update classification:
    adjust the legacy inference helpers so old `fatal:` / `error:` messages still map correctly.
@@ -238,4 +259,4 @@ Integration tests parse the final JSON stderr line and assert both:
 - human-readable text still makes sense
 - machine-readable fields are stable
 
-Shared helpers live in [tests/command/mod.rs](/Volumes/Data/GitMono/libra/tests/command/mod.rs).
+Shared helpers live in [`tests/command/mod.rs`](../tests/command/mod.rs).

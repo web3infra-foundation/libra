@@ -66,6 +66,10 @@ fn help_error_codes_topic_prints_error_code_reference() {
     assert!(stdout.contains("# Libra CLI Error Codes"));
     assert!(stdout.contains("LBR-CLI-001"));
     assert!(stdout.contains("LBR-REPO-001"));
+    assert!(
+        !stdout.contains("/Volumes/Data/GitMono/libra"),
+        "help output should not leak local filesystem paths: {stdout}"
+    );
     assert!(stdout.contains("## How To Change Codes"));
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 }

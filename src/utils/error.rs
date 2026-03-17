@@ -7,7 +7,7 @@
 
 use std::{collections::BTreeMap, fmt};
 
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 use serde_json::Value;
 
 /// Shared CLI result type.
@@ -94,6 +94,15 @@ pub enum StableErrorCode {
     IoReadFailed,
     IoWriteFailed,
     InternalInvariant,
+}
+
+impl Serialize for StableErrorCode {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
 }
 
 impl StableErrorCode {
@@ -283,6 +292,10 @@ impl CliError {
     ///
     /// This is the shared bridge for commands whose inner implementation still
     /// returns `Result<(), String>` with a human-readable prefix.
+    ///
+    /// New command code should prefer setting [`StableErrorCode`] explicitly
+    /// with [`CliError::with_stable_code`] instead of depending on message
+    /// substring inference.
     pub fn from_legacy_string(msg: impl Into<String>) -> Self {
         let raw = msg.into();
         let trimmed = raw.trim().to_string();
@@ -374,6 +387,10 @@ impl CliError {
     }
 
     pub fn render_json(&self) -> String {
+        // INVARIANT: `CliErrorReport` contains only serializable enums, strings,
+        // integers, vectors, maps, and `serde_json::Value`. Serialization is
+        // expected to succeed; this fallback only guards against an unexpected
+        // future regression in the report type itself.
         serde_json::to_string(&self.report()).unwrap_or_else(|_| {
             "{\"ok\":false,\"error_code\":\"LBR-INTERNAL-001\",\"category\":\"internal\",\
 \"exit_code\":8,\"severity\":\"fatal\",\"message\":\"failed to serialize CLI error report\"}"
@@ -427,7 +444,7 @@ impl CliError {
     fn report(&self) -> CliErrorReport {
         CliErrorReport {
             ok: false,
-            error_code: self.stable_code.as_str(),
+            error_code: self.stable_code,
             category: self.category(),
             exit_code: self.exit_code(),
             severity: self.severity(),
@@ -446,7 +463,7 @@ impl CliError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct CliErrorReport {
     ok: bool,
-    error_code: &'static str,
+    error_code: StableErrorCode,
     category: CliErrorCategory,
     exit_code: i32,
     severity: &'static str,
@@ -526,6 +543,11 @@ macro_rules! cli_error {
     }};
 }
 
+/// Transitional best-effort classifier for legacy string-only error paths.
+///
+/// New command implementations should set [`StableErrorCode`] explicitly with
+/// [`CliError::with_stable_code`] instead of relying on these message
+/// heuristics.
 fn infer_stable_error_code(kind: CliErrorKind, message: &str) -> StableErrorCode {
     let lower = message.to_ascii_lowercase();
 
@@ -697,8 +719,9 @@ fn is_conflict_unresolved_error(lower: &str) -> bool {
             "on conflict",
             "conflicted",
             "conflict:",
+            "conflict marker",
         ],
-    ) || (lower.contains("conflict") && !lower.contains("argument conflict"))
+    )
 }
 
 fn is_conflict_blocked_error(lower: &str) -> bool {
@@ -752,9 +775,12 @@ fn is_network_protocol_error(lower: &str) -> bool {
     contains_any(
         lower,
         &[
-            "protocol",
-            "packet",
-            "pkt",
+            "protocol error",
+            "packet line",
+            "pkt-line",
+            "pkt line",
+            "invalid packet line",
+            "invalid pkt-line",
             "sideband",
             "checksum mismatch",
             "content-type",
@@ -978,6 +1004,58 @@ mod tests {
         let err = CliError::fatal("rebase already in progress");
         assert_eq!(err.stable_code(), StableErrorCode::ConflictOperationBlocked);
         assert_eq!(err.exit_code(), 4);
+    }
+
+    #[test]
+    fn legacy_inference_matches_representative_runtime_messages() {
+        let cases = [
+            (
+                "repository database not found at '/tmp/libra.db'",
+                StableErrorCode::RepoCorrupt,
+            ),
+            (
+                "error: you must resolve all conflicts before continuing",
+                StableErrorCode::ConflictUnresolved,
+            ),
+            (
+                "failed to read server response: timed out",
+                StableErrorCode::NetworkUnavailable,
+            ),
+            (
+                "invalid packet line header 'zzzz'",
+                StableErrorCode::NetworkProtocol,
+            ),
+            (
+                "failed to write index: Permission denied",
+                StableErrorCode::IoWriteFailed,
+            ),
+            (
+                "author identity unknown",
+                StableErrorCode::AuthMissingCredentials,
+            ),
+            ("failed to read object", StableErrorCode::IoReadFailed),
+        ];
+
+        for (message, expected) in cases {
+            let err = CliError::fatal(message);
+            assert_eq!(
+                err.stable_code(),
+                expected,
+                "message should classify consistently: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_inference_does_not_treat_generic_conflict_word_as_unresolved_conflict() {
+        let err = CliError::fatal("the conflict resolution strategy is unavailable");
+        assert_eq!(err.stable_code(), StableErrorCode::InternalInvariant);
+    }
+
+    #[test]
+    fn legacy_inference_does_not_treat_generic_protocol_word_as_network_protocol_error() {
+        let err = CliError::fatal("unsupported protocol version for local storage");
+        assert_eq!(err.stable_code(), StableErrorCode::InternalInvariant);
     }
 
     #[test]

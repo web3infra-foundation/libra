@@ -30,7 +30,10 @@ use libra::{
     },
     common_utils::format_commit_msg,
     internal::{branch::Branch, head::Head},
-    utils::test::{self, ChangeDirGuard},
+    utils::{
+        pager::LIBRA_TEST_ENV,
+        test::{self, ChangeDirGuard},
+    },
 };
 use serde::Deserialize;
 use serial_test::serial;
@@ -65,6 +68,7 @@ fn run_libra_command(args: &[&str], cwd: &Path) -> Output {
         .env("XDG_CONFIG_HOME", &config_home)
         .env("LANG", "C")
         .env("LC_ALL", "C")
+        .env(LIBRA_TEST_ENV, "1")
         .output()
         .expect("failed to execute libra binary")
 }

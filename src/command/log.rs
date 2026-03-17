@@ -1,9 +1,5 @@
 //! Log command rendering commit history with optional decorations, filtering, and custom formatting utilities.
 
-#[cfg(unix)]
-use std::io::Write;
-#[cfg(unix)]
-use std::process::{Command, Stdio};
 use std::{
     cmp::min,
     collections::{HashMap, HashSet, VecDeque},
@@ -33,6 +29,7 @@ use crate::{
     utils::{
         error::{CliError, CliResult},
         object_ext::TreeExt,
+        pager::Pager,
         util,
     },
 };
@@ -343,14 +340,7 @@ pub async fn execute_safe(args: LogArgs) -> CliResult<()> {
         .await
         .map_err(|value| CliError::fatal(format!("invalid --decorate option: {value}")))?;
 
-    #[cfg(unix)]
-    let mut process = Command::new("less")
-        .arg("-R")
-        .arg("-F")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::inherit())
-        .spawn()
-        .map_err(|e| CliError::fatal(format!("failed to execute pager: {e}")))?;
+    let mut pager = Pager::new()?;
 
     let head = Head::current().await;
     // check if the current branch has any commits
@@ -548,27 +538,10 @@ pub async fn execute_safe(args: LogArgs) -> CliResult<()> {
             }
         }
 
-        #[cfg(unix)]
-        {
-            if let Some(ref mut stdin) = process.stdin {
-                writeln!(stdin, "{message}")
-                    .map_err(|e| CliError::fatal(format!("failed to write pager output: {e}")))?;
-            } else {
-                return Err(CliError::fatal("failed to capture pager stdin"));
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            println!("{message}");
-        }
+        pager.write_line(&message)?;
     }
 
-    #[cfg(unix)]
-    {
-        process
-            .wait()
-            .map_err(|e| CliError::fatal(format!("failed to wait on pager: {e}")))?;
-    }
+    pager.finish()?;
     Ok(())
 }
 
