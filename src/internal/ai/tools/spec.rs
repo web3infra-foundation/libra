@@ -103,8 +103,24 @@ impl ToolSpec {
                     "number",
                     "Timeout in milliseconds (default: 10000)",
                 ),
+                (
+                    "sandbox_permissions",
+                    "string",
+                    "Sandbox override: use_default (default) or require_escalated",
+                ),
+                (
+                    "justification",
+                    "string",
+                    "Reason for requesting escalated execution outside sandbox",
+                ),
             ],
-            [("command", true), ("workdir", false), ("timeout_ms", false)],
+            [
+                ("command", true),
+                ("workdir", false),
+                ("timeout_ms", false),
+                ("sandbox_permissions", false),
+                ("justification", false),
+            ],
         ))
     }
 
@@ -186,9 +202,24 @@ impl ToolSpec {
                                             "problemStatement": {"type": "string"},
                                             "changeType": {
                                                 "type": "string",
+                                                "description": "High-level code-change category. Do not use 'analysis' here. For read-only plans, use 'unknown' and set objectives[*].kind='analysis'.",
                                                 "enum": ["bugfix","feature","refactor","performance","security","docs","chore","unknown"]
                                             },
-                                            "objectives": {"type": "array", "items": {"type": "string"}},
+                                            "objectives": {
+                                                "type": "array",
+                                                "items": {
+                                                    "type": "object",
+                                                    "required": ["title", "kind"],
+                                                    "properties": {
+                                                        "title": {"type": "string"},
+                                                        "kind": {
+                                                            "type": "string",
+                                                            "description": "Use 'analysis' for read-only work and 'implementation' for code-changing work.",
+                                                            "enum": ["implementation", "analysis"]
+                                                        }
+                                                    }
+                                                }
+                                            },
                                             "inScope": {"type": "array", "items": {"type": "string"}},
                                             "outOfScope": {"type": "array", "items": {"type": "string"}},
                                             "touchHints": {

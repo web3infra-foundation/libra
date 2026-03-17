@@ -128,9 +128,17 @@ impl CompletionModelTrait for Model {
 
         if !status.is_success() {
             if let Ok(error_response) = serde_json::from_str::<ChatErrorResponse>(&response_text) {
-                return Err(CompletionError::ProviderError(error_response.error.message));
+                return Err(CompletionError::ProviderError(format!(
+                    "status {}: {}",
+                    status.as_u16(),
+                    error_response.error.message
+                )));
             }
-            return Err(CompletionError::ProviderError(response_text));
+            return Err(CompletionError::ProviderError(format!(
+                "status {}: {}",
+                status.as_u16(),
+                response_text
+            )));
         }
 
         let zhipu_response: ChatResponse =

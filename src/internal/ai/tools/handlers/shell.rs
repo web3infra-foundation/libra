@@ -3,14 +3,9 @@
 //! Executes shell commands in the user's default shell with configurable
 //! working directory and timeout. Output is capped to prevent memory issues.
 
-use std::{
-    path::{Path, PathBuf},
-    process::Stdio,
-    sync::Arc,
-};
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use tokio::{io::AsyncReadExt, process::Command, sync::Mutex, time::Duration};
 
 use super::parse_arguments;
 use crate::internal::ai::tools::{
@@ -24,14 +19,11 @@ use crate::internal::ai::tools::{
 /// Handler for executing shell commands.
 pub struct ShellHandler;
 
-/// Default timeout: 10 seconds (matches codex default).
-const DEFAULT_TIMEOUT_MS: u64 = 10_000;
 /// Maximum bytes captured per stream (stdout or stderr) before truncation.
-const MAX_OUTPUT_BYTES: usize = 100 * 1024; // 100 KiB
+const DEFAULT_MAX_OUTPUT_BYTES: usize = 100 * 1024; // 100 KiB
 /// Exit code emitted when a command is killed due to timeout (matches GNU timeout).
+#[cfg(test)]
 const TIMEOUT_EXIT_CODE: i32 = 124;
-/// Max wait for stream-drain tasks after process exit before forcing completion.
-const STREAM_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[async_trait]
 impl ToolHandler for ShellHandler {
@@ -46,8 +38,10 @@ impl ToolHandler for ShellHandler {
 
     async fn handle(&self, invocation: ToolInvocation) -> ToolResult<ToolOutput> {
         let ToolInvocation {
+            call_id,
             payload,
             working_dir,
+            runtime_context,
             ..
         } = invocation;
 
@@ -65,7 +59,38 @@ impl ToolHandler for ShellHandler {
         // Resolve and validate the execution working directory.
         let cwd = resolve_workdir(args.workdir.as_deref(), &working_dir)?;
 
-        let output = run_shell(&args.command, &cwd, args.timeout_ms).await?;
+        let max_output_bytes = runtime_context
+            .as_ref()
+            .and_then(|ctx| ctx.max_output_bytes)
+            .unwrap_or(DEFAULT_MAX_OUTPUT_BYTES);
+        let sandbox_runtime = runtime_context
+            .as_ref()
+            .and_then(|ctx| ctx.sandbox_runtime.clone());
+        let approval = runtime_context
+            .as_ref()
+            .and_then(|ctx| ctx.approval.clone());
+        let sandbox = runtime_context.as_ref().and_then(|ctx| {
+            ctx.sandbox.clone().map(|mut sandbox| {
+                sandbox.permissions = args.sandbox_permissions;
+                sandbox
+            })
+        });
+
+        let output = crate::internal::ai::sandbox::run_shell_command_with_approval(
+            crate::internal::ai::sandbox::ShellCommandRequest {
+                call_id,
+                command: args.command,
+                cwd,
+                timeout_ms: args.timeout_ms,
+                max_output_bytes,
+                sandbox,
+                sandbox_runtime,
+                approval,
+                justification: args.justification,
+            },
+        )
+        .await
+        .map_err(ToolError::ExecutionFailed)?;
 
         let formatted = format_output(
             output.exit_code,
@@ -83,21 +108,6 @@ impl ToolHandler for ShellHandler {
     fn schema(&self) -> ToolSpec {
         ToolSpec::shell()
     }
-}
-
-// ── Internal types ────────────────────────────────────────────────────────────
-
-struct ExecOutput {
-    exit_code: i32,
-    stdout: String,
-    stderr: String,
-    timed_out: bool,
-}
-
-#[derive(Default, Clone)]
-struct StreamState {
-    bytes: Vec<u8>,
-    truncated: bool,
 }
 
 // ── Output formatting ─────────────────────────────────────────────────────────
@@ -120,136 +130,6 @@ fn format_output(exit_code: i32, stdout: &str, stderr: &str, timed_out: bool) ->
     }
 
     parts.join("\n")
-}
-
-// ── Execution ─────────────────────────────────────────────────────────────────
-
-async fn run_shell(command: &str, cwd: &Path, timeout_ms: Option<u64>) -> ToolResult<ExecOutput> {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-    let timeout_dur = Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
-
-    let mut cmd = Command::new(&shell);
-    cmd.arg("-c")
-        .arg(command)
-        .current_dir(cwd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| ToolError::ExecutionFailed(format!("failed to spawn shell: {e}")))?;
-
-    // Take pipe handles before waiting to avoid deadlocks on large output.
-    let stdout_pipe = child.stdout.take().expect("stdout is piped");
-    let stderr_pipe = child.stderr.take().expect("stderr is piped");
-
-    // Drain both streams concurrently. Continuing to drain after MAX_OUTPUT_BYTES
-    // prevents the process from blocking on a full pipe buffer.
-    let stdout_state = Arc::new(Mutex::new(StreamState::default()));
-    let stderr_state = Arc::new(Mutex::new(StreamState::default()));
-    let stdout_task = tokio::spawn(drain_reader(
-        stdout_pipe,
-        MAX_OUTPUT_BYTES,
-        stdout_state.clone(),
-    ));
-    let stderr_task = tokio::spawn(drain_reader(
-        stderr_pipe,
-        MAX_OUTPUT_BYTES,
-        stderr_state.clone(),
-    ));
-
-    let (exit_code, timed_out) = tokio::select! {
-        status = child.wait() => {
-            let code = status
-                .map_err(|e| ToolError::ExecutionFailed(format!("wait failed: {e}")))?
-                .code()
-                .unwrap_or(-1);
-            (code, false)
-        }
-        _ = tokio::time::sleep(timeout_dur) => {
-            // Kill the process and reap the zombie before collecting output.
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            (TIMEOUT_EXIT_CODE, true)
-        }
-    };
-
-    // Background descendants can inherit stdout/stderr; avoid hanging forever waiting
-    // for EOF by bounding how long we wait for the stream readers after process exit.
-    let (mut stdout, stdout_truncated, stdout_incomplete) =
-        collect_stream(stdout_task, stdout_state).await;
-    let (mut stderr, stderr_truncated, stderr_incomplete) =
-        collect_stream(stderr_task, stderr_state).await;
-
-    if stdout_truncated {
-        stdout.push_str("\n[stdout truncated]");
-    }
-    if stderr_truncated {
-        stderr.push_str("\n[stderr truncated]");
-    }
-    if stdout_incomplete {
-        stdout.push_str("\n[stdout stream incomplete]");
-    }
-    if stderr_incomplete {
-        stderr.push_str("\n[stderr stream incomplete]");
-    }
-
-    Ok(ExecOutput {
-        exit_code,
-        stdout,
-        stderr,
-        timed_out,
-    })
-}
-
-/// Reads from `reader` into shared state, capping at `max_bytes`.
-/// Continues draining after the cap to prevent pipe-buffer deadlock.
-async fn drain_reader(
-    mut reader: impl AsyncReadExt + Unpin,
-    max_bytes: usize,
-    state: Arc<Mutex<StreamState>>,
-) {
-    let mut tmp = [0u8; 8192];
-    loop {
-        match reader.read(&mut tmp).await {
-            Ok(0) | Err(_) => break,
-            Ok(n) => {
-                let mut guard = state.lock().await;
-                append_chunk(&mut guard, &tmp[..n], max_bytes);
-            }
-        }
-    }
-}
-
-fn append_chunk(state: &mut StreamState, chunk: &[u8], max_bytes: usize) {
-    let remaining = max_bytes.saturating_sub(state.bytes.len());
-    let to_take = remaining.min(chunk.len());
-    if to_take > 0 {
-        state.bytes.extend_from_slice(&chunk[..to_take]);
-    }
-    if to_take < chunk.len() {
-        state.truncated = true;
-    }
-}
-
-async fn collect_stream(
-    mut task: tokio::task::JoinHandle<()>,
-    state: Arc<Mutex<StreamState>>,
-) -> (String, bool, bool) {
-    let completed = tokio::time::timeout(STREAM_DRAIN_TIMEOUT, &mut task)
-        .await
-        .is_ok();
-    if !completed {
-        task.abort();
-        let _ = task.await;
-    }
-
-    let snapshot = state.lock().await.clone();
-    (
-        String::from_utf8_lossy(&snapshot.bytes).into_owned(),
-        snapshot.truncated,
-        !completed,
-    )
 }
 
 fn resolve_workdir(requested_workdir: Option<&str>, working_dir: &Path) -> ToolResult<PathBuf> {
@@ -284,6 +164,8 @@ fn resolve_workdir(requested_workdir: Option<&str>, working_dir: &Path) -> ToolR
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use tempfile::TempDir;
 
     use super::*;
@@ -623,22 +505,5 @@ mod tests {
         assert!(text.contains("stdout content"));
         assert!(text.contains("[stderr]"));
         assert!(text.contains("stderr content"));
-    }
-
-    #[test]
-    fn test_append_chunk_exact_limit_not_truncated() {
-        let mut state = StreamState::default();
-        append_chunk(&mut state, &[b'a'; MAX_OUTPUT_BYTES], MAX_OUTPUT_BYTES);
-        assert_eq!(state.bytes.len(), MAX_OUTPUT_BYTES);
-        assert!(!state.truncated);
-    }
-
-    #[test]
-    fn test_append_chunk_over_limit_is_truncated() {
-        let mut state = StreamState::default();
-        append_chunk(&mut state, &[b'a'; MAX_OUTPUT_BYTES], MAX_OUTPUT_BYTES);
-        append_chunk(&mut state, b"z", MAX_OUTPUT_BYTES);
-        assert_eq!(state.bytes.len(), MAX_OUTPUT_BYTES);
-        assert!(state.truncated);
     }
 }

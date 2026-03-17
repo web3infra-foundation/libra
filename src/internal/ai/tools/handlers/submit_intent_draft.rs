@@ -1,8 +1,8 @@
 //! Handler for the `submit_intent_draft` tool.
 
 use async_trait::async_trait;
+use serde_json::Value;
 
-use super::parse_arguments;
 use crate::internal::ai::tools::{
     ToolResult,
     context::{SubmitIntentDraftArgs, ToolInvocation, ToolKind, ToolOutput, ToolPayload},
@@ -32,7 +32,20 @@ impl ToolHandler for SubmitIntentDraftHandler {
             }
         };
 
-        let _args: SubmitIntentDraftArgs = parse_arguments(&arguments)?;
+        let value: Value = serde_json::from_str(&arguments)
+            .map_err(|e| ToolError::ParseError(format!("Failed to parse arguments: {e}")))?;
+        if value
+            .pointer("/draft/intent/changeType")
+            .and_then(Value::as_str)
+            == Some("analysis")
+        {
+            return Err(ToolError::ParseError(
+                "intent.changeType cannot be 'analysis'; use intent.objectives[*].kind='analysis' and set changeType='unknown' for read-only plans".into(),
+            ));
+        }
+
+        let _args: SubmitIntentDraftArgs = serde_json::from_value(value)
+            .map_err(|e| ToolError::ParseError(format!("Failed to parse arguments: {e}")))?;
         Ok(ToolOutput::success("Intent draft submitted"))
     }
 
@@ -68,7 +81,7 @@ mod tests {
                         "summary": "Fix bug",
                         "problemStatement": "A bug exists",
                         "changeType": "bugfix",
-                        "objectives": ["fix it"],
+                        "objectives": [{"title": "fix it", "kind": "implementation"}],
                         "inScope": ["src/main.rs"],
                         "outOfScope": []
                     },
@@ -96,5 +109,40 @@ mod tests {
         let inv = make_invocation(r#"{"draft": {"intent": {}}}"#);
         let result = handler.handle(inv).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_change_type_analysis_returns_actionable_error() {
+        let handler = SubmitIntentDraftHandler;
+        let inv = make_invocation(
+            r#"{
+                "draft": {
+                    "intent": {
+                        "summary": "Analyze repo",
+                        "problemStatement": "Need a read-only diagnosis",
+                        "changeType": "analysis",
+                        "objectives": [{"title": "inspect", "kind": "analysis"}],
+                        "inScope": ["src"],
+                        "outOfScope": []
+                    },
+                    "acceptance": {
+                        "successCriteria": ["report findings"],
+                        "fastChecks": [],
+                        "integrationChecks": [],
+                        "securityChecks": [],
+                        "releaseChecks": []
+                    },
+                    "risk": {
+                        "rationale": "read-only"
+                    }
+                }
+            }"#,
+        );
+        let result = handler.handle(inv).await;
+        let err = result.expect_err("changeType=analysis should be rejected");
+        assert!(
+            err.to_string()
+                .contains("intent.changeType cannot be 'analysis'")
+        );
     }
 }

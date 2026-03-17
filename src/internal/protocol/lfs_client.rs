@@ -723,12 +723,18 @@ mod tests {
     /// pointer-file fallback and returns `Ok`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_download_object_404_writes_pointer_file() {
+        use std::io::ErrorKind;
+
         use axum::{Router, routing::post};
 
         let test_oid = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
         let test_size: u64 = 1024;
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == ErrorKind::PermissionDenied => return,
+            Err(err) => panic!("failed to bind local LFS test server: {err}"),
+        };
         let addr = listener.local_addr().unwrap();
         let app = Router::new().route(
             "/objects/batch",

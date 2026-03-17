@@ -1,5 +1,12 @@
 # Agent Workflow: From Intent to Release
 
+> Local implementation note (2026-03-13)
+>
+> Libra currently supports explicit objective kinds (`implementation` /
+> `analysis`). Until task-specific worktree / staging support is added,
+> code-changing objectives are intentionally scheduled serially.
+
+
 This document defines the runtime workflow after the snapshot / event /
 Libra split described in `docs/agent.md`.
 

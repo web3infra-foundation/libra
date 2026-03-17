@@ -9,12 +9,15 @@ mod bottom_pane;
 mod chatwidget;
 mod diff;
 mod history_cell;
+mod markdown_render;
 mod slash_command;
 mod status_indicator;
 mod terminal;
+mod theme;
+mod welcome_shader;
 
 pub use app::{App, AppConfig, AppExitInfo, ExitReason};
-pub use app_event::{AgentEvent, AgentStatus, AppEvent, ExitMode};
+pub use app_event::{AgentEvent, AgentStatus, AppEvent};
 pub use diff::{DiffSummary, FileChange};
 pub use history_cell::DiffHistoryCell;
 pub use slash_command::{BuiltinCommand, parse_builtin};

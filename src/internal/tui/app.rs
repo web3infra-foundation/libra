@@ -3,26 +3,35 @@
 //! The `App` struct manages the TUI state and coordinates between
 //! user input, agent execution, and UI rendering.
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    future::Future,
+    path::PathBuf,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 use crossterm::event::{KeyCode, KeyModifiers};
 use tokio::{
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
     task::JoinHandle,
-    time::sleep,
+    time::{interval, sleep, timeout},
 };
 use tokio_stream::StreamExt;
-use walkdir::WalkDir;
 
 use super::{
-    app_event::{AgentEvent, AgentStatus, AppEvent, ExitMode},
+    app_event::{AgentEvent, AgentStatus, AppEvent, TurnId},
     chatwidget::ChatWidget,
     diff::FileChange,
     history_cell::{
-        AssistantHistoryCell, DiffHistoryCell, PlanUpdateHistoryCell, ToolCallHistoryCell,
-        UserHistoryCell,
+        AssistantHistoryCell, DiffHistoryCell, HistoryCell, OrchestratorResultHistoryCell,
+        PlanSummaryHistoryCell, PlanUpdateHistoryCell, ToolCallHistoryCell, UserHistoryCell,
     },
     terminal::{TARGET_FRAME_INTERVAL, Tui, TuiEvent},
+    welcome_shader::{self, WelcomeView},
 };
 use crate::{
     cli_error,
@@ -31,19 +40,23 @@ use crate::{
             ToolLoopConfig, profile::AgentProfileRouter, run_tool_loop_with_history_and_observer,
         },
         commands::CommandDispatcher,
-        completion::{CompletionModel, Message},
+        completion::{
+            CompletionModel, CompletionRetryEvent, CompletionRetryObserver, CompletionRetryPolicy,
+            Message, RetryingCompletionModel,
+        },
         intentspec::{
-            IntentDraft, ResolveContext, RiskLevel, persist_intentspec, render_summary,
-            repair_intentspec, resolve_intentspec, validate_intentspec,
+            IntentDraft, ResolveContext, RiskLevel, render_summary, repair_intentspec,
+            resolve_intentspec, validate_intentspec,
         },
         mcp::{
             resource::{
-                CreateContextSnapshotParams, CreateDecisionParams, CreateEvidenceParams,
-                CreateIntentParams, CreatePatchSetParams, CreatePlanParams, CreateProvenanceParams,
-                CreateRunParams, CreateTaskParams, CreateToolInvocationParams, TouchedFileParams,
+                CreateContextSnapshotParams, CreateDecisionParams, CreateIntentParams,
+                CreatePlanParams, CreateRunParams, CreateTaskParams, CreateToolInvocationParams,
             },
             server::LibraMcpServer,
         },
+        orchestrator::{planner::compile_execution_plan_spec, types::ExecutionPlanSpec},
+        sandbox::{ExecApprovalRequest, ReviewDecision},
         session::{SessionState, SessionStore},
         tools::{
             ToolOutput, ToolRegistry,
@@ -52,21 +65,56 @@ use crate::{
                 UserInputRequest, UserInputResponse,
             },
         },
+        workflow_objects::{build_git_plan, parse_object_id},
     },
 };
 
-/// MCP resource IDs for tracking the workflow
 #[derive(Debug, Clone, Default)]
-pub struct McpIds {
-    pub _intent_id: Option<String>,
-    pub task_id: Option<String>,
-    pub run_id: Option<String>,
-    pub _context_snapshot_id: Option<String>,
+struct McpWriteTracker {
+    tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
+}
+
+impl McpWriteTracker {
+    fn spawn<F>(&self, fut: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let handle = tokio::spawn(async move {
+            if timeout(MCP_WRITE_TIMEOUT, fut).await.is_err() {
+                tracing::warn!("MCP background write timed out");
+            }
+        });
+        match self.tasks.lock() {
+            Ok(mut tasks) => {
+                tasks.retain(|task| !task.is_finished());
+                tasks.push(handle);
+            }
+            Err(_) => handle.abort(),
+        }
+    }
+
+    async fn drain(&self) {
+        loop {
+            let pending = match self.tasks.lock() {
+                Ok(mut tasks) => std::mem::take(&mut *tasks),
+                Err(_) => return,
+            };
+            if pending.is_empty() {
+                return;
+            }
+            for handle in pending {
+                let _ = handle.await;
+            }
+        }
+    }
 }
 
 const LATEST_INTENTSPEC_INTENT_ID: &str = "latest_intentspec_intent_id";
+const LATEST_EXECUTION_PLAN_ID: &str = "latest_execution_plan_id";
 const LATEST_INTENTSPEC_JSON: &str = "latest_intentspec_json";
 const MAX_INTENTSPEC_REPAIR_ATTEMPTS: usize = 2;
+const MCP_WRITE_TIMEOUT: Duration = Duration::from_secs(8);
+const MCP_TURN_TRACKING_TIMEOUT: Duration = Duration::from_secs(3);
 
 fn summarize_mcp_content(content: &[rmcp::model::Content]) -> Option<String> {
     let mut parts = Vec::new();
@@ -135,6 +183,12 @@ struct PendingPostPlan {
     selected: usize, // 0=Execute, 1=Modify, 2=Cancel
 }
 
+/// Pending sandbox approval state.
+struct PendingExecApproval {
+    request: ExecApprovalRequest,
+    selected: usize, // 0=Approve, 1=Approve Session, 2=Deny, 3=Abort
+}
+
 /// Configuration for creating an App.
 pub struct AppConfig {
     pub welcome_message: String,
@@ -143,6 +197,7 @@ pub struct AppConfig {
     pub session: SessionState,
     pub session_store: SessionStore,
     pub user_input_rx: UnboundedReceiver<UserInputRequest>,
+    pub exec_approval_rx: UnboundedReceiver<ExecApprovalRequest>,
     /// Display name of the active model (e.g. "gemini-2.5-flash").
     pub model_name: String,
     /// Provider identifier (e.g. "gemini", "anthropic").
@@ -158,7 +213,7 @@ pub struct App<M: CompletionModel> {
     /// The chat widget.
     widget: ChatWidget,
     /// The completion model used by the agent loop.
-    model: M,
+    model: RetryingCompletionModel<M>,
     /// The tool registry.
     registry: Arc<ToolRegistry>,
     /// Tool loop runtime config.
@@ -171,8 +226,6 @@ pub struct App<M: CompletionModel> {
     app_event_rx: UnboundedReceiver<AppEvent>,
     /// Sender for app events.
     app_event_tx: UnboundedSender<AppEvent>,
-    /// Whether the app should exit.
-    should_exit: bool,
     /// The exit info, if any.
     exit_info: Option<AppExitInfo>,
     /// Last draw time for frame rate control.
@@ -183,6 +236,8 @@ pub struct App<M: CompletionModel> {
     scheduled_draw_task: Option<JoinHandle<()>>,
     /// Initial welcome message.
     welcome_message: String,
+    /// Whether the animated welcome screen is shown.
+    welcome_active: bool,
     /// Slash command dispatcher.
     command_dispatcher: CommandDispatcher,
     /// Agent router for auto-selection.
@@ -193,8 +248,12 @@ pub struct App<M: CompletionModel> {
     session_store: SessionStore,
     /// Receiver for user-input requests from the `request_user_input` tool handler.
     user_input_rx: UnboundedReceiver<UserInputRequest>,
+    /// Receiver for exec-approval requests from sandbox-governed handlers.
+    exec_approval_rx: UnboundedReceiver<ExecApprovalRequest>,
     /// Currently pending user-input interaction, if any.
     pending_user_input: Option<PendingUserInput>,
+    /// Currently pending exec approval interaction, if any.
+    pending_exec_approval: Option<PendingExecApproval>,
     /// Post-plan dialog state (present when user is choosing Execute/Modify/Cancel).
     pending_post_plan: Option<PendingPostPlan>,
     /// Display name of the active model.
@@ -203,8 +262,22 @@ pub struct App<M: CompletionModel> {
     provider_name: String,
     /// MCP server instance for writing data.
     mcp_server: Option<Arc<LibraMcpServer>>,
-    /// MCP resource IDs for tracking the workflow
-    mcp_ids: McpIds,
+    /// Latest execution plan ID for attaching new turn runs.
+    mcp_plan_id: Option<String>,
+    /// Active turn run ID for appending decisions and tool invocations.
+    mcp_run_id: Option<String>,
+    /// Pending detached MCP write operations that must finish before shutdown.
+    mcp_write_tracker: McpWriteTracker,
+    /// Current active async turn. Events from stale turns are ignored.
+    active_turn_id: Option<TurnId>,
+    /// Monotonic turn counter.
+    next_turn_id: TurnId,
+    /// Shared view of active turn for global retry observer callbacks.
+    active_turn_signal: Arc<AtomicU64>,
+    /// Number of tool calls currently running in UI.
+    running_tool_calls: usize,
+    /// Shared run-id slot for the active turn, backfilled by MCP tracking.
+    active_turn_run_id: Option<Arc<Mutex<Option<String>>>>,
 }
 
 impl<M: CompletionModel + Clone + 'static> App<M> {
@@ -217,6 +290,29 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         app_config: AppConfig,
     ) -> Self {
         let (app_event_tx, app_event_rx) = mpsc::unbounded_channel();
+        let active_turn_signal = Arc::new(AtomicU64::new(0));
+        struct TuiRetryObserver {
+            tx: UnboundedSender<AppEvent>,
+            active_turn_signal: Arc<AtomicU64>,
+        }
+
+        impl CompletionRetryObserver for TuiRetryObserver {
+            fn on_retry(&self, event: &CompletionRetryEvent) {
+                let turn_id = self.active_turn_signal.load(Ordering::Relaxed);
+                if turn_id == 0 {
+                    return;
+                }
+                let _ = self.tx.send(AppEvent::AgentEvent {
+                    turn_id,
+                    event: AgentEvent::Retrying {
+                        attempt: event.next_attempt,
+                        total_attempts: event.total_attempts,
+                        delay_ms: event.delay.as_millis().min(u128::from(u64::MAX)) as u64,
+                        error: event.error.clone(),
+                    },
+                });
+            }
+        }
         let history = app_config.session.to_history();
         let default_allowed_tools = registry
             .tool_specs()
@@ -224,33 +320,60 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             .map(|s| s.function.name)
             .filter(|name| name != "submit_intent_draft")
             .collect();
+        let mut widget = ChatWidget::new();
+        widget
+            .bottom_pane
+            .set_cwd(registry.working_dir().to_path_buf());
+        widget
+            .bottom_pane
+            .set_git_branch(current_git_branch_label(registry.working_dir()));
+        let mcp_plan_id = app_config
+            .session
+            .metadata
+            .get(LATEST_EXECUTION_PLAN_ID)
+            .and_then(|value| value.as_str())
+            .map(ToString::to_string);
         Self {
             tui,
-            widget: ChatWidget::new(),
-            model,
+            widget,
+            model: RetryingCompletionModel::new(model)
+                .with_policy(CompletionRetryPolicy::default())
+                .with_observer(Arc::new(TuiRetryObserver {
+                    tx: app_event_tx.clone(),
+                    active_turn_signal: active_turn_signal.clone(),
+                })),
             registry,
             config,
             default_allowed_tools,
             history,
             app_event_rx,
             app_event_tx,
-            should_exit: false,
             exit_info: None,
             last_draw_time: Instant::now(),
             agent_task: None,
             scheduled_draw_task: None,
             welcome_message: app_config.welcome_message,
+            welcome_active: true,
             command_dispatcher: app_config.command_dispatcher,
             agent_router: app_config.agent_router,
             session: app_config.session,
             session_store: app_config.session_store,
             user_input_rx: app_config.user_input_rx,
+            exec_approval_rx: app_config.exec_approval_rx,
             pending_user_input: None,
+            pending_exec_approval: None,
             pending_post_plan: None,
             model_name: app_config.model_name,
             provider_name: app_config.provider_name,
             mcp_server: app_config.mcp_server,
-            mcp_ids: McpIds::default(),
+            mcp_plan_id,
+            mcp_run_id: None,
+            mcp_write_tracker: McpWriteTracker::default(),
+            active_turn_id: None,
+            next_turn_id: 1,
+            active_turn_signal,
+            running_tool_calls: 0,
+            active_turn_run_id: None,
         }
     }
 
@@ -289,20 +412,16 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         );
         self.widget.bottom_pane.set_command_hints(hints);
 
-        // Welcome message
-        self.widget.add_cell(Box::new(AssistantHistoryCell::new(
-            self.welcome_message.clone(),
-        )));
-
         // Initial draw - ensure UI is rendered immediately
         self.draw()?;
 
         // Get the event stream
         let mut event_stream = self.tui.event_stream();
+        let mut animation_tick = interval(Duration::from_millis(120));
 
         loop {
             // Check if we should exit
-            if self.should_exit {
+            if self.exit_info.is_some() {
                 break;
             }
 
@@ -314,121 +433,63 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
                 // Handle app events
                 Some(event) = self.app_event_rx.recv() => {
-                    if self.handle_app_event(event).await? {
-                        break;
-                    }
+                    self.handle_app_event(event).await?;
                 }
 
                 // Handle user-input requests from the tool handler
                 Some(request) = self.user_input_rx.recv() => {
                     self.handle_user_input_request(request);
                 }
+
+                // Handle exec-approval requests from sandbox-governed handlers.
+                Some(request) = self.exec_approval_rx.recv() => {
+                    self.handle_exec_approval_request(request);
+                }
+
+                // Drive subtle status/tool animations while the agent is active.
+                _ = animation_tick.tick() => {
+                    if matches!(
+                        self.widget.bottom_pane.status,
+                        AgentStatus::Thinking | AgentStatus::Retrying | AgentStatus::ExecutingTool
+                    ) || self.welcome_active {
+                        self.schedule_draw();
+                    }
+                }
             }
         }
 
-        // Create decision via MCP when exiting
-        if let Some(ref mcp_server) = self.mcp_server {
-            let mcp_ids_clone = self.mcp_ids.clone();
-            let mcp_server_clone = mcp_server.clone();
-
-            tokio::spawn(async move {
-                // Create decision
-                let decision_params = CreateDecisionParams {
-                    run_id: mcp_ids_clone
-                        .run_id
-                        .clone()
-                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-                    decision_type: "complete".to_string(),
-                    chosen_patchset_id: None,
-                    result_commit_sha: None,
-                    rationale: Some("Session completed successfully".to_string()),
-                    checkpoint_id: None,
-                    tags: None,
-                    external_ids: None,
-                    actor_kind: Some("system".to_string()),
-                    actor_id: Some("libra-code".to_string()),
-                };
-
-                // Resolve actor
-                let actor = match mcp_server_clone.resolve_actor_from_params(
-                    decision_params.actor_kind.as_deref(),
-                    decision_params.actor_id.as_deref(),
-                ) {
-                    Ok(actor) => actor,
-                    Err(e) => {
-                        cli_error!(e, "error: failed to resolve actor for decision");
-                        return;
-                    }
-                };
-
-                // Create Evidence via MCP (validation results)
-                let evidence_params = CreateEvidenceParams {
-                    run_id: mcp_ids_clone
-                        .run_id
-                        .clone()
-                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-                    patchset_id: None,
-                    kind: "session_complete".to_string(),
-                    tool: "libra-code".to_string(),
-                    command: None,
-                    exit_code: Some(0),
-                    summary: Some("Session completed successfully".to_string()),
-                    report_artifacts: None,
-                    tags: None,
-                    external_ids: None,
-                    actor_kind: Some("system".to_string()),
-                    actor_id: Some("libra-code".to_string()),
-                };
-
-                // Resolve actor for evidence
-                let evidence_actor = match mcp_server_clone.resolve_actor_from_params(
-                    evidence_params.actor_kind.as_deref(),
-                    evidence_params.actor_id.as_deref(),
-                ) {
-                    Ok(actor) => actor,
-                    Err(e) => {
-                        cli_error!(e, "error: failed to resolve actor for evidence");
-                        return;
-                    }
-                };
-
-                // Call MCP interface to create evidence
-                match mcp_server_clone
-                    .create_evidence_impl(evidence_params, evidence_actor)
-                    .await
-                {
-                    Ok(result) => {
-                        if result.is_error.unwrap_or(false) {
-                            render_mcp_error("failed to create evidence", result.content);
-                        }
-                    }
-                    Err(e) => {
-                        cli_error!(e, "error: failed to create evidence");
-                    }
-                }
-
-                // Call MCP interface to create decision
-                match mcp_server_clone
-                    .create_decision_impl(decision_params, actor)
-                    .await
-                {
-                    Ok(result) => {
-                        if !result.is_error.unwrap_or(false) {
-                            println!("Decision created successfully");
-                        } else {
-                            render_mcp_error("failed to create decision", result.content);
-                        }
-                    }
-                    Err(e) => {
-                        cli_error!(e, "error: failed to create decision");
-                    }
-                }
-            });
-        }
-
-        Ok(self.exit_info.clone().unwrap_or(AppExitInfo {
+        self.interrupt_agent_task();
+        self.mcp_write_tracker.drain().await;
+        let exit_info = self.exit_info.clone().unwrap_or(AppExitInfo {
             reason: ExitReason::UserRequested,
-        }))
+        });
+        self.create_mcp_exit_decision(&exit_info.reason).await;
+
+        Ok(exit_info)
+    }
+
+    fn begin_turn(&mut self) -> TurnId {
+        let turn_id = self.next_turn_id;
+        self.next_turn_id = self.next_turn_id.saturating_add(1);
+        self.active_turn_id = Some(turn_id);
+        self.active_turn_signal.store(turn_id, Ordering::Relaxed);
+        self.active_turn_run_id = Some(Arc::new(Mutex::new(None)));
+        turn_id
+    }
+
+    fn clear_active_turn(&mut self) {
+        self.active_turn_id = None;
+        self.active_turn_signal.store(0, Ordering::Relaxed);
+        self.active_turn_run_id = None;
+    }
+
+    fn clear_turn_tracking(&mut self) {
+        self.clear_active_turn();
+        self.clear_mcp_run_id();
+    }
+
+    fn is_active_turn(&self, turn_id: TurnId) -> bool {
+        self.active_turn_id == Some(turn_id)
     }
 
     /// Handle a terminal event.
@@ -467,12 +528,12 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         // Check for Ctrl+C first (always handled)
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.cancel_pending_user_input();
+            self.cancel_pending_exec_approval();
             self.dismiss_post_plan_dialog();
             self.interrupt_agent_task();
             self.exit_info = Some(AppExitInfo {
                 reason: ExitReason::UserRequested,
             });
-            self.should_exit = true;
             return Ok(());
         }
 
@@ -498,11 +559,16 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     self.schedule_draw();
                 }
                 // ── Normal idle handlers ─────────────────────────────
-                KeyCode::Enter if !self.widget.bottom_pane.is_empty() => {
-                    let text = self.widget.bottom_pane.take_input();
-                    self.submit_message(text).await;
+                KeyCode::Enter => {
+                    if !self.widget.bottom_pane.is_empty() {
+                        let text = self.widget.bottom_pane.take_input();
+                        if self.welcome_active {
+                            self.welcome_active = false;
+                            self.schedule_draw();
+                        }
+                        self.submit_message(text).await;
+                    }
                 }
-                KeyCode::Enter => {}
                 // Clear screen (Ctrl+K) - must come before generic Char handler
                 KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.widget.clear();
@@ -575,6 +641,29 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             AgentStatus::AwaitingUserInput => {
                 self.handle_user_input_key(key);
             }
+            AgentStatus::AwaitingApproval => match key.code {
+                KeyCode::Up => {
+                    if let Some(ref mut pending) = self.pending_exec_approval {
+                        pending.selected = pending.selected.saturating_sub(1);
+                        self.widget.bottom_pane.exec_approval_selected = pending.selected;
+                    }
+                    self.schedule_draw();
+                }
+                KeyCode::Down => {
+                    if let Some(ref mut pending) = self.pending_exec_approval {
+                        pending.selected = (pending.selected + 1).min(3);
+                        self.widget.bottom_pane.exec_approval_selected = pending.selected;
+                    }
+                    self.schedule_draw();
+                }
+                KeyCode::Enter => {
+                    self.submit_exec_approval_decision();
+                }
+                KeyCode::Esc => {
+                    self.reject_pending_exec_approval();
+                }
+                _ => {}
+            },
             AgentStatus::AwaitingPostPlanChoice => match key.code {
                 KeyCode::Up => {
                     if let Some(ref mut p) = self.pending_post_plan {
@@ -598,10 +687,15 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 }
                 _ => {}
             },
-            AgentStatus::Thinking | AgentStatus::ExecutingTool => {
+            AgentStatus::Thinking | AgentStatus::Retrying | AgentStatus::ExecutingTool => {
                 // During processing, only handle Escape for interrupt
                 if key.code == KeyCode::Esc {
+                    self.enqueue_mcp_turn_decision(
+                        "abandon",
+                        "Turn interrupted by user".to_string(),
+                    );
                     self.interrupt_agent_task();
+                    self.clear_mcp_run_id();
                     self.widget.bottom_pane.set_status(AgentStatus::Idle);
                     self.complete_streaming_assistant_cell("Interrupted.".to_string());
                     self.complete_running_tool_cells_with_interrupt();
@@ -649,13 +743,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 if let Some(ref mut pending) = self.pending_user_input {
                     let q = &pending.request.questions[pending.current_question];
                     let base = q.options.as_ref().map_or(0, |o| o.len());
-                    let max = if q.is_other {
-                        base
-                    } else if base > 0 {
-                        base - 1
-                    } else {
-                        0
-                    };
+                    let max = max_selectable_option(base, q.is_other);
                     if pending.selected_option < max {
                         pending.selected_option += 1;
                     }
@@ -669,13 +757,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 if let Some(ref mut pending) = self.pending_user_input {
                     let q = &pending.request.questions[pending.current_question];
                     let base = q.options.as_ref().map_or(0, |o| o.len());
-                    let max = if q.is_other {
-                        base
-                    } else if base > 0 {
-                        base - 1
-                    } else {
-                        0
-                    };
+                    let max = max_selectable_option(base, q.is_other);
                     if idx <= max {
                         pending.selected_option = idx;
                     }
@@ -753,26 +835,26 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             return;
         };
 
-        let pending = self.pending_user_input.as_mut().unwrap();
-        let question_id = pending.request.questions[pending.current_question]
-            .id
-            .clone();
-        pending.answers.insert(question_id, answer);
-        pending.current_question += 1;
-        pending.selected_option = 0;
-        pending.notes_focused = false;
-        pending.notes_text.clear();
-        self.widget.bottom_pane.clear();
-
-        // Check if all questions have been answered.
-        let done = {
-            let p = self.pending_user_input.as_ref().unwrap();
-            p.current_question >= p.request.questions.len()
+        let done = if let Some(pending) = self.pending_user_input.as_mut() {
+            let question_id = pending.request.questions[pending.current_question]
+                .id
+                .clone();
+            pending.answers.insert(question_id, answer);
+            pending.current_question += 1;
+            pending.selected_option = 0;
+            pending.notes_focused = false;
+            pending.notes_text.clear();
+            self.widget.bottom_pane.clear();
+            pending.current_question >= pending.request.questions.len()
+        } else {
+            return;
         };
 
         if done {
             // Send the response back to the handler.
-            let pending = self.pending_user_input.take().unwrap();
+            let Some(pending) = self.pending_user_input.take() else {
+                return;
+            };
             let response = UserInputResponse {
                 answers: pending.answers,
             };
@@ -829,6 +911,88 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         self.schedule_draw();
     }
 
+    fn handle_exec_approval_request(&mut self, request: ExecApprovalRequest) {
+        if self.active_turn_id.is_none() {
+            let _ = request.response_tx.send(ReviewDecision::Denied);
+            return;
+        }
+
+        self.widget.bottom_pane.set_exec_approval(
+            Some(request.command.clone()),
+            Some(request.cwd.display().to_string()),
+            request.reason.clone(),
+            request.is_retry,
+        );
+        self.pending_exec_approval = Some(PendingExecApproval {
+            request,
+            selected: 0,
+        });
+        self.widget.bottom_pane.exec_approval_selected = 0;
+        self.widget
+            .bottom_pane
+            .set_status(AgentStatus::AwaitingApproval);
+        self.schedule_draw();
+    }
+
+    fn submit_exec_approval_decision(&mut self) {
+        let Some(pending) = self.pending_exec_approval.take() else {
+            return;
+        };
+
+        let decision = match pending.selected {
+            0 => ReviewDecision::Approved,
+            1 => ReviewDecision::ApprovedForSession,
+            2 => ReviewDecision::Denied,
+            _ => ReviewDecision::Abort,
+        };
+        let _ = pending.request.response_tx.send(decision);
+
+        self.widget
+            .bottom_pane
+            .set_exec_approval(None, None, None, false);
+
+        if decision == ReviewDecision::Abort {
+            self.enqueue_mcp_turn_decision(
+                "abandon",
+                "Turn interrupted by approval dialog".to_string(),
+            );
+            self.interrupt_agent_task();
+            self.clear_mcp_run_id();
+            self.widget.bottom_pane.set_status(AgentStatus::Idle);
+            self.complete_streaming_assistant_cell("Interrupted.".to_string());
+            self.complete_running_tool_cells_with_interrupt();
+            self.schedule_draw();
+            return;
+        }
+
+        self.widget
+            .bottom_pane
+            .set_status(AgentStatus::ExecutingTool);
+        self.schedule_draw();
+    }
+
+    fn reject_pending_exec_approval(&mut self) {
+        if let Some(pending) = self.pending_exec_approval.take() {
+            let _ = pending.request.response_tx.send(ReviewDecision::Denied);
+        }
+        self.widget
+            .bottom_pane
+            .set_exec_approval(None, None, None, false);
+        self.widget
+            .bottom_pane
+            .set_status(AgentStatus::ExecutingTool);
+        self.schedule_draw();
+    }
+
+    fn cancel_pending_exec_approval(&mut self) {
+        if let Some(pending) = self.pending_exec_approval.take() {
+            let _ = pending.request.response_tx.send(ReviewDecision::Denied);
+        }
+        self.widget
+            .bottom_pane
+            .set_exec_approval(None, None, None, false);
+    }
+
     fn handle_mouse_event(&mut self, mouse: crossterm::event::MouseEvent) {
         use crossterm::event::{MouseButton, MouseEventKind};
 
@@ -849,23 +1013,19 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
     }
 
     /// Handle an app event.
-    async fn handle_app_event(&mut self, event: AppEvent) -> anyhow::Result<bool> {
+    async fn handle_app_event(&mut self, event: AppEvent) -> anyhow::Result<()> {
+        if !self.is_active_turn(event.turn_id()) {
+            return Ok(());
+        }
+
         match event {
-            AppEvent::Exit(mode) => match mode {
-                ExitMode::Immediate => {
-                    self.should_exit = true;
-                    return Ok(true);
-                }
-                ExitMode::ShutdownFirst => {
-                    self.should_exit = true;
-                    return Ok(true);
-                }
-            },
             AppEvent::SubmitUserMessage {
+                turn_id,
                 text,
                 allowed_tools,
             } => {
                 // Track in session
+                self.running_tool_calls = 0;
                 self.session.add_user_message(&text);
 
                 // Add user cell immediately
@@ -877,314 +1037,32 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     .add_cell(Box::new(AssistantHistoryCell::streaming()));
                 self.widget.bottom_pane.set_status(AgentStatus::Thinking);
                 self.schedule_draw();
-
-                // Create run and context snapshot via MCP if available
-                if let Some(ref mcp_server) = self.mcp_server {
-                    let text_clone = text.clone();
-                    let mcp_ids_clone = self.mcp_ids.clone();
-                    let mcp_server_clone = mcp_server.clone();
-                    let provider_name = self.provider_name.clone();
-                    let model_name = self.model_name.clone();
-
+                self.clear_mcp_run_id();
+                if let Some(run_id_slot) = self.active_turn_run_id.as_ref()
+                    && let Ok(mut slot) = run_id_slot.lock()
+                {
+                    *slot = None;
+                }
+                if let Some(mcp_server) = self.mcp_server.clone() {
+                    let tx = self.app_event_tx.clone();
+                    let working_dir = self.registry.working_dir().to_path_buf();
+                    let plan_id = self.mcp_plan_id.clone();
+                    let mcp_text = text.clone();
                     tokio::spawn(async move {
-                        // Step 1: Create Intent (per docs: Intent → Plan)
-                        let intent_params = CreateIntentParams {
-                            content: text_clone.clone(),
-                            structured_content: None,
-                            parent_id: mcp_ids_clone._intent_id.clone(),
-                            parent_ids: None,
-                            analysis_context_frame_ids: None,
-                            status: Some("active".to_string()),
-                            commit_sha: None,
-                            reason: Some("User submitted message".to_string()),
-                            next_intent_id: None,
-                            actor_kind: Some("human".to_string()),
-                            actor_id: Some("user".to_string()),
-                        };
-
-                        // Resolve actor for intent
-                        let intent_actor = match mcp_server_clone.resolve_actor_from_params(
-                            intent_params.actor_kind.as_deref(),
-                            intent_params.actor_id.as_deref(),
-                        ) {
-                            Ok(actor) => actor,
-                            Err(e) => {
-                                cli_error!(e, "error: failed to resolve actor for intent");
-                                return;
-                            }
-                        };
-
-                        // Call MCP interface to create intent
-                        let created_intent_id = match mcp_server_clone
-                            .create_intent_impl(intent_params, intent_actor)
-                            .await
+                        match timeout(
+                            MCP_TURN_TRACKING_TIMEOUT,
+                            resolve_mcp_turn_tracking(mcp_server, plan_id, working_dir, mcp_text),
+                        )
+                        .await
                         {
                             Ok(result) => {
-                                // Extract intent_id from result: "Intent created with ID: {uuid}"
-                                result.content.iter().find_map(|c| {
-                                    c.as_text().and_then(|t| {
-                                        t.text
-                                            .strip_prefix("Intent created with ID: ")
-                                            .map(|s| s.to_string())
-                                    })
-                                })
-                            }
-                            Err(e) => {
-                                cli_error!(e, "error: failed to create intent");
-                                None
-                            }
-                        };
-
-                        // Use the created intent_id, or fall back to mcp_ids
-                        let intent_id = created_intent_id
-                            .or_else(|| mcp_ids_clone._intent_id.clone())
-                            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-
-                        // Step 2: Create Plan via MCP (per docs: Intent → Plan)
-                        let plan_params = CreatePlanParams {
-                            intent_id: intent_id.clone(),
-                            parent_plan_ids: None,
-                            context_frame_ids: None,
-                            steps: None,
-                            tags: None,
-                            external_ids: None,
-                            actor_kind: Some("system".to_string()),
-                            actor_id: Some("libra-code".to_string()),
-                        };
-
-                        // Resolve actor for plan
-                        let plan_actor = match mcp_server_clone.resolve_actor_from_params(
-                            plan_params.actor_kind.as_deref(),
-                            plan_params.actor_id.as_deref(),
-                        ) {
-                            Ok(actor) => actor,
-                            Err(e) => {
-                                cli_error!(e, "error: failed to resolve actor for plan");
-                                return;
-                            }
-                        };
-
-                        // Call MCP interface to create plan
-                        match mcp_server_clone
-                            .create_plan_impl(plan_params, plan_actor)
-                            .await
-                        {
-                            Ok(result) => {
-                                if result.is_error.unwrap_or(false) {
-                                    render_mcp_error("failed to create plan", result.content);
-                                }
-                            }
-                            Err(e) => {
-                                cli_error!(e, "error: failed to create plan");
-                            }
-                        }
-
-                        // Create Task via MCP (second, per docs: Plan → Task)
-                        let task_params = CreateTaskParams {
-                            title: format!(
-                                "Task for: {}",
-                                text_clone.chars().take(50).collect::<String>()
-                            ),
-                            description: Some(format!(
-                                "Task created from user input: {}",
-                                text_clone
-                            )),
-                            goal_type: Some("feature".to_string()),
-                            constraints: None,
-                            acceptance_criteria: None,
-                            requested_by_kind: Some("human".to_string()),
-                            requested_by_id: Some("user".to_string()),
-                            dependencies: None,
-                            intent_id: mcp_ids_clone._intent_id.clone(),
-                            parent_task_id: None,
-                            origin_step_id: None,
-                            status: Some("running".to_string()),
-                            reason: Some("User requested task execution".to_string()),
-                            tags: None,
-                            external_ids: None,
-                            actor_kind: Some("human".to_string()),
-                            actor_id: Some("user".to_string()),
-                        };
-
-                        // Resolve actor for task
-                        let task_actor = match mcp_server_clone.resolve_actor_from_params(
-                            task_params.actor_kind.as_deref(),
-                            task_params.actor_id.as_deref(),
-                        ) {
-                            Ok(actor) => actor,
-                            Err(e) => {
-                                cli_error!(e, "error: failed to resolve actor for task");
-                                return;
-                            }
-                        };
-
-                        // Call MCP interface to create task
-                        let created_task_id = match mcp_server_clone
-                            .create_task_impl(task_params, task_actor)
-                            .await
-                        {
-                            Ok(result) => {
-                                // Extract task_id from result: "Task created with ID: {uuid}"
-                                let task_id = result.content.iter().find_map(|c| {
-                                    c.as_text().and_then(|t| {
-                                        t.text
-                                            .strip_prefix("Task created with ID: ")
-                                            .map(|s| s.to_string())
-                                    })
+                                let _ = tx.send(AppEvent::McpTurnTrackingReady {
+                                    turn_id,
+                                    run_id: result.run_id,
                                 });
-                                if result.is_error.unwrap_or(false) {
-                                    render_mcp_error("failed to create task", result.content);
-                                }
-                                task_id
                             }
-                            Err(e) => {
-                                cli_error!(e, "error: failed to create task");
-                                None
-                            }
-                        };
-
-                        // Create run (third, per docs: Task → Run)
-                        // Use the task_id from create_task_impl result, or fall back to mcp_ids
-                        let run_task_id = created_task_id
-                            .or_else(|| mcp_ids_clone.task_id.clone())
-                            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-
-                        let run_params = CreateRunParams {
-                            task_id: run_task_id,
-                            base_commit_sha: "0000000000000000000000000000000000000000".to_string(),
-                            plan_id: None,
-                            status: Some("created".to_string()),
-                            context_snapshot_id: None,
-                            error: None,
-                            agent_instances: None,
-                            metrics_json: None,
-                            reason: None,
-                            orchestrator_version: None,
-                            tags: None,
-                            external_ids: None,
-                            actor_kind: Some("human".to_string()),
-                            actor_id: Some("user".to_string()),
-                        };
-
-                        // Resolve actor
-                        let actor = match mcp_server_clone.resolve_actor_from_params(
-                            run_params.actor_kind.as_deref(),
-                            run_params.actor_id.as_deref(),
-                        ) {
-                            Ok(actor) => actor,
-                            Err(e) => {
-                                cli_error!(e, "error: failed to resolve actor for run");
-                                return;
-                            }
-                        };
-
-                        // Call MCP interface to create run
-                        let created_run_id =
-                            match mcp_server_clone.create_run_impl(run_params, actor).await {
-                                Ok(result) => {
-                                    // Extract run_id from result: "Run created with ID: {uuid}"
-                                    let run_id = result.content.iter().find_map(|c| {
-                                        c.as_text().and_then(|t| {
-                                            t.text
-                                                .strip_prefix("Run created with ID: ")
-                                                .map(|s| s.to_string())
-                                        })
-                                    });
-                                    if result.is_error.unwrap_or(false) {
-                                        render_mcp_error("failed to create run", result.content);
-                                    }
-                                    run_id
-                                }
-                                Err(e) => {
-                                    cli_error!(e, "error: failed to create run");
-                                    None
-                                }
-                            };
-
-                        // Use the created run_id for provenance, or fall back to mcp_ids
-                        let provenance_run_id = created_run_id
-                            .or_else(|| mcp_ids_clone.run_id.clone())
-                            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-
-                        // Create Provenance via MCP (LLM metadata)
-                        let provenance_params = CreateProvenanceParams {
-                            run_id: provenance_run_id,
-                            provider: provider_name,
-                            model: model_name,
-                            parameters_json: None,
-                            temperature: None,
-                            max_tokens: None,
-                            tags: None,
-                            external_ids: None,
-                            actor_kind: Some("system".to_string()),
-                            actor_id: Some("libra-code".to_string()),
-                        };
-
-                        // Resolve actor for provenance
-                        let provenance_actor = match mcp_server_clone.resolve_actor_from_params(
-                            provenance_params.actor_kind.as_deref(),
-                            provenance_params.actor_id.as_deref(),
-                        ) {
-                            Ok(actor) => actor,
-                            Err(e) => {
-                                cli_error!(e, "error: failed to resolve actor for provenance");
-                                return;
-                            }
-                        };
-
-                        // Call MCP interface to create provenance
-                        match mcp_server_clone
-                            .create_provenance_impl(provenance_params, provenance_actor)
-                            .await
-                        {
-                            Ok(result) => {
-                                if result.is_error.unwrap_or(false) {
-                                    render_mcp_error("failed to create provenance", result.content);
-                                }
-                            }
-                            Err(e) => {
-                                cli_error!(e, "error: failed to create provenance");
-                            }
-                        }
-
-                        // Create context snapshot
-                        let snapshot_params = CreateContextSnapshotParams {
-                            selection_strategy: "heuristic".to_string(),
-                            items: None,
-                            summary: Some(format!("Context for: {}", text_clone)),
-                            tags: None,
-                            external_ids: None,
-                            actor_kind: Some("system".to_string()),
-                            actor_id: Some("libra-code".to_string()),
-                        };
-
-                        // Resolve actor for snapshot
-                        let snapshot_actor = match mcp_server_clone.resolve_actor_from_params(
-                            snapshot_params.actor_kind.as_deref(),
-                            snapshot_params.actor_id.as_deref(),
-                        ) {
-                            Ok(actor) => actor,
-                            Err(e) => {
-                                cli_error!(e, "error: failed to resolve actor for snapshot");
-                                return;
-                            }
-                        };
-
-                        // Call MCP interface to create context snapshot
-                        match mcp_server_clone
-                            .create_context_snapshot_impl(snapshot_params, snapshot_actor)
-                            .await
-                        {
-                            Ok(result) => {
-                                if result.is_error.unwrap_or(false) {
-                                    render_mcp_error(
-                                        "failed to create context snapshot",
-                                        result.content,
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                cli_error!(e, "error: failed to create context snapshot");
+                            Err(_) => {
+                                tracing::warn!("MCP turn tracking timed out before agent start");
                             }
                         }
                     });
@@ -1200,20 +1078,29 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 let tx = self.app_event_tx.clone();
                 let user_text = text;
                 let mcp_server = self.mcp_server.clone();
-                let mcp_ids = self.mcp_ids.clone();
+                let run_id = self
+                    .active_turn_run_id
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(Mutex::new(None)));
+                let mcp_write_tracker = self.mcp_write_tracker.clone();
 
                 // Execute agent call in background task
                 let handle = tokio::spawn(async move {
                     struct UiObserver {
                         tx: UnboundedSender<AppEvent>,
                         mcp_server: Option<Arc<LibraMcpServer>>,
-                        mcp_ids: McpIds,
+                        run_id: Arc<Mutex<Option<String>>>,
+                        mcp_write_tracker: McpWriteTracker,
+                        turn_id: TurnId,
                     }
 
                     impl crate::internal::ai::agent::ToolLoopObserver for UiObserver {
                         fn on_assistant_step_text(&mut self, text: &str) {
                             let cell = Box::new(AssistantHistoryCell::new(text.to_string()));
-                            let _ = self.tx.send(AppEvent::InsertHistoryCell(cell));
+                            let _ = self.tx.send(AppEvent::InsertHistoryCell {
+                                turn_id: self.turn_id,
+                                cell,
+                            });
                         }
 
                         fn on_tool_call_begin(
@@ -1223,31 +1110,48 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                             arguments: &serde_json::Value,
                         ) {
                             let _ = self.tx.send(AppEvent::ToolCallBegin {
+                                turn_id: self.turn_id,
                                 call_id: call_id.to_string(),
                                 tool_name: tool_name.to_string(),
                                 arguments: arguments.clone(),
                             });
+                        }
 
-                            // Record tool invocation via MCP if available
-                            if let Some(ref mcp_server) = self.mcp_server {
-                                let _call_id = call_id.to_string();
+                        fn on_tool_call_end(
+                            &mut self,
+                            call_id: &str,
+                            tool_name: &str,
+                            result: &Result<ToolOutput, String>,
+                        ) {
+                            let _ = self.tx.send(AppEvent::ToolCallEnd {
+                                turn_id: self.turn_id,
+                                call_id: call_id.to_string(),
+                                tool_name: tool_name.to_string(),
+                                result: result.clone(),
+                            });
+
+                            // Record tool invocation via MCP with final status.
+                            let run_id = self.run_id.lock().ok().and_then(|slot| slot.clone());
+                            if let (Some(mcp_server), Some(run_id)) =
+                                (self.mcp_server.clone(), run_id)
+                            {
                                 let tool_name = tool_name.to_string();
-                                let arguments = arguments.clone();
-                                let mcp_server_clone = mcp_server.clone();
-                                let mcp_ids = self.mcp_ids.clone();
+                                let result = result.clone();
+                                self.mcp_write_tracker.spawn(async move {
+                                    let (status, result_summary) = match &result {
+                                        Ok(output) => {
+                                            ("ok".to_string(), Some(summarize_tool_output(output)))
+                                        }
+                                        Err(err) => ("error".to_string(), Some(err.clone())),
+                                    };
 
-                                tokio::spawn(async move {
-                                    // Create tool invocation
                                     let invocation_params = CreateToolInvocationParams {
-                                        run_id: mcp_ids
-                                            .run_id
-                                            .clone()
-                                            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-                                        tool_name: tool_name.clone(),
-                                        args_json: Some(arguments.to_string()),
-                                        status: Some("ok".to_string()),
+                                        run_id,
+                                        tool_name,
+                                        status: Some(status),
+                                        args_json: None,
                                         io_footprint: None,
-                                        result_summary: None,
+                                        result_summary,
                                         artifacts: None,
                                         tags: None,
                                         external_ids: None,
@@ -1255,8 +1159,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                                         actor_id: Some("libra-agent".to_string()),
                                     };
 
-                                    // Resolve actor
-                                    let actor = match mcp_server_clone.resolve_actor_from_params(
+                                    let actor = match mcp_server.resolve_actor_from_params(
                                         invocation_params.actor_kind.as_deref(),
                                         invocation_params.actor_id.as_deref(),
                                     ) {
@@ -1270,8 +1173,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                                         }
                                     };
 
-                                    // Call MCP interface to create tool invocation
-                                    match mcp_server_clone
+                                    match mcp_server
                                         .create_tool_invocation_impl(invocation_params, actor)
                                         .await
                                     {
@@ -1293,55 +1195,15 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                                 });
                             }
                         }
-
-                        fn on_tool_call_end(
-                            &mut self,
-                            call_id: &str,
-                            tool_name: &str,
-                            result: &Result<ToolOutput, String>,
-                        ) {
-                            let _ = self.tx.send(AppEvent::ToolCallEnd {
-                                call_id: call_id.to_string(),
-                                tool_name: tool_name.to_string(),
-                                result: result.clone(),
-                            });
-                        }
                     }
-
-                    // Clone mcp_server for observer (it will be consumed)
-                    let mcp_server_for_observer = mcp_server.clone();
 
                     let mut observer = UiObserver {
                         tx,
-                        mcp_server: mcp_server_for_observer,
-                        mcp_ids: mcp_ids.clone(),
+                        mcp_server,
+                        run_id,
+                        mcp_write_tracker,
+                        turn_id,
                     };
-
-                    // Set run_id on the model if available (for Codex to link patchsets)
-                    if let Some(run_id) = mcp_ids.run_id.clone() {
-                        model.set_run_id(run_id);
-                    }
-
-                    // Step 1: Take file snapshot before agent execution
-                    let working_dir = registry.working_dir().to_path_buf();
-                    let mut previous_files = std::collections::HashSet::new();
-                    if working_dir.exists() {
-                        for entry in WalkDir::new(&working_dir)
-                            .into_iter()
-                            .filter_map(|e| e.ok())
-                        {
-                            let path = entry.path();
-                            if path.is_file()
-                                && let Ok(rel_path) = path.strip_prefix(&working_dir)
-                            {
-                                let rel_str = rel_path.to_string_lossy().replace("\\", "/");
-                                if !rel_str.starts_with(".git") && !rel_str.starts_with(".libra") {
-                                    previous_files.insert(rel_str);
-                                }
-                            }
-                        }
-                    }
-
                     let result = run_tool_loop_with_history_and_observer(
                         &model,
                         history,
@@ -1354,111 +1216,20 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
                     match result {
                         Ok(turn) => {
-                            let _ = observer.tx.send(AppEvent::AgentEvent(
-                                AgentEvent::ResponseComplete {
+                            let _ = observer.tx.send(AppEvent::AgentEvent {
+                                turn_id: observer.turn_id,
+                                event: AgentEvent::ResponseComplete {
                                     text: turn.final_text,
                                     new_history: turn.history,
                                 },
-                            ));
+                            });
                         }
                         Err(e) => {
-                            let _ = observer.tx.send(AppEvent::AgentEvent(AgentEvent::Error {
-                                message: e.to_string(),
-                            }));
-                        }
-                    }
-
-                    // Step 2: Detect file changes and create PatchSet
-                    if let Some(ref mcp_server) = mcp_server {
-                        let run_id = mcp_ids
-                            .run_id
-                            .clone()
-                            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-
-                        // Detect current files
-                        let mut current_files = std::collections::HashSet::new();
-                        let mut file_changes: Vec<TouchedFileParams> = Vec::new();
-
-                        if working_dir.exists() {
-                            for entry in WalkDir::new(&working_dir)
-                                .into_iter()
-                                .filter_map(|e| e.ok())
-                            {
-                                let path = entry.path();
-                                if path.is_file()
-                                    && let Ok(rel_path) = path.strip_prefix(&working_dir)
-                                {
-                                    let rel_str = rel_path.to_string_lossy().replace("\\", "/");
-                                    if !rel_str.starts_with(".git")
-                                        && !rel_str.starts_with(".libra")
-                                    {
-                                        current_files.insert(rel_str.clone());
-
-                                        // New or modified file
-                                        if !previous_files.contains(&rel_str) {
-                                            file_changes.push(TouchedFileParams {
-                                                path: rel_str,
-                                                change_type: "add".to_string(),
-                                                lines_added: 0,
-                                                lines_deleted: 0,
-                                            });
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Detect deleted files
-                            for prev_file in &previous_files {
-                                if !current_files.contains(prev_file) {
-                                    file_changes.push(TouchedFileParams {
-                                        path: prev_file.clone(),
-                                        change_type: "delete".to_string(),
-                                        lines_added: 0,
-                                        lines_deleted: 0,
-                                    });
-                                }
-                            }
-                        }
-
-                        // Create PatchSet if there are changes
-                        if !file_changes.is_empty() {
-                            let actor = match mcp_server
-                                .resolve_actor_from_params(Some("system"), Some("libra-code"))
-                            {
-                                Ok(a) => a,
-                                Err(_) => {
-                                    // Skip PatchSet creation if actor resolution fails
-                                    return;
-                                }
-                            };
-
-                            let params = CreatePatchSetParams {
-                                run_id,
-                                generation: 1,
-                                sequence: None,
-                                base_commit_sha: "0".repeat(64),
-                                touched_files: Some(file_changes),
-                                rationale: Some("Files changed during agent execution".to_string()),
-                                diff_format: Some("unified_diff".to_string()),
-                                diff_artifact: None,
-                                tags: None,
-                                external_ids: None,
-                                actor_kind: Some("system".to_string()),
-                                actor_id: Some("libra-code".to_string()),
-                            };
-
-                            let mcp_server_clone = mcp_server.clone();
-                            tokio::spawn(async move {
-                                match mcp_server_clone.create_patchset_impl(params, actor).await {
-                                    Ok(result) => {
-                                        if result.is_error.unwrap_or(false) {
-                                            tracing::warn!("Failed to create patchset");
-                                        }
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!("Failed to create patchset: {}", e);
-                                    }
-                                }
+                            let _ = observer.tx.send(AppEvent::AgentEvent {
+                                turn_id: observer.turn_id,
+                                event: AgentEvent::Error {
+                                    message: e.to_string(),
+                                },
                             });
                         }
                     }
@@ -1466,75 +1237,93 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
                 self.agent_task = Some(handle);
             }
-            AppEvent::AgentEvent(agent_event) => {
+            AppEvent::AgentEvent {
+                turn_id: _turn_id,
+                event: agent_event,
+            } => {
                 match agent_event {
-                    AgentEvent::TextDelta { delta } => {
-                        // Find and update the streaming assistant cell
-                        for cell in self.widget.cells.iter_mut().rev() {
-                            if let Some(assistant_cell) =
-                                cell.as_any_mut().downcast_mut::<AssistantHistoryCell>()
-                                && assistant_cell.is_streaming
-                            {
-                                assistant_cell.append(&delta);
-                                break;
-                            }
-                        }
-                        self.schedule_draw();
-                    }
                     AgentEvent::ResponseComplete { text, new_history } => {
-                        self.agent_task = None;
+                        self.enqueue_mcp_turn_decision(
+                            "checkpoint",
+                            "Turn completed successfully".to_string(),
+                        );
+                        self.finish_turn_state();
                         self.history = new_history;
 
                         // Track in session
                         self.session.add_assistant_message(&text);
-
-                        // Find and complete the streaming assistant cell
-                        // (may not be the last cell if tool calls were made)
-                        for cell in self.widget.cells.iter_mut().rev() {
-                            if let Some(assistant_cell) =
-                                cell.as_any_mut().downcast_mut::<AssistantHistoryCell>()
-                                && assistant_cell.is_streaming
-                            {
-                                assistant_cell.content = text;
-                                assistant_cell.complete();
-                                break;
-                            }
-                        }
-                        self.widget.bottom_pane.set_status(AgentStatus::Idle);
-                        self.schedule_draw();
+                        self.complete_streaming_assistant_cell(text);
+                        self.set_idle_and_draw();
                     }
                     AgentEvent::Error { message } => {
-                        self.agent_task = None;
+                        self.enqueue_mcp_turn_decision(
+                            "abandon",
+                            format!("Turn failed: {message}"),
+                        );
+                        self.finish_turn_state();
 
                         self.complete_streaming_assistant_cell(format!("Error: {}", message));
-                        self.widget.bottom_pane.set_status(AgentStatus::Idle);
+                        self.set_idle_and_draw();
+                    }
+                    AgentEvent::Retrying {
+                        attempt,
+                        total_attempts,
+                        delay_ms,
+                        error,
+                    } => {
+                        let reason = summarize_retry_error(&error);
+                        self.widget.bottom_pane.set_retry_notice(format!(
+                            "● Retrying request {attempt}/{total_attempts} in {:.1}s ({reason})",
+                            delay_ms as f64 / 1000.0
+                        ));
                         self.schedule_draw();
                     }
                 }
             }
             AppEvent::PlanWorkflowComplete {
+                turn_id: _turn_id,
                 text,
                 new_history,
                 intent_id,
+                plan_id,
                 spec_json,
+                spec,
+                plan,
+                warnings,
             } => {
-                self.agent_task = None;
+                self.finish_turn_state();
                 self.history = new_history;
                 self.session.add_assistant_message(&text);
                 self.session.metadata.insert(
                     LATEST_INTENTSPEC_JSON.to_string(),
                     serde_json::Value::String(spec_json.clone()),
                 );
-                if let Some(id) = intent_id {
+                if let Some(ref id) = intent_id {
                     self.session.metadata.insert(
                         LATEST_INTENTSPEC_INTENT_ID.to_string(),
-                        serde_json::Value::String(id),
+                        serde_json::Value::String(id.clone()),
                     );
                 } else {
                     self.session.metadata.remove(LATEST_INTENTSPEC_INTENT_ID);
                 }
+                if let Some(id) = plan_id.clone() {
+                    self.session.metadata.insert(
+                        LATEST_EXECUTION_PLAN_ID.to_string(),
+                        serde_json::Value::String(id.clone()),
+                    );
+                    self.mcp_plan_id = Some(id);
+                } else {
+                    self.session.metadata.remove(LATEST_EXECUTION_PLAN_ID);
+                    self.mcp_plan_id = None;
+                }
 
-                self.complete_streaming_assistant_cell(text);
+                self.replace_streaming_assistant_cell(Box::new(PlanSummaryHistoryCell::new(
+                    *spec,
+                    *plan,
+                    intent_id.clone(),
+                    plan_id.clone(),
+                    warnings,
+                )));
 
                 // Show post-plan dialog instead of returning to Idle
                 self.pending_post_plan = Some(PendingPostPlan {
@@ -1547,11 +1336,38 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     .set_status(AgentStatus::AwaitingPostPlanChoice);
                 self.schedule_draw();
             }
-            AppEvent::InsertHistoryCell(cell) => {
+            AppEvent::InsertHistoryCell {
+                turn_id: _turn_id,
+                cell,
+            } => {
                 self.insert_before_streaming_assistant(cell);
                 self.schedule_draw();
             }
+            AppEvent::DagGraphBegin {
+                turn_id: _turn_id,
+                plan,
+            } => {
+                self.widget.show_dag_panel(plan);
+                self.schedule_draw();
+            }
+            AppEvent::DagTaskStatus {
+                turn_id: _turn_id,
+                task_id,
+                status,
+            } => {
+                self.widget.update_dag_task_status(task_id, status);
+                self.schedule_draw();
+            }
+            AppEvent::DagGraphProgress {
+                turn_id: _turn_id,
+                completed,
+                total,
+            } => {
+                self.widget.update_dag_progress(completed, total);
+                self.schedule_draw();
+            }
             AppEvent::ToolCallBegin {
+                turn_id: _turn_id,
                 call_id,
                 tool_name,
                 arguments,
@@ -1566,20 +1382,26 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                         };
                     let cell = Box::new(PlanUpdateHistoryCell::new(call_id, explanation, steps));
                     self.insert_before_streaming_assistant(cell);
-                } else {
+                } else if !append_to_last_tool_group_cell(
+                    &mut self.widget.cells,
+                    call_id.clone(),
+                    tool_name.as_str(),
+                    arguments.clone(),
+                ) {
                     let cell = Box::new(ToolCallHistoryCell::new(call_id, tool_name, arguments));
                     self.insert_before_streaming_assistant(cell);
                 }
-                self.widget
-                    .bottom_pane
-                    .set_status(AgentStatus::ExecutingTool);
+                self.running_tool_calls = self.running_tool_calls.saturating_add(1);
+                self.update_status_after_tool_progress();
                 self.schedule_draw();
             }
             AppEvent::ToolCallEnd {
+                turn_id: _turn_id,
                 call_id,
                 tool_name,
                 result,
             } => {
+                let should_hide_failure = should_hide_tool_failure(&tool_name, &result);
                 // For successful apply_patch, insert a visual diff cell.
                 if tool_name == "apply_patch"
                     && let Ok(ref output) = result
@@ -1601,30 +1423,71 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     }
                 }
                 if !found {
-                    for cell in self.widget.cells.iter_mut().rev() {
-                        if let Some(tool_cell) =
-                            cell.as_any_mut().downcast_mut::<ToolCallHistoryCell>()
-                            && tool_cell.call_id == call_id
-                            && tool_cell.is_running
-                        {
-                            tool_cell.complete(result);
-                            break;
+                    let mut pending_result = Some(result);
+                    for idx in (0..self.widget.cells.len()).rev() {
+                        let Some(tool_cell) = self.widget.cells[idx]
+                            .as_any_mut()
+                            .downcast_mut::<ToolCallHistoryCell>()
+                        else {
+                            continue;
+                        };
+                        if !tool_cell.contains_call_id(&call_id) {
+                            continue;
                         }
+                        if should_hide_failure && tool_cell.hides_failed_calls() {
+                            tool_cell.remove_call(&call_id);
+                            if tool_cell.is_empty() {
+                                self.widget.cells.remove(idx);
+                            }
+                        } else if let Some(result) = pending_result.take() {
+                            tool_cell.complete_call(&call_id, result);
+                        }
+                        break;
                     }
                 }
-                self.widget.bottom_pane.set_status(AgentStatus::Thinking);
+                self.running_tool_calls = self.running_tool_calls.saturating_sub(1);
+                self.update_status_after_tool_progress();
                 self.schedule_draw();
             }
-            AppEvent::AgentStatusUpdate { status } => {
+            AppEvent::AgentStatusUpdate {
+                turn_id: _turn_id,
+                status,
+            } => {
                 self.widget.bottom_pane.set_status(status);
                 self.schedule_draw();
             }
-            AppEvent::RequestUserInput { request } => {
-                self.handle_user_input_request(request);
+            AppEvent::McpTurnTrackingReady {
+                turn_id: _turn_id,
+                run_id,
+            } => {
+                self.mcp_run_id = run_id.clone();
+                if let Some(run_id_slot) = self.active_turn_run_id.as_ref()
+                    && let Ok(mut slot) = run_id_slot.lock()
+                {
+                    *slot = run_id;
+                }
+            }
+            AppEvent::ExecuteWorkflowComplete {
+                turn_id: _turn_id,
+                text,
+                new_history,
+                result,
+            } => {
+                self.finish_turn_state();
+                self.history = new_history;
+                self.session.add_assistant_message(&text);
+                if let Some(result) = result {
+                    self.replace_streaming_assistant_cell(Box::new(
+                        OrchestratorResultHistoryCell::new(*result),
+                    ));
+                } else {
+                    self.complete_streaming_assistant_cell(text);
+                }
+                self.set_idle_and_draw();
             }
         }
 
-        Ok(false)
+        Ok(())
     }
 
     /// Submit a user message, expanding slash commands and applying agent context.
@@ -1658,7 +1521,10 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             effective_text
         };
 
+        self.widget.clear_dag_panel();
+        let turn_id = self.begin_turn();
         let _ = self.app_event_tx.send(AppEvent::SubmitUserMessage {
+            turn_id,
             text: final_text,
             allowed_tools,
         });
@@ -1689,6 +1555,8 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 self.widget.clear();
                 self.history.clear();
                 self.session = SessionState::new(&self.registry.working_dir().to_string_lossy());
+                self.mcp_plan_id = None;
+                self.mcp_run_id = None;
             }
             BuiltinCommand::Model => {
                 let info = format!(
@@ -1715,12 +1583,58 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 self.handle_intent_command(args).await;
             }
             BuiltinCommand::Quit => {
-                self.should_exit = true;
                 self.exit_info = Some(AppExitInfo {
                     reason: ExitReason::UserRequested,
                 });
             }
         }
+    }
+
+    async fn create_mcp_exit_decision(&self, reason: &ExitReason) {
+        let (Some(mcp_server), Some(run_id)) = (self.mcp_server.clone(), self.mcp_run_id.clone())
+        else {
+            return;
+        };
+
+        let (decision_type, rationale) = match reason {
+            ExitReason::UserRequested => ("abandon", "Session ended by user request".to_string()),
+            ExitReason::Fatal(message) => (
+                "abandon",
+                format!("Session ended due to fatal error: {message}"),
+            ),
+        };
+
+        write_mcp_decision(mcp_server, run_id, decision_type.to_string(), rationale).await;
+    }
+
+    fn enqueue_mcp_turn_decision(&self, decision_type: &str, rationale: String) {
+        let (Some(mcp_server), Some(run_id)) = (self.mcp_server.clone(), self.mcp_run_id.clone())
+        else {
+            return;
+        };
+        let decision_type = decision_type.to_string();
+        self.mcp_write_tracker.spawn(async move {
+            write_mcp_decision(mcp_server, run_id, decision_type, rationale).await;
+        });
+    }
+
+    fn clear_mcp_run_id(&mut self) {
+        self.mcp_run_id = None;
+    }
+
+    fn finish_turn_state(&mut self) {
+        self.cancel_pending_exec_approval();
+        self.agent_task = None;
+        self.running_tool_calls = 0;
+        self.clear_turn_tracking();
+    }
+
+    fn set_idle_and_draw(&mut self) {
+        self.widget
+            .bottom_pane
+            .set_git_branch(current_git_branch_label(self.registry.working_dir()));
+        self.widget.bottom_pane.set_status(AgentStatus::Idle);
+        self.schedule_draw();
     }
 
     // ── Post-plan dialog ────────────────────────────────────────────
@@ -1756,12 +1670,17 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
 
     fn dismiss_post_plan_dialog(&mut self) {
         self.pending_post_plan = None;
-        self.widget.bottom_pane.set_status(AgentStatus::Idle);
-        self.schedule_draw();
+        self.set_idle_and_draw();
     }
 
     async fn start_execute_workflow(&mut self, spec_json: &str) {
-        use crate::internal::ai::intentspec::types::IntentSpec;
+        use crate::internal::ai::{
+            intentspec::types::IntentSpec,
+            orchestrator::{
+                Orchestrator,
+                types::{OrchestratorConfig, OrchestratorObserver, PersistedExecution, TaskSpec},
+            },
+        };
 
         let spec: IntentSpec = match serde_json::from_str(spec_json) {
             Ok(s) => s,
@@ -1770,18 +1689,247 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     .add_cell(Box::new(AssistantHistoryCell::new(format!(
                         "Failed to parse IntentSpec: {e}"
                     ))));
-                self.widget.bottom_pane.set_status(AgentStatus::Idle);
-                self.schedule_draw();
+                self.set_idle_and_draw();
                 return;
             }
         };
 
-        self.widget.add_cell(Box::new(AssistantHistoryCell::new(format!(
-            "IntentSpec validated successfully!\n\n**Summary:** {}\n\n**Note:** Scheduler execution is not yet implemented. This feature will be available in a future update.",
-            spec.intent.summary
-        ))));
-        self.widget.bottom_pane.set_status(AgentStatus::Idle);
+        self.widget.clear_dag_panel();
+        self.widget
+            .add_cell(Box::new(AssistantHistoryCell::streaming()));
+        self.widget.bottom_pane.set_status(AgentStatus::Thinking);
         self.schedule_draw();
+        let turn_id = self.begin_turn();
+        self.running_tool_calls = 0;
+
+        let model = self.model.clone();
+        let registry = self.registry.clone();
+        let working_dir = self.registry.working_dir().to_path_buf();
+        let coder_preamble = self
+            .agent_router
+            .get("coder")
+            .map(|a| a.system_prompt.clone());
+        let reviewer_preamble = self
+            .agent_router
+            .get("reviewer")
+            .map(|a| a.system_prompt.clone());
+        let mcp_server = self.mcp_server.clone();
+        let tx = self.app_event_tx.clone();
+        let history = self.history.clone();
+
+        let handle = tokio::spawn(async move {
+            struct UiOrchestratorObserver {
+                tx: UnboundedSender<AppEvent>,
+                turn_id: TurnId,
+            }
+
+            impl UiOrchestratorObserver {
+                fn send_note(&self, text: String) {
+                    let _ = self.tx.send(AppEvent::InsertHistoryCell {
+                        turn_id: self.turn_id,
+                        cell: Box::new(AssistantHistoryCell::new(text)),
+                    });
+                }
+
+                fn scoped_call_id(task: &TaskSpec, call_id: &str) -> String {
+                    format!("{}:{call_id}", task.id())
+                }
+
+                fn summarize_gate_check(
+                    check: &crate::internal::ai::intentspec::types::Check,
+                ) -> String {
+                    match check.kind {
+                        crate::internal::ai::intentspec::types::CheckKind::Policy => {
+                            format!("policy {}", check.id)
+                        }
+                        crate::internal::ai::intentspec::types::CheckKind::Command
+                        | crate::internal::ai::intentspec::types::CheckKind::TestSuite => check
+                            .command
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|command| !command.is_empty())
+                            .map(|command| command.to_string())
+                            .unwrap_or_else(|| check.id.clone()),
+                    }
+                }
+            }
+
+            impl OrchestratorObserver for UiOrchestratorObserver {
+                fn on_plan_compiled(&self, plan: &ExecutionPlanSpec) {
+                    let _ = self.tx.send(AppEvent::DagGraphBegin {
+                        turn_id: self.turn_id,
+                        plan: plan.clone(),
+                    });
+                }
+
+                fn on_task_started(&self, task: &TaskSpec) {
+                    let _ = self.tx.send(AppEvent::AgentStatusUpdate {
+                        turn_id: self.turn_id,
+                        status: AgentStatus::Thinking,
+                    });
+                    let _ = self.tx.send(AppEvent::DagTaskStatus {
+                        turn_id: self.turn_id,
+                        task_id: task.id(),
+                        status: crate::internal::ai::orchestrator::types::TaskNodeStatus::Running,
+                    });
+                }
+
+                fn on_task_completed(
+                    &self,
+                    task: &TaskSpec,
+                    result: &crate::internal::ai::orchestrator::types::TaskResult,
+                ) {
+                    let _ = self.tx.send(AppEvent::DagTaskStatus {
+                        turn_id: self.turn_id,
+                        task_id: task.id(),
+                        status: result.status.clone(),
+                    });
+                    self.send_note(format_task_completion_note(task.title(), result));
+                }
+
+                fn on_task_assistant_message(&self, _task: &TaskSpec, _text: &str) {}
+
+                fn on_tool_call_begin(
+                    &self,
+                    task: &TaskSpec,
+                    call_id: &str,
+                    tool_name: &str,
+                    arguments: &serde_json::Value,
+                ) {
+                    let _ = self.tx.send(AppEvent::ToolCallBegin {
+                        turn_id: self.turn_id,
+                        call_id: Self::scoped_call_id(task, call_id),
+                        tool_name: tool_name.to_string(),
+                        arguments: arguments.clone(),
+                    });
+                }
+
+                fn on_tool_call_end(
+                    &self,
+                    task: &TaskSpec,
+                    call_id: &str,
+                    tool_name: &str,
+                    result: &Result<ToolOutput, String>,
+                ) {
+                    let _ = self.tx.send(AppEvent::ToolCallEnd {
+                        turn_id: self.turn_id,
+                        call_id: Self::scoped_call_id(task, call_id),
+                        tool_name: tool_name.to_string(),
+                        result: result.clone(),
+                    });
+                }
+
+                fn on_reviewer_started(&self, _task: &TaskSpec) {}
+
+                fn on_reviewer_completed(
+                    &self,
+                    _task: &TaskSpec,
+                    _review: Option<&crate::internal::ai::orchestrator::types::ReviewOutcome>,
+                ) {
+                }
+
+                fn on_gate_check_started(
+                    &self,
+                    task: &TaskSpec,
+                    check: &crate::internal::ai::intentspec::types::Check,
+                ) {
+                    let summary = Self::summarize_gate_check(check);
+                    self.send_note(format!(
+                        "Gate Check · {}  \nrunning · {}",
+                        task.title(),
+                        summary
+                    ));
+                }
+
+                fn on_gate_check_completed(
+                    &self,
+                    task: &TaskSpec,
+                    check: &crate::internal::ai::intentspec::types::Check,
+                    result: &crate::internal::ai::orchestrator::types::GateResult,
+                ) {
+                    let summary = Self::summarize_gate_check(check);
+                    let outcome = if result.passed { "passed" } else { "failed" };
+                    let detail = if result.timed_out {
+                        "timed out".to_string()
+                    } else {
+                        format!("exit {}", result.exit_code)
+                    };
+                    let mut metrics = vec![outcome.to_string(), summary];
+                    if result.duration_ms > 0 {
+                        metrics.push(format!("{} ms", result.duration_ms));
+                    }
+                    metrics.push(detail);
+                    self.send_note(format!(
+                        "Gate Check · {}  \n{}",
+                        task.title(),
+                        metrics.join(" · ")
+                    ));
+                }
+
+                fn on_graph_progress(&self, completed: usize, total: usize) {
+                    let _ = self.tx.send(AppEvent::DagGraphProgress {
+                        turn_id: self.turn_id,
+                        completed,
+                        total,
+                    });
+                }
+
+                fn on_graph_checkpoint_saved(
+                    &self,
+                    _checkpoint_id: &str,
+                    _pc: usize,
+                    _completed_nodes: usize,
+                ) {
+                }
+
+                fn on_graph_checkpoint_restored(&self, _checkpoint_id: &str, _pc: usize) {}
+
+                fn on_replan(
+                    &self,
+                    _current_revision: u32,
+                    _next_revision: u32,
+                    _reason: &str,
+                    _diff_summary: &str,
+                ) {
+                }
+
+                fn on_persistence_complete(&self, _execution: &PersistedExecution) {}
+            }
+
+            let observer: Arc<dyn OrchestratorObserver> = Arc::new(UiOrchestratorObserver {
+                tx: tx.clone(),
+                turn_id,
+            });
+            let config = OrchestratorConfig {
+                working_dir,
+                base_commit: None,
+                dagrs_resume_checkpoint_id: None,
+                coder_preamble,
+                reviewer_preamble,
+                mcp_server,
+                observer: Some(observer),
+            };
+            let orchestrator = Orchestrator::new(model, registry, config);
+
+            let result = orchestrator.run(spec).await;
+
+            let (summary, ui_result) = match &result {
+                Ok(r) => (format_orchestrator_result(r), Some(Box::new(r.clone()))),
+                Err(e) => (format!("Orchestrator failed: {e}"), None),
+            };
+
+            let mut new_history = history;
+            new_history.push(Message::assistant(summary.clone()));
+
+            let _ = tx.send(AppEvent::ExecuteWorkflowComplete {
+                turn_id,
+                text: summary,
+                new_history,
+                result: ui_result,
+            });
+        });
+
+        self.agent_task = Some(handle);
     }
 
     async fn start_plan_workflow(&mut self, request: &str) {
@@ -1795,9 +1943,12 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         }
 
         let user_text = format!("/plan {request}");
+        let turn_id = self.begin_turn();
+        self.running_tool_calls = 0;
         self.session.add_user_message(&user_text);
         self.widget
             .add_cell(Box::new(UserHistoryCell::new(user_text.clone())));
+        self.widget.clear_dag_panel();
         self.widget
             .add_cell(Box::new(AssistantHistoryCell::streaming()));
         self.widget.bottom_pane.set_status(AgentStatus::Thinking);
@@ -1830,15 +1981,17 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         let handle = tokio::spawn(async move {
             struct PlanObserver {
                 tx: UnboundedSender<AppEvent>,
+                turn_id: TurnId,
                 draft: Option<IntentDraft>,
                 risk_prompted: bool,
                 selected_risk: Option<RiskLevel>,
             }
 
             impl PlanObserver {
-                fn new(tx: UnboundedSender<AppEvent>) -> Self {
+                fn new(tx: UnboundedSender<AppEvent>, turn_id: TurnId) -> Self {
                     Self {
                         tx,
+                        turn_id,
                         draft: None,
                         risk_prompted: false,
                         selected_risk: None,
@@ -1854,6 +2007,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     arguments: &serde_json::Value,
                 ) {
                     let _ = self.tx.send(AppEvent::ToolCallBegin {
+                        turn_id: self.turn_id,
                         call_id: call_id.to_string(),
                         tool_name: tool_name.to_string(),
                         arguments: arguments.clone(),
@@ -1885,6 +2039,7 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     result: &Result<ToolOutput, String>,
                 ) {
                     let _ = self.tx.send(AppEvent::ToolCallEnd {
+                        turn_id: self.turn_id,
                         call_id: call_id.to_string(),
                         tool_name: tool_name.to_string(),
                         result: result.clone(),
@@ -1901,40 +2056,64 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 }
             }
 
-            let mut observer = PlanObserver::new(tx.clone());
+            let mut observer = PlanObserver::new(tx.clone(), turn_id);
+            let fallback_history = history.clone();
             let run_result = run_tool_loop_with_history_and_observer(
                 &model,
                 history,
                 prompt,
                 &registry,
-                config,
+                config.clone(),
                 &mut observer,
             )
             .await;
 
             let turn = match run_result {
-                Ok(turn) => turn,
+                Ok(turn) => Some(turn),
                 Err(e) => {
-                    let _ = tx.send(AppEvent::AgentEvent(AgentEvent::Error {
-                        message: e.to_string(),
-                    }));
-                    return;
+                    if observer.risk_prompted
+                        && observer.selected_risk.is_some()
+                        && observer.draft.is_some()
+                    {
+                        let _ = tx.send(AppEvent::InsertHistoryCell {
+                            turn_id,
+                            cell: Box::new(AssistantHistoryCell::new(format!(
+                                "Planner response failed after draft submission. Continuing with the submitted draft.\nReason: {}",
+                                e
+                            ))),
+                        });
+                        None
+                    } else {
+                        let _ = tx.send(AppEvent::AgentEvent {
+                            turn_id,
+                            event: AgentEvent::Error {
+                                message: e.to_string(),
+                            },
+                        });
+                        return;
+                    }
                 }
             };
 
             if !observer.risk_prompted {
-                let _ = tx.send(AppEvent::AgentEvent(AgentEvent::Error {
-                    message: "Plan failed: planner did not ask for risk profile.".to_string(),
-                }));
+                let _ = tx.send(AppEvent::AgentEvent {
+                    turn_id,
+                    event: AgentEvent::Error {
+                        message: "Plan failed: planner did not ask for risk profile.".to_string(),
+                    },
+                });
                 return;
             }
 
             let risk_level = match observer.selected_risk.clone() {
                 Some(level) => level,
                 None => {
-                    let _ = tx.send(AppEvent::AgentEvent(AgentEvent::Error {
-                        message: "Plan failed: risk profile was not selected.".to_string(),
-                    }));
+                    let _ = tx.send(AppEvent::AgentEvent {
+                        turn_id,
+                        event: AgentEvent::Error {
+                            message: "Plan failed: risk profile was not selected.".to_string(),
+                        },
+                    });
                     return;
                 }
             };
@@ -1942,9 +2121,12 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             let draft = match observer.draft.take() {
                 Some(d) => d,
                 None => {
-                    let _ = tx.send(AppEvent::AgentEvent(AgentEvent::Error {
-                        message: "Plan failed: no intent draft was submitted.".to_string(),
-                    }));
+                    let _ = tx.send(AppEvent::AgentEvent {
+                        turn_id,
+                        event: AgentEvent::Error {
+                            message: "Plan failed: no intent draft was submitted.".to_string(),
+                        },
+                    });
                     return;
                 }
             };
@@ -1974,22 +2156,63 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                     .map(|i| format!("- {}: {}", i.path, i.message))
                     .collect::<Vec<_>>()
                     .join("\n");
-                let _ = tx.send(AppEvent::AgentEvent(AgentEvent::Error {
-                    message: format!(
-                        "Plan failed after automatic repair.\nValidation issues:\n{}",
-                        report
-                    ),
-                }));
+                let _ = tx.send(AppEvent::AgentEvent {
+                    turn_id,
+                    event: AgentEvent::Error {
+                        message: format!(
+                            "Plan failed after automatic repair.\nValidation issues:\n{}",
+                            report
+                        ),
+                    },
+                });
                 return;
             }
 
+            let canonical =
+                match crate::internal::ai::intentspec::canonical::to_canonical_json(&spec) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let _ = tx.send(AppEvent::AgentEvent {
+                            turn_id,
+                            event: AgentEvent::Error {
+                                message: format!("Plan failed: cannot serialize IntentSpec: {e}"),
+                            },
+                        });
+                        return;
+                    }
+                };
+
             let mut persistence_warning = None;
-            let intent_id = if let Some(mcp_server) = mcp_server {
-                match persist_intentspec(&spec, &mcp_server).await {
-                    Ok(id) => Some(id),
+            let intent_id = if let Some(ref mcp_server) = mcp_server {
+                let params = CreateIntentParams {
+                    content: "IntentSpec generated by planner".to_string(),
+                    structured_content: Some(canonical),
+                    parent_id: None,
+                    parent_ids: None,
+                    analysis_context_frame_ids: None,
+                    status: Some("active".to_string()),
+                    commit_sha: None,
+                    reason: None,
+                    next_intent_id: None,
+                    actor_kind: Some("system".to_string()),
+                    actor_id: Some("libra-plan".to_string()),
+                };
+                let actor_kind = params.actor_kind.clone();
+                let actor_id = params.actor_id.clone();
+                match mcp_server
+                    .resolve_actor_from_params(actor_kind.as_deref(), actor_id.as_deref())
+                {
+                    Ok(actor) => match mcp_server.create_intent_impl(params, actor).await {
+                        Ok(call_result) => parse_created_id(&call_result),
+                        Err(e) => {
+                            persistence_warning =
+                                Some(format!("failed to persist intent into MCP: {e:?}"));
+                            None
+                        }
+                    },
                     Err(e) => {
                         persistence_warning =
-                            Some(format!("failed to persist intent into MCP: {e:?}"));
+                            Some(format!("failed to resolve MCP actor for intent: {e:?}"));
                         None
                     }
                 }
@@ -1999,21 +2222,70 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
                 None
             };
 
-            let mut summary = render_summary(&spec, intent_id.as_deref());
-            if let Some(warn) = persistence_warning {
-                summary.push_str(&format!("\nWarning: {warn}"));
-            }
-
             let pretty_json =
                 serde_json::to_string_pretty(&spec).unwrap_or_else(|_| "{}".to_string());
-            let mut new_history = turn.history;
+            let execution_plan = match compile_execution_plan_spec(&spec) {
+                Ok(plan) => plan,
+                Err(e) => {
+                    let _ = tx.send(AppEvent::AgentEvent {
+                        turn_id,
+                        event: AgentEvent::Error {
+                            message: format!("Plan failed: cannot compile execution plan: {e}"),
+                        },
+                    });
+                    return;
+                }
+            };
+
+            let mut summary = render_summary(&spec, intent_id.as_deref());
+            let mut plan_warning = None;
+            let plan_id = if let (Some(mcp_server), Some(intent_id)) =
+                (mcp_server.as_ref(), intent_id.as_ref())
+            {
+                match persist_execution_plan(&execution_plan, intent_id, mcp_server).await {
+                    Ok(id) => Some(id),
+                    Err(e) => {
+                        plan_warning = Some(format!("failed to persist execution plan: {e}"));
+                        None
+                    }
+                }
+            } else if mcp_server.is_some() {
+                plan_warning = Some(
+                    "intent persistence unavailable; execution plan not persisted.".to_string(),
+                );
+                None
+            } else {
+                plan_warning =
+                    Some("MCP server unavailable; execution plan not persisted.".to_string());
+                None
+            };
+
+            if let Some(ref warn) = persistence_warning {
+                summary.push_str(&format!("\nWarning: {warn}"));
+            }
+            if let Some(ref warn) = plan_warning {
+                summary.push_str(&format!("\nWarning: {warn}"));
+            }
+            summary.push_str("\n\nExecution plan ready. Review the workflow card and choose Execute / Modify / Cancel below.");
+
+            let warnings = [persistence_warning, plan_warning]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
+
+            let mut new_history = turn.map(|turn| turn.history).unwrap_or(fallback_history);
             new_history.push(Message::assistant(summary.clone()));
 
             let _ = tx.send(AppEvent::PlanWorkflowComplete {
+                turn_id,
                 text: summary,
                 new_history,
                 intent_id,
+                plan_id,
                 spec_json: pretty_json,
+                spec: Box::new(spec),
+                plan: Box::new(execution_plan),
+                warnings,
             });
         });
 
@@ -2074,6 +2346,25 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
         if let Some(handle) = self.agent_task.take() {
             handle.abort();
         }
+        self.clear_active_turn();
+        self.running_tool_calls = 0;
+    }
+
+    fn update_status_after_tool_progress(&mut self) {
+        let next_status = if self.pending_post_plan.is_some() {
+            AgentStatus::AwaitingPostPlanChoice
+        } else if self.pending_exec_approval.is_some() {
+            AgentStatus::AwaitingApproval
+        } else if self.pending_user_input.is_some() {
+            AgentStatus::AwaitingUserInput
+        } else if self.running_tool_calls > 0 {
+            AgentStatus::ExecutingTool
+        } else if self.agent_task.is_some() {
+            AgentStatus::Thinking
+        } else {
+            AgentStatus::Idle
+        };
+        self.widget.bottom_pane.set_status(next_status);
     }
 
     fn insert_before_streaming_assistant(
@@ -2156,12 +2447,24 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
             .add_cell(Box::new(AssistantHistoryCell::new(content)));
     }
 
+    fn replace_streaming_assistant_cell(&mut self, replacement: Box<dyn HistoryCell>) {
+        for idx in (0..self.widget.cells.len()).rev() {
+            if let Some(assistant_cell) = self.widget.cells[idx]
+                .as_any()
+                .downcast_ref::<AssistantHistoryCell>()
+                && assistant_cell.is_streaming
+            {
+                self.widget.cells[idx] = replacement;
+                return;
+            }
+        }
+        self.widget.add_cell(replacement);
+    }
+
     fn complete_running_tool_cells_with_interrupt(&mut self) {
         for cell in self.widget.cells.iter_mut() {
-            if let Some(tool_cell) = cell.as_any_mut().downcast_mut::<ToolCallHistoryCell>()
-                && tool_cell.is_running
-            {
-                tool_cell.complete(Err("Interrupted".to_string()));
+            if let Some(tool_cell) = cell.as_any_mut().downcast_mut::<ToolCallHistoryCell>() {
+                tool_cell.interrupt_running();
             }
         }
     }
@@ -2202,13 +2505,641 @@ impl<M: CompletionModel + Clone + 'static> App<M> {
     fn draw(&mut self) -> anyhow::Result<()> {
         self.tui.draw(|frame| {
             let area = frame.area();
-            let cursor_pos = self.widget.render(area, frame.buffer_mut());
+            let cursor_pos = if self.welcome_active {
+                let chat_area = self.widget.chat_area_rect(area);
+                let welcome_view = WelcomeView {
+                    welcome_message: &self.welcome_message,
+                    model_name: &self.model_name,
+                    provider_name: &self.provider_name,
+                    cwd: self.registry.working_dir(),
+                };
+                welcome_shader::render(chat_area, frame.buffer_mut(), welcome_view);
+                self.widget
+                    .render_bottom_pane_only(area, frame.buffer_mut())
+            } else {
+                self.widget.render(area, frame.buffer_mut())
+            };
             if let Some(pos) = cursor_pos {
                 frame.set_cursor_position(pos);
             }
         })?;
         Ok(())
     }
+}
+
+fn append_to_last_tool_group_cell(
+    cells: &mut Vec<Box<dyn super::history_cell::HistoryCell>>,
+    call_id: String,
+    tool_name: &str,
+    arguments: serde_json::Value,
+) -> bool {
+    let anchor_index = if let Some(streaming_index) = cells.iter().rposition(|cell| {
+        cell.as_any()
+            .downcast_ref::<AssistantHistoryCell>()
+            .is_some_and(|assistant| assistant.is_streaming)
+    }) {
+        streaming_index.checked_sub(1)
+    } else {
+        cells.len().checked_sub(1)
+    };
+
+    let Some(anchor_index) = anchor_index else {
+        return false;
+    };
+
+    let Some(tool_cell) = cells[anchor_index]
+        .as_any_mut()
+        .downcast_mut::<ToolCallHistoryCell>()
+    else {
+        return false;
+    };
+
+    if !tool_cell.can_merge(tool_name) {
+        return false;
+    }
+
+    tool_cell.append_call(call_id, tool_name.to_string(), arguments);
+    true
+}
+
+fn should_hide_tool_failure(tool_name: &str, result: &Result<ToolOutput, String>) -> bool {
+    matches!(
+        tool_name,
+        "read_file" | "list_dir" | "grep_files" | "apply_patch"
+    ) && !matches!(result, Ok(output) if output.is_success())
+}
+
+fn format_orchestrator_result(
+    result: &crate::internal::ai::orchestrator::types::OrchestratorResult,
+) -> String {
+    let mut lines = Vec::new();
+    let decision_label = orchestrator_decision_label(&result.decision);
+    let groups = result.execution_plan_spec.parallel_groups();
+    let lane_count = groups.iter().map(Vec::len).max().unwrap_or(0);
+    let layer_count = groups.len();
+    lines.push(format!("# Execution Result: {decision_label}"));
+    lines.push(String::new());
+
+    lines.push("## Overview".to_string());
+    lines.push("| Field | Value |".to_string());
+    lines.push("| --- | --- |".to_string());
+    lines.push(format!("| Decision | {decision_label} |"));
+    lines.push(format!(
+        "| Revision | {} |",
+        result.execution_plan_spec.revision
+    ));
+    lines.push(format!(
+        "| Tasks | {} |",
+        result.execution_plan_spec.tasks.len()
+    ));
+    lines.push(format!(
+        "| Max parallel | {} |",
+        result.execution_plan_spec.max_parallel
+    ));
+    lines.push(format!("| Active lanes | {} |", lane_count));
+    lines.push(format!("| Layers | {} |", layer_count));
+    lines.push(format!("| Replans | {} |", result.replan_count));
+    lines.push(format!(
+        "| Intent | `{}` |",
+        short_markdown_id(&result.intent_spec_id)
+    ));
+    if let Some(persistence) = &result.persistence {
+        lines.push(format!(
+            "| Run | `{}` |",
+            short_markdown_id(&persistence.run_id)
+        ));
+        lines.push(format!("| Persisted tasks | {} |", persistence.tasks.len()));
+        lines.push(format!(
+            "| Checkpoints | {} |",
+            persistence.checkpoints.len()
+        ));
+    }
+    lines.push(String::new());
+
+    lines.push("## Verification".to_string());
+    lines.push("| Check | Status | Notes |".to_string());
+    lines.push("| --- | --- | --- |".to_string());
+    lines.push(format!(
+        "| Integration | {} | {} |",
+        bool_label(result.system_report.integration.all_required_passed),
+        gate_report_summary(&result.system_report.integration)
+    ));
+    lines.push(format!(
+        "| Security | {} | {} |",
+        bool_label(result.system_report.security.all_required_passed),
+        gate_report_summary(&result.system_report.security)
+    ));
+    lines.push(format!(
+        "| Release | {} | {} |",
+        bool_label(result.system_report.release.all_required_passed),
+        gate_report_summary(&result.system_report.release)
+    ));
+    lines.push(format!(
+        "| Review | {} | {} |",
+        bool_label(result.system_report.review_passed),
+        if result.system_report.review_findings.is_empty() {
+            "No findings".to_string()
+        } else {
+            format!("{} findings", result.system_report.review_findings.len())
+        }
+    ));
+    lines.push(format!(
+        "| Artifacts | {} | {} |",
+        bool_label(result.system_report.artifacts_complete),
+        if result.system_report.missing_artifacts.is_empty() {
+            "Complete".to_string()
+        } else {
+            format!(
+                "Missing {}",
+                result.system_report.missing_artifacts.join(", ")
+            )
+        }
+    ));
+
+    if !result.system_report.review_findings.is_empty() {
+        lines.push(String::new());
+        lines.push("### Review Findings".to_string());
+        for finding in &result.system_report.review_findings {
+            lines.push(format!("- {}", finding));
+        }
+    }
+    if !result.system_report.missing_artifacts.is_empty() {
+        lines.push(String::new());
+        lines.push("### Missing Artifacts".to_string());
+        for artifact in &result.system_report.missing_artifacts {
+            lines.push(format!("- `{artifact}`"));
+        }
+    }
+
+    lines.push(String::new());
+    lines.push("## Tasks".to_string());
+    lines.push("| Task | Status | Retries | Tools | Violations | Notes |".to_string());
+    lines.push("| --- | --- | ---: | ---: | ---: | --- |".to_string());
+    for (idx, task) in result.execution_plan_spec.tasks.iter().enumerate() {
+        let task_result = result
+            .task_results
+            .iter()
+            .find(|item| item.task_id == task.id());
+        let kind = match task.kind {
+            crate::internal::ai::orchestrator::types::TaskKind::Implementation => "I",
+            crate::internal::ai::orchestrator::types::TaskKind::Analysis => "A",
+            crate::internal::ai::orchestrator::types::TaskKind::Gate => "G",
+        };
+        let label = format!("{kind}{:02} {}", idx + 1, task.title());
+        let (status, retries, tools, violations, notes) = if let Some(task_result) = task_result {
+            let notes = if let Some(review) = task_result.review.as_ref() {
+                let mut note = format!(
+                    "Review: {} | approved: {}",
+                    review.summary,
+                    if review.approved { "yes" } else { "no" }
+                );
+                if !review.issues.is_empty() {
+                    note.push_str(&format!(" | Issues: {}", review.issues.join("; ")));
+                }
+                note
+            } else if task_result.status
+                == crate::internal::ai::orchestrator::types::TaskNodeStatus::Failed
+            {
+                if let Some(reason) = task_result
+                    .agent_output
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|reason| !reason.is_empty())
+                {
+                    format!("Reason: {reason}")
+                } else if let Some(reason) =
+                    summarize_failed_gate_report(task_result.gate_report.as_ref())
+                {
+                    format!("Reason: {reason}")
+                } else {
+                    "-".to_string()
+                }
+            } else {
+                "-".to_string()
+            };
+            (
+                orchestrator_status_label(&task_result.status),
+                task_result.retry_count.to_string(),
+                task_result.tool_calls.len().to_string(),
+                task_result.policy_violations.len().to_string(),
+                notes,
+            )
+        } else {
+            (
+                "pending",
+                "0".to_string(),
+                "0".to_string(),
+                "0".to_string(),
+                "-".to_string(),
+            )
+        };
+        lines.push(format!(
+            "| {} | {} | {} | {} | {} | {} |",
+            escape_markdown_cell(&label),
+            status,
+            retries,
+            tools,
+            violations,
+            escape_markdown_cell(&notes)
+        ));
+    }
+
+    if let Some(persistence) = &result.persistence {
+        lines.push(String::new());
+        lines.push("## Persistence".to_string());
+        lines.push("| Object | Value |".to_string());
+        lines.push("| --- | --- |".to_string());
+        lines.push(format!(
+            "| Provenance | `{}` |",
+            persistence
+                .provenance_id
+                .as_deref()
+                .map(short_markdown_id)
+                .unwrap_or_else(|| "none".to_string())
+        ));
+        lines.push(format!(
+            "| Decision object | `{}` |",
+            persistence
+                .decision_id
+                .as_deref()
+                .map(short_markdown_id)
+                .unwrap_or_else(|| "none".to_string())
+        ));
+        lines.push(format!(
+            "| Initial snapshot | `{}` |",
+            persistence
+                .initial_snapshot_id
+                .as_deref()
+                .map(short_markdown_id)
+                .unwrap_or_else(|| "none".to_string())
+        ));
+        if !persistence.checkpoints.is_empty() {
+            lines.push(String::new());
+            lines.push("### Checkpoints".to_string());
+            lines.push("| Rev | Snapshot | Decision | Reason |".to_string());
+            lines.push("| --- | --- | --- | --- |".to_string());
+            for checkpoint in &persistence.checkpoints {
+                lines.push(format!(
+                    "| {} | `{}` | `{}` | {} |",
+                    checkpoint.revision,
+                    checkpoint
+                        .snapshot_id
+                        .as_deref()
+                        .map(short_markdown_id)
+                        .unwrap_or_else(|| "none".to_string()),
+                    checkpoint
+                        .decision_id
+                        .as_deref()
+                        .map(short_markdown_id)
+                        .unwrap_or_else(|| "none".to_string()),
+                    escape_markdown_cell(&checkpoint.reason)
+                ));
+            }
+        }
+    }
+
+    lines.join("\n")
+}
+
+fn orchestrator_decision_label(
+    decision: &crate::internal::ai::orchestrator::types::DecisionOutcome,
+) -> &'static str {
+    match decision {
+        crate::internal::ai::orchestrator::types::DecisionOutcome::Commit => "Commit",
+        crate::internal::ai::orchestrator::types::DecisionOutcome::HumanReviewRequired => {
+            "Human Review Required"
+        }
+        crate::internal::ai::orchestrator::types::DecisionOutcome::Abandon => "Abandon",
+    }
+}
+
+fn orchestrator_status_label(
+    status: &crate::internal::ai::orchestrator::types::TaskNodeStatus,
+) -> &'static str {
+    match status {
+        crate::internal::ai::orchestrator::types::TaskNodeStatus::Pending => "pending",
+        crate::internal::ai::orchestrator::types::TaskNodeStatus::Running => "running",
+        crate::internal::ai::orchestrator::types::TaskNodeStatus::Completed => "done",
+        crate::internal::ai::orchestrator::types::TaskNodeStatus::Failed => "failed",
+        crate::internal::ai::orchestrator::types::TaskNodeStatus::Skipped => "skipped",
+    }
+}
+
+fn gate_report_summary(report: &crate::internal::ai::orchestrator::types::GateReport) -> String {
+    if report.results.is_empty() {
+        return "No checks".to_string();
+    }
+    let passed = report.results.iter().filter(|item| item.passed).count();
+    format!("{passed}/{} checks passed", report.results.len())
+}
+
+fn bool_label(value: bool) -> &'static str {
+    if value { "Pass" } else { "Fail" }
+}
+
+fn short_markdown_id(id: &str) -> String {
+    if id.len() <= 12 {
+        id.to_string()
+    } else {
+        format!("{}…", &id[..12])
+    }
+}
+
+fn escape_markdown_cell(text: &str) -> String {
+    text.replace('|', "\\|").replace('\n', " ")
+}
+
+#[cfg(test)]
+mod tests {
+    use git_internal::internal::object::{task::Task as GitTask, types::ActorRef};
+    use serde_json::json;
+
+    use super::{
+        append_to_last_tool_group_cell, format_orchestrator_result, should_hide_tool_failure,
+    };
+    use crate::internal::{
+        ai::{
+            orchestrator::types::{
+                DecisionOutcome, ExecutionPlanSpec, GateReport, OrchestratorResult, SystemReport,
+                TaskContract, TaskKind, TaskNodeStatus, TaskResult, TaskSpec,
+            },
+            tools::ToolOutput,
+        },
+        tui::history_cell::{AssistantHistoryCell, HistoryCell, ToolCallHistoryCell},
+    };
+
+    fn make_task(title: &str, kind: TaskKind) -> TaskSpec {
+        let actor = ActorRef::agent("format-orchestrator-result").unwrap();
+        let task = GitTask::new(actor, title, None).unwrap();
+        TaskSpec {
+            step: git_internal::internal::object::plan::PlanStep::new(title),
+            task,
+            objective: title.to_string(),
+            kind,
+            gate_stage: None,
+            owner_role: None,
+            scope_in: vec![],
+            scope_out: vec![],
+            checks: vec![],
+            contract: TaskContract::default(),
+        }
+    }
+
+    fn orchestrator_fixture() -> OrchestratorResult {
+        let first = make_task("Inspect sources", TaskKind::Implementation);
+        let second = make_task("Run checks", TaskKind::Gate);
+        let plan = ExecutionPlanSpec {
+            intent_spec_id: "intent-1".into(),
+            revision: 4,
+            parent_revision: Some(3),
+            replan_reason: Some("task kept failing after retries".into()),
+            tasks: vec![first.clone(), second.clone()],
+            max_parallel: 1,
+            checkpoints: vec![],
+        };
+        OrchestratorResult {
+            decision: DecisionOutcome::Abandon,
+            execution_plan_spec: plan.clone(),
+            plan_revision_specs: vec![plan],
+            run_state: Default::default(),
+            task_results: vec![TaskResult {
+                task_id: first.id(),
+                status: TaskNodeStatus::Failed,
+                gate_report: None,
+                agent_output: None,
+                retry_count: 4,
+                tool_calls: vec![],
+                policy_violations: vec![],
+                review: None,
+            }],
+            system_report: SystemReport {
+                integration: GateReport::empty(),
+                security: GateReport::empty(),
+                release: GateReport::empty(),
+                review_passed: false,
+                review_findings: vec!["missing regression test".into()],
+                artifacts_complete: false,
+                missing_artifacts: vec!["patchset@per-task".into()],
+                overall_passed: false,
+            },
+            intent_spec_id: "019ce515-077c-7c12-8e90-755533e512e3".into(),
+            lifecycle_change_log: vec![],
+            replan_count: 3,
+            persistence: None,
+        }
+    }
+
+    #[test]
+    fn appends_to_last_matching_tool_group_before_streaming_cell() {
+        let mut cells: Vec<Box<dyn HistoryCell>> = vec![
+            Box::new(ToolCallHistoryCell::new(
+                "1".to_string(),
+                "read_file".to_string(),
+                json!({"file_path":"src/main.rs"}),
+            )),
+            Box::new(AssistantHistoryCell::streaming()),
+        ];
+
+        assert!(append_to_last_tool_group_cell(
+            &mut cells,
+            "2".to_string(),
+            "list_dir",
+            json!({"dir_path":"src"}),
+        ));
+
+        let tool_cell = cells[0]
+            .as_any()
+            .downcast_ref::<ToolCallHistoryCell>()
+            .expect("expected grouped tool cell");
+        assert!(tool_cell.contains_call_id("1"));
+        assert!(tool_cell.contains_call_id("2"));
+    }
+
+    #[test]
+    fn does_not_append_across_non_tool_cells() {
+        let mut cells: Vec<Box<dyn HistoryCell>> = vec![
+            Box::new(ToolCallHistoryCell::new(
+                "1".to_string(),
+                "read_file".to_string(),
+                json!({"file_path":"src/main.rs"}),
+            )),
+            Box::new(AssistantHistoryCell::new("note".to_string())),
+            Box::new(AssistantHistoryCell::streaming()),
+        ];
+
+        assert!(!append_to_last_tool_group_cell(
+            &mut cells,
+            "2".to_string(),
+            "list_dir",
+            json!({"dir_path":"src"}),
+        ));
+    }
+
+    #[test]
+    fn orchestrator_result_markdown_uses_tables_and_sections() {
+        let rendered = format_orchestrator_result(&orchestrator_fixture());
+
+        assert!(rendered.contains("# Execution Result: Abandon"));
+        assert!(rendered.contains("## Overview"));
+        assert!(rendered.contains("| Field | Value |"));
+        assert!(rendered.contains("## Verification"));
+        assert!(rendered.contains("| Task | Status | Retries | Tools | Violations | Notes |"));
+        assert!(rendered.contains("### Missing Artifacts"));
+    }
+
+    #[test]
+    fn hides_failed_explore_and_edit_calls() {
+        assert!(should_hide_tool_failure(
+            "read_file",
+            &Err("file not found".to_string())
+        ));
+        assert!(should_hide_tool_failure(
+            "apply_patch",
+            &Err("context mismatch".to_string())
+        ));
+    }
+
+    #[test]
+    fn keeps_failed_shell_calls_visible() {
+        assert!(!should_hide_tool_failure(
+            "shell",
+            &Err("command exited with status 1".to_string())
+        ));
+        assert!(!should_hide_tool_failure(
+            "read_file",
+            &Ok(ToolOutput::success("ok"))
+        ));
+    }
+}
+
+fn summarize_retry_error(error: &str) -> String {
+    let lowered = error.to_ascii_lowercase();
+    if lowered.contains("timeout") {
+        "timeout".to_string()
+    } else if lowered.contains("429") || lowered.contains("rate limit") {
+        "rate limited".to_string()
+    } else if lowered.contains("503") || lowered.contains("overloaded") {
+        "upstream overloaded".to_string()
+    } else if lowered.contains("connection") || lowered.contains("sending request") {
+        "network issue".to_string()
+    } else {
+        "transient error".to_string()
+    }
+}
+
+fn max_selectable_option(base: usize, is_other: bool) -> usize {
+    if is_other {
+        base
+    } else {
+        base.saturating_sub(1)
+    }
+}
+
+async fn write_mcp_decision(
+    mcp_server: Arc<LibraMcpServer>,
+    run_id: String,
+    decision_type: String,
+    rationale: String,
+) {
+    let decision_params = CreateDecisionParams {
+        run_id,
+        decision_type,
+        chosen_patchset_id: None,
+        result_commit_sha: None,
+        rationale: Some(rationale),
+        checkpoint_id: None,
+        tags: None,
+        external_ids: None,
+        actor_kind: Some("system".to_string()),
+        actor_id: Some("libra-code".to_string()),
+    };
+    let actor = match mcp_server.resolve_actor_from_params(
+        decision_params.actor_kind.as_deref(),
+        decision_params.actor_id.as_deref(),
+    ) {
+        Ok(actor) => actor,
+        Err(e) => {
+            cli_error!(e, "error: failed to resolve actor for decision");
+            return;
+        }
+    };
+
+    match mcp_server
+        .create_decision_impl(decision_params, actor)
+        .await
+    {
+        Ok(result) => {
+            if result.is_error.unwrap_or(false) {
+                render_mcp_error("failed to create decision", result.content);
+            }
+        }
+        Err(e) => {
+            cli_error!(e, "error: failed to create decision");
+        }
+    }
+}
+
+fn summarize_tool_output(output: &ToolOutput) -> String {
+    let raw = match output {
+        ToolOutput::Function { content, .. } => content.as_str().trim().to_string(),
+        ToolOutput::Mcp { result } => serde_json::to_string(result).unwrap_or_default(),
+    };
+    const MAX_LEN: usize = 240;
+    if raw.chars().count() <= MAX_LEN {
+        raw
+    } else {
+        let mut truncated: String = raw.chars().take(MAX_LEN).collect();
+        truncated.push_str("...");
+        truncated
+    }
+}
+
+async fn persist_execution_plan(
+    plan: &ExecutionPlanSpec,
+    intent_id: &str,
+    mcp_server: &Arc<LibraMcpServer>,
+) -> Result<String, String> {
+    let git_plan = build_git_plan(
+        parse_object_id(intent_id).map_err(|e| format!("invalid intent id: {e}"))?,
+        plan,
+    )
+    .map_err(|e| format!("failed to build git plan: {e}"))?;
+    let steps = git_plan
+        .steps()
+        .iter()
+        .map(|step| crate::internal::ai::mcp::resource::PlanStepParams {
+            description: step.description().to_string(),
+            inputs: step.inputs().cloned(),
+            checks: step.checks().cloned(),
+        })
+        .collect::<Vec<_>>();
+
+    let params = CreatePlanParams {
+        intent_id: intent_id.to_string(),
+        parent_plan_ids: None,
+        context_frame_ids: None,
+        steps: Some(steps),
+        tags: None,
+        external_ids: None,
+        actor_kind: Some("system".to_string()),
+        actor_id: Some("libra-plan".to_string()),
+    };
+
+    let actor = mcp_server
+        .resolve_actor_from_params(params.actor_kind.as_deref(), params.actor_id.as_deref())
+        .map_err(|e| format!("failed to resolve plan actor: {e:?}"))?;
+    let result = mcp_server
+        .create_plan_impl(params, actor)
+        .await
+        .map_err(|e| format!("MCP create_plan failed: {e:?}"))?;
+
+    if result.is_error.unwrap_or(false) {
+        return Err(
+            summarize_mcp_content(&result.content).unwrap_or_else(|| "unknown MCP error".into())
+        );
+    }
+
+    parse_created_id(&result).ok_or_else(|| "failed to parse plan id from MCP result".to_string())
 }
 
 fn build_plan_prompt(request: &str) -> String {
@@ -2268,6 +3199,323 @@ fn current_head_sha(working_dir: &std::path::Path) -> String {
     }
 }
 
+fn current_git_branch_label(working_dir: &std::path::Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .current_dir(working_dir)
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !branch.is_empty() {
+            return Some(branch);
+        }
+    }
+
+    let detached = std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .current_dir(working_dir)
+        .output()
+        .ok()?;
+
+    if !detached.status.success() {
+        return None;
+    }
+
+    let sha = String::from_utf8_lossy(&detached.stdout).trim().to_string();
+    if sha.is_empty() {
+        None
+    } else {
+        Some(format!("detached@{sha}"))
+    }
+}
+
+async fn current_head_sha_async(working_dir: std::path::PathBuf) -> String {
+    tokio::task::spawn_blocking(move || current_head_sha(&working_dir))
+        .await
+        .unwrap_or_else(|_| "HEAD".to_string())
+}
+
+#[derive(Debug, Clone, Default)]
+struct McpTurnTrackingResult {
+    run_id: Option<String>,
+}
+
+async fn resolve_mcp_turn_tracking(
+    mcp_server: Arc<LibraMcpServer>,
+    plan_id: Option<String>,
+    working_dir: std::path::PathBuf,
+    text: String,
+) -> McpTurnTrackingResult {
+    let snapshot_params = CreateContextSnapshotParams {
+        selection_strategy: "heuristic".to_string(),
+        items: None,
+        summary: Some(format!("Context for: {text}")),
+        tags: None,
+        external_ids: None,
+        actor_kind: Some("system".to_string()),
+        actor_id: Some("libra-code".to_string()),
+    };
+    let snapshot_actor = match mcp_server.resolve_actor_from_params(
+        snapshot_params.actor_kind.as_deref(),
+        snapshot_params.actor_id.as_deref(),
+    ) {
+        Ok(actor) => actor,
+        Err(e) => {
+            cli_error!(e, "error: failed to resolve actor for snapshot");
+            return McpTurnTrackingResult::default();
+        }
+    };
+    let context_snapshot_id = match mcp_server
+        .create_context_snapshot_impl(snapshot_params, snapshot_actor)
+        .await
+    {
+        Ok(result) => {
+            if result.is_error.unwrap_or(false) {
+                render_mcp_error("failed to create context snapshot", result.content);
+                None
+            } else {
+                parse_created_id(&result)
+            }
+        }
+        Err(e) => {
+            cli_error!(e, "error: failed to create context snapshot");
+            None
+        }
+    };
+
+    let task_params = CreateTaskParams {
+        title: summarize_turn_task_title(&text),
+        description: Some("Interactive TUI user request".to_string()),
+        goal_type: None,
+        constraints: None,
+        acceptance_criteria: None,
+        requested_by_kind: Some("human".to_string()),
+        requested_by_id: Some("user".to_string()),
+        dependencies: None,
+        intent_id: None,
+        parent_task_id: None,
+        origin_step_id: None,
+        status: Some("created".to_string()),
+        reason: Some("start user turn".to_string()),
+        tags: None,
+        external_ids: None,
+        actor_kind: Some("human".to_string()),
+        actor_id: Some("user".to_string()),
+    };
+    let task_actor = match mcp_server.resolve_actor_from_params(
+        task_params.actor_kind.as_deref(),
+        task_params.actor_id.as_deref(),
+    ) {
+        Ok(actor) => actor,
+        Err(e) => {
+            cli_error!(e, "error: failed to resolve actor for task");
+            return McpTurnTrackingResult::default();
+        }
+    };
+
+    let task_id = match mcp_server.create_task_impl(task_params, task_actor).await {
+        Ok(result) => {
+            if result.is_error.unwrap_or(false) {
+                render_mcp_error("failed to create task", result.content);
+                None
+            } else {
+                parse_created_id(&result)
+            }
+        }
+        Err(e) => {
+            cli_error!(e, "error: failed to create task");
+            None
+        }
+    };
+    let Some(task_id) = task_id else {
+        return McpTurnTrackingResult::default();
+    };
+
+    let run_params = CreateRunParams {
+        task_id: task_id.clone(),
+        base_commit_sha: current_head_sha_async(working_dir).await,
+        plan_id,
+        status: Some("created".to_string()),
+        context_snapshot_id: context_snapshot_id.clone(),
+        error: None,
+        agent_instances: None,
+        metrics_json: None,
+        reason: Some("start user turn".to_string()),
+        orchestrator_version: None,
+        tags: None,
+        external_ids: None,
+        actor_kind: Some("human".to_string()),
+        actor_id: Some("user".to_string()),
+    };
+    let run_actor = match mcp_server.resolve_actor_from_params(
+        run_params.actor_kind.as_deref(),
+        run_params.actor_id.as_deref(),
+    ) {
+        Ok(actor) => actor,
+        Err(e) => {
+            cli_error!(e, "error: failed to resolve actor for run");
+            return McpTurnTrackingResult::default();
+        }
+    };
+
+    let run_id = match mcp_server.create_run_impl(run_params, run_actor).await {
+        Ok(result) => {
+            if result.is_error.unwrap_or(false) {
+                render_mcp_error("failed to create run", result.content);
+                None
+            } else {
+                parse_created_id(&result)
+            }
+        }
+        Err(e) => {
+            cli_error!(e, "error: failed to create run");
+            None
+        }
+    };
+
+    McpTurnTrackingResult { run_id }
+}
+
+fn parse_created_id(result: &rmcp::model::CallToolResult) -> Option<String> {
+    for content in &result.content {
+        if let Some(text) = content.as_text().map(|t| t.text.as_str())
+            && let Some(id) = text.split("ID:").nth(1)
+        {
+            let id = id.trim();
+            if !id.is_empty() {
+                return Some(id.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn summarize_turn_task_title(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return "TUI user request".to_string();
+    }
+
+    let mut title: String = trimmed.chars().take(72).collect();
+    if trimmed.chars().count() > 72 {
+        title.push_str("...");
+    }
+    format!("TUI: {title}")
+}
+
+fn format_task_completion_note(
+    title: &str,
+    result: &crate::internal::ai::orchestrator::types::TaskResult,
+) -> String {
+    let mut note = format!("{} · {}", task_status_heading(&result.status), title.trim());
+
+    let mut metrics = Vec::new();
+    if !result.tool_calls.is_empty() {
+        metrics.push(format!("{} tools", result.tool_calls.len()));
+    }
+    if result.retry_count > 0 {
+        metrics.push(format!("{} retries", result.retry_count));
+    }
+    if !result.policy_violations.is_empty() {
+        let count = result.policy_violations.len();
+        metrics.push(format!(
+            "{} policy violation{}",
+            count,
+            if count == 1 { "" } else { "s" }
+        ));
+    }
+    if !metrics.is_empty() {
+        note.push_str(&format!("  \n{}", metrics.join(" · ")));
+    }
+
+    if let Some(review) = result.review.as_ref() {
+        note.push_str(&format!(
+            "  \nreview · {} · approved {}",
+            review.summary,
+            if review.approved { "yes" } else { "no" }
+        ));
+        if !review.issues.is_empty() {
+            note.push_str(&format!("  \nissues · {}", review.issues.join("; ")));
+        }
+    } else if matches!(
+        result.status,
+        crate::internal::ai::orchestrator::types::TaskNodeStatus::Failed
+    ) && let Some(reason) = result
+        .agent_output
+        .as_deref()
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+    {
+        note.push_str(&format!("  \nreason · {}", reason));
+    } else if matches!(
+        result.status,
+        crate::internal::ai::orchestrator::types::TaskNodeStatus::Failed
+    ) && let Some(reason) = summarize_failed_gate_report(result.gate_report.as_ref())
+    {
+        note.push_str(&format!("  \nreason · {}", reason));
+    }
+
+    note
+}
+
+fn task_status_heading(
+    status: &crate::internal::ai::orchestrator::types::TaskNodeStatus,
+) -> &'static str {
+    match status {
+        crate::internal::ai::orchestrator::types::TaskNodeStatus::Pending => "Pending",
+        crate::internal::ai::orchestrator::types::TaskNodeStatus::Running => "Running",
+        crate::internal::ai::orchestrator::types::TaskNodeStatus::Completed => "Completed",
+        crate::internal::ai::orchestrator::types::TaskNodeStatus::Failed => "Failed",
+        crate::internal::ai::orchestrator::types::TaskNodeStatus::Skipped => "Skipped",
+    }
+}
+
+fn summarize_failed_gate_report(
+    gate_report: Option<&crate::internal::ai::orchestrator::types::GateReport>,
+) -> Option<String> {
+    let report = gate_report?;
+    let failed_checks: Vec<_> = report
+        .results
+        .iter()
+        .filter(|result| !result.passed)
+        .collect();
+    if failed_checks.is_empty() {
+        return None;
+    }
+
+    let summary = failed_checks
+        .iter()
+        .take(2)
+        .map(|result| {
+            let outcome = if result.timed_out {
+                "timed out".to_string()
+            } else {
+                format!("exit {}", result.exit_code)
+            };
+            let detail = result
+                .stderr
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .or_else(|| result.stdout.lines().find(|line| !line.trim().is_empty()))
+                .map(str::trim)
+                .filter(|detail| !detail.is_empty())
+                .map(|detail| format!(": {detail}"))
+                .unwrap_or_default();
+            format!("{} ({outcome}{detail})", result.check_id)
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    let remainder = failed_checks.len().saturating_sub(2);
+    if remainder > 0 {
+        Some(format!("{summary}; +{remainder} more failed checks"))
+    } else {
+        Some(summary)
+    }
+}
+
 async fn list_intent_object_ids(mcp: &Arc<LibraMcpServer>) -> Vec<String> {
     let mut ids = Vec::new();
     let resources = match mcp.read_resource_impl("libra://objects/intent").await {
@@ -2319,5 +3567,241 @@ fn extract_content_field(value: &serde_json::Value) -> Option<String> {
         }
         serde_json::Value::Array(items) => items.iter().find_map(extract_content_field),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod orchestrator_result_tests {
+    use git_internal::internal::object::{plan::PlanStep, task::Task as GitTask, types::ActorRef};
+    use uuid::Uuid;
+
+    use super::{format_orchestrator_result, format_task_completion_note};
+    use crate::internal::ai::orchestrator::{
+        run_state::RunStateSnapshot,
+        types::{
+            DecisionOutcome, ExecutionPlanSpec, GateReport, GateResult, OrchestratorResult,
+            ReviewOutcome, SystemReport, TaskContract, TaskKind, TaskNodeStatus, TaskResult,
+            TaskSpec,
+        },
+    };
+
+    fn test_task_spec(title: &str, kind: TaskKind) -> TaskSpec {
+        let actor = ActorRef::agent("test-tui").unwrap();
+        let task = GitTask::new(actor, title, None).unwrap();
+        TaskSpec {
+            step: PlanStep::new(title),
+            task,
+            objective: title.into(),
+            kind,
+            gate_stage: None,
+            owner_role: Some("coder".into()),
+            scope_in: vec![],
+            scope_out: vec![],
+            checks: vec![],
+            contract: TaskContract::default(),
+        }
+    }
+
+    #[test]
+    fn failed_task_note_includes_review_summary() {
+        let note = format_task_completion_note(
+            "Analyze requested scope",
+            &TaskResult {
+                task_id: Uuid::new_v4(),
+                status: TaskNodeStatus::Failed,
+                gate_report: None,
+                agent_output: Some("partial analysis".into()),
+                retry_count: 4,
+                tool_calls: vec![],
+                policy_violations: vec![],
+                review: Some(ReviewOutcome {
+                    approved: false,
+                    summary: "response is incomplete".into(),
+                    issues: vec!["missing final diagnosis".into()],
+                }),
+            },
+        );
+
+        assert!(note.contains("review · response is incomplete · approved no"));
+        assert!(note.contains("issues · missing final diagnosis"));
+    }
+
+    #[test]
+    fn failed_task_note_falls_back_to_failure_reason_when_review_is_missing() {
+        let note = format_task_completion_note(
+            "Analyze requested scope",
+            &TaskResult {
+                task_id: Uuid::new_v4(),
+                status: TaskNodeStatus::Failed,
+                gate_report: None,
+                agent_output: Some("reviewer pass failed: invalid reviewer JSON".into()),
+                retry_count: 4,
+                tool_calls: vec![],
+                policy_violations: vec![],
+                review: None,
+            },
+        );
+
+        assert!(note.contains("reason · reviewer pass failed: invalid reviewer JSON"));
+    }
+
+    #[test]
+    fn failed_gate_note_includes_gate_failure_reason() {
+        let note = format_task_completion_note(
+            "Integration gate",
+            &TaskResult {
+                task_id: Uuid::new_v4(),
+                status: TaskNodeStatus::Failed,
+                gate_report: Some(GateReport {
+                    results: vec![GateResult {
+                        check_id: "cargo-test".into(),
+                        kind: "command".into(),
+                        passed: false,
+                        exit_code: 101,
+                        stdout: String::new(),
+                        stderr: "tests failed".into(),
+                        duration_ms: 1234,
+                        timed_out: false,
+                    }],
+                    all_required_passed: false,
+                }),
+                agent_output: None,
+                retry_count: 0,
+                tool_calls: vec![],
+                policy_violations: vec![],
+                review: None,
+            },
+        );
+
+        assert!(note.contains("reason · cargo-test (exit 101: tests failed)"));
+    }
+
+    #[test]
+    fn orchestrator_result_includes_task_review_and_failure_reason() {
+        let reviewed_task = test_task_spec("Summarize findings", TaskKind::Analysis);
+        let failed_task = test_task_spec("Count Rust modules", TaskKind::Analysis);
+        let result = OrchestratorResult {
+            decision: DecisionOutcome::Abandon,
+            execution_plan_spec: ExecutionPlanSpec {
+                intent_spec_id: "intent-1".into(),
+                revision: 1,
+                parent_revision: None,
+                replan_reason: None,
+                tasks: vec![reviewed_task.clone(), failed_task.clone()],
+                max_parallel: 2,
+                checkpoints: vec![],
+            },
+            plan_revision_specs: vec![],
+            run_state: RunStateSnapshot::default(),
+            task_results: vec![
+                TaskResult {
+                    task_id: reviewed_task.id(),
+                    status: TaskNodeStatus::Completed,
+                    gate_report: None,
+                    agent_output: Some("done".into()),
+                    retry_count: 0,
+                    tool_calls: vec![],
+                    policy_violations: vec![],
+                    review: Some(ReviewOutcome {
+                        approved: true,
+                        summary: "analysis is complete".into(),
+                        issues: vec![],
+                    }),
+                },
+                TaskResult {
+                    task_id: failed_task.id(),
+                    status: TaskNodeStatus::Failed,
+                    gate_report: None,
+                    agent_output: Some(
+                        "Agent reached final response without covering all objectives".into(),
+                    ),
+                    retry_count: 4,
+                    tool_calls: vec![],
+                    policy_violations: vec![],
+                    review: None,
+                },
+            ],
+            system_report: SystemReport {
+                integration: GateReport::empty(),
+                security: GateReport::empty(),
+                release: GateReport::empty(),
+                review_passed: true,
+                review_findings: vec![],
+                artifacts_complete: true,
+                missing_artifacts: vec![],
+                overall_passed: true,
+            },
+            intent_spec_id: "intent-1".into(),
+            lifecycle_change_log: vec![],
+            replan_count: 0,
+            persistence: None,
+        };
+
+        let rendered = format_orchestrator_result(&result);
+
+        assert!(rendered.contains("Review: analysis is complete \\| approved: yes"));
+        assert!(
+            rendered
+                .contains("Reason: Agent reached final response without covering all objectives")
+        );
+    }
+
+    #[test]
+    fn orchestrator_result_includes_gate_failure_reason() {
+        let gate_task = test_task_spec("Integration gate", TaskKind::Gate);
+        let result = OrchestratorResult {
+            decision: DecisionOutcome::Abandon,
+            execution_plan_spec: ExecutionPlanSpec {
+                intent_spec_id: "intent-2".into(),
+                revision: 1,
+                parent_revision: None,
+                replan_reason: None,
+                tasks: vec![gate_task.clone()],
+                max_parallel: 1,
+                checkpoints: vec![],
+            },
+            plan_revision_specs: vec![],
+            run_state: RunStateSnapshot::default(),
+            task_results: vec![TaskResult {
+                task_id: gate_task.id(),
+                status: TaskNodeStatus::Failed,
+                gate_report: Some(GateReport {
+                    results: vec![GateResult {
+                        check_id: "clippy".into(),
+                        kind: "command".into(),
+                        passed: false,
+                        exit_code: 101,
+                        stdout: String::new(),
+                        stderr: "lint failed".into(),
+                        duration_ms: 900,
+                        timed_out: false,
+                    }],
+                    all_required_passed: false,
+                }),
+                agent_output: None,
+                retry_count: 0,
+                tool_calls: vec![],
+                policy_violations: vec![],
+                review: None,
+            }],
+            system_report: SystemReport {
+                integration: GateReport::empty(),
+                security: GateReport::empty(),
+                release: GateReport::empty(),
+                review_passed: true,
+                review_findings: vec![],
+                artifacts_complete: true,
+                missing_artifacts: vec![],
+                overall_passed: false,
+            },
+            intent_spec_id: "intent-2".into(),
+            lifecycle_change_log: vec![],
+            replan_count: 0,
+            persistence: None,
+        };
+
+        let rendered = format_orchestrator_result(&result);
+
+        assert!(rendered.contains("Reason: clippy (exit 101: lint failed)"));
     }
 }

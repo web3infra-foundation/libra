@@ -5,7 +5,10 @@
 //! - Web Mode (`--web`): Web server only, suitable for browser access or remote hosting.
 //! - Stdio Mode (`--stdio`): MCP server over standard input/output, designed for integration with AI clients like Claude Desktop.
 
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+};
 
 use axum::{Router, response::IntoResponse, routing::get};
 use clap::{Parser, ValueEnum};
@@ -18,7 +21,7 @@ use crate::internal::{
     ai::{
         client::CompletionClient,
         history::HistoryManager,
-        mcp::{resource::CreateIntentParams, server::LibraMcpServer},
+        mcp::server::LibraMcpServer,
         providers::{
             anthropic::{CLAUDE_3_5_SONNET, Client as AnthropicClient},
             codex::CODEX_01,
@@ -27,6 +30,10 @@ use crate::internal::{
             ollama::Client as OllamaClient,
             openai::{Client as OpenAIClient, GPT_4O_MINI},
             zhipu::{Client as ZhipuClient, GLM_5},
+        },
+        sandbox::{
+            ApprovalStore, AskForApproval, ExecApprovalRequest, SandboxPermissions, SandboxPolicy,
+            ToolApprovalContext, ToolRuntimeContext, ToolSandboxContext,
         },
         tools::{
             ToolRegistry, ToolRegistryBuilder,
@@ -39,6 +46,15 @@ use crate::internal::{
     tui::{App, AppConfig, Tui, tui_init, tui_restore},
 };
 
+const DEFAULT_WEB_PORT: u16 = 3000;
+const DEFAULT_MCP_PORT: u16 = 6789;
+const DEFAULT_BIND_HOST: &str = "127.0.0.1";
+#[expect(
+    dead_code,
+    reason = "Embedded browse page is reserved for the web/TUI code flow"
+)]
+const BROWSE_PAGE_HTML: &str = include_str!("code/index.html");
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum CodeProvider {
     Gemini,
@@ -50,6 +66,42 @@ pub enum CodeProvider {
     Codex,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum CodeContext {
+    #[value(alias = "development")]
+    Dev,
+    #[value(alias = "code-review")]
+    Review,
+    #[value(alias = "explore")]
+    Research,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum CodeApprovalPolicy {
+    /// Never prompt; dangerous commands are rejected.
+    Never,
+    /// Prompt only when retrying after sandbox denial.
+    #[value(alias = "on-failure")]
+    OnFailure,
+    /// Run inside sandbox by default; prompt when escalation or policy requires it.
+    #[value(alias = "on-request")]
+    OnRequest,
+    /// Prompt for non-trusted operations (safe read commands are auto-allowed).
+    #[value(alias = "unless-trusted", alias = "untrusted")]
+    Untrusted,
+}
+
+impl From<CodeApprovalPolicy> for AskForApproval {
+    fn from(value: CodeApprovalPolicy) -> Self {
+        match value {
+            CodeApprovalPolicy::Never => AskForApproval::Never,
+            CodeApprovalPolicy::OnFailure => AskForApproval::OnFailure,
+            CodeApprovalPolicy::OnRequest => AskForApproval::OnRequest,
+            CodeApprovalPolicy::Untrusted => AskForApproval::UnlessTrusted,
+        }
+    }
+}
+
 #[derive(Parser, Debug)]
 pub struct CodeArgs {
     /// Run the web server only (no TUI). Alias: `--web`.
@@ -57,11 +109,11 @@ pub struct CodeArgs {
     pub web_only: bool,
 
     /// Port to listen on (web server)
-    #[arg(short, long, default_value = "17654")]
+    #[arg(short, long, default_value_t = DEFAULT_WEB_PORT)]
     pub port: u16,
 
     /// Host address to bind to (web server)
-    #[arg(long, default_value = "127.0.0.1")]
+    #[arg(long, default_value = DEFAULT_BIND_HOST)]
     pub host: String,
 
     /// AI provider backend
@@ -77,15 +129,23 @@ pub struct CodeArgs {
     pub temperature: Option<f64>,
 
     /// Operating context mode (dev, review, research)
-    #[arg(long)]
-    pub context: Option<String>,
+    #[arg(long, value_enum)]
+    pub context: Option<CodeContext>,
 
     /// Resume the most recent session
     #[arg(long)]
     pub resume: bool,
 
+    /// Tool approval policy:
+    /// - `never`: no prompts, dangerous commands are rejected
+    /// - `on-failure`: prompt only for retry outside sandbox after sandbox denial
+    /// - `on-request`: run sandboxed by default; prompt for escalation/policy-required cases
+    /// - `untrusted`: prompt for non-trusted operations, auto-allow known-safe reads
+    #[arg(long, value_enum, default_value_t = CodeApprovalPolicy::OnRequest)]
+    pub approval_policy: CodeApprovalPolicy,
+
     /// Port to listen on (MCP server)
-    #[arg(long, default_value_t = 6789)]
+    #[arg(long, default_value_t = DEFAULT_MCP_PORT)]
     pub mcp_port: u16,
 
     /// Run the MCP server over Stdio (for Claude Desktop integration)
@@ -98,8 +158,12 @@ pub struct CodeArgs {
 }
 
 pub async fn execute(args: CodeArgs) {
+    if let Err(err) = validate_mode_args(&args) {
+        eprintln!("error: {err}");
+        return;
+    }
     if args.stdio {
-        execute_stdio(args).await
+        execute_stdio().await
     } else if args.web_only {
         execute_web_only(args).await
     } else {
@@ -164,20 +228,42 @@ fn build_web_router() -> Router {
         .fallback(static_handler)
 }
 
-struct WebHandle {
+struct WebServerHandle {
     addr: SocketAddr,
     shutdown_tx: oneshot::Sender<()>,
     join: tokio::task::JoinHandle<anyhow::Result<()>>,
 }
 
-impl WebHandle {
+impl WebServerHandle {
     async fn shutdown(self) {
         let _ = self.shutdown_tx.send(());
         let _ = self.join.await;
     }
 }
 
-async fn start_web_server(host: &str, port: u16) -> anyhow::Result<WebHandle> {
+struct McpServerHandle {
+    addr: SocketAddr,
+    shutdown_tx: oneshot::Sender<()>,
+    join: tokio::task::JoinHandle<anyhow::Result<()>>,
+    connection_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+}
+
+impl McpServerHandle {
+    async fn shutdown(self) {
+        let _ = self.shutdown_tx.send(());
+        let _ = self.join.await;
+        let pending = match self.connection_tasks.lock() {
+            Ok(mut handles) => std::mem::take(&mut *handles),
+            Err(_) => Vec::new(),
+        };
+        for handle in pending {
+            handle.abort();
+            let _ = handle.await;
+        }
+    }
+}
+
+async fn start_web_server(host: &str, port: u16) -> anyhow::Result<WebServerHandle> {
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
@@ -193,74 +279,22 @@ async fn start_web_server(host: &str, port: u16) -> anyhow::Result<WebHandle> {
             .map_err(|e| anyhow::anyhow!(e))
     });
 
-    Ok(WebHandle {
+    Ok(WebServerHandle {
         addr,
         shutdown_tx,
         join,
     })
 }
 
-/// MCP write helper: create initial intent
-async fn create_initial_intent(mcp_server: &Arc<LibraMcpServer>) {
-    let params = CreateIntentParams {
-        content: "Libra Code session started".to_string(),
-        structured_content: None,
-        parent_id: None,
-        parent_ids: None,
-        analysis_context_frame_ids: None,
-        status: Some("active".to_string()),
-        commit_sha: None,
-        reason: None,
-        next_intent_id: None,
-        actor_kind: Some("system".to_string()),
-        actor_id: Some("libra-code".to_string()),
-    };
-
-    // Resolve actor
-    let actor = match mcp_server
-        .resolve_actor_from_params(params.actor_kind.as_deref(), params.actor_id.as_deref())
-    {
-        Ok(actor) => actor,
-        Err(e) => {
-            cli_error!(e, "error: failed to resolve actor");
-            return;
-        }
-    };
-
-    // Call MCP interface to create intent
-    match mcp_server.create_intent_impl(params, actor).await {
-        Ok(result) => {
-            if !result.is_error.unwrap_or(false) {
-                // Initial intent created successfully
-            } else {
-                eprintln!("error: failed to create initial intent");
-            }
-        }
-        Err(e) => {
-            cli_error!(e, "error: failed to create initial intent");
-        }
-    }
-}
-
 async fn execute_web_only(args: CodeArgs) {
-    let addr: SocketAddr = match format!("{}:{}", args.host, args.port).parse() {
-        Ok(addr) => addr,
-        Err(e) => {
-            cli_error!(e, "error: invalid address '{}:{}'", args.host, args.port);
+    let web_handle = match start_web_server(&args.host, args.port).await {
+        Ok(handle) => handle,
+        Err(err) => {
+            cli_error!(err, "fatal: failed to start web server");
             return;
         }
     };
-
-    let listener = match tokio::net::TcpListener::bind(addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            cli_error!(e, "fatal: failed to bind to {}", addr);
-            return;
-        }
-    };
-
-    let app = build_web_router();
-    println!("Libra Code server running at http://{}", addr);
+    println!("Libra Code server running at http://{}", web_handle.addr);
 
     // Prepare MCP server instance shared between the HTTP transport and TUI bridge
     // Use repository working directory to ensure correct initialization of .libra resources.
@@ -269,32 +303,21 @@ async fn execute_web_only(args: CodeArgs) {
     let mcp_server = init_mcp_server(&working_dir).await;
 
     // Start MCP Server
-    let (mcp_handle, mcp_line) =
-        match start_mcp_server(&args.host, args.mcp_port, mcp_server.clone()).await {
-            Ok(handle) => {
-                let line = format!("MCP: http://{}", handle.addr);
-                (Some(handle), line)
-            }
-            Err(err) => (None, format!("MCP: failed to start ({err})")),
-        };
+    let mcp_handle = match start_mcp_server(&args.host, args.mcp_port, mcp_server.clone()).await {
+        Ok(handle) => {
+            println!("MCP: http://{}", handle.addr);
+            handle
+        }
+        Err(err) => {
+            cli_error!(err, "fatal: failed to start MCP server");
+            web_handle.shutdown().await;
+            return;
+        }
+    };
 
-    // Create initial intent via MCP
-    create_initial_intent(&mcp_server).await;
-
-    println!("{}", mcp_line);
-
-    if let Err(e) = axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await
-    {
-        eprintln!("Server error: {}", e);
-    }
-
-    if let Some(handle) = mcp_handle {
-        handle.shutdown().await;
-    }
+    let _ = tokio::signal::ctrl_c().await;
+    web_handle.shutdown().await;
+    mcp_handle.shutdown().await;
 }
 
 async fn execute_tui(args: CodeArgs) {
@@ -325,7 +348,7 @@ async fn execute_tui(args: CodeArgs) {
         }
     }
 
-    let preamble = system_preamble(&working_dir, args.context.as_deref());
+    let preamble = system_preamble(&working_dir, args.context);
     let temperature = args.temperature;
     let resume = args.resume;
 
@@ -336,6 +359,8 @@ async fn execute_tui(args: CodeArgs) {
     let (user_input_tx, user_input_rx) = tokio::sync::mpsc::unbounded_channel::<
         crate::internal::ai::tools::context::UserInputRequest,
     >();
+    let (exec_approval_tx, exec_approval_rx) =
+        tokio::sync::mpsc::unbounded_channel::<ExecApprovalRequest>();
 
     // Build registry: basic file tools + MCP workflow tools
     let mut builder = ToolRegistryBuilder::with_working_dir(working_dir)
@@ -357,8 +382,21 @@ async fn execute_tui(args: CodeArgs) {
 
     let registry = Arc::new(builder.build());
 
-    // Resolve model name before entering the provider match
     let provider_name = format!("{:?}", args.provider).to_lowercase();
+    let launch_config = TuiLaunchConfig {
+        host: args.host,
+        port: args.port,
+        mcp_port: args.mcp_port,
+        registry,
+        preamble,
+        temperature,
+        resume,
+        approval_policy: args.approval_policy.into(),
+        user_input_rx,
+        exec_approval_rx,
+        exec_approval_tx,
+        mcp_server,
+    };
 
     // Create agent based on provider
     match args.provider {
@@ -372,23 +410,7 @@ async fn execute_tui(args: CodeArgs) {
             };
             let model_name = args.model.unwrap_or_else(|| GEMINI_2_5_FLASH.to_string());
             let model = client.completion_model(&model_name);
-            run_tui_with_model(
-                model,
-                TuiParams {
-                    host: args.host,
-                    port: args.port,
-                    mcp_port: args.mcp_port,
-                    registry: registry.clone(),
-                    preamble,
-                    temperature,
-                    resume,
-                    user_input_rx,
-                    mcp_server,
-                    model_name,
-                    provider_name,
-                },
-            )
-            .await;
+            run_tui_with_model(model, launch_config, model_name, provider_name).await;
         }
         CodeProvider::Openai => {
             let client = match OpenAIClient::from_env() {
@@ -400,23 +422,7 @@ async fn execute_tui(args: CodeArgs) {
             };
             let model_name = args.model.unwrap_or_else(|| GPT_4O_MINI.to_string());
             let model = client.completion_model(&model_name);
-            run_tui_with_model(
-                model,
-                TuiParams {
-                    host: args.host,
-                    port: args.port,
-                    mcp_port: args.mcp_port,
-                    registry: registry.clone(),
-                    preamble,
-                    temperature,
-                    resume,
-                    user_input_rx,
-                    mcp_server,
-                    model_name,
-                    provider_name,
-                },
-            )
-            .await;
+            run_tui_with_model(model, launch_config, model_name, provider_name).await;
         }
         CodeProvider::Anthropic => {
             let client = match AnthropicClient::from_env() {
@@ -428,23 +434,7 @@ async fn execute_tui(args: CodeArgs) {
             };
             let model_name = args.model.unwrap_or_else(|| CLAUDE_3_5_SONNET.to_string());
             let model = client.completion_model(&model_name);
-            run_tui_with_model(
-                model,
-                TuiParams {
-                    host: args.host,
-                    port: args.port,
-                    mcp_port: args.mcp_port,
-                    registry: registry.clone(),
-                    preamble,
-                    temperature,
-                    resume,
-                    user_input_rx,
-                    mcp_server,
-                    model_name,
-                    provider_name,
-                },
-            )
-            .await;
+            run_tui_with_model(model, launch_config, model_name, provider_name).await;
         }
         CodeProvider::Deepseek => {
             let client = match DeepSeekClient::from_env() {
@@ -454,25 +444,9 @@ async fn execute_tui(args: CodeArgs) {
                     return;
                 }
             };
-            let model_name = "deepseek-chat".to_string();
+            let model_name = args.model.unwrap_or_else(|| "deepseek-chat".to_string());
             let model = client.completion_model(&model_name);
-            run_tui_with_model(
-                model,
-                TuiParams {
-                    host: args.host,
-                    port: args.port,
-                    mcp_port: args.mcp_port,
-                    registry: registry.clone(),
-                    preamble,
-                    temperature,
-                    resume,
-                    user_input_rx,
-                    mcp_server,
-                    model_name,
-                    provider_name,
-                },
-            )
-            .await;
+            run_tui_with_model(model, launch_config, model_name, provider_name).await;
         }
         CodeProvider::Zhipu => {
             let client = match ZhipuClient::from_env() {
@@ -484,23 +458,7 @@ async fn execute_tui(args: CodeArgs) {
             };
             let model_name = args.model.unwrap_or_else(|| GLM_5.to_string());
             let model = client.completion_model(&model_name);
-            run_tui_with_model(
-                model,
-                TuiParams {
-                    host: args.host,
-                    port: args.port,
-                    mcp_port: args.mcp_port,
-                    registry: registry.clone(),
-                    preamble,
-                    temperature,
-                    resume,
-                    user_input_rx,
-                    mcp_server,
-                    model_name,
-                    provider_name,
-                },
-            )
-            .await;
+            run_tui_with_model(model, launch_config, model_name, provider_name).await;
         }
         CodeProvider::Ollama => {
             let client = if let Some(base_url) = &args.api_base {
@@ -518,23 +476,7 @@ async fn execute_tui(args: CodeArgs) {
                 }
             };
             let model = client.completion_model(&model_name);
-            run_tui_with_model(
-                model,
-                TuiParams {
-                    host: args.host,
-                    port: args.port,
-                    mcp_port: args.mcp_port,
-                    registry: registry.clone(),
-                    preamble,
-                    temperature,
-                    resume,
-                    user_input_rx,
-                    mcp_server,
-                    model_name,
-                    provider_name,
-                },
-            )
-            .await;
+            run_tui_with_model(model, launch_config, model_name, provider_name).await;
         }
         CodeProvider::Codex => {
             let ws_client = match crate::internal::ai::providers::codex::Client::from_env() {
@@ -548,34 +490,18 @@ async fn execute_tui(args: CodeArgs) {
             let mut model = crate::internal::ai::providers::codex::Model::new(
                 ws_client,
                 &model_name,
-                Some(mcp_server.clone()),
+                Some(launch_config.mcp_server.clone()),
             );
             if let Err(e) = model.connect().await {
                 eprintln!("error: Failed to connect to Codex WebSocket: {}", e);
                 return;
             }
-            run_tui_with_model(
-                model,
-                TuiParams {
-                    host: args.host,
-                    port: args.port,
-                    mcp_port: args.mcp_port,
-                    registry: registry.clone(),
-                    preamble,
-                    temperature,
-                    resume,
-                    user_input_rx,
-                    mcp_server,
-                    model_name,
-                    provider_name,
-                },
-            )
-            .await;
+            run_tui_with_model(model, launch_config, model_name, provider_name).await;
         }
     }
 }
 
-struct TuiParams {
+struct TuiLaunchConfig {
     host: String,
     port: u16,
     mcp_port: u16,
@@ -583,15 +509,20 @@ struct TuiParams {
     preamble: String,
     temperature: Option<f64>,
     resume: bool,
+    approval_policy: AskForApproval,
     user_input_rx:
         tokio::sync::mpsc::UnboundedReceiver<crate::internal::ai::tools::context::UserInputRequest>,
+    exec_approval_rx: tokio::sync::mpsc::UnboundedReceiver<ExecApprovalRequest>,
+    exec_approval_tx: tokio::sync::mpsc::UnboundedSender<ExecApprovalRequest>,
     mcp_server: Arc<LibraMcpServer>,
-    model_name: String,
-    provider_name: String,
 }
 
-async fn run_tui_with_model<M>(model: M, params: TuiParams)
-where
+async fn run_tui_with_model<M>(
+    model: M,
+    params: TuiLaunchConfig,
+    model_name: String,
+    provider_name: String,
+) where
     M: crate::internal::ai::completion::CompletionModel + 'static,
 {
     let registry = params.registry;
@@ -607,9 +538,27 @@ where
     let config = crate::internal::ai::agent::ToolLoopConfig {
         preamble: Some(params.preamble),
         temperature: params.temperature,
-        max_steps: None, // TUI mode: unlimited tool steps
         hook_runner,
         allowed_tools: None,
+        runtime_context: Some(ToolRuntimeContext {
+            sandbox: Some(ToolSandboxContext {
+                policy: SandboxPolicy::WorkspaceWrite {
+                    writable_roots: vec![registry.working_dir().to_path_buf()],
+                    network_access: true,
+                    exclude_tmpdir_env_var: false,
+                    exclude_slash_tmp: false,
+                },
+                permissions: SandboxPermissions::UseDefault,
+            }),
+            sandbox_runtime: None,
+            approval: Some(ToolApprovalContext {
+                policy: params.approval_policy,
+                request_tx: params.exec_approval_tx.clone(),
+                store: Arc::new(tokio::sync::Mutex::new(ApprovalStore::default())),
+            }),
+            max_output_bytes: None,
+        }),
+        max_turns: None,
     };
 
     // Initialize terminal
@@ -646,9 +595,6 @@ where
             Err(err) => (None, format!("MCP: failed to start ({err})")),
         };
 
-    // Create initial intent via MCP
-    create_initial_intent(&params.mcp_server).await;
-
     let welcome = format!(
         "Welcome to Libra Code! Type your message and press Enter to chat with the AI assistant.\n{}\n{}",
         web_line, mcp_line
@@ -664,7 +610,9 @@ where
 
     // Set up session persistence
     let working_dir_str = registry.working_dir().to_string_lossy().to_string();
-    let session_store = crate::internal::ai::session::SessionStore::new(registry.working_dir());
+    let storage_root = resolve_storage_root(registry.working_dir());
+    let session_store =
+        crate::internal::ai::session::SessionStore::from_storage_path(&storage_root);
     let session = if params.resume {
         match session_store.load_latest() {
             Ok(Some(s)) => s,
@@ -687,8 +635,9 @@ where
             session,
             session_store,
             user_input_rx: params.user_input_rx,
-            model_name: params.model_name,
-            provider_name: params.provider_name,
+            exec_approval_rx: params.exec_approval_rx,
+            model_name,
+            provider_name,
             mcp_server: Some(params.mcp_server),
         },
     );
@@ -724,7 +673,7 @@ async fn start_mcp_server(
     host: &str,
     port: u16,
     mcp_server: Arc<LibraMcpServer>,
-) -> anyhow::Result<WebHandle> {
+) -> anyhow::Result<McpServerHandle> {
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
@@ -736,6 +685,9 @@ async fn start_mcp_server(
     ));
 
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
+    let connection_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>> =
+        Arc::new(Mutex::new(Vec::new()));
+    let tracked_connections = connection_tasks.clone();
 
     let join = tokio::spawn(async move {
         loop {
@@ -748,7 +700,7 @@ async fn start_mcp_server(
                         Ok((stream, _)) => {
                             let io = TokioIo::new(stream);
                             let service = service.clone();
-                            tokio::spawn(async move {
+                            let conn_task = tokio::spawn(async move {
                                 if let Err(e) = hyper_util::server::conn::auto::Builder::new(TokioExecutor::default())
                                     .serve_connection(io, service)
                                     .await
@@ -756,6 +708,13 @@ async fn start_mcp_server(
                                     cli_error!(e, "warning: MCP connection error");
                                 }
                             });
+                            match tracked_connections.lock() {
+                                Ok(mut tasks) => {
+                                    tasks.retain(|task| !task.is_finished());
+                                    tasks.push(conn_task);
+                                }
+                                Err(_) => conn_task.abort(),
+                            }
                         }
                         Err(e) => {
                             cli_error!(e, "warning: MCP accept error");
@@ -767,31 +726,31 @@ async fn start_mcp_server(
         Ok(())
     });
 
-    Ok(WebHandle {
+    Ok(McpServerHandle {
         addr,
         shutdown_tx,
         join,
+        connection_tasks,
     })
 }
 
-fn system_preamble(working_dir: &std::path::Path, context: Option<&str>) -> String {
+fn system_preamble(working_dir: &std::path::Path, context: Option<CodeContext>) -> String {
     let mut builder = crate::internal::ai::prompt::SystemPromptBuilder::new(working_dir);
-    if let Some(ctx_str) = context {
-        if let Ok(mode) = ctx_str.parse::<crate::internal::ai::prompt::ContextMode>() {
-            builder = builder.with_context(mode);
-        } else {
-            tracing::warn!(context = ctx_str, "unknown context mode, ignoring");
-        }
+    if let Some(ctx) = context {
+        let mode = match ctx {
+            CodeContext::Dev => crate::internal::ai::prompt::ContextMode::Dev,
+            CodeContext::Review => crate::internal::ai::prompt::ContextMode::Review,
+            CodeContext::Research => crate::internal::ai::prompt::ContextMode::Research,
+        };
+        builder = builder.with_context(mode);
     }
     builder.build()
 }
 
 async fn init_mcp_server(working_dir: &std::path::Path) -> Arc<LibraMcpServer> {
-    // Use the resolved .libra storage directory for isolation, supporting
-    // linked worktrees via try_get_storage_path.
-    let storage_dir = crate::utils::util::try_get_storage_path(Some(working_dir.to_path_buf()))
-        .unwrap_or_else(|_| working_dir.join(".libra"));
-    let (objects_dir, dot_libra) = (storage_dir.join("objects"), storage_dir);
+    let storage_dir = resolve_storage_root(working_dir);
+    let objects_dir = storage_dir.join("objects");
+    let dot_libra = storage_dir;
 
     // Try to create the directory. If it fails, we assume read-only or permission issues.
     if let Err(e) = std::fs::create_dir_all(&objects_dir) {
@@ -805,7 +764,13 @@ async fn init_mcp_server(working_dir: &std::path::Path) -> Arc<LibraMcpServer> {
 
     // Connect to DB
     let db_path = dot_libra.join("libra.db");
-    let db_path_str = db_path.to_str().unwrap_or_default();
+    let Some(db_path_str) = db_path.to_str() else {
+        eprintln!(
+            "Warning: Database path is not valid UTF-8: {}. History disabled.",
+            db_path.display()
+        );
+        return Arc::new(LibraMcpServer::new(None, None));
+    };
 
     #[cfg(target_os = "windows")]
     let db_path_string = db_path_str.replace("\\", "/");
@@ -831,7 +796,14 @@ async fn init_mcp_server(working_dir: &std::path::Path) -> Arc<LibraMcpServer> {
     ))
 }
 
-async fn execute_stdio(_args: CodeArgs) {
+fn resolve_storage_root(working_dir: &std::path::Path) -> std::path::PathBuf {
+    // Use the resolved .libra storage directory for isolation, supporting
+    // linked worktrees via try_get_storage_path.
+    crate::utils::util::try_get_storage_path(Some(working_dir.to_path_buf()))
+        .unwrap_or_else(|_| working_dir.join(".libra"))
+}
+
+async fn execute_stdio() {
     // Use repository working directory to ensure correct initialization of .libra resources.
     let working_dir = crate::utils::util::working_dir();
 
@@ -847,13 +819,107 @@ async fn execute_stdio(_args: CodeArgs) {
 
     match serve_server(mcp_server, transport).await {
         Ok(running) => {
-            let result = running.waiting().await;
-            if let Err(e) = result {
+            if let Err(e) = running.waiting().await {
                 eprintln!("MCP Stdio server error: {}", e);
             }
         }
         Err(e) => {
             cli_error!(e, "fatal: failed to start MCP Stdio server");
         }
+    }
+}
+
+fn validate_mode_args(args: &CodeArgs) -> Result<(), String> {
+    if !args.stdio && args.port == args.mcp_port {
+        return Err(format!(
+            "--port ({}) and --mcp-port ({}) must be different",
+            args.port, args.mcp_port
+        ));
+    }
+
+    if args.web_only {
+        reject_non_tui_flags(args, "--web")?;
+    }
+
+    if args.stdio {
+        reject_non_tui_flags(args, "--stdio")?;
+        reject_mode_flag(args.host != DEFAULT_BIND_HOST, "--host", "--stdio")?;
+        reject_mode_flag(args.port != DEFAULT_WEB_PORT, "--port", "--stdio")?;
+        reject_mode_flag(args.mcp_port != DEFAULT_MCP_PORT, "--mcp-port", "--stdio")?;
+    }
+
+    Ok(())
+}
+
+fn reject_mode_flag(is_invalid: bool, flag: &str, mode: &str) -> Result<(), String> {
+    if is_invalid {
+        return Err(format!("{flag} is not supported in {mode} mode"));
+    }
+    Ok(())
+}
+
+fn reject_non_tui_flags(args: &CodeArgs, mode: &str) -> Result<(), String> {
+    reject_mode_flag(args.provider != CodeProvider::Gemini, "--provider", mode)?;
+    reject_mode_flag(args.model.is_some(), "--model", mode)?;
+    reject_mode_flag(args.temperature.is_some(), "--temperature", mode)?;
+    reject_mode_flag(args.context.is_some(), "--context", mode)?;
+    reject_mode_flag(args.resume, "--resume", mode)?;
+    reject_mode_flag(
+        args.approval_policy != CodeApprovalPolicy::OnRequest,
+        "--approval-policy",
+        mode,
+    )?;
+    reject_mode_flag(args.api_base.is_some(), "--api-base", mode)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_args() -> CodeArgs {
+        CodeArgs {
+            web_only: false,
+            port: DEFAULT_WEB_PORT,
+            host: DEFAULT_BIND_HOST.to_string(),
+            provider: CodeProvider::Gemini,
+            model: None,
+            temperature: None,
+            context: None,
+            resume: false,
+            approval_policy: CodeApprovalPolicy::OnRequest,
+            mcp_port: DEFAULT_MCP_PORT,
+            stdio: false,
+            api_base: None,
+        }
+    }
+
+    #[test]
+    fn rejects_same_web_and_mcp_ports() {
+        let mut args = base_args();
+        args.mcp_port = args.port;
+        assert!(validate_mode_args(&args).is_err());
+    }
+
+    #[test]
+    fn rejects_tui_flags_in_web_mode() {
+        let mut args = base_args();
+        args.web_only = true;
+        args.model = Some("foo".to_string());
+        assert!(validate_mode_args(&args).is_err());
+    }
+
+    #[test]
+    fn rejects_web_flags_in_stdio_mode() {
+        let mut args = base_args();
+        args.stdio = true;
+        args.host = "0.0.0.0".to_string();
+        assert!(validate_mode_args(&args).is_err());
+    }
+
+    #[test]
+    fn accepts_default_tui_mode() {
+        let args = base_args();
+        assert!(validate_mode_args(&args).is_ok());
     }
 }

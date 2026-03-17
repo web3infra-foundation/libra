@@ -1,5 +1,7 @@
 //! Handler for the apply_patch tool using Codex-style format.
 
+use std::collections::BTreeSet;
+
 use async_trait::async_trait;
 
 use crate::internal::ai::tools::{
@@ -8,7 +10,7 @@ use crate::internal::ai::tools::{
     error::ToolError,
     registry::ToolHandler,
     spec::ToolSpec,
-    utils::validate_path,
+    utils::{is_within_working_dir, validate_path},
 };
 
 /// Handler for applying patches to files.
@@ -29,8 +31,10 @@ impl ToolHandler for ApplyPatchHandler {
 
     async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, ToolError> {
         let ToolInvocation {
+            call_id,
             payload,
             working_dir,
+            runtime_context,
             ..
         } = invocation;
 
@@ -46,9 +50,50 @@ impl ToolHandler for ApplyPatchHandler {
         let parsed = apply_patch::parse_patch(&patch_text)
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 
+        let mut touched_paths = BTreeSet::new();
         for hunk in &parsed.hunks {
             for path in hunk.all_resolved_paths(&working_dir) {
                 validate_path(&path, &working_dir)?;
+                touched_paths.insert(path);
+            }
+        }
+        let mut constrained_to_workspace = true;
+        for path in &touched_paths {
+            constrained_to_workspace &= is_within_working_dir(path, &working_dir)?;
+        }
+
+        if let Some(approval_ctx) = runtime_context
+            .as_ref()
+            .and_then(|ctx| ctx.approval.as_ref())
+            && patch_needs_approval(approval_ctx.policy, constrained_to_workspace)?
+        {
+            let keys = touched_paths
+                .iter()
+                .map(|path| patch_approval_key(path, &working_dir))
+                .collect::<Vec<_>>();
+            let decision = crate::internal::ai::sandbox::request_cached_approval_with_keys(
+                approval_ctx,
+                &keys,
+                |response_tx| crate::internal::ai::sandbox::ExecApprovalRequest {
+                    call_id: call_id.clone(),
+                    command: format!("apply_patch ({} path(s))", touched_paths.len()),
+                    cwd: working_dir.clone(),
+                    reason: Some(format_patch_approval_reason(&touched_paths, &working_dir)),
+                    is_retry: false,
+                    response_tx,
+                },
+            )
+            .await;
+
+            match decision {
+                crate::internal::ai::sandbox::ReviewDecision::Approved
+                | crate::internal::ai::sandbox::ReviewDecision::ApprovedForSession => {}
+                crate::internal::ai::sandbox::ReviewDecision::Denied => {
+                    return Err(ToolError::ExecutionFailed("rejected by user".to_string()));
+                }
+                crate::internal::ai::sandbox::ReviewDecision::Abort => {
+                    return Err(ToolError::ExecutionFailed("aborted by user".to_string()));
+                }
             }
         }
 
@@ -107,6 +152,71 @@ fn parse_patch_text_from_arguments(arguments: &str) -> Result<String, ToolError>
     Ok(arguments.to_string())
 }
 
+fn patch_needs_approval(
+    policy: crate::internal::ai::sandbox::AskForApproval,
+    constrained_to_workspace: bool,
+) -> Result<bool, ToolError> {
+    match policy {
+        crate::internal::ai::sandbox::AskForApproval::UnlessTrusted => Ok(true),
+        crate::internal::ai::sandbox::AskForApproval::Never => {
+            if constrained_to_workspace {
+                Ok(false)
+            } else {
+                Err(ToolError::ExecutionFailed(
+                    "writing outside of the project; rejected by approval policy".to_string(),
+                ))
+            }
+        }
+        crate::internal::ai::sandbox::AskForApproval::OnFailure
+        | crate::internal::ai::sandbox::AskForApproval::OnRequest => Ok(!constrained_to_workspace),
+    }
+}
+
+fn patch_approval_key(path: &std::path::Path, working_dir: &std::path::Path) -> String {
+    let rendered = path
+        .strip_prefix(working_dir)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .to_string();
+    format!("apply_patch|{rendered}")
+}
+
+fn format_patch_approval_reason(
+    touched_paths: &BTreeSet<std::path::PathBuf>,
+    working_dir: &std::path::Path,
+) -> String {
+    let mut rendered_paths = touched_paths
+        .iter()
+        .map(|path| {
+            path.strip_prefix(working_dir)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    rendered_paths.sort();
+
+    let shown = rendered_paths
+        .iter()
+        .take(8)
+        .map(|path| format!(" - {path}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if rendered_paths.len() > 8 {
+        format!(
+            "apply_patch will modify {} paths:\n{}\n - ...",
+            rendered_paths.len(),
+            shown
+        )
+    } else {
+        format!(
+            "apply_patch will modify {} paths:\n{}",
+            rendered_paths.len(),
+            shown
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, io::Write};
@@ -118,6 +228,35 @@ mod tests {
 
     fn wrap_patch(body: &str) -> String {
         format!("*** Begin Patch\n{body}\n*** End Patch")
+    }
+
+    #[test]
+    fn patch_needs_approval_matches_codex_policy_intent() {
+        assert!(
+            !patch_needs_approval(
+                crate::internal::ai::sandbox::AskForApproval::OnRequest,
+                true
+            )
+            .unwrap()
+        );
+        assert!(
+            !patch_needs_approval(
+                crate::internal::ai::sandbox::AskForApproval::OnFailure,
+                true
+            )
+            .unwrap()
+        );
+        assert!(
+            !patch_needs_approval(crate::internal::ai::sandbox::AskForApproval::Never, true)
+                .unwrap()
+        );
+        assert!(
+            patch_needs_approval(
+                crate::internal::ai::sandbox::AskForApproval::UnlessTrusted,
+                true
+            )
+            .unwrap()
+        );
     }
 
     #[tokio::test]

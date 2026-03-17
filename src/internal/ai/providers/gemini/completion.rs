@@ -175,10 +175,11 @@ impl CompletionModelTrait for CompletionModel {
             .send()
             .await
             .map_err(CompletionError::HttpError)?;
+        let status = resp.status();
 
-        tracing::debug!("Received response status: {}", resp.status());
+        tracing::debug!("Received response status: {}", status);
 
-        if !resp.status().is_success() {
+        if !status.is_success() {
             // Read only the first 1KB of the error body to avoid memory issues with large responses
             // and handle potential non-UTF8 content safely.
             use std::io::Read;
@@ -194,7 +195,8 @@ impl CompletionModelTrait for CompletionModel {
             let text = String::from_utf8_lossy(&buf[..n]);
 
             return Err(CompletionError::ProviderError(format!(
-                "Gemini API Error: {}",
+                "status {}: Gemini API Error: {}",
+                status.as_u16(),
                 text
             )));
         }

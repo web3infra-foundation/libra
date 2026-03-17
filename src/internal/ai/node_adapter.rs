@@ -31,11 +31,38 @@ use crate::internal::ai::{
     tools::ToolRegistry,
 };
 
+async fn collect_upstream_prompt(in_channels: &mut InChannels) -> Result<String, String> {
+    let ids = in_channels.get_sender_ids();
+    let mut inputs = Vec::new();
+
+    for id in ids {
+        match in_channels.recv_from(&id).await {
+            Ok(content) => {
+                if let Some(text) = content.get::<String>() {
+                    inputs.push(text.to_owned());
+                } else {
+                    tracing::warn!(
+                        "Received content from upstream {:?} is not a String. Defaulting to empty.",
+                        id
+                    );
+                }
+            }
+            Err(e) => {
+                let error_msg = format!("Failed to receive input from upstream {:?}: {:?}", id, e);
+                tracing::error!("{}", error_msg);
+                return Err(error_msg);
+            }
+        }
+    }
+
+    Ok(inputs.join("\n\n"))
+}
+
 /// An [`Action`] adapter that wraps an AI [`Agent`] for use in a DAG node.
 ///
 /// This adapter bridges the gap between `dagrs::Action` and the AI `Agent`.
 /// It automatically handles:
-/// 1. Reading input from upstream nodes (as Prompt).
+/// 1. Reading input from upstream nodes.
 ///    - If there are multiple upstream nodes, their outputs are concatenated
 ///      with newlines (`"\n\n"`) to form a single prompt.
 /// 2. Invoking the Agent with the assembled prompt.
@@ -82,34 +109,10 @@ impl<M: CompletionModel> Action for AgentAction<M> {
         out_channels: &mut OutChannels,
         _env: Arc<EnvVar>,
     ) -> Output {
-        // Step 1: Collect inputs from all upstream nodes
-        let ids = in_channels.get_sender_ids();
-        let mut inputs = Vec::new();
-
-        for id in ids {
-            match in_channels.recv_from(&id).await {
-                Ok(content) => {
-                    // Attempt to extract a String from the upstream content
-                    if let Some(text) = content.get::<String>() {
-                        inputs.push(text.clone());
-                    } else {
-                        tracing::warn!(
-                            "Received content from upstream {:?} is not a String. Defaulting to empty.",
-                            id
-                        );
-                    }
-                }
-                Err(e) => {
-                    let error_msg =
-                        format!("Failed to receive input from upstream {:?}: {:?}", id, e);
-                    tracing::error!("{}", error_msg);
-                    return Output::Err(error_msg);
-                }
-            }
-        }
-
-        // Concatenate all upstream outputs into a single prompt
-        let input = inputs.join("\n\n");
+        let input = match collect_upstream_prompt(in_channels).await {
+            Ok(input) => input,
+            Err(e) => return Output::Err(e),
+        };
 
         // Step 2: Run the agent with the assembled prompt
         match self.agent.prompt(input).await {
@@ -131,7 +134,7 @@ impl<M: CompletionModel> Action for AgentAction<M> {
 ///
 /// Unlike [`AgentAction`], which performs a single prompt-response cycle, this adapter
 /// invokes [`run_tool_loop`], allowing the agent to call tools repeatedly in a loop
-/// until it produces a final answer or reaches the maximum number of steps.
+/// until it produces a final answer.
 ///
 /// # Type Parameters
 ///
@@ -141,7 +144,7 @@ impl<M: CompletionModel> Action for AgentAction<M> {
 ///
 /// * `model` - The language model used for generating completions.
 /// * `registry` - The registry of tools available to the agent during the loop.
-/// * `config` - Configuration for the tool loop (preamble, temperature, max steps, etc.).
+/// * `config` - Configuration for the tool loop (preamble, temperature, hooks, etc.).
 pub struct ToolLoopAction<M: CompletionModel + 'static> {
     /// The language model used for generating completions.
     model: M,
@@ -160,13 +163,11 @@ impl<M: CompletionModel> ToolLoopAction<M> {
     /// * `registry` - The tool registry containing all available tools.
     /// * `preamble` - An optional system preamble prepended to every prompt.
     /// * `temperature` - An optional temperature value controlling response randomness.
-    /// * `max_steps` - An optional limit on the number of tool-calling iterations.
     pub fn new(
         model: M,
         registry: ToolRegistry,
         preamble: Option<String>,
         temperature: Option<f64>,
-        max_steps: Option<usize>,
     ) -> Self {
         Self {
             model,
@@ -174,9 +175,10 @@ impl<M: CompletionModel> ToolLoopAction<M> {
             config: ToolLoopConfig {
                 preamble,
                 temperature,
-                max_steps,
                 hook_runner: None,
                 allowed_tools: None,
+                runtime_context: None,
+                max_turns: None,
             },
         }
     }
@@ -201,34 +203,10 @@ impl<M: CompletionModel> Action for ToolLoopAction<M> {
         out_channels: &mut OutChannels,
         _env: Arc<EnvVar>,
     ) -> Output {
-        // Collect upstream string outputs into one prompt, consistent with AgentAction.
-        let ids = in_channels.get_sender_ids();
-        let mut inputs = Vec::new();
-
-        for id in ids {
-            match in_channels.recv_from(&id).await {
-                Ok(content) => {
-                    // Attempt to extract a String from the upstream content
-                    if let Some(text) = content.get::<String>() {
-                        inputs.push(text.clone());
-                    } else {
-                        tracing::warn!(
-                            "Received content from upstream {:?} is not a String. Defaulting to empty.",
-                            id
-                        );
-                    }
-                }
-                Err(e) => {
-                    let error_msg =
-                        format!("Failed to receive input from upstream {:?}: {:?}", id, e);
-                    tracing::error!("{}", error_msg);
-                    return Output::Err(error_msg);
-                }
-            }
-        }
-
-        // Concatenate all upstream outputs into a single prompt
-        let prompt = inputs.join("\n\n");
+        let prompt = match collect_upstream_prompt(in_channels).await {
+            Ok(prompt) => prompt,
+            Err(e) => return Output::Err(e),
+        };
 
         // Run the iterative tool-calling loop with the assembled prompt
         match run_tool_loop(&self.model, prompt, &self.registry, self.config.clone()).await {

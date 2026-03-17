@@ -1,5 +1,11 @@
 # IntentSpec Design
 
+> Local implementation note (2026-03-13)
+>
+> Libra currently accepts structured objectives in `intent.objectives[]`,
+> where each objective is `{ title, kind }` and `kind` is one of
+> `implementation` or `analysis`.
+
 **Version:** 1.0.0  
 **Spec foundations:** JSON Schema Draft 2020-12 · NIST SSDF · SLSA v1.0 · OWASP LLM Top 10 (2025)  
 **Execution layer:** Libra AI Object Model (`git-internal`)

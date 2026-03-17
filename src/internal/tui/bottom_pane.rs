@@ -2,13 +2,18 @@
 //!
 //! Provides the user input area and status display at the bottom of the TUI.
 
+use std::{
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::app_event::AgentStatus;
+use super::{app_event::AgentStatus, theme};
 
 /// Snapshot of user-input question data for rendering (avoids borrowing the request).
 #[derive(Clone)]
@@ -24,6 +29,14 @@ struct UserInputQuestionSnapshot {
     is_secret: bool,
 }
 
+#[derive(Clone)]
+struct ExecApprovalSnapshot {
+    command: String,
+    cwd: String,
+    reason: Option<String>,
+    is_retry: bool,
+}
+
 /// State for the slash-command autocomplete popup.
 struct CommandPopupState {
     /// Known commands: `(name, description)`, set once at startup.
@@ -32,7 +45,11 @@ struct CommandPopupState {
     visible: bool,
     /// Index of the currently highlighted command in the *filtered* list.
     selected: usize,
+    /// First visible item in the filtered popup list.
+    scroll_offset: usize,
 }
+
+const COMMAND_POPUP_MAX_VISIBLE: usize = 8;
 
 /// The bottom pane containing input area and status.
 pub struct BottomPane {
@@ -54,10 +71,20 @@ pub struct BottomPane {
     pub user_input_notes_focused: bool,
     /// Current notes text (driven by App).
     pub user_input_notes_text: String,
+    /// Snapshot of the current exec approval request (while awaiting approval).
+    exec_approval: Option<ExecApprovalSnapshot>,
+    /// Currently selected exec approval option.
+    pub exec_approval_selected: usize,
     /// Slash-command autocomplete popup state.
     command_popup: CommandPopupState,
     /// Currently selected option in the post-plan dialog (0=Execute, 1=Modify, 2=Cancel).
     pub post_plan_selected: usize,
+    /// Current working directory shown in the input border.
+    cwd: Option<PathBuf>,
+    /// Current Git branch or detached HEAD label shown beside the working directory.
+    git_branch: Option<String>,
+    /// Current retry notice shown in the status line.
+    retry_notice: Option<String>,
 }
 
 impl BottomPane {
@@ -73,12 +100,18 @@ impl BottomPane {
             user_input_selected_option: 0,
             user_input_notes_focused: false,
             user_input_notes_text: String::new(),
+            exec_approval: None,
+            exec_approval_selected: 0,
             command_popup: CommandPopupState {
                 commands: Vec::new(),
                 visible: false,
                 selected: 0,
+                scroll_offset: 0,
             },
             post_plan_selected: 0,
+            cwd: None,
+            git_branch: None,
+            retry_notice: None,
         }
     }
 
@@ -106,6 +139,25 @@ impl BottomPane {
         self.user_input_selected_option = 0;
         self.user_input_notes_focused = false;
         self.user_input_notes_text.clear();
+    }
+
+    pub fn set_exec_approval(
+        &mut self,
+        command: Option<String>,
+        cwd: Option<String>,
+        reason: Option<String>,
+        is_retry: bool,
+    ) {
+        self.exec_approval = match (command, cwd) {
+            (Some(command), Some(cwd)) => Some(ExecApprovalSnapshot {
+                command,
+                cwd,
+                reason,
+                is_retry,
+            }),
+            _ => None,
+        };
+        self.exec_approval_selected = 0;
     }
 
     /// Reset the post-plan dialog selection.
@@ -176,6 +228,25 @@ impl BottomPane {
     /// Set the agent status.
     pub fn set_status(&mut self, status: AgentStatus) {
         self.status = status;
+        if status != AgentStatus::Retrying {
+            self.retry_notice = None;
+        }
+    }
+
+    /// Set the current working directory badge shown on the input border.
+    pub fn set_cwd(&mut self, cwd: PathBuf) {
+        self.cwd = Some(cwd);
+    }
+
+    /// Set or clear the Git branch label shown on the input border.
+    pub fn set_git_branch(&mut self, git_branch: Option<String>) {
+        self.git_branch = git_branch;
+    }
+
+    /// Show a transient retry notice in the status line.
+    pub fn set_retry_notice(&mut self, notice: String) {
+        self.retry_notice = Some(notice);
+        self.status = AgentStatus::Retrying;
     }
 
     // ── Slash-command autocomplete popup ────────────────────────────
@@ -205,11 +276,14 @@ impl BottomPane {
             let count = self.filtered_commands().len();
             if count == 0 {
                 self.command_popup.visible = false;
+                self.command_popup.scroll_offset = 0;
             } else if self.command_popup.selected >= count {
                 self.command_popup.selected = count.saturating_sub(1);
             }
+            self.ensure_command_popup_selection_visible(count);
         } else {
             self.command_popup.selected = 0;
+            self.command_popup.scroll_offset = 0;
         }
     }
 
@@ -217,12 +291,14 @@ impl BottomPane {
     pub fn dismiss_command_popup(&mut self) {
         self.command_popup.visible = false;
         self.command_popup.selected = 0;
+        self.command_popup.scroll_offset = 0;
     }
 
     /// Move selection up in the popup.
     pub fn command_popup_up(&mut self) {
         if self.command_popup.selected > 0 {
             self.command_popup.selected -= 1;
+            self.ensure_command_popup_selection_visible(self.filtered_commands().len());
         }
     }
 
@@ -231,6 +307,7 @@ impl BottomPane {
         let count = self.filtered_commands().len();
         if count > 0 && self.command_popup.selected < count - 1 {
             self.command_popup.selected += 1;
+            self.ensure_command_popup_selection_visible(count);
         }
     }
 
@@ -246,6 +323,7 @@ impl BottomPane {
             self.cursor_pos = self.input.len();
             self.command_popup.visible = false;
             self.command_popup.selected = 0;
+            self.command_popup.scroll_offset = 0;
             true
         } else {
             false
@@ -264,6 +342,26 @@ impl BottomPane {
             .collect()
     }
 
+    fn ensure_command_popup_selection_visible(&mut self, count: usize) {
+        if count <= COMMAND_POPUP_MAX_VISIBLE {
+            self.command_popup.scroll_offset = 0;
+            return;
+        }
+
+        if self.command_popup.selected < self.command_popup.scroll_offset {
+            self.command_popup.scroll_offset = self.command_popup.selected;
+        } else {
+            let end = self.command_popup.scroll_offset + COMMAND_POPUP_MAX_VISIBLE;
+            if self.command_popup.selected >= end {
+                self.command_popup.scroll_offset =
+                    self.command_popup.selected + 1 - COMMAND_POPUP_MAX_VISIBLE;
+            }
+        }
+
+        let max_offset = count.saturating_sub(COMMAND_POPUP_MAX_VISIBLE);
+        self.command_popup.scroll_offset = self.command_popup.scroll_offset.min(max_offset);
+    }
+
     /// Check if input is empty.
     pub fn is_empty(&self) -> bool {
         self.input.is_empty()
@@ -271,13 +369,17 @@ impl BottomPane {
 
     /// Return the height (in lines) the bottom pane needs for the current state.
     pub fn desired_height(&self) -> u16 {
+        if self.status == AgentStatus::AwaitingApproval {
+            // status(1) + summary(3) + options(4) + help(1) = 9
+            return 9;
+        }
         if self.status == AgentStatus::AwaitingPostPlanChoice {
             // status(1) + 3 options + 1 blank + help(1) = 6
             return 6;
         }
         if self.status != AgentStatus::AwaitingUserInput {
-            // Normal mode: status(1) + input(3) + help(1) = 5
-            return 5;
+            // Normal mode: rounded input box(5, with 3-line input inner area) + statusline(1) = 6
+            return 6;
         }
 
         let questions = match &self.user_input_questions {
@@ -313,26 +415,24 @@ impl BottomPane {
         if self.status == AgentStatus::AwaitingUserInput {
             return self.render_user_input_mode(area, buf);
         }
+        if self.status == AgentStatus::AwaitingApproval {
+            return self.render_exec_approval_dialog(area, buf);
+        }
         if self.status == AgentStatus::AwaitingPostPlanChoice {
             return self.render_post_plan_dialog(area, buf);
         }
 
-        // Split area into status bar and input area
+        // Split area into input area and status bar.
         let chunks = Layout::vertical([
-            Constraint::Length(1), // Status bar
-            Constraint::Length(3), // Input area
-            Constraint::Length(1), // Help text
+            Constraint::Length(5), // Rounded input box (3-line inner input)
+            Constraint::Length(1), // Status line
         ])
         .split(area);
 
-        // Render status bar
-        self.render_status_bar(chunks[0], buf);
-
         // Render input area
-        let cursor_pos = self.render_input_area(chunks[1], buf);
-
-        // Render help text
-        self.render_help_text(chunks[2], buf);
+        let cursor_pos = self.render_input_area(chunks[0], buf);
+        // Render status bar below the input box
+        self.render_status_bar(chunks[1], buf);
 
         // Render command popup (floats above the bottom pane)
         if self.command_popup.visible && self.status == AgentStatus::Idle {
@@ -340,6 +440,52 @@ impl BottomPane {
         }
 
         cursor_pos
+    }
+
+    /// Return the clickable input hitbox for focus handling.
+    pub fn input_hitbox(&self, area: Rect) -> Option<Rect> {
+        if self.status == AgentStatus::AwaitingApproval {
+            return None;
+        }
+        if self.status == AgentStatus::AwaitingPostPlanChoice {
+            return None;
+        }
+
+        if self.status != AgentStatus::AwaitingUserInput {
+            let chunks =
+                Layout::vertical([Constraint::Length(5), Constraint::Length(1)]).split(area);
+            return Some(chunks[0]);
+        }
+
+        let questions = self.user_input_questions.as_ref()?;
+        let question = questions.get(self.user_input_current_question)?;
+        let options = question.options.as_deref().unwrap_or_default();
+        let is_freeform = options.is_empty();
+
+        let option_lines = if is_freeform {
+            0u16
+        } else {
+            let extra = if question.is_other { 1u16 } else { 0 };
+            options.len() as u16 + extra
+        };
+        let question_area_height = 1 + 1 + option_lines;
+        let notes_height = if !is_freeform { 3u16 } else { 0 };
+
+        let chunks = Layout::vertical([
+            Constraint::Length(1),                    // Status bar
+            Constraint::Length(question_area_height), // Question + options
+            Constraint::Length(3),                    // Freeform input
+            Constraint::Length(notes_height),         // Notes
+            Constraint::Length(1),                    // Help text
+        ])
+        .split(area);
+
+        let hit = if is_freeform { chunks[2] } else { chunks[3] };
+        if hit.width > 0 && hit.height > 0 {
+            Some(hit)
+        } else {
+            None
+        }
     }
 
     /// Render the bottom pane in user-input mode (questions + options).
@@ -385,7 +531,7 @@ impl BottomPane {
         } else {
             "● Awaiting input...".to_string()
         };
-        let status_line = Line::styled(progress, Style::default().fg(Color::Magenta).bold());
+        let status_line = Line::styled(progress, theme::status::pending_input());
         Paragraph::new(status_line).render(chunks[0], buf);
 
         // Question display
@@ -394,13 +540,13 @@ impl BottomPane {
         // Header
         lines.push(Line::styled(
             format!("  {}", question.header),
-            Style::default().fg(Color::Cyan).bold(),
+            theme::interactive::title(),
         ));
 
         // Question text
         lines.push(Line::styled(
             format!("  {}", question.question),
-            Style::default(),
+            theme::text::primary(),
         ));
 
         let selected = self.user_input_selected_option;
@@ -414,9 +560,9 @@ impl BottomPane {
                     " "
                 };
                 let style = if i == selected {
-                    Style::default().fg(Color::Cyan).bold()
+                    theme::interactive::selected_option()
                 } else {
-                    Style::default()
+                    theme::text::primary()
                 };
                 lines.push(Line::styled(
                     format!("  {} {}. {}  {}", marker, i + 1, label, description),
@@ -433,9 +579,9 @@ impl BottomPane {
                     " "
                 };
                 let style = if selected == other_idx {
-                    Style::default().fg(Color::Cyan).bold()
+                    theme::interactive::selected_option()
                 } else {
-                    Style::default().add_modifier(Modifier::DIM)
+                    theme::text::muted().add_modifier(Modifier::DIM)
                 };
                 lines.push(Line::styled(
                     format!(
@@ -469,7 +615,7 @@ impl BottomPane {
         } else {
             "[↑/↓: Select] [1-9: Quick select] [Tab: Notes] [Enter: Submit] [Esc: Cancel]"
         };
-        let help_line = Line::styled(help, Style::default().add_modifier(Modifier::DIM));
+        let help_line = Line::styled(help, theme::text::help());
         Paragraph::new(help_line).render(chunks[4], buf);
 
         // Show cursor: for freeform always, for options only when notes focused
@@ -507,9 +653,9 @@ impl BottomPane {
                 " "
             };
             let style = if i == self.post_plan_selected {
-                Style::default().fg(Color::Cyan).bold()
+                theme::interactive::selected_option()
             } else {
-                Style::default().fg(Color::White)
+                theme::text::primary()
             };
             lines.push(Line::styled(
                 format!("  {} {:<16} {}", marker, label, desc),
@@ -526,6 +672,72 @@ impl BottomPane {
         None // no cursor in this mode
     }
 
+    fn render_exec_approval_dialog(&self, area: Rect, buf: &mut Buffer) -> Option<Position> {
+        let Some(approval) = &self.exec_approval else {
+            return None;
+        };
+
+        let chunks = Layout::vertical([
+            Constraint::Length(1), // Status bar
+            Constraint::Length(3), // Command summary
+            Constraint::Length(4), // Options
+            Constraint::Length(1), // Help text
+        ])
+        .split(area);
+
+        self.render_status_bar(chunks[0], buf);
+
+        let retry_prefix = if approval.is_retry { "Retry: " } else { "" };
+        let mut summary_lines = vec![
+            Line::styled(
+                format!("  {}{}", retry_prefix, approval.command),
+                theme::text::primary(),
+            ),
+            Line::styled(
+                format!("  cwd: {}", approval.cwd),
+                theme::text::muted().add_modifier(Modifier::DIM),
+            ),
+        ];
+        if let Some(reason) = approval.reason.as_deref() {
+            summary_lines.push(Line::styled(
+                format!("  reason: {reason}"),
+                theme::status::warning(),
+            ));
+        }
+        Paragraph::new(Text::from(summary_lines)).render(chunks[1], buf);
+
+        let options = [
+            ("Approve", "Allow this execution once"),
+            (
+                "Approve Session",
+                "Allow matching commands for this session",
+            ),
+            ("Deny", "Reject this execution"),
+            ("Abort Turn", "Interrupt the current turn"),
+        ];
+        let mut option_lines: Vec<Line<'static>> = Vec::new();
+        for (i, (label, desc)) in options.iter().enumerate() {
+            let marker = if i == self.exec_approval_selected {
+                "▸"
+            } else {
+                " "
+            };
+            let style = if i == self.exec_approval_selected {
+                theme::interactive::selected_option()
+            } else {
+                theme::text::primary()
+            };
+            option_lines.push(Line::styled(
+                format!("  {} {:<16} {}", marker, label, desc),
+                style,
+            ));
+        }
+        Paragraph::new(Text::from(option_lines)).render(chunks[2], buf);
+
+        self.render_help_text(chunks[3], buf);
+        None
+    }
+
     /// Render the notes input area for option questions.
     fn render_notes_area(&self, area: Rect, buf: &mut Buffer) -> Option<Position> {
         if area.height == 0 {
@@ -533,23 +745,20 @@ impl BottomPane {
         }
 
         let border_style = if self.user_input_notes_focused {
-            Style::default().fg(Color::Cyan)
+            theme::border::focused()
         } else {
-            Style::default().fg(Color::DarkGray)
+            theme::border::idle()
         };
 
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(border_style)
-            .title(" Notes ");
+            .title(Line::styled(" Notes ", theme::interactive::title()));
 
         let inner = block.inner(area);
 
         let display = if self.user_input_notes_text.is_empty() {
-            Text::styled(
-                "Tab to add notes...",
-                Style::default().add_modifier(Modifier::DIM),
-            )
+            Text::styled("Tab to add notes...", theme::text::placeholder())
         } else {
             Text::raw(&self.user_input_notes_text)
         };
@@ -574,7 +783,7 @@ impl BottomPane {
             return;
         }
 
-        let max_visible: u16 = 8;
+        let max_visible = COMMAND_POPUP_MAX_VISIBLE as u16;
         let item_count = filtered.len() as u16;
         // +2 for border top/bottom
         let popup_height = item_count.min(max_visible) + 2;
@@ -601,7 +810,14 @@ impl BottomPane {
         // Build the list lines.
         let inner_width = clamped.width.saturating_sub(2) as usize; // borders
         let mut lines: Vec<Line<'static>> = Vec::new();
-        for (i, (name, desc)) in filtered.iter().enumerate() {
+        let start = self.command_popup.scroll_offset.min(filtered.len());
+        let end = (start + COMMAND_POPUP_MAX_VISIBLE).min(filtered.len());
+        for (i, (name, desc)) in filtered
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(end.saturating_sub(start))
+        {
             let is_selected = i == self.command_popup.selected;
             let prefix = format!("  /{:<16}", name);
             let remaining = inner_width.saturating_sub(prefix.len());
@@ -614,71 +830,91 @@ impl BottomPane {
             };
             let text = format!("{}{}", prefix, truncated_desc);
             let style = if is_selected {
-                Style::default().add_modifier(Modifier::REVERSED)
+                theme::interactive::selected_option()
             } else {
-                Style::default().fg(Color::White)
+                theme::text::primary()
             };
             lines.push(Line::styled(text, style));
         }
 
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().add_modifier(Modifier::DIM))
-            .title(" Commands ");
+            .border_style(theme::border::idle())
+            .title(Line::styled(" Commands ", theme::interactive::title()));
 
         let paragraph = Paragraph::new(Text::from(lines)).block(block);
         paragraph.render(clamped, buf);
     }
 
     fn render_status_bar(&self, area: Rect, buf: &mut Buffer) {
-        let status_text = match self.status {
-            AgentStatus::Idle => "● Ready",
-            AgentStatus::Thinking => "● Thinking...",
-            AgentStatus::ExecutingTool => "● Executing tool...",
-            AgentStatus::AwaitingUserInput => "● Awaiting input...",
-            AgentStatus::AwaitingPostPlanChoice => "● Plan complete — choose next step",
+        let phase = animation_phase(120);
+        let status_line = match self.status {
+            AgentStatus::Idle => Line::styled("● Ready", theme::status::ready()),
+            AgentStatus::Thinking => {
+                gradient_line("● Thinking...", &thinking_colors(), phase, true)
+            }
+            AgentStatus::Retrying => gradient_line(
+                self.retry_notice
+                    .as_deref()
+                    .unwrap_or("● Retrying model request..."),
+                &executing_tool_colors(),
+                phase,
+                true,
+            ),
+            AgentStatus::ExecutingTool => {
+                gradient_line("● Executing tool...", &executing_tool_colors(), phase, true)
+            }
+            AgentStatus::AwaitingUserInput => {
+                Line::styled("● Awaiting input...", theme::status::pending_input())
+            }
+            AgentStatus::AwaitingApproval => Line::styled(
+                "● Awaiting sandbox approval...",
+                theme::status::pending_approval(),
+            ),
+            AgentStatus::AwaitingPostPlanChoice => Line::styled(
+                "● Plan complete — choose next step",
+                theme::status::pending_choice(),
+            ),
         };
-
-        let status_color = match self.status {
-            AgentStatus::Idle => Color::Green,
-            AgentStatus::Thinking | AgentStatus::ExecutingTool => Color::Yellow,
-            AgentStatus::AwaitingUserInput | AgentStatus::AwaitingPostPlanChoice => Color::Magenta,
-        };
-
-        let status_line = Line::styled(status_text, Style::default().fg(status_color).bold());
         Paragraph::new(status_line).render(area, buf);
     }
 
     fn render_input_area(&self, area: Rect, buf: &mut Buffer) -> Option<Position> {
         let border_style = if self.focused {
-            Style::default().fg(Color::Cyan)
+            theme::border::focused()
         } else {
-            Style::default().fg(Color::DarkGray)
+            theme::border::idle()
         };
 
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(border_style);
 
         let inner = block.inner(area);
 
         let content_width = inner.width as usize;
-        let (display_text, cursor_x) = if self.input.is_empty() {
+        let content_height = inner.height as usize;
+        let (display_text, cursor_x, cursor_y) = if self.input.is_empty() {
             let placeholder = if self.status == AgentStatus::AwaitingUserInput {
                 "Type custom answer..."
             } else {
                 "Type your message..."
             };
             (
-                Text::styled(placeholder, Style::default().add_modifier(Modifier::DIM)),
+                Text::from(vec![Line::styled(placeholder, theme::text::placeholder())]),
+                0u16,
                 0u16,
             )
         } else {
-            let (visible, cursor_x) = self.visible_input_and_cursor_x(content_width);
-            (Text::raw(visible), cursor_x)
+            let (lines, cursor_x, cursor_y) =
+                self.visible_input_and_cursor(content_width, content_height);
+            let text_lines = lines.into_iter().map(Line::raw).collect::<Vec<_>>();
+            (Text::from(text_lines), cursor_x, cursor_y)
         };
 
         Paragraph::new(display_text).block(block).render(area, buf);
+        self.render_workspace_badge(area, buf, border_style);
 
         if !self.focused || inner.width == 0 || inner.height == 0 {
             return None;
@@ -686,8 +922,43 @@ impl BottomPane {
 
         Some(Position {
             x: inner.x.saturating_add(cursor_x),
-            y: inner.y,
+            y: inner.y.saturating_add(cursor_y),
         })
+    }
+
+    fn render_workspace_badge(&self, area: Rect, buf: &mut Buffer, border_style: Style) {
+        if area.width < 12 || area.height == 0 {
+            return;
+        }
+
+        let Some(cwd) = &self.cwd else {
+            return;
+        };
+
+        let badge = format_workspace_badge(
+            cwd,
+            self.git_branch.as_deref(),
+            area.width.saturating_sub(6) as usize,
+        );
+        if badge.is_empty() {
+            return;
+        }
+
+        let badge_width = badge.width() as u16;
+        if badge_width + 3 >= area.width {
+            return;
+        }
+
+        let y = area.y.saturating_add(area.height.saturating_sub(1));
+        let x = area
+            .x
+            .saturating_add(area.width.saturating_sub(badge_width + 3));
+
+        let spans = vec![
+            Span::styled("┤", border_style),
+            Span::styled(badge, theme::badge::workspace()),
+        ];
+        buf.set_line(x, y, &Line::from(spans), area.width.saturating_sub(x));
     }
 
     fn render_help_text(&self, area: Rect, buf: &mut Buffer) {
@@ -699,18 +970,19 @@ impl BottomPane {
                     "[Enter: Send] [PgUp/PgDn: Scroll] [Shift+Drag: Select] [Ctrl+C: Exit]"
                 }
             }
-            AgentStatus::Thinking | AgentStatus::ExecutingTool => {
+            AgentStatus::Thinking | AgentStatus::Retrying | AgentStatus::ExecutingTool => {
                 "[Esc: Interrupt] [PgUp/PgDn: Scroll] [Shift+Drag: Select] [Ctrl+C: Exit]"
             }
             AgentStatus::AwaitingUserInput => {
                 "[Up/Down: Select] [1-9: Quick select] [Enter: Submit] [Esc: Cancel]"
             }
+            AgentStatus::AwaitingApproval => "[Up/Down: Select] [Enter: Confirm] [Esc: Deny]",
             AgentStatus::AwaitingPostPlanChoice => {
                 "[Up/Down: Select] [Enter: Confirm] [Esc: Cancel]"
             }
         };
 
-        let help_line = Line::styled(help, Style::default().add_modifier(Modifier::DIM));
+        let help_line = Line::styled(help, theme::text::help());
         Paragraph::new(help_line).render(area, buf);
     }
 
@@ -727,61 +999,295 @@ impl BottomPane {
             .unwrap_or(self.input.len())
     }
 
-    fn visible_input_and_cursor_x(&self, content_width: usize) -> (String, u16) {
-        if content_width == 0 {
-            return (String::new(), 0);
+    fn visible_input_and_cursor(
+        &self,
+        content_width: usize,
+        content_height: usize,
+    ) -> (Vec<String>, u16, u16) {
+        if content_width == 0 || content_height == 0 {
+            return (Vec::new(), 0, 0);
         }
 
-        let prefix = &self.input[..self.cursor_pos.min(self.input.len())];
-        let cursor_col = prefix.width();
+        let mut wrapped_lines: Vec<String> = Vec::new();
+        let mut current_line = String::new();
+        let mut current_col = 0usize;
+        let mut cursor_row = 0usize;
+        let mut cursor_col = 0usize;
+        let mut line_index = 0usize;
 
-        let max_cursor_col = content_width.saturating_sub(1);
-        let scroll_cols = cursor_col.saturating_sub(max_cursor_col);
+        for (idx, ch) in self.input.char_indices() {
+            if ch == '\n' {
+                if idx == self.cursor_pos {
+                    cursor_row = line_index;
+                    cursor_col = current_col;
+                }
+                wrapped_lines.push(std::mem::take(&mut current_line));
+                line_index += 1;
+                current_col = 0;
+                continue;
+            }
 
-        let start_byte = byte_index_at_display_col(&self.input, scroll_cols);
-        let visible = take_by_display_width(&self.input[start_byte..], content_width);
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
+            if current_col + ch_width > content_width && current_col > 0 {
+                wrapped_lines.push(std::mem::take(&mut current_line));
+                line_index += 1;
+                current_col = 0;
+            }
 
-        let cursor_x = (cursor_col.saturating_sub(scroll_cols)).min(u16::MAX as usize) as u16;
+            if idx == self.cursor_pos {
+                cursor_row = line_index;
+                cursor_col = current_col;
+            }
 
-        (visible.to_string(), cursor_x)
+            current_line.push(ch);
+            current_col += ch_width;
+        }
+
+        if self.cursor_pos == self.input.len() {
+            cursor_row = line_index;
+            cursor_col = current_col;
+        }
+
+        wrapped_lines.push(current_line);
+
+        let start_row = cursor_row.saturating_sub(content_height.saturating_sub(1));
+        let end_row = (start_row + content_height).min(wrapped_lines.len());
+        let mut visible_lines = wrapped_lines[start_row..end_row].to_vec();
+        while visible_lines.len() < content_height {
+            visible_lines.push(String::new());
+        }
+
+        let cursor_y = cursor_row.saturating_sub(start_row).min(u16::MAX as usize) as u16;
+        let max_cursor_x = content_width.saturating_sub(1);
+        let cursor_x = cursor_col.min(max_cursor_x).min(u16::MAX as usize) as u16;
+        (visible_lines, cursor_x, cursor_y)
     }
 }
 
-fn byte_index_at_display_col(s: &str, col: usize) -> usize {
-    if col == 0 {
-        return 0;
-    }
-
-    let mut acc = 0usize;
-    for (byte_idx, ch) in s.char_indices() {
-        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if acc + w > col {
-            return byte_idx;
-        }
-        acc += w;
-    }
-    s.len()
+fn animation_phase(step_ms: u128) -> usize {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    (millis / step_ms.max(1)) as usize
 }
 
-fn take_by_display_width(s: &str, max_cols: usize) -> &str {
-    if max_cols == 0 {
-        return "";
+fn thinking_colors() -> [Color; 5] {
+    theme::animation::active_gradient()
+}
+
+fn executing_tool_colors() -> [Color; 5] {
+    theme::animation::executing_gradient()
+}
+
+fn gradient_line(text: &str, colors: &[Color], phase: usize, bold: bool) -> Line<'static> {
+    let spans = text
+        .chars()
+        .enumerate()
+        .map(|(idx, ch)| {
+            let color = colors[(idx + phase) % colors.len()];
+            let mut style = Style::default().fg(color);
+            if bold {
+                style = style.bold();
+            }
+            Span::styled(ch.to_string(), style)
+        })
+        .collect::<Vec<_>>();
+    Line::from(spans)
+}
+
+fn format_workspace_badge(path: &Path, git_branch: Option<&str>, max_width: usize) -> String {
+    if max_width <= 2 {
+        return String::new();
     }
-    let mut acc = 0usize;
-    let mut end = 0usize;
-    for (byte_idx, ch) in s.char_indices() {
-        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if acc + w > max_cols {
+
+    let display = if let Some(home) = dirs::home_dir() {
+        if let Ok(stripped) = path.strip_prefix(&home) {
+            if stripped.as_os_str().is_empty() {
+                "~".to_string()
+            } else {
+                format!("~/{}", stripped.display())
+            }
+        } else {
+            path.display().to_string()
+        }
+    } else {
+        path.display().to_string()
+    };
+
+    let display = match git_branch.filter(|branch| !branch.trim().is_empty()) {
+        Some(branch) => format!("{display} ({branch})"),
+        None => display,
+    };
+
+    format!(
+        " {} ",
+        truncate_from_left(&display, max_width.saturating_sub(2))
+    )
+}
+
+fn truncate_from_left(text: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+
+    if text.width() <= max_width {
+        return text.to_string();
+    }
+
+    if max_width == 1 {
+        return "…".to_string();
+    }
+
+    let mut width = 1usize;
+    let mut kept = Vec::new();
+    for ch in text.chars().rev() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
+        if width + ch_width > max_width {
             break;
         }
-        acc += w;
-        end = byte_idx + ch.len_utf8();
+        kept.push(ch);
+        width += ch_width;
     }
-    &s[..end.min(s.len())]
+    kept.reverse();
+    format!("…{}", kept.into_iter().collect::<String>())
 }
 
 impl Default for BottomPane {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use ratatui::{buffer::Buffer, layout::Rect};
+
+    use super::BottomPane;
+    use crate::internal::tui::{app_event::AgentStatus, theme};
+
+    fn row_text(buf: &Buffer, y: u16, width: u16) -> String {
+        let mut out = String::new();
+        for x in 0..width {
+            out.push_str(buf[(x, y)].symbol());
+        }
+        out
+    }
+
+    fn row_symbol_x(buf: &Buffer, y: u16, width: u16, symbol: &str) -> Option<u16> {
+        (0..width).find(|&x| buf[(x, y)].symbol() == symbol)
+    }
+
+    #[test]
+    fn normal_mode_height_is_six_lines() {
+        let pane = BottomPane::new();
+        assert_eq!(pane.desired_height(), 6);
+    }
+
+    #[test]
+    fn approval_mode_height_is_nine_lines() {
+        let mut pane = BottomPane::new();
+        pane.status = AgentStatus::AwaitingApproval;
+        assert_eq!(pane.desired_height(), 9);
+    }
+
+    #[test]
+    fn statusline_renders_below_rounded_input_box() {
+        let mut pane = BottomPane::new();
+        pane.status = AgentStatus::Idle;
+
+        let area = Rect::new(0, 0, 40, 6);
+        let mut buf = Buffer::empty(area);
+        let _ = pane.render(area, &mut buf);
+
+        let top = row_text(&buf, 0, area.width);
+        let bottom_of_box = row_text(&buf, 4, area.width);
+        let status = row_text(&buf, 5, area.width);
+
+        assert!(top.contains("╭"));
+        assert!(bottom_of_box.contains("╰"));
+        assert!(status.contains("Ready"));
+        assert!(!status.contains("Enter: Send"));
+    }
+
+    #[test]
+    fn input_box_renders_cwd_badge_on_bottom_border() {
+        let mut pane = BottomPane::new();
+        pane.set_cwd(PathBuf::from("/Users/neon/Documents/Projects/libra"));
+        pane.set_git_branch(Some("main".to_string()));
+
+        let area = Rect::new(0, 0, 48, 6);
+        let mut buf = Buffer::empty(area);
+        let _ = pane.render(area, &mut buf);
+
+        let bottom_of_box = row_text(&buf, 4, area.width);
+        assert!(bottom_of_box.contains("libra"));
+        assert!(bottom_of_box.contains("(main)"));
+        assert!(bottom_of_box.contains("┤"));
+        assert!(bottom_of_box.ends_with("─╯"));
+    }
+
+    #[test]
+    fn focused_input_uses_shared_theme_colors() {
+        let mut pane = BottomPane::new();
+        pane.set_cwd(PathBuf::from("/Users/neon/Documents/Projects/libra"));
+        pane.set_git_branch(Some("main".to_string()));
+
+        let area = Rect::new(0, 0, 48, 6);
+        let mut buf = Buffer::empty(area);
+        let _ = pane.render(area, &mut buf);
+
+        assert_eq!(theme::border::focused().fg, Some(buf[(0, 0)].fg));
+
+        let badge_x = row_symbol_x(&buf, 4, area.width, "┤").expect("badge separator missing");
+        assert_eq!(theme::border::focused().fg, Some(buf[(badge_x, 4)].fg));
+    }
+
+    #[test]
+    fn command_popup_scrolls_with_selection() {
+        let mut pane = BottomPane::new();
+        pane.set_command_hints(
+            (0..12)
+                .map(|i| (format!("cmd{i}"), format!("command {i}")))
+                .collect(),
+        );
+        pane.input = "/".to_string();
+        pane.cursor_pos = 1;
+        pane.sync_command_popup();
+
+        for _ in 0..9 {
+            pane.command_popup_down();
+        }
+
+        assert_eq!(pane.command_popup.selected, 9);
+        assert_eq!(pane.command_popup.scroll_offset, 2);
+    }
+
+    #[test]
+    fn command_popup_scroll_offset_clamps_after_filter_change() {
+        let mut pane = BottomPane::new();
+        pane.set_command_hints(
+            (0..12)
+                .map(|i| (format!("cmd{i}"), format!("command {i}")))
+                .collect(),
+        );
+        pane.input = "/".to_string();
+        pane.cursor_pos = 1;
+        pane.sync_command_popup();
+
+        for _ in 0..10 {
+            pane.command_popup_down();
+        }
+        assert!(pane.command_popup.scroll_offset > 0);
+
+        pane.input = "/cmd1".to_string();
+        pane.cursor_pos = pane.input.len();
+        pane.sync_command_popup();
+
+        assert_eq!(pane.filtered_commands().len(), 3);
+        assert_eq!(pane.command_popup.scroll_offset, 0);
+        assert_eq!(pane.command_popup.selected, 2);
     }
 }

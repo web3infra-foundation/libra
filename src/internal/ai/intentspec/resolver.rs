@@ -33,7 +33,8 @@ pub fn resolve_intentspec(
     ctx: ResolveContext,
 ) -> IntentSpec {
     let constraints = profiles::default_constraints(risk_level.clone());
-    let mut artifacts = profiles::default_artifacts(risk_level.clone());
+    let has_implementation_work = draft.intent.has_implementation_objectives();
+    let mut artifacts = profiles::default_artifacts(risk_level.clone(), has_implementation_work);
 
     let verification_plan = VerificationPlan {
         fast_checks: draft
@@ -119,7 +120,7 @@ pub fn resolve_intentspec(
         security: profiles::default_security(),
         execution: profiles::default_execution(risk_level.clone()),
         artifacts,
-        provenance: profiles::default_provenance(risk_level),
+        provenance: profiles::default_provenance(risk_level, has_implementation_work),
         lifecycle: Lifecycle {
             schema_version: "1.0.0".to_string(),
             status: LifecycleStatus::Active,
@@ -150,8 +151,11 @@ fn normalize_working_dir(raw: &str) -> String {
 }
 
 fn merge_artifacts_from_checks(plan: &VerificationPlan, artifacts: &mut Artifacts) {
-    let mut existing: HashSet<ArtifactName> =
-        artifacts.required.iter().map(|a| a.name.clone()).collect();
+    let mut existing: HashSet<(ArtifactName, ArtifactStage)> = artifacts
+        .required
+        .iter()
+        .map(|a| (a.name.clone(), a.stage.clone()))
+        .collect();
 
     for (stage, checks) in [
         (ArtifactStage::PerTask, &plan.fast_checks),
@@ -161,16 +165,17 @@ fn merge_artifacts_from_checks(plan: &VerificationPlan, artifacts: &mut Artifact
     ] {
         for check in checks {
             for name in &check.artifacts_produced {
-                if let Some(parsed_name) = parse_artifact_name(name)
-                    && !existing.contains(&parsed_name)
-                {
-                    artifacts.required.push(ArtifactReq {
-                        name: parsed_name.clone(),
-                        stage: stage.clone(),
-                        required: true,
-                        format: String::new(),
-                    });
-                    existing.insert(parsed_name);
+                if let Some(parsed_name) = parse_artifact_name(name) {
+                    let key = (parsed_name.clone(), stage.clone());
+                    if !existing.contains(&key) {
+                        artifacts.required.push(ArtifactReq {
+                            name: parsed_name.clone(),
+                            stage: stage.clone(),
+                            required: true,
+                            format: String::new(),
+                        });
+                        existing.insert(key);
+                    }
                 }
             }
         }
@@ -203,7 +208,10 @@ fn harmonize_retention(constraints: &Constraints, artifacts: &mut Artifacts) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::internal::ai::intentspec::draft::{DraftAcceptance, DraftIntent, DraftRisk};
+    use crate::internal::ai::intentspec::{
+        draft::{DraftAcceptance, DraftIntent, DraftRisk},
+        types::{CheckKind, Objective, ObjectiveKind},
+    };
 
     #[test]
     fn test_resolve_intentspec_low_profile() {
@@ -212,7 +220,10 @@ mod tests {
                 summary: "Fix bug".to_string(),
                 problem_statement: "Bug details".to_string(),
                 change_type: ChangeType::Bugfix,
-                objectives: vec!["fix".to_string()],
+                objectives: vec![Objective {
+                    title: "fix".to_string(),
+                    kind: ObjectiveKind::Implementation,
+                }],
                 in_scope: vec!["src".to_string()],
                 out_of_scope: vec![],
                 touch_hints: None,
@@ -250,5 +261,142 @@ mod tests {
                 .and_then(|q| q.require_new_tests_when_bugfix)
                 .unwrap_or(false)
         );
+    }
+
+    #[test]
+    fn test_merge_artifacts_preserves_stage_for_same_name() {
+        let plan = VerificationPlan {
+            fast_checks: vec![],
+            integration_checks: vec![Check {
+                id: "integration".into(),
+                kind: CheckKind::Command,
+                command: Some("cargo test".into()),
+                timeout_seconds: None,
+                expected_exit_code: None,
+                required: true,
+                artifacts_produced: vec!["test-log".into()],
+            }],
+            security_checks: vec![],
+            release_checks: vec![Check {
+                id: "release".into(),
+                kind: CheckKind::Command,
+                command: Some("cargo test --release".into()),
+                timeout_seconds: None,
+                expected_exit_code: None,
+                required: true,
+                artifacts_produced: vec!["test-log".into()],
+            }],
+        };
+        let mut artifacts = Artifacts {
+            required: vec![],
+            retention: crate::internal::ai::intentspec::types::ArtifactRetention::default(),
+        };
+
+        merge_artifacts_from_checks(&plan, &mut artifacts);
+
+        assert!(artifacts.required.iter().any(|req| {
+            req.name == ArtifactName::TestLog && req.stage == ArtifactStage::Integration
+        }));
+        assert!(artifacts.required.iter().any(|req| {
+            req.name == ArtifactName::TestLog && req.stage == ArtifactStage::Release
+        }));
+    }
+
+    #[test]
+    fn test_resolve_analysis_only_does_not_require_patchset_by_default() {
+        let draft = IntentDraft {
+            intent: DraftIntent {
+                summary: "Diagnose repository".to_string(),
+                problem_statement: "Summarize technical debt hotspots".to_string(),
+                change_type: ChangeType::Unknown,
+                objectives: vec![Objective {
+                    title: "Inventory key issues".to_string(),
+                    kind: ObjectiveKind::Analysis,
+                }],
+                in_scope: vec!["src".to_string()],
+                out_of_scope: vec![],
+                touch_hints: None,
+            },
+            acceptance: DraftAcceptance {
+                success_criteria: vec!["Findings are summarized".to_string()],
+                fast_checks: vec![],
+                integration_checks: vec![],
+                security_checks: vec![],
+                release_checks: vec![],
+            },
+            risk: DraftRisk {
+                rationale: "read-only analysis".to_string(),
+                factors: vec![],
+                level: Some(RiskLevel::Low),
+            },
+        };
+
+        let spec = resolve_intentspec(
+            draft,
+            RiskLevel::Low,
+            ResolveContext {
+                working_dir: ".".to_string(),
+                base_ref: "HEAD".to_string(),
+                created_by_id: "tester".to_string(),
+            },
+        );
+
+        assert!(
+            !spec
+                .artifacts
+                .required
+                .iter()
+                .any(|req| req.name == ArtifactName::Patchset),
+            "{:?}",
+            spec.artifacts.required
+        );
+    }
+
+    #[test]
+    fn test_resolve_analysis_only_medium_risk_has_no_default_security_or_release_artifacts() {
+        let draft = IntentDraft {
+            intent: DraftIntent {
+                summary: "Diagnose repository".to_string(),
+                problem_statement: "Summarize technical debt hotspots".to_string(),
+                change_type: ChangeType::Unknown,
+                objectives: vec![Objective {
+                    title: "Inventory key issues".to_string(),
+                    kind: ObjectiveKind::Analysis,
+                }],
+                in_scope: vec!["src".to_string()],
+                out_of_scope: vec![],
+                touch_hints: None,
+            },
+            acceptance: DraftAcceptance {
+                success_criteria: vec!["Findings are summarized".to_string()],
+                fast_checks: vec![],
+                integration_checks: vec![],
+                security_checks: vec![],
+                release_checks: vec![],
+            },
+            risk: DraftRisk {
+                rationale: "read-only analysis".to_string(),
+                factors: vec![],
+                level: Some(RiskLevel::Medium),
+            },
+        };
+
+        let spec = resolve_intentspec(
+            draft,
+            RiskLevel::Medium,
+            ResolveContext {
+                working_dir: ".".to_string(),
+                base_ref: "HEAD".to_string(),
+                created_by_id: "tester".to_string(),
+            },
+        );
+
+        assert!(
+            spec.artifacts.required.is_empty(),
+            "{:?}",
+            spec.artifacts.required
+        );
+        assert!(!spec.provenance.require_slsa_provenance);
+        assert!(!spec.provenance.require_sbom);
     }
 }

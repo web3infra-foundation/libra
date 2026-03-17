@@ -21,6 +21,8 @@ pub use error::{ToolError, ToolResult};
 pub use registry::{ToolHandler, ToolRegistry, ToolRegistryBuilder};
 pub use spec::{FunctionDefinition, FunctionParameters, ToolSpec, ToolSpecBuilder};
 
+pub use crate::internal::ai::sandbox::ToolRuntimeContext;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
     pub name: String,

@@ -75,8 +75,10 @@ impl StatusIndicator {
 
         let status_text = match self.status {
             AgentStatus::Thinking => "Thinking",
+            AgentStatus::Retrying => "Retrying",
             AgentStatus::ExecutingTool => "Executing tool",
             AgentStatus::AwaitingUserInput => "Awaiting input",
+            AgentStatus::AwaitingApproval => "Awaiting approval",
             AgentStatus::Idle | AgentStatus::AwaitingPostPlanChoice => return,
         };
 

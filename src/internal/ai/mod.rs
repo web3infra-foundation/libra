@@ -32,12 +32,15 @@ pub mod intent;
 pub mod intentspec;
 pub mod mcp;
 pub mod node_adapter;
+pub mod orchestrator;
 pub mod projection;
 pub mod prompt;
 pub mod providers;
+pub mod sandbox;
 pub mod session;
 pub mod tools;
 pub mod util;
+pub mod workflow_objects;
 
 pub use agent::{Agent, AgentBuilder, ChatAgent};
 pub use completion::{Chat, CompletionModel, Message, Prompt};

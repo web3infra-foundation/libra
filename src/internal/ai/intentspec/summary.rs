@@ -24,7 +24,7 @@ mod tests {
         ResolveContext,
         draft::{DraftAcceptance, DraftIntent, DraftRisk, IntentDraft},
         resolve_intentspec,
-        types::{ChangeType, RiskLevel},
+        types::{ChangeType, Objective, ObjectiveKind, RiskLevel},
     };
 
     #[test]
@@ -35,7 +35,10 @@ mod tests {
                     summary: "Fix bug".to_string(),
                     problem_statement: "Bug".to_string(),
                     change_type: ChangeType::Bugfix,
-                    objectives: vec!["fix".to_string()],
+                    objectives: vec![Objective {
+                        title: "fix".to_string(),
+                        kind: ObjectiveKind::Implementation,
+                    }],
                     in_scope: vec!["src".to_string()],
                     out_of_scope: vec![],
                     touch_hints: None,

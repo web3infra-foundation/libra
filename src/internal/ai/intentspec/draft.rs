@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::types::{ChangeType, CheckKind, RiskLevel, TouchHints};
+use super::types::{ChangeType, CheckKind, Objective, RiskLevel, TouchHints};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct IntentDraft {
@@ -16,7 +16,7 @@ pub struct DraftIntent {
     pub problem_statement: String,
     #[serde(rename = "changeType")]
     pub change_type: ChangeType,
-    pub objectives: Vec<String>,
+    pub objectives: Vec<Objective>,
     #[serde(rename = "inScope")]
     pub in_scope: Vec<String>,
     #[serde(rename = "outOfScope", default)]
@@ -27,6 +27,14 @@ pub struct DraftIntent {
         skip_serializing_if = "Option::is_none"
     )]
     pub touch_hints: Option<TouchHints>,
+}
+
+impl DraftIntent {
+    pub fn has_implementation_objectives(&self) -> bool {
+        self.objectives
+            .iter()
+            .any(|objective| objective.kind == super::types::ObjectiveKind::Implementation)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
