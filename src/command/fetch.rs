@@ -267,7 +267,7 @@ impl From<FetchError> for CliError {
 
 pub async fn execute(args: FetchArgs) {
     if let Err(err) = execute_safe(args).await {
-        eprintln!("{}", err.render());
+        err.print_stderr();
     }
 }
 
@@ -381,7 +381,7 @@ pub async fn fetch_repository(
     depth: Option<usize>,
 ) {
     if let Err(err) = fetch_repository_safe(remote_config, branch, single_branch, depth).await {
-        eprintln!("{}", CliError::from(err).render());
+        CliError::from(err).print_stderr();
     }
 }
 

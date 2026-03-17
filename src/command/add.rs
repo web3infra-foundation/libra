@@ -110,7 +110,7 @@ struct ValidatedPathspecs {
 
 pub async fn execute(args: AddArgs) {
     if let Err(err) = execute_safe(args).await {
-        eprintln!("{}", err.render());
+        err.print_stderr();
     }
 }
 

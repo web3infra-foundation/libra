@@ -88,7 +88,7 @@ pub struct BranchArgs {
 }
 pub async fn execute(args: BranchArgs) {
     if let Err(err) = execute_safe(args).await {
-        eprintln!("{}", err.render());
+        err.print_stderr();
     }
 }
 
@@ -129,7 +129,7 @@ pub async fn execute_safe(args: BranchArgs) -> CliResult<()> {
 
 pub async fn set_upstream(branch: &str, upstream: &str) {
     if let Err(err) = set_upstream_safe(branch, upstream).await {
-        eprintln!("{}", err.render());
+        err.print_stderr();
     }
 }
 
@@ -158,7 +158,7 @@ pub async fn set_upstream_safe(branch: &str, upstream: &str) -> CliResult<()> {
 
 pub async fn create_branch(new_branch: String, branch_or_commit: Option<String>) {
     if let Err(err) = create_branch_safe(new_branch, branch_or_commit).await {
-        eprintln!("{}", err.render());
+        err.print_stderr();
     }
 }
 

@@ -1,7 +1,7 @@
 //! CLI entry for Libra, defining clap subcommands, setting the hash algorithm from config,
 //! and dispatching each command handler.
 
-use std::env;
+use std::{env, io::Write};
 
 use clap::{
     Parser, Subcommand,
@@ -13,6 +13,13 @@ use crate::{
     command, utils,
     utils::error::{CliError, CliResult},
 };
+
+const ROOT_AFTER_HELP: &str = "\
+Help Topics:
+  error-codes  Print the stable CLI error code table (`libra help error-codes`)
+";
+
+const ERROR_CODES_HELP: &str = include_str!("../docs/error-codes.md");
 
 /// Reads the repository's configuration and sets the global hash kind.
 /// This must be called for any command that operates within an existing repository.
@@ -52,7 +59,8 @@ async fn set_local_hash_kind() -> CliResult<()> {
 #[derive(Parser, Debug)]
 #[command(
     about = "Libra: An AI native version control system for monorepo and trunk-based development.",
-    version = "0.1.0"
+    version = "0.1.0",
+    after_help = ROOT_AFTER_HELP
 )]
 struct Cli {
     #[command(subcommand)]
@@ -370,6 +378,33 @@ fn repo_not_found_error() -> CliError {
     CliError::repo_not_found()
 }
 
+fn is_error_codes_help_topic(argv: &[String]) -> bool {
+    let Some((index, _)) = find_subcommand_index(argv) else {
+        return false;
+    };
+    if !matches!(argv.get(index).map(String::as_str), Some("help")) {
+        return false;
+    }
+    if !matches!(
+        argv.get(index + 1).map(String::as_str),
+        Some("error-codes" | "errors")
+    ) {
+        return false;
+    }
+    index + 2 == argv.len()
+}
+
+fn print_error_codes_help() -> CliResult<()> {
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(ERROR_CODES_HELP.as_bytes())
+        .map_err(|e| CliError::fatal(format!("failed to write error code help: {e}")))?;
+    stdout
+        .flush()
+        .map_err(|e| CliError::fatal(format!("failed to flush error code help: {e}")))?;
+    Ok(())
+}
+
 fn is_top_level_unknown_command(argv: &[String], err: &clap::Error) -> Option<String> {
     let invalid = match err.get(ContextKind::InvalidSubcommand) {
         Some(ContextValue::String(cmd)) => cmd,
@@ -423,6 +458,9 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         None => env::args().collect::<Vec<_>>(),
     };
     let argv = rewrite_log_short_number_args(argv);
+    if is_error_codes_help_topic(&argv) {
+        return print_error_codes_help();
+    }
     let args = match Cli::try_parse_from(argv.clone()) {
         Ok(args) => args,
         Err(err) => match err.kind() {
@@ -465,7 +503,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::ClaudeSdk(args) => command::claude_sdk::execute(args)
             .await
             .map_err(|e| CliError::fatal(e.to_string()))?,
-        Commands::Code(args) => command::code::execute(args).await,
+        Commands::Code(args) => command::code::execute(args).await?,
         Commands::Add(args) => command::add::execute_safe(args).await?,
         Commands::Rm(args) => command::remove::execute_safe(args).await?,
         Commands::Restore(args) => command::restore::execute_safe(args).await?,
@@ -590,5 +628,28 @@ mod tests {
             msg.contains("Hint:") || msg.contains("similar"),
             "expected clap fuzzy-match suggestion, got: {msg}"
         );
+    }
+
+    #[test]
+    fn detects_help_error_codes_topic() {
+        assert!(is_error_codes_help_topic(&[
+            "libra".to_string(),
+            "help".to_string(),
+            "error-codes".to_string(),
+        ]));
+        assert!(is_error_codes_help_topic(&[
+            "libra".to_string(),
+            "help".to_string(),
+            "errors".to_string(),
+        ]));
+        assert!(!is_error_codes_help_topic(&[
+            "libra".to_string(),
+            "help".to_string(),
+            "status".to_string(),
+        ]));
+        assert!(!is_error_codes_help_topic(&[
+            "libra".to_string(),
+            "--help".to_string(),
+        ]));
     }
 }

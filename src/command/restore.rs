@@ -46,7 +46,7 @@ pub struct RestoreArgs {
 
 pub async fn execute(args: RestoreArgs) {
     if let Err(e) = execute_safe(args).await {
-        eprintln!("{}", e.render());
+        e.print_stderr();
     }
 }
 

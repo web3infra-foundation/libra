@@ -22,7 +22,7 @@ pub struct CleanArgs {
 
 pub async fn execute(args: CleanArgs) {
     if let Err(err) = execute_safe(args).await {
-        eprintln!("{}", err.render());
+        err.print_stderr();
     }
 }
 

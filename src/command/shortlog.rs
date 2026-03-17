@@ -49,14 +49,18 @@
 //! layer (it writes directly to the provided `Write`), while still
 //! aggregating per-author statistics in memory for predictable formatting.
 
-use std::{collections::HashMap, io::Write};
+use std::{
+    collections::HashMap,
+    fmt,
+    io::{self, Write},
+};
 
 use clap::Parser;
 use git_internal::internal::object::commit::Commit;
 
 use crate::{
     internal::{head::Head, log::date_parser::parse_date},
-    utils::error::{CliError, CliResult},
+    utils::error::{CliError, CliResult, StableErrorCode},
 };
 
 #[derive(Parser, Debug)]
@@ -105,19 +109,14 @@ impl AuthorStats {
     }
 }
 
-pub async fn execute_to(args: ShortlogArgs, writer: &mut impl Write) -> std::io::Result<()> {
-    if !crate::utils::util::check_repo_exist() {
-        return Ok(());
-    }
+pub async fn execute_to(args: ShortlogArgs, writer: &mut impl Write) -> CliResult<()> {
+    crate::utils::util::require_repo().map_err(|_| CliError::repo_not_found())?;
 
     // Validate date arguments before processing
     let since_ts = if let Some(ref since_str) = args.since {
         match parse_date(since_str) {
             Ok(ts) => Some(ts),
-            Err(e) => {
-                eprintln!("fatal: {}", e);
-                return Ok(());
-            }
+            Err(e) => return Err(CliError::fatal(e.to_string())),
         }
     } else {
         None
@@ -126,10 +125,7 @@ pub async fn execute_to(args: ShortlogArgs, writer: &mut impl Write) -> std::io:
     let until_ts = if let Some(ref until_str) = args.until {
         match parse_date(until_str) {
             Ok(ts) => Some(ts),
-            Err(e) => {
-                eprintln!("fatal: {}", e);
-                return Ok(());
-            }
+            Err(e) => return Err(CliError::fatal(e.to_string())),
         }
     } else {
         None
@@ -137,7 +133,7 @@ pub async fn execute_to(args: ShortlogArgs, writer: &mut impl Write) -> std::io:
 
     let commits = get_commits_for_shortlog(&args, since_ts, until_ts)
         .await
-        .map_err(|e| std::io::Error::other(e.message().to_string()))?;
+        .map_err(|e| CliError::fatal(e.message().to_string()))?;
 
     let mut author_map: HashMap<String, AuthorStats> = HashMap::new();
 
@@ -187,26 +183,29 @@ pub async fn execute_to(args: ShortlogArgs, writer: &mut impl Write) -> std::io:
 
     for (_key, stats) in authors {
         if args.email {
-            writeln!(
+            if !write_shortlog_line(
                 writer,
-                "{:>width$}  {} <{}>",
-                stats.count,
-                stats.name,
-                stats.email,
-                width = width
-            )?;
-        } else {
-            writeln!(
-                writer,
-                "{:>width$}  {}",
-                stats.count,
-                stats.name,
-                width = width
-            )?;
+                format_args!(
+                    "{:>width$}  {} <{}>",
+                    stats.count,
+                    stats.name,
+                    stats.email,
+                    width = width
+                ),
+            )? {
+                return Ok(());
+            }
+        } else if !write_shortlog_line(
+            writer,
+            format_args!("{:>width$}  {}", stats.count, stats.name, width = width),
+        )? {
+            return Ok(());
         }
         if !args.summary {
             for subject in &stats.subjects {
-                writeln!(writer, "      {}", subject)?;
+                if !write_shortlog_line(writer, format_args!("      {}", subject))? {
+                    return Ok(());
+                }
             }
         }
     }
@@ -214,9 +213,28 @@ pub async fn execute_to(args: ShortlogArgs, writer: &mut impl Write) -> std::io:
     Ok(())
 }
 
+fn write_shortlog_line(writer: &mut impl Write, args: fmt::Arguments<'_>) -> CliResult<bool> {
+    match writer.write_fmt(args) {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::BrokenPipe => return Ok(false),
+        Err(err) => return Err(shortlog_output_error(err)),
+    }
+
+    match writer.write_all(b"\n") {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == io::ErrorKind::BrokenPipe => Ok(false),
+        Err(err) => Err(shortlog_output_error(err)),
+    }
+}
+
+fn shortlog_output_error(err: io::Error) -> CliError {
+    CliError::fatal(format!("shortlog output error: {err}"))
+        .with_stable_code(StableErrorCode::IoWriteFailed)
+}
+
 pub async fn execute(args: ShortlogArgs) {
     if let Err(e) = execute_safe(args).await {
-        eprintln!("{}", e.render());
+        e.print_stderr();
     }
 }
 
@@ -224,12 +242,7 @@ pub async fn execute(args: ShortlogArgs) {
 /// errors and exiting. Summarises commit history by author, delegating to
 /// [`execute_to`] for formatted output.
 pub async fn execute_safe(args: ShortlogArgs) -> CliResult<()> {
-    crate::utils::util::require_repo().map_err(|_| CliError::repo_not_found())?;
-    match execute_to(args, &mut std::io::stdout()).await {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
-        Err(e) => Err(CliError::fatal(format!("shortlog output error: {e}"))),
-    }
+    execute_to(args, &mut std::io::stdout()).await
 }
 
 async fn get_commits_for_shortlog(
@@ -286,7 +299,10 @@ fn passes_filter(commit: &Commit, since_ts: Option<i64>, until_ts: Option<i64>) 
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+
     use super::*;
+    use crate::utils::error::StableErrorCode;
 
     #[test]
     fn test_parse_args() {
@@ -302,5 +318,46 @@ mod tests {
 
         let args = ShortlogArgs::parse_from(["shortlog", "--since", "2024-01-01"]);
         assert!(args.since.is_some());
+    }
+
+    #[test]
+    fn broken_pipe_writer_is_ignored() {
+        struct BrokenPipeWriter;
+
+        impl Write for BrokenPipeWriter {
+            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+                Err(io::Error::from(io::ErrorKind::BrokenPipe))
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut writer = BrokenPipeWriter;
+        assert!(
+            !write_shortlog_line(&mut writer, format_args!("alice")).unwrap(),
+            "BrokenPipe should terminate output quietly"
+        );
+    }
+
+    #[test]
+    fn non_broken_pipe_writer_error_is_structured() {
+        struct PermissionDeniedWriter;
+
+        impl Write for PermissionDeniedWriter {
+            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut writer = PermissionDeniedWriter;
+        let err = write_shortlog_line(&mut writer, format_args!("alice")).unwrap_err();
+        assert_eq!(err.stable_code(), StableErrorCode::IoWriteFailed);
+        assert!(err.message().contains("shortlog output error"));
     }
 }

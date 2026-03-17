@@ -14,7 +14,7 @@ use serial_test::serial;
 use tempfile::TempDir;
 use tokio::{process::Command as TokioCommand, time::timeout};
 
-use super::{create_committed_repo_via_cli, run_libra_command};
+use super::{create_committed_repo_via_cli, parse_cli_error_stderr, run_libra_command};
 
 fn libra_command(cwd: &std::path::Path) -> Command {
     let home = cwd.join(".libra-test-home");
@@ -98,9 +98,10 @@ fn test_push_cli_without_remote_returns_fatal_128() {
     let repo = create_committed_repo_via_cli();
 
     let output = run_libra_command(&["push"], repo.path());
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(report.error_code, "LBR-REPO-003");
     assert!(stderr.contains("fatal: no configured push destination"));
     assert!(stderr.contains("Hint:"));
 }

@@ -102,7 +102,7 @@ async fn test_commit_requires_configured_identity_in_strict_mode() {
 
 #[test]
 #[serial]
-fn test_commit_cli_without_identity_returns_fatal_128() {
+fn test_commit_cli_without_identity_returns_auth_exit_code() {
     let repo = tempdir().unwrap();
     init_repo_via_cli(repo.path());
 
@@ -114,14 +114,15 @@ fn test_commit_cli_without_identity_returns_fatal_128() {
     let output = run_libra_command(&["commit", "-m", "missing identity"], repo.path());
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(output.status.code(), Some(6));
     assert!(stderr.contains("fatal: author identity unknown"));
+    assert!(stderr.contains("Error-Code: LBR-AUTH-001"));
     assert!(stderr.contains("Hint: run 'libra config --global user.name"));
 }
 
 #[test]
 #[serial]
-fn test_commit_cli_use_config_only_returns_fatal_128() {
+fn test_commit_cli_use_config_only_returns_auth_exit_code() {
     let repo = tempdir().unwrap();
     init_repo_via_cli(repo.path());
 
@@ -136,8 +137,9 @@ fn test_commit_cli_use_config_only_returns_fatal_128() {
     let output = run_libra_command(&["commit", "-m", "missing identity"], repo.path());
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(output.status.code(), Some(6));
     assert!(stderr.contains("fatal: author identity unknown"));
+    assert!(stderr.contains("Error-Code: LBR-AUTH-001"));
     assert!(stderr.contains("Hint: run 'libra config --global user.name"));
 }
 

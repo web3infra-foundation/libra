@@ -604,7 +604,7 @@ pub struct Key {
 /// errors can be handled without terminating the process.
 pub async fn execute(args: ConfigArgs) {
     if let Err(e) = execute_safe(args).await {
-        eprintln!("{}", e.render());
+        e.print_stderr();
     }
 }
 

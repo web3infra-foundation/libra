@@ -1,11 +1,5 @@
 //! Runs blame for a file at a given commit by walking trees/diffs, attributing lines to commits, and streaming formatted output.
 
-#[cfg(unix)]
-use std::{
-    io::Write,
-    process::{Command, Stdio},
-};
-
 use chrono::DateTime;
 use clap::Parser;
 use git_internal::{
@@ -19,6 +13,7 @@ use crate::{
     utils::{
         error::{CliError, CliResult},
         object_ext::TreeExt,
+        pager::Pager,
         util,
     },
 };
@@ -48,7 +43,7 @@ struct LineBlame {
 
 pub async fn execute(args: BlameArgs) {
     if let Err(e) = execute_safe(args).await {
-        eprintln!("{}", e.render());
+        e.print_stderr();
     }
 }
 
@@ -189,36 +184,9 @@ pub async fn execute_safe(args: BlameArgs) -> CliResult<()> {
         ));
     }
 
-    #[cfg(unix)]
-    {
-        match Command::new("less")
-            .arg("-R") // Allow ANSI colors
-            .arg("-F") // Quit if output fits on one screen
-            .stdin(Stdio::piped())
-            .spawn()
-        {
-            Ok(mut child) => {
-                let write_result = if let Some(stdin) = child.stdin.as_mut() {
-                    stdin.write_all(output.as_bytes())
-                } else {
-                    Ok(())
-                };
-                if write_result.is_err() || child.wait().is_err() {
-                    // If writing to less or waiting for less fails, fallback to printing
-                    print!("{}", output);
-                }
-            }
-            Err(_) => {
-                // If spawning less fails, fallback to printing
-                print!("{}", output);
-            }
-        }
-    }
-
-    #[cfg(not(unix))]
-    {
-        print!("{}", output);
-    }
+    let mut pager = Pager::new()?;
+    pager.write_str(&output)?;
+    pager.finish()?;
     Ok(())
 }
 fn get_file_lines(commit: &Commit, file_path: &str) -> Result<Vec<String>, String> {

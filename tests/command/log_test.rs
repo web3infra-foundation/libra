@@ -8,7 +8,7 @@ use git_internal::{
     hash::ObjectHash,
     internal::object::{blob::Blob, commit::Commit, tree::Tree},
 };
-use libra::utils::{object_ext::TreeExt, util};
+use libra::utils::{object_ext::TreeExt, pager::LIBRA_PAGER_ENV, util};
 
 use super::*;
 
@@ -18,7 +18,7 @@ fn test_log_cli_outside_repository_returns_fatal_128() {
     let temp = tempdir().unwrap();
 
     let output = run_libra_command(&["log", "--oneline"], temp.path());
-    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(output.status.code(), Some(3));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("fatal: not a libra repository"),
@@ -33,13 +33,17 @@ fn test_log_cli_empty_repository_returns_fatal_128() {
     init_repo_via_cli(repo.path());
 
     let output = run_libra_command(&["log", "--oneline"], repo.path());
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(128));
-    assert!(!stderr.contains("thread 'main'"));
+    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(report.error_code, "LBR-REPO-003");
+    assert_eq!(
+        report.message,
+        "your current branch 'main' does not have any commits yet"
+    );
     assert_eq!(
         stderr,
-        "fatal: your current branch 'main' does not have any commits yet\n"
+        "fatal: your current branch 'main' does not have any commits yet\nError-Code: LBR-REPO-003"
     );
 }
 
@@ -307,17 +311,11 @@ async fn test_log_patch_no_pathspec() {
         // Set PATH and run
         let old_path = std::env::var("PATH").unwrap_or_default();
         let new_path = format!("{}:{}", bin_dir.display(), old_path);
-        unsafe {
-            std::env::set_var("PATH", &new_path);
-        }
+        let _path = test::ScopedEnvVar::set("PATH", &new_path);
+        let _pager = test::ScopedEnvVar::set(LIBRA_PAGER_ENV, "always");
 
         let args = LogArgs::try_parse_from(["libra", "--number", "2", "-p"]).unwrap();
         libra::command::log::execute(args).await;
-
-        unsafe {
-            // Restore PATH
-            std::env::set_var("PATH", old_path);
-        }
 
         let combined_out = std::fs::read_to_string(&out_file).unwrap_or_default();
         assert!(
@@ -401,16 +399,11 @@ async fn test_log_patch_with_pathspec() {
 
         let old_path = std::env::var("PATH").unwrap_or_default();
         let new_path = format!("{}:{}", bin_dir.display(), old_path);
-        unsafe {
-            std::env::set_var("PATH", &new_path);
-        }
+        let _path = test::ScopedEnvVar::set("PATH", &new_path);
+        let _pager = test::ScopedEnvVar::set(LIBRA_PAGER_ENV, "always");
 
         let args = LogArgs::try_parse_from(["libra", "-p", "A.txt"]).unwrap();
         libra::command::log::execute(args).await;
-
-        unsafe {
-            std::env::set_var("PATH", old_path);
-        }
 
         let out = std::fs::read_to_string(out_file).unwrap_or_default();
         assert!(

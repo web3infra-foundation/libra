@@ -30,7 +30,7 @@ use crate::{
     internal::{ai::history::HistoryManager, db, model::reference},
     utils::{
         client_storage::ClientStorage,
-        error::{CliError, CliResult},
+        error::{CliError, CliResult, exit_with_legacy_stderr},
         path,
         storage::local::LocalStorage,
         util,
@@ -122,6 +122,10 @@ const AI_OBJECT_TYPES: &[&str] = &[
 ];
 const TAG_REF_PREFIX: &str = "refs/tags/";
 
+fn cat_file_exit(message: impl Into<String>) -> ! {
+    exit_with_legacy_stderr(message)
+}
+
 pub async fn execute(args: CatFileArgs) {
     // ── AI modes (no positional object arg required) ────────────────────
     if args.ai_list_types {
@@ -144,10 +148,7 @@ pub async fn execute(args: CatFileArgs) {
     // ── Git modes (positional object arg required) ──────────────────────
     let object_ref = match args.object {
         Some(ref o) => o.as_str(),
-        None => {
-            eprintln!("fatal: <object> is required for Git object modes");
-            std::process::exit(129);
-        }
+        None => cat_file_exit("fatal: <object> is required for Git object modes"),
     };
 
     let storage = ClientStorage::init(path::objects());
@@ -160,10 +161,7 @@ pub async fn execute(args: CatFileArgs) {
 
     let obj_type = match storage.get_object_type(&hash) {
         Ok(t) => t,
-        Err(_) => {
-            eprintln!("fatal: Not a valid object name {}", object_ref);
-            std::process::exit(128);
-        }
+        Err(_) => cat_file_exit(format!("fatal: Not a valid object name {}", object_ref)),
     };
 
     if args.show_type {
@@ -173,8 +171,7 @@ pub async fn execute(args: CatFileArgs) {
     } else if args.pretty_print {
         pretty_print_object(&hash, obj_type);
     } else {
-        eprintln!("fatal: one of '-t', '-s', '-p', '-e' or an --ai* flag is required");
-        std::process::exit(129);
+        cat_file_exit("fatal: one of '-t', '-s', '-p', '-e' or an --ai* flag is required");
     }
 }
 
@@ -216,16 +213,14 @@ async fn resolve_object(object_ref: &str, storage: &ClientStorage) -> ObjectHash
     if results.len() == 1 {
         return results[0];
     } else if results.len() > 1 {
-        eprintln!(
+        cat_file_exit(format!(
             "fatal: ambiguous argument '{}': matched {} objects",
             object_ref,
             results.len()
-        );
-        std::process::exit(128);
+        ));
     }
 
-    eprintln!("fatal: Not a valid object name {}", object_ref);
-    std::process::exit(128);
+    cat_file_exit(format!("fatal: Not a valid object name {}", object_ref));
 }
 
 fn normalize_tag_ref_name(object_ref: &str) -> String {
@@ -251,7 +246,7 @@ async fn resolve_tag_object_ref(object_ref: &str) -> Option<ObjectHash> {
     ObjectHash::from_str(&target_hash).ok()
 }
 
-/// Exit with 0 if the object exists, 1 otherwise.
+/// Exit with 0 if the object exists, 1 otherwise, without printing diagnostics.
 fn check_object_exists(hash: &ObjectHash, storage: &ClientStorage) {
     if !storage.exist(hash) {
         std::process::exit(1);
@@ -262,10 +257,7 @@ fn check_object_exists(hash: &ObjectHash, storage: &ClientStorage) {
 fn print_object_size(storage: &ClientStorage, hash: &ObjectHash) {
     match storage.get(hash) {
         Ok(data) => println!("{}", data.len()),
-        Err(e) => {
-            eprintln!("fatal: unable to read object {}: {}", hash, e);
-            std::process::exit(128);
-        }
+        Err(e) => cat_file_exit(format!("fatal: unable to read object {}: {}", hash, e)),
     }
 }
 
@@ -276,10 +268,7 @@ fn pretty_print_object(hash: &ObjectHash, obj_type: ObjectType) {
         ObjectType::Tree => print_tree(hash),
         ObjectType::Commit => print_commit(hash),
         ObjectType::Tag => print_tag(hash),
-        _ => {
-            eprintln!("fatal: unsupported object type {:?}", obj_type);
-            std::process::exit(128);
-        }
+        _ => cat_file_exit(format!("fatal: unsupported object type {:?}", obj_type)),
     }
 }
 
@@ -287,17 +276,11 @@ fn pretty_print_object(hash: &ObjectHash, obj_type: ObjectType) {
 fn print_blob(hash: &ObjectHash) {
     let blob: Blob = match std::panic::catch_unwind(|| load_object(hash)) {
         Ok(Ok(b)) => b,
-        Ok(Err(e)) => {
-            eprintln!("fatal: could not read blob {}: {}", hash, e);
-            std::process::exit(128);
-        }
-        Err(_) => {
-            eprintln!(
-                "fatal: failed to load blob object {}: internal error (panic)",
-                hash
-            );
-            std::process::exit(128);
-        }
+        Ok(Err(e)) => cat_file_exit(format!("fatal: could not read blob {}: {}", hash, e)),
+        Err(_) => cat_file_exit(format!(
+            "fatal: failed to load blob object {}: internal error (panic)",
+            hash
+        )),
     };
     match String::from_utf8(blob.data.clone()) {
         Ok(text) => print!("{}", text),
@@ -307,8 +290,7 @@ fn print_blob(hash: &ObjectHash) {
             let stdout = std::io::stdout();
             let mut handle = stdout.lock();
             handle.write_all(&blob.data).unwrap_or_else(|e| {
-                eprintln!("fatal: write error: {}", e);
-                std::process::exit(128);
+                cat_file_exit(format!("fatal: write error: {}", e));
             });
         }
     }
@@ -318,17 +300,11 @@ fn print_blob(hash: &ObjectHash) {
 fn print_tree(hash: &ObjectHash) {
     let tree: Tree = match std::panic::catch_unwind(|| load_object(hash)) {
         Ok(Ok(t)) => t,
-        Ok(Err(e)) => {
-            eprintln!("fatal: could not read tree {}: {}", hash, e);
-            std::process::exit(128);
-        }
-        Err(_) => {
-            eprintln!(
-                "fatal: failed to load tree object {}: internal error (panic)",
-                hash
-            );
-            std::process::exit(128);
-        }
+        Ok(Err(e)) => cat_file_exit(format!("fatal: could not read tree {}: {}", hash, e)),
+        Err(_) => cat_file_exit(format!(
+            "fatal: failed to load tree object {}: internal error (panic)",
+            hash
+        )),
     };
     for item in &tree.tree_items {
         let type_name = match item.mode {
@@ -346,17 +322,11 @@ fn print_tree(hash: &ObjectHash) {
 fn print_commit(hash: &ObjectHash) {
     let commit: Commit = match std::panic::catch_unwind(|| load_object(hash)) {
         Ok(Ok(c)) => c,
-        Ok(Err(e)) => {
-            eprintln!("fatal: could not read commit {}: {}", hash, e);
-            std::process::exit(128);
-        }
-        Err(_) => {
-            eprintln!(
-                "fatal: failed to load commit object {}: internal error (panic)",
-                hash
-            );
-            std::process::exit(128);
-        }
+        Ok(Err(e)) => cat_file_exit(format!("fatal: could not read commit {}: {}", hash, e)),
+        Err(_) => cat_file_exit(format!(
+            "fatal: failed to load commit object {}: internal error (panic)",
+            hash
+        )),
     };
     println!("tree {}", commit.tree_id);
     for parent in &commit.parent_commit_ids {
@@ -386,18 +356,12 @@ fn print_tag(hash: &ObjectHash) {
     let storage = ClientStorage::init(path::objects());
     let data = match storage.get(hash) {
         Ok(d) => d,
-        Err(e) => {
-            eprintln!("fatal: could not read tag {}: {}", hash, e);
-            std::process::exit(128);
-        }
+        Err(e) => cat_file_exit(format!("fatal: could not read tag {}: {}", hash, e)),
     };
     // Tag objects are text-based, print raw content
     match String::from_utf8(data) {
         Ok(text) => print!("{}", text),
-        Err(_) => {
-            eprintln!("fatal: invalid tag object encoding for {}", hash);
-            std::process::exit(128);
-        }
+        Err(_) => cat_file_exit(format!("fatal: invalid tag object encoding for {}", hash)),
     }
 }
 
@@ -420,10 +384,10 @@ async fn ai_list_types() {
                 println!("{}\t({} objects)", type_name, objects.len());
             }
             Ok(_) => {}
-            Err(e) => {
-                eprintln!("fatal: failed to list {} objects: {}", type_name, e);
-                std::process::exit(128);
-            }
+            Err(e) => cat_file_exit(format!(
+                "fatal: failed to list {} objects: {}",
+                type_name, e
+            )),
         }
     }
 }
@@ -431,21 +395,20 @@ async fn ai_list_types() {
 /// List all AI objects of a specific type.
 async fn ai_list_objects(type_name: &str) {
     if !AI_OBJECT_TYPES.contains(&type_name) {
-        eprintln!(
+        cat_file_exit(format!(
             "fatal: unknown AI object type '{}'. Valid types: {}",
             type_name,
             AI_OBJECT_TYPES.join(", ")
-        );
-        std::process::exit(128);
+        ));
     }
 
     let hm = build_history_manager().await;
     let objects = match hm.list_objects(type_name).await {
         Ok(o) => o,
-        Err(e) => {
-            eprintln!("fatal: failed to list {} objects: {}", type_name, e);
-            std::process::exit(128);
-        }
+        Err(e) => cat_file_exit(format!(
+            "fatal: failed to list {} objects: {}",
+            type_name, e
+        )),
     };
 
     if objects.is_empty() {
@@ -473,28 +436,22 @@ async fn ai_pretty_print(uuid: &str) {
     let hm = build_history_manager().await;
     let (hash, type_name) = match hm.find_object_hash(uuid).await {
         Ok(Some(pair)) => pair,
-        Ok(None) => {
-            eprintln!("fatal: AI object not found: {}", redact_uuid(uuid));
-            std::process::exit(128);
-        }
-        Err(e) => {
-            eprintln!(
-                "fatal: failed to look up AI object {}: {}",
-                redact_uuid(uuid),
-                e
-            );
-            std::process::exit(128);
-        }
+        Ok(None) => cat_file_exit(format!("fatal: AI object not found: {}", redact_uuid(uuid))),
+        Err(e) => cat_file_exit(format!(
+            "fatal: failed to look up AI object {}: {}",
+            redact_uuid(uuid),
+            e
+        )),
     };
 
     // Read raw blob JSON
     let storage = ClientStorage::init(path::objects());
     let data = match storage.get(&hash) {
         Ok(d) => d,
-        Err(e) => {
-            eprintln!("fatal: could not read AI object blob {}: {}", hash, e);
-            std::process::exit(128);
-        }
+        Err(e) => cat_file_exit(format!(
+            "fatal: could not read AI object blob {}: {}",
+            hash, e
+        )),
     };
 
     // Try to pretty-print as JSON
@@ -729,18 +686,12 @@ async fn ai_show_type(uuid: &str) {
     let hm = build_history_manager().await;
     match hm.find_object_hash(uuid).await {
         Ok(Some((_hash, type_name))) => println!("{}", type_name),
-        Ok(None) => {
-            eprintln!("fatal: AI object not found: {}", redact_uuid(uuid));
-            std::process::exit(128);
-        }
-        Err(e) => {
-            eprintln!(
-                "fatal: failed to look up AI object {}: {}",
-                redact_uuid(uuid),
-                e
-            );
-            std::process::exit(128);
-        }
+        Ok(None) => cat_file_exit(format!("fatal: AI object not found: {}", redact_uuid(uuid))),
+        Err(e) => cat_file_exit(format!(
+            "fatal: failed to look up AI object {}: {}",
+            redact_uuid(uuid),
+            e
+        )),
     }
 }
 

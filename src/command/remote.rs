@@ -95,7 +95,7 @@ pub enum RemoteCmds {
 
 pub async fn execute(command: RemoteCmds) {
     if let Err(e) = execute_safe(command).await {
-        eprintln!("{}", e.render());
+        e.print_stderr();
     }
 }
 
@@ -123,7 +123,7 @@ pub async fn execute_safe(command: RemoteCmds) -> CliResult<()> {
         RemoteCmds::List => {
             let remotes = Config::all_remote_configs().await;
             for remote in remotes {
-                show_remote_verbose(&remote.name).await;
+                show_remote_verbose(&remote.name).await?;
             }
         }
         RemoteCmds::Show => {
@@ -218,7 +218,7 @@ pub async fn execute_safe(command: RemoteCmds) -> CliResult<()> {
     Ok(())
 }
 
-async fn show_remote_verbose(remote: &str) {
+async fn show_remote_verbose(remote: &str) -> CliResult<()> {
     // There can be multiple URLs for a remote, like Gitee & GitHub
     let urls = Config::get_all("remote", Some(remote), "url").await;
     match urls.first() {
@@ -226,13 +226,15 @@ async fn show_remote_verbose(remote: &str) {
             println!("{remote} {url} (fetch)");
         }
         None => {
-            // This is a display helper called in a loop; print inline rather than propagating.
-            eprintln!("fatal: no URL configured for remote '{remote}'");
+            return Err(CliError::fatal(format!(
+                "no URL configured for remote '{remote}'"
+            )));
         }
     }
     for url in urls {
         println!("{remote} {url} (push)");
     }
+    Ok(())
 }
 
 async fn prune_remote(name: &str, dry_run: bool) -> Result<(), CliError> {

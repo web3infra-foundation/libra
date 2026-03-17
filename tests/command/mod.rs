@@ -30,10 +30,27 @@ use libra::{
     },
     common_utils::format_commit_msg,
     internal::{branch::Branch, head::Head},
-    utils::test::{self, ChangeDirGuard},
+    utils::{
+        pager::LIBRA_TEST_ENV,
+        test::{self, ChangeDirGuard},
+    },
 };
+use serde::Deserialize;
 use serial_test::serial;
 use tempfile::tempdir;
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+pub(crate) struct CliErrorReport {
+    pub(crate) error_code: String,
+    pub(crate) category: String,
+    pub(crate) exit_code: i32,
+    pub(crate) severity: String,
+    pub(crate) message: String,
+    pub(crate) usage: Option<String>,
+    #[serde(default)]
+    pub(crate) hints: Vec<String>,
+}
 
 /// Run the Libra binary with an isolated HOME so host config never leaks into tests.
 fn run_libra_command(args: &[&str], cwd: &Path) -> Output {
@@ -51,6 +68,7 @@ fn run_libra_command(args: &[&str], cwd: &Path) -> Output {
         .env("XDG_CONFIG_HOME", &config_home)
         .env("LANG", "C")
         .env("LC_ALL", "C")
+        .env(LIBRA_TEST_ENV, "1")
         .output()
         .expect("failed to execute libra binary")
 }
@@ -62,6 +80,18 @@ fn assert_cli_success(output: &Output, context: &str) {
         "{context}: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// Split a structured CLI error into the human-readable block and the JSON report.
+fn parse_cli_error_stderr(stderr: &[u8]) -> (String, CliErrorReport) {
+    let stderr = String::from_utf8_lossy(stderr).to_string();
+    let trimmed = stderr.trim_end();
+    let (human, json_line) = trimmed
+        .rsplit_once('\n')
+        .expect("expected structured CLI stderr with trailing JSON report");
+    let report: CliErrorReport =
+        serde_json::from_str(json_line).expect("expected final stderr line to be JSON");
+    (human.to_string(), report)
 }
 
 /// Initialize a repository through the CLI to exercise the real process entrypoint.

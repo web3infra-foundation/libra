@@ -4,6 +4,8 @@ use std::{fs, path::Path, process::Command};
 
 use tempfile::tempdir;
 
+use super::parse_cli_error_stderr;
+
 fn run_libra(args: &[&str], cwd: &Path) -> std::process::Output {
     let home = cwd.join(".home");
     fs::create_dir_all(&home).unwrap();
@@ -88,13 +90,15 @@ fn create_remote_with_main(base: &Path) -> std::path::PathBuf {
 fn invalid_source_does_not_panic() {
     let temp = tempdir().unwrap();
     let output = run_libra(&["clone", "/"], temp.path());
-    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(output.status.code(), Some(3));
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
     assert_eq!(
         stderr,
-        "fatal: '/' does not appear to be a libra repository\n"
+        "fatal: '/' does not appear to be a libra repository\nError-Code: LBR-REPO-001"
     );
+    assert_eq!(report.error_code, "LBR-REPO-001");
+    assert_eq!(report.exit_code, 3);
     assert!(!stderr.contains("thread 'main' panicked"));
 }
 
@@ -115,10 +119,12 @@ fn missing_branch_keeps_preexisting_empty_destination() {
         ],
         temp.path(),
     );
-    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(output.status.code(), Some(3));
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
     assert!(stderr.contains("fatal: remote branch nope not found in upstream origin"));
+    assert!(stderr.contains("Error-Code: LBR-REPO-003"));
+    assert_eq!(report.error_code, "LBR-REPO-003");
     assert!(existing.is_dir());
     assert_eq!(fs::read_dir(&existing).unwrap().count(), 0);
 }

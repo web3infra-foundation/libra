@@ -68,7 +68,7 @@ pub struct PushArgs {
 
 pub async fn execute(args: PushArgs) {
     if let Err(err) = execute_safe(args).await {
-        eprintln!("{}", err.render());
+        err.print_stderr();
     }
 }
 

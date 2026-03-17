@@ -108,7 +108,7 @@ base64 = "0.22.1"
 pager = "0.16.1"
 
 [dev-dependencies]
-serial_test = "3.4.0"
+serial_test = { version = "3.4.0", default-features = false, features = ["async"] }
 tokio = { version = "1.50.0", features = [
     "rt-multi-thread",
     "rt",

@@ -79,9 +79,10 @@ fn test_fetch_cli_without_remote_is_noop_like_git() {
     let output = run_libra_command(&["fetch"], repo.path());
 
     // Without a configured remote, fetch should fail with a fatal error.
-    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(output.status.code(), Some(3));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("no configured remote for the current branch"));
+    assert!(stderr.contains("Error-Code: LBR-REPO-003"));
 }
 
 #[cfg(unix)]

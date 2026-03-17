@@ -31,7 +31,7 @@ pub struct CheckoutArgs {
 
 pub async fn execute(args: CheckoutArgs) {
     if let Err(e) = execute_safe(args).await {
-        eprintln!("{}", e.render());
+        e.print_stderr();
     }
 }
 

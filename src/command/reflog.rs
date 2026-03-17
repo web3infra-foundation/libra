@@ -1,9 +1,5 @@
 //! Reads and displays reflog entries for HEAD or branches with filtering and timestamp formatting options.
 
-#[cfg(unix)]
-use std::io::Write;
-#[cfg(unix)]
-use std::process::{Command, Stdio};
 use std::{
     collections::HashMap,
     fmt::{Display, Formatter},
@@ -13,7 +9,9 @@ use std::{
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use git_internal::{hash::ObjectHash, internal::object::commit::Commit};
-use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait, sqlx::types::chrono};
+use sea_orm::{
+    ConnectionTrait, DbBackend, DbErr, Statement, TransactionTrait, sqlx::types::chrono,
+};
 
 use crate::{
     command::load_object,
@@ -23,7 +21,10 @@ use crate::{
         model::reflog::Model,
         reflog::{HEAD, Reflog, ReflogError},
     },
-    utils::error::{CliError, CliResult},
+    utils::{
+        error::{CliError, CliResult},
+        pager::Pager,
+    },
 };
 
 #[derive(Parser, Debug)]
@@ -77,7 +78,7 @@ enum Subcommands {
 
 pub async fn execute(args: ReflogArgs) {
     if let Err(e) = execute_safe(args).await {
-        eprintln!("{}", e.render());
+        e.print_stderr();
     }
 }
 
@@ -170,30 +171,9 @@ async fn handle_show(ref_name: &str, options: ReflogShowOptions) -> CliResult<()
         stat: options.stat,
     };
 
-    #[cfg(unix)]
-    let mut less = Command::new("less") // create a pipe to less
-        .arg("-R") // raw control characters
-        .arg("-F")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::inherit())
-        .spawn()
-        .map_err(|e| CliError::fatal(format!("failed to start pager: {e}")))?;
-
-    #[cfg(unix)]
-    if let Some(ref mut stdin) = less.stdin {
-        writeln!(stdin, "{}", formatter)
-            .map_err(|e| CliError::fatal(format!("failed to write to pager: {e}")))?;
-    } else {
-        return Err(CliError::fatal("failed to capture pager stdin"));
-    }
-
-    #[cfg(unix)]
-    let _ = less
-        .wait()
-        .map_err(|e| CliError::fatal(format!("pager exited with error: {e}")))?;
-
-    #[cfg(not(unix))]
-    println!("{formatter}");
+    let mut pager = Pager::new()?;
+    pager.write_line(&formatter.to_string())?;
+    pager.finish()?;
 
     Ok(())
 }
@@ -282,7 +262,10 @@ async fn delete_single_group(group: &[(&str, usize)]) -> CliResult<()> {
                     .await?;
                     continue;
                 }
-                eprintln!("fatal: reflog entry `{ref_name}@{{{index}}}` not found")
+                return Err(DbErr::Custom(format!(
+                    "reflog entry `{ref_name}@{{{index}}}` not found"
+                ))
+                .into());
             }
 
             Ok::<_, ReflogError>(())

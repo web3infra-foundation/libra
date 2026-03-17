@@ -16,7 +16,7 @@ use crate::{
     internal::{head::Head, protocol::lfs_client::LFSClient},
     lfs_structs::LockListQuery,
     utils::{
-        error::{CliError, CliResult},
+        error::{CliError, CliResult, StableErrorCode, emit_legacy_stderr},
         lfs, path,
         path_ext::PathExt,
         util,
@@ -66,7 +66,7 @@ pub enum LfsCmds {
     },
 }
 
-pub async fn execute(cmd: LfsCmds) {
+pub async fn execute(cmd: LfsCmds) -> CliResult<()> {
     // TODO: attributes file should be created in current dir, NOT root dir
     let attr_path = path::attributes().to_string_or_panic();
     match cmd {
@@ -75,10 +75,13 @@ pub async fn execute(cmd: LfsCmds) {
             match pattern {
                 Some(pattern) => {
                     let pattern = convert_patterns_to_workdir(pattern); //
-                    add_lfs_patterns(&attr_path, pattern).unwrap();
+                    add_lfs_patterns(&attr_path, pattern).map_err(|e| {
+                        CliError::io(format!("failed to update '{attr_path}': {e}"))
+                    })?;
                 }
                 None => {
-                    let lfs_patterns = lfs::extract_lfs_patterns(&attr_path).unwrap();
+                    let lfs_patterns = lfs::extract_lfs_patterns(&attr_path)
+                        .map_err(|e| CliError::io(format!("failed to read '{attr_path}': {e}")))?;
                     if !lfs_patterns.is_empty() {
                         println!("Listing tracked patterns");
                         for p in lfs_patterns {
@@ -91,10 +94,11 @@ pub async fn execute(cmd: LfsCmds) {
         LfsCmds::Untrack { path } => {
             // only remove totally same pattern with path ?
             let path = convert_patterns_to_workdir(path); //
-            untrack_lfs_patterns(&attr_path, path).unwrap();
+            untrack_lfs_patterns(&attr_path, path)
+                .map_err(|e| CliError::io(format!("failed to update '{attr_path}': {e}")))?;
         }
         LfsCmds::Locks { id, path, limit } => {
-            let refspec = current_refspec().await.unwrap();
+            let refspec = current_refspec_or_err().await?;
             tracing::debug!("refspec: {}", refspec);
             let query = LockListQuery {
                 id: id.unwrap_or_default(),
@@ -119,11 +123,13 @@ pub async fn execute(cmd: LfsCmds) {
         LfsCmds::Lock { path } => {
             // Only check existence
             if !Path::new(&path).exists() {
-                eprintln!("fatal: pathspec '{path}' did not match any files");
-                return;
+                return Err(
+                    CliError::fatal(format!("pathspec '{path}' did not match any files"))
+                        .with_stable_code(StableErrorCode::CliInvalidTarget),
+                );
             }
 
-            let refspec = current_refspec().await.unwrap();
+            let refspec = current_refspec_or_err().await?;
             let code = LFSClient::get()
                 .await
                 .lock(path.clone(), refspec.clone())
@@ -131,23 +137,35 @@ pub async fn execute(cmd: LfsCmds) {
             if code.is_success() {
                 println!("Locked {path}");
             } else if code == StatusCode::FORBIDDEN {
-                eprintln!("Forbidden: You must have push access to create a lock");
+                return Err(
+                    CliError::fatal("You must have push access to create a lock")
+                        .with_stable_code(StableErrorCode::AuthPermissionDenied),
+                );
             } else if code == StatusCode::CONFLICT {
-                eprintln!("Conflict: already created lock");
+                return Err(CliError::conflict("lock already exists")
+                    .with_stable_code(StableErrorCode::ConflictOperationBlocked));
+            } else {
+                return Err(CliError::network(format!(
+                    "LFS lock failed with status {}",
+                    code.as_u16()
+                ))
+                .with_detail("status", code.as_u16()));
             }
         }
         LfsCmds::Unlock { path, force, id } => {
             if !force {
                 if !Path::new(&path).exists() {
-                    eprintln!("fatal: pathspec '{path}' did not match any files");
-                    return;
+                    return Err(CliError::fatal(format!(
+                        "pathspec '{path}' did not match any files"
+                    ))
+                    .with_stable_code(StableErrorCode::CliInvalidTarget));
                 }
                 if !status::is_clean().await {
-                    eprintln!("fatal: working tree not clean");
-                    return;
+                    return Err(CliError::conflict("working tree not clean")
+                        .with_stable_code(StableErrorCode::ConflictOperationBlocked));
                 }
             }
-            let refspec = current_refspec().await.unwrap();
+            let refspec = current_refspec_or_err().await?;
             let id = match id {
                 None => {
                     // get id by path
@@ -163,8 +181,8 @@ pub async fn execute(cmd: LfsCmds) {
                         .await
                         .locks;
                     if locks.is_empty() {
-                        eprintln!("fatal: no lock found for path '{path}'");
-                        return;
+                        return Err(CliError::fatal(format!("no lock found for path '{path}'"))
+                            .with_stable_code(StableErrorCode::RepoStateInvalid));
                     }
                     locks[0].id.clone()
                 }
@@ -177,7 +195,14 @@ pub async fn execute(cmd: LfsCmds) {
             if code.is_success() {
                 println!("Unlocked {path}");
             } else if code == StatusCode::FORBIDDEN {
-                eprintln!("Forbidden: You must have push access to unlock");
+                return Err(CliError::fatal("You must have push access to unlock")
+                    .with_stable_code(StableErrorCode::AuthPermissionDenied));
+            } else {
+                return Err(CliError::network(format!(
+                    "LFS unlock failed with status {}",
+                    code.as_u16()
+                ))
+                .with_detail("status", code.as_u16()));
             }
         }
         LfsCmds::LsFiles {
@@ -186,13 +211,16 @@ pub async fn execute(cmd: LfsCmds) {
             name_only,
         } => {
             let idx_file = path::index();
-            let index = Index::load(&idx_file).unwrap();
+            let index = Index::load(&idx_file)
+                .map_err(|e| CliError::io(format!("failed to load index: {e}")))?;
             let entries = index.tracked_entries(0);
             let storage = util::objects_storage();
             for entry in entries {
                 let path_abs = util::workdir_to_absolute(&entry.name);
                 if lfs::is_lfs_tracked(&path_abs) {
-                    let data = storage.get(&entry.hash).unwrap();
+                    let data = storage.get(&entry.hash).map_err(|e| {
+                        CliError::io(format!("failed to read blob {}: {e}", entry.hash))
+                    })?;
                     if let Some((oid, lfs_size)) = lfs::parse_pointer_data(&data) {
                         let is_pointer = lfs::parse_pointer_file(&path_abs).is_ok();
                         // An asterisk (*) after the OID indicates a full object, a minus (-) indicates an LFS pointer.
@@ -219,29 +247,29 @@ pub async fn execute(cmd: LfsCmds) {
             }
         }
     }
+
+    Ok(())
 }
 
-/// Thin wrapper for CLI dispatch. Internal errors are still handled via `eprintln!`.
-///
-/// # Known limitations
-///
-/// `execute()` handles errors internally with `eprintln!` and never propagates
-/// them, so this wrapper always returns `Ok(())` even when the command fails.
-// TODO: refactor execute() to return CliResult so errors propagate to callers.
 pub async fn execute_safe(cmd: LfsCmds) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
-    execute(cmd).await;
-    Ok(())
+    execute(cmd).await
 }
 
 pub(crate) async fn current_refspec() -> Option<String> {
     match Head::current().await {
         Head::Branch(name) => Some(format!("refs/heads/{name}")),
         Head::Detached(_) => {
-            println!("fatal: HEAD is detached");
+            emit_legacy_stderr("fatal: HEAD is detached");
             None
         }
     }
+}
+
+async fn current_refspec_or_err() -> CliResult<String> {
+    current_refspec().await.ok_or_else(|| {
+        CliError::fatal("HEAD is detached").with_stable_code(StableErrorCode::RepoStateInvalid)
+    })
 }
 
 /// temp

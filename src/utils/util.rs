@@ -157,7 +157,9 @@ pub fn require_repo() -> io::Result<()> {
 /// Legacy repository check that still prints for commands not yet migrated.
 pub fn check_repo_exist() -> bool {
     if require_repo().is_err() {
-        eprintln!("fatal: not a libra repository (or any of the parent directories): .libra");
+        crate::utils::error::emit_legacy_stderr(
+            "fatal: not a libra repository (or any of the parent directories): .libra",
+        );
         return false;
     }
     true

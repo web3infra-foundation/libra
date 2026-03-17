@@ -86,41 +86,31 @@ pub struct StatusArgs {
 }
 
 /// Execute cloud command
-pub async fn execute(args: CloudArgs) {
+pub async fn execute(args: CloudArgs) -> CliResult<()> {
     match args.command {
-        CloudCommand::Sync(sync_args) => {
-            if let Err(e) = execute_sync(sync_args).await {
-                cli_error!(e, "fatal: sync failed");
-                std::process::exit(1);
-            }
-        }
-        CloudCommand::Restore(restore_args) => {
-            if let Err(e) = execute_restore(restore_args).await {
-                cli_error!(e, "fatal: restore failed");
-                std::process::exit(1);
-            }
-        }
-        CloudCommand::Status(status_args) => {
-            if let Err(e) = execute_status(status_args).await {
-                cli_error!(e, "fatal: status check failed");
-                std::process::exit(1);
-            }
-        }
+        CloudCommand::Sync(sync_args) => execute_sync(sync_args)
+            .await
+            .map_err(|e| cloud_cli_error("sync", e))?,
+        CloudCommand::Restore(restore_args) => execute_restore(restore_args)
+            .await
+            .map_err(|e| cloud_cli_error("restore", e))?,
+        CloudCommand::Status(status_args) => execute_status(status_args)
+            .await
+            .map_err(|e| cloud_cli_error("status", e))?,
     }
+
+    Ok(())
 }
 
-/// Thin wrapper for CLI dispatch. Internal errors are still handled via
-/// `eprintln!` + `process::exit`.
-///
-/// # Known limitations
-///
-/// `execute()` handles errors internally and never propagates them, so this
-/// wrapper always returns `Ok(())` even when the cloud command fails.
-// TODO: refactor execute() to return CliResult so errors propagate to callers.
 pub async fn execute_safe(args: CloudArgs) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
-    execute(args).await;
-    Ok(())
+    execute(args).await
+}
+
+fn cloud_cli_error(operation: &str, error: String) -> CliError {
+    CliError::fatal(format!("{operation} failed: {error}"))
+        .with_detail("operation", operation)
+        .with_detail("component", "cloud")
 }
 
 /// Execute sync command - uploads objects to R2, indexes to D1, and registers project name

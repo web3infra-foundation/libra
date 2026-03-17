@@ -41,7 +41,7 @@ use crate::{
 
 pub async fn execute(stash_cmd: Stash) {
     if let Err(e) = execute_safe(stash_cmd).await {
-        eprintln!("{}", e.render());
+        e.print_stderr();
     }
 }
 

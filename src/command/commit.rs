@@ -207,7 +207,8 @@ fn missing_identity_error(name_missing: bool, email_missing: bool) -> CliError {
 
 fn classify_commit_error(message: String) -> CliError {
     if message == "nothing to commit, working tree clean" {
-        return CliError::failure(message);
+        return CliError::failure(message)
+            .with_stable_code(crate::utils::error::StableErrorCode::RepoStateInvalid);
     }
     if let Some(message) = message.strip_prefix("fatal: ") {
         return CliError::fatal(message);
@@ -566,7 +567,7 @@ async fn execute_impl(args: CommitArgs) -> Result<(), CommitExecError> {
 
 pub async fn execute(args: CommitArgs) {
     if let Err(error) = execute_safe(args).await {
-        eprintln!("{}", error.render());
+        error.print_stderr();
     }
 }
 
@@ -854,36 +855,47 @@ mod test {
         let err = classify_commit_error("nothing to commit, working tree clean".to_string());
         assert_eq!(
             err.exit_code(),
-            1,
-            "nothing-to-commit is a non-fatal failure"
+            3,
+            "nothing-to-commit should be classified as repository state"
         );
         assert!(
             err.message().contains("nothing to commit"),
             "message should be preserved: {}",
             err.message()
         );
+        assert_eq!(err.stable_code().as_str(), "LBR-REPO-003");
     }
 
     #[test]
     fn test_classify_commit_error_fatal_prefix() {
         let err = classify_commit_error("fatal: could not read tree".to_string());
-        assert_eq!(err.exit_code(), 128, "fatal prefix should map to exit 128");
+        assert_eq!(
+            err.exit_code(),
+            7,
+            "fatal read errors should map to IO exit code"
+        );
         assert!(
             err.message().contains("could not read tree"),
             "message should strip prefix: {}",
             err.message()
         );
+        assert_eq!(err.stable_code().as_str(), "LBR-IO-001");
     }
 
     #[test]
     fn test_classify_commit_error_error_prefix() {
         let err = classify_commit_error("error: pathspec 'x' did not match any file".to_string());
-        assert_eq!(err.exit_code(), 1, "error prefix should map to exit 1");
+        assert_eq!(
+            err.exit_code(),
+            2,
+            "pathspec failures should map to usage exit code"
+        );
         assert!(
             err.message().contains("pathspec"),
             "message should strip prefix: {}",
             err.message()
         );
+        assert_eq!(err.stable_code().as_str(), "LBR-CLI-003");
     }
 
     #[test]
@@ -891,9 +903,10 @@ mod test {
         let err = classify_commit_error("some unexpected message".to_string());
         assert_eq!(
             err.exit_code(),
-            128,
-            "unknown messages should default to fatal (128)"
+            8,
+            "unknown messages should default to internal failure"
         );
+        assert_eq!(err.stable_code().as_str(), "LBR-INTERNAL-001");
     }
 
     #[test]

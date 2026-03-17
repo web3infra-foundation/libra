@@ -23,7 +23,7 @@ lazy_static! {
 
 pub async fn execute(args: OpenArgs) {
     if let Err(e) = execute_safe(args).await {
-        eprintln!("{}", e.render());
+        e.print_stderr();
     }
 }
 

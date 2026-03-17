@@ -15,7 +15,6 @@ use clap::{Parser, ValueEnum};
 use tokio::sync::oneshot;
 use url::Url;
 
-use crate::cli_error;
 // use uuid::Uuid;
 use crate::internal::{
     ai::{
@@ -44,6 +43,10 @@ use crate::internal::{
         },
     },
     tui::{App, AppConfig, Tui, tui_init, tui_restore},
+};
+use crate::{
+    cli_error,
+    utils::error::{CliError, CliResult, StableErrorCode},
 };
 
 const DEFAULT_WEB_PORT: u16 = 3000;
@@ -157,11 +160,8 @@ pub struct CodeArgs {
     pub api_base: Option<String>,
 }
 
-pub async fn execute(args: CodeArgs) {
-    if let Err(err) = validate_mode_args(&args) {
-        eprintln!("error: {err}");
-        return;
-    }
+pub async fn execute(args: CodeArgs) -> CliResult<()> {
+    validate_mode_args(&args).map_err(CliError::command_usage)?;
     if args.stdio {
         execute_stdio().await
     } else if args.web_only {
@@ -286,12 +286,14 @@ async fn start_web_server(host: &str, port: u16) -> anyhow::Result<WebServerHand
     })
 }
 
-async fn execute_web_only(args: CodeArgs) {
+async fn execute_web_only(args: CodeArgs) -> CliResult<()> {
     let web_handle = match start_web_server(&args.host, args.port).await {
         Ok(handle) => handle,
         Err(err) => {
-            cli_error!(err, "fatal: failed to start web server");
-            return;
+            return Err(
+                CliError::network(format!("failed to start web server: {err}"))
+                    .with_detail("component", "web_server"),
+            );
         }
     };
     println!("Libra Code server running at http://{}", web_handle.addr);
@@ -309,18 +311,21 @@ async fn execute_web_only(args: CodeArgs) {
             handle
         }
         Err(err) => {
-            cli_error!(err, "fatal: failed to start MCP server");
             web_handle.shutdown().await;
-            return;
+            return Err(
+                CliError::network(format!("failed to start MCP server: {err}"))
+                    .with_detail("component", "mcp_server"),
+            );
         }
     };
 
     let _ = tokio::signal::ctrl_c().await;
     web_handle.shutdown().await;
     mcp_handle.shutdown().await;
+    Ok(())
 }
 
-async fn execute_tui(args: CodeArgs) {
+async fn execute_tui(args: CodeArgs) -> CliResult<()> {
     // Use repository working directory to ensure correct initialization of .libra resources.
     let working_dir = crate::utils::util::working_dir();
 
@@ -335,15 +340,15 @@ async fn execute_tui(args: CodeArgs) {
         match Url::parse(base_url) {
             Ok(u) if u.scheme() == "http" || u.scheme() == "https" => {}
             Ok(u) => {
-                eprintln!(
-                    "error: --api-base must use http or https (got {})",
+                return Err(CliError::command_usage(format!(
+                    "--api-base must use http or https (got {})",
                     u.scheme()
-                );
-                return;
+                )));
             }
             Err(e) => {
-                eprintln!("error: --api-base is not a valid URL: {e}");
-                return;
+                return Err(CliError::command_usage(format!(
+                    "--api-base is not a valid URL: {e}"
+                )));
             }
         }
     }
@@ -403,62 +408,47 @@ async fn execute_tui(args: CodeArgs) {
         CodeProvider::Gemini => {
             let client = match GeminiClient::from_env() {
                 Ok(client) => client,
-                Err(_) => {
-                    eprintln!("error: GEMINI_API_KEY is not set");
-                    return;
-                }
+                Err(_) => return Err(CliError::auth("GEMINI_API_KEY is not set")),
             };
             let model_name = args.model.unwrap_or_else(|| GEMINI_2_5_FLASH.to_string());
             let model = client.completion_model(&model_name);
-            run_tui_with_model(model, launch_config, model_name, provider_name).await;
+            run_tui_with_model(model, launch_config, model_name, provider_name).await?;
         }
         CodeProvider::Openai => {
             let client = match OpenAIClient::from_env() {
                 Ok(client) => client,
-                Err(_) => {
-                    eprintln!("error: OPENAI_API_KEY is not set");
-                    return;
-                }
+                Err(_) => return Err(CliError::auth("OPENAI_API_KEY is not set")),
             };
             let model_name = args.model.unwrap_or_else(|| GPT_4O_MINI.to_string());
             let model = client.completion_model(&model_name);
-            run_tui_with_model(model, launch_config, model_name, provider_name).await;
+            run_tui_with_model(model, launch_config, model_name, provider_name).await?;
         }
         CodeProvider::Anthropic => {
             let client = match AnthropicClient::from_env() {
                 Ok(client) => client,
-                Err(_) => {
-                    eprintln!("error: ANTHROPIC_API_KEY is not set");
-                    return;
-                }
+                Err(_) => return Err(CliError::auth("ANTHROPIC_API_KEY is not set")),
             };
             let model_name = args.model.unwrap_or_else(|| CLAUDE_3_5_SONNET.to_string());
             let model = client.completion_model(&model_name);
-            run_tui_with_model(model, launch_config, model_name, provider_name).await;
+            run_tui_with_model(model, launch_config, model_name, provider_name).await?;
         }
         CodeProvider::Deepseek => {
             let client = match DeepSeekClient::from_env() {
                 Ok(client) => client,
-                Err(_) => {
-                    eprintln!("error: DEEPSEEK_API_KEY is not set");
-                    return;
-                }
+                Err(_) => return Err(CliError::auth("DEEPSEEK_API_KEY is not set")),
             };
             let model_name = args.model.unwrap_or_else(|| "deepseek-chat".to_string());
             let model = client.completion_model(&model_name);
-            run_tui_with_model(model, launch_config, model_name, provider_name).await;
+            run_tui_with_model(model, launch_config, model_name, provider_name).await?;
         }
         CodeProvider::Zhipu => {
             let client = match ZhipuClient::from_env() {
                 Ok(client) => client,
-                Err(_) => {
-                    eprintln!("error: ZHIPU_API_KEY is not set");
-                    return;
-                }
+                Err(_) => return Err(CliError::auth("ZHIPU_API_KEY is not set")),
             };
             let model_name = args.model.unwrap_or_else(|| GLM_5.to_string());
             let model = client.completion_model(&model_name);
-            run_tui_with_model(model, launch_config, model_name, provider_name).await;
+            run_tui_with_model(model, launch_config, model_name, provider_name).await?;
         }
         CodeProvider::Ollama => {
             let client = if let Some(base_url) = &args.api_base {
@@ -469,22 +459,18 @@ async fn execute_tui(args: CodeArgs) {
             let model_name = match args.model {
                 Some(m) => m,
                 None => {
-                    eprintln!(
-                        "error: --model is required when using --provider ollama (e.g. --model llama3.2)"
-                    );
-                    return;
+                    return Err(CliError::command_usage(
+                        "--model is required when using --provider ollama (e.g. --model llama3.2)",
+                    ));
                 }
             };
             let model = client.completion_model(&model_name);
-            run_tui_with_model(model, launch_config, model_name, provider_name).await;
+            run_tui_with_model(model, launch_config, model_name, provider_name).await?;
         }
         CodeProvider::Codex => {
             let ws_client = match crate::internal::ai::providers::codex::Client::from_env() {
                 Ok(c) => c,
-                Err(_) => {
-                    eprintln!("error: OPENAI_API_KEY is not set");
-                    return;
-                }
+                Err(_) => return Err(CliError::auth("OPENAI_API_KEY is not set")),
             };
             let model_name = args.model.unwrap_or_else(|| CODEX_01.to_string());
             let mut model = crate::internal::ai::providers::codex::Model::new(
@@ -493,12 +479,17 @@ async fn execute_tui(args: CodeArgs) {
                 Some(launch_config.mcp_server.clone()),
             );
             if let Err(e) = model.connect().await {
-                eprintln!("error: Failed to connect to Codex WebSocket: {}", e);
-                return;
+                return Err(CliError::network(format!(
+                    "failed to connect to Codex WebSocket: {}",
+                    e
+                ))
+                .with_detail("provider", "codex"));
             }
-            run_tui_with_model(model, launch_config, model_name, provider_name).await;
+            run_tui_with_model(model, launch_config, model_name, provider_name).await?;
         }
     }
+
+    Ok(())
 }
 
 struct TuiLaunchConfig {
@@ -522,7 +513,8 @@ async fn run_tui_with_model<M>(
     params: TuiLaunchConfig,
     model_name: String,
     provider_name: String,
-) where
+) -> CliResult<()>
+where
     M: crate::internal::ai::completion::CompletionModel + 'static,
 {
     let registry = params.registry;
@@ -564,10 +556,7 @@ async fn run_tui_with_model<M>(
     // Initialize terminal
     let terminal = match tui_init() {
         Ok(t) => t,
-        Err(e) => {
-            cli_error!(e, "fatal: failed to initialize terminal");
-            return;
-        }
+        Err(e) => return Err(CliError::io(format!("failed to initialize terminal: {e}"))),
     };
 
     // Ensure terminal is restored on exit
@@ -645,12 +634,12 @@ async fn run_tui_with_model<M>(
     match app.run().await {
         Ok(exit_info) => {
             if let crate::internal::tui::ExitReason::Fatal(msg) = exit_info.reason {
-                eprintln!("fatal: {}", msg);
+                return Err(
+                    CliError::fatal(msg).with_stable_code(StableErrorCode::InternalInvariant)
+                );
             }
         }
-        Err(e) => {
-            cli_error!(e, "fatal: TUI exited unexpectedly");
-        }
+        Err(e) => return Err(CliError::internal(format!("TUI exited unexpectedly: {e}"))),
     }
 
     if let Some(handle) = web_handle {
@@ -659,6 +648,8 @@ async fn run_tui_with_model<M>(
     if let Some(handle) = mcp_handle {
         handle.shutdown().await;
     }
+
+    Ok(())
 }
 
 use hyper_util::{
@@ -803,7 +794,7 @@ fn resolve_storage_root(working_dir: &std::path::Path) -> std::path::PathBuf {
         .unwrap_or_else(|_| working_dir.join(".libra"))
 }
 
-async fn execute_stdio() {
+async fn execute_stdio() -> CliResult<()> {
     // Use repository working directory to ensure correct initialization of .libra resources.
     let working_dir = crate::utils::util::working_dir();
 
@@ -820,13 +811,17 @@ async fn execute_stdio() {
     match serve_server(mcp_server, transport).await {
         Ok(running) => {
             if let Err(e) = running.waiting().await {
-                eprintln!("MCP Stdio server error: {}", e);
+                return Err(CliError::internal(format!("MCP Stdio server error: {}", e)));
             }
         }
         Err(e) => {
-            cli_error!(e, "fatal: failed to start MCP Stdio server");
+            return Err(CliError::network(format!(
+                "failed to start MCP Stdio server: {e}"
+            )));
         }
     }
+
+    Ok(())
 }
 
 fn validate_mode_args(args: &CodeArgs) -> Result<(), String> {

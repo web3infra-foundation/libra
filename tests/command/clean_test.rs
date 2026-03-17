@@ -67,9 +67,10 @@ async fn test_clean_requires_flag() {
         .output()
         .expect("failed to execute `libra clean`");
 
-    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(output.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("fatal: clean requires -f or -n"));
+    assert!(stderr.contains("Error-Code: LBR-CLI-002"));
     assert!(stderr.contains("Hint:"));
 
     assert!(std::path::Path::new("untracked.txt").exists());
@@ -243,9 +244,10 @@ async fn test_clean_force_with_corrupted_index_returns_fatal_128() {
         .output()
         .expect("failed to execute `libra clean`");
 
-    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(output.status.code(), Some(7));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("fatal: failed to load index"));
+    assert!(stderr.contains("Error-Code: LBR-IO-001"));
     assert!(std::path::Path::new("untracked.txt").exists());
 }
 
@@ -344,7 +346,7 @@ async fn test_clean_force_does_not_follow_symlink_dirs() {
 #[tokio::test]
 #[serial]
 /// Tests clean reports a fatal error when deletion is denied.
-async fn test_clean_force_permission_error_returns_fatal_128() {
+async fn test_clean_force_permission_error_returns_io_exit_code() {
     let test_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(test_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(test_dir.path());
@@ -363,9 +365,10 @@ async fn test_clean_force_permission_error_returns_fatal_128() {
         .output()
         .expect("failed to execute `libra clean`");
 
-    assert_eq!(output.status.code(), Some(128));
+    assert_eq!(output.status.code(), Some(7));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("fatal: failed to remove"));
+    assert!(stderr.contains("Error-Code: LBR-IO-002"));
     assert!(std::path::Path::new("protected/untracked.txt").exists());
 
     let mut perms = fs::metadata("protected").unwrap().permissions();

@@ -45,7 +45,7 @@ pub struct SwitchArgs {
 
 pub async fn execute(args: SwitchArgs) {
     if let Err(err) = execute_safe(args).await {
-        eprintln!("{}", err.render());
+        err.print_stderr();
     }
 }
 

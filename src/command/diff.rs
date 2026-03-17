@@ -1,7 +1,5 @@
 //! Provides diff command logic comparing commits, the index, and the working tree with algorithm selection, pathspec filtering, and optional file output.
 
-#[cfg(unix)]
-use std::process::{Command, Stdio};
 use std::{
     fmt,
     io::{self, IsTerminal, Write},
@@ -29,6 +27,7 @@ use crate::{
         error::{CliError, CliResult},
         ignore::{self, IgnorePolicy},
         object_ext::TreeExt,
+        pager::Pager,
         path, util,
         util::to_workdir_path,
     },
@@ -172,25 +171,15 @@ pub async fn execute(args: DiffArgs) {
             } else {
                 results.join("")
             };
-            if io::stdout().is_terminal() {
-                #[cfg(unix)]
-                {
-                    let mut child = Command::new("less")
-                        .arg("-R")
-                        .arg("-F")
-                        .stdin(Stdio::piped())
-                        .spawn()
-                        .expect("failed to execute process");
-                    let stdin = child.stdin.as_mut().unwrap();
-                    stdin.write_all(output.as_bytes()).unwrap();
-                    child.wait().unwrap();
+            let mut pager = match Pager::new() {
+                Ok(pager) => pager,
+                Err(err) => {
+                    err.print_stderr();
+                    return;
                 }
-                #[cfg(not(unix))]
-                {
-                    io::stdout().write_all(output.as_bytes()).unwrap();
-                }
-            } else {
-                io::stdout().write_all(output.as_bytes()).unwrap();
+            };
+            if let Err(err) = pager.write_str(&output).and_then(|_| pager.finish()) {
+                err.print_stderr();
             }
         }
     }

@@ -202,7 +202,7 @@ pub struct InitArgs {
 /// Execute the init function
 pub async fn execute(args: InitArgs) {
     if let Err(e) = execute_safe(args).await {
-        eprintln!("{}", e.render());
+        e.print_stderr();
     }
 }
 /// Safe entry point that returns structured [`CliResult`] instead of printing
