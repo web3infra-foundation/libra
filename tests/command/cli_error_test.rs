@@ -48,6 +48,25 @@ fn help_output_is_not_treated_as_an_error() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stdout.starts_with("Libra: An AI native version control system"));
+    assert!(
+        stdout.contains("libra help error-codes"),
+        "root help should advertise the error code topic: {stdout}"
+    );
+    assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
+}
+
+#[test]
+fn help_error_codes_topic_prints_error_code_reference() {
+    let temp = tempdir().unwrap();
+    let output = run_libra(&["help", "error-codes"], temp.path());
+    assert_eq!(output.status.code(), Some(0));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stdout.contains("# Libra CLI Error Codes"));
+    assert!(stdout.contains("LBR-CLI-001"));
+    assert!(stdout.contains("LBR-REPO-001"));
+    assert!(stdout.contains("## How To Change Codes"));
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 }
 

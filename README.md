@@ -61,6 +61,7 @@ Options:
 ## Error Reporting
 
 CLI failures use stable exit codes, stable error codes, and a trailing JSON stderr report for agents and wrappers.
+Run `libra help error-codes` for the built-in CLI reference.
 See [docs/error-codes.md](/Volumes/Data/GitMono/libra/docs/error-codes.md).
 
 ---
