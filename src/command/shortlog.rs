@@ -195,13 +195,11 @@ pub async fn execute_to(args: ShortlogArgs, writer: &mut impl Write) -> CliResul
             )? {
                 return Ok(());
             }
-        } else {
-            if !write_shortlog_line(
-                writer,
-                format_args!("{:>width$}  {}", stats.count, stats.name, width = width),
-            )? {
-                return Ok(());
-            }
+        } else if !write_shortlog_line(
+            writer,
+            format_args!("{:>width$}  {}", stats.count, stats.name, width = width),
+        )? {
+            return Ok(());
         }
         if !args.summary {
             for subject in &stats.subjects {
