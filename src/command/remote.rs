@@ -8,7 +8,10 @@ use git_internal::hash::get_hash_kind;
 use crate::{
     command::fetch::RemoteClient,
     internal::{branch::Branch, config::Config, protocol::set_wire_hash_kind},
-    utils::error::{CliError, CliResult},
+    utils::{
+        error::{CliError, CliResult},
+        output::OutputConfig,
+    },
 };
 
 #[derive(Subcommand, Debug)]
@@ -94,7 +97,7 @@ pub enum RemoteCmds {
 }
 
 pub async fn execute(command: RemoteCmds) {
-    if let Err(e) = execute_safe(command).await {
+    if let Err(e) = execute_safe(command, &OutputConfig::default()).await {
         e.print_stderr();
     }
 }
@@ -102,7 +105,7 @@ pub async fn execute(command: RemoteCmds) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Dispatches to remote sub-commands (add, remove, rename,
 /// set-url, list, show).
-pub async fn execute_safe(command: RemoteCmds) -> CliResult<()> {
+pub async fn execute_safe(command: RemoteCmds, _output: &OutputConfig) -> CliResult<()> {
     match command {
         RemoteCmds::Add { name, url } => {
             if Config::remote_config(&name).await.is_some() {

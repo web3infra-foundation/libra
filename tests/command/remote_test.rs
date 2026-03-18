@@ -11,6 +11,7 @@ use libra::{
         branch::Branch,
         config::{Config, RemoteConfig},
     },
+    utils::output::OutputConfig,
 };
 
 use super::*;
@@ -41,17 +42,23 @@ async fn test_remote_add_duplicate_name_returns_error() {
     test::setup_with_new_libra_in(repo_dir.path()).await;
     let _guard = test::ChangeDirGuard::new(repo_dir.path());
 
-    remote::execute_safe(RemoteCmds::Add {
-        name: "origin".into(),
-        url: "https://example.com/repo.git".into(),
-    })
+    remote::execute_safe(
+        RemoteCmds::Add {
+            name: "origin".into(),
+            url: "https://example.com/repo.git".into(),
+        },
+        &OutputConfig::default(),
+    )
     .await
     .expect("first add should succeed");
 
-    let result = remote::execute_safe(RemoteCmds::Add {
-        name: "origin".into(),
-        url: "https://example.com/another.git".into(),
-    })
+    let result = remote::execute_safe(
+        RemoteCmds::Add {
+            name: "origin".into(),
+            url: "https://example.com/another.git".into(),
+        },
+        &OutputConfig::default(),
+    )
     .await;
 
     assert!(result.is_err(), "adding existing remote should fail");

@@ -4,7 +4,10 @@ use clap::Parser;
 
 use crate::{
     internal::{branch::Branch, head::Head, tag},
-    utils::error::{CliError, CliResult},
+    utils::{
+        error::{CliError, CliResult},
+        output::OutputConfig,
+    },
 };
 
 #[derive(Parser, Debug)]
@@ -35,7 +38,7 @@ pub async fn execute(args: ShowRefArgs) -> Result<(), String> {
 
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Lists all refs (branches, tags) with their object IDs.
-pub async fn execute_safe(args: ShowRefArgs) -> CliResult<()> {
+pub async fn execute_safe(args: ShowRefArgs, _output: &OutputConfig) -> CliResult<()> {
     run_show_ref(args).await.map_err(CliError::failure)
 }
 

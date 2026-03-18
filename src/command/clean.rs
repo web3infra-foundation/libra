@@ -7,6 +7,7 @@ use git_internal::internal::index::Index;
 
 use crate::utils::{
     error::{CliError, CliResult},
+    output::OutputConfig,
     path, util, worktree,
 };
 
@@ -21,14 +22,14 @@ pub struct CleanArgs {
 }
 
 pub async fn execute(args: CleanArgs) {
-    if let Err(err) = execute_safe(args).await {
+    if let Err(err) = execute_safe(args, &OutputConfig::default()).await {
         err.print_stderr();
     }
 }
 
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Removes untracked files from the working tree.
-pub async fn execute_safe(args: CleanArgs) -> CliResult<()> {
+pub async fn execute_safe(args: CleanArgs, _output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
     run_clean(args)
 }

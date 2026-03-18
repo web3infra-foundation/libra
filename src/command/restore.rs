@@ -22,6 +22,7 @@ use crate::{
         error::{CliError, CliResult},
         lfs,
         object_ext::{BlobExt, CommitExt, TreeExt},
+        output::OutputConfig,
         path,
         path_ext::PathExt,
         util,
@@ -45,7 +46,7 @@ pub struct RestoreArgs {
 }
 
 pub async fn execute(args: RestoreArgs) {
-    if let Err(e) = execute_safe(args).await {
+    if let Err(e) = execute_safe(args, &OutputConfig::default()).await {
         e.print_stderr();
     }
 }
@@ -53,7 +54,7 @@ pub async fn execute(args: RestoreArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Resets files or entire trees from a commit or the
 /// index, respecting pathspecs and staged-vs-worktree targets.
-pub async fn execute_safe(args: RestoreArgs) -> CliResult<()> {
+pub async fn execute_safe(args: RestoreArgs, _output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
     execute_checked(args)
         .await

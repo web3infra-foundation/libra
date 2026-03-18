@@ -42,6 +42,7 @@ use crate::{
     utils::{
         error::{CliError, CliResult},
         object_ext::{BlobExt, CommitExt, TreeExt},
+        output::OutputConfig,
     },
 };
 
@@ -67,7 +68,7 @@ pub struct PushArgs {
 }
 
 pub async fn execute(args: PushArgs) {
-    if let Err(err) = execute_safe(args).await {
+    if let Err(err) = execute_safe(args, &OutputConfig::default()).await {
         err.print_stderr();
     }
 }
@@ -75,7 +76,7 @@ pub async fn execute(args: PushArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Validates arguments, reads remote configuration,
 /// negotiates with the server, and sends local refs and pack data.
-pub async fn execute_safe(args: PushArgs) -> CliResult<()> {
+pub async fn execute_safe(args: PushArgs, _output: &OutputConfig) -> CliResult<()> {
     if args.repository.is_some() ^ args.refspec.is_some() {
         // must provide both or none
         return Err(CliError::command_usage(
@@ -665,7 +666,7 @@ fn diff_tree_objs(old_tree: Option<&ObjectHash>, new_tree: &ObjectHash) -> HashS
                     // TODO: submodule (TreeItemMode: Commit)
                     if item.mode == TreeItemMode::Commit {
                         // (160000)| Gitlink (Submodule)
-                        eprintln!("warning: submodule is not supported yet");
+                        crate::utils::error::emit_warning("submodule is not supported yet");
                     }
                     let blob = Blob::load(&item.id);
                     objs.insert(blob.into());

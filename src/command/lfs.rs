@@ -17,7 +17,9 @@ use crate::{
     lfs_structs::LockListQuery,
     utils::{
         error::{CliError, CliResult, StableErrorCode, emit_legacy_stderr},
-        lfs, path,
+        lfs,
+        output::OutputConfig,
+        path,
         path_ext::PathExt,
         util,
     },
@@ -251,7 +253,7 @@ pub async fn execute(cmd: LfsCmds) -> CliResult<()> {
     Ok(())
 }
 
-pub async fn execute_safe(cmd: LfsCmds) -> CliResult<()> {
+pub async fn execute_safe(cmd: LfsCmds, _output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
     execute(cmd).await
 }

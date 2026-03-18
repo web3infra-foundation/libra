@@ -3,6 +3,7 @@
 
 use std::process::Command;
 
+use libra::utils::output::OutputConfig;
 use serial_test::serial;
 
 use super::{create_committed_repo_via_cli, run_libra_command};
@@ -343,7 +344,7 @@ async fn test_show_execute_safe_bad_ref_returns_cli_error() {
         stat: false,
         pathspec: vec![],
     };
-    let result = execute_safe(args).await;
+    let result = execute_safe(args, &OutputConfig::default()).await;
     assert!(result.is_err(), "execute_safe should fail for bad ref");
     let err = result.unwrap_err();
     assert_eq!(
@@ -382,6 +383,6 @@ async fn test_show_execute_safe_bad_rev_path_returns_cli_error() {
         stat: false,
         pathspec: vec![],
     };
-    let result = execute_safe(args).await;
+    let result = execute_safe(args, &OutputConfig::default()).await;
     assert!(result.is_err(), "execute_safe should fail for bad rev:path");
 }

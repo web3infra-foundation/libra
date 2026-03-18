@@ -17,6 +17,7 @@ use crate::{
     },
     utils::{
         error::{CliError, CliResult},
+        output::OutputConfig,
         util::{self, get_commit_base},
     },
 };
@@ -44,7 +45,7 @@ pub struct SwitchArgs {
 }
 
 pub async fn execute(args: SwitchArgs) {
-    if let Err(err) = execute_safe(args).await {
+    if let Err(err) = execute_safe(args, &OutputConfig::default()).await {
         err.print_stderr();
     }
 }
@@ -52,8 +53,8 @@ pub async fn execute(args: SwitchArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Validates clean working-tree state, then switches,
 /// creates, or detaches HEAD to the requested branch.
-pub async fn execute_safe(args: SwitchArgs) -> CliResult<()> {
-    ensure_clean_status().await?;
+pub async fn execute_safe(args: SwitchArgs, output: &OutputConfig) -> CliResult<()> {
+    ensure_clean_status(output).await?;
     let SwitchArgs {
         branch,
         create,
@@ -68,7 +69,7 @@ pub async fn execute_safe(args: SwitchArgs) -> CliResult<()> {
                 return Err(CliError::fatal("missing remote branch name"));
             }
         };
-        return switch_to_tracked_remote_branch(target).await;
+        return switch_to_tracked_remote_branch(target, output).await;
     }
 
     match create {
@@ -80,7 +81,7 @@ pub async fn execute_safe(args: SwitchArgs) -> CliResult<()> {
                 )));
             }
             branch::create_branch(new_branch_name.clone(), branch).await;
-            switch_to_branch(new_branch_name).await
+            switch_to_branch(new_branch_name, output).await
         }
         None => match detach {
             true => {
@@ -90,12 +91,12 @@ pub async fn execute_safe(args: SwitchArgs) -> CliResult<()> {
                 let commit_base = get_commit_base(&branch)
                     .await
                     .map_err(|e| CliError::fatal(e.to_string()))?;
-                switch_to_commit(commit_base).await
+                switch_to_commit(commit_base, output).await
             }
             false => {
                 let branch =
                     branch.ok_or_else(|| CliError::command_usage("branch name is required"))?;
-                switch_to_branch(branch).await
+                switch_to_branch(branch, output).await
             }
         },
     }
@@ -106,7 +107,7 @@ pub async fn execute_safe(args: SwitchArgs) -> CliResult<()> {
 /// When uncommitted or unstaged changes are detected, this prints the current
 /// status summary (via `status::execute`) and returns a descriptive
 /// [`CliError`] so callers can decide how to surface the problem.
-pub async fn ensure_clean_status() -> CliResult<()> {
+pub async fn ensure_clean_status(output: &OutputConfig) -> CliResult<()> {
     let unstaged = match status::changes_to_be_staged() {
         Ok(c) => c,
         Err(err) => {
@@ -116,17 +117,31 @@ pub async fn ensure_clean_status() -> CliResult<()> {
         }
     };
     if !unstaged.deleted.is_empty() || !unstaged.modified.is_empty() {
-        status::execute(StatusArgs::default()).await;
+        if !output.quiet && !output.is_json() {
+            status::execute(StatusArgs::default()).await;
+        }
         Err(CliError::fatal("unstaged changes, can't switch branch"))
-    } else if !status::changes_to_be_committed().await.is_empty() {
-        status::execute(StatusArgs::default()).await;
-        Err(CliError::fatal("uncommitted changes, can't switch branch"))
     } else {
-        Ok(())
+        let staged = match status::changes_to_be_committed_safe().await {
+            Ok(c) => c,
+            Err(err) => {
+                return Err(CliError::fatal(format!(
+                    "failed to determine working tree status: {err}"
+                )));
+            }
+        };
+        if !staged.is_empty() {
+            if !output.quiet && !output.is_json() {
+                status::execute(StatusArgs::default()).await;
+            }
+            Err(CliError::fatal("uncommitted changes, can't switch branch"))
+        } else {
+            Ok(())
+        }
     }
 }
 
-async fn switch_to_tracked_remote_branch(target: String) -> CliResult<()> {
+async fn switch_to_tracked_remote_branch(target: String, output: &OutputConfig) -> CliResult<()> {
     let (remote_name, remote_branch_name) = if let Some(rest) = target.strip_prefix("refs/remotes/")
     {
         match rest.split_once('/') {
@@ -188,11 +203,11 @@ async fn switch_to_tracked_remote_branch(target: String) -> CliResult<()> {
         &format!("{remote_name}/{remote_branch_name}"),
     )
     .await;
-    switch_to_branch(remote_branch_name).await
+    switch_to_branch(remote_branch_name, output).await
 }
 
 /// change the working directory to the version of commit_hash
-async fn switch_to_commit(commit_hash: ObjectHash) -> CliResult<()> {
+async fn switch_to_commit(commit_hash: ObjectHash, output: &OutputConfig) -> CliResult<()> {
     let db = get_db_conn_instance().await;
 
     let old_oid = Head::current_commit_with_conn(&db)
@@ -233,11 +248,11 @@ async fn switch_to_commit(commit_hash: ObjectHash) -> CliResult<()> {
 
     // Only restore the working directory *after* HEAD has been successfully updated.
     restore_to_commit(commit_hash).await?;
-    println!("HEAD is now at {}", &commit_hash.to_string()[..7]);
+    crate::info_println!(output, "HEAD is now at {}", &commit_hash.to_string()[..7]);
     Ok(())
 }
 
-async fn switch_to_branch(branch_name: String) -> CliResult<()> {
+async fn switch_to_branch(branch_name: String, output: &OutputConfig) -> CliResult<()> {
     if branch_name == "intent" {
         return Err(CliError::fatal(
             "switching to 'intent' branch is not allowed",
@@ -273,7 +288,7 @@ async fn switch_to_branch(branch_name: String) -> CliResult<()> {
     };
 
     if from_ref_name == branch_name {
-        println!("Already on '{branch_name}'");
+        crate::info_println!(output, "Already on '{branch_name}'");
         return Ok(());
     }
 
@@ -305,7 +320,7 @@ async fn switch_to_branch(branch_name: String) -> CliResult<()> {
     }
 
     restore_to_commit(target_commit_id).await?;
-    println!("Switched to branch '{}'", target_branch.name);
+    crate::info_println!(output, "Switched to branch '{}'", target_branch.name);
     Ok(())
 }
 
@@ -316,7 +331,7 @@ async fn restore_to_commit(commit_id: ObjectHash) -> CliResult<()> {
         source: Some(commit_id.to_string()),
         pathspec: vec![util::working_dir_string()],
     };
-    restore::execute_safe(restore_args).await
+    restore::execute_safe(restore_args, &OutputConfig::default()).await
 }
 
 #[cfg(test)]

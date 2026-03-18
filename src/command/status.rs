@@ -29,6 +29,7 @@ use crate::{
         error::{CliError, CliResult},
         ignore::IgnorePolicy,
         object_ext::{CommitExt, TreeExt},
+        output::OutputConfig,
         path, util,
     },
 };
@@ -342,8 +343,12 @@ pub async fn execute_to(args: StatusArgs, writer: &mut impl Write) {
     }
 
     if !staged.is_empty() {
-        println!("Changes to be committed:");
-        println!("  use \"libra restore --staged <file>...\" to unstage");
+        writeln!(writer, "Changes to be committed:").unwrap();
+        writeln!(
+            writer,
+            "  use \"libra restore --staged <file>...\" to unstage"
+        )
+        .unwrap();
         staged.deleted.iter().for_each(|f| {
             let str = format!("\tdeleted: {}", f.display());
             writeln!(writer, "{}", str.bright_green()).unwrap();
@@ -359,9 +364,17 @@ pub async fn execute_to(args: StatusArgs, writer: &mut impl Write) {
     }
 
     if !unstaged.deleted.is_empty() || !unstaged.modified.is_empty() {
-        println!("Changes not staged for commit:");
-        println!("  use \"libra add <file>...\" to update what will be committed");
-        println!("  use \"libra restore <file>...\" to discard changes in working directory");
+        writeln!(writer, "Changes not staged for commit:").unwrap();
+        writeln!(
+            writer,
+            "  use \"libra add <file>...\" to update what will be committed"
+        )
+        .unwrap();
+        writeln!(
+            writer,
+            "  use \"libra restore <file>...\" to discard changes in working directory"
+        )
+        .unwrap();
         unstaged.deleted.iter().for_each(|f| {
             let str = format!("\tdeleted: {}", f.display());
             writeln!(writer, "{}", str.bright_red()).unwrap();
@@ -372,8 +385,12 @@ pub async fn execute_to(args: StatusArgs, writer: &mut impl Write) {
         });
     }
     if !unstaged.new.is_empty() {
-        println!("Untracked files:");
-        println!("  use \"libra add <file>...\" to include in what will be committed");
+        writeln!(writer, "Untracked files:").unwrap();
+        writeln!(
+            writer,
+            "  use \"libra add <file>...\" to include in what will be committed"
+        )
+        .unwrap();
         unstaged.new.iter().for_each(|f| {
             let str = format!("\t{}", f.display());
             writeln!(writer, "{}", str.bright_red()).unwrap();
@@ -381,8 +398,12 @@ pub async fn execute_to(args: StatusArgs, writer: &mut impl Write) {
     }
 
     if args.ignored && !ignored_files.is_empty() {
-        println!("Ignored files:");
-        println!("  (modify .libraignore to change which files are ignored)");
+        writeln!(writer, "Ignored files:").unwrap();
+        writeln!(
+            writer,
+            "  (modify .libraignore to change which files are ignored)"
+        )
+        .unwrap();
         for f in &ignored_files {
             let str = format!("\t{}", f.display());
             writeln!(writer, "{}", str.bright_red()).unwrap();
@@ -762,17 +783,81 @@ pub async fn execute(args: StatusArgs) {
 }
 
 /// Safe entry point that returns structured [`CliResult`] instead of printing
-/// errors and exiting. Computes staged, unstaged, and untracked sets then
-/// prints a concise summary via [`execute_to`].
+/// errors and exiting. JSON mode propagates status-computation failures as
+/// structured CLI errors; text mode still delegates to [`execute_to`].
 ///
 /// # Known limitations
 ///
 /// `execute_to()` handles errors internally with `unwrap()` and never propagates
-/// them, so this wrapper always returns `Ok(())` even when the status fails.
-// TODO: refactor execute_to() to return CliResult so errors propagate to callers.
-pub async fn execute_safe(args: StatusArgs) -> CliResult<()> {
+/// them, so the text-output path still returns `Ok(())` even when status fails.
+// TODO: refactor execute_to() to return CliResult so text-mode errors propagate to callers.
+pub async fn execute_safe(args: StatusArgs, output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
-    execute_to(args, &mut std::io::stdout()).await;
+
+    if output.is_json() {
+        emit_status_json(output).await?;
+    } else if output.quiet {
+        // Quiet mode: suppress all informational output.
+    } else {
+        execute_to(args, &mut std::io::stdout()).await;
+    }
+    Ok(())
+}
+
+/// Build a structured JSON status object with stable, machine-readable fields.
+async fn emit_status_json(output: &OutputConfig) -> CliResult<()> {
+    let status_error = |err: StatusError| {
+        CliError::fatal(format!("failed to determine working tree status: {err}"))
+    };
+    let head = match Head::current().await {
+        Head::Branch(name) => serde_json::json!({"type": "branch", "name": name}),
+        Head::Detached(hash) => {
+            serde_json::json!({"type": "detached", "oid": hash.to_string()})
+        }
+    };
+    let has_commits = Head::current_commit().await.is_some();
+
+    let staged = changes_to_be_committed_safe()
+        .await
+        .map(|c| c.to_relative())
+        .map_err(status_error)?;
+    let unstaged = changes_to_be_staged()
+        .map(|c| c.to_relative())
+        .map_err(status_error)?;
+
+    let paths_to_json = |paths: &[PathBuf]| -> Vec<serde_json::Value> {
+        paths
+            .iter()
+            .map(|p| serde_json::Value::String(p.display().to_string()))
+            .collect()
+    };
+
+    let json_data = serde_json::json!({
+        "head": head,
+        "has_commits": has_commits,
+        "staged": {
+            "new": paths_to_json(&staged.new),
+            "modified": paths_to_json(&staged.modified),
+            "deleted": paths_to_json(&staged.deleted),
+        },
+        "unstaged": {
+            "modified": paths_to_json(&unstaged.modified),
+            "deleted": paths_to_json(&unstaged.deleted),
+        },
+        "untracked": paths_to_json(&unstaged.new),
+        "is_clean": staged.is_empty() && unstaged.is_empty(),
+    });
+
+    let envelope = match output.json_format {
+        Some(crate::utils::output::JsonFormat::Pretty) => serde_json::to_string_pretty(
+            &serde_json::json!({"ok": true, "command": "status", "data": json_data}),
+        ),
+        _ => serde_json::to_string(
+            &serde_json::json!({"ok": true, "command": "status", "data": json_data}),
+        ),
+    }
+    .map_err(|err| CliError::fatal(format!("failed to serialize status output: {err}")))?;
+    println!("{envelope}");
     Ok(())
 }
 
@@ -780,7 +865,13 @@ pub async fn execute_safe(args: StatusArgs) -> CliResult<()> {
 ///
 /// Returns `false` when the status cannot be determined (e.g. corrupt index).
 pub async fn is_clean() -> bool {
-    let staged = changes_to_be_committed().await;
+    let staged = match changes_to_be_committed_safe().await {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::error!("failed to calculate committed changes: {err}");
+            return false;
+        }
+    };
     let unstaged = match changes_to_be_staged() {
         Ok(c) => c,
         Err(err) => {
@@ -830,6 +921,52 @@ pub async fn changes_to_be_committed() -> Changes {
         .collect();
 
     changes
+}
+
+pub async fn changes_to_be_committed_safe() -> Result<Changes, StatusError> {
+    let mut changes = Changes::default();
+    let index_path = path::try_index().map_err(|source| StatusError::Workdir { source })?;
+    let index = Index::load(&index_path).map_err(|source| StatusError::IndexLoad {
+        path: index_path.clone(),
+        source,
+    })?;
+    let head_commit = Head::current_commit().await;
+    let tracked_files = index.tracked_files();
+
+    if head_commit.is_none() {
+        changes.new = tracked_files;
+        return Ok(changes);
+    }
+
+    let head_commit = match head_commit {
+        Some(head_commit) => head_commit,
+        None => return Ok(changes),
+    };
+    let commit = Commit::load(&head_commit);
+    let tree = Tree::load(&commit.tree_id);
+    let tree_files = tree.get_plain_items();
+
+    for (item_path, item_hash) in tree_files.iter() {
+        let item_str = item_path
+            .to_str()
+            .ok_or_else(|| StatusError::InvalidPathEncoding {
+                path: item_path.clone(),
+            })?;
+        if index.tracked(item_str, 0) {
+            if !index.verify_hash(item_str, 0, item_hash) {
+                changes.modified.push(item_path.clone());
+            }
+        } else {
+            changes.deleted.push(item_path.clone());
+        }
+    }
+    let tree_files_set: HashSet<PathBuf> = tree_files.into_iter().map(|(path, _)| path).collect();
+    changes.new = tracked_files
+        .into_iter()
+        .filter(|path| !tree_files_set.contains(path))
+        .collect();
+
+    Ok(changes)
 }
 
 /// Compare the difference between `index` and the `workdir` using the default ignore rules.

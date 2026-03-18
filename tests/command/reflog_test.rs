@@ -4,6 +4,7 @@ use clap::Parser;
 use libra::{
     command::{commit, reflog},
     internal::{db::get_db_conn_instance, reflog::Reflog},
+    utils::output::OutputConfig,
 };
 use serial_test::serial;
 use tempfile::tempdir;
@@ -113,7 +114,7 @@ async fn test_reflog_show_invalid_date() {
 
     // Test with invalid date format - should return error, not panic
     let args = reflog::ReflogArgs::parse_from(["reflog", "show", "--since", "invalid-date-format"]);
-    let result = reflog::execute_safe(args).await;
+    let result = reflog::execute_safe(args, &OutputConfig::default()).await;
     assert!(
         result.is_err(),
         "invalid --since date should return an error"

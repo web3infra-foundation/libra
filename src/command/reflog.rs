@@ -23,6 +23,7 @@ use crate::{
     },
     utils::{
         error::{CliError, CliResult},
+        output::OutputConfig,
         pager::Pager,
     },
 };
@@ -77,7 +78,7 @@ enum Subcommands {
 }
 
 pub async fn execute(args: ReflogArgs) {
-    if let Err(e) = execute_safe(args).await {
+    if let Err(e) = execute_safe(args, &OutputConfig::default()).await {
         e.print_stderr();
     }
 }
@@ -85,7 +86,7 @@ pub async fn execute(args: ReflogArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Dispatches to the show, delete, or exists sub-command
 /// for reflog management.
-pub async fn execute_safe(args: ReflogArgs) -> CliResult<()> {
+pub async fn execute_safe(args: ReflogArgs, output: &OutputConfig) -> CliResult<()> {
     match args.command {
         Subcommands::Show {
             ref_name,
@@ -108,7 +109,7 @@ pub async fn execute_safe(args: ReflogArgs) -> CliResult<()> {
                 patch,
                 stat,
             };
-            handle_show(&ref_name, options).await
+            handle_show(&ref_name, options, output).await
         }
         Subcommands::Delete { selectors } => handle_delete(&selectors).await,
         Subcommands::Exists { ref_name } => handle_exists(&ref_name).await,
@@ -127,7 +128,11 @@ struct ReflogShowOptions {
     stat: bool,
 }
 
-async fn handle_show(ref_name: &str, options: ReflogShowOptions) -> CliResult<()> {
+async fn handle_show(
+    ref_name: &str,
+    options: ReflogShowOptions,
+    output: &OutputConfig,
+) -> CliResult<()> {
     let db = get_db_conn_instance().await;
 
     // Parse date filters
@@ -171,7 +176,7 @@ async fn handle_show(ref_name: &str, options: ReflogShowOptions) -> CliResult<()
         stat: options.stat,
     };
 
-    let mut pager = Pager::new()?;
+    let mut pager = Pager::with_config(output)?;
     pager.write_line(&formatter.to_string())?;
     pager.finish()?;
 

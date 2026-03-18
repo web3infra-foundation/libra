@@ -41,6 +41,7 @@ use crate::{
     },
     utils::{
         error::{CliError, CliResult},
+        output::OutputConfig,
         path, util,
     },
 };
@@ -266,7 +267,7 @@ impl From<FetchError> for CliError {
 }
 
 pub async fn execute(args: FetchArgs) {
-    if let Err(err) = execute_safe(args).await {
+    if let Err(err) = execute_safe(args, &OutputConfig::default()).await {
         err.print_stderr();
     }
 }
@@ -274,7 +275,7 @@ pub async fn execute(args: FetchArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Negotiates with remotes, downloads pack data, and
 /// updates remote-tracking refs.
-pub async fn execute_safe(args: FetchArgs) -> CliResult<()> {
+pub async fn execute_safe(args: FetchArgs, _output: &OutputConfig) -> CliResult<()> {
     tracing::debug!("`fetch` args: {:?}", args);
 
     if args.all {

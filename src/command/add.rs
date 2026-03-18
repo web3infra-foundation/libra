@@ -21,6 +21,7 @@ use crate::{
         error::{CliError, CliResult},
         lfs,
         object_ext::BlobExt,
+        output::OutputConfig,
         path, util,
     },
 };
@@ -109,7 +110,7 @@ struct ValidatedPathspecs {
 }
 
 pub async fn execute(args: AddArgs) {
-    if let Err(err) = execute_safe(args).await {
+    if let Err(err) = execute_safe(args, &OutputConfig::default()).await {
         err.print_stderr();
     }
 }
@@ -117,7 +118,7 @@ pub async fn execute(args: AddArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Stages changes by resolving pathspecs, respecting
 /// ignore policy, and writing blob objects to storage.
-pub async fn execute_safe(args: AddArgs) -> CliResult<()> {
+pub async fn execute_safe(args: AddArgs, _output: &OutputConfig) -> CliResult<()> {
     let workdir = util::try_working_dir().map_err(|source| {
         if source.kind() == io::ErrorKind::NotFound {
             AddError::NotInRepo

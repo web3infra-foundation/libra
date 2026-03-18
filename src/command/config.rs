@@ -9,7 +9,10 @@ use tokio::sync::Mutex;
 
 use crate::{
     internal::config,
-    utils::error::{CliError, CliResult},
+    utils::{
+        error::{CliError, CliResult},
+        output::OutputConfig,
+    },
 };
 
 /// Cached database connection for Global scope, paired with the resolved DB path.
@@ -603,7 +606,7 @@ pub struct Key {
 /// **Note:** Prefer [`execute_safe`] for programmatic / embedded callers so
 /// errors can be handled without terminating the process.
 pub async fn execute(args: ConfigArgs) {
-    if let Err(e) = execute_safe(args).await {
+    if let Err(e) = execute_safe(args, &OutputConfig::default()).await {
         e.print_stderr();
     }
 }
@@ -611,7 +614,7 @@ pub async fn execute(args: ConfigArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. This is the preferred entry point for CLI dispatch,
 /// library consumers, and tests.
-pub async fn execute_safe(args: ConfigArgs) -> CliResult<()> {
+pub async fn execute_safe(args: ConfigArgs, _output: &OutputConfig) -> CliResult<()> {
     execute_inner(args)
         .await
         .map_err(CliError::from_legacy_string)
@@ -767,7 +770,9 @@ async fn import_git_config(scope: ConfigScope) -> Result<(), String> {
         println!("  (skipped {skipped} duplicates)");
     }
     if ignored_invalid > 0 {
-        eprintln!("warning: ignored {ignored_invalid} unsupported Git config entries");
+        crate::utils::error::emit_warning(format!(
+            "ignored {ignored_invalid} unsupported Git config entries"
+        ));
     }
     Ok(())
 }

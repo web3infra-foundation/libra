@@ -31,6 +31,7 @@ use crate::{
     utils::{
         client_storage::ClientStorage,
         error::{CliError, CliResult, exit_with_legacy_stderr},
+        output::OutputConfig,
         path,
         storage::local::LocalStorage,
         util,
@@ -183,7 +184,7 @@ pub async fn execute(args: CatFileArgs) {
 /// `execute()` handles errors internally and never propagates them, so this
 /// wrapper always returns `Ok(())` even when cat-file fails.
 // TODO: refactor execute() to return CliResult so errors propagate to callers.
-pub async fn execute_safe(args: CatFileArgs) -> CliResult<()> {
+pub async fn execute_safe(args: CatFileArgs, _output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
     execute(args).await;
     Ok(())

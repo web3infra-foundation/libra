@@ -76,7 +76,7 @@ impl BasicAuth {
                 eprintln!("fatal: failed to authenticate after {MAX_TRY} attempts");
                 break;
             }
-            eprintln!("warning: authentication required, retrying...");
+            crate::utils::error::emit_warning("authentication required, retrying...");
             AUTH.lock().unwrap().replace(ask_basic_auth());
             try_cnt += 1;
         }

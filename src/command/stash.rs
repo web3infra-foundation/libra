@@ -35,12 +35,13 @@ use crate::{
         error::{CliError, CliResult},
         object,
         object_ext::TreeExt,
+        output::OutputConfig,
         tree, util,
     },
 };
 
 pub async fn execute(stash_cmd: Stash) {
-    if let Err(e) = execute_safe(stash_cmd).await {
+    if let Err(e) = execute_safe(stash_cmd, &OutputConfig::default()).await {
         e.print_stderr();
     }
 }
@@ -48,7 +49,7 @@ pub async fn execute(stash_cmd: Stash) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Dispatches to stash sub-commands (push, pop, list,
 /// apply, drop).
-pub async fn execute_safe(stash_cmd: Stash) -> CliResult<()> {
+pub async fn execute_safe(stash_cmd: Stash, _output: &OutputConfig) -> CliResult<()> {
     let result = match stash_cmd {
         Stash::Push { message } => push(message).await,
         Stash::Pop { stash } => pop(stash).await,

@@ -6,6 +6,7 @@ use crate::{
     internal::{config::Config, vault},
     utils::{
         error::{CliError, CliResult},
+        output::OutputConfig,
         util,
     },
 };
@@ -41,12 +42,12 @@ pub enum VaultCommand {
 }
 
 pub async fn execute(args: VaultArgs) {
-    if let Err(e) = execute_safe(args).await {
+    if let Err(e) = execute_safe(args, &OutputConfig::default()).await {
         e.print_stderr();
     }
 }
 
-pub async fn execute_safe(args: VaultArgs) -> CliResult<()> {
+pub async fn execute_safe(args: VaultArgs, _output: &OutputConfig) -> CliResult<()> {
     let root_dir = util::storage_path();
     if !vault::vault_exists(&root_dir) {
         return Err(CliError::fatal(

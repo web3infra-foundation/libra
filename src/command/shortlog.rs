@@ -60,7 +60,10 @@ use git_internal::internal::object::commit::Commit;
 
 use crate::{
     internal::{head::Head, log::date_parser::parse_date},
-    utils::error::{CliError, CliResult, StableErrorCode},
+    utils::{
+        error::{CliError, CliResult, StableErrorCode},
+        output::OutputConfig,
+    },
 };
 
 #[derive(Parser, Debug)]
@@ -233,7 +236,7 @@ fn shortlog_output_error(err: io::Error) -> CliError {
 }
 
 pub async fn execute(args: ShortlogArgs) {
-    if let Err(e) = execute_safe(args).await {
+    if let Err(e) = execute_safe(args, &OutputConfig::default()).await {
         e.print_stderr();
     }
 }
@@ -241,7 +244,7 @@ pub async fn execute(args: ShortlogArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Summarises commit history by author, delegating to
 /// [`execute_to`] for formatted output.
-pub async fn execute_safe(args: ShortlogArgs) -> CliResult<()> {
+pub async fn execute_safe(args: ShortlogArgs, _output: &OutputConfig) -> CliResult<()> {
     execute_to(args, &mut std::io::stdout()).await
 }
 

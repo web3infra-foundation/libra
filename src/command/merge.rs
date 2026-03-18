@@ -19,6 +19,7 @@ use crate::{
     },
     utils::{
         error::{CliError, CliResult},
+        output::OutputConfig,
         util,
     },
 };
@@ -30,7 +31,7 @@ pub struct MergeArgs {
 }
 
 pub async fn execute(args: MergeArgs) {
-    if let Err(err) = execute_safe(args).await {
+    if let Err(err) = execute_safe(args, &OutputConfig::default()).await {
         err.print_stderr();
     }
 }
@@ -38,7 +39,7 @@ pub async fn execute(args: MergeArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Resolves the merge target, performs fast-forward or
 /// recursive merge, stages results, and updates refs.
-pub async fn execute_safe(args: MergeArgs) -> CliResult<()> {
+pub async fn execute_safe(args: MergeArgs, output: &OutputConfig) -> CliResult<()> {
     let commit_hash = get_target_commit(&args.branch)
         .await
         .map_err(|_| CliError::failure(format!("{} - not something we can merge", args.branch)))?;
@@ -49,7 +50,7 @@ pub async fn execute_safe(args: MergeArgs) -> CliResult<()> {
     // If the current HEAD doesn't point to any commit, perform a fast-forward merge directly
     let current_commit_id = Head::current_commit().await;
     if current_commit_id.is_none() {
-        return merge_ff(target_commit, &args.branch).await;
+        return merge_ff(target_commit, &args.branch, output).await;
     }
 
     // INVARIANT: `current_commit_id` is `Some` — the `None` case returns above.
@@ -73,7 +74,7 @@ pub async fn execute_safe(args: MergeArgs) -> CliResult<()> {
             &target_commit.id.to_string()[..6]
         );
         // fast-forward merge
-        merge_ff(target_commit, &args.branch).await
+        merge_ff(target_commit, &args.branch, output).await
     } else {
         // didn't support yet
         Err(CliError::fatal(
@@ -111,7 +112,11 @@ async fn lca_commit(lhs: &Commit, rhs: &Commit) -> Result<Option<Commit>, CliErr
 }
 
 /// try merge in fast-forward mode, if it's not possible, do nothing
-async fn merge_ff(target_commit: Commit, target_branch_name: &str) -> CliResult<()> {
+async fn merge_ff(
+    target_commit: Commit,
+    target_branch_name: &str,
+    output: &OutputConfig,
+) -> CliResult<()> {
     println!("Fast-forward");
     let db = get_db_conn_instance().await;
 
@@ -163,12 +168,15 @@ async fn merge_ff(target_commit: Commit, target_branch_name: &str) -> CliResult<
     }
 
     // Only restore the working directory *after* the pointers have been updated.
-    restore::execute_safe(RestoreArgs {
-        worktree: true,
-        staged: true,
-        source: None, // `restore` without source defaults to HEAD, which is now correct.
-        pathspec: vec![util::working_dir_string()],
-    })
+    restore::execute_safe(
+        RestoreArgs {
+            worktree: true,
+            staged: true,
+            source: None, // `restore` without source defaults to HEAD, which is now correct.
+            pathspec: vec![util::working_dir_string()],
+        },
+        output,
+    )
     .await?;
     Ok(())
 }

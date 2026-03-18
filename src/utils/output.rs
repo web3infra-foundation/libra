@@ -1,0 +1,524 @@
+//! Global output configuration for the Libra CLI.
+//!
+//! This module resolves the raw global CLI flags (`--json`, `--machine`,
+//! `--color`, `--quiet`, `--no-pager`, `--progress`, `--exit-code-on-warning`)
+//! into a single [`OutputConfig`] that every command handler receives.
+//!
+//! The design ensures that all commands share the same output-control surface
+//! without duplicating flag definitions in per-command `Args` structs.
+
+use std::{
+    env,
+    io::{self, IsTerminal, Write},
+    sync::atomic::{AtomicBool, Ordering},
+};
+
+use indicatif::{ProgressBar, ProgressStyle};
+use serde::Serialize;
+
+use crate::utils::error::{CliError, CliResult};
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+/// JSON output layout selected by `--json[=FORMAT]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JsonFormat {
+    /// Pretty-printed JSON (the default when `--json` is passed without a value).
+    Pretty,
+    /// Single-line compact JSON.
+    Compact,
+    /// Newline-delimited JSON — one JSON object per line.
+    Ndjson,
+}
+
+/// Terminal color policy resolved from `--color` and `NO_COLOR`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorChoice {
+    /// Let the `colored` crate auto-detect based on TTY.
+    Auto,
+    /// Never emit ANSI color codes.
+    Never,
+    /// Always emit ANSI color codes, even when piped.
+    Always,
+}
+
+/// Progress reporting mode resolved from `--progress`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgressMode {
+    /// Emit NDJSON progress events to stderr.
+    Json,
+    /// Human-friendly `indicatif` progress bar on stderr.
+    Text,
+    /// Suppress all progress output.
+    None,
+}
+
+// ---------------------------------------------------------------------------
+// OutputConfig
+// ---------------------------------------------------------------------------
+
+/// Resolved output configuration, passed to every command handler.
+///
+/// Constructed once in `parse_async()` from the global CLI flags and
+/// environment variables, then threaded through to each command's
+/// `execute_safe(args, &output)`.
+#[derive(Debug, Clone)]
+pub struct OutputConfig {
+    /// `Some(format)` when JSON output was requested; `None` for human mode.
+    pub json_format: Option<JsonFormat>,
+    /// Resolved color policy.
+    pub color: ColorChoice,
+    /// Whether a pager is allowed (false when `--no-pager` or `--machine`).
+    pub pager: bool,
+    /// Suppress informational messages (keep errors/warnings on stderr).
+    pub quiet: bool,
+    /// Return exit code 9 when any warning is emitted.
+    pub exit_code_on_warning: bool,
+    /// How to report progress for long-running operations.
+    pub progress: ProgressMode,
+}
+
+impl Default for OutputConfig {
+    /// The default matches pre-existing behavior: human output, auto color,
+    /// pager allowed, not quiet, no warning exit, text progress when TTY.
+    fn default() -> Self {
+        Self {
+            json_format: None,
+            color: ColorChoice::Auto,
+            pager: true,
+            quiet: false,
+            exit_code_on_warning: false,
+            progress: ProgressMode::Text,
+        }
+    }
+}
+
+impl OutputConfig {
+    /// Resolve raw CLI flag values into a normalized [`OutputConfig`].
+    ///
+    /// The `color_raw` and `progress_raw` parameters are the string values
+    /// of `--color` and `--progress` (e.g. `"auto"`, `"never"`, `"json"`).
+    #[allow(clippy::fn_params_excessive_bools)]
+    pub fn resolve(
+        json: Option<&str>,
+        machine: bool,
+        no_pager: bool,
+        color_raw: &str,
+        quiet: bool,
+        exit_code_on_warning: bool,
+        progress_raw: &str,
+    ) -> Self {
+        // --machine implies --json=ndjson --no-pager --color=never --quiet
+        let json_format = if machine {
+            Some(JsonFormat::Ndjson)
+        } else {
+            json.map(|s| match s {
+                "compact" => JsonFormat::Compact,
+                "ndjson" => JsonFormat::Ndjson,
+                _ => JsonFormat::Pretty,
+            })
+        };
+
+        let quiet = quiet || machine;
+        let pager = !no_pager && !machine && json_format.is_none();
+
+        // Color: --machine forces never; otherwise parse the flag.
+        // NO_COLOR env (any value) forces Never unless --color=always was explicit.
+        let explicit_color = if machine {
+            ColorChoice::Never
+        } else {
+            match color_raw {
+                "never" => ColorChoice::Never,
+                "always" => ColorChoice::Always,
+                _ => ColorChoice::Auto,
+            }
+        };
+
+        let color = if explicit_color == ColorChoice::Auto && env::var_os("NO_COLOR").is_some() {
+            ColorChoice::Never
+        } else {
+            explicit_color
+        };
+
+        // Progress: resolve "auto" based on context.
+        let progress = if machine {
+            ProgressMode::None
+        } else {
+            match progress_raw {
+                "json" => ProgressMode::Json,
+                "text" => ProgressMode::Text,
+                "none" => ProgressMode::None,
+                // "auto"
+                _ => {
+                    if json_format.is_some() {
+                        ProgressMode::Json
+                    } else if quiet {
+                        ProgressMode::None
+                    } else if io::stdout().is_terminal() {
+                        ProgressMode::Text
+                    } else {
+                        ProgressMode::None
+                    }
+                }
+            }
+        };
+
+        Self {
+            json_format,
+            color,
+            pager,
+            quiet,
+            exit_code_on_warning,
+            progress,
+        }
+    }
+
+    /// Returns `true` if any JSON output format was requested.
+    pub fn is_json(&self) -> bool {
+        self.json_format.is_some()
+    }
+
+    /// Apply the resolved color choice to the `colored` crate's global override.
+    ///
+    /// Call this once, early in `parse_async()`, before any command runs.
+    pub fn apply_color_override(&self) {
+        match self.color {
+            ColorChoice::Never => colored::control::set_override(false),
+            ColorChoice::Always => colored::control::set_override(true),
+            ColorChoice::Auto => {} // let `colored` auto-detect
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CommandOutput trait + emit helpers
+// ---------------------------------------------------------------------------
+
+/// Trait for command result types that support both human and JSON rendering.
+///
+/// Implementors must derive (or manually impl) `Serialize` for JSON mode and
+/// provide a `render_human` method for the default text path.
+pub trait CommandOutput: Serialize {
+    /// Write a human-readable representation to `w`.
+    fn render_human(&self, w: &mut dyn Write, config: &OutputConfig) -> io::Result<()>;
+}
+
+/// Emit a single value according to the active output mode.
+///
+/// - `Pretty` → pretty-printed JSON envelope `{"ok":true,"data":...}`
+/// - `Compact` → single-line JSON envelope
+/// - `Ndjson` → one JSON line (no envelope wrapper)
+/// - `None` (human) → delegates to `CommandOutput::render_human`
+pub fn emit<T: CommandOutput>(value: &T, config: &OutputConfig) -> CliResult<()> {
+    let stdout = io::stdout();
+    let mut w = stdout.lock();
+    match config.json_format {
+        Some(JsonFormat::Pretty) => {
+            let envelope = serde_json::json!({"ok": true, "data": value});
+            serde_json::to_writer_pretty(&mut w, &envelope)
+                .map_err(|e| CliError::internal(format!("JSON serialization failed: {e}")))?;
+            writeln!(w).map_err(|e| CliError::io(format!("failed to write JSON output: {e}")))?;
+        }
+        Some(JsonFormat::Compact) => {
+            let envelope = serde_json::json!({"ok": true, "data": value});
+            serde_json::to_writer(&mut w, &envelope)
+                .map_err(|e| CliError::internal(format!("JSON serialization failed: {e}")))?;
+            writeln!(w).map_err(|e| CliError::io(format!("failed to write JSON output: {e}")))?;
+        }
+        Some(JsonFormat::Ndjson) => {
+            serde_json::to_writer(&mut w, value)
+                .map_err(|e| CliError::internal(format!("JSON serialization failed: {e}")))?;
+            writeln!(w).map_err(|e| CliError::io(format!("failed to write JSON output: {e}")))?;
+        }
+        None => {
+            value
+                .render_human(&mut w, config)
+                .map_err(|e| CliError::io(format!("failed to write output: {e}")))?;
+        }
+    }
+    Ok(())
+}
+
+/// Emit each item in an iterator as a separate NDJSON line, or collect into a
+/// JSON array envelope, or render human-readable text.
+pub fn emit_list<T: CommandOutput>(items: &[T], config: &OutputConfig) -> CliResult<()> {
+    let stdout = io::stdout();
+    let mut w = stdout.lock();
+    match config.json_format {
+        Some(JsonFormat::Pretty) => {
+            let envelope = serde_json::json!({"ok": true, "data": items});
+            serde_json::to_writer_pretty(&mut w, &envelope)
+                .map_err(|e| CliError::internal(format!("JSON serialization failed: {e}")))?;
+            writeln!(w).map_err(|e| CliError::io(format!("failed to write JSON output: {e}")))?;
+        }
+        Some(JsonFormat::Compact) => {
+            let envelope = serde_json::json!({"ok": true, "data": items});
+            serde_json::to_writer(&mut w, &envelope)
+                .map_err(|e| CliError::internal(format!("JSON serialization failed: {e}")))?;
+            writeln!(w).map_err(|e| CliError::io(format!("failed to write JSON output: {e}")))?;
+        }
+        Some(JsonFormat::Ndjson) => {
+            for item in items {
+                serde_json::to_writer(&mut w, item)
+                    .map_err(|e| CliError::internal(format!("JSON serialization failed: {e}")))?;
+                writeln!(w)
+                    .map_err(|e| CliError::io(format!("failed to write JSON output: {e}")))?;
+            }
+        }
+        None => {
+            for item in items {
+                item.render_human(&mut w, config)
+                    .map_err(|e| CliError::io(format!("failed to write output: {e}")))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// info_println! macro
+// ---------------------------------------------------------------------------
+
+/// Print to stdout only when quiet mode is **not** active.
+///
+/// Usage mirrors `println!` but takes an `&OutputConfig` as the first argument:
+/// ```ignore
+/// info_println!(output, "Switched to branch '{}'", branch_name);
+/// ```
+#[macro_export]
+macro_rules! info_println {
+    ($config:expr, $($arg:tt)*) => {
+        if !$config.quiet {
+            println!($($arg)*);
+        }
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Warning tracker (for --exit-code-on-warning)
+// ---------------------------------------------------------------------------
+
+static WARNING_EMITTED: AtomicBool = AtomicBool::new(false);
+
+/// Record that a warning was emitted during command execution.
+///
+/// Called from `emit_legacy_stderr()` when it detects a `"warning: "` prefix,
+/// and may be called explicitly by commands that issue warnings.
+pub fn record_warning() {
+    WARNING_EMITTED.store(true, Ordering::Relaxed);
+}
+
+/// Returns `true` if [`record_warning`] was called at least once.
+pub fn warning_was_emitted() -> bool {
+    WARNING_EMITTED.load(Ordering::Relaxed)
+}
+
+/// Reset the warning tracker. Used between test runs.
+#[cfg(test)]
+pub fn reset_warning_tracker() {
+    WARNING_EMITTED.store(false, Ordering::Relaxed);
+}
+
+// ---------------------------------------------------------------------------
+// ProgressReporter
+// ---------------------------------------------------------------------------
+
+/// Unified progress reporter that adapts to the resolved [`ProgressMode`].
+///
+/// - `Text` → wraps an `indicatif::ProgressBar` on stderr.
+/// - `Json` → emits NDJSON progress events to stderr.
+/// - `None` → all calls are no-ops.
+pub struct ProgressReporter {
+    mode: ProgressMode,
+    task: String,
+    bar: Option<ProgressBar>,
+}
+
+impl ProgressReporter {
+    /// Create a new reporter for the given task name.
+    ///
+    /// `total` is `Some(n)` for determinate progress or `None` for a spinner.
+    pub fn new(task: &str, total: Option<u64>, config: &OutputConfig) -> Self {
+        let mode = config.progress;
+        let bar = match mode {
+            ProgressMode::Text => {
+                let pb = if let Some(len) = total {
+                    let pb = ProgressBar::new(len);
+                    pb.set_style(
+                        ProgressStyle::default_bar()
+                            .template("{spinner:.magenta} [{elapsed_precise}] [{bar:40.green/white}] {bytes}/{total_bytes} ({eta}) {bytes_per_sec}")
+                            .unwrap()
+                            .progress_chars("=> "),
+                    );
+                    pb
+                } else {
+                    ProgressBar::new_spinner()
+                };
+                Some(pb)
+            }
+            _ => None,
+        };
+
+        Self {
+            mode,
+            task: task.to_string(),
+            bar,
+        }
+    }
+
+    /// Update progress to `current` (out of the total set at construction).
+    pub fn tick(&self, current: u64) {
+        match self.mode {
+            ProgressMode::Text => {
+                if let Some(bar) = &self.bar {
+                    bar.set_position(current);
+                }
+            }
+            ProgressMode::Json => {
+                let total = self.bar.as_ref().map(|b| b.length().unwrap_or(0));
+                let event = serde_json::json!({
+                    "event": "progress",
+                    "task": self.task,
+                    "current": current,
+                    "total": total,
+                });
+                // Progress goes to stderr to keep stdout clean for data.
+                let _ = writeln!(io::stderr(), "{}", event);
+            }
+            ProgressMode::None => {}
+        }
+    }
+
+    /// Mark the task as finished.
+    pub fn finish(&self) {
+        match self.mode {
+            ProgressMode::Text => {
+                if let Some(bar) = &self.bar {
+                    bar.finish_and_clear();
+                }
+            }
+            ProgressMode::Json => {
+                let event = serde_json::json!({
+                    "event": "progress_done",
+                    "task": self.task,
+                });
+                let _ = writeln!(io::stderr(), "{}", event);
+            }
+            ProgressMode::None => {}
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_is_human_mode() {
+        let config = OutputConfig::default();
+        assert!(config.json_format.is_none());
+        assert_eq!(config.color, ColorChoice::Auto);
+        assert!(config.pager);
+        assert!(!config.quiet);
+        assert!(!config.exit_code_on_warning);
+    }
+
+    #[test]
+    fn resolve_machine_mode() {
+        let config = OutputConfig::resolve(
+            None,  // json
+            true,  // machine
+            false, // no_pager
+            "auto", false, // quiet
+            false, // exit_code_on_warning
+            "auto",
+        );
+        assert_eq!(config.json_format, Some(JsonFormat::Ndjson));
+        assert_eq!(config.color, ColorChoice::Never);
+        assert!(!config.pager);
+        assert!(config.quiet);
+        assert_eq!(config.progress, ProgressMode::None);
+    }
+
+    #[test]
+    fn resolve_json_without_value() {
+        let config =
+            OutputConfig::resolve(Some("pretty"), false, false, "auto", false, false, "auto");
+        assert_eq!(config.json_format, Some(JsonFormat::Pretty));
+        // JSON mode disables pager
+        assert!(!config.pager);
+    }
+
+    #[test]
+    fn resolve_json_compact() {
+        let config =
+            OutputConfig::resolve(Some("compact"), false, false, "auto", false, false, "auto");
+        assert_eq!(config.json_format, Some(JsonFormat::Compact));
+    }
+
+    #[test]
+    fn resolve_json_ndjson() {
+        let config =
+            OutputConfig::resolve(Some("ndjson"), false, false, "auto", false, false, "auto");
+        assert_eq!(config.json_format, Some(JsonFormat::Ndjson));
+    }
+
+    #[test]
+    fn resolve_color_never() {
+        let config = OutputConfig::resolve(None, false, false, "never", false, false, "auto");
+        assert_eq!(config.color, ColorChoice::Never);
+    }
+
+    #[test]
+    fn resolve_color_always() {
+        let config = OutputConfig::resolve(None, false, false, "always", false, false, "auto");
+        assert_eq!(config.color, ColorChoice::Always);
+    }
+
+    #[test]
+    fn resolve_no_pager() {
+        let config = OutputConfig::resolve(None, false, true, "auto", false, false, "auto");
+        assert!(!config.pager);
+    }
+
+    #[test]
+    fn resolve_quiet_suppresses_progress() {
+        let config = OutputConfig::resolve(None, false, false, "auto", true, false, "auto");
+        assert!(config.quiet);
+        assert_eq!(config.progress, ProgressMode::None);
+    }
+
+    #[test]
+    fn resolve_explicit_progress_json() {
+        let config = OutputConfig::resolve(None, false, false, "auto", false, false, "json");
+        assert_eq!(config.progress, ProgressMode::Json);
+    }
+
+    #[test]
+    fn resolve_explicit_progress_none() {
+        let config = OutputConfig::resolve(None, false, false, "auto", false, false, "none");
+        assert_eq!(config.progress, ProgressMode::None);
+    }
+
+    #[test]
+    fn resolve_exit_code_on_warning() {
+        let config = OutputConfig::resolve(None, false, false, "auto", false, true, "auto");
+        assert!(config.exit_code_on_warning);
+    }
+
+    #[test]
+    fn warning_tracker() {
+        reset_warning_tracker();
+        assert!(!warning_was_emitted());
+        record_warning();
+        assert!(warning_was_emitted());
+        reset_warning_tracker();
+        assert!(!warning_was_emitted());
+    }
+}

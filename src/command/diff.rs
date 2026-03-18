@@ -27,6 +27,7 @@ use crate::{
         error::{CliError, CliResult},
         ignore::{self, IgnorePolicy},
         object_ext::TreeExt,
+        output::OutputConfig,
         pager::Pager,
         path, util,
         util::to_workdir_path,
@@ -192,7 +193,7 @@ pub async fn execute(args: DiffArgs) {
 /// `execute()` handles errors internally with `eprintln!` and never propagates
 /// them, so this wrapper always returns `Ok(())` even when the diff fails.
 // TODO: refactor execute() to return CliResult so errors propagate to callers.
-pub async fn execute_safe(args: DiffArgs) -> CliResult<()> {
+pub async fn execute_safe(args: DiffArgs, _output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
     execute(args).await;
     Ok(())

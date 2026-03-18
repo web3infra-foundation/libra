@@ -27,6 +27,7 @@ use crate::{
     utils::{
         error::{CliError, CliResult},
         object_ext::{BlobExt, TreeExt},
+        output::OutputConfig,
         path, util,
     },
 };
@@ -67,7 +68,7 @@ enum ResetMode {
 /// - Mixed: Moves HEAD and resets index (default)
 /// - Hard: Moves HEAD, resets index and working directory
 pub async fn execute(args: ResetArgs) {
-    if let Err(e) = execute_safe(args).await {
+    if let Err(e) = execute_safe(args, &OutputConfig::default()).await {
         e.print_stderr();
     }
 }
@@ -75,7 +76,7 @@ pub async fn execute(args: ResetArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Moves HEAD (and optionally the index/worktree) to a
 /// target commit using soft, mixed, or hard mode.
-pub async fn execute_safe(args: ResetArgs) -> CliResult<()> {
+pub async fn execute_safe(args: ResetArgs, _output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
 
     // Determine reset mode
@@ -326,7 +327,11 @@ pub(crate) async fn reset_working_directory_to_commit(
             if full_path.exists()
                 && let Err(e) = fs::remove_file(&full_path)
             {
-                eprintln!("warning: failed to remove {}: {}", full_path.display(), e);
+                crate::utils::error::emit_warning(format!(
+                    "failed to remove {}: {}",
+                    full_path.display(),
+                    e
+                ));
             }
         }
     }

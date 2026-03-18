@@ -25,7 +25,10 @@ use git_internal::{
 };
 use sha1::{Digest, Sha1};
 
-use crate::utils::error::{CliError, CliResult};
+use crate::utils::{
+    error::{CliError, CliResult},
+    output::OutputConfig,
+};
 
 #[derive(Parser, Debug)]
 pub struct IndexPackArgs {
@@ -44,12 +47,12 @@ pub struct IndexPackArgs {
 }
 
 pub fn execute(args: IndexPackArgs) {
-    if let Err(err) = execute_safe(args) {
+    if let Err(err) = execute_safe(args, &OutputConfig::default()) {
         err.print_stderr();
     }
 }
 
-pub fn execute_safe(args: IndexPackArgs) -> CliResult<()> {
+pub fn execute_safe(args: IndexPackArgs, _output: &OutputConfig) -> CliResult<()> {
     let pack_file = args.pack_file;
     let index_file = match args.index_file {
         Some(index_file) => index_file,

@@ -10,7 +10,7 @@ use libra::{
         restore::{self, RestoreArgs},
     },
     internal::{config::Config, head::Head},
-    utils::{test, util},
+    utils::{output::OutputConfig, test, util},
 };
 use serial_test::serial;
 use tempfile::tempdir;
@@ -104,7 +104,7 @@ async fn test_checkout_module_functions() {
         no_verify: false,
         author: None,
     };
-    commit::execute_safe(commit_args)
+    commit::execute_safe(commit_args, &OutputConfig::default())
         .await
         .expect("initial commit should succeed");
 
@@ -157,7 +157,7 @@ async fn test_checkout_module_functions_sha256() {
         no_verify: false,
         author: None,
     };
-    commit::execute_safe(commit_args)
+    commit::execute_safe(commit_args, &OutputConfig::default())
         .await
         .expect("initial commit should succeed");
 
@@ -200,31 +200,37 @@ async fn checkout_restore_rejects_sha1_hash_in_sha256_repo() {
 
     // create and commit a file
     test::ensure_file("foo.txt", Some("v1"));
-    add::execute_safe(AddArgs {
-        pathspec: vec!["foo.txt".into()],
-        all: false,
-        update: false,
-        refresh: false,
-        force: false,
-        verbose: false,
-        dry_run: false,
-        ignore_errors: false,
-    })
+    add::execute_safe(
+        AddArgs {
+            pathspec: vec!["foo.txt".into()],
+            all: false,
+            update: false,
+            refresh: false,
+            force: false,
+            verbose: false,
+            dry_run: false,
+            ignore_errors: false,
+        },
+        &OutputConfig::default(),
+    )
     .await
     .expect("add should succeed");
-    commit::execute_safe(commit::CommitArgs {
-        message: Some("init".into()),
-        file: None,
-        allow_empty: false,
-        conventional: false,
-        no_edit: false,
-        amend: false,
-        signoff: false,
-        disable_pre: true,
-        all: true,
-        no_verify: false,
-        author: None,
-    })
+    commit::execute_safe(
+        commit::CommitArgs {
+            message: Some("init".into()),
+            file: None,
+            allow_empty: false,
+            conventional: false,
+            no_edit: false,
+            amend: false,
+            signoff: false,
+            disable_pre: true,
+            all: true,
+            no_verify: false,
+            author: None,
+        },
+        &OutputConfig::default(),
+    )
     .await
     .expect("commit should succeed");
 
@@ -232,12 +238,15 @@ async fn checkout_restore_rejects_sha1_hash_in_sha256_repo() {
     test::ensure_file("foo.txt", Some("v2"));
 
     // try to restore using a SHA-1 length hash in a SHA-256 repo; should no-op
-    let _ = restore::execute_safe(RestoreArgs {
-        worktree: true,
-        staged: true,
-        source: Some("4b825dc642cb6eb9a060e54bf8d69288fbee4904".into()),
-        pathspec: vec![util::working_dir_string()],
-    })
+    let _ = restore::execute_safe(
+        RestoreArgs {
+            worktree: true,
+            staged: true,
+            source: Some("4b825dc642cb6eb9a060e54bf8d69288fbee4904".into()),
+            pathspec: vec![util::working_dir_string()],
+        },
+        &OutputConfig::default(),
+    )
     .await;
 
     let content = std::fs::read_to_string(util::working_dir().join("foo.txt")).unwrap();
@@ -269,52 +278,63 @@ async fn test_checkout_new_branch_with_dirty_worktree_returns_error() {
 
     // Create initial commit so HEAD exists
     test::ensure_file("base.txt", Some("base"));
-    add::execute_safe(AddArgs {
-        pathspec: vec!["base.txt".into()],
-        all: false,
-        update: false,
-        refresh: false,
-        verbose: false,
-        force: false,
-        dry_run: false,
-        ignore_errors: false,
-    })
+    add::execute_safe(
+        AddArgs {
+            pathspec: vec!["base.txt".into()],
+            all: false,
+            update: false,
+            refresh: false,
+            verbose: false,
+            force: false,
+            dry_run: false,
+            ignore_errors: false,
+        },
+        &OutputConfig::default(),
+    )
     .await
     .expect("add should succeed");
-    commit::execute_safe(commit::CommitArgs {
-        message: Some("initial".into()),
-        file: None,
-        allow_empty: false,
-        conventional: false,
-        no_edit: false,
-        amend: false,
-        signoff: false,
-        disable_pre: true,
-        all: false,
-        no_verify: false,
-        author: None,
-    })
+    commit::execute_safe(
+        commit::CommitArgs {
+            message: Some("initial".into()),
+            file: None,
+            allow_empty: false,
+            conventional: false,
+            no_edit: false,
+            amend: false,
+            signoff: false,
+            disable_pre: true,
+            all: false,
+            no_verify: false,
+            author: None,
+        },
+        &OutputConfig::default(),
+    )
     .await
     .expect("initial commit should succeed");
 
     // Stage a change without committing — working tree is "dirty"
     test::ensure_file("dirty.txt", Some("uncommitted"));
-    add::execute_safe(AddArgs {
-        pathspec: vec!["dirty.txt".into()],
-        all: false,
-        update: false,
-        refresh: false,
-        verbose: false,
-        force: false,
-        dry_run: false,
-        ignore_errors: false,
-    })
+    add::execute_safe(
+        AddArgs {
+            pathspec: vec!["dirty.txt".into()],
+            all: false,
+            update: false,
+            refresh: false,
+            verbose: false,
+            force: false,
+            dry_run: false,
+            ignore_errors: false,
+        },
+        &OutputConfig::default(),
+    )
     .await
     .expect("add dirty file should succeed");
 
-    let result =
-        checkout::execute_safe(CheckoutArgs::try_parse_from(["checkout", "-b", "new"]).unwrap())
-            .await;
+    let result = checkout::execute_safe(
+        CheckoutArgs::try_parse_from(["checkout", "-b", "new"]).unwrap(),
+        &OutputConfig::default(),
+    )
+    .await;
     assert!(
         result.is_err(),
         "checkout should fail when worktree is dirty"
@@ -351,31 +371,37 @@ async fn test_checkout_current_branch_with_dirty_worktree_succeeds() {
     Config::insert("user", None, "email", "checkout@test.com").await;
 
     test::ensure_file("base.txt", Some("base"));
-    add::execute_safe(AddArgs {
-        pathspec: vec!["base.txt".into()],
-        all: false,
-        update: false,
-        refresh: false,
-        verbose: false,
-        force: false,
-        dry_run: false,
-        ignore_errors: false,
-    })
+    add::execute_safe(
+        AddArgs {
+            pathspec: vec!["base.txt".into()],
+            all: false,
+            update: false,
+            refresh: false,
+            verbose: false,
+            force: false,
+            dry_run: false,
+            ignore_errors: false,
+        },
+        &OutputConfig::default(),
+    )
     .await
     .expect("add should succeed");
-    commit::execute_safe(commit::CommitArgs {
-        message: Some("initial".into()),
-        file: None,
-        allow_empty: false,
-        conventional: false,
-        no_edit: false,
-        amend: false,
-        signoff: false,
-        disable_pre: true,
-        all: false,
-        no_verify: false,
-        author: None,
-    })
+    commit::execute_safe(
+        commit::CommitArgs {
+            message: Some("initial".into()),
+            file: None,
+            allow_empty: false,
+            conventional: false,
+            no_edit: false,
+            amend: false,
+            signoff: false,
+            disable_pre: true,
+            all: false,
+            no_verify: false,
+            author: None,
+        },
+        &OutputConfig::default(),
+    )
     .await
     .expect("initial commit should succeed");
 
@@ -386,7 +412,7 @@ async fn test_checkout_current_branch_with_dirty_worktree_succeeds() {
         .await
         .expect("current branch should be present");
     let args = CheckoutArgs::try_parse_from(["checkout", current.as_str()]).unwrap();
-    let result = checkout::execute_safe(args).await;
+    let result = checkout::execute_safe(args, &OutputConfig::default()).await;
     assert!(
         result.is_ok(),
         "checkout current branch should not fail on dirty worktree"

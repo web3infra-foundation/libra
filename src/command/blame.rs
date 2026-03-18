@@ -13,6 +13,7 @@ use crate::{
     utils::{
         error::{CliError, CliResult},
         object_ext::TreeExt,
+        output::OutputConfig,
         pager::Pager,
         util,
     },
@@ -42,7 +43,7 @@ struct LineBlame {
 }
 
 pub async fn execute(args: BlameArgs) {
-    if let Err(e) = execute_safe(args).await {
+    if let Err(e) = execute_safe(args, &OutputConfig::default()).await {
         e.print_stderr();
     }
 }
@@ -50,7 +51,7 @@ pub async fn execute(args: BlameArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Walks commit history for the target file, attributing
 /// each line to the commit that last changed it.
-pub async fn execute_safe(args: BlameArgs) -> CliResult<()> {
+pub async fn execute_safe(args: BlameArgs, out_config: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
 
     let commit_id = get_target_commit(&args.commit)
@@ -184,7 +185,7 @@ pub async fn execute_safe(args: BlameArgs) -> CliResult<()> {
         ));
     }
 
-    let mut pager = Pager::new()?;
+    let mut pager = Pager::with_config(out_config)?;
     pager.write_str(&output)?;
     pager.finish()?;
     Ok(())

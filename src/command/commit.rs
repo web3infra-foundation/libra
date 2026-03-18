@@ -42,6 +42,7 @@ use crate::{
         error::{CliError, CliResult},
         lfs,
         object_ext::BlobExt,
+        output::OutputConfig,
         path, util,
     },
 };
@@ -566,7 +567,7 @@ async fn execute_impl(args: CommitArgs) -> Result<(), CommitExecError> {
 }
 
 pub async fn execute(args: CommitArgs) {
-    if let Err(error) = execute_safe(args).await {
+    if let Err(error) = execute_safe(args, &OutputConfig::default()).await {
         error.print_stderr();
     }
 }
@@ -574,7 +575,7 @@ pub async fn execute(args: CommitArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Collects staged changes, resolves committer identity,
 /// builds tree and commit objects, and updates HEAD.
-pub async fn execute_safe(args: CommitArgs) -> CliResult<()> {
+pub async fn execute_safe(args: CommitArgs, _output: &OutputConfig) -> CliResult<()> {
     execute_impl(args).await.map_err(CommitExecError::into_cli)
 }
 
