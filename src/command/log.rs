@@ -29,6 +29,7 @@ use crate::{
     utils::{
         error::{CliError, CliResult},
         object_ext::TreeExt,
+        output::OutputConfig,
         pager::Pager,
         util,
     },
@@ -307,7 +308,7 @@ struct Reference {
 }
 
 pub async fn execute(args: LogArgs) {
-    if let Err(err) = execute_safe(args).await {
+    if let Err(err) = execute_safe(args, &OutputConfig::default()).await {
         err.print_stderr();
     }
 }
@@ -315,7 +316,13 @@ pub async fn execute(args: LogArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Walks commit history applying filters (date range,
 /// author, path) and renders formatted log output.
-pub async fn execute_safe(args: LogArgs) -> CliResult<()> {
+pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()> {
+    if output.is_json() {
+        return Err(CliError::command_usage(
+            "`log` does not yet support --json or --machine output",
+        ));
+    }
+
     let name_status = args.name_status;
     // Check parameter mutual exclusion: if both name flags and --patch are specified, prioritize the name display flags
     let name_only = args.name_only && !name_status;
@@ -340,7 +347,7 @@ pub async fn execute_safe(args: LogArgs) -> CliResult<()> {
         .await
         .map_err(|value| CliError::fatal(format!("invalid --decorate option: {value}")))?;
 
-    let mut pager = Pager::new()?;
+    let mut pager = Pager::with_config(output)?;
 
     let head = Head::current().await;
     // check if the current branch has any commits
@@ -371,6 +378,10 @@ pub async fn execute_safe(args: LogArgs) -> CliResult<()> {
     let mut reachable_commits = get_reachable_commits(commit_hash.clone(), None).await?;
     // default sort with signature time
     reachable_commits.sort_by_key(|b| std::cmp::Reverse(b.committer.timestamp));
+
+    if output.quiet {
+        return Ok(());
+    }
 
     let ref_commits = create_reference_commit_map().await;
     let full_hash_len = commit_hash.len();

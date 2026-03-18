@@ -11,12 +11,19 @@ use git_internal::hash::{HashKind, set_hash_kind};
 
 use crate::{
     command, utils,
-    utils::error::{CliError, CliResult},
+    utils::{
+        error::{CliError, CliResult},
+        output::OutputConfig,
+    },
 };
 
 const ROOT_AFTER_HELP: &str = "\
 Help Topics:
   error-codes  Print the stable CLI error code table (`libra help error-codes`)
+
+Output Examples:
+  libra --json status
+  libra --json branch
 ";
 
 const ERROR_CODES_HELP: &str = include_str!("../docs/error-codes.md");
@@ -63,6 +70,65 @@ async fn set_local_hash_kind() -> CliResult<()> {
     after_help = ROOT_AFTER_HELP
 )]
 struct Cli {
+    /// Emit machine-readable JSON to stdout.
+    /// Use `--json` alone for pretty output, or `--json=compact` / `--json=ndjson`
+    /// to select an alternative layout.  The `=` is required when specifying a format
+    /// so that the subcommand name is not consumed as the value.
+    #[arg(
+        long,
+        short = 'J',
+        global = true,
+        value_name = "FORMAT",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "pretty",
+        value_parser = ["pretty", "compact", "ndjson"],
+    )]
+    json: Option<String>,
+
+    /// Strict machine mode.
+    /// Implies --json=ndjson --no-pager --color=never --quiet.
+    /// Disables all prompts and decorative text.
+    #[arg(long, global = true)]
+    machine: bool,
+
+    /// Disable automatic pager (less) for long output.
+    #[arg(long, global = true)]
+    no_pager: bool,
+
+    /// When to use terminal colors.
+    /// Also respects the NO_COLOR environment variable (see <https://no-color.org>).
+    #[arg(
+        long,
+        global = true,
+        value_name = "WHEN",
+        default_value = "auto",
+        value_parser = ["auto", "never", "always"],
+    )]
+    color: String,
+
+    /// Suppress standard stdout output; keep warnings/errors on stderr.
+    /// This includes primary command results, unlike some Git per-command
+    /// `--quiet` flags that only suppress informational chatter.
+    #[arg(long, short = 'q', global = true)]
+    quiet: bool,
+
+    /// Return non-zero exit code (exit 9) when a warning is emitted.
+    #[arg(long, global = true)]
+    exit_code_on_warning: bool,
+
+    /// Control progress output for long-running operations.
+    /// `json` emits NDJSON progress events; `text` shows a human-friendly bar;
+    /// `none` suppresses progress entirely.
+    #[arg(
+        long,
+        global = true,
+        value_name = "MODE",
+        default_value = "auto",
+        value_parser = ["json", "text", "none", "auto"],
+    )]
+    progress: String,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -458,6 +524,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         None => env::args().collect::<Vec<_>>(),
     };
     let argv = rewrite_log_short_number_args(argv);
+    utils::output::reset_warning_tracker();
     if is_error_codes_help_topic(&argv) {
         return print_error_codes_help();
     }
@@ -482,65 +549,85 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
             set_local_hash_kind().await?;
         }
     }
+    // Resolve global output flags into a single config before dispatching.
+    let output = OutputConfig::resolve(
+        args.json.as_deref(),
+        args.machine,
+        args.no_pager,
+        &args.color,
+        args.quiet,
+        args.exit_code_on_warning,
+        &args.progress,
+    );
+    output.apply_color_override();
+
     // parse the command and execute the corresponding function with it's args
     match args.command {
-        Commands::Init(args) => {
+        Commands::Init(cmd_args) => {
             let original_dir = utils::util::cur_dir();
-            command::init::execute_safe(args).await?; // set working directory as args.repo_directory
-            set_local_hash_kind().await?; // set hash kind after init
+            command::init::execute_safe(cmd_args, &output).await?;
+            set_local_hash_kind().await?;
             env::set_current_dir(&original_dir).map_err(|e| {
                 CliError::fatal(format!(
                     "failed to restore working directory '{}': {}",
                     original_dir.display(),
                     e
                 ))
-            })?; // restore working directory as original_dir
+            })?;
         }
-        Commands::Clone(args) => command::clone::execute_safe(args).await?, //clone will use init internally,so we don't need to set hash kind here again
-        Commands::AgentCodex(args) => command::agent_codex::execute(args)
+        Commands::Clone(cmd_args) => command::clone::execute_safe(cmd_args, &output).await?,
+        Commands::AgentCodex(cmd_args) => command::agent_codex::execute(cmd_args)
             .await
             .map_err(|e| CliError::fatal(e.to_string()))?,
-        Commands::ClaudeSdk(args) => command::claude_sdk::execute(args)
+        Commands::ClaudeSdk(cmd_args) => command::claude_sdk::execute(cmd_args)
             .await
             .map_err(|e| CliError::fatal(e.to_string()))?,
-        Commands::Code(args) => command::code::execute(args).await?,
-        Commands::Add(args) => command::add::execute_safe(args).await?,
-        Commands::Rm(args) => command::remove::execute_safe(args).await?,
-        Commands::Restore(args) => command::restore::execute_safe(args).await?,
-        Commands::Status(args) => command::status::execute_safe(args).await?,
-        Commands::Clean(args) => command::clean::execute_safe(args).await?,
-        Commands::Stash(cmd) => command::stash::execute_safe(cmd).await?,
-        Commands::Lfs(cmd) => command::lfs::execute_safe(cmd).await?,
-        Commands::Log(args) => command::log::execute_safe(args).await?,
-        Commands::Shortlog(args) => command::shortlog::execute_safe(args).await?,
-        Commands::Show(args) => command::show::execute_safe(args).await?,
-        Commands::ShowRef(args) => command::show_ref::execute_safe(args).await?,
-        Commands::Branch(args) => command::branch::execute_safe(args).await?,
-        Commands::Tag(args) => command::tag::execute_safe(args).await?,
-        Commands::Commit(args) => command::commit::execute_safe(args).await?,
-        Commands::Switch(args) => command::switch::execute_safe(args).await?,
-        Commands::Rebase(args) => command::rebase::execute_safe(args).await?,
-        Commands::Merge(args) => command::merge::execute_safe(args).await?,
-        Commands::Reset(args) => command::reset::execute_safe(args).await?,
-        Commands::Mv(args) => command::mv::execute_safe(args).await?,
-        Commands::Describe(args) => command::describe::execute_safe(args).await?,
-        Commands::CherryPick(args) => command::cherry_pick::execute_safe(args).await?,
-        Commands::Push(args) => command::push::execute_safe(args).await?,
-        Commands::CatFile(args) => command::cat_file::execute_safe(args).await?,
-        Commands::IndexPack(args) => command::index_pack::execute_safe(args)?,
-        Commands::Fetch(args) => command::fetch::execute_safe(args).await?,
-        Commands::Diff(args) => command::diff::execute_safe(args).await?,
-        Commands::Blame(args) => command::blame::execute_safe(args).await?,
-        Commands::Revert(args) => command::revert::execute_safe(args).await?,
-        Commands::Remote(cmd) => command::remote::execute_safe(cmd).await?,
-        Commands::Open(args) => command::open::execute_safe(args).await?,
-        Commands::Pull(args) => command::pull::execute_safe(args).await?,
-        Commands::Config(args) => command::config::execute_safe(args).await?,
-        Commands::Vault(args) => command::vault::execute_safe(args).await?,
-        Commands::Checkout(args) => command::checkout::execute_safe(args).await?,
-        Commands::Reflog(args) => command::reflog::execute_safe(args).await?,
-        Commands::Worktree(args) => command::worktree::execute_safe(args).await?,
-        Commands::Cloud(args) => command::cloud::execute_safe(args).await?,
+        Commands::Code(cmd_args) => command::code::execute(cmd_args).await?,
+        Commands::Add(cmd_args) => command::add::execute_safe(cmd_args, &output).await?,
+        Commands::Rm(cmd_args) => command::remove::execute_safe(cmd_args, &output).await?,
+        Commands::Restore(cmd_args) => command::restore::execute_safe(cmd_args, &output).await?,
+        Commands::Status(cmd_args) => command::status::execute_safe(cmd_args, &output).await?,
+        Commands::Clean(cmd_args) => command::clean::execute_safe(cmd_args, &output).await?,
+        Commands::Stash(cmd) => command::stash::execute_safe(cmd, &output).await?,
+        Commands::Lfs(cmd) => command::lfs::execute_safe(cmd, &output).await?,
+        Commands::Log(cmd_args) => command::log::execute_safe(cmd_args, &output).await?,
+        Commands::Shortlog(cmd_args) => command::shortlog::execute_safe(cmd_args, &output).await?,
+        Commands::Show(cmd_args) => command::show::execute_safe(cmd_args, &output).await?,
+        Commands::ShowRef(cmd_args) => command::show_ref::execute_safe(cmd_args, &output).await?,
+        Commands::Branch(cmd_args) => command::branch::execute_safe(cmd_args, &output).await?,
+        Commands::Tag(cmd_args) => command::tag::execute_safe(cmd_args, &output).await?,
+        Commands::Commit(cmd_args) => command::commit::execute_safe(cmd_args, &output).await?,
+        Commands::Switch(cmd_args) => command::switch::execute_safe(cmd_args, &output).await?,
+        Commands::Rebase(cmd_args) => command::rebase::execute_safe(cmd_args, &output).await?,
+        Commands::Merge(cmd_args) => command::merge::execute_safe(cmd_args, &output).await?,
+        Commands::Reset(cmd_args) => command::reset::execute_safe(cmd_args, &output).await?,
+        Commands::Mv(cmd_args) => command::mv::execute_safe(cmd_args, &output).await?,
+        Commands::Describe(cmd_args) => command::describe::execute_safe(cmd_args, &output).await?,
+        Commands::CherryPick(cmd_args) => {
+            command::cherry_pick::execute_safe(cmd_args, &output).await?
+        }
+        Commands::Push(cmd_args) => command::push::execute_safe(cmd_args, &output).await?,
+        Commands::CatFile(cmd_args) => command::cat_file::execute_safe(cmd_args, &output).await?,
+        Commands::IndexPack(cmd_args) => command::index_pack::execute_safe(cmd_args, &output)?,
+        Commands::Fetch(cmd_args) => command::fetch::execute_safe(cmd_args, &output).await?,
+        Commands::Diff(cmd_args) => command::diff::execute_safe(cmd_args, &output).await?,
+        Commands::Blame(cmd_args) => command::blame::execute_safe(cmd_args, &output).await?,
+        Commands::Revert(cmd_args) => command::revert::execute_safe(cmd_args, &output).await?,
+        Commands::Remote(cmd) => command::remote::execute_safe(cmd, &output).await?,
+        Commands::Open(cmd_args) => command::open::execute_safe(cmd_args, &output).await?,
+        Commands::Pull(cmd_args) => command::pull::execute_safe(cmd_args, &output).await?,
+        Commands::Config(cmd_args) => command::config::execute_safe(cmd_args, &output).await?,
+        Commands::Vault(cmd_args) => command::vault::execute_safe(cmd_args, &output).await?,
+        Commands::Checkout(cmd_args) => command::checkout::execute_safe(cmd_args, &output).await?,
+        Commands::Reflog(cmd_args) => command::reflog::execute_safe(cmd_args, &output).await?,
+        Commands::Worktree(cmd_args) => command::worktree::execute_safe(cmd_args, &output).await?,
+        Commands::Cloud(cmd_args) => command::cloud::execute_safe(cmd_args, &output).await?,
+    }
+
+    // Check for warnings when --exit-code-on-warning is active.
+    if output.exit_code_on_warning && utils::output::warning_was_emitted() {
+        return Err(CliError::failure("command completed with warnings")
+            .with_stable_code(utils::error::StableErrorCode::WarningEmitted));
     }
 
     // Wait for any background storage tasks (e.g. object indexing) to complete
@@ -558,7 +645,7 @@ mod tests {
     use serial_test::serial;
 
     use super::*;
-    use crate::utils::{error::CliErrorKind, test::ChangeDirGuard};
+    use crate::utils::{error::CliErrorKind, output, test::ChangeDirGuard};
 
     /// this test is to verify that the CLI can be built without panicking
     /// according [clap dock](https://docs.rs/clap/latest/clap/_derive/_tutorial/chapter_4/index.html)
@@ -627,6 +714,30 @@ mod tests {
         assert!(
             msg.contains("Hint:") || msg.contains("similar"),
             "expected clap fuzzy-match suggestion, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn parse_async_resets_warning_tracker_before_dispatch() {
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = ChangeDirGuard::new(temp.path());
+
+        output::record_warning();
+        assert!(output::warning_was_emitted());
+
+        parse_async(Some(&[
+            "libra",
+            "--exit-code-on-warning",
+            "--quiet",
+            "init",
+        ]))
+        .await
+        .unwrap();
+
+        assert!(
+            !output::warning_was_emitted(),
+            "top-level CLI dispatch should clear stale warning state before running"
         );
     }
 

@@ -13,6 +13,7 @@ use crate::{
     utils::{
         error::{CliError, CliResult},
         object_ext::TreeExt,
+        output::OutputConfig,
         pager::Pager,
         util,
     },
@@ -42,7 +43,7 @@ struct LineBlame {
 }
 
 pub async fn execute(args: BlameArgs) {
-    if let Err(e) = execute_safe(args).await {
+    if let Err(e) = execute_safe(args, &OutputConfig::default()).await {
         e.print_stderr();
     }
 }
@@ -50,8 +51,14 @@ pub async fn execute(args: BlameArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Walks commit history for the target file, attributing
 /// each line to the commit that last changed it.
-pub async fn execute_safe(args: BlameArgs) -> CliResult<()> {
+pub async fn execute_safe(args: BlameArgs, out_config: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
+
+    if out_config.is_json() {
+        return Err(CliError::command_usage(
+            "`blame` does not yet support --json or --machine output",
+        ));
+    }
 
     let commit_id = get_target_commit(&args.commit)
         .await
@@ -64,7 +71,9 @@ pub async fn execute_safe(args: BlameArgs) -> CliResult<()> {
     let target_lines = get_file_lines(&commit_obj, &args.file).map_err(CliError::fatal)?;
 
     if target_lines.is_empty() {
-        println!("File is empty");
+        if !out_config.quiet {
+            println!("File is empty");
+        }
         return Ok(());
     }
 
@@ -184,9 +193,11 @@ pub async fn execute_safe(args: BlameArgs) -> CliResult<()> {
         ));
     }
 
-    let mut pager = Pager::new()?;
-    pager.write_str(&output)?;
-    pager.finish()?;
+    if !out_config.quiet {
+        let mut pager = Pager::with_config(out_config)?;
+        pager.write_str(&output)?;
+        pager.finish()?;
+    }
     Ok(())
 }
 fn get_file_lines(commit: &Commit, file_path: &str) -> Result<Vec<String>, String> {

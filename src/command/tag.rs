@@ -6,7 +6,10 @@ use sea_orm::sqlx::types::chrono;
 
 use crate::{
     internal::{tag, tag::TagObject},
-    utils::error::{CliError, CliResult},
+    utils::{
+        error::{CliError, CliResult},
+        output::OutputConfig,
+    },
 };
 
 #[derive(Parser, Debug)]
@@ -37,7 +40,7 @@ pub struct TagArgs {
 }
 
 pub async fn execute(args: TagArgs) {
-    if let Err(err) = execute_safe(args).await {
+    if let Err(err) = execute_safe(args, &OutputConfig::default()).await {
         err.print_stderr();
     }
 }
@@ -45,7 +48,7 @@ pub async fn execute(args: TagArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Lists, creates, or deletes tags depending on the
 /// provided arguments.
-pub async fn execute_safe(args: TagArgs) -> CliResult<()> {
+pub async fn execute_safe(args: TagArgs, _output: &OutputConfig) -> CliResult<()> {
     if args.list || args.n_lines.is_some() {
         let show_lines = args.n_lines.unwrap_or(0);
         let rendered = render_tags(show_lines)

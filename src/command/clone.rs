@@ -21,6 +21,7 @@ use crate::{
     },
     utils::{
         error::{CliError, CliResult},
+        output::OutputConfig,
         util,
     },
 };
@@ -95,7 +96,7 @@ fn contains_initialized_repo(metadata_root: &Path) -> bool {
 }
 
 pub async fn execute(args: CloneArgs) {
-    if let Err(err) = execute_safe(args).await {
+    if let Err(err) = execute_safe(args, &OutputConfig::default()).await {
         err.print_stderr();
     }
 }
@@ -104,9 +105,9 @@ pub async fn execute(args: CloneArgs) {
 /// errors and exiting. Fetches objects from a remote URL, writes refs/config,
 /// and checks out the working tree. Restores the original working directory on
 /// failure.
-pub async fn execute_safe(args: CloneArgs) -> CliResult<()> {
+pub async fn execute_safe(args: CloneArgs, output: &OutputConfig) -> CliResult<()> {
     let original_dir = util::cur_dir();
-    let result = execute_clone(args, &original_dir).await;
+    let result = execute_clone(args, &original_dir, output).await;
 
     if env::current_dir().ok().as_ref() != Some(&original_dir) {
         env::set_current_dir(&original_dir).map_err(|source| {
@@ -120,7 +121,11 @@ pub async fn execute_safe(args: CloneArgs) -> CliResult<()> {
     result.map_err(CliError::from)
 }
 
-async fn execute_clone(args: CloneArgs, original_dir: &Path) -> Result<(), CloneError> {
+async fn execute_clone(
+    args: CloneArgs,
+    original_dir: &Path,
+    output: &OutputConfig,
+) -> Result<(), CloneError> {
     let mut remote_repo = args.remote_repo.clone();
     if !remote_repo.ends_with('/') {
         remote_repo.push('/');
@@ -180,10 +185,12 @@ async fn execute_clone(args: CloneArgs, original_dir: &Path) -> Result<(), Clone
         .and_then(|name| name.to_str())
         .map(str::to_string)
         .unwrap_or_else(|| local_path.to_string_lossy().into_owned());
-    if args.bare {
-        eprintln!("Cloning into bare repository '{repo_name}'...");
-    } else {
-        eprintln!("Cloning into '{repo_name}'...");
+    if !output.quiet && !output.is_json() {
+        if args.bare {
+            eprintln!("Cloning into bare repository '{repo_name}'...");
+        } else {
+            eprintln!("Cloning into '{repo_name}'...");
+        }
     }
 
     if let Some(branch) = &args.branch
@@ -201,6 +208,7 @@ async fn execute_clone(args: CloneArgs, original_dir: &Path) -> Result<(), Clone
         &discovery,
         &local_path,
         original_dir,
+        output,
     )
     .await
     {
@@ -208,7 +216,9 @@ async fn execute_clone(args: CloneArgs, original_dir: &Path) -> Result<(), Clone
         return Err(error);
     }
 
-    eprintln!("done.");
+    if !output.quiet && !output.is_json() {
+        eprintln!("done.");
+    }
 
     Ok(())
 }
@@ -220,6 +230,7 @@ async fn clone_into_destination(
     discovery: &crate::internal::protocol::DiscoveryResult,
     local_path: &Path,
     original_dir: &Path,
+    output: &OutputConfig,
 ) -> Result<(), CloneError> {
     env::set_current_dir(local_path).map_err(|source| CloneError::ChangeDirectory {
         path: local_path.to_path_buf(),
@@ -231,19 +242,22 @@ async fn clone_into_destination(
         git_internal::hash::HashKind::Sha256 => "sha256".to_string(),
     };
 
-    command::init::execute_safe(command::init::InitArgs {
-        bare: args.bare,
-        template: None,
-        initial_branch: args.branch.clone(),
-        repo_directory: local_path.to_string_lossy().into_owned(),
-        quiet: true,
-        shared: None,
-        object_format: Some(object_format),
-        ref_format: None,
-        from_git_repository: None,
-        separate_libra_dir: None,
-        vault: true,
-    })
+    command::init::execute_safe(
+        command::init::InitArgs {
+            bare: args.bare,
+            template: None,
+            initial_branch: args.branch.clone(),
+            repo_directory: local_path.to_string_lossy().into_owned(),
+            quiet: true,
+            shared: None,
+            object_format: Some(object_format),
+            ref_format: None,
+            from_git_repository: None,
+            separate_libra_dir: None,
+            vault: true,
+        },
+        output,
+    )
     .await
     .map_err(|error| CloneError::InitializeRepository {
         message: error.to_string(),
@@ -258,6 +272,7 @@ async fn clone_into_destination(
         args.branch.clone(),
         args.single_branch,
         args.depth,
+        output,
     )
     .await
     .map_err(|source| CloneError::FetchFailed { source })?;
@@ -410,7 +425,7 @@ pub(crate) async fn setup_repository(
             .await;
         }
     } else {
-        eprintln!("warning: You appear to have cloned an empty repository.");
+        crate::utils::error::emit_warning("You appear to have cloned an empty repository.");
 
         Config::insert(
             "remote",

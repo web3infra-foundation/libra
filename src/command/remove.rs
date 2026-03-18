@@ -11,6 +11,7 @@ use crate::{
     command::status::{changes_to_be_committed, changes_to_be_staged},
     utils::{
         error::{CliError, CliResult},
+        output::OutputConfig,
         path,
         path_ext::PathExt,
         util,
@@ -78,7 +79,7 @@ struct DiffStatus {
 }
 
 pub async fn execute(args: RemoveArgs) {
-    if let Err(err) = execute_safe(args).await {
+    if let Err(err) = execute_safe(args, &OutputConfig::default()).await {
         err.print_stderr();
     }
 }
@@ -86,7 +87,7 @@ pub async fn execute(args: RemoveArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Removes paths from the index and optionally from the
 /// working tree, supporting recursive and cache-only modes.
-pub async fn execute_safe(args: RemoveArgs) -> CliResult<()> {
+pub async fn execute_safe(args: RemoveArgs, _output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
     let idx_file = path::index();
     let mut remove_list = Vec::new();

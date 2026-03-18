@@ -21,6 +21,7 @@ use crate::{
     utils::{
         error::{CliError, CliResult},
         object_ext::{BlobExt, TreeExt},
+        output::OutputConfig,
         path, util,
     },
 };
@@ -42,7 +43,7 @@ pub struct RevertArgs {
 /// This function reverts a specified commit by applying the inverse changes
 /// and creating a new commit that undoes the original commit
 pub async fn execute(args: RevertArgs) {
-    if let Err(e) = execute_safe(args).await {
+    if let Err(e) = execute_safe(args, &OutputConfig::default()).await {
         e.print_stderr();
     }
 }
@@ -50,7 +51,7 @@ pub async fn execute(args: RevertArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Reverses one or more commits by replaying their inverse
 /// changes into the index/worktree and optionally creating new commits.
-pub async fn execute_safe(args: RevertArgs) -> CliResult<()> {
+pub async fn execute_safe(args: RevertArgs, _output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
 
     // Ensure we're on a branch, not in detached HEAD state

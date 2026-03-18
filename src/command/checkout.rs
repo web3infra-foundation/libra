@@ -15,6 +15,7 @@ use crate::{
     },
     utils::{
         error::{CliError, CliResult},
+        output::OutputConfig,
         util,
     },
 };
@@ -30,7 +31,7 @@ pub struct CheckoutArgs {
 }
 
 pub async fn execute(args: CheckoutArgs) {
-    if let Err(e) = execute_safe(args).await {
+    if let Err(e) = execute_safe(args, &OutputConfig::default()).await {
         e.print_stderr();
     }
 }
@@ -38,7 +39,7 @@ pub async fn execute(args: CheckoutArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Validates arguments, checks for local changes, then
 /// delegates to branch switching or creation via restore utilities.
-pub async fn execute_safe(args: CheckoutArgs) -> CliResult<()> {
+pub async fn execute_safe(args: CheckoutArgs, output: &OutputConfig) -> CliResult<()> {
     if let Some(ref branch_name) = args.branch
         && branch_name == INTENT_BRANCH
     {
@@ -61,40 +62,57 @@ pub async fn execute_safe(args: CheckoutArgs) -> CliResult<()> {
     if let Some(ref target_branch) = args.branch
         && get_current_branch().await == Some(target_branch.clone())
     {
-        println!("Already on {target_branch}");
+        crate::info_println!(output, "Already on {target_branch}");
         return Ok(());
     }
 
-    switch::ensure_clean_status()
-        .await
-        .map_err(|_| CliError::failure("local changes would be overwritten by checkout"))?;
+    match switch::ensure_clean_status(output).await {
+        Ok(()) => {}
+        Err(err)
+            if matches!(
+                err.message(),
+                "unstaged changes, can't switch branch"
+                    | "uncommitted changes, can't switch branch"
+            ) =>
+        {
+            return Err(CliError::failure(
+                "local changes would be overwritten by checkout",
+            ));
+        }
+        Err(err) => return Err(err),
+    }
 
     match (args.branch, args.new_branch) {
-        (Some(target_branch), _) => check_and_switch_branch(&target_branch).await?,
-        (None, Some(new_branch)) => create_and_switch_new_branch(&new_branch).await?,
-        (None, None) => show_current_branch().await,
+        (Some(target_branch), _) => check_and_switch_branch(&target_branch, output).await?,
+        (None, Some(new_branch)) => create_and_switch_new_branch(&new_branch, output).await?,
+        (None, None) => show_current_branch(output).await,
     }
     Ok(())
 }
 
 pub async fn get_current_branch() -> Option<String> {
-    let head = Head::current().await;
-    match head {
-        Head::Detached(commit_hash) => {
-            println!("HEAD detached at {}", &commit_hash.to_string()[..8]);
-            None
-        }
+    match Head::current().await {
+        Head::Detached(_) => None,
         Head::Branch(name) => Some(name),
     }
 }
 
-async fn show_current_branch() {
-    if let Some(current_branch) = get_current_branch().await {
-        println!("Current branch is {current_branch}.");
+async fn show_current_branch(output: &OutputConfig) {
+    match Head::current().await {
+        Head::Detached(commit_hash) => {
+            crate::info_println!(output, "HEAD detached at {}", &commit_hash.to_string()[..8]);
+        }
+        Head::Branch(current_branch) => {
+            crate::info_println!(output, "Current branch is {current_branch}.");
+        }
     }
 }
 
 pub async fn switch_branch(branch_name: &str) -> CliResult<()> {
+    switch_branch_with_output(branch_name, &OutputConfig::default()).await
+}
+
+async fn switch_branch_with_output(branch_name: &str, output: &OutputConfig) -> CliResult<()> {
     if branch_name == INTENT_BRANCH {
         return Err(CliError::fatal(format!(
             "switching to '{}' branch is not allowed",
@@ -104,36 +122,43 @@ pub async fn switch_branch(branch_name: &str) -> CliResult<()> {
     let target_branch = Branch::find_branch(branch_name, None)
         .await
         .ok_or_else(|| CliError::fatal(format!("branch '{}' not found", branch_name)))?;
-    restore_to_commit(target_branch.commit).await?;
+    restore_to_commit(target_branch.commit, output).await?;
     let head = Head::Branch(branch_name.to_string());
     Head::update(head, None).await;
     Ok(())
 }
 
-async fn create_and_switch_new_branch(new_branch: &str) -> CliResult<()> {
+async fn create_and_switch_new_branch(new_branch: &str, output: &OutputConfig) -> CliResult<()> {
     branch::create_branch_safe(new_branch.to_string(), get_current_branch().await).await?;
-    switch_branch(new_branch).await?;
-    println!("Switched to a new branch '{new_branch}'");
+    switch_branch_with_output(new_branch, output).await?;
+    crate::info_println!(output, "Switched to a new branch '{new_branch}'");
     Ok(())
 }
 
-async fn get_remote(branch_name: &str) -> CliResult<()> {
+async fn get_remote(branch_name: &str, output: &OutputConfig) -> CliResult<()> {
     let remote_branch_name: String = format!("origin/{branch_name}");
 
-    create_and_switch_new_branch(branch_name).await?;
+    create_and_switch_new_branch(branch_name, output).await?;
     // Set branch upstream
-    branch::set_upstream_safe(branch_name, &remote_branch_name).await?;
+    branch::set_upstream_safe_with_output(branch_name, &remote_branch_name, output).await?;
     // Synchronous branches
     // Use the pull command to update the local branch with the latest changes from the remote branch
-    pull::execute_safe(pull::PullArgs::make(None, None)).await?;
+    pull::execute_safe(pull::PullArgs::make(None, None), output).await?;
     Ok(())
 }
 
 /// Returns `Ok(Some(true))` if remote branch found, `Ok(Some(false))` if local branch found,
 /// `Ok(None)` if already on the branch.
 pub async fn check_branch(branch_name: &str) -> CliResult<Option<bool>> {
+    check_branch_with_output(branch_name, &OutputConfig::default()).await
+}
+
+async fn check_branch_with_output(
+    branch_name: &str,
+    output: &OutputConfig,
+) -> CliResult<Option<bool>> {
     if get_current_branch().await == Some(branch_name.to_string()) {
-        println!("Already on {branch_name}");
+        crate::info_println!(output, "Already on {branch_name}");
         return Ok(None);
     }
 
@@ -141,7 +166,10 @@ pub async fn check_branch(branch_name: &str) -> CliResult<Option<bool>> {
     if target_branch.is_none() {
         let remote_branch_name: String = format!("origin/{branch_name}");
         if !Branch::search_branch(&remote_branch_name).await.is_empty() {
-            println!("branch '{branch_name}' set up to track '{remote_branch_name}'.");
+            crate::info_println!(
+                output,
+                "branch '{branch_name}' set up to track '{remote_branch_name}'."
+            );
             Ok(Some(true))
         } else {
             Err(CliError::fatal(format!(
@@ -150,28 +178,28 @@ pub async fn check_branch(branch_name: &str) -> CliResult<Option<bool>> {
             )))
         }
     } else {
-        println!("Switched to branch '{branch_name}'");
+        crate::info_println!(output, "Switched to branch '{branch_name}'");
         Ok(Some(false))
     }
 }
 
-async fn check_and_switch_branch(branch_name: &str) -> CliResult<()> {
-    match check_branch(branch_name).await? {
-        Some(true) => get_remote(branch_name).await?,
-        Some(false) => switch_branch(branch_name).await?,
+async fn check_and_switch_branch(branch_name: &str, output: &OutputConfig) -> CliResult<()> {
+    match check_branch_with_output(branch_name, output).await? {
+        Some(true) => get_remote(branch_name, output).await?,
+        Some(false) => switch_branch_with_output(branch_name, output).await?,
         None => (),
     }
     Ok(())
 }
 
-async fn restore_to_commit(commit_id: ObjectHash) -> CliResult<()> {
+async fn restore_to_commit(commit_id: ObjectHash, output: &OutputConfig) -> CliResult<()> {
     let restore_args = RestoreArgs {
         worktree: true,
         staged: true,
         source: Some(commit_id.to_string()),
         pathspec: vec![util::working_dir_string()],
     };
-    restore::execute_safe(restore_args).await
+    restore::execute_safe(restore_args, output).await
 }
 
 /// Unit tests for the checkout module

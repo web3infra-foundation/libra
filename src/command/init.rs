@@ -18,6 +18,7 @@ use crate::{
     utils::{
         convert,
         error::{CliError, CliResult},
+        output::OutputConfig,
         util::{DATABASE, ROOT_DIR, cur_dir},
     },
 };
@@ -201,14 +202,14 @@ pub struct InitArgs {
 
 /// Execute the init function
 pub async fn execute(args: InitArgs) {
-    if let Err(e) = execute_safe(args).await {
+    if let Err(e) = execute_safe(args, &OutputConfig::default()).await {
         e.print_stderr();
     }
 }
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Creates `.libra` storage, seeds HEAD and default
 /// refs/config, and initialises the backing SQLite database.
-pub async fn execute_safe(args: InitArgs) -> CliResult<()> {
+pub async fn execute_safe(args: InitArgs, _output: &OutputConfig) -> CliResult<()> {
     let from_git = args.from_git_repository.clone();
     let is_bare = args.bare;
     let enable_vault = args.vault;

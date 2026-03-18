@@ -266,7 +266,9 @@ pub async fn process_hook_event_from_stdin(
                 session
                     .metadata
                     .insert("persisted".to_string(), json!(false));
-                eprintln!("warning: failed to persist session history: {err}");
+                crate::utils::error::emit_warning(format!(
+                    "failed to persist session history: {err}"
+                ));
                 session_store.save(&session).map_err(|save_err| {
                     anyhow!("failed to save session after persistence failure: {save_err}")
                 })?;

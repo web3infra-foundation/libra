@@ -5,7 +5,10 @@ use clap::Parser;
 use super::{fetch, merge};
 use crate::{
     internal::{config::Config, head::Head},
-    utils::error::{CliError, CliResult},
+    utils::{
+        error::{CliError, CliResult},
+        output::OutputConfig,
+    },
 };
 #[derive(Parser, Debug)]
 pub struct PullArgs {
@@ -27,7 +30,7 @@ impl PullArgs {
 }
 
 pub async fn execute(args: PullArgs) {
-    if let Err(err) = execute_safe(args).await {
+    if let Err(err) = execute_safe(args, &OutputConfig::default()).await {
         err.print_stderr();
     }
 }
@@ -35,18 +38,21 @@ pub async fn execute(args: PullArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Fetches from the remote then merges into the current
 /// branch.
-pub async fn execute_safe(args: PullArgs) -> CliResult<()> {
+pub async fn execute_safe(args: PullArgs, output: &OutputConfig) -> CliResult<()> {
     let fetch_args = fetch::FetchArgs {
         repository: args.repository.clone(),
         refspec: args.refspec.clone(),
         all: false,
     };
-    fetch::execute_safe(fetch_args).await?;
+    fetch::execute_safe(fetch_args, output).await?;
 
     if let (Some(remote), Some(refspec)) = (&args.repository, &args.refspec) {
-        merge::execute_safe(merge::MergeArgs {
-            branch: format!("{remote}/{refspec}"),
-        })
+        merge::execute_safe(
+            merge::MergeArgs {
+                branch: format!("{remote}/{refspec}"),
+            },
+            output,
+        )
         .await?;
         return Ok(());
     }
@@ -58,7 +64,7 @@ pub async fn execute_safe(args: PullArgs) -> CliResult<()> {
                 let merge_args = merge::MergeArgs {
                     branch: format!("{}/{}", branch_config.remote, branch_config.merge),
                 };
-                merge::execute_safe(merge_args).await?;
+                merge::execute_safe(merge_args, output).await?;
                 Ok(())
             }
             None => Err(CliError::failure(

@@ -29,6 +29,7 @@ use crate::{
     utils::{
         d1_client::D1Client,
         error::{CliError, CliResult},
+        output::OutputConfig,
         path,
         storage::{Storage, local::LocalStorage, remote::RemoteStorage},
         util,
@@ -102,7 +103,7 @@ pub async fn execute(args: CloudArgs) -> CliResult<()> {
     Ok(())
 }
 
-pub async fn execute_safe(args: CloudArgs) -> CliResult<()> {
+pub async fn execute_safe(args: CloudArgs, _output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
     execute(args).await
 }
@@ -459,7 +460,7 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
     } else {
         // Restore metadata
         if let Err(e) = restore_metadata(&db_conn, &r2_storage).await {
-            eprintln!("warning: failed to restore metadata: {}", e);
+            crate::utils::error::emit_warning(format!("failed to restore metadata: {}", e));
         }
 
         // Post-restore: update HEAD and restore worktree if we're in a fresh repo state
@@ -508,7 +509,7 @@ async fn restore_worktree_to_head() -> Result<(), String> {
     };
 
     if let Err(e) = crate::command::restore::execute_checked(restore_args).await {
-        eprintln!("warning: failed to restore worktree files: {}", e);
+        crate::utils::error::emit_warning(format!("failed to restore worktree files: {}", e));
         Err(e.to_string())
     } else {
         println!("Successfully restored working directory files.");

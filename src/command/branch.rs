@@ -13,7 +13,10 @@ use crate::{
         config::Config,
         head::Head,
     },
-    utils::error::{CliError, CliResult},
+    utils::{
+        error::{CliError, CliResult},
+        output::{OutputConfig, emit_json_data},
+    },
 };
 
 pub enum BranchListMode {
@@ -22,9 +25,16 @@ pub enum BranchListMode {
     All,
 }
 
+const BRANCH_AFTER_HELP: &str = "\
+Compatibility Notes:
+  Libra's global --quiet suppresses the branch listing itself.
+  This differs from `git branch --quiet`, which still prints the primary list.
+";
+
 // action options are mutually exclusive with query options
 // query options can be combined
 #[derive(Parser, Debug)]
+#[command(after_help = BRANCH_AFTER_HELP)]
 #[command(group(
     ArgGroup::new("action")
         .multiple(false)
@@ -87,7 +97,7 @@ pub struct BranchArgs {
     pub no_contains: Vec<String>,
 }
 pub async fn execute(args: BranchArgs) {
-    if let Err(err) = execute_safe(args).await {
+    if let Err(err) = execute_safe(args, &OutputConfig::default()).await {
         err.print_stderr();
     }
 }
@@ -95,7 +105,7 @@ pub async fn execute(args: BranchArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Creates, deletes, renames, or lists branches depending
 /// on the provided arguments.
-pub async fn execute_safe(args: BranchArgs) -> CliResult<()> {
+pub async fn execute_safe(args: BranchArgs, output: &OutputConfig) -> CliResult<()> {
     if let Some(new_branch) = args.new_branch {
         create_branch_safe(new_branch, args.commit_hash).await
     } else if let Some(branch_to_delete) = args.delete {
@@ -103,18 +113,19 @@ pub async fn execute_safe(args: BranchArgs) -> CliResult<()> {
     } else if let Some(branch_to_delete) = args.delete_safe {
         delete_branch_safe(branch_to_delete).await
     } else if args.show_current {
-        show_current_branch().await;
+        if !output.quiet {
+            show_current_branch().await;
+        }
         Ok(())
     } else if let Some(upstream) = args.set_upstream_to {
         match Head::current().await {
-            Head::Branch(name) => set_upstream_safe(&name, &upstream).await,
+            Head::Branch(name) => set_upstream_safe_with_output(&name, &upstream, output).await,
             Head::Detached(_) => Err(CliError::fatal("HEAD is detached")),
         }
     } else if !args.rename.is_empty() {
         rename_branch(args.rename).await
     } else {
         // Default behavior: list branches
-        // priority: `--all` > `--remote` > `--list` (default when no manipulate options given)
         let list_mode = if args.all {
             BranchListMode::All
         } else if args.remotes {
@@ -123,7 +134,21 @@ pub async fn execute_safe(args: BranchArgs) -> CliResult<()> {
             BranchListMode::Local
         };
 
-        list_branches(list_mode, &args.contains, &args.no_contains).await
+        if output.is_json() {
+            // Collect branch names and emit as JSON.
+            let branches =
+                collect_branch_names(list_mode, &args.contains, &args.no_contains).await?;
+            emit_json_data(
+                "branch",
+                &serde_json::json!({ "branches": branches }),
+                output,
+            )
+        } else if output.quiet {
+            // Quiet mode: suppress branch listing.
+            Ok(())
+        } else {
+            list_branches(list_mode, &args.contains, &args.no_contains).await
+        }
     }
 }
 
@@ -134,6 +159,14 @@ pub async fn set_upstream(branch: &str, upstream: &str) {
 }
 
 pub async fn set_upstream_safe(branch: &str, upstream: &str) -> CliResult<()> {
+    set_upstream_safe_with_output(branch, upstream, &OutputConfig::default()).await
+}
+
+pub async fn set_upstream_safe_with_output(
+    branch: &str,
+    upstream: &str,
+    output: &OutputConfig,
+) -> CliResult<()> {
     let branch_config = Config::branch_config(branch).await;
     if branch_config.is_none() {
         let (remote, remote_branch) = match upstream.split_once('/') {
@@ -152,7 +185,10 @@ pub async fn set_upstream_safe(branch: &str, upstream: &str) -> CliResult<()> {
         )
         .await;
     }
-    println!("Branch '{branch}' set up to track remote branch '{upstream}'");
+    crate::info_println!(
+        output,
+        "Branch '{branch}' set up to track remote branch '{upstream}'"
+    );
     Ok(())
 }
 
@@ -408,17 +444,26 @@ async fn show_current_branch() {
         }
     }
 }
-async fn display_head_state() -> String {
+/// Return the current HEAD name and optionally print detached-HEAD info.
+///
+/// When `print` is `true`, a "HEAD detached at ..." line is written to stdout
+/// (the traditional human-visible behavior). Pass `false` for machine-readable
+/// paths that must not leak human text.
+async fn head_branch_name(print: bool) -> String {
     let head = Head::current().await;
-    if let Head::Detached(commit) = head {
+    if print && let Head::Detached(commit) = head {
         let s = "HEAD detached at  ".to_string() + &commit.to_string()[..8];
         let s = s.green();
         println!("{s}");
-    };
+    }
     match head {
         Head::Branch(name) => name,
         Head::Detached(_) => "".to_string(),
     }
+}
+
+async fn display_head_state() -> String {
+    head_branch_name(true).await
 }
 
 fn format_branch_name(branch: &Branch) -> String {
@@ -462,6 +507,47 @@ fn display_branches(branches: Vec<Branch>, head_name: &str, is_remote: bool) {
             println!("  {}", name);
         }
     }
+}
+
+/// Collect branch names as strings for JSON output.
+async fn collect_branch_names(
+    list_mode: BranchListMode,
+    commits_contains: &[String],
+    commits_no_contains: &[String],
+) -> CliResult<Vec<serde_json::Value>> {
+    // Use the quiet variant: do NOT print "HEAD detached at ..." to stdout.
+    let head_name = head_branch_name(false).await;
+
+    let mut local_branches = match &list_mode {
+        BranchListMode::Local | BranchListMode::All => Branch::list_branches(None).await,
+        _ => vec![],
+    };
+    let mut remote_branches = vec![];
+    match list_mode {
+        BranchListMode::Remote | BranchListMode::All => {
+            let remote_configs = Config::all_remote_configs().await;
+            for remote in remote_configs {
+                remote_branches.extend(Branch::list_branches(Some(&remote.name)).await);
+            }
+        }
+        _ => {}
+    };
+
+    let contains_set = resolve_commits(commits_contains).await?;
+    let no_contains_set = resolve_commits(commits_no_contains).await?;
+    for branches in [&mut local_branches, &mut remote_branches] {
+        filter_branches(branches, &contains_set, &no_contains_set)?;
+    }
+
+    let mut result = Vec::new();
+    for branch in local_branches.iter().chain(remote_branches.iter()) {
+        result.push(serde_json::json!({
+            "name": branch.name,
+            "current": branch.name == head_name,
+            "commit": branch.commit.to_string(),
+        }));
+    }
+    Ok(result)
 }
 
 pub async fn list_branches(

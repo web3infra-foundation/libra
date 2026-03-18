@@ -20,6 +20,7 @@ use crate::{
         client_storage::ClientStorage,
         error::{CliError, CliResult},
         object_ext::TreeExt,
+        output::OutputConfig,
         path, util,
     },
 };
@@ -54,7 +55,7 @@ pub struct ShowArgs {
 
 /// Executes the show command.
 pub async fn execute(args: ShowArgs) {
-    if let Err(err) = execute_safe(args).await {
+    if let Err(err) = execute_safe(args, &OutputConfig::default()).await {
         err.print_stderr();
     }
 }
@@ -62,7 +63,7 @@ pub async fn execute(args: ShowArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Resolves a revision (commit, tag, tree, blob, or
 /// `<rev>:<path>`) and prints its contents with diff formatting.
-pub async fn execute_safe(args: ShowArgs) -> CliResult<()> {
+pub async fn execute_safe(args: ShowArgs, _output: &OutputConfig) -> CliResult<()> {
     let object_ref = args.object.as_deref().unwrap_or("HEAD");
 
     // Handle `<revision>:<path>` lookups before generic revision resolution.

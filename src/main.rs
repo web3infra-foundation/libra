@@ -1,6 +1,6 @@
 //! Binary entry point that boots the async runtime, parses CLI arguments, and dispatches execution.
 
-use libra::cli;
+use libra::{cli, utils::output::OutputConfig};
 use tracing_subscriber::EnvFilter;
 
 fn main() {
@@ -20,7 +20,12 @@ fn main() {
     }
 
     if let Err(err) = cli::parse(None) {
-        err.print_stderr();
+        // Best-effort JSON rendering: resolve the output flags directly from
+        // argv so parse-time failures follow the same precedence rules as
+        // successful dispatch.
+        let argv: Vec<String> = std::env::args().collect();
+        let output = OutputConfig::resolve_from_argv(&argv);
+        err.print_for_output(&output);
         std::process::exit(err.exit_code());
     }
 }

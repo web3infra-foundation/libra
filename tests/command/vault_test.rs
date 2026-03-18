@@ -9,6 +9,7 @@ use libra::{
         vault::{VaultArgs, VaultCommand},
     },
     internal::config::Config,
+    utils::output::OutputConfig,
 };
 use serial_test::serial;
 use tempfile::tempdir;
@@ -146,12 +147,15 @@ async fn test_generate_gpg_key_overwrites_duplicate_signing_rows() {
     Config::insert("vault", None, "signing", "false").await;
     Config::insert("vault", None, "signing", "false").await;
 
-    libra::command::vault::execute_safe(VaultArgs {
-        command: VaultCommand::GenerateGpgKey {
-            name: Some("Test User".to_string()),
-            email: Some("test@example.com".to_string()),
+    libra::command::vault::execute_safe(
+        VaultArgs {
+            command: VaultCommand::GenerateGpgKey {
+                name: Some("Test User".to_string()),
+                email: Some("test@example.com".to_string()),
+            },
         },
-    })
+        &OutputConfig::default(),
+    )
     .await
     .expect("vault generate-gpg-key should succeed");
 

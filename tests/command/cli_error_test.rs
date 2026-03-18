@@ -96,7 +96,7 @@ fn global_parse_error_uses_exit_code_2() {
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
     assert!(stderr.starts_with("error: unexpected argument '--bad' found"));
     assert!(stderr.contains("Error-Code: LBR-CLI-002"));
-    assert!(stderr.contains("Usage: libra <COMMAND>"));
+    assert!(stderr.contains("Usage: libra"));
     assert_eq!(report.error_code, "LBR-CLI-002");
     assert_eq!(report.category, "cli");
     assert_eq!(report.exit_code, 2);

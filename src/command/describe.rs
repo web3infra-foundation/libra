@@ -18,6 +18,7 @@ use crate::{
     },
     utils::{
         error::{CliError, CliResult},
+        output::OutputConfig,
         util,
     },
 };
@@ -44,14 +45,14 @@ struct TagInfo {
 }
 
 pub async fn execute(args: DescribeArgs) {
-    if let Err(e) = execute_safe(args).await {
+    if let Err(e) = execute_safe(args, &OutputConfig::default()).await {
         e.print_stderr();
     }
 }
 
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting.
-pub async fn execute_safe(args: DescribeArgs) -> CliResult<()> {
+pub async fn execute_safe(args: DescribeArgs, _output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
     execute_inner(args)
         .await

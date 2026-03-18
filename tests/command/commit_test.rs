@@ -1,6 +1,6 @@
 //! Integration tests for the commit command covering staged changes, message handling, and tree/hash updates.
 
-use libra::utils::object_ext::TreeExt;
+use libra::utils::{object_ext::TreeExt, output::OutputConfig};
 use serial_test::serial;
 use tempfile::tempdir;
 
@@ -28,7 +28,7 @@ async fn test_execute_commit_with_empty_index_fail() {
         no_verify: false,
         author: None,
     };
-    let result = execute_safe(args).await;
+    let result = execute_safe(args, &OutputConfig::default()).await;
     assert!(result.is_err());
     assert!(result.unwrap_err().render().contains("nothing to commit"));
 }
@@ -73,19 +73,22 @@ async fn test_commit_requires_configured_identity_in_strict_mode() {
     })
     .await;
 
-    let result = execute_safe(CommitArgs {
-        message: Some("should fail without identity".to_string()),
-        file: None,
-        allow_empty: false,
-        conventional: false,
-        no_edit: false,
-        amend: false,
-        signoff: false,
-        disable_pre: true,
-        all: false,
-        no_verify: false,
-        author: None,
-    })
+    let result = execute_safe(
+        CommitArgs {
+            message: Some("should fail without identity".to_string()),
+            file: None,
+            allow_empty: false,
+            conventional: false,
+            no_edit: false,
+            amend: false,
+            signoff: false,
+            disable_pre: true,
+            all: false,
+            no_verify: false,
+            author: None,
+        },
+        &OutputConfig::default(),
+    )
     .await;
     assert!(result.is_err());
     let rendered = result.unwrap_err().render();
@@ -694,7 +697,7 @@ async fn test_commit_empty_working_tree() {
         author: None,
     };
 
-    let result = execute_safe(args).await;
+    let result = execute_safe(args, &OutputConfig::default()).await;
     assert!(result.is_err());
     assert!(result.unwrap_err().render().contains("nothing to commit"));
 }
@@ -844,19 +847,22 @@ async fn test_commit_without_identity_fails_by_default() {
     })
     .await;
 
-    let result = execute_safe(CommitArgs {
-        message: Some("auto-detect identity test".to_string()),
-        file: None,
-        allow_empty: false,
-        conventional: false,
-        no_edit: false,
-        amend: false,
-        signoff: false,
-        disable_pre: true,
-        all: false,
-        no_verify: false,
-        author: None,
-    })
+    let result = execute_safe(
+        CommitArgs {
+            message: Some("auto-detect identity test".to_string()),
+            file: None,
+            allow_empty: false,
+            conventional: false,
+            no_edit: false,
+            amend: false,
+            signoff: false,
+            disable_pre: true,
+            all: false,
+            no_verify: false,
+            author: None,
+        },
+        &OutputConfig::default(),
+    )
     .await;
 
     assert!(result.is_err(), "commit should fail without identity");

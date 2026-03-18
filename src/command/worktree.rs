@@ -12,6 +12,7 @@ use crate::{
     internal::head::Head,
     utils::{
         error::{CliError, CliResult},
+        output::OutputConfig,
         util,
     },
 };
@@ -118,7 +119,7 @@ impl Drop for DirGuard {
 /// to the concrete handler for the requested worktree operation. Any `io::Error`
 /// returned from handlers is formatted as a `fatal:` message on stderr.
 pub async fn execute(args: WorktreeArgs) {
-    if let Err(e) = execute_safe(args).await {
+    if let Err(e) = execute_safe(args, &OutputConfig::default()).await {
         e.print_stderr();
     }
 }
@@ -126,7 +127,7 @@ pub async fn execute(args: WorktreeArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Dispatches to the appropriate worktree sub-command
 /// (add, list, lock, unlock, move, prune, remove, repair).
-pub async fn execute_safe(args: WorktreeArgs) -> CliResult<()> {
+pub async fn execute_safe(args: WorktreeArgs, _output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
 
     match args.command {

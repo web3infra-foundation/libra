@@ -11,7 +11,10 @@ use std::{
     io::{self, IsTerminal, Write},
 };
 
-use crate::utils::error::{CliError, CliResult, StableErrorCode};
+use crate::utils::{
+    error::{CliError, CliResult, StableErrorCode},
+    output::OutputConfig,
+};
 
 pub const LIBRA_PAGER_ENV: &str = "LIBRA_PAGER";
 pub const LIBRA_TEST_ENV: &str = "LIBRA_TEST";
@@ -66,6 +69,18 @@ impl Pager {
                     Ok(Self::stdout())
                 }
             }
+        }
+    }
+
+    /// Create a writer that respects the global [`OutputConfig`].
+    ///
+    /// Returns plain stdout when the config disables paging (`--no-pager`,
+    /// `--machine`, or `--json` mode).  Otherwise delegates to `Pager::new()`.
+    pub fn with_config(config: &OutputConfig) -> CliResult<Self> {
+        if !config.pager || config.is_json() {
+            Ok(Self::stdout())
+        } else {
+            Self::new()
         }
     }
 

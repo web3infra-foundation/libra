@@ -6,7 +6,10 @@ use regex::Regex;
 
 use crate::{
     internal::config::Config,
-    utils::error::{CliError, CliResult},
+    utils::{
+        error::{CliError, CliResult},
+        output::OutputConfig,
+    },
 };
 
 #[derive(Parser, Debug)]
@@ -22,7 +25,7 @@ lazy_static! {
 }
 
 pub async fn execute(args: OpenArgs) {
-    if let Err(e) = execute_safe(args).await {
+    if let Err(e) = execute_safe(args, &OutputConfig::default()).await {
         e.print_stderr();
     }
 }
@@ -30,7 +33,7 @@ pub async fn execute(args: OpenArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Resolves the remote URL and opens it in the default
 /// browser.
-pub async fn execute_safe(args: OpenArgs) -> CliResult<()> {
+pub async fn execute_safe(args: OpenArgs, _output: &OutputConfig) -> CliResult<()> {
     let in_repo = crate::utils::util::require_repo().is_ok();
 
     let remote_url = if let Some(input) = args.remote {

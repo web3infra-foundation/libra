@@ -8,7 +8,7 @@
 use std::{
     collections::BTreeMap,
     env, fmt,
-    io::{self, IsTerminal},
+    io::{self, IsTerminal, Write},
 };
 
 use serde::{Serialize, Serializer};
@@ -47,6 +47,8 @@ pub enum CliExitCode {
     Auth = 6,
     Io = 7,
     Internal = 8,
+    /// Returned by `--exit-code-on-warning` when warnings were emitted.
+    Warning = 9,
 }
 
 impl CliExitCode {
@@ -68,6 +70,8 @@ pub enum CliErrorCategory {
     Auth,
     Io,
     Internal,
+    /// Command succeeded but emitted warnings; used with `--exit-code-on-warning`.
+    Warning,
 }
 
 impl CliErrorCategory {
@@ -80,6 +84,7 @@ impl CliErrorCategory {
             Self::Auth => "auth",
             Self::Io => "io",
             Self::Internal => "internal",
+            Self::Warning => "warning",
         }
     }
 }
@@ -102,6 +107,8 @@ pub enum StableErrorCode {
     IoReadFailed,
     IoWriteFailed,
     InternalInvariant,
+    /// Command succeeded but emitted warnings (`--exit-code-on-warning`).
+    WarningEmitted,
 }
 
 impl Serialize for StableErrorCode {
@@ -131,6 +138,7 @@ impl StableErrorCode {
             Self::IoReadFailed => "LBR-IO-001",
             Self::IoWriteFailed => "LBR-IO-002",
             Self::InternalInvariant => "LBR-INTERNAL-001",
+            Self::WarningEmitted => "LBR-WARN-001",
         }
     }
 
@@ -147,6 +155,7 @@ impl StableErrorCode {
             Self::AuthMissingCredentials | Self::AuthPermissionDenied => CliErrorCategory::Auth,
             Self::IoReadFailed | Self::IoWriteFailed => CliErrorCategory::Io,
             Self::InternalInvariant => CliErrorCategory::Internal,
+            Self::WarningEmitted => CliErrorCategory::Warning,
         }
     }
 
@@ -159,6 +168,7 @@ impl StableErrorCode {
             CliErrorCategory::Auth => CliExitCode::Auth,
             CliErrorCategory::Io => CliExitCode::Io,
             CliErrorCategory::Internal => CliExitCode::Internal,
+            CliErrorCategory::Warning => CliExitCode::Warning,
         }
     }
 
@@ -190,6 +200,9 @@ impl StableErrorCode {
             Self::IoWriteFailed => "Filesystem or storage write failed.",
             Self::InternalInvariant => {
                 "Unexpected internal failure or broken invariant. This should be reported."
+            }
+            Self::WarningEmitted => {
+                "Command completed successfully but emitted warnings (--exit-code-on-warning)."
             }
         }
     }
@@ -425,6 +438,36 @@ impl CliError {
         eprintln!("{}", self.render_for_stderr());
     }
 
+    /// Print the error according to the global output configuration.
+    ///
+    /// When JSON output is active, the error is rendered as a JSON envelope to
+    /// **stderr** so stdout remains reserved for successful command data.
+    pub fn print_for_output(&self, config: &crate::utils::output::OutputConfig) {
+        use crate::utils::output::JsonFormat;
+
+        if let Some(fmt) = config.json_format {
+            let json = self.render_json();
+            let stderr = std::io::stderr();
+            let mut writer = stderr.lock();
+            match fmt {
+                JsonFormat::Pretty => {
+                    // Re-parse and pretty-print the JSON.
+                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) {
+                        let _ = serde_json::to_writer_pretty(&mut writer, &value);
+                        let _ = writeln!(writer);
+                    } else {
+                        let _ = writeln!(writer, "{json}");
+                    }
+                }
+                JsonFormat::Compact | JsonFormat::Ndjson => {
+                    let _ = writeln!(writer, "{json}");
+                }
+            }
+        } else {
+            self.print_stderr();
+        }
+    }
+
     fn severity(&self) -> &'static str {
         match self.kind {
             CliErrorKind::Fatal => "fatal",
@@ -571,6 +614,7 @@ impl std::error::Error for CliError {}
 pub fn emit_legacy_stderr(message: impl Into<String>) {
     let message = message.into();
     if let Some(text) = message.trim().strip_prefix("warning: ") {
+        crate::utils::output::record_warning();
         eprintln!("warning: {}", text);
         return;
     }
@@ -599,6 +643,16 @@ macro_rules! cli_error {
         let prefix = format!($($arg)+);
         $crate::utils::error::emit_legacy_stderr(format!("{prefix}: {}", $err));
     }};
+}
+
+/// Emit a warning to stderr and record it for `--exit-code-on-warning`.
+///
+/// Use this instead of raw `eprintln!("warning: ...")` so that the
+/// global warning tracker is updated and the `--exit-code-on-warning` flag
+/// works correctly.
+pub fn emit_warning(message: impl std::fmt::Display) {
+    crate::utils::output::record_warning();
+    eprintln!("warning: {message}");
 }
 
 /// Transitional best-effort classifier for legacy string-only error paths.

@@ -30,6 +30,7 @@ use crate::{
     utils::{
         error::{CliError, CliResult},
         object_ext::{BlobExt, TreeExt},
+        output::OutputConfig,
         path, util, worktree,
     },
 };
@@ -58,7 +59,7 @@ pub struct CherryPickArgs {
 ///    TODO: Now, it will apply the picked commits exactly as they are,
 ///    without resolving any conflicts, and it will not take the state of the staging area into account.
 pub async fn execute(args: CherryPickArgs) {
-    if let Err(e) = execute_safe(args).await {
+    if let Err(e) = execute_safe(args, &OutputConfig::default()).await {
         e.print_stderr();
     }
 }
@@ -66,7 +67,7 @@ pub async fn execute(args: CherryPickArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Replays one or more commit changes onto the current
 /// branch, optionally creating new commits or leaving them staged.
-pub async fn execute_safe(args: CherryPickArgs) -> CliResult<()> {
+pub async fn execute_safe(args: CherryPickArgs, _output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
 
     if let Head::Detached(_) = Head::current().await {

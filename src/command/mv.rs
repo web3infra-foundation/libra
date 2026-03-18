@@ -11,6 +11,7 @@ use crate::{
     command::calc_file_blob_hash,
     utils::{
         error::{CliError, CliResult},
+        output::OutputConfig,
         path, util,
     },
 };
@@ -49,7 +50,7 @@ impl MovePlan {
 }
 
 pub async fn execute(args: MvArgs) {
-    if let Err(e) = execute_safe(args).await {
+    if let Err(e) = execute_safe(args, &OutputConfig::default()).await {
         e.print_stderr();
     }
 }
@@ -57,7 +58,7 @@ pub async fn execute(args: MvArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Moves or renames files in the working directory and
 /// updates the index accordingly.
-pub async fn execute_safe(args: MvArgs) -> CliResult<()> {
+pub async fn execute_safe(args: MvArgs, _output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
     execute_inner(args)
         .await

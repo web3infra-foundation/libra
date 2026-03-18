@@ -41,6 +41,7 @@ use crate::{
     },
     utils::{
         error::{CliError, CliResult},
+        output::OutputConfig,
         path, util,
     },
 };
@@ -266,7 +267,7 @@ impl From<FetchError> for CliError {
 }
 
 pub async fn execute(args: FetchArgs) {
-    if let Err(err) = execute_safe(args).await {
+    if let Err(err) = execute_safe(args, &OutputConfig::default()).await {
         err.print_stderr();
     }
 }
@@ -274,12 +275,12 @@ pub async fn execute(args: FetchArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Negotiates with remotes, downloads pack data, and
 /// updates remote-tracking refs.
-pub async fn execute_safe(args: FetchArgs) -> CliResult<()> {
+pub async fn execute_safe(args: FetchArgs, output: &OutputConfig) -> CliResult<()> {
     tracing::debug!("`fetch` args: {:?}", args);
 
     if args.all {
         for remote in Config::all_remote_configs().await {
-            fetch_repository_safe(remote, None, false, None)
+            fetch_repository_safe(remote, None, false, None, output)
                 .await
                 .map_err(CliError::from)?;
         }
@@ -306,7 +307,7 @@ pub async fn execute_safe(args: FetchArgs) -> CliResult<()> {
         ))
     })?;
 
-    fetch_repository_safe(remote_config, args.refspec, false, None)
+    fetch_repository_safe(remote_config, args.refspec, false, None, output)
         .await
         .map_err(CliError::from)
 }
@@ -380,7 +381,15 @@ pub async fn fetch_repository(
     single_branch: bool,
     depth: Option<usize>,
 ) {
-    if let Err(err) = fetch_repository_safe(remote_config, branch, single_branch, depth).await {
+    if let Err(err) = fetch_repository_safe(
+        remote_config,
+        branch,
+        single_branch,
+        depth,
+        &OutputConfig::default(),
+    )
+    .await
+    {
         CliError::from(err).print_stderr();
     }
 }
@@ -390,6 +399,7 @@ pub async fn fetch_repository_safe(
     branch: Option<String>,
     single_branch: bool,
     depth: Option<usize>,
+    output: &OutputConfig,
 ) -> Result<(), FetchError> {
     let (remote_client, discovery) = discover_remote(&remote_config.url).await?;
     let local_kind = get_hash_kind();
@@ -446,7 +456,7 @@ pub async fn fetch_repository_safe(
             source,
         })?;
 
-    let pack_data = read_fetch_stream(&mut result_stream).await?;
+    let pack_data = read_fetch_stream(&mut result_stream, output).await?;
     let pack_file = write_pack_and_index(&pack_data)?;
     if let Some(pack_file) = pack_file {
         let index_version = match get_hash_kind() {
@@ -470,11 +480,15 @@ pub async fn fetch_repository_safe(
     update_references(&remote_config, &refs, &ref_heads, remote_head, branch).await
 }
 
-async fn read_fetch_stream(result_stream: &mut FetchStream) -> Result<Vec<u8>, FetchError> {
+async fn read_fetch_stream(
+    result_stream: &mut FetchStream,
+    output: &OutputConfig,
+) -> Result<Vec<u8>, FetchError> {
     let mut reader = StreamReader::new(result_stream);
     let mut pack_data = Vec::new();
     let mut reach_pack = false;
-    let bar = ProgressBar::new_spinner();
+    let render_progress = matches!(output.progress, crate::utils::output::ProgressMode::Text);
+    let bar = render_progress.then(ProgressBar::new_spinner);
     let time = Instant::now();
 
     loop {
@@ -495,13 +509,17 @@ async fn read_fetch_stream(result_stream: &mut FetchStream) -> Result<Vec<u8>, F
                         let bytes_per_sec = pack_data.len() as f64 / time.elapsed().as_secs_f64();
                         let total = util::auto_unit_bytes(pack_data.len() as u64);
                         let bps = util::auto_unit_bytes(bytes_per_sec as u64);
-                        bar.set_message(format!("Receiving objects: {total:.2} | {bps:.2}/s"));
-                        bar.tick();
+                        if let Some(bar) = &bar {
+                            bar.set_message(format!("Receiving objects: {total:.2} | {bps:.2}/s"));
+                            bar.tick();
+                        }
                         pack_data.extend(payload);
                     }
-                    2 => print_remote_progress(payload),
+                    2 => print_remote_progress(payload, render_progress),
                     3 => {
-                        bar.finish_and_clear();
+                        if let Some(bar) = &bar {
+                            bar.finish_and_clear();
+                        }
                         return Err(FetchError::RemoteSideband {
                             message: String::from_utf8_lossy(payload).trim().to_string(),
                         });
@@ -515,30 +533,38 @@ async fn read_fetch_stream(result_stream: &mut FetchStream) -> Result<Vec<u8>, F
             && let Some((&code, payload)) = data.split_first()
         {
             match code {
-                2 => print_remote_progress(payload),
+                2 => print_remote_progress(payload, render_progress),
                 3 => {
-                    bar.finish_and_clear();
+                    if let Some(bar) = &bar {
+                        bar.finish_and_clear();
+                    }
                     return Err(FetchError::RemoteSideband {
                         message: String::from_utf8_lossy(payload).trim().to_string(),
                     });
                 }
                 _ => {
-                    let text = String::from_utf8_lossy(&data);
-                    eprint!("{text}");
-                    let _ = io::stderr().flush();
+                    if render_progress {
+                        let text = String::from_utf8_lossy(&data);
+                        eprint!("{text}");
+                        let _ = io::stderr().flush();
+                    }
                 }
             }
         }
     }
-    bar.finish_and_clear();
+    if let Some(bar) = &bar {
+        bar.finish_and_clear();
+    }
 
     Ok(pack_data)
 }
 
-fn print_remote_progress(payload: &[u8]) {
-    let text = String::from_utf8_lossy(payload);
-    eprint!("{text}");
-    let _ = io::stderr().flush();
+fn print_remote_progress(payload: &[u8], render_progress: bool) {
+    if render_progress {
+        let text = String::from_utf8_lossy(payload);
+        eprint!("{text}");
+        let _ = io::stderr().flush();
+    }
 }
 
 fn write_pack_and_index(pack_data: &[u8]) -> Result<Option<String>, FetchError> {
