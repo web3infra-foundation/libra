@@ -31,7 +31,7 @@ use crate::{
     utils::{
         client_storage::ClientStorage,
         error::{CliError, CliResult, exit_with_legacy_stderr},
-        output::OutputConfig,
+        output::{OutputConfig, emit_json_data},
         path,
         storage::local::LocalStorage,
         util,
@@ -181,13 +181,404 @@ pub async fn execute(args: CatFileArgs) {
 ///
 /// # Known limitations
 ///
-/// `execute()` handles errors internally and never propagates them, so this
-/// wrapper always returns `Ok(())` even when cat-file fails.
-// TODO: refactor execute() to return CliResult so errors propagate to callers.
-pub async fn execute_safe(args: CatFileArgs, _output: &OutputConfig) -> CliResult<()> {
+/// `execute()` handles errors internally and never propagates them, so the
+/// safe path only delegates to it for plain human-output mode.
+pub async fn execute_safe(args: CatFileArgs, output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
-    execute(args).await;
-    Ok(())
+
+    if args.check_exist && !output.is_json() {
+        execute(args).await;
+        return Ok(());
+    }
+
+    if !output.quiet && !output.is_json() {
+        execute(args).await;
+        return Ok(());
+    }
+
+    execute_with_output_contract(args, output).await
+}
+
+async fn execute_with_output_contract(args: CatFileArgs, output: &OutputConfig) -> CliResult<()> {
+    if args.ai_list_types {
+        let types = ai_list_types_data().await?;
+        if output.is_json() {
+            emit_json_data(
+                "cat-file",
+                &serde_json::json!({
+                    "mode": "ai_list_types",
+                    "types": types,
+                }),
+                output,
+            )?;
+        }
+        return Ok(());
+    }
+
+    if let Some(type_name) = args.ai_list.as_deref() {
+        let objects = ai_list_objects_data(type_name).await?;
+        if output.is_json() {
+            emit_json_data(
+                "cat-file",
+                &serde_json::json!({
+                    "mode": "ai_list",
+                    "object_type": type_name,
+                    "entries": objects,
+                    "total": objects.len(),
+                }),
+                output,
+            )?;
+        }
+        return Ok(());
+    }
+
+    if let Some(uuid) = args.ai_object.as_deref() {
+        let ai_object = ai_pretty_print_data(uuid).await?;
+        if output.is_json() {
+            emit_json_data("cat-file", &ai_object, output)?;
+        }
+        return Ok(());
+    }
+
+    if let Some(uuid) = args.ai_type.as_deref() {
+        let object_type = ai_show_type_data(uuid).await?;
+        if output.is_json() {
+            emit_json_data(
+                "cat-file",
+                &serde_json::json!({
+                    "mode": "ai_type",
+                    "object_type": object_type,
+                }),
+                output,
+            )?;
+        }
+        return Ok(());
+    }
+
+    let object_ref = args
+        .object
+        .as_deref()
+        .ok_or_else(|| CliError::command_usage("<object> is required for Git object modes"))?;
+
+    if args.check_exist {
+        return Err(CliError::command_usage(
+            "`cat-file -e` does not yet support --json or --machine output",
+        ));
+    }
+
+    let storage = ClientStorage::init(path::objects());
+    let hash = resolve_object_safe(object_ref, &storage).await?;
+    let obj_type = storage
+        .get_object_type(&hash)
+        .map_err(|_| invalid_object_name_error(object_ref))?;
+
+    if args.show_type {
+        if output.is_json() {
+            emit_json_data(
+                "cat-file",
+                &serde_json::json!({
+                    "mode": "type",
+                    "object": object_ref,
+                    "hash": hash.to_string(),
+                    "object_type": obj_type.to_string(),
+                }),
+                output,
+            )?;
+        }
+        return Ok(());
+    }
+
+    if args.show_size {
+        let data = storage
+            .get(&hash)
+            .map_err(|e| CliError::fatal(format!("unable to read object {hash}: {e}")))?;
+        if output.is_json() {
+            emit_json_data(
+                "cat-file",
+                &serde_json::json!({
+                    "mode": "size",
+                    "object": object_ref,
+                    "hash": hash.to_string(),
+                    "size": data.len(),
+                }),
+                output,
+            )?;
+        }
+        return Ok(());
+    }
+
+    if args.pretty_print {
+        return emit_pretty_print_json(object_ref, &hash, obj_type, output);
+    }
+
+    Err(CliError::command_usage(
+        "one of '-t', '-s', '-p', '-e' or an --ai* flag is required",
+    ))
+}
+
+fn invalid_object_name_error(object_ref: &str) -> CliError {
+    CliError::from_legacy_string(format!("fatal: Not a valid object name {}", object_ref))
+}
+
+async fn resolve_object_safe(object_ref: &str, storage: &ClientStorage) -> CliResult<ObjectHash> {
+    if let Some(hash) = resolve_tag_object_ref(object_ref).await {
+        return Ok(hash);
+    }
+
+    if let Ok(hash) = util::get_commit_base(object_ref).await {
+        return Ok(hash);
+    }
+
+    if let Ok(hash) = ObjectHash::from_str(object_ref) {
+        return Ok(hash);
+    }
+
+    let results = storage.search(object_ref).await;
+    if results.len() == 1 {
+        return Ok(results[0]);
+    }
+    if results.len() > 1 {
+        return Err(CliError::fatal(format!(
+            "ambiguous argument '{}': matched {} objects",
+            object_ref,
+            results.len()
+        )));
+    }
+
+    Err(invalid_object_name_error(object_ref))
+}
+
+fn emit_pretty_print_json(
+    object_ref: &str,
+    hash: &ObjectHash,
+    obj_type: ObjectType,
+    output: &OutputConfig,
+) -> CliResult<()> {
+    match obj_type {
+        ObjectType::Blob => {
+            let blob = load_object::<Blob>(hash)
+                .map_err(|e| CliError::fatal(format!("could not read blob {hash}: {e}")))?;
+            if output.is_json() {
+                let content = String::from_utf8(blob.data).map_err(|_| {
+                    CliError::command_usage(
+                        "`cat-file -p` does not yet support --json for binary blob content",
+                    )
+                })?;
+                emit_json_data(
+                    "cat-file",
+                    &serde_json::json!({
+                        "mode": "pretty",
+                        "object": object_ref,
+                        "hash": hash.to_string(),
+                        "object_type": "blob",
+                        "content": content,
+                    }),
+                    output,
+                )?;
+            }
+            Ok(())
+        }
+        ObjectType::Tree => {
+            let tree = load_object::<Tree>(hash)
+                .map_err(|e| CliError::fatal(format!("could not read tree {hash}: {e}")))?;
+            if output.is_json() {
+                let entries: Vec<serde_json::Value> = tree
+                    .tree_items
+                    .iter()
+                    .map(|item| {
+                        serde_json::json!({
+                            "mode": format!("{:06o}", item.mode as u32),
+                            "object_type": match item.mode {
+                                git_internal::internal::object::tree::TreeItemMode::Tree => "tree",
+                                _ => "blob",
+                            },
+                            "hash": item.id.to_string(),
+                            "name": item.name,
+                        })
+                    })
+                    .collect();
+                emit_json_data(
+                    "cat-file",
+                    &serde_json::json!({
+                        "mode": "pretty",
+                        "object": object_ref,
+                        "hash": hash.to_string(),
+                        "object_type": "tree",
+                        "entries": entries,
+                    }),
+                    output,
+                )?;
+            }
+            Ok(())
+        }
+        ObjectType::Commit => {
+            let commit = load_object::<Commit>(hash)
+                .map_err(|e| CliError::fatal(format!("could not read commit {hash}: {e}")))?;
+            if output.is_json() {
+                let (message, _) = crate::common_utils::parse_commit_msg(&commit.message);
+                emit_json_data(
+                    "cat-file",
+                    &serde_json::json!({
+                        "mode": "pretty",
+                        "object": object_ref,
+                        "hash": hash.to_string(),
+                        "object_type": "commit",
+                        "tree": commit.tree_id.to_string(),
+                        "parents": commit
+                            .parent_commit_ids
+                            .iter()
+                            .map(|parent| parent.to_string())
+                            .collect::<Vec<_>>(),
+                        "author": {
+                            "name": commit.author.name.trim(),
+                            "email": commit.author.email.trim(),
+                            "timestamp": commit.author.timestamp,
+                            "timezone": commit.author.timezone,
+                        },
+                        "committer": {
+                            "name": commit.committer.name.trim(),
+                            "email": commit.committer.email.trim(),
+                            "timestamp": commit.committer.timestamp,
+                            "timezone": commit.committer.timezone,
+                        },
+                        "message": message.trim(),
+                    }),
+                    output,
+                )?;
+            }
+            Ok(())
+        }
+        ObjectType::Tag => {
+            let storage = ClientStorage::init(path::objects());
+            let data = storage
+                .get(hash)
+                .map_err(|e| CliError::fatal(format!("could not read tag {hash}: {e}")))?;
+            if output.is_json() {
+                let content = String::from_utf8(data).map_err(|_| {
+                    CliError::command_usage(
+                        "`cat-file -p` does not yet support --json for non-UTF-8 tag content",
+                    )
+                })?;
+                emit_json_data(
+                    "cat-file",
+                    &serde_json::json!({
+                        "mode": "pretty",
+                        "object": object_ref,
+                        "hash": hash.to_string(),
+                        "object_type": "tag",
+                        "content": content,
+                    }),
+                    output,
+                )?;
+            }
+            Ok(())
+        }
+        _ => Err(CliError::fatal(format!(
+            "unsupported object type {:?}",
+            obj_type
+        ))),
+    }
+}
+
+async fn ai_list_types_data() -> CliResult<Vec<serde_json::Value>> {
+    let hm = build_history_manager().await;
+    let mut types = Vec::new();
+    for &type_name in AI_OBJECT_TYPES {
+        let objects = hm
+            .list_objects(type_name)
+            .await
+            .map_err(|e| CliError::fatal(format!("failed to list {type_name} objects: {e}")))?;
+        if !objects.is_empty() {
+            types.push(serde_json::json!({
+                "object_type": type_name,
+                "count": objects.len(),
+            }));
+        }
+    }
+    Ok(types)
+}
+
+async fn ai_list_objects_data(type_name: &str) -> CliResult<Vec<serde_json::Value>> {
+    if !AI_OBJECT_TYPES.contains(&type_name) {
+        return Err(CliError::fatal(format!(
+            "unknown AI object type '{}'. Valid types: {}",
+            type_name,
+            AI_OBJECT_TYPES.join(", ")
+        )));
+    }
+
+    let hm = build_history_manager().await;
+    let objects = hm
+        .list_objects(type_name)
+        .await
+        .map_err(|e| CliError::fatal(format!("failed to list {type_name} objects: {e}")))?;
+
+    Ok(objects
+        .into_iter()
+        .map(|(id, hash)| {
+            serde_json::json!({
+                "id": id,
+                "hash": hash.to_string(),
+            })
+        })
+        .collect())
+}
+
+async fn ai_pretty_print_data(uuid: &str) -> CliResult<serde_json::Value> {
+    let hm = build_history_manager().await;
+    let (hash, type_name) = hm
+        .find_object_hash(uuid)
+        .await
+        .map_err(|e| {
+            CliError::fatal(format!(
+                "failed to look up AI object {}: {}",
+                redact_uuid(uuid),
+                e
+            ))
+        })?
+        .ok_or_else(|| CliError::fatal(format!("AI object not found: {}", redact_uuid(uuid))))?;
+
+    let storage = ClientStorage::init(path::objects());
+    let data = storage
+        .get(&hash)
+        .map_err(|e| CliError::fatal(format!("could not read AI object blob {hash}: {e}")))?;
+    let parsed = serde_json::from_slice::<serde_json::Value>(&data)
+        .unwrap_or_else(|_| serde_json::Value::String(String::from_utf8_lossy(&data).to_string()));
+
+    let summary = if let serde_json::Value::Object(_) = &parsed {
+        let lines = match type_name.as_str() {
+            "ai_session" => ai_session_summary_lines(&parsed),
+            "provider_session" => provider_session_summary_lines(&parsed),
+            "evidence_input" => evidence_input_summary_lines(&parsed),
+            _ => vec![],
+        };
+        serde_json::Value::Array(lines.into_iter().map(serde_json::Value::String).collect())
+    } else {
+        serde_json::Value::Array(vec![])
+    };
+
+    Ok(serde_json::json!({
+        "mode": "ai_object",
+        "object_type": type_name,
+        "hash": hash.to_string(),
+        "summary": summary,
+        "value": parsed,
+    }))
+}
+
+async fn ai_show_type_data(uuid: &str) -> CliResult<String> {
+    let hm = build_history_manager().await;
+    hm.find_object_hash(uuid)
+        .await
+        .map_err(|e| {
+            CliError::fatal(format!(
+                "failed to look up AI object {}: {}",
+                redact_uuid(uuid),
+                e
+            ))
+        })?
+        .map(|(_hash, type_name)| type_name)
+        .ok_or_else(|| CliError::fatal(format!("AI object not found: {}", redact_uuid(uuid))))
 }
 
 /// Resolve a user-supplied object reference to an `ObjectHash`.

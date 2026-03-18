@@ -7,13 +7,28 @@ use libra::{
     command::{
         stash,
         status::{
-            PorcelainVersion, StatusArgs, UntrackedFiles, execute_to as status_execute,
-            output_porcelain,
+            PorcelainVersion, StatusArgs, UntrackedFiles, execute_to as status_execute_inner,
+            output_porcelain as output_porcelain_inner,
         },
     },
 };
 
 use super::*;
+
+async fn status_execute(args: StatusArgs, writer: &mut impl Write) {
+    status_execute_inner(args, writer)
+        .await
+        .expect("status output should succeed in test");
+}
+
+fn output_porcelain(
+    staged: &libra::command::status::Changes,
+    unstaged: &libra::command::status::Changes,
+    writer: &mut impl Write,
+) {
+    output_porcelain_inner(staged, unstaged, writer)
+        .expect("porcelain output should succeed in test");
+}
 
 #[test]
 #[serial]
@@ -129,11 +144,17 @@ async fn test_status_rejects_bare_repository() {
     let _guard = ChangeDirGuard::new(temp_path.path());
 
     let mut out = Vec::new();
-    status_execute(StatusArgs::default(), &mut out).await;
-    let output = String::from_utf8(out).unwrap();
+    let err = status_execute_inner(StatusArgs::default(), &mut out)
+        .await
+        .expect_err("status should refuse to run in bare repositories");
     assert!(
-        output.contains("fatal: this operation must be run in a work tree"),
-        "status should refuse to run in bare repositories: {output}"
+        err.to_string()
+            .contains("this operation must be run in a work tree"),
+        "unexpected bare-repo error: {err}"
+    );
+    assert!(
+        out.is_empty(),
+        "bare repo status should not write to stdout"
     );
 }
 

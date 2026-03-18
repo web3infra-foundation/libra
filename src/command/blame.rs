@@ -54,6 +54,12 @@ pub async fn execute(args: BlameArgs) {
 pub async fn execute_safe(args: BlameArgs, out_config: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
 
+    if out_config.is_json() {
+        return Err(CliError::command_usage(
+            "`blame` does not yet support --json or --machine output",
+        ));
+    }
+
     let commit_id = get_target_commit(&args.commit)
         .await
         .map_err(|e| CliError::fatal(e.to_string()))?;
@@ -65,7 +71,9 @@ pub async fn execute_safe(args: BlameArgs, out_config: &OutputConfig) -> CliResu
     let target_lines = get_file_lines(&commit_obj, &args.file).map_err(CliError::fatal)?;
 
     if target_lines.is_empty() {
-        println!("File is empty");
+        if !out_config.quiet {
+            println!("File is empty");
+        }
         return Ok(());
     }
 
@@ -185,9 +193,11 @@ pub async fn execute_safe(args: BlameArgs, out_config: &OutputConfig) -> CliResu
         ));
     }
 
-    let mut pager = Pager::with_config(out_config)?;
-    pager.write_str(&output)?;
-    pager.finish()?;
+    if !out_config.quiet {
+        let mut pager = Pager::with_config(out_config)?;
+        pager.write_str(&output)?;
+        pager.finish()?;
+    }
     Ok(())
 }
 fn get_file_lines(commit: &Commit, file_path: &str) -> Result<Vec<String>, String> {

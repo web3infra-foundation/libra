@@ -221,15 +221,19 @@ async fn is_bare_repository() -> bool {
  * 1. unstaged
  * 2. staged to be committed
  */
-pub async fn execute_to(args: StatusArgs, writer: &mut impl Write) {
-    if !util::check_repo_exist() {
-        return;
-    }
+pub async fn execute_to(args: StatusArgs, writer: &mut impl Write) -> CliResult<()> {
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
 
     if is_bare_repository().await {
-        writeln!(writer, "fatal: this operation must be run in a work tree").unwrap();
-        return;
+        return Err(CliError::fatal("this operation must be run in a work tree"));
     }
+
+    let status_error = |err: StatusError| {
+        CliError::fatal(format!("failed to determine working tree status: {err}"))
+    };
+    let write_error =
+        |err: io::Error| CliError::io(format!("failed to write status output: {err}"));
+    let mut buffer = Vec::new();
 
     let is_porcelain = args.porcelain.is_some();
     let is_standard_mode = !is_porcelain && !args.short;
@@ -238,15 +242,20 @@ pub async fn execute_to(args: StatusArgs, writer: &mut impl Write) {
     if is_standard_mode {
         match Head::current().await {
             Head::Detached(commit_hash) => {
-                writeln!(writer, "HEAD detached at {}", &commit_hash.to_string()[..8]).unwrap();
+                writeln!(
+                    &mut buffer,
+                    "HEAD detached at {}",
+                    &commit_hash.to_string()[..8]
+                )
+                .map_err(write_error)?;
             }
             Head::Branch(branch) => {
-                writeln!(writer, "On branch {branch}").unwrap();
+                writeln!(&mut buffer, "On branch {branch}").map_err(write_error)?;
             }
         }
 
         if Head::current_commit().await.is_none() {
-            writeln!(writer, "\nNo commits yet\n").unwrap();
+            writeln!(&mut buffer, "\nNo commits yet\n").map_err(write_error)?;
         }
     }
 
@@ -254,27 +263,26 @@ pub async fn execute_to(args: StatusArgs, writer: &mut impl Write) {
         let stash_num = stash::get_stash_num().unwrap_or(0);
         let entry_text = if stash_num == 1 { "entry" } else { "entries" };
         if stash_num > 0 {
-            writeln!(writer, "Your stash currently has {stash_num} {entry_text}").unwrap();
+            writeln!(
+                &mut buffer,
+                "Your stash currently has {stash_num} {entry_text}"
+            )
+            .map_err(write_error)?;
         }
     }
 
     // to cur_dir relative path
-    let staged = changes_to_be_committed().await.to_relative();
-    let mut unstaged = match changes_to_be_staged() {
-        Ok(c) => c.to_relative(),
-        Err(err) => {
-            eprintln!("fatal: {err}");
-            return;
-        }
-    };
+    let staged = changes_to_be_committed_safe()
+        .await
+        .map(|c| c.to_relative())
+        .map_err(status_error)?;
+    let mut unstaged = changes_to_be_staged()
+        .map(|c| c.to_relative())
+        .map_err(status_error)?;
     let mut ignored_files = if args.ignored && !matches!(args.untracked_files, UntrackedFiles::No) {
-        match list_ignored_files() {
-            Ok(c) => c.to_relative().new,
-            Err(err) => {
-                eprintln!("fatal: {err}");
-                return;
-            }
-        }
+        list_ignored_files()
+            .map(|c| c.to_relative().new)
+            .map_err(status_error)?
     } else {
         vec![]
     };
@@ -287,7 +295,14 @@ pub async fn execute_to(args: StatusArgs, writer: &mut impl Write) {
         }
         UntrackedFiles::Normal => {
             // Collapse fully-untracked directories into single entries
-            let index = Index::load(path::index()).unwrap();
+            let index_path = path::try_index()
+                .map_err(|source| status_error(StatusError::Workdir { source }))?;
+            let index = Index::load(&index_path).map_err(|source| {
+                status_error(StatusError::IndexLoad {
+                    path: index_path.clone(),
+                    source,
+                })
+            })?;
             unstaged.new = collapse_untracked_directories(unstaged.new, &index);
             ignored_files = collapse_untracked_directories(ignored_files, &index);
         }
@@ -300,23 +315,25 @@ pub async fn execute_to(args: StatusArgs, writer: &mut impl Write) {
     match args.porcelain {
         Some(PorcelainVersion::V2) => {
             if args.branch {
-                write_branch_info_v2(writer).await;
+                write_branch_info_v2(&mut buffer).await?;
             }
-            output_porcelain_v2(&staged, &unstaged, &ignored_files, writer).await;
-            return;
+            output_porcelain_v2(&staged, &unstaged, &ignored_files, &mut buffer).await?;
+            writer.write_all(&buffer).map_err(write_error)?;
+            return Ok(());
         }
         Some(PorcelainVersion::V1) => {
             if args.branch {
-                print_branch_info(writer).await;
+                print_branch_info(&mut buffer).await?;
             }
-            output_porcelain(&staged, &unstaged, writer);
+            output_porcelain(&staged, &unstaged, &mut buffer)?;
             // Porcelain: ignored files prefixed with "!!"
             if args.ignored && !ignored_files.is_empty() {
                 for file in &ignored_files {
-                    writeln!(writer, "!! {}", file.display()).unwrap();
+                    writeln!(&mut buffer, "!! {}", file.display()).map_err(write_error)?;
                 }
             }
-            return;
+            writer.write_all(&buffer).map_err(write_error)?;
+            return Ok(());
         }
         None => {}
     };
@@ -325,93 +342,102 @@ pub async fn execute_to(args: StatusArgs, writer: &mut impl Write) {
     if args.short {
         // if branch option is specified, print the branch info
         if args.branch {
-            print_branch_info(writer).await;
+            print_branch_info(&mut buffer).await?;
         }
-        output_short_format(&staged, &unstaged, writer).await;
+        output_short_format(&staged, &unstaged, &mut buffer).await?;
         // Short: append ignored files with "!!"
         if args.ignored {
             for file in &ignored_files {
-                writeln!(writer, "!! {}", file.display()).unwrap();
+                writeln!(&mut buffer, "!! {}", file.display()).map_err(write_error)?;
             }
         }
-        return;
+        writer.write_all(&buffer).map_err(write_error)?;
+        return Ok(());
     }
 
     if staged.is_empty() && unstaged.is_empty() {
-        writeln!(writer, "nothing to commit, working tree clean").unwrap();
-        return;
+        writeln!(&mut buffer, "nothing to commit, working tree clean").map_err(write_error)?;
+        writer.write_all(&buffer).map_err(write_error)?;
+        return Ok(());
     }
 
     if !staged.is_empty() {
-        writeln!(writer, "Changes to be committed:").unwrap();
+        writeln!(&mut buffer, "Changes to be committed:").map_err(write_error)?;
         writeln!(
-            writer,
+            &mut buffer,
             "  use \"libra restore --staged <file>...\" to unstage"
         )
-        .unwrap();
-        staged.deleted.iter().for_each(|f| {
+        .map_err(write_error)?;
+        for f in &staged.deleted {
             let str = format!("\tdeleted: {}", f.display());
-            writeln!(writer, "{}", str.bright_green()).unwrap();
-        });
-        staged.modified.iter().for_each(|f| {
+            writeln!(&mut buffer, "{}", str.bright_green()).map_err(write_error)?;
+        }
+        for f in &staged.modified {
             let str = format!("\tmodified: {}", f.display());
-            writeln!(writer, "{}", str.bright_green()).unwrap();
-        });
-        staged.new.iter().for_each(|f| {
+            writeln!(&mut buffer, "{}", str.bright_green()).map_err(write_error)?;
+        }
+        for f in &staged.new {
             let str = format!("\tnew file: {}", f.display());
-            writeln!(writer, "{}", str.bright_green()).unwrap();
-        });
+            writeln!(&mut buffer, "{}", str.bright_green()).map_err(write_error)?;
+        }
     }
 
     if !unstaged.deleted.is_empty() || !unstaged.modified.is_empty() {
-        writeln!(writer, "Changes not staged for commit:").unwrap();
+        writeln!(&mut buffer, "Changes not staged for commit:").map_err(write_error)?;
         writeln!(
-            writer,
+            &mut buffer,
             "  use \"libra add <file>...\" to update what will be committed"
         )
-        .unwrap();
+        .map_err(write_error)?;
         writeln!(
-            writer,
+            &mut buffer,
             "  use \"libra restore <file>...\" to discard changes in working directory"
         )
-        .unwrap();
-        unstaged.deleted.iter().for_each(|f| {
+        .map_err(write_error)?;
+        for f in &unstaged.deleted {
             let str = format!("\tdeleted: {}", f.display());
-            writeln!(writer, "{}", str.bright_red()).unwrap();
-        });
-        unstaged.modified.iter().for_each(|f| {
+            writeln!(&mut buffer, "{}", str.bright_red()).map_err(write_error)?;
+        }
+        for f in &unstaged.modified {
             let str = format!("\tmodified: {}", f.display());
-            writeln!(writer, "{}", str.bright_red()).unwrap();
-        });
+            writeln!(&mut buffer, "{}", str.bright_red()).map_err(write_error)?;
+        }
     }
     if !unstaged.new.is_empty() {
-        writeln!(writer, "Untracked files:").unwrap();
+        writeln!(&mut buffer, "Untracked files:").map_err(write_error)?;
         writeln!(
-            writer,
+            &mut buffer,
             "  use \"libra add <file>...\" to include in what will be committed"
         )
-        .unwrap();
-        unstaged.new.iter().for_each(|f| {
+        .map_err(write_error)?;
+        for f in &unstaged.new {
             let str = format!("\t{}", f.display());
-            writeln!(writer, "{}", str.bright_red()).unwrap();
-        });
+            writeln!(&mut buffer, "{}", str.bright_red()).map_err(write_error)?;
+        }
     }
 
     if args.ignored && !ignored_files.is_empty() {
-        writeln!(writer, "Ignored files:").unwrap();
+        writeln!(&mut buffer, "Ignored files:").map_err(write_error)?;
         writeln!(
-            writer,
+            &mut buffer,
             "  (modify .libraignore to change which files are ignored)"
         )
-        .unwrap();
+        .map_err(write_error)?;
         for f in &ignored_files {
             let str = format!("\t{}", f.display());
-            writeln!(writer, "{}", str.bright_red()).unwrap();
+            writeln!(&mut buffer, "{}", str.bright_red()).map_err(write_error)?;
         }
     }
+
+    writer.write_all(&buffer).map_err(write_error)?;
+    Ok(())
 }
 
-pub fn output_porcelain(staged: &Changes, unstaged: &Changes, writer: &mut impl Write) {
+pub fn output_porcelain(
+    staged: &Changes,
+    unstaged: &Changes,
+    writer: &mut impl Write,
+) -> CliResult<()> {
     // Use generate_short_format_status to correctly merge staged and unstaged states
     // e.g., a file that is staged then modified should show "MM" not two separate lines
     let status_list = generate_short_format_status(staged, unstaged);
@@ -423,8 +449,9 @@ pub fn output_porcelain(staged: &Changes, unstaged: &Changes, writer: &mut impl 
             unstaged_status,
             file.display()
         )
-        .unwrap();
+        .map_err(|e| CliError::io(format!("failed to write status output: {e}")))?;
     }
+    Ok(())
 }
 
 /// File information from HEAD tree for porcelain v2 output.
@@ -521,13 +548,14 @@ pub async fn output_porcelain_v2(
     unstaged: &Changes,
     ignored: &[PathBuf],
     writer: &mut impl Write,
-) {
+) -> CliResult<()> {
     let zero_hash = zero_hash_str();
     let index = match Index::load(path::index()) {
         Ok(idx) => idx,
         Err(e) => {
-            writeln!(writer, "error: failed to load index: {}", e).ok();
-            return;
+            return Err(CliError::fatal(format!(
+                "failed to determine working tree status: failed to load index: {e}"
+            )));
         }
     };
     let head_commit = Head::current_commit().await;
@@ -555,7 +583,8 @@ pub async fn output_porcelain_v2(
     let status_list = generate_short_format_status(staged, unstaged);
     for (file, staged_status, unstaged_status) in status_list {
         if staged_status == '?' && unstaged_status == '?' {
-            writeln!(writer, "? {}", file.display()).unwrap();
+            writeln!(writer, "? {}", file.display())
+                .map_err(|e| CliError::io(format!("failed to write status output: {e}")))?;
             continue;
         }
 
@@ -611,12 +640,14 @@ pub async fn output_porcelain_v2(
             hash_index,
             file.display()
         )
-        .unwrap();
+        .map_err(|e| CliError::io(format!("failed to write status output: {e}")))?;
     }
 
     for file in ignored {
-        writeln!(writer, "! {}", file.display()).unwrap();
+        writeln!(writer, "! {}", file.display())
+            .map_err(|e| CliError::io(format!("failed to write status output: {e}")))?;
     }
+    Ok(())
 }
 
 fn zero_hash_str() -> String {
@@ -683,7 +714,11 @@ pub fn generate_short_format_status(
         .collect()
 }
 
-pub async fn output_short_format(staged: &Changes, unstaged: &Changes, writer: &mut impl Write) {
+pub async fn output_short_format(
+    staged: &Changes,
+    unstaged: &Changes,
+    writer: &mut impl Write,
+) -> CliResult<()> {
     // Check if colors should be used
     let use_colors = should_use_colors().await;
 
@@ -694,7 +729,8 @@ pub async fn output_short_format(staged: &Changes, unstaged: &Changes, writer: &
     for (file, staged_status, unstaged_status) in status_list {
         if use_colors {
             let colored_output = format_colored_status(staged_status, unstaged_status, &file);
-            writeln!(writer, "{}", colored_output).unwrap();
+            writeln!(writer, "{}", colored_output)
+                .map_err(|e| CliError::io(format!("failed to write status output: {e}")))?;
         } else {
             writeln!(
                 writer,
@@ -703,9 +739,10 @@ pub async fn output_short_format(staged: &Changes, unstaged: &Changes, writer: &
                 unstaged_status,
                 file.display()
             )
-            .unwrap();
+            .map_err(|e| CliError::io(format!("failed to write status output: {e}")))?;
         }
     }
+    Ok(())
 }
 
 /// Check if colors should be used based on configuration
@@ -779,18 +816,14 @@ fn format_colored_status(
 }
 
 pub async fn execute(args: StatusArgs) {
-    execute_to(args, &mut std::io::stdout()).await
+    if let Err(err) = execute_to(args, &mut std::io::stdout()).await {
+        err.print_stderr();
+    }
 }
 
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. JSON mode propagates status-computation failures as
-/// structured CLI errors; text mode still delegates to [`execute_to`].
-///
-/// # Known limitations
-///
-/// `execute_to()` handles errors internally with `unwrap()` and never propagates
-/// them, so the text-output path still returns `Ok(())` even when status fails.
-// TODO: refactor execute_to() to return CliResult so text-mode errors propagate to callers.
+/// structured CLI errors; text mode uses the same structured error contract.
 pub async fn execute_safe(args: StatusArgs, output: &OutputConfig) -> CliResult<()> {
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
 
@@ -799,7 +832,7 @@ pub async fn execute_safe(args: StatusArgs, output: &OutputConfig) -> CliResult<
     } else if output.quiet {
         let _ = collect_status_json(&args).await?;
     } else {
-        execute_to(args, &mut std::io::stdout()).await;
+        execute_to(args, &mut std::io::stdout()).await?;
     }
     Ok(())
 }
@@ -1118,7 +1151,7 @@ pub fn list_ignored_files() -> Result<Changes, StatusError> {
 }
 
 /// Helper function for printing branch info when `branch` flag is enabled
-async fn print_branch_info(writer: &mut impl Write) {
+async fn print_branch_info(writer: &mut impl Write) -> CliResult<()> {
     match Head::current().await {
         Head::Detached(commit_hash) => {
             writeln!(
@@ -1126,16 +1159,18 @@ async fn print_branch_info(writer: &mut impl Write) {
                 "## HEAD (detached at {})",
                 &commit_hash.to_string()[..8]
             )
-            .unwrap();
+            .map_err(|e| CliError::io(format!("failed to write status output: {e}")))?;
         }
         Head::Branch(branch) => {
-            writeln!(writer, "## {branch}").unwrap();
+            writeln!(writer, "## {branch}")
+                .map_err(|e| CliError::io(format!("failed to write status output: {e}")))?;
         }
     }
+    Ok(())
 }
 
 /// Write branch information in porcelain v2 style
-async fn write_branch_info_v2(writer: &mut impl Write) {
+async fn write_branch_info_v2(writer: &mut impl Write) -> CliResult<()> {
     let head = Head::current().await;
     let head_commit = Head::current_commit().await;
     let oid = head_commit
@@ -1144,13 +1179,17 @@ async fn write_branch_info_v2(writer: &mut impl Write) {
 
     match head {
         Head::Detached(_) => {
-            writeln!(writer, "# branch.head (detached)").unwrap();
+            writeln!(writer, "# branch.head (detached)")
+                .map_err(|e| CliError::io(format!("failed to write status output: {e}")))?;
         }
         Head::Branch(name) => {
-            writeln!(writer, "# branch.head {}", name).unwrap();
+            writeln!(writer, "# branch.head {}", name)
+                .map_err(|e| CliError::io(format!("failed to write status output: {e}")))?;
         }
     }
-    writeln!(writer, "# branch.oid {}", oid).unwrap();
+    writeln!(writer, "# branch.oid {}", oid)
+        .map_err(|e| CliError::io(format!("failed to write status output: {e}")))?;
+    Ok(())
 }
 
 #[cfg(test)]

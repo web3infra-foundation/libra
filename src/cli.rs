@@ -23,7 +23,7 @@ Help Topics:
 
 Output Examples:
   libra --json status
-  libra --json=ndjson log
+  libra --json branch
 ";
 
 const ERROR_CODES_HELP: &str = include_str!("../docs/error-codes.md");
@@ -108,6 +108,8 @@ struct Cli {
     color: String,
 
     /// Suppress standard stdout output; keep warnings/errors on stderr.
+    /// This includes primary command results, unlike some Git per-command
+    /// `--quiet` flags that only suppress informational chatter.
     #[arg(long, short = 'q', global = true)]
     quiet: bool,
 

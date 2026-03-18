@@ -190,3 +190,35 @@ fn successful_clone_initializes_vault() {
         "clone should enable vault.signing"
     );
 }
+
+#[test]
+fn machine_clone_suppresses_decorative_stderr() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("clone-machine");
+
+    let output = run_libra(
+        &[
+            "--machine",
+            "clone",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "machine clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stdout.trim().is_empty(), "unexpected stdout: {stdout}");
+    assert!(
+        stderr.trim().is_empty(),
+        "machine clone should suppress decorative stderr, got: {stderr}"
+    );
+    assert!(dest.join("README.md").exists());
+}

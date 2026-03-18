@@ -174,7 +174,7 @@ impl OutputConfig {
                         ProgressMode::Json
                     } else if quiet {
                         ProgressMode::None
-                    } else if io::stdout().is_terminal() {
+                    } else if io::stderr().is_terminal() {
                         ProgressMode::Text
                     } else {
                         ProgressMode::None
@@ -209,6 +209,10 @@ impl OutputConfig {
 
         let mut args = argv.iter().peekable();
         while let Some(arg) = args.next() {
+            if let Some(value) = arg.strip_prefix("-J=") {
+                json = Some(value.to_string());
+                continue;
+            }
             if let Some(value) = arg.strip_prefix("--json=") {
                 json = Some(value.to_string());
                 continue;
@@ -220,6 +224,19 @@ impl OutputConfig {
             if let Some(value) = arg.strip_prefix("--progress=") {
                 progress = value.to_string();
                 continue;
+            }
+            if arg.starts_with('-') && !arg.starts_with("--") && arg.len() > 2 {
+                let short_flags = &arg[1..];
+                if short_flags.chars().all(|flag| matches!(flag, 'J' | 'q')) {
+                    for flag in short_flags.chars() {
+                        match flag {
+                            'J' => json = Some(String::from("pretty")),
+                            'q' => quiet = true,
+                            _ => {}
+                        }
+                    }
+                    continue;
+                }
             }
 
             match arg.as_str() {
@@ -516,8 +533,17 @@ impl ProgressReporter {
 #[cfg(test)]
 mod tests {
     use colored::Colorize;
+    use serial_test::serial;
 
     use super::*;
+
+    struct ColorOverrideReset;
+
+    impl Drop for ColorOverrideReset {
+        fn drop(&mut self) {
+            colored::control::unset_override();
+        }
+    }
 
     #[test]
     fn default_is_human_mode() {
@@ -638,7 +664,19 @@ mod tests {
     }
 
     #[test]
+    fn resolve_from_argv_supports_clustered_short_flags() {
+        let argv = vec!["libra".to_string(), "-qJ".to_string(), "status".to_string()];
+
+        let config = OutputConfig::resolve_from_argv(&argv);
+
+        assert_eq!(config.json_format, Some(JsonFormat::Pretty));
+        assert!(config.quiet);
+    }
+
+    #[test]
+    #[serial]
     fn apply_color_override_auto_clears_previous_override() {
+        let _guard = ColorOverrideReset;
         colored::control::set_override(true);
         assert!(
             "x".red().to_string().contains("\u{1b}["),
@@ -651,6 +689,5 @@ mod tests {
             !"x".red().to_string().contains("\u{1b}["),
             "auto mode should clear the process-wide color override"
         );
-        colored::control::unset_override();
     }
 }

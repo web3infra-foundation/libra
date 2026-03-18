@@ -272,6 +272,49 @@ fn quiet_config_get_suppresses_output() {
 }
 
 #[test]
+fn quiet_cat_file_type_suppresses_output() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo_with_commit_via_cli(&repo);
+
+    let output = run(&["--quiet", "cat-file", "-t", "HEAD"], &repo);
+    assert_cli_success(&output, "quiet cat-file -t HEAD");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.trim().is_empty(),
+        "quiet cat-file should suppress stdout, got: {stdout}"
+    );
+}
+
+#[test]
+fn json_cat_file_badref_returns_structured_error() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo_via_cli(&repo);
+
+    let output = run(&["--json", "cat-file", "-t", "badref"], &repo);
+    assert_ne!(output.status.code(), Some(0));
+    assert!(
+        output.stdout.is_empty(),
+        "structured JSON errors should not contaminate stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(stderr.trim())
+        .unwrap_or_else(|e| panic!("expected JSON on stderr, got: {stderr}\nerror: {e}"));
+    assert_eq!(parsed["ok"], false);
+    assert!(
+        parsed["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Not a valid object name badref"),
+        "expected invalid object error, got: {stderr}"
+    );
+}
+
+#[test]
 fn quiet_status_suppresses_output() {
     let temp = tempdir().unwrap();
     let repo = temp.path().join("repo");
@@ -658,6 +701,65 @@ fn quiet_merge_fast_forward_suppresses_output() {
     assert!(
         stdout.trim().is_empty(),
         "quiet fast-forward merge should suppress informational stdout, got: {stdout}"
+    );
+}
+
+#[test]
+fn quiet_log_suppresses_output() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo_with_commit_via_cli(&repo);
+
+    let output = run(&["--quiet", "log"], &repo);
+    assert_cli_success(&output, "quiet log");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.trim().is_empty(),
+        "quiet log should suppress stdout, got: {stdout}"
+    );
+}
+
+#[test]
+fn json_log_is_rejected_with_structured_error() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo_with_commit_via_cli(&repo);
+
+    let output = run(&["--json", "log"], &repo);
+    assert_ne!(output.status.code(), Some(0));
+    assert!(
+        output.stdout.is_empty(),
+        "structured JSON errors should not contaminate stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(stderr.trim())
+        .unwrap_or_else(|e| panic!("expected JSON on stderr, got: {stderr}\nerror: {e}"));
+    assert_eq!(parsed["ok"], false);
+    assert!(
+        parsed["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("does not yet support --json or --machine output"),
+        "expected unsupported-json error, got: {stderr}"
+    );
+}
+
+#[test]
+fn quiet_blame_suppresses_output() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo_with_commit_via_cli(&repo);
+
+    let output = run(&["--quiet", "blame", "f.txt"], &repo);
+    assert_cli_success(&output, "quiet blame");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.trim().is_empty(),
+        "quiet blame should suppress stdout, got: {stdout}"
     );
 }
 

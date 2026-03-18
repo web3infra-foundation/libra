@@ -36,6 +36,11 @@ This design is specifically about error reporting and failure classification.
 It does not define a full machine-readable success-output model for all Libra
 commands.
 
+Separately, Libra's newer root-level output flags use a stricter global
+contract than Git's per-command flags. In particular, global `--quiet`
+suppresses stdout entirely, including primary command results; callers that
+still need success payloads should use `--json` / `--machine`.
+
 ## Design Summary
 
 The Libra CLI error contract has three layers:

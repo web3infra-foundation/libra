@@ -185,10 +185,12 @@ async fn execute_clone(
         .and_then(|name| name.to_str())
         .map(str::to_string)
         .unwrap_or_else(|| local_path.to_string_lossy().into_owned());
-    if args.bare {
-        eprintln!("Cloning into bare repository '{repo_name}'...");
-    } else {
-        eprintln!("Cloning into '{repo_name}'...");
+    if !output.quiet && !output.is_json() {
+        if args.bare {
+            eprintln!("Cloning into bare repository '{repo_name}'...");
+        } else {
+            eprintln!("Cloning into '{repo_name}'...");
+        }
     }
 
     if let Some(branch) = &args.branch
@@ -214,7 +216,9 @@ async fn execute_clone(
         return Err(error);
     }
 
-    eprintln!("done.");
+    if !output.quiet && !output.is_json() {
+        eprintln!("done.");
+    }
 
     Ok(())
 }
@@ -268,6 +272,7 @@ async fn clone_into_destination(
         args.branch.clone(),
         args.single_branch,
         args.depth,
+        output,
     )
     .await
     .map_err(|source| CloneError::FetchFailed { source })?;

@@ -317,6 +317,12 @@ pub async fn execute(args: LogArgs) {
 /// errors and exiting. Walks commit history applying filters (date range,
 /// author, path) and renders formatted log output.
 pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()> {
+    if output.is_json() {
+        return Err(CliError::command_usage(
+            "`log` does not yet support --json or --machine output",
+        ));
+    }
+
     let name_status = args.name_status;
     // Check parameter mutual exclusion: if both name flags and --patch are specified, prioritize the name display flags
     let name_only = args.name_only && !name_status;
@@ -372,6 +378,10 @@ pub async fn execute_safe(args: LogArgs, output: &OutputConfig) -> CliResult<()>
     let mut reachable_commits = get_reachable_commits(commit_hash.clone(), None).await?;
     // default sort with signature time
     reachable_commits.sort_by_key(|b| std::cmp::Reverse(b.committer.timestamp));
+
+    if output.quiet {
+        return Ok(());
+    }
 
     let ref_commits = create_reference_commit_map().await;
     let full_hash_len = commit_hash.len();

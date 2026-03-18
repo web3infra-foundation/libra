@@ -1,9 +1,6 @@
 //! Binary entry point that boots the async runtime, parses CLI arguments, and dispatches execution.
 
-use libra::{
-    cli,
-    utils::output::{JsonFormat, OutputConfig},
-};
+use libra::{cli, utils::output::OutputConfig};
 use tracing_subscriber::EnvFilter;
 
 fn main() {
@@ -28,25 +25,7 @@ fn main() {
         // successful dispatch.
         let argv: Vec<String> = std::env::args().collect();
         let output = OutputConfig::resolve_from_argv(&argv);
-        if let Some(json_format) = output.json_format {
-            let json = err.render_json();
-            if matches!(json_format, JsonFormat::Pretty) {
-                // Re-parse and pretty-print.
-                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) {
-                    if let Ok(formatted) = serde_json::to_string_pretty(&value) {
-                        eprintln!("{formatted}");
-                    } else {
-                        eprintln!("{json}");
-                    }
-                } else {
-                    eprintln!("{json}");
-                }
-            } else {
-                eprintln!("{json}");
-            }
-        } else {
-            err.print_stderr();
-        }
+        err.print_for_output(&output);
         std::process::exit(err.exit_code());
     }
 }
