@@ -72,10 +72,15 @@ fn json_error_on_unknown_command() {
     let temp = tempdir().unwrap();
     let output = run(&["--json", "nonexistent"], temp.path());
     assert_ne!(output.status.code(), Some(0));
+    assert!(
+        output.stdout.is_empty(),
+        "structured JSON errors should not contaminate stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
-        .unwrap_or_else(|e| panic!("expected JSON on stdout, got: {stdout}\nerror: {e}"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(stderr.trim())
+        .unwrap_or_else(|e| panic!("expected JSON on stderr, got: {stderr}\nerror: {e}"));
     assert_eq!(parsed["ok"], false);
     assert!(parsed["error_code"].as_str().unwrap().starts_with("LBR-"));
 }
@@ -87,10 +92,15 @@ fn json_error_on_repo_not_found() {
     // the optional --json value.
     let output = run(&["status", "--json"], temp.path());
     assert_ne!(output.status.code(), Some(0));
+    assert!(
+        output.stdout.is_empty(),
+        "structured JSON errors should not contaminate stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
-        .unwrap_or_else(|e| panic!("expected JSON on stdout, got: {stdout}\nerror: {e}"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(stderr.trim())
+        .unwrap_or_else(|e| panic!("expected JSON on stderr, got: {stderr}\nerror: {e}"));
     assert_eq!(parsed["ok"], false);
     assert_eq!(parsed["error_code"], "LBR-REPO-001");
 }
@@ -102,10 +112,15 @@ fn machine_error_is_json() {
     let temp = tempdir().unwrap();
     let output = run(&["--machine", "nonexistent"], temp.path());
     assert_ne!(output.status.code(), Some(0));
+    assert!(
+        output.stdout.is_empty(),
+        "machine-mode errors should keep stdout empty, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
-        .unwrap_or_else(|e| panic!("expected NDJSON on stdout, got: {stdout}\nerror: {e}"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(stderr.trim())
+        .unwrap_or_else(|e| panic!("expected JSON on stderr, got: {stderr}\nerror: {e}"));
     assert_eq!(parsed["ok"], false);
 }
 
@@ -193,6 +208,54 @@ fn json_status_dirty_repo_has_structured_untracked() {
 }
 
 #[test]
+fn json_status_ignored_flag_includes_ignored_entries() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo_via_cli(&repo);
+
+    fs::write(repo.join(".libraignore"), "ignored.txt\n").unwrap();
+    fs::write(repo.join("ignored.txt"), "ignore me").unwrap();
+
+    let output = run(&["--json", "status", "--ignored"], &repo);
+    assert_cli_success(&output, "json status ignored");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("expected valid JSON on stdout, got: {stdout}\nerror: {e}"));
+    let ignored = parsed["data"]["ignored"]
+        .as_array()
+        .expect("ignored must be an array");
+    let names: Vec<&str> = ignored.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        names.iter().any(|n| n.contains("ignored.txt")),
+        "ignored array should contain 'ignored.txt', got: {names:?}"
+    );
+}
+
+#[test]
+fn json_status_untracked_files_no_suppresses_untracked_entries() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo_via_cli(&repo);
+
+    fs::write(repo.join("untracked.txt"), "dirty").unwrap();
+
+    let output = run(&["--json", "status", "--untracked-files=no"], &repo);
+    assert_cli_success(&output, "json status untracked-files=no");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("expected valid JSON on stdout, got: {stdout}\nerror: {e}"));
+    let untracked = parsed["data"]["untracked"]
+        .as_array()
+        .expect("untracked must be an array");
+    assert!(
+        untracked.is_empty(),
+        "--untracked-files=no should suppress untracked entries, got: {untracked:?}"
+    );
+}
+
+#[test]
 fn json_status_invalid_index_returns_structured_error() {
     let temp = tempdir().unwrap();
     let repo = temp.path().join("repo");
@@ -202,17 +265,22 @@ fn json_status_invalid_index_returns_structured_error() {
 
     let output = run(&["--json", "status"], &repo);
     assert_ne!(output.status.code(), Some(0));
+    assert!(
+        output.stdout.is_empty(),
+        "structured JSON errors should not contaminate stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
-        .unwrap_or_else(|e| panic!("expected JSON error on stdout, got: {stdout}\nerror: {e}"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(stderr.trim())
+        .unwrap_or_else(|e| panic!("expected JSON error on stderr, got: {stderr}\nerror: {e}"));
     assert_eq!(parsed["ok"], false);
     assert!(
         parsed["message"]
             .as_str()
             .unwrap_or_default()
             .contains("failed to determine working tree status"),
-        "expected structured status error, got: {stdout}"
+        "expected structured status error, got: {stderr}"
     );
 }
 
@@ -270,14 +338,19 @@ fn machine_switch_dirty_repo_returns_only_json_error() {
 
     let output = run(&["--machine", "switch", "--detach", "main"], &repo);
     assert_ne!(output.status.code(), Some(0));
+    assert!(
+        output.stdout.is_empty(),
+        "machine mode must keep stdout empty on error, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
-        .unwrap_or_else(|e| panic!("expected JSON error on stdout, got: {stdout}\nerror: {e}"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(stderr.trim())
+        .unwrap_or_else(|e| panic!("expected JSON error on stderr, got: {stderr}\nerror: {e}"));
     assert_eq!(parsed["ok"], false);
     assert!(
-        !stdout.contains("On branch") && !stdout.contains("Changes not staged"),
-        "machine mode must not leak human status text, got: {stdout}"
+        !stderr.contains("On branch") && !stderr.contains("Changes not staged"),
+        "machine mode must not leak human status text, got: {stderr}"
     );
 }
 
@@ -345,12 +418,17 @@ fn json_pretty_error_is_indented() {
     // status outside a repo should fail with JSON.
     let output = run(&["--json=pretty", "status"], temp.path());
     assert_ne!(output.status.code(), Some(0));
+    assert!(
+        output.stdout.is_empty(),
+        "structured JSON errors should not contaminate stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     // Pretty-printed JSON should contain newlines and indentation.
     assert!(
-        stdout.contains('\n') && stdout.contains("  "),
-        "expected pretty-printed JSON, got: {stdout}"
+        stderr.contains('\n') && stderr.contains("  "),
+        "expected pretty-printed JSON, got: {stderr}"
     );
 }
 

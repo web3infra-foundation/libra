@@ -72,12 +72,30 @@ pub struct OutputConfig {
     pub color: ColorChoice,
     /// Whether a pager is allowed (false when `--no-pager` or `--machine`).
     pub pager: bool,
-    /// Suppress informational messages (keep errors/warnings on stderr).
+    /// Suppress standard stdout output (keep warnings/errors on stderr).
     pub quiet: bool,
     /// Return exit code 9 when any warning is emitted.
     pub exit_code_on_warning: bool,
     /// How to report progress for long-running operations.
     pub progress: ProgressMode,
+}
+
+fn write_json_command_envelope<W: Write, T: Serialize>(
+    writer: &mut W,
+    command: &str,
+    data: &T,
+    format: JsonFormat,
+) -> io::Result<()> {
+    let envelope = serde_json::json!({
+        "ok": true,
+        "command": command,
+        "data": data,
+    });
+    match format {
+        JsonFormat::Pretty => serde_json::to_writer_pretty(&mut *writer, &envelope)?,
+        JsonFormat::Compact | JsonFormat::Ndjson => serde_json::to_writer(&mut *writer, &envelope)?,
+    }
+    writeln!(writer)
 }
 
 impl Default for OutputConfig {
@@ -241,6 +259,22 @@ pub fn emit<T: CommandOutput>(value: &T, config: &OutputConfig) -> CliResult<()>
     Ok(())
 }
 
+/// Emit a JSON success envelope for commands that already have structured
+/// machine-readable data but are not yet modeled as [`CommandOutput`].
+pub fn emit_json_data<T: Serialize>(
+    command: &str,
+    data: &T,
+    config: &OutputConfig,
+) -> CliResult<()> {
+    let format = config.json_format.ok_or_else(|| {
+        CliError::internal("emit_json_data called without an active JSON output mode")
+    })?;
+    let stdout = io::stdout();
+    let mut writer = stdout.lock();
+    write_json_command_envelope(&mut writer, command, data, format)
+        .map_err(|e| CliError::io(format!("failed to write JSON output: {e}")))
+}
+
 /// Emit each item in an iterator as a separate NDJSON line, or collect into a
 /// JSON array envelope, or render human-readable text.
 pub fn emit_list<T: CommandOutput>(items: &[T], config: &OutputConfig) -> CliResult<()> {
@@ -334,6 +368,7 @@ pub struct ProgressReporter {
     mode: ProgressMode,
     task: String,
     bar: Option<ProgressBar>,
+    total: Option<u64>,
 }
 
 impl ProgressReporter {
@@ -365,6 +400,7 @@ impl ProgressReporter {
             mode,
             task: task.to_string(),
             bar,
+            total,
         }
     }
 
@@ -377,12 +413,11 @@ impl ProgressReporter {
                 }
             }
             ProgressMode::Json => {
-                let total = self.bar.as_ref().map(|b| b.length().unwrap_or(0));
                 let event = serde_json::json!({
                     "event": "progress",
                     "task": self.task,
                     "current": current,
-                    "total": total,
+                    "total": self.total,
                 });
                 // Progress goes to stderr to keep stdout clean for data.
                 let _ = writeln!(io::stderr(), "{}", event);

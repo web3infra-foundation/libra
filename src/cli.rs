@@ -20,6 +20,10 @@ use crate::{
 const ROOT_AFTER_HELP: &str = "\
 Help Topics:
   error-codes  Print the stable CLI error code table (`libra help error-codes`)
+
+Output Examples:
+  libra --json status
+  libra --json=ndjson log
 ";
 
 const ERROR_CODES_HELP: &str = include_str!("../docs/error-codes.md");
@@ -103,7 +107,7 @@ struct Cli {
     )]
     color: String,
 
-    /// Suppress informational messages; only emit primary result.
+    /// Suppress standard stdout output; keep warnings/errors on stderr.
     #[arg(long, short = 'q', global = true)]
     quiet: bool,
 

@@ -34,15 +34,15 @@ fn main() {
                 // Re-parse and pretty-print.
                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) {
                     if let Ok(formatted) = serde_json::to_string_pretty(&value) {
-                        println!("{formatted}");
+                        eprintln!("{formatted}");
                     } else {
-                        println!("{json}");
+                        eprintln!("{json}");
                     }
                 } else {
-                    println!("{json}");
+                    eprintln!("{json}");
                 }
             } else {
-                println!("{json}");
+                eprintln!("{json}");
             }
         } else {
             err.print_stderr();

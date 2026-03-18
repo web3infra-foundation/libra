@@ -38,20 +38,20 @@ pub async fn execute(args: PullArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Fetches from the remote then merges into the current
 /// branch.
-pub async fn execute_safe(args: PullArgs, _output: &OutputConfig) -> CliResult<()> {
+pub async fn execute_safe(args: PullArgs, output: &OutputConfig) -> CliResult<()> {
     let fetch_args = fetch::FetchArgs {
         repository: args.repository.clone(),
         refspec: args.refspec.clone(),
         all: false,
     };
-    fetch::execute_safe(fetch_args, _output).await?;
+    fetch::execute_safe(fetch_args, output).await?;
 
     if let (Some(remote), Some(refspec)) = (&args.repository, &args.refspec) {
         merge::execute_safe(
             merge::MergeArgs {
                 branch: format!("{remote}/{refspec}"),
             },
-            _output,
+            output,
         )
         .await?;
         return Ok(());
@@ -64,7 +64,7 @@ pub async fn execute_safe(args: PullArgs, _output: &OutputConfig) -> CliResult<(
                 let merge_args = merge::MergeArgs {
                     branch: format!("{}/{}", branch_config.remote, branch_config.merge),
                 };
-                merge::execute_safe(merge_args, _output).await?;
+                merge::execute_safe(merge_args, output).await?;
                 Ok(())
             }
             None => Err(CliError::failure(

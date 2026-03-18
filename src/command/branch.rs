@@ -15,7 +15,7 @@ use crate::{
     },
     utils::{
         error::{CliError, CliResult},
-        output::OutputConfig,
+        output::{OutputConfig, emit_json_data},
     },
 };
 
@@ -131,18 +131,11 @@ pub async fn execute_safe(args: BranchArgs, output: &OutputConfig) -> CliResult<
             // Collect branch names and emit as JSON.
             let branches =
                 collect_branch_names(list_mode, &args.contains, &args.no_contains).await?;
-            let envelope = match output.json_format {
-                Some(crate::utils::output::JsonFormat::Pretty) => serde_json::to_string_pretty(
-                    &serde_json::json!({"ok": true, "command": "branch", "data": {"branches": branches}}),
-                ),
-                _ => serde_json::to_string(
-                    &serde_json::json!({"ok": true, "command": "branch", "data": {"branches": branches}}),
-                ),
-            };
-            if let Ok(json) = envelope {
-                println!("{json}");
-            }
-            Ok(())
+            emit_json_data(
+                "branch",
+                &serde_json::json!({ "branches": branches }),
+                output,
+            )
         } else if output.quiet {
             // Quiet mode: suppress branch listing.
             Ok(())

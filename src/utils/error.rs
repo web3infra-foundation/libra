@@ -8,7 +8,7 @@
 use std::{
     collections::BTreeMap,
     env, fmt,
-    io::{self, IsTerminal},
+    io::{self, IsTerminal, Write},
 };
 
 use serde::{Serialize, Serializer};
@@ -441,25 +441,26 @@ impl CliError {
     /// Print the error according to the global output configuration.
     ///
     /// When JSON output is active, the error is rendered as a JSON envelope to
-    /// **stdout** (so it can be piped/parsed alongside success output). The
-    /// human-readable form is still written to stderr for debugging.
+    /// **stderr** so stdout remains reserved for successful command data.
     pub fn print_for_output(&self, config: &crate::utils::output::OutputConfig) {
         use crate::utils::output::JsonFormat;
 
         if let Some(fmt) = config.json_format {
             let json = self.render_json();
+            let stderr = std::io::stderr();
+            let mut writer = stderr.lock();
             match fmt {
                 JsonFormat::Pretty => {
                     // Re-parse and pretty-print the JSON.
                     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) {
-                        let _ = serde_json::to_writer_pretty(std::io::stdout(), &value);
-                        println!();
+                        let _ = serde_json::to_writer_pretty(&mut writer, &value);
+                        let _ = writeln!(writer);
                     } else {
-                        println!("{json}");
+                        let _ = writeln!(writer, "{json}");
                     }
                 }
                 JsonFormat::Compact | JsonFormat::Ndjson => {
-                    println!("{json}");
+                    let _ = writeln!(writer, "{json}");
                 }
             }
         } else {

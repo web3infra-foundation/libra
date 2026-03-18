@@ -247,7 +247,7 @@ async fn switch_to_commit(commit_hash: ObjectHash, output: &OutputConfig) -> Cli
     };
 
     // Only restore the working directory *after* HEAD has been successfully updated.
-    restore_to_commit(commit_hash).await?;
+    restore_to_commit(commit_hash, output).await?;
     crate::info_println!(output, "HEAD is now at {}", &commit_hash.to_string()[..7]);
     Ok(())
 }
@@ -319,19 +319,19 @@ async fn switch_to_branch(branch_name: String, output: &OutputConfig) -> CliResu
         return Err(CliError::fatal(e.to_string()));
     }
 
-    restore_to_commit(target_commit_id).await?;
+    restore_to_commit(target_commit_id, output).await?;
     crate::info_println!(output, "Switched to branch '{}'", target_branch.name);
     Ok(())
 }
 
-async fn restore_to_commit(commit_id: ObjectHash) -> CliResult<()> {
+async fn restore_to_commit(commit_id: ObjectHash, output: &OutputConfig) -> CliResult<()> {
     let restore_args = RestoreArgs {
         worktree: true,
         staged: true,
         source: Some(commit_id.to_string()),
         pathspec: vec![util::working_dir_string()],
     };
-    restore::execute_safe(restore_args, &OutputConfig::default()).await
+    restore::execute_safe(restore_args, output).await
 }
 
 #[cfg(test)]

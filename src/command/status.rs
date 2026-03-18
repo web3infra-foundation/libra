@@ -29,7 +29,7 @@ use crate::{
         error::{CliError, CliResult},
         ignore::IgnorePolicy,
         object_ext::{CommitExt, TreeExt},
-        output::OutputConfig,
+        output::{OutputConfig, emit_json_data},
         path, util,
     },
 };
@@ -795,7 +795,7 @@ pub async fn execute_safe(args: StatusArgs, output: &OutputConfig) -> CliResult<
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
 
     if output.is_json() {
-        emit_status_json(output).await?;
+        emit_status_json(&args, output).await?;
     } else if output.quiet {
         // Quiet mode: suppress all informational output.
     } else {
@@ -805,7 +805,7 @@ pub async fn execute_safe(args: StatusArgs, output: &OutputConfig) -> CliResult<
 }
 
 /// Build a structured JSON status object with stable, machine-readable fields.
-async fn emit_status_json(output: &OutputConfig) -> CliResult<()> {
+async fn emit_status_json(args: &StatusArgs, output: &OutputConfig) -> CliResult<()> {
     let status_error = |err: StatusError| {
         CliError::fatal(format!("failed to determine working tree status: {err}"))
     };
@@ -821,9 +821,36 @@ async fn emit_status_json(output: &OutputConfig) -> CliResult<()> {
         .await
         .map(|c| c.to_relative())
         .map_err(status_error)?;
-    let unstaged = changes_to_be_staged()
+    let mut unstaged = changes_to_be_staged()
         .map(|c| c.to_relative())
         .map_err(status_error)?;
+    let mut ignored_files = if args.ignored && !matches!(args.untracked_files, UntrackedFiles::No) {
+        list_ignored_files()
+            .map(|c| c.to_relative().new)
+            .map_err(status_error)?
+    } else {
+        vec![]
+    };
+
+    match args.untracked_files {
+        UntrackedFiles::No => {
+            unstaged.new.clear();
+            ignored_files.clear();
+        }
+        UntrackedFiles::Normal => {
+            let index_path = path::try_index()
+                .map_err(|source| status_error(StatusError::Workdir { source }))?;
+            let index = Index::load(&index_path).map_err(|source| {
+                status_error(StatusError::IndexLoad {
+                    path: index_path.clone(),
+                    source,
+                })
+            })?;
+            unstaged.new = collapse_untracked_directories(unstaged.new, &index);
+            ignored_files = collapse_untracked_directories(ignored_files, &index);
+        }
+        UntrackedFiles::All => {}
+    }
 
     let paths_to_json = |paths: &[PathBuf]| -> Vec<serde_json::Value> {
         paths
@@ -832,7 +859,7 @@ async fn emit_status_json(output: &OutputConfig) -> CliResult<()> {
             .collect()
     };
 
-    let json_data = serde_json::json!({
+    let mut json_data = serde_json::json!({
         "head": head,
         "has_commits": has_commits,
         "staged": {
@@ -845,20 +872,19 @@ async fn emit_status_json(output: &OutputConfig) -> CliResult<()> {
             "deleted": paths_to_json(&unstaged.deleted),
         },
         "untracked": paths_to_json(&unstaged.new),
+        "ignored": paths_to_json(&ignored_files),
         "is_clean": staged.is_empty() && unstaged.is_empty(),
     });
-
-    let envelope = match output.json_format {
-        Some(crate::utils::output::JsonFormat::Pretty) => serde_json::to_string_pretty(
-            &serde_json::json!({"ok": true, "command": "status", "data": json_data}),
-        ),
-        _ => serde_json::to_string(
-            &serde_json::json!({"ok": true, "command": "status", "data": json_data}),
-        ),
+    if args.show_stash
+        && let Some(map) = json_data.as_object_mut()
+    {
+        map.insert(
+            "stash_entries".to_string(),
+            serde_json::json!(stash::get_stash_num().unwrap_or(0)),
+        );
     }
-    .map_err(|err| CliError::fatal(format!("failed to serialize status output: {err}")))?;
-    println!("{envelope}");
-    Ok(())
+
+    emit_json_data("status", &json_data, output)
 }
 
 /// Check if the working tree is clean.
