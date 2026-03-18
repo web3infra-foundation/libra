@@ -25,9 +25,16 @@ pub enum BranchListMode {
     All,
 }
 
+const BRANCH_AFTER_HELP: &str = "\
+Compatibility Notes:
+  Libra's global --quiet suppresses the branch listing itself.
+  This differs from `git branch --quiet`, which still prints the primary list.
+";
+
 // action options are mutually exclusive with query options
 // query options can be combined
 #[derive(Parser, Debug)]
+#[command(after_help = BRANCH_AFTER_HELP)]
 #[command(group(
     ArgGroup::new("action")
         .multiple(false)

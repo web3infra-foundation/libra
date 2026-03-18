@@ -563,3 +563,19 @@ fn subcommand_help_shows_global_flags() {
         "subcommand help should inherit --json flag"
     );
 }
+
+#[test]
+fn branch_help_documents_quiet_listing_deviation() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo_via_cli(&repo);
+
+    let output = run(&["branch", "--help"], &repo);
+    assert_cli_success(&output, "branch --help");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("This differs from `git branch --quiet`"),
+        "branch help should document quiet-mode deviation, got: {stdout}"
+    );
+}
