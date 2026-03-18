@@ -66,9 +66,21 @@ pub async fn execute_safe(args: CheckoutArgs, output: &OutputConfig) -> CliResul
         return Ok(());
     }
 
-    switch::ensure_clean_status(output)
-        .await
-        .map_err(|_| CliError::failure("local changes would be overwritten by checkout"))?;
+    match switch::ensure_clean_status(output).await {
+        Ok(()) => {}
+        Err(err)
+            if matches!(
+                err.message(),
+                "unstaged changes, can't switch branch"
+                    | "uncommitted changes, can't switch branch"
+            ) =>
+        {
+            return Err(CliError::failure(
+                "local changes would be overwritten by checkout",
+            ));
+        }
+        Err(err) => return Err(err),
+    }
 
     match (args.branch, args.new_branch) {
         (Some(target_branch), _) => check_and_switch_branch(&target_branch, output).await?,
@@ -128,7 +140,7 @@ async fn get_remote(branch_name: &str, output: &OutputConfig) -> CliResult<()> {
 
     create_and_switch_new_branch(branch_name, output).await?;
     // Set branch upstream
-    branch::set_upstream_safe(branch_name, &remote_branch_name).await?;
+    branch::set_upstream_safe_with_output(branch_name, &remote_branch_name, output).await?;
     // Synchronous branches
     // Use the pull command to update the local branch with the latest changes from the remote branch
     pull::execute_safe(pull::PullArgs::make(None, None), output).await?;

@@ -205,7 +205,7 @@ impl OutputConfig {
         match self.color {
             ColorChoice::Never => colored::control::set_override(false),
             ColorChoice::Always => colored::control::set_override(true),
-            ColorChoice::Auto => {} // let `colored` auto-detect
+            ColorChoice::Auto => colored::control::unset_override(),
         }
     }
 }
@@ -349,8 +349,7 @@ pub fn warning_was_emitted() -> bool {
     WARNING_EMITTED.load(Ordering::Relaxed)
 }
 
-/// Reset the warning tracker. Used between test runs.
-#[cfg(test)]
+/// Reset the warning tracker before each top-level CLI invocation.
 pub fn reset_warning_tracker() {
     WARNING_EMITTED.store(false, Ordering::Relaxed);
 }
@@ -381,12 +380,16 @@ impl ProgressReporter {
             ProgressMode::Text => {
                 let pb = if let Some(len) = total {
                     let pb = ProgressBar::new(len);
-                    pb.set_style(
-                        ProgressStyle::default_bar()
-                            .template("{spinner:.magenta} [{elapsed_precise}] [{bar:40.green/white}] {bytes}/{total_bytes} ({eta}) {bytes_per_sec}")
-                            .unwrap()
-                            .progress_chars("=> "),
-                    );
+                    let style = match ProgressStyle::default_bar().template(
+                        "{spinner:.magenta} [{elapsed_precise}] [{bar:40.green/white}] {bytes}/{total_bytes} ({eta}) {bytes_per_sec}",
+                    ) {
+                        Ok(style) => style.progress_chars("=> "),
+                        Err(err) => {
+                            tracing::warn!("failed to build progress bar template: {err}");
+                            ProgressStyle::default_bar()
+                        }
+                    };
+                    pb.set_style(style);
                     pb
                 } else {
                     ProgressBar::new_spinner()
@@ -452,6 +455,8 @@ impl ProgressReporter {
 
 #[cfg(test)]
 mod tests {
+    use colored::Colorize;
+
     use super::*;
 
     #[test]
@@ -555,5 +560,22 @@ mod tests {
         assert!(warning_was_emitted());
         reset_warning_tracker();
         assert!(!warning_was_emitted());
+    }
+
+    #[test]
+    fn apply_color_override_auto_clears_previous_override() {
+        colored::control::set_override(true);
+        assert!(
+            "x".red().to_string().contains("\u{1b}["),
+            "forced override should enable ANSI colors"
+        );
+
+        OutputConfig::default().apply_color_override();
+
+        assert!(
+            !"x".red().to_string().contains("\u{1b}["),
+            "auto mode should clear the process-wide color override"
+        );
+        colored::control::unset_override();
     }
 }

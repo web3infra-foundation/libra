@@ -198,11 +198,12 @@ async fn switch_to_tracked_remote_branch(target: String, output: &OutputConfig) 
             "failed to create branch '{remote_branch_name}': {e}"
         ))
     })?;
-    branch::set_upstream(
+    branch::set_upstream_safe_with_output(
         &remote_branch_name,
         &format!("{remote_name}/{remote_branch_name}"),
+        output,
     )
-    .await;
+    .await?;
     switch_to_branch(remote_branch_name, output).await
 }
 

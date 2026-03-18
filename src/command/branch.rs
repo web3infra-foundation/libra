@@ -119,7 +119,7 @@ pub async fn execute_safe(args: BranchArgs, output: &OutputConfig) -> CliResult<
         Ok(())
     } else if let Some(upstream) = args.set_upstream_to {
         match Head::current().await {
-            Head::Branch(name) => set_upstream_safe(&name, &upstream).await,
+            Head::Branch(name) => set_upstream_safe_with_output(&name, &upstream, output).await,
             Head::Detached(_) => Err(CliError::fatal("HEAD is detached")),
         }
     } else if !args.rename.is_empty() {
@@ -159,6 +159,14 @@ pub async fn set_upstream(branch: &str, upstream: &str) {
 }
 
 pub async fn set_upstream_safe(branch: &str, upstream: &str) -> CliResult<()> {
+    set_upstream_safe_with_output(branch, upstream, &OutputConfig::default()).await
+}
+
+pub async fn set_upstream_safe_with_output(
+    branch: &str,
+    upstream: &str,
+    output: &OutputConfig,
+) -> CliResult<()> {
     let branch_config = Config::branch_config(branch).await;
     if branch_config.is_none() {
         let (remote, remote_branch) = match upstream.split_once('/') {
@@ -177,7 +185,10 @@ pub async fn set_upstream_safe(branch: &str, upstream: &str) -> CliResult<()> {
         )
         .await;
     }
-    println!("Branch '{branch}' set up to track remote branch '{upstream}'");
+    crate::info_println!(
+        output,
+        "Branch '{branch}' set up to track remote branch '{upstream}'"
+    );
     Ok(())
 }
 

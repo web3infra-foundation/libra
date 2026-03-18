@@ -65,10 +65,11 @@ pub async fn execute_safe(args: MergeArgs, output: &OutputConfig) -> CliResult<(
 
     if lca.id == target_commit.id {
         // no need to merge
-        println!("Already up to date.");
+        crate::info_println!(output, "Already up to date.");
         Ok(())
     } else if lca.id == current_commit.id {
-        println!(
+        crate::info_println!(
+            output,
             "Updating {}..{}",
             &current_commit.id.to_string()[..6],
             &target_commit.id.to_string()[..6]
@@ -117,7 +118,7 @@ async fn merge_ff(
     target_branch_name: &str,
     output: &OutputConfig,
 ) -> CliResult<()> {
-    println!("Fast-forward");
+    crate::info_println!(output, "Fast-forward");
     let db = get_db_conn_instance().await;
 
     let old_oid_opt = Head::current_commit_with_conn(&db).await;

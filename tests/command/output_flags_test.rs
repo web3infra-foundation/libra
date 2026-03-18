@@ -176,6 +176,29 @@ fn quiet_status_suppresses_output() {
     );
 }
 
+#[test]
+fn quiet_status_invalid_index_still_returns_error() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo_via_cli(&repo);
+
+    fs::write(repo.join(".libra").join("index"), b"not a valid index").unwrap();
+
+    let output = run(&["--quiet", "status"], &repo);
+    assert_ne!(output.status.code(), Some(0));
+    assert!(
+        output.stdout.is_empty(),
+        "quiet status should not emit stdout on failure: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("failed to determine working tree status"),
+        "quiet status should preserve the real status error, got: {stderr}"
+    );
+}
+
 // ─── --json on dirty worktree ─────────────────────────────────────────────────
 
 #[test]
@@ -326,6 +349,25 @@ fn quiet_branch_suppresses_output() {
     );
 }
 
+#[test]
+fn quiet_branch_set_upstream_suppresses_output() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo_with_commit_via_cli(&repo);
+
+    let output = run(
+        &["--quiet", "branch", "--set-upstream-to", "origin/main"],
+        &repo,
+    );
+    assert_cli_success(&output, "quiet branch --set-upstream-to");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.trim().is_empty(),
+        "quiet branch upstream setup should suppress informational output, got: {stdout}"
+    );
+}
+
 // ─── switch / checkout output suppression ────────────────────────────────────
 
 #[test]
@@ -407,6 +449,59 @@ fn machine_checkout_existing_branch_suppresses_human_output() {
     assert!(
         stdout.trim().is_empty(),
         "machine checkout should not emit human text, got: {stdout}"
+    );
+}
+
+#[test]
+fn checkout_invalid_index_preserves_status_error() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo_with_commit_via_cli(&repo);
+
+    let branch = run(&["branch", "foo"], &repo);
+    assert_cli_success(&branch, "branch foo");
+
+    fs::write(repo.join(".libra").join("index"), b"not a valid index").unwrap();
+
+    let output = run(&["checkout", "foo"], &repo);
+    assert_ne!(output.status.code(), Some(0));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("failed to determine working tree status"),
+        "checkout should preserve status failures, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("local changes would be overwritten by checkout"),
+        "checkout should not collapse index corruption into a dirty-tree message, got: {stderr}"
+    );
+}
+
+#[test]
+fn quiet_merge_fast_forward_suppresses_output() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo_with_commit_via_cli(&repo);
+
+    let checkout_feature = run(&["checkout", "-b", "feature"], &repo);
+    assert_cli_success(&checkout_feature, "checkout -b feature");
+
+    fs::write(repo.join("f.txt"), "feature change").unwrap();
+    let add = run(&["add", "f.txt"], &repo);
+    assert_cli_success(&add, "add");
+    let commit = run(&["commit", "-m", "feature", "--no-verify"], &repo);
+    assert_cli_success(&commit, "commit feature");
+
+    let checkout_main = run(&["checkout", "main"], &repo);
+    assert_cli_success(&checkout_main, "checkout main");
+
+    let output = run(&["--quiet", "merge", "feature"], &repo);
+    assert_cli_success(&output, "quiet merge feature");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.trim().is_empty(),
+        "quiet fast-forward merge should suppress informational stdout, got: {stdout}"
     );
 }
 

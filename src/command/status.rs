@@ -797,18 +797,20 @@ pub async fn execute_safe(args: StatusArgs, output: &OutputConfig) -> CliResult<
     if output.is_json() {
         emit_status_json(&args, output).await?;
     } else if output.quiet {
-        // Quiet mode: suppress all informational output.
+        let _ = collect_status_json(&args).await?;
     } else {
         execute_to(args, &mut std::io::stdout()).await;
     }
     Ok(())
 }
 
-/// Build a structured JSON status object with stable, machine-readable fields.
-async fn emit_status_json(args: &StatusArgs, output: &OutputConfig) -> CliResult<()> {
+async fn collect_status_json(args: &StatusArgs) -> CliResult<serde_json::Value> {
     let status_error = |err: StatusError| {
         CliError::fatal(format!("failed to determine working tree status: {err}"))
     };
+    if is_bare_repository().await {
+        return Err(CliError::fatal("this operation must be run in a work tree"));
+    }
     let head = match Head::current().await {
         Head::Branch(name) => serde_json::json!({"type": "branch", "name": name}),
         Head::Detached(hash) => {
@@ -884,6 +886,12 @@ async fn emit_status_json(args: &StatusArgs, output: &OutputConfig) -> CliResult
         );
     }
 
+    Ok(json_data)
+}
+
+/// Build a structured JSON status object with stable, machine-readable fields.
+async fn emit_status_json(args: &StatusArgs, output: &OutputConfig) -> CliResult<()> {
+    let json_data = collect_status_json(args).await?;
     emit_json_data("status", &json_data, output)
 }
 

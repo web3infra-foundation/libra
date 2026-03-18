@@ -522,6 +522,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         None => env::args().collect::<Vec<_>>(),
     };
     let argv = rewrite_log_short_number_args(argv);
+    utils::output::reset_warning_tracker();
     if is_error_codes_help_topic(&argv) {
         return print_error_codes_help();
     }
@@ -642,7 +643,7 @@ mod tests {
     use serial_test::serial;
 
     use super::*;
-    use crate::utils::{error::CliErrorKind, test::ChangeDirGuard};
+    use crate::utils::{error::CliErrorKind, output, test::ChangeDirGuard};
 
     /// this test is to verify that the CLI can be built without panicking
     /// according [clap dock](https://docs.rs/clap/latest/clap/_derive/_tutorial/chapter_4/index.html)
@@ -711,6 +712,30 @@ mod tests {
         assert!(
             msg.contains("Hint:") || msg.contains("similar"),
             "expected clap fuzzy-match suggestion, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn parse_async_resets_warning_tracker_before_dispatch() {
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = ChangeDirGuard::new(temp.path());
+
+        output::record_warning();
+        assert!(output::warning_was_emitted());
+
+        parse_async(Some(&[
+            "libra",
+            "--exit-code-on-warning",
+            "--quiet",
+            "init",
+        ]))
+        .await
+        .unwrap();
+
+        assert!(
+            !output::warning_was_emitted(),
+            "top-level CLI dispatch should clear stale warning state before running"
         );
     }
 
