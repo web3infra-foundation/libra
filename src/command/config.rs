@@ -5,6 +5,7 @@ use std::{path::PathBuf, process::Command};
 use clap::Parser;
 use once_cell::sync::Lazy;
 use sea_orm::DatabaseConnection;
+use serde::Serialize;
 use tokio::sync::Mutex;
 
 use crate::{
@@ -601,6 +602,35 @@ pub struct Key {
     key: String,
 }
 
+impl Key {
+    fn display(&self) -> String {
+        match &self.name {
+            Some(name) => format!("{}.{}.{}", self.configuration, name, self.key),
+            None => format!("{}.{}", self.configuration, self.key),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ConfigValueResult {
+    values: Vec<String>,
+    default_applied: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ConfigListEntry {
+    key: String,
+    value: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ConfigImportSummary {
+    scope: &'static str,
+    imported: usize,
+    skipped_duplicates: usize,
+    ignored_invalid: usize,
+}
+
 /// Execute the `config` command, printing any error to stderr.
 ///
 /// **Note:** Prefer [`execute_safe`] for programmatic / embedded callers so
@@ -614,40 +644,78 @@ pub async fn execute(args: ConfigArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. This is the preferred entry point for CLI dispatch,
 /// library consumers, and tests.
-pub async fn execute_safe(args: ConfigArgs, _output: &OutputConfig) -> CliResult<()> {
-    execute_inner(args)
-        .await
-        .map_err(CliError::from_legacy_string)
+pub async fn execute_safe(args: ConfigArgs, output: &OutputConfig) -> CliResult<()> {
+    execute_inner(args, output).await
 }
 
-/// Inner implementation that returns legacy `Result<(), String>` with
-/// human-readable prefixed error messages.
-async fn execute_inner(args: ConfigArgs) -> Result<(), String> {
-    args.validate().map_err(|e| format!("error: {e}"))?;
+/// Inner implementation that resolves config operations and renders success
+/// output according to the global [`OutputConfig`].
+async fn execute_inner(args: ConfigArgs, output: &OutputConfig) -> CliResult<()> {
+    args.validate()
+        .map_err(|e| CliError::from_legacy_string(format!("error: {e}")))?;
 
     let scope = args.get_scope();
     let use_cascade = !args.has_explicit_scope();
 
     if args.is_import_mode() {
-        return import_git_config(scope).await;
+        let summary = import_git_config(scope)
+            .await
+            .map_err(CliError::from_legacy_string)?;
+        if output.is_json() {
+            crate::utils::output::emit_json_data(
+                "config",
+                &serde_json::json!({
+                    "action": "import",
+                    "scope": summary.scope,
+                    "imported": summary.imported,
+                    "skipped_duplicates": summary.skipped_duplicates,
+                    "ignored_invalid": summary.ignored_invalid,
+                }),
+                output,
+            )?;
+        } else {
+            print_import_summary(&summary, output);
+        }
+        return Ok(());
     }
 
     if args.list {
-        list_config(args.name_only, scope, use_cascade).await
+        let entries = list_config(args.name_only, scope, use_cascade)
+            .await
+            .map_err(CliError::from_legacy_string)?;
+        if output.is_json() {
+            crate::utils::output::emit_json_data(
+                "config",
+                &serde_json::json!({
+                    "action": "list",
+                    "scope": scope_name(scope),
+                    "use_cascade": use_cascade,
+                    "name_only": args.name_only,
+                    "entries": entries,
+                }),
+                output,
+            )?;
+        } else {
+            print_config_entries(&entries, output);
+        }
+        Ok(())
     } else {
-        let origin_key = args
-            .key
-            .as_deref()
-            .ok_or_else(|| "missing required argument: <key>".to_string())?;
-        let key = parse_key(origin_key)?;
+        let origin_key = args.key.as_deref().ok_or_else(|| {
+            CliError::from_legacy_string("error: missing required argument: <key>")
+        })?;
+        let key = parse_key(origin_key).map_err(CliError::from_legacy_string)?;
+        let key_display = key.display();
         if args.add {
-            let value = args
-                .valuepattern
-                .as_deref()
-                .ok_or_else(|| "missing required argument: <value_pattern>".to_string())?;
-            add_config(&key, value, scope).await
+            let value = args.valuepattern.as_deref().ok_or_else(|| {
+                CliError::from_legacy_string("error: missing required argument: <value_pattern>")
+            })?;
+            add_config(&key, value, scope)
+                .await
+                .map_err(CliError::from_legacy_string)?;
+            emit_config_ack("add", scope, &key_display, output)?;
+            Ok(())
         } else if args.get {
-            get_config(
+            let result = get_config(
                 &key,
                 args.default.as_deref(),
                 args.valuepattern.as_deref(),
@@ -655,8 +723,26 @@ async fn execute_inner(args: ConfigArgs) -> Result<(), String> {
                 use_cascade,
             )
             .await
+            .map_err(CliError::from_legacy_string)?;
+            if output.is_json() {
+                crate::utils::output::emit_json_data(
+                    "config",
+                    &serde_json::json!({
+                        "action": "get",
+                        "scope": scope_name(scope),
+                        "use_cascade": use_cascade,
+                        "key": key_display,
+                        "values": result.values,
+                        "default_applied": result.default_applied,
+                    }),
+                    output,
+                )?;
+            } else {
+                print_config_values(&result, output);
+            }
+            Ok(())
         } else if args.get_all {
-            get_all_config(
+            let result = get_all_config(
                 &key,
                 args.default.as_deref(),
                 args.valuepattern.as_deref(),
@@ -664,17 +750,46 @@ async fn execute_inner(args: ConfigArgs) -> Result<(), String> {
                 use_cascade,
             )
             .await
+            .map_err(CliError::from_legacy_string)?;
+            if output.is_json() {
+                crate::utils::output::emit_json_data(
+                    "config",
+                    &serde_json::json!({
+                        "action": "get_all",
+                        "scope": scope_name(scope),
+                        "use_cascade": use_cascade,
+                        "key": key_display,
+                        "values": result.values,
+                        "default_applied": result.default_applied,
+                    }),
+                    output,
+                )?;
+            } else {
+                print_config_values(&result, output);
+            }
+            Ok(())
         } else if args.unset {
-            unset_config(&key, args.valuepattern.as_deref(), scope).await
+            unset_config(&key, args.valuepattern.as_deref(), scope)
+                .await
+                .map_err(CliError::from_legacy_string)?;
+            emit_config_ack("unset", scope, &key_display, output)?;
+            Ok(())
         } else if args.unset_all {
-            unset_all_config(&key, args.valuepattern.as_deref(), scope).await
+            unset_all_config(&key, args.valuepattern.as_deref(), scope)
+                .await
+                .map_err(CliError::from_legacy_string)?;
+            emit_config_ack("unset_all", scope, &key_display, output)?;
+            Ok(())
         } else {
             // If none of the above flags are present, then default to setting a config
-            let value = args
-                .valuepattern
-                .as_deref()
-                .ok_or_else(|| "missing required argument: <value_pattern>".to_string())?;
-            set_config(&key, value, scope).await
+            let value = args.valuepattern.as_deref().ok_or_else(|| {
+                CliError::from_legacy_string("error: missing required argument: <value_pattern>")
+            })?;
+            set_config(&key, value, scope)
+                .await
+                .map_err(CliError::from_legacy_string)?;
+            emit_config_ack("set", scope, &key_display, output)?;
+            Ok(())
         }
     }
 }
@@ -695,7 +810,71 @@ fn scope_name(scope: ConfigScope) -> &'static str {
     }
 }
 
-async fn import_git_config(scope: ConfigScope) -> Result<(), String> {
+fn print_import_summary(summary: &ConfigImportSummary, output: &OutputConfig) {
+    if output.quiet {
+        return;
+    }
+
+    if summary.imported > 0 {
+        println!(
+            "Imported {} entries from Git {} config.",
+            summary.imported, summary.scope
+        );
+    } else {
+        println!(
+            "No new entries to import from Git {} config.",
+            summary.scope
+        );
+    }
+    if summary.skipped_duplicates > 0 {
+        println!("  (skipped {} duplicates)", summary.skipped_duplicates);
+    }
+}
+
+fn print_config_values(result: &ConfigValueResult, output: &OutputConfig) {
+    if output.quiet {
+        return;
+    }
+
+    for value in &result.values {
+        println!("{value}");
+    }
+}
+
+fn print_config_entries(entries: &[ConfigListEntry], output: &OutputConfig) {
+    if output.quiet {
+        return;
+    }
+
+    for entry in entries {
+        match &entry.value {
+            Some(value) => println!("{}={value}", entry.key),
+            None => println!("{}", entry.key),
+        }
+    }
+}
+
+fn emit_config_ack(
+    action: &str,
+    scope: ConfigScope,
+    key: &str,
+    output: &OutputConfig,
+) -> CliResult<()> {
+    if output.is_json() {
+        crate::utils::output::emit_json_data(
+            "config",
+            &serde_json::json!({
+                "action": action,
+                "scope": scope_name(scope),
+                "key": key,
+            }),
+            output,
+        )?;
+    }
+    Ok(())
+}
+
+async fn import_git_config(scope: ConfigScope) -> Result<ConfigImportSummary, String> {
     let git_flag = scope_to_git_flag(scope);
     let output = Command::new("git")
         .args(["config", git_flag, "--list", "-z"])
@@ -761,20 +940,17 @@ async fn import_git_config(scope: ConfigScope) -> Result<(), String> {
     }
 
     let scope_label = scope_name(scope);
-    if imported > 0 {
-        println!("Imported {imported} entries from Git {scope_label} config.");
-    } else {
-        println!("No new entries to import from Git {scope_label} config.");
-    }
-    if skipped > 0 {
-        println!("  (skipped {skipped} duplicates)");
-    }
     if ignored_invalid > 0 {
         crate::utils::error::emit_warning(format!(
             "ignored {ignored_invalid} unsupported Git config entries"
         ));
     }
-    Ok(())
+    Ok(ConfigImportSummary {
+        scope: scope_label,
+        imported,
+        skipped_duplicates: skipped,
+        ignored_invalid,
+    })
 }
 
 /// Parse the original key string to three fields: configuration, name and key
@@ -869,36 +1045,38 @@ async fn get_config(
     valuepattern: Option<&str>,
     scope: ConfigScope,
     use_cascade: bool,
-) -> Result<(), String> {
+) -> Result<ConfigValueResult, String> {
     let value = if use_cascade {
         get_config_cascaded(&key.configuration, key.name.as_deref(), &key.key).await?
     } else {
         ScopedConfig::get(scope, &key.configuration, key.name.as_deref(), &key.key).await?
     };
 
+    let mut values = Vec::new();
+    let mut default_applied = false;
+
     if let Some(v) = value {
         // Build the full dotted key for secret detection
-        let full_key = match &key.name {
-            Some(n) => format!("{}.{}.{}", key.configuration, n, key.key),
-            None => format!("{}.{}", key.configuration, key.key),
-        };
+        let full_key = key.display();
         let redact = is_secret_key(&full_key);
         // Match against the raw value, but display redacted if needed
         if let Some(vp) = valuepattern {
             if v.contains(vp) {
-                let display_value = if redact { "<REDACTED>".to_string() } else { v };
-                println!("{display_value}");
+                values.push(if redact { "<REDACTED>".to_string() } else { v });
             }
         } else {
-            let display_value = if redact { "<REDACTED>".to_string() } else { v };
-            println!("{display_value}");
+            values.push(if redact { "<REDACTED>".to_string() } else { v });
         }
     } else if let Some(default_value) = default {
         // if value does not exist just return the default value if it's present
-        println!("{default_value}");
+        values.push(default_value.to_string());
+        default_applied = true;
     }
 
-    Ok(())
+    Ok(ConfigValueResult {
+        values,
+        default_applied,
+    })
 }
 
 /// Get all the configurations by the given key and value pattern
@@ -908,7 +1086,7 @@ async fn get_all_config(
     valuepattern: Option<&str>,
     scope: ConfigScope,
     use_cascade: bool,
-) -> Result<(), String> {
+) -> Result<ConfigValueResult, String> {
     let values = if use_cascade {
         get_all_config_cascaded(&key.configuration, key.name.as_deref(), &key.key).await?
     } else {
@@ -916,12 +1094,10 @@ async fn get_all_config(
     };
 
     // Build the full dotted key for secret detection
-    let full_key = match &key.name {
-        Some(n) => format!("{}.{}.{}", key.configuration, n, key.key),
-        None => format!("{}.{}", key.configuration, key.key),
-    };
+    let full_key = key.display();
     let redact = is_secret_key(&full_key);
 
+    let mut matched_values = Vec::new();
     let mut matched_any = false;
     for value in values {
         let display_value = if redact {
@@ -932,19 +1108,29 @@ async fn get_all_config(
         if let Some(vp) = valuepattern {
             // When redacting, match against the original value but display redacted
             if value.contains(vp) {
-                println!("{display_value}");
+                matched_values.push(display_value);
                 matched_any = true;
             }
         } else {
             matched_any = true;
-            println!("{display_value}");
+            matched_values.push(display_value);
         }
     }
-    if !matched_any && let Some(default_value) = default {
-        println!("{default_value}");
-    }
+    let default_applied = if !matched_any {
+        if let Some(default_value) = default {
+            matched_values.push(default_value.to_string());
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
 
-    Ok(())
+    Ok(ConfigValueResult {
+        values: matched_values,
+        default_applied,
+    })
 }
 
 /// Get the first matching configuration value using `CASCADE_ORDER`
@@ -1036,24 +1222,30 @@ async fn unset_all_config(
 }
 
 /// List all configurations
-async fn list_config(name_only: bool, scope: ConfigScope, use_cascade: bool) -> Result<(), String> {
+async fn list_config(
+    name_only: bool,
+    scope: ConfigScope,
+    use_cascade: bool,
+) -> Result<Vec<ConfigListEntry>, String> {
     let configurations = if use_cascade {
         list_all_config_cascaded().await?
     } else {
         ScopedConfig::list_all(scope).await?
     };
 
-    for (key, value) in configurations {
-        if name_only {
-            println!("{key}");
-        } else if is_secret_key(&key) {
-            println!("{key}=<REDACTED>");
-        } else {
-            println!("{key}={value}");
-        }
-    }
-
-    Ok(())
+    Ok(configurations
+        .into_iter()
+        .map(|(key, value)| ConfigListEntry {
+            value: if name_only {
+                None
+            } else if is_secret_key(&key) {
+                Some("<REDACTED>".to_string())
+            } else {
+                Some(value)
+            },
+            key,
+        })
+        .collect())
 }
 
 /// Returns true if the config key holds sensitive material that should not be

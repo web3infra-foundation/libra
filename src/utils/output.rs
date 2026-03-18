@@ -193,6 +193,66 @@ impl OutputConfig {
         }
     }
 
+    /// Best-effort resolution of global output flags directly from argv.
+    ///
+    /// This is used during startup parse failures, before clap has produced a
+    /// fully typed `Cli`, so error rendering still follows the same precedence
+    /// rules as successful command execution.
+    pub fn resolve_from_argv(argv: &[String]) -> Self {
+        let mut json: Option<String> = None;
+        let mut machine = false;
+        let mut no_pager = false;
+        let mut color = String::from("auto");
+        let mut quiet = false;
+        let mut exit_code_on_warning = false;
+        let mut progress = String::from("auto");
+
+        let mut args = argv.iter().peekable();
+        while let Some(arg) = args.next() {
+            if let Some(value) = arg.strip_prefix("--json=") {
+                json = Some(value.to_string());
+                continue;
+            }
+            if let Some(value) = arg.strip_prefix("--color=") {
+                color = value.to_string();
+                continue;
+            }
+            if let Some(value) = arg.strip_prefix("--progress=") {
+                progress = value.to_string();
+                continue;
+            }
+
+            match arg.as_str() {
+                "--json" | "-J" => json = Some(String::from("pretty")),
+                "--machine" => machine = true,
+                "--no-pager" => no_pager = true,
+                "--quiet" | "-q" => quiet = true,
+                "--exit-code-on-warning" => exit_code_on_warning = true,
+                "--color" => {
+                    if let Some(value) = args.next() {
+                        color = value.to_string();
+                    }
+                }
+                "--progress" => {
+                    if let Some(value) = args.next() {
+                        progress = value.to_string();
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Self::resolve(
+            json.as_deref(),
+            machine,
+            no_pager,
+            &color,
+            quiet,
+            exit_code_on_warning,
+            &progress,
+        )
+    }
+
     /// Returns `true` if any JSON output format was requested.
     pub fn is_json(&self) -> bool {
         self.json_format.is_some()
@@ -560,6 +620,21 @@ mod tests {
         assert!(warning_was_emitted());
         reset_warning_tracker();
         assert!(!warning_was_emitted());
+    }
+
+    #[test]
+    fn resolve_from_argv_machine_overrides_json_pretty() {
+        let argv = vec![
+            "libra".to_string(),
+            "--machine".to_string(),
+            "--json".to_string(),
+            "status".to_string(),
+        ];
+
+        let config = OutputConfig::resolve_from_argv(&argv);
+
+        assert_eq!(config.json_format, Some(JsonFormat::Ndjson));
+        assert!(config.quiet);
     }
 
     #[test]

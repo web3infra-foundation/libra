@@ -124,6 +124,27 @@ fn machine_error_is_json() {
     assert_eq!(parsed["ok"], false);
 }
 
+#[test]
+fn machine_overrides_json_for_parse_errors() {
+    let temp = tempdir().unwrap();
+    let output = run(&["--machine", "-J", "nonexistent"], temp.path());
+    assert_ne!(output.status.code(), Some(0));
+    assert!(
+        output.stdout.is_empty(),
+        "machine-mode parse errors should keep stdout empty, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(stderr.trim())
+        .unwrap_or_else(|e| panic!("expected JSON on stderr, got: {stderr}\nerror: {e}"));
+    assert_eq!(parsed["ok"], false);
+    assert!(
+        !stderr.contains("\n  "),
+        "--machine should force single-line JSON even when -J is also present, got: {stderr}"
+    );
+}
+
 // ─── --json on success path ───────────────────────────────────────────────────
 
 #[test]
@@ -158,6 +179,96 @@ fn json_status_success_returns_structured_data() {
     );
     // Clean repo should be empty.
     assert_eq!(data["is_clean"], true);
+}
+
+#[test]
+fn json_commit_returns_structured_summary() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo_via_cli(&repo);
+    configure_identity_via_cli(&repo);
+
+    fs::write(repo.join("f.txt"), "hello").unwrap();
+    let add = run(&["add", "f.txt"], &repo);
+    assert_cli_success(&add, "add");
+
+    let output = run(&["--json", "commit", "-m", "initial", "--no-verify"], &repo);
+    assert_cli_success(&output, "json commit");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("expected JSON on stdout, got: {stdout}\nerror: {e}"));
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["command"], "commit");
+    assert_eq!(parsed["data"]["subject"], "initial");
+    assert!(parsed["data"]["commit"].is_string());
+    assert_eq!(parsed["data"]["files_changed"]["total"], 1);
+    assert_eq!(parsed["data"]["files_changed"]["new"], 1);
+}
+
+#[test]
+fn quiet_commit_suppresses_summary() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo_via_cli(&repo);
+    configure_identity_via_cli(&repo);
+
+    fs::write(repo.join("f.txt"), "hello").unwrap();
+    let add = run(&["add", "f.txt"], &repo);
+    assert_cli_success(&add, "add");
+
+    let output = run(
+        &["--quiet", "commit", "-m", "initial", "--no-verify"],
+        &repo,
+    );
+    assert_cli_success(&output, "quiet commit");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.trim().is_empty(),
+        "quiet commit should suppress summary output, got: {stdout}"
+    );
+}
+
+#[test]
+fn json_config_get_returns_structured_value() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo_via_cli(&repo);
+
+    let set = run(&["config", "user.name", "Alice"], &repo);
+    assert_cli_success(&set, "config set");
+
+    let output = run(&["--json", "config", "--get", "user.name"], &repo);
+    assert_cli_success(&output, "json config --get");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("expected JSON on stdout, got: {stdout}\nerror: {e}"));
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["command"], "config");
+    assert_eq!(parsed["data"]["action"], "get");
+    assert_eq!(parsed["data"]["key"], "user.name");
+    assert_eq!(parsed["data"]["values"][0], "Alice");
+}
+
+#[test]
+fn quiet_config_get_suppresses_output() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo_via_cli(&repo);
+
+    let set = run(&["config", "user.name", "Alice"], &repo);
+    assert_cli_success(&set, "config set");
+
+    let output = run(&["--quiet", "config", "--get", "user.name"], &repo);
+    assert_cli_success(&output, "quiet config --get");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.trim().is_empty(),
+        "quiet config --get should suppress stdout, got: {stdout}"
+    );
 }
 
 #[test]
@@ -334,6 +445,35 @@ fn json_branch_returns_json_with_branches() {
 }
 
 #[test]
+fn json_show_ref_returns_structured_entries() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo_with_commit_via_cli(&repo);
+
+    let output = run(&["--json", "show-ref", "--head"], &repo);
+    assert_cli_success(&output, "json show-ref --head");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("expected JSON on stdout, got: {stdout}\nerror: {e}"));
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["command"], "show-ref");
+    let entries = parsed["data"]["entries"]
+        .as_array()
+        .expect("show-ref entries should be an array");
+    assert!(
+        entries.iter().any(|entry| entry["refname"] == "HEAD"),
+        "expected HEAD entry, got: {entries:?}"
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["refname"] == "refs/heads/main"),
+        "expected refs/heads/main entry, got: {entries:?}"
+    );
+}
+
+#[test]
 fn quiet_branch_suppresses_output() {
     let temp = tempdir().unwrap();
     let repo = temp.path().join("repo");
@@ -346,6 +486,22 @@ fn quiet_branch_suppresses_output() {
     assert!(
         stdout.trim().is_empty(),
         "expected no output with --quiet branch, got: {stdout}"
+    );
+}
+
+#[test]
+fn quiet_show_ref_suppresses_output() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo_with_commit_via_cli(&repo);
+
+    let output = run(&["--quiet", "show-ref", "--head"], &repo);
+    assert_cli_success(&output, "quiet show-ref --head");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.trim().is_empty(),
+        "quiet show-ref should suppress stdout, got: {stdout}"
     );
 }
 

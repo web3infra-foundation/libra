@@ -3,6 +3,7 @@
 use std::{
     collections::HashSet,
     env,
+    io::Write,
     path::PathBuf,
     process::{Command, Stdio},
     str::FromStr,
@@ -42,7 +43,7 @@ use crate::{
         error::{CliError, CliResult},
         lfs,
         object_ext::BlobExt,
-        output::OutputConfig,
+        output::{OutputConfig, emit_json_data},
         path, util,
     },
 };
@@ -302,7 +303,12 @@ fn first_message_line(message: &str) -> String {
     message.lines().next().unwrap_or("").trim().to_string()
 }
 
-async fn print_commit_summary(commit: &Commit, message: &str, staged_changes: &status::Changes) {
+async fn emit_commit_summary(
+    commit: &Commit,
+    message: &str,
+    staged_changes: &status::Changes,
+    output: &OutputConfig,
+) -> CliResult<()> {
     let head_label = match Head::current().await {
         Head::Branch(branch) => branch,
         Head::Detached(_) => "detached".to_string(),
@@ -312,28 +318,63 @@ async fn print_commit_summary(commit: &Commit, message: &str, staged_changes: &s
     let short_id: String = commit_str.chars().take(7).collect();
     let subject = first_message_line(message);
 
-    if commit.parent_commit_ids.is_empty() {
-        println!("[{} (root-commit) {}] {}", head_label, short_id, subject);
-    } else {
-        println!("[{} {}] {}", head_label, short_id, subject);
-    }
-
     let file_count =
         staged_changes.new.len() + staged_changes.modified.len() + staged_changes.deleted.len();
+    if output.is_json() {
+        return emit_json_data(
+            "commit",
+            &serde_json::json!({
+                "head": head_label,
+                "commit": commit_str,
+                "short_id": short_id,
+                "subject": subject,
+                "root_commit": commit.parent_commit_ids.is_empty(),
+                "files_changed": {
+                    "total": file_count,
+                    "new": staged_changes.new.len(),
+                    "modified": staged_changes.modified.len(),
+                    "deleted": staged_changes.deleted.len(),
+                },
+            }),
+            output,
+        );
+    }
+
+    if output.quiet {
+        return Ok(());
+    }
+
+    let stdout = std::io::stdout();
+    let mut writer = stdout.lock();
+    if commit.parent_commit_ids.is_empty() {
+        writeln!(
+            writer,
+            "[{} (root-commit) {}] {}",
+            head_label, short_id, subject
+        )
+        .map_err(|e| CliError::io(format!("failed to write commit summary: {e}")))?;
+    } else {
+        writeln!(writer, "[{} {}] {}", head_label, short_id, subject)
+            .map_err(|e| CliError::io(format!("failed to write commit summary: {e}")))?;
+    }
+
     if file_count > 0 {
         let files_word = if file_count == 1 { "file" } else { "files" };
-        println!(
+        writeln!(
+            writer,
             " {} {} changed (new: {}, modified: {}, deleted: {})",
             file_count,
             files_word,
             staged_changes.new.len(),
             staged_changes.modified.len(),
             staged_changes.deleted.len()
-        );
+        )
+        .map_err(|e| CliError::io(format!("failed to write commit summary: {e}")))?;
     }
+    Ok(())
 }
 
-async fn execute_impl(args: CommitArgs) -> Result<(), CommitExecError> {
+async fn execute_impl(args: CommitArgs, output: &OutputConfig) -> Result<(), CommitExecError> {
     /* check args */
     let auto_stage_applied = if args.all {
         // Mimic `git commit -a` by staging tracked modifications/deletions first
@@ -509,7 +550,7 @@ async fn execute_impl(args: CommitArgs) -> Result<(), CommitExecError> {
 
         /* update HEAD */
         update_head_and_reflog(&commit.id.to_string(), &commit_message).await?;
-        print_commit_summary(&commit, &commit_message, &staged_changes).await;
+        emit_commit_summary(&commit, &commit_message, &staged_changes, output).await?;
         return Ok(());
     }
 
@@ -562,7 +603,7 @@ async fn execute_impl(args: CommitArgs) -> Result<(), CommitExecError> {
 
     /* update HEAD */
     update_head_and_reflog(&commit.id.to_string(), &commit_message).await?;
-    print_commit_summary(&commit, &commit_message, &staged_changes).await;
+    emit_commit_summary(&commit, &commit_message, &staged_changes, output).await?;
     Ok(())
 }
 
@@ -575,8 +616,10 @@ pub async fn execute(args: CommitArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Collects staged changes, resolves committer identity,
 /// builds tree and commit objects, and updates HEAD.
-pub async fn execute_safe(args: CommitArgs, _output: &OutputConfig) -> CliResult<()> {
-    execute_impl(args).await.map_err(CommitExecError::into_cli)
+pub async fn execute_safe(args: CommitArgs, output: &OutputConfig) -> CliResult<()> {
+    execute_impl(args, output)
+        .await
+        .map_err(CommitExecError::into_cli)
 }
 
 /// If vault signing is enabled, sign the commit content and return the

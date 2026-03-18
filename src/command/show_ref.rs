@@ -1,12 +1,15 @@
 //! Implements `show-ref` to list all refs (branches, tags) with their object IDs.
 
+use std::io::Write;
+
 use clap::Parser;
+use serde::Serialize;
 
 use crate::{
     internal::{branch::Branch, head::Head, tag},
     utils::{
         error::{CliError, CliResult},
-        output::OutputConfig,
+        output::{OutputConfig, emit_json_data},
     },
 };
 
@@ -32,38 +35,78 @@ pub struct ShowRefArgs {
     pub pattern: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct ShowRefEntry {
+    hash: String,
+    refname: String,
+}
+
 pub async fn execute(args: ShowRefArgs) -> Result<(), String> {
-    run_show_ref(args).await
+    execute_safe(args, &OutputConfig::default())
+        .await
+        .map_err(|err| err.render())
 }
 
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Lists all refs (branches, tags) with their object IDs.
-pub async fn execute_safe(args: ShowRefArgs, _output: &OutputConfig) -> CliResult<()> {
-    run_show_ref(args).await.map_err(CliError::failure)
+pub async fn execute_safe(args: ShowRefArgs, output: &OutputConfig) -> CliResult<()> {
+    let hash_only = args.hash;
+    let entries = collect_show_ref_entries(&args)
+        .await
+        .map_err(CliError::failure)?;
+
+    if output.is_json() {
+        emit_json_data(
+            "show-ref",
+            &serde_json::json!({
+                "hash_only": hash_only,
+                "entries": entries,
+            }),
+            output,
+        )
+    } else if output.quiet {
+        Ok(())
+    } else {
+        let stdout = std::io::stdout();
+        let mut writer = stdout.lock();
+        for entry in &entries {
+            if hash_only {
+                writeln!(writer, "{}", entry.hash)
+                    .map_err(|e| CliError::io(format!("failed to write show-ref output: {e}")))?;
+            } else {
+                writeln!(writer, "{} {}", entry.hash, entry.refname)
+                    .map_err(|e| CliError::io(format!("failed to write show-ref output: {e}")))?;
+            }
+        }
+        Ok(())
+    }
 }
 
-async fn run_show_ref(args: ShowRefArgs) -> Result<(), String> {
+async fn collect_show_ref_entries(args: &ShowRefArgs) -> Result<Vec<ShowRefEntry>, String> {
     // When neither --heads nor --tags is specified, show both
     let show_heads = args.heads || !args.tags;
     let show_tags = args.tags || !args.heads;
 
-    let mut entries: Vec<(String, String)> = Vec::new(); // (hash, refname)
+    let mut entries: Vec<ShowRefEntry> = Vec::new();
 
     // Include HEAD if --head is specified
     if args.head
         && let Some(hash) = Head::current_commit().await
     {
-        entries.push((hash.to_string(), "HEAD".to_string()));
+        entries.push(ShowRefEntry {
+            hash: hash.to_string(),
+            refname: "HEAD".to_string(),
+        });
     }
 
     // Collect local branches: refs/heads/<name>
     if show_heads {
         let branches = Branch::list_branches(None).await;
         for branch in branches {
-            entries.push((
-                branch.commit.to_string(),
-                format!("refs/heads/{}", branch.name),
-            ));
+            entries.push(ShowRefEntry {
+                hash: branch.commit.to_string(),
+                refname: format!("refs/heads/{}", branch.name),
+            });
         }
 
         // TODO: collect remote-tracking branches
@@ -80,14 +123,21 @@ async fn run_show_ref(args: ShowRefArgs) -> Result<(), String> {
                 tag::TagObject::Blob(b) => b.id.to_string(),
                 tag::TagObject::Tree(tr) => tr.id.to_string(),
             };
-            entries.push((hash, format!("refs/tags/{}", t.name)));
+            entries.push(ShowRefEntry {
+                hash,
+                refname: format!("refs/tags/{}", t.name),
+            });
         }
     }
 
     // Apply pattern filter if any patterns were given
     if !args.pattern.is_empty() {
-        entries.retain(|(_, refname)| {
-            refname == "HEAD" || args.pattern.iter().any(|p| refname.contains(p.as_str()))
+        entries.retain(|entry| {
+            entry.refname == "HEAD"
+                || args
+                    .pattern
+                    .iter()
+                    .any(|p| entry.refname.contains(p.as_str()))
         });
     }
 
@@ -95,16 +145,7 @@ async fn run_show_ref(args: ShowRefArgs) -> Result<(), String> {
         return Err("no matching refs found".to_string());
     }
 
-    // Print entries
-    for (hash, refname) in &entries {
-        if args.hash {
-            println!("{}", hash);
-        } else {
-            println!("{} {}", hash, refname);
-        }
-    }
-
-    Ok(())
+    Ok(entries)
 }
 
 #[cfg(test)]
