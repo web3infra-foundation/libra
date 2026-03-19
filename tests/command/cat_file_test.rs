@@ -1,5 +1,7 @@
 //! Tests for the `cat-file` command, verifying object type, size, content display,
 //! existence checks, and AI object inspection.
+//!
+//! **Layer:** L1 — deterministic, no external dependencies.
 
 use std::process::Command;
 
@@ -328,7 +330,7 @@ async fn test_cat_file_panic_handling() {
         .expect("Failed to execute cat-file");
 
     assert!(!output.status.success());
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(129));
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
     assert_eq!(report.error_code, "LBR-CLI-003");
     assert!(stderr.contains("fatal:"));
@@ -631,7 +633,7 @@ fn test_cat_file_cli_outside_repository_returns_fatal_128() {
         .output()
         .expect("Failed to execute cat-file");
 
-    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(output.status.code(), Some(128));
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
     assert_eq!(report.error_code, "LBR-REPO-001");
     assert!(

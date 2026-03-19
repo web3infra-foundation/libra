@@ -1,4 +1,7 @@
 //! Tests push command negotiation and ref update flows against remotes.
+//!
+//! **Layer:** L1 (most tests). `test_push_invalid_remote` and `test_push_force_with_local_changes`
+//! are L2 — require `LIBRA_TEST_GITHUB_TOKEN` or are `#[cfg(unix)]`.
 
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
@@ -100,7 +103,7 @@ fn test_push_cli_without_remote_returns_fatal_128() {
     let output = run_libra_command(&["push"], repo.path());
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(output.status.code(), Some(128));
     assert_eq!(report.error_code, "LBR-REPO-003");
     assert!(stderr.contains("fatal: no configured push destination"));
     assert!(stderr.contains("Hint:"));
@@ -258,9 +261,12 @@ async fn test_push_file_remote_fails_without_reflog() {
 }
 
 #[tokio::test]
-#[ignore] // This test requires network connectivity
 /// Test pushing to an invalid remote repository with timeout
 async fn test_push_invalid_remote() {
+    if std::env::var("LIBRA_TEST_GITHUB_TOKEN").map_or(true, |v| v.is_empty()) {
+        eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
+        return;
+    }
     let temp_repo = init_temp_repo();
     let temp_path = temp_repo.path();
     let _guard = ChangeDirGuard::new(temp_path);
@@ -337,15 +343,141 @@ async fn test_push_invalid_remote() {
     eprintln!("test_push_invalid_remote passed");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 #[serial]
 async fn test_push_force_with_local_changes() {
-    // This test would verify force push functionality in a local repository setup
-    // It would require setting up two repositories, making divergent changes,
-    // and verifying that force push correctly overwrites the remote history
+    let temp_root = tempfile::tempdir().expect("failed to create temp root");
+    let remote_dir = temp_root.path().join("remote.git");
+    let local_dir = temp_root.path().join("local");
+    let ssh_script = create_fake_ssh_script(temp_root.path());
 
-    // Note: This is a placeholder for a more comprehensive integration test
-    // that would require a more complex setup with actual Git repositories
+    // Create a bare remote repository
+    assert!(
+        Command::new("git")
+            .args(["init", "--bare", remote_dir.to_str().unwrap()])
+            .status()
+            .expect("failed to init bare remote")
+            .success()
+    );
+
+    // Set up local repo with initial commit and push
+    fs::create_dir_all(&local_dir).expect("failed to create local dir");
+    let init_out = libra_command(&local_dir)
+        .args(["init"])
+        .output()
+        .expect("failed to init local libra repo");
+    assert!(
+        init_out.status.success(),
+        "local init failed: {}",
+        String::from_utf8_lossy(&init_out.stderr)
+    );
+    configure_local_identity(&local_dir);
+
+    fs::write(local_dir.join("file.txt"), "initial content").expect("failed to write file");
+    let add_out = libra_command(&local_dir)
+        .args(["add", "file.txt"])
+        .output()
+        .expect("failed to add file");
+    assert!(add_out.status.success());
+    let commit_out = libra_command(&local_dir)
+        .args(["commit", "-m", "initial commit"])
+        .output()
+        .expect("failed to commit");
+    assert!(commit_out.status.success());
+
+    let current_branch = String::from_utf8(
+        libra_command(&local_dir)
+            .args(["branch", "--show-current"])
+            .output()
+            .expect("failed to read current branch")
+            .stdout,
+    )
+    .expect("branch name not utf8")
+    .trim()
+    .to_string();
+
+    let ssh_remote = format!("git@fakehost:{}", remote_dir.to_string_lossy());
+    let remote_add_out = libra_command(&local_dir)
+        .args(["remote", "add", "origin", &ssh_remote])
+        .output()
+        .expect("failed to add ssh remote");
+    assert!(remote_add_out.status.success());
+
+    let push_out = libra_command(&local_dir)
+        .env("LIBRA_SSH_COMMAND", &ssh_script)
+        .args(["push", "origin", &current_branch])
+        .output()
+        .expect("failed to push");
+    assert!(
+        push_out.status.success(),
+        "initial push should succeed, stderr: {}",
+        String::from_utf8_lossy(&push_out.stderr)
+    );
+
+    // Record the initial remote HEAD
+    let initial_head = String::from_utf8(
+        Command::new("git")
+            .args([
+                "--git-dir",
+                remote_dir.to_str().unwrap(),
+                "rev-parse",
+                &format!("refs/heads/{current_branch}"),
+            ])
+            .output()
+            .expect("failed to read remote head")
+            .stdout,
+    )
+    .expect("hash not utf8")
+    .trim()
+    .to_string();
+
+    // Amend the commit locally to create divergent history
+    fs::write(local_dir.join("file.txt"), "force pushed content").expect("failed to overwrite");
+    let add_out = libra_command(&local_dir)
+        .args(["add", "file.txt"])
+        .output()
+        .expect("failed to add");
+    assert!(add_out.status.success());
+    let commit_out = libra_command(&local_dir)
+        .args(["commit", "-m", "divergent commit"])
+        .output()
+        .expect("failed to commit");
+    assert!(commit_out.status.success());
+
+    // Force push should succeed and update the remote
+    let force_push_out = libra_command(&local_dir)
+        .env("LIBRA_SSH_COMMAND", &ssh_script)
+        .args(["push", "--force", "origin", &current_branch])
+        .output()
+        .expect("failed to force push");
+    assert!(
+        force_push_out.status.success(),
+        "force push should succeed, stderr: {}",
+        String::from_utf8_lossy(&force_push_out.stderr)
+    );
+
+    // Verify that the remote HEAD changed
+    let final_head = String::from_utf8(
+        Command::new("git")
+            .args([
+                "--git-dir",
+                remote_dir.to_str().unwrap(),
+                "rev-parse",
+                &format!("refs/heads/{current_branch}"),
+            ])
+            .output()
+            .expect("failed to read remote head")
+            .stdout,
+    )
+    .expect("hash not utf8")
+    .trim()
+    .to_string();
+
+    assert_ne!(
+        initial_head, final_head,
+        "force push should have updated the remote HEAD"
+    );
 }
 
 #[cfg(unix)]

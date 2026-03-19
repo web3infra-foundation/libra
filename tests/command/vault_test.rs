@@ -1,4 +1,6 @@
 //! Integration tests for the vault (PGP signing) feature.
+//!
+//! **Layer:** L1 — deterministic, no external dependencies.
 
 use std::process::Command;
 

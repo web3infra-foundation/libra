@@ -1,4 +1,6 @@
 //! Integration tests for reflog command with filtering functionality.
+//!
+//! **Layer:** L1 — deterministic, no external dependencies.
 
 use clap::Parser;
 use libra::{

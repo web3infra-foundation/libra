@@ -1,4 +1,6 @@
 //! Binary-level `libra add` behavior checks.
+//!
+//! **Layer:** L1 — deterministic, no external dependencies.
 
 use std::{fs, path::Path, process::Command};
 
@@ -35,7 +37,7 @@ fn missing_pathspec_is_fatal_and_atomic() {
     fs::write(repo.join("good.txt"), "good").unwrap();
 
     let output = run_libra(&["add", "good.txt", "missing.txt"], &repo);
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(129));
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("fatal: pathspec 'missing.txt' did not match any files"));
@@ -56,7 +58,7 @@ fn ignored_path_returns_conflict_exit_code_and_valid_paths_still_stage() {
     fs::write(repo.join("ignored.txt"), "ignored").unwrap();
 
     let output = run_libra(&["add", "good.txt", "ignored.txt"], &repo);
-    assert_eq!(output.status.code(), Some(4));
+    assert_eq!(output.status.code(), Some(128));
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("ignored.txt"));
@@ -77,7 +79,7 @@ fn ignored_only_path_returns_conflict_exit_code() {
     fs::write(repo.join("ignored.txt"), "ignored").unwrap();
 
     let output = run_libra(&["add", "ignored.txt"], &repo);
-    assert_eq!(output.status.code(), Some(4));
+    assert_eq!(output.status.code(), Some(128));
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("ignored.txt"));
@@ -103,7 +105,7 @@ fn corrupt_index_reports_fatal_without_panic() {
     fs::write(repo.join(".libra").join("index"), b"garb").unwrap();
 
     let output = run_libra(&["add", "good.txt"], &repo);
-    assert_eq!(output.status.code(), Some(7));
+    assert_eq!(output.status.code(), Some(128));
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("fatal: unable to read index"));

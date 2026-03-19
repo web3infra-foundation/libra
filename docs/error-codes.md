@@ -35,7 +35,7 @@ Example:
 fatal: not a libra repository (or any of the parent directories): .libra
 Error-Code: LBR-REPO-001
 Hint: run 'libra init' to create a repository in the current directory.
-{"ok":false,"error_code":"LBR-REPO-001","category":"repo","exit_code":3,"severity":"fatal","message":"not a libra repository (or any of the parent directories): .libra","hints":["run 'libra init' to create a repository in the current directory."]}
+{"ok":false,"error_code":"LBR-REPO-001","category":"repo","exit_code":128,"severity":"fatal","message":"not a libra repository (or any of the parent directories): .libra","hints":["run 'libra init' to create a repository in the current directory."]}
 ```
 
 Warnings and progress messages remain plain text. Only failures participate in this contract.
@@ -49,51 +49,55 @@ when the object is missing.
 | Exit | Meaning | Primary automation use |
 | --- | --- | --- |
 | `0` | Success | Continue |
-| `2` | Usage / invalid target | Fix CLI invocation |
-| `3` | Repository / repo state | Fix repository context or state |
-| `4` | Conflict / blocked operation | Resolve conflicts or local state |
-| `5` | Network / transport | Retry or inspect remote connectivity |
-| `6` | Authentication / authorization | Configure identity or credentials |
-| `7` | Filesystem / storage I/O | Inspect files, permissions, locks |
-| `8` | Internal / invariant | Report bug or unexpected failure |
+| `9` | Warnings emitted (`--exit-code-on-warning`) | Review warnings |
+| `128` | Fatal runtime error | Check `error_code` for category |
+| `129` | Usage / invalid target | Fix CLI invocation |
 
-## Migration From Legacy Exit Codes
+Set `LIBRA_FINE_EXIT_CODES=1` to re-enable the legacy fine-grained exit codes (2-8) described in the migration section below. When this variable is unset or `0`, Libra uses the Git-standard codes shown above.
 
-Earlier Libra CLI paths often collapsed failures into a few generic process exits.
-The stable contract keeps success at `0`, but normalizes failures into category-specific
-exit codes plus a stable symbolic code.
+## Migration From Fine-Grained Exit Codes
 
-| Legacy behavior | Historical exit | Stable contract |
+Libra previously used fine-grained exit codes (2-8) to distinguish failure categories.
+The current default aligns with Git-standard exit codes: `128` for fatal errors,
+`129` for usage errors, and `9` for warnings. The stable symbolic `error_code` field
+in the JSON report continues to provide fine-grained classification.
+
+This is an intentional migration from fine-grained exit codes (2-8) to Git-standard
+exit codes (128/129), improving compatibility with Git-aware tooling and CI systems.
+
+| Fine-grained behavior | Fine-grained exit | Git-standard contract |
 | --- | --- | --- |
-| Unknown command | `1` | `2` + `LBR-CLI-001` |
-| Parse or command usage error | `129` | `2` + `LBR-CLI-002` or `LBR-CLI-003` |
-| Generic `fatal:` runtime error | `128` | `3`, `4`, `5`, `6`, `7`, or `8` depending on the primary failure mode |
+| Usage / invalid target | `2` | `129` + same `LBR-CLI-*` code |
+| Fatal runtime errors (repo, conflict, network, auth, I/O, internal) | `3`-`8` | `128` + same `LBR-*` code |
+| Warnings emitted | `9` | Unchanged `9` |
 | `cat-file -e` missing object probe | `1` | Still `1` with no stderr output |
 
-If you have existing scripts that branch on `1`, `128`, or `129`, update them to branch
-on the stable exit-code table above. For precise automation, prefer the final JSON stderr
-line and inspect `error_code` in addition to `exit_code`. If your automation allocates a
-TTY, set `LIBRA_ERROR_JSON=1` so the structured report is always present.
+If you have existing scripts that branch on fine-grained exit codes (2-8), you can
+set `LIBRA_FINE_EXIT_CODES=1` to preserve the old behavior. Otherwise, migrate your
+scripts to branch on `128`/`129` and use the JSON `error_code` field for fine-grained
+classification. If your automation allocates a TTY, set `LIBRA_ERROR_JSON=1` so the
+structured report is always present.
 
 ## Complete Stable Code Table
 
 | Exit | Stable code | Category | Meaning | Typical examples |
 | --- | --- | --- | --- | --- |
-| `2` | `LBR-CLI-001` | `cli` | Unknown command | `libra wat` |
-| `2` | `LBR-CLI-002` | `cli` | Invalid or missing CLI arguments | missing required flag, conflicting flags |
-| `2` | `LBR-CLI-003` | `cli` | Invalid object, revision, pathspec, or move target | bad ref, invalid pathspec, outside-repo move target |
-| `3` | `LBR-REPO-001` | `repo` | Not inside a Libra repository | running repo commands outside `.libra` |
-| `3` | `LBR-REPO-002` | `repo` | Repository metadata is corrupt or incompatible | missing DB, corrupted metadata |
-| `3` | `LBR-REPO-003` | `repo` | Repository state blocks the operation | no commits yet, detached state mismatch, missing configured remote |
-| `4` | `LBR-CONFLICT-001` | `conflict` | Unresolved conflict is present | merge/rebase conflict still unresolved |
-| `4` | `LBR-CONFLICT-002` | `conflict` | Operation blocked to avoid overwriting state | non-fast-forward, destination exists, dirty worktree |
-| `5` | `LBR-NET-001` | `network` | Remote unreachable or transport unavailable | DNS, timeout, TLS, connection refused |
-| `5` | `LBR-NET-002` | `network` | Protocol, negotiation, or pack failure | packet-line, sideband, unpack/ref update protocol errors |
-| `6` | `LBR-AUTH-001` | `auth` | Missing identity, token, or credentials | missing commit identity, missing API key, missing SSH material |
-| `6` | `LBR-AUTH-002` | `auth` | Credential present but permission denied | forbidden push, insufficient scope |
-| `7` | `LBR-IO-001` | `io` | Read/open/load failure | failed to open pack, failed to read index |
-| `7` | `LBR-IO-002` | `io` | Write/save/update/remove failure | failed to write index, failed to remove file |
-| `8` | `LBR-INTERNAL-001` | `internal` | Unexpected internal invariant failure | invariant break, unclassified internal failure |
+| `129` | `LBR-CLI-001` | `cli` | Unknown command | `libra wat` |
+| `129` | `LBR-CLI-002` | `cli` | Invalid or missing CLI arguments | missing required flag, conflicting flags |
+| `129` | `LBR-CLI-003` | `cli` | Invalid object, revision, pathspec, or move target | bad ref, invalid pathspec, outside-repo move target |
+| `128` | `LBR-REPO-001` | `repo` | Not inside a Libra repository | running repo commands outside `.libra` |
+| `128` | `LBR-REPO-002` | `repo` | Repository metadata is corrupt or incompatible | missing DB, corrupted metadata |
+| `128` | `LBR-REPO-003` | `repo` | Repository state blocks the operation | no commits yet, detached state mismatch, missing configured remote |
+| `128` | `LBR-CONFLICT-001` | `conflict` | Unresolved conflict is present | merge/rebase conflict still unresolved |
+| `128` | `LBR-CONFLICT-002` | `conflict` | Operation blocked to avoid overwriting state | non-fast-forward, destination exists, dirty worktree |
+| `128` | `LBR-NET-001` | `network` | Remote unreachable or transport unavailable | DNS, timeout, TLS, connection refused |
+| `128` | `LBR-NET-002` | `network` | Protocol, negotiation, or pack failure | packet-line, sideband, unpack/ref update protocol errors |
+| `128` | `LBR-AUTH-001` | `auth` | Missing identity, token, or credentials | missing commit identity, missing API key, missing SSH material |
+| `128` | `LBR-AUTH-002` | `auth` | Credential present but permission denied | forbidden push, insufficient scope |
+| `128` | `LBR-IO-001` | `io` | Read/open/load failure | failed to open pack, failed to read index |
+| `128` | `LBR-IO-002` | `io` | Write/save/update/remove failure | failed to write index, failed to remove file |
+| `128` | `LBR-INTERNAL-001` | `internal` | Unexpected internal invariant failure | invariant break, unclassified internal failure |
+| `9` | `LBR-WARN-001` | `warning` | Command completed with warnings | `--exit-code-on-warning` |
 
 ## Stable Codes By Category
 
@@ -147,6 +151,12 @@ TTY, set `LIBRA_ERROR_JSON=1` so the structured report is always present.
 | --- | --- |
 | `LBR-INTERNAL-001` | Unexpected internal invariant failure |
 
+### Warning
+
+| Stable code | Meaning |
+| --- | --- |
+| `LBR-WARN-001` | Command completed with warnings (`--exit-code-on-warning`) |
+
 ## How To Use Codes
 
 ### Shell And CI
@@ -158,15 +168,29 @@ if libra push; then
   echo "ok"
 else
   case "$?" in
-    2) echo "fix CLI invocation" ;;
-    3) echo "fix repository state" ;;
-    4) echo "resolve conflicts or dirty state" ;;
-    5) echo "retry or inspect network/remote" ;;
-    6) echo "configure identity or credentials" ;;
-    7) echo "inspect filesystem or permissions" ;;
-    8) echo "unexpected internal failure" ;;
+    128) echo "fatal error (check error_code for details)" ;;
+    129) echo "fix CLI invocation" ;;
+    9)   echo "warnings emitted" ;;
   esac
 fi
+```
+
+For fine-grained classification, parse the JSON report from stderr:
+
+```bash
+output="$(libra push 2>&1)" || {
+  json_line="$(printf '%s\n' "$output" | tail -n 1)"
+  code="$(printf '%s\n' "$json_line" | jq -r '.error_code')"
+  case "$code" in
+    LBR-REPO-*)     echo "repository problem" ;;
+    LBR-NET-*)      echo "network problem" ;;
+    LBR-AUTH-*)     echo "auth problem" ;;
+    LBR-CONFLICT-*) echo "conflict" ;;
+    LBR-IO-*)       echo "I/O problem" ;;
+    LBR-CLI-*)      echo "usage problem" ;;
+    *)              echo "other: $code" ;;
+  esac
+}
 ```
 
 ### Agents And Wrappers
@@ -210,7 +234,7 @@ Every structured failure report includes:
 | --- | --- | --- |
 | `ok` | `bool` | Always `false` for error reports |
 | `error_code` | `string` | Stable code such as `LBR-REPO-001` |
-| `category` | `string` | `cli`, `repo`, `conflict`, `network`, `auth`, `io`, `internal` |
+| `category` | `string` | `cli`, `repo`, `conflict`, `network`, `auth`, `io`, `internal`, `warning` |
 | `exit_code` | `number` | Shell-facing exit code |
 | `severity` | `string` | `error` or `fatal` |
 | `message` | `string` | User-facing error summary without prefix |

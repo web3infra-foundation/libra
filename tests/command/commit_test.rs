@@ -1,4 +1,6 @@
 //! Integration tests for the commit command covering staged changes, message handling, and tree/hash updates.
+//!
+//! **Layer:** L1 — deterministic, no external dependencies.
 
 use libra::utils::{object_ext::TreeExt, output::OutputConfig};
 use serial_test::serial;
@@ -117,7 +119,7 @@ fn test_commit_cli_without_identity_returns_auth_exit_code() {
     let output = run_libra_command(&["commit", "-m", "missing identity"], repo.path());
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(6));
+    assert_eq!(output.status.code(), Some(128));
     assert!(stderr.contains("fatal: author identity unknown"));
     assert!(stderr.contains("Error-Code: LBR-AUTH-001"));
     assert!(stderr.contains("Hint: run 'libra config --global user.name"));
@@ -140,7 +142,7 @@ fn test_commit_cli_use_config_only_returns_auth_exit_code() {
     let output = run_libra_command(&["commit", "-m", "missing identity"], repo.path());
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(6));
+    assert_eq!(output.status.code(), Some(128));
     assert!(stderr.contains("fatal: author identity unknown"));
     assert!(stderr.contains("Error-Code: LBR-AUTH-001"));
     assert!(stderr.contains("Hint: run 'libra config --global user.name"));

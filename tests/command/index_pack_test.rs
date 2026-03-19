@@ -1,4 +1,6 @@
 //! Tests pack index generation validating offsets, CRC32, fanout tables, and trailer hashes.
+//!
+//! **Layer:** L1 — deterministic, no external dependencies.
 
 use std::{
     collections::HashMap,
@@ -166,7 +168,7 @@ fn test_index_pack_cli_missing_file_returns_fatal_128() {
     let output = run_libra_command(&["index-pack", missing_pack.to_str().unwrap()], repo.path());
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(7));
+    assert_eq!(output.status.code(), Some(128));
     assert_eq!(report.error_code, "LBR-IO-001");
     assert_eq!(
         stderr,

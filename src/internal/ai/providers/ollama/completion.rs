@@ -268,8 +268,12 @@ mod tests {
     ///
     /// Run with: `OLLAMA_TEST_MODEL=llama3.2 cargo test -- --ignored`
     #[tokio::test]
-    #[ignore = "requires a local Ollama instance"]
     async fn test_ollama_live_completion() {
+        if std::env::var("OLLAMA_TEST_MODEL").map_or(true, |v| v.is_empty()) {
+            eprintln!("skipped (OLLAMA_TEST_MODEL not set)");
+            return;
+        }
+
         // Quick check if Ollama is available
         let client = reqwest::Client::new();
         if client
@@ -278,7 +282,7 @@ mod tests {
             .await
             .is_err()
         {
-            println!("Skipping: Ollama not running on localhost:11434");
+            eprintln!("skipped (Ollama not running on localhost:11434)");
             return;
         }
 

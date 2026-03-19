@@ -1,4 +1,6 @@
 //! Initializes a repository by creating .libra storage, seeding HEAD and default refs, and preparing the backing database.
+//!
+//! **Layer:** L1 — deterministic, no external dependencies.
 
 use std::{
     fs,

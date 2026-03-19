@@ -1,4 +1,6 @@
 //! Tests for remote subcommands validating add/list/show behavior and URL mutation scenarios.
+//!
+//! **Layer:** L1 — deterministic, no external dependencies.
 
 use std::{fs, process::Command};
 

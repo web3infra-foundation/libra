@@ -141,5 +141,16 @@ jobs:
           command -v rg
           rg --version
 
-      - name: Run tests
+      - name: Run tests (L1 + L2 + L3)
+        env:
+          LIBRA_TEST_GITHUB_TOKEN: ${{ secrets.LIBRA_TEST_GITHUB_TOKEN }}
+          LIBRA_TEST_GITHUB_NAMESPACE: ${{ secrets.LIBRA_TEST_GITHUB_NAMESPACE }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          LIBRA_D1_ACCOUNT_ID: ${{ secrets.LIBRA_D1_ACCOUNT_ID }}
+          LIBRA_D1_API_TOKEN: ${{ secrets.LIBRA_D1_API_TOKEN }}
+          LIBRA_D1_DATABASE_ID: ${{ secrets.LIBRA_D1_DATABASE_ID }}
+          LIBRA_STORAGE_ENDPOINT: ${{ secrets.LIBRA_STORAGE_ENDPOINT }}
+          LIBRA_STORAGE_BUCKET: ${{ secrets.LIBRA_STORAGE_BUCKET }}
+          LIBRA_STORAGE_ACCESS_KEY: ${{ secrets.LIBRA_STORAGE_ACCESS_KEY }}
+          LIBRA_STORAGE_SECRET_KEY: ${{ secrets.LIBRA_STORAGE_SECRET_KEY }}
         run: cargo test --all

@@ -1,4 +1,6 @@
 //! Binary-level `libra clone` behavior checks.
+//!
+//! **Layer:** L1 — deterministic, no external dependencies.
 
 use std::{fs, path::Path, process::Command};
 
@@ -90,7 +92,7 @@ fn create_remote_with_main(base: &Path) -> std::path::PathBuf {
 fn invalid_source_does_not_panic() {
     let temp = tempdir().unwrap();
     let output = run_libra(&["clone", "/"], temp.path());
-    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(output.status.code(), Some(128));
 
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
     assert_eq!(
@@ -98,7 +100,7 @@ fn invalid_source_does_not_panic() {
         "fatal: '/' does not appear to be a libra repository\nError-Code: LBR-REPO-001"
     );
     assert_eq!(report.error_code, "LBR-REPO-001");
-    assert_eq!(report.exit_code, 3);
+    assert_eq!(report.exit_code, 128);
     assert!(!stderr.contains("thread 'main' panicked"));
 }
 
@@ -119,7 +121,7 @@ fn missing_branch_keeps_preexisting_empty_destination() {
         ],
         temp.path(),
     );
-    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(output.status.code(), Some(128));
 
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
     assert!(stderr.contains("fatal: remote branch nope not found in upstream origin"));

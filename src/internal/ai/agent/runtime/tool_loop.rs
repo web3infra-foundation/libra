@@ -574,7 +574,7 @@ mod tests {
                 hooks: vec![HookDefinition {
                     event: HookEvent::PreToolUse,
                     matcher: "mock_tool".to_string(),
-                    command: r#"echo "{\"message\":\"tool blocked by test hook\"}" && exit 2"#
+                    command: r#"echo "{\"message\":\"tool blocked by test hook\"}" && exit 129"#
                         .to_string(),
                     description: "test blocker".to_string(),
                     timeout_ms: 5000,

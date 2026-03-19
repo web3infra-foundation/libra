@@ -1,6 +1,6 @@
 //! Tests merge command scenarios including fast-forward handling and conflict reporting.
-
-use std::process::Command;
+//!
+//! **Layer:** L1 — deterministic, no external dependencies.
 
 use libra::{
     internal::{branch::Branch, head::Head},
@@ -8,7 +8,9 @@ use libra::{
 };
 use serial_test::serial;
 
-use super::{create_committed_repo_via_cli, parse_cli_error_stderr, run_libra_command};
+use super::{
+    assert_cli_success, create_committed_repo_via_cli, parse_cli_error_stderr, run_libra_command,
+};
 
 #[test]
 #[serial]
@@ -18,7 +20,7 @@ fn test_merge_cli_missing_branch_returns_error_1() {
     let output = run_libra_command(&["merge", "no-such"], repo.path());
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(129));
     assert_eq!(report.error_code, "LBR-CLI-003");
     assert!(stderr.contains("error: no-such - not something we can merge"));
 }
@@ -29,47 +31,33 @@ async fn test_merge_fast_forward() {
     let temp_repo = create_committed_repo_via_cli();
     let temp_path = temp_repo.path();
 
-    Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
-        .args(["branch", "feature"])
-        .output()
-        .expect("Failed to create branch");
-
-    Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
-        .args(["checkout", "feature"])
-        .output()
-        .expect("Failed to checkout branch");
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create branch",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
 
     // Commit changes on the feature branch
-    let file_path = temp_path.join("file.txt");
-    std::fs::write(&file_path, "Feature content").expect("Failed to write file");
-
-    Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
-        .args(["add", "."])
-        .output()
-        .expect("Failed to add file");
-
-    Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
-        .args(["commit", "-m", "Add feature content"])
-        .output()
-        .expect("Failed to commit");
+    std::fs::write(temp_path.join("file.txt"), "Feature content").expect("Failed to write file");
+    assert_cli_success(&run_libra_command(&["add", "."], temp_path), "add file");
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "-m", "Add feature content", "--no-verify"],
+            temp_path,
+        ),
+        "commit",
+    );
 
     // Switch back to the main branch and perform fast-forward merge
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
 
-    Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
-        .args(["checkout", "main"])
-        .output()
-        .expect("Failed to checkout main branch");
-
-    let merge_output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
-        .args(["merge", "feature"])
-        .output()
-        .expect("Failed to merge branch");
+    let merge_output = run_libra_command(&["merge", "feature"], temp_path);
     assert!(
         merge_output.status.success(),
         "Fast-forward merge failed: {}",
@@ -84,31 +72,24 @@ async fn test_merge_remote_branch() {
     let temp_repo = create_committed_repo_via_cli();
     let temp_path = temp_repo.path();
 
-    Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
-        .args(["branch", "feature"])
-        .output()
-        .expect("Failed to create branch");
-
-    Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
-        .args(["checkout", "feature"])
-        .output()
-        .expect("Failed to checkout feature branch");
+    assert_cli_success(
+        &run_libra_command(&["branch", "feature"], temp_path),
+        "create branch",
+    );
+    assert_cli_success(
+        &run_libra_command(&["checkout", "feature"], temp_path),
+        "checkout feature",
+    );
 
     std::fs::write(temp_path.join("remote.txt"), "Remote content").expect("Failed to write file");
-
-    Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
-        .args(["add", "."])
-        .output()
-        .expect("Failed to add file");
-
-    Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
-        .args(["commit", "-m", "Add remote content"])
-        .output()
-        .expect("Failed to commit");
+    assert_cli_success(&run_libra_command(&["add", "."], temp_path), "add file");
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "-m", "Add remote content", "--no-verify"],
+            temp_path,
+        ),
+        "commit",
+    );
 
     let _guard = ChangeDirGuard::new(temp_path);
     let feature_commit = Head::current_commit()
@@ -118,17 +99,12 @@ async fn test_merge_remote_branch() {
         .await
         .unwrap();
 
-    Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
-        .args(["checkout", "main"])
-        .output()
-        .expect("Failed to checkout main branch");
+    assert_cli_success(
+        &run_libra_command(&["checkout", "main"], temp_path),
+        "checkout main",
+    );
 
-    let merge_output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(temp_path)
-        .args(["merge", "origin/feature"])
-        .output()
-        .expect("Failed to merge remote branch");
+    let merge_output = run_libra_command(&["merge", "origin/feature"], temp_path);
     assert!(
         merge_output.status.success(),
         "Merge remote branch failed: {}",
@@ -194,7 +170,7 @@ fn test_merge_diverged_branch_returns_fatal_128() {
     assert!(output.status.success(), "Failed to checkout branch1");
 
     let merge_output = run_libra_command(&["merge", "branch2"], temp_path);
-    assert_eq!(merge_output.status.code(), Some(4));
+    assert_eq!(merge_output.status.code(), Some(128));
     let (stderr, report) = parse_cli_error_stderr(&merge_output.stderr);
     assert_eq!(report.error_code, "LBR-CONFLICT-002");
     assert!(stderr.contains("fatal: Not possible to fast-forward merge"));

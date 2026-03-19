@@ -1,4 +1,6 @@
-use std::env;
+//! L3 integration test for stateful ChatAgent conversation with real Gemini API.
+//!
+//! **Layer:** L3 — requires `GEMINI_API_KEY`. Skipped silently when unset.
 
 use libra::internal::ai::{
     agent::{AgentBuilder, ChatAgent},
@@ -16,9 +18,8 @@ use libra::internal::ai::{
 /// ```
 #[tokio::test]
 async fn test_chat_agent_conversation() {
-    // Check for API Key
-    if env::var("GEMINI_API_KEY").is_err() {
-        println!("Skipping test_chat_agent_conversation because GEMINI_API_KEY is not set.");
+    if std::env::var("GEMINI_API_KEY").map_or(true, |v| v.is_empty()) {
+        eprintln!("skipped (GEMINI_API_KEY not set)");
         return;
     }
 

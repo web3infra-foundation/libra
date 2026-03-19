@@ -1,4 +1,6 @@
 //! Tests fetch command behavior for remote ref updates and pack retrieval flows.
+//!
+//! **Layer:** L1 (most tests). `test_fetch_invalid_remote` is L2 — requires `LIBRA_TEST_GITHUB_TOKEN`.
 
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
@@ -79,7 +81,7 @@ fn test_fetch_cli_without_remote_is_noop_like_git() {
     let output = run_libra_command(&["fetch"], repo.path());
 
     // Without a configured remote, fetch should fail with a fatal error.
-    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(output.status.code(), Some(128));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("no configured remote for the current branch"));
     assert!(stderr.contains("Error-Code: LBR-REPO-003"));
@@ -127,9 +129,12 @@ exec sh -c "$remote_cmd"
 }
 
 #[tokio::test]
-#[ignore] // This test requires network connectivity
 /// Test fetching from an invalid remote repository with timeout
 async fn test_fetch_invalid_remote() {
+    if std::env::var("LIBRA_TEST_GITHUB_TOKEN").map_or(true, |v| v.is_empty()) {
+        eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
+        return;
+    }
     let temp_repo = init_temp_repo();
     let temp_path = temp_repo.path();
 

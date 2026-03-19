@@ -1,3 +1,7 @@
+//! Mock-based S3/R2 storage tests using in-memory object store for prefix isolation, tiered logic, and search.
+//!
+//! **Layer:** L1 — deterministic, uses `object_store::memory::InMemory`.
+
 use std::{str::FromStr, sync::Arc};
 
 use git_internal::internal::object::{ObjectTrait, blob::Blob};

@@ -1,3 +1,9 @@
+//! Cloud backup and storage tests covering D1 metadata, R2 object storage, and full sync/restore workflows.
+//!
+//! **Layer:** Mock tests (`mock_*`, `cloud_*_fails_without_*`) are L1. Live tests (`d1_*`, `r2_*`,
+//! `cloud_full_*`, `cloud_sync_name_conflict`) are L3 — require `LIBRA_D1_ACCOUNT_ID` and/or
+//! `LIBRA_STORAGE_ENDPOINT`. Skipped silently when unset.
+
 use std::{process::Command, str::FromStr, sync::Arc};
 
 use git_internal::internal::object::{ObjectTrait, blob::Blob};
@@ -225,8 +231,11 @@ fn cloud_sync_fails_without_d1_env() {
 
 #[tokio::test]
 #[serial]
-#[ignore]
 async fn d1_connection() {
+    if std::env::var("LIBRA_D1_ACCOUNT_ID").map_or(true, |v| v.is_empty()) {
+        eprintln!("skipped (LIBRA_D1_ACCOUNT_ID not set)");
+        return;
+    }
     let client = d1_client_from_env();
     let result = client.execute("SELECT 1 as test", None).await;
     assert!(result.is_ok(), "D1 connection failed: {:?}", result.err());
@@ -234,8 +243,11 @@ async fn d1_connection() {
 
 #[tokio::test]
 #[serial]
-#[ignore]
 async fn d1_ensure_table() {
+    if std::env::var("LIBRA_D1_ACCOUNT_ID").map_or(true, |v| v.is_empty()) {
+        eprintln!("skipped (LIBRA_D1_ACCOUNT_ID not set)");
+        return;
+    }
     let client = d1_client_from_env();
     let result = client.ensure_object_index_table().await;
     assert!(result.is_ok(), "Failed to create table: {:?}", result.err());
@@ -243,8 +255,11 @@ async fn d1_ensure_table() {
 
 #[tokio::test]
 #[serial]
-#[ignore]
 async fn d1_upsert_and_query() {
+    if std::env::var("LIBRA_D1_ACCOUNT_ID").map_or(true, |v| v.is_empty()) {
+        eprintln!("skipped (LIBRA_D1_ACCOUNT_ID not set)");
+        return;
+    }
     let client = d1_client_from_env();
     client.ensure_object_index_table().await.unwrap();
 
@@ -266,8 +281,11 @@ async fn d1_upsert_and_query() {
 
 #[tokio::test]
 #[serial]
-#[ignore]
 async fn d1_batch() {
+    if std::env::var("LIBRA_D1_ACCOUNT_ID").map_or(true, |v| v.is_empty()) {
+        eprintln!("skipped (LIBRA_D1_ACCOUNT_ID not set)");
+        return;
+    }
     let client = d1_client_from_env();
     client.ensure_object_index_table().await.unwrap();
 
@@ -299,8 +317,11 @@ async fn d1_batch() {
 
 #[tokio::test]
 #[serial]
-#[ignore]
 async fn r2_connection_basic() {
+    if std::env::var("LIBRA_STORAGE_ENDPOINT").map_or(true, |v| v.is_empty()) {
+        eprintln!("skipped (LIBRA_STORAGE_ENDPOINT not set)");
+        return;
+    }
     let storage = r2_storage_from_env("cloud-backup-test");
 
     let content = format!("Test content {}", chrono::Utc::now().timestamp());
@@ -319,8 +340,13 @@ async fn r2_connection_basic() {
 
 #[tokio::test]
 #[serial]
-#[ignore]
 async fn cloud_full_workflow_end_to_end() {
+    if std::env::var("LIBRA_D1_ACCOUNT_ID").map_or(true, |v| v.is_empty())
+        || std::env::var("LIBRA_STORAGE_ENDPOINT").map_or(true, |v| v.is_empty())
+    {
+        eprintln!("skipped (LIBRA_D1_ACCOUNT_ID or LIBRA_STORAGE_ENDPOINT not set)");
+        return;
+    }
     // Setup - Initialize two separate local repos
     let repo_a_dir = init_repo();
     let repo_b_dir = init_repo();
@@ -591,8 +617,13 @@ async fn cloud_full_workflow_end_to_end() {
 
 #[tokio::test]
 #[serial]
-#[ignore]
 async fn cloud_sync_name_conflict() {
+    if std::env::var("LIBRA_D1_ACCOUNT_ID").map_or(true, |v| v.is_empty())
+        || std::env::var("LIBRA_STORAGE_ENDPOINT").map_or(true, |v| v.is_empty())
+    {
+        eprintln!("skipped (LIBRA_D1_ACCOUNT_ID or LIBRA_STORAGE_ENDPOINT not set)");
+        return;
+    }
     let repo_a = init_repo();
     let repo_b = init_repo();
     let cloud_name = format!("conflict-test-{}", Uuid::new_v4());
@@ -664,7 +695,7 @@ fn run_libra_cmd(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
         cmd.env(var, val);
     }
 
-    if std::env::var("LIBRA_STORAGE_REGION").is_err() {
+    if std::env::var("LIBRA_STORAGE_REGION").map_or(true, |v| v.is_empty()) {
         cmd.env("LIBRA_STORAGE_REGION", "auto");
     } else {
         cmd.env(

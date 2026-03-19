@@ -79,6 +79,10 @@ Initial exit-code mapping:
 | `7` | `io` | `LBR-IO-001` | Filesystem or storage read/write failure |
 | `8` | `internal` | `LBR-INTERNAL-001` | Internal unrecoverable error |
 
+> **Note:** The table above is historical. The current default exit-code
+> scheme uses `128` for general errors, `129` for usage/CLI errors, and `9`
+> for conflicts.
+
 ### Stable error code format
 
 Stable error codes use the form:

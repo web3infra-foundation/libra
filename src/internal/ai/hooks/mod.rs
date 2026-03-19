@@ -2,7 +2,7 @@
 //!
 //! Hooks are shell commands triggered by lifecycle events (tool use, session
 //! start/end). They receive JSON on stdin and can optionally block operations
-//! (PreToolUse only, via exit code 2).
+//! (PreToolUse only, via exit code 129).
 //!
 //! Hook configuration is loaded from:
 //! 1. `{working_dir}/.libra/hooks.json` (project-local)

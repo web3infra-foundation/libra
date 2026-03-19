@@ -18,6 +18,17 @@ use serde_json::Value;
 pub type CliResult<T = ()> = Result<T, CliError>;
 
 pub const LIBRA_ERROR_JSON_ENV: &str = "LIBRA_ERROR_JSON";
+pub const LIBRA_FINE_EXIT_CODES_ENV: &str = "LIBRA_FINE_EXIT_CODES";
+
+/// Returns `true` when `LIBRA_FINE_EXIT_CODES=1` is set, enabling backward-
+/// compatible category-specific exit codes (2–9) instead of the default
+/// Git-standard 128/129.
+fn fine_exit_codes_enabled() -> bool {
+    matches!(
+        env::var(LIBRA_FINE_EXIT_CODES_ENV).as_deref(),
+        Ok("1" | "true" | "yes" | "on")
+    )
+}
 
 /// High-level CLI error classes used to decide prefixes and parse semantics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,18 +48,22 @@ pub enum ErrorLevel {
 }
 
 /// Coarse process exit codes for shell and CI automation.
+///
+/// Values follow the Git convention: **128** for fatal runtime errors and
+/// **129** for usage / invalid-argument errors, so existing scripts that
+/// branch on Git's exit codes work unchanged with Libra.
+///
+/// The finer-grained failure category is still available through the
+/// [`StableErrorCode`] carried in the structured JSON report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[repr(i32)]
 pub enum CliExitCode {
-    Usage = 2,
-    Repo = 3,
-    Conflict = 4,
-    Network = 5,
-    Auth = 6,
-    Io = 7,
-    Internal = 8,
-    /// Returned by `--exit-code-on-warning` when warnings were emitted.
+    /// Command succeeded but emitted warnings (`--exit-code-on-warning`).
     Warning = 9,
+    /// Fatal runtime error (repo, conflict, network, auth, I/O, internal).
+    Fatal = 128,
+    /// CLI usage or invalid-target error.
+    Usage = 129,
 }
 
 impl CliExitCode {
@@ -162,13 +177,26 @@ impl StableErrorCode {
     pub const fn exit_code(self) -> CliExitCode {
         match self.category() {
             CliErrorCategory::Cli => CliExitCode::Usage,
-            CliErrorCategory::Repo => CliExitCode::Repo,
-            CliErrorCategory::Conflict => CliExitCode::Conflict,
-            CliErrorCategory::Network => CliExitCode::Network,
-            CliErrorCategory::Auth => CliExitCode::Auth,
-            CliErrorCategory::Io => CliExitCode::Io,
-            CliErrorCategory::Internal => CliExitCode::Internal,
             CliErrorCategory::Warning => CliExitCode::Warning,
+            _ => CliExitCode::Fatal,
+        }
+    }
+
+    /// Fine-grained exit code for backward compatibility.
+    ///
+    /// Returns the category-specific exit code (2–9) used prior to the
+    /// Git-standard 128/129 migration.  Activated by setting
+    /// `LIBRA_FINE_EXIT_CODES=1`.
+    pub const fn fine_exit_code(self) -> i32 {
+        match self.category() {
+            CliErrorCategory::Cli => 2,
+            CliErrorCategory::Repo => 3,
+            CliErrorCategory::Conflict => 4,
+            CliErrorCategory::Network => 5,
+            CliErrorCategory::Auth => 6,
+            CliErrorCategory::Io => 7,
+            CliErrorCategory::Internal => 8,
+            CliErrorCategory::Warning => 9,
         }
     }
 
@@ -404,6 +432,9 @@ impl CliError {
     }
 
     pub fn exit_code(&self) -> i32 {
+        if fine_exit_codes_enabled() {
+            return self.stable_code.fine_exit_code();
+        }
         self.stable_code.exit_code().as_i32()
     }
 
@@ -414,7 +445,7 @@ impl CliError {
         // future regression in the report type itself.
         serde_json::to_string(&self.report()).unwrap_or_else(|_| {
             "{\"ok\":false,\"error_code\":\"LBR-INTERNAL-001\",\"category\":\"internal\",\
-\"exit_code\":8,\"severity\":\"fatal\",\"message\":\"failed to serialize CLI error report\"}"
+\"exit_code\":128,\"severity\":\"fatal\",\"message\":\"failed to serialize CLI error report\"}"
                 .to_string()
         })
     }
@@ -1012,8 +1043,8 @@ mod tests {
     use serial_test::serial;
 
     use super::{
-        CliError, CliErrorKind, LIBRA_ERROR_JSON_ENV, StableErrorCode, StderrRenderMode,
-        StructuredStderrMode, stderr_render_mode,
+        CliError, CliErrorKind, LIBRA_ERROR_JSON_ENV, LIBRA_FINE_EXIT_CODES_ENV, StableErrorCode,
+        StderrRenderMode, StructuredStderrMode, stderr_render_mode,
     };
     use crate::utils::test::ScopedEnvVar;
 
@@ -1066,7 +1097,7 @@ mod tests {
             err.render(),
             "libra: 'wat' is not a libra command. See 'libra --help'."
         );
-        assert_eq!(err.exit_code(), 2);
+        assert_eq!(err.exit_code(), 129);
     }
 
     #[test]
@@ -1094,24 +1125,24 @@ mod tests {
     }
 
     #[test]
-    fn stable_code_maps_repo_not_found_to_exit_code_3() {
+    fn stable_code_maps_repo_not_found_to_exit_code_128() {
         let err = CliError::repo_not_found();
         assert_eq!(err.stable_code(), StableErrorCode::RepoNotFound);
-        assert_eq!(err.exit_code(), 3);
+        assert_eq!(err.exit_code(), 128);
     }
 
     #[test]
     fn stable_code_infers_auth_missing() {
         let err = CliError::fatal("OPENAI_API_KEY is not set");
         assert_eq!(err.stable_code(), StableErrorCode::AuthMissingCredentials);
-        assert_eq!(err.exit_code(), 6);
+        assert_eq!(err.exit_code(), 128);
     }
 
     #[test]
     fn stable_code_infers_conflict() {
         let err = CliError::fatal("rebase already in progress");
         assert_eq!(err.stable_code(), StableErrorCode::ConflictOperationBlocked);
-        assert_eq!(err.exit_code(), 4);
+        assert_eq!(err.exit_code(), 128);
     }
 
     #[test]
@@ -1184,7 +1215,7 @@ mod tests {
             serde_json::from_str(json_line).expect("last line should be valid JSON");
         assert_eq!(payload["error_code"], "LBR-REPO-001");
         assert_eq!(payload["category"], "repo");
-        assert_eq!(payload["exit_code"], 3);
+        assert_eq!(payload["exit_code"], 128);
     }
 
     #[test]
@@ -1214,5 +1245,19 @@ mod tests {
             StructuredStderrMode::Always
         );
         assert_eq!(stderr_render_mode(), StderrRenderMode::Structured);
+    }
+
+    #[test]
+    #[serial]
+    fn fine_exit_codes_env_returns_legacy_category_codes() {
+        let _guard = ScopedEnvVar::set(LIBRA_FINE_EXIT_CODES_ENV, "1");
+
+        assert_eq!(CliError::repo_not_found().exit_code(), 3);
+        assert_eq!(CliError::fatal("OPENAI_API_KEY is not set").exit_code(), 6);
+        assert_eq!(CliError::fatal("rebase already in progress").exit_code(), 4);
+        assert_eq!(
+            CliError::unknown_command("libra: 'wat' is not a libra command.").exit_code(),
+            2
+        );
     }
 }

@@ -717,7 +717,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     #[serial]
     async fn parse_async_resets_warning_tracker_before_dispatch() {
         let temp = tempfile::tempdir().unwrap();

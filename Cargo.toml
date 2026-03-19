@@ -4,7 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = []
+default        = []
+test-network   = []   # L2: tests requiring outbound network but no secrets
+test-live-ai   = []   # L3: tests calling real LLM APIs
+test-live-cloud = []  # L3: tests hitting real D1/R2 endpoints
 
 [dependencies]
 uuid = { version = "1.22.0", features = ["v4", "v7"] }

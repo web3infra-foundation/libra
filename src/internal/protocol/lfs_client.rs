@@ -661,9 +661,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
-    // Do not use mega repo in unit test, because mega exceeded its LFS budget. The account responsible for the budget should increase it to restore access
     async fn test_github_batch() {
+        if std::env::var("LIBRA_TEST_GITHUB_TOKEN").map_or(true, |v| v.is_empty()) {
+            eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
+            return;
+        }
         let batch_request = BatchRequest {
             operation: Operation::Download,
             transfers: vec![lfs::LFS_TRANSFER_API.to_string()],
@@ -690,8 +692,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // need to start local mega server
     async fn test_push_object() {
+        if std::env::var("LIBRA_TEST_MEGA_SERVER").map_or(true, |v| v.is_empty()) {
+            eprintln!("skipped (LIBRA_TEST_MEGA_SERVER not set)");
+            return;
+        }
         use tempfile::tempdir;
 
         use crate::utils::lfs;

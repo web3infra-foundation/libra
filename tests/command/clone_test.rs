@@ -1,21 +1,156 @@
 //! Tests clone command setup to ensure objects, refs, and working copies are created correctly.
+//!
+//! All tests in this file are **L2 (network)**: they require `LIBRA_TEST_GITHUB_TOKEN`
+//! and `LIBRA_TEST_GITHUB_NAMESPACE` to create a temporary GitHub repository.
+//! Without these env vars the tests are silently skipped.
+
+use std::{fs, process::Command, sync::OnceLock};
 
 use libra::{command, command::clone::CloneArgs, internal::head::Head, utils::test};
 use serial_test::serial;
 use tempfile::tempdir;
 
+// ---------------------------------------------------------------------------
+// GitHub test-repo lifecycle helpers
+// ---------------------------------------------------------------------------
+
+struct GitHubTestRepo {
+    full_name: String,
+    https_url: String,
+    token: String,
+}
+
+impl Drop for GitHubTestRepo {
+    fn drop(&mut self) {
+        // Safety: only delete repos whose name starts with "libra-test-"
+        if !self.full_name.contains("/libra-test-") {
+            return;
+        }
+        let _ = reqwest::blocking::Client::new()
+            .delete(format!("https://api.github.com/repos/{}", self.full_name))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("User-Agent", "libra-test")
+            .header("Accept", "application/vnd.github+json")
+            .send();
+    }
+}
+
+static GITHUB_REPO: OnceLock<Option<GitHubTestRepo>> = OnceLock::new();
+
+/// Get or lazily create the shared temporary GitHub repo.
+/// Returns `None` (and tests skip) when env vars are absent.
+fn github_test_repo() -> Option<&'static GitHubTestRepo> {
+    GITHUB_REPO
+        .get_or_init(|| {
+            let token = std::env::var("LIBRA_TEST_GITHUB_TOKEN")
+                .ok()
+                .filter(|v| !v.is_empty())?;
+            let namespace = std::env::var("LIBRA_TEST_GITHUB_NAMESPACE")
+                .ok()
+                .filter(|v| !v.is_empty())?;
+            Some(setup_github_repo(&token, &namespace))
+        })
+        .as_ref()
+}
+
+fn setup_github_repo(token: &str, namespace: &str) -> GitHubTestRepo {
+    let suffix = &uuid::Uuid::new_v4().to_string()[..6];
+    let repo_name = format!("libra-test-{suffix}");
+    let full_name = format!("{namespace}/{repo_name}");
+
+    // Create repo via GitHub API
+    let client = reqwest::blocking::Client::new();
+    let resp = client
+        .post("https://api.github.com/user/repos")
+        .header("Authorization", format!("Bearer {token}"))
+        .header("User-Agent", "libra-test")
+        .header("Accept", "application/vnd.github+json")
+        .json(&serde_json::json!({
+            "name": repo_name,
+            "auto_init": false,
+            "private": false,
+        }))
+        .send()
+        .expect("failed to create GitHub repo");
+    assert!(
+        resp.status().is_success(),
+        "GitHub repo creation failed: {}",
+        resp.text().unwrap_or_default()
+    );
+
+    let https_url = format!("https://github.com/{full_name}.git");
+
+    // Push test data: main branch with a commit, then dev branch with another commit.
+    let work_dir = tempfile::tempdir().expect("failed to create workdir for push");
+    let wd = work_dir.path();
+
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .current_dir(wd)
+            .args(args)
+            .output()
+            .expect("git command failed");
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out
+    };
+
+    let auth_url = format!("https://x-access-token:{token}@github.com/{full_name}.git");
+
+    git(&["init"]);
+    git(&["config", "user.name", "Libra Test"]);
+    git(&["config", "user.email", "test@libra.dev"]);
+    fs::write(wd.join("README.md"), "libra clone test repo").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-m", "initial commit"]);
+
+    // Detect the default branch name (may be main or master).
+    let head_out = git(&["rev-parse", "--abbrev-ref", "HEAD"]);
+    let default_branch = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
+    // Ensure we are on 'main'.
+    if default_branch != "main" {
+        git(&["branch", "-M", "main"]);
+    }
+    git(&["remote", "add", "origin", &auth_url]);
+    git(&["push", "-u", "origin", "main"]);
+
+    // Create dev branch with an extra commit.
+    git(&["checkout", "-b", "dev"]);
+    fs::write(wd.join("dev.txt"), "dev branch content").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-m", "dev commit"]);
+    git(&["push", "-u", "origin", "dev"]);
+
+    GitHubTestRepo {
+        full_name,
+        https_url,
+        token: token.to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Clone tests
+// ---------------------------------------------------------------------------
+
 #[tokio::test]
 #[serial]
-#[ignore]
-/// Test the clone command with a specific branch
 async fn test_clone_branch() {
+    let repo = match github_test_repo() {
+        Some(r) => r,
+        None => {
+            eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
+            return;
+        }
+    };
     let temp_path = tempdir().unwrap();
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
-    let remote_url = "https://gitee.com/pikady/mega-libra-clone-branch-test.git".to_string();
-
     command::clone::execute(CloneArgs {
-        remote_repo: remote_url,
+        remote_repo: repo.https_url.clone(),
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
         branch: Some("dev".to_string()),
         single_branch: false,
@@ -24,32 +159,29 @@ async fn test_clone_branch() {
     })
     .await;
 
-    // Verify that the `.libra` directory exists
-    let libra_dir = temp_path.path().join(".libra");
-    assert!(libra_dir.exists());
-
-    // Verify the Head reference
+    assert!(temp_path.path().join(".libra").exists());
     match Head::current().await {
-        Head::Branch(current_branch) => {
-            assert_eq!(current_branch, "dev");
-        }
+        Head::Branch(b) => assert_eq!(b, "dev"),
         _ => panic!("should be branch"),
     };
 }
 
 #[tokio::test]
 #[serial]
-#[ignore]
-/// Test the clone command in bare mode to ensure no working tree is created
 async fn test_clone_bare_repository() {
+    let repo = match github_test_repo() {
+        Some(r) => r,
+        None => {
+            eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
+            return;
+        }
+    };
     let temp_path = tempdir().unwrap();
     let _guard = test::ChangeDirGuard::new(temp_path.path());
-
-    let repo_dir = temp_path.path().join("mega-libra-clone-branch-test.git");
-    let remote_url = "https://gitee.com/pikady/mega-libra-clone-branch-test.git".to_string();
+    let repo_dir = temp_path.path().join("bare-clone.git");
 
     command::clone::execute(CloneArgs {
-        remote_repo: remote_url,
+        remote_repo: repo.https_url.clone(),
         local_path: Some(repo_dir.to_str().unwrap().to_string()),
         branch: Some("dev".to_string()),
         single_branch: false,
@@ -64,37 +196,38 @@ async fn test_clone_bare_repository() {
     );
     assert!(
         repo_dir.join("info").join("exclude").exists(),
-        "bare clone should create info/exclude at repo root"
+        "bare clone should create info/exclude"
     );
     assert!(
         repo_dir.join("objects").exists(),
-        "bare clone should have objects directory at repo root"
+        "bare clone should have objects directory"
     );
     assert!(
         !repo_dir.join(".libra").exists(),
-        "bare clone should not create nested .libra metadata"
+        "bare clone should not create nested .libra"
     );
 
     match Head::current().await {
-        Head::Branch(current_branch) => {
-            assert_eq!(current_branch, "dev");
-        }
+        Head::Branch(b) => assert_eq!(b, "dev"),
         _ => panic!("bare clone should still update HEAD to a branch"),
     };
 }
 
 #[tokio::test]
 #[serial]
-#[ignore]
-/// Test the clone command with a specific branch and single branch
 async fn test_clone_branch_single_branch() {
+    let repo = match github_test_repo() {
+        Some(r) => r,
+        None => {
+            eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
+            return;
+        }
+    };
     let temp_path = tempdir().unwrap();
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
-    let remote_url = "https://gitee.com/pikady/mega-libra-clone-branch-test.git".to_string();
-
     command::clone::execute(CloneArgs {
-        remote_repo: remote_url,
+        remote_repo: repo.https_url.clone(),
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
         branch: Some("dev".to_string()),
         single_branch: true,
@@ -103,33 +236,28 @@ async fn test_clone_branch_single_branch() {
     })
     .await;
 
-    // Verify that the `.libra` directory exists
-    let libra_dir = temp_path.path().join(".libra");
-    assert!(libra_dir.exists());
-
-    // Verify the Head reference
+    assert!(temp_path.path().join(".libra").exists());
     match Head::current().await {
-        Head::Branch(current_branch) => {
-            assert_eq!(current_branch, "dev");
-        }
+        Head::Branch(b) => assert_eq!(b, "dev"),
         _ => panic!("should be branch"),
     };
-
-    // TODO: Verify that only the specified branch is cloned
 }
 
 #[tokio::test]
 #[serial]
-#[ignore]
-/// Test the clone command with the default branch
 async fn test_clone_default_branch() {
+    let repo = match github_test_repo() {
+        Some(r) => r,
+        None => {
+            eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
+            return;
+        }
+    };
     let temp_path = tempdir().unwrap();
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
-    let remote_url = "https://gitee.com/pikady/mega-libra-clone-branch-test.git".to_string();
-
     command::clone::execute(CloneArgs {
-        remote_repo: remote_url,
+        remote_repo: repo.https_url.clone(),
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
         branch: None,
         single_branch: false,
@@ -138,31 +266,28 @@ async fn test_clone_default_branch() {
     })
     .await;
 
-    // Verify that the `.libra` directory exists
-    let libra_dir = temp_path.path().join(".libra");
-    assert!(libra_dir.exists());
-
-    // Verify the Head reference
+    assert!(temp_path.path().join(".libra").exists());
     match Head::current().await {
-        Head::Branch(current_branch) => {
-            assert_eq!(current_branch, "main");
-        }
+        Head::Branch(b) => assert_eq!(b, "main"),
         _ => panic!("should be branch"),
     };
 }
 
 #[tokio::test]
 #[serial]
-#[ignore]
-/// Test the clone command with the default branch and single branch
 async fn test_clone_default_branch_single_branch() {
+    let repo = match github_test_repo() {
+        Some(r) => r,
+        None => {
+            eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
+            return;
+        }
+    };
     let temp_path = tempdir().unwrap();
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
-    let remote_url = "https://gitee.com/pikady/mega-libra-clone-branch-test.git".to_string();
-
     command::clone::execute(CloneArgs {
-        remote_repo: remote_url,
+        remote_repo: repo.https_url.clone(),
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
         branch: None,
         single_branch: true,
@@ -171,68 +296,30 @@ async fn test_clone_default_branch_single_branch() {
     })
     .await;
 
-    // Verify that the `.libra` directory exists
-    let libra_dir = temp_path.path().join(".libra");
-    assert!(libra_dir.exists());
-
-    // Verify the Head reference
+    assert!(temp_path.path().join(".libra").exists());
     match Head::current().await {
-        Head::Branch(current_branch) => {
-            assert_eq!(current_branch, "main");
-        }
-        _ => panic!("should be branch"),
-    };
-
-    // TODO: Verify the single branch
-}
-
-#[tokio::test]
-#[serial]
-#[ignore]
-/// Test the clone command with an empty repository
-async fn test_clone_empty_repo() {
-    let temp_path = tempdir().unwrap();
-    let _guard = test::ChangeDirGuard::new(temp_path.path());
-
-    let remote_url = "https://gitee.com/pikady/mega-libra-empty-repo.git".to_string();
-
-    command::clone::execute(CloneArgs {
-        remote_repo: remote_url,
-        local_path: Some(temp_path.path().to_str().unwrap().to_string()),
-        branch: None,
-        single_branch: false,
-        bare: false,
-        depth: None,
-    })
-    .await;
-
-    // Verify that the `.libra` directory exists
-    let libra_dir = temp_path.path().join(".libra");
-    assert!(libra_dir.exists());
-
-    // Verify the Head reference
-    match Head::current().await {
-        Head::Branch(current_branch) => {
-            assert_eq!(current_branch, "main");
-        }
+        Head::Branch(b) => assert_eq!(b, "main"),
         _ => panic!("should be branch"),
     };
 }
 
 #[tokio::test]
 #[serial]
-#[ignore]
-/// Test the clone command with an existing empty directory
 async fn test_clone_to_existing_empty_dir() {
+    let repo = match github_test_repo() {
+        Some(r) => r,
+        None => {
+            eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
+            return;
+        }
+    };
     let temp_path = tempdir().unwrap();
     let _guard = test::ChangeDirGuard::new(temp_path.path());
-    let repo_path = temp_path.path().join("mega-libra-clone-branch-test");
-    std::fs::create_dir(&repo_path).unwrap();
-
-    let remote_url = "https://gitee.com/pikady/mega-libra-clone-branch-test.git".to_string();
+    let repo_path = temp_path.path().join("clone-target");
+    fs::create_dir(&repo_path).unwrap();
 
     command::clone::execute(CloneArgs {
-        remote_repo: remote_url,
+        remote_repo: repo.https_url.clone(),
         local_path: Some(repo_path.to_str().unwrap().to_string()),
         branch: Some("dev".to_string()),
         single_branch: false,
@@ -241,36 +328,33 @@ async fn test_clone_to_existing_empty_dir() {
     })
     .await;
 
-    // Verify that the `.libra` directory exists
-    let libra_dir = repo_path.join(".libra");
-    assert!(libra_dir.exists());
-
-    // Verify the Head reference
+    assert!(repo_path.join(".libra").exists());
     match Head::current().await {
-        Head::Branch(current_branch) => {
-            assert_eq!(current_branch, "dev");
-        }
+        Head::Branch(b) => assert_eq!(b, "dev"),
         _ => panic!("should be branch"),
     };
 }
 
 #[tokio::test]
 #[serial]
-#[ignore]
-/// Test that clone fails when the target directory exists and is not empty
 async fn test_clone_to_existing_dir() {
+    let repo = match github_test_repo() {
+        Some(r) => r,
+        None => {
+            eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
+            return;
+        }
+    };
     let temp_path = tempdir().unwrap();
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
-    let repo_path = temp_path.path().join("mega-libra-clone-branch-test");
-    std::fs::create_dir(&repo_path).unwrap();
+    let repo_path = temp_path.path().join("clone-target");
+    fs::create_dir(&repo_path).unwrap();
     let dummy_file = repo_path.join("exists.txt");
-    std::fs::write(&dummy_file, "test").unwrap();
-
-    let remote_url = "https://gitee.com/pikady/mega-libra-clone-branch-test.git".to_string();
+    fs::write(&dummy_file, "test").unwrap();
 
     command::clone::execute(CloneArgs {
-        remote_repo: remote_url,
+        remote_repo: repo.https_url.clone(),
         local_path: Some(repo_path.to_str().unwrap().to_string()),
         branch: Some("dev".to_string()),
         single_branch: false,
@@ -279,34 +363,29 @@ async fn test_clone_to_existing_dir() {
     })
     .await;
 
-    // Verify that the `.libra` directory does not exist
-    let libra_dir = repo_path.join(".libra");
-    assert!(!libra_dir.exists());
-    // Make sure that the pre-existing file should still exist
+    assert!(!repo_path.join(".libra").exists());
     assert!(dummy_file.exists(), "pre-existing file should still exist");
-    let content = std::fs::read_to_string(&dummy_file).unwrap();
-    // Make sure that the pre-existing file content should remain unchanged
-    assert_eq!(
-        content, "test",
-        "pre-existing file content should remain unchanged"
-    );
+    assert_eq!(fs::read_to_string(&dummy_file).unwrap(), "test");
 }
 
 #[tokio::test]
 #[serial]
-#[ignore]
-/// Test that clone fails when a file exists at the target path.
 async fn test_clone_to_dir_with_existing_file_name() {
+    let repo = match github_test_repo() {
+        Some(r) => r,
+        None => {
+            eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
+            return;
+        }
+    };
     let temp_path = tempdir().unwrap();
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
-    let conflict_path = temp_path.path().join("mega-libra-clone-branch-test");
-    std::fs::write(&conflict_path, "test").unwrap();
-
-    let remote_url = "https://gitee.com/pikady/mega-libra-clone-branch-test.git".to_string();
+    let conflict_path = temp_path.path().join("clone-target");
+    fs::write(&conflict_path, "test").unwrap();
 
     command::clone::execute(CloneArgs {
-        remote_repo: remote_url,
+        remote_repo: repo.https_url.clone(),
         local_path: Some(conflict_path.to_str().unwrap().to_string()),
         branch: Some("dev".to_string()),
         single_branch: false,
@@ -315,36 +394,28 @@ async fn test_clone_to_dir_with_existing_file_name() {
     })
     .await;
 
-    // Verify that the pre-existing file remains a file (clone should not succeed)
     assert!(
         conflict_path.is_file(),
         "pre-existing file should remain a file"
     );
-    // Make sure that the pre-existing file should still exist
-    assert!(
-        conflict_path.exists(),
-        "pre-existing file should still exist"
-    );
-    let content = std::fs::read_to_string(&conflict_path).unwrap();
-    // Make sure that the pre-existing file content should remain unchanged
-    assert_eq!(
-        content, "test",
-        "pre-existing file content should remain unchanged"
-    );
+    assert_eq!(fs::read_to_string(&conflict_path).unwrap(), "test");
 }
 
 #[tokio::test]
 #[serial]
-#[ignore]
-/// Test the clone command with --depth parameter for shallow clone
 async fn test_clone_with_depth() {
+    let repo = match github_test_repo() {
+        Some(r) => r,
+        None => {
+            eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
+            return;
+        }
+    };
     let temp_path = tempdir().unwrap();
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
-    let remote_url = "https://gitee.com/pikady/mega-libra-clone-branch-test.git".to_string();
-
     command::clone::execute(CloneArgs {
-        remote_repo: remote_url,
+        remote_repo: repo.https_url.clone(),
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
         branch: None,
         single_branch: false,
@@ -353,31 +424,28 @@ async fn test_clone_with_depth() {
     })
     .await;
 
-    // Verify that the `.libra` directory exists
-    let libra_dir = temp_path.path().join(".libra");
-    assert!(libra_dir.exists(), ".libra directory should exist");
-
-    // Verify the Head reference
+    assert!(temp_path.path().join(".libra").exists());
     match Head::current().await {
-        Head::Branch(current_branch) => {
-            assert_eq!(current_branch, "main");
-        }
+        Head::Branch(b) => assert_eq!(b, "main"),
         _ => panic!("should be branch"),
     };
 }
 
 #[tokio::test]
 #[serial]
-#[ignore]
-/// Test the clone command with --depth and --branch parameters
 async fn test_clone_with_depth_and_branch() {
+    let repo = match github_test_repo() {
+        Some(r) => r,
+        None => {
+            eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
+            return;
+        }
+    };
     let temp_path = tempdir().unwrap();
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
-    let remote_url = "https://gitee.com/pikady/mega-libra-clone-branch-test.git".to_string();
-
     command::clone::execute(CloneArgs {
-        remote_repo: remote_url,
+        remote_repo: repo.https_url.clone(),
         local_path: Some(temp_path.path().to_str().unwrap().to_string()),
         branch: Some("dev".to_string()),
         single_branch: true,
@@ -386,15 +454,9 @@ async fn test_clone_with_depth_and_branch() {
     })
     .await;
 
-    // Verify that the `.libra` directory exists
-    let libra_dir = temp_path.path().join(".libra");
-    assert!(libra_dir.exists(), ".libra directory should exist");
-
-    // Verify the Head reference
+    assert!(temp_path.path().join(".libra").exists());
     match Head::current().await {
-        Head::Branch(current_branch) => {
-            assert_eq!(current_branch, "dev");
-        }
+        Head::Branch(b) => assert_eq!(b, "dev"),
         _ => panic!("should be branch"),
     };
 }

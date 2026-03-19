@@ -1,3 +1,7 @@
+//! Intent specification flow tests covering draft, resolve, validate, and repair stages.
+//!
+//! **Layer:** L1 — deterministic, no external dependencies.
+
 use std::sync::Arc;
 
 use git_internal::internal::object::{

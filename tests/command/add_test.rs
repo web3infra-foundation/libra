@@ -1,4 +1,6 @@
 //! Tests add command behavior for staging files, refresh operations, and edge cases.
+//!
+//! **Layer:** L1 — deterministic, no external dependencies.
 
 use std::{fs, io::Write};
 

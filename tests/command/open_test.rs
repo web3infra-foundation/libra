@@ -1,4 +1,7 @@
 //! Tests open command integration to ensure it finds remote correctly.
+//!
+//! **Layer:** L1 — deterministic, no external dependencies.
+
 use std::path::{Path, PathBuf};
 
 use libra::{

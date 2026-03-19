@@ -1,4 +1,6 @@
 //! Tests clean command removing untracked files with minimal flags.
+//!
+//! **Layer:** L1 — deterministic, no external dependencies.
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -67,7 +69,7 @@ async fn test_clean_requires_flag() {
         .output()
         .expect("failed to execute `libra clean`");
 
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(129));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("fatal: clean requires -f or -n"));
     assert!(stderr.contains("Error-Code: LBR-CLI-002"));
@@ -244,7 +246,7 @@ async fn test_clean_force_with_corrupted_index_returns_fatal_128() {
         .output()
         .expect("failed to execute `libra clean`");
 
-    assert_eq!(output.status.code(), Some(7));
+    assert_eq!(output.status.code(), Some(128));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("fatal: failed to load index"));
     assert!(stderr.contains("Error-Code: LBR-IO-001"));
@@ -365,7 +367,7 @@ async fn test_clean_force_permission_error_returns_io_exit_code() {
         .output()
         .expect("failed to execute `libra clean`");
 
-    assert_eq!(output.status.code(), Some(7));
+    assert_eq!(output.status.code(), Some(128));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("fatal: failed to remove"));
     assert!(stderr.contains("Error-Code: LBR-IO-002"));

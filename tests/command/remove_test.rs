@@ -1,4 +1,6 @@
 //! Tests rm command removing files from the index and working tree while respecting flags.
+//!
+//! **Layer:** L1 — deterministic, no external dependencies.
 
 use std::{fs, io::Write, path::PathBuf};
 
@@ -26,7 +28,7 @@ fn test_remove_cli_missing_pathspec_returns_cli_exit_code() {
 
     let output = run_libra_command(&["rm", "no-such.txt"], repo.path());
 
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(129));
     assert!(
         String::from_utf8_lossy(&output.stderr)
             .contains("fatal: pathspec 'no-such.txt' did not match any files")

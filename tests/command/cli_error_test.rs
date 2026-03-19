@@ -1,4 +1,6 @@
 //! Binary-level CLI error rendering and exit code checks.
+//!
+//! **Layer:** L1 — deterministic, no external dependencies.
 
 use std::{path::Path, process::Command};
 
@@ -28,7 +30,7 @@ fn run_libra(args: &[&str], cwd: &Path) -> std::process::Output {
 fn unknown_command_uses_cli_exit_code_and_json_report() {
     let temp = tempdir().unwrap();
     let output = run_libra(&["wat"], temp.path());
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(129));
 
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
     assert_eq!(
@@ -37,7 +39,7 @@ fn unknown_command_uses_cli_exit_code_and_json_report() {
     );
     assert_eq!(report.error_code, "LBR-CLI-001");
     assert_eq!(report.category, "cli");
-    assert_eq!(report.exit_code, 2);
+    assert_eq!(report.exit_code, 129);
 }
 
 #[test]
@@ -91,7 +93,7 @@ fn version_output_is_not_treated_as_an_error() {
 fn global_parse_error_uses_exit_code_2() {
     let temp = tempdir().unwrap();
     let output = run_libra(&["--bad"], temp.path());
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(129));
 
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
     assert!(stderr.starts_with("error: unexpected argument '--bad' found"));
@@ -99,7 +101,7 @@ fn global_parse_error_uses_exit_code_2() {
     assert!(stderr.contains("Usage: libra"));
     assert_eq!(report.error_code, "LBR-CLI-002");
     assert_eq!(report.category, "cli");
-    assert_eq!(report.exit_code, 2);
+    assert_eq!(report.exit_code, 129);
 }
 
 #[test]
@@ -111,7 +113,7 @@ fn command_usage_error_uses_cli_exit_code_and_json_report() {
     assert!(init.status.success());
 
     let output = run_libra(&["add", "--bad"], &repo);
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(129));
 
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
     assert!(stderr.starts_with("error: unexpected argument '--bad' found"));
@@ -119,14 +121,14 @@ fn command_usage_error_uses_cli_exit_code_and_json_report() {
     assert!(stderr.contains("Usage: libra add [OPTIONS] [PATHSPEC]..."));
     assert_eq!(report.error_code, "LBR-CLI-002");
     assert_eq!(report.category, "cli");
-    assert_eq!(report.exit_code, 2);
+    assert_eq!(report.exit_code, 129);
 }
 
 #[test]
 fn runtime_repo_error_uses_repo_exit_code_and_json_report() {
     let temp = tempdir().unwrap();
     let output = run_libra(&["add", "good.txt"], temp.path());
-    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(output.status.code(), Some(128));
 
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
     assert!(
@@ -140,5 +142,5 @@ fn runtime_repo_error_uses_repo_exit_code_and_json_report() {
     );
     assert_eq!(report.error_code, "LBR-REPO-001");
     assert_eq!(report.category, "repo");
-    assert_eq!(report.exit_code, 3);
+    assert_eq!(report.exit_code, 128);
 }

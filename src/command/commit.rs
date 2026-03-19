@@ -899,7 +899,7 @@ mod test {
         let err = classify_commit_error("nothing to commit, working tree clean".to_string());
         assert_eq!(
             err.exit_code(),
-            3,
+            128,
             "nothing-to-commit should be classified as repository state"
         );
         assert!(
@@ -915,7 +915,7 @@ mod test {
         let err = classify_commit_error("fatal: could not read tree".to_string());
         assert_eq!(
             err.exit_code(),
-            7,
+            128,
             "fatal read errors should map to IO exit code"
         );
         assert!(
@@ -931,7 +931,7 @@ mod test {
         let err = classify_commit_error("error: pathspec 'x' did not match any file".to_string());
         assert_eq!(
             err.exit_code(),
-            2,
+            129,
             "pathspec failures should map to usage exit code"
         );
         assert!(
@@ -947,7 +947,7 @@ mod test {
         let err = classify_commit_error("some unexpected message".to_string());
         assert_eq!(
             err.exit_code(),
-            8,
+            128,
             "unknown messages should default to internal failure"
         );
         assert_eq!(err.stable_code().as_str(), "LBR-INTERNAL-001");

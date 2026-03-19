@@ -1,4 +1,6 @@
 //! Tests config command read/write behaviors, scope handling, and edge cases.
+//!
+//! **Layer:** L1 — deterministic, no external dependencies.
 //
 use std::process::Command;
 

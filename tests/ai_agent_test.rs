@@ -1,9 +1,10 @@
-use std::{
-    env,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+//! L3 integration tests for the Gemini AI agent DAG execution and tool-use pipeline.
+//!
+//! **Layer:** L3 — requires `GEMINI_API_KEY`. Skipped silently when unset.
+
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
 };
 
 use async_trait::async_trait;
@@ -48,9 +49,8 @@ impl Action for InputGenerator {
 /// ```
 #[test]
 fn test_gemini_agent_execution() {
-    // Check for API Key
-    if env::var("GEMINI_API_KEY").is_err() {
-        println!("Skipping test_gemini_agent_execution because GEMINI_API_KEY is not set.");
+    if std::env::var("GEMINI_API_KEY").map_or(true, |v| v.is_empty()) {
+        eprintln!("skipped (GEMINI_API_KEY not set)");
         return;
     }
 
@@ -150,9 +150,8 @@ impl Tool for WeatherTool {
 /// ```
 #[test]
 fn test_gemini_agent_with_tools() {
-    // Check for API Key
-    if env::var("GEMINI_API_KEY").is_err() {
-        println!("Skipping test_gemini_agent_with_tools because GEMINI_API_KEY is not set.");
+    if std::env::var("GEMINI_API_KEY").map_or(true, |v| v.is_empty()) {
+        eprintln!("skipped (GEMINI_API_KEY not set)");
         return;
     }
 

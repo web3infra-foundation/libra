@@ -6,6 +6,8 @@
 //! - Output format (`-s`, `-e`)
 //! - Date filtering (`--since`, `--until`)
 //! - Grouping logic (merging authors with same name but different emails when `-e` is absent)
+//!
+//! **Layer:** L1 — deterministic, no external dependencies.
 
 use super::*;
 
@@ -14,7 +16,7 @@ use super::*;
 fn test_shortlog_cli_outside_repository_returns_fatal_128() {
     let temp = tempdir().unwrap();
     let output = run_libra_command(&["shortlog"], temp.path());
-    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(output.status.code(), Some(128));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("fatal: not a libra repository"),

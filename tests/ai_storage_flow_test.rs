@@ -1,3 +1,7 @@
+//! Integration tests for AI object storage (Task, Run, Plan, Artifact) on local and R2 backends.
+//!
+//! **Layer:** `test_ai_flow_local` is L1 (in-memory). `test_ai_flow_r2` is L3 — requires `R2_ENDPOINT`.
+
 use std::{str::FromStr, sync::Arc};
 
 use git_internal::{
@@ -155,8 +159,12 @@ async fn test_ai_flow_local() {
 /// - Artifacts are correctly stored in R2
 /// - Connectivity to the remote storage provider works as expected
 #[tokio::test]
-#[ignore]
 async fn test_ai_flow_r2() {
+    if std::env::var("R2_ENDPOINT").map_or(true, |v| v.is_empty()) {
+        eprintln!("skipped (R2_ENDPOINT not set)");
+        return;
+    }
+
     // 1. Load Config from Env
     let endpoint = std::env::var("R2_ENDPOINT").expect("R2_ENDPOINT not set");
     let access_key = std::env::var("R2_ACCESS_KEY").expect("R2_ACCESS_KEY not set");
