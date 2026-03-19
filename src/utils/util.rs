@@ -23,7 +23,6 @@ use crate::{
 pub const ROOT_DIR: &str = ".libra";
 pub const DATABASE: &str = "libra.db";
 pub const ATTRIBUTES: &str = ".libra_attributes";
-const STORAGE_MARKERS: &[&str] = &["objects", DATABASE, "info/exclude", "hooks"];
 
 /// Returns the current working directory as a `PathBuf`.
 ///
@@ -112,9 +111,15 @@ fn parse_separate_libra_dir_file(link: &Path) -> Result<PathBuf, io::Error> {
 }
 
 fn is_valid_storage_dir(path: &Path) -> bool {
-    STORAGE_MARKERS
+    if path.join(DATABASE).exists() {
+        return true;
+    }
+
+    ["objects", "info/exclude", "hooks"]
         .iter()
-        .any(|marker| path.join(marker).exists())
+        .filter(|marker| path.join(marker).exists())
+        .count()
+        >= 2
 }
 
 fn try_get_paths(path: Option<PathBuf>) -> Result<(PathBuf, PathBuf), io::Error> {
@@ -133,7 +138,7 @@ fn try_get_paths(path: Option<PathBuf>) -> Result<(PathBuf, PathBuf), io::Error>
             }
         }
 
-        if is_valid_storage_dir(&path) {
+        if path.join(DATABASE).exists() && path.join("objects").exists() {
             return Ok((path.clone(), path.clone()));
         }
 
@@ -883,7 +888,6 @@ mod test {
 
     #[test]
     #[serial]
-    // Tests confirm that the global .libra directory is no longer misidentified.
     fn test_try_get_storage_path_ignores_global_libra_dir_without_repo_markers() {
         let temp = tempdir().unwrap();
         let home_like = temp.path();
@@ -904,7 +908,6 @@ mod test {
     }
     #[test]
     #[serial]
-    // Tests confirm that normal repos are not affected.
     fn test_try_get_storage_path_accepts_valid_repo_under_ancestor_with_global_libra_dir() {
         let temp = tempdir().unwrap();
         let home_like = temp.path();
@@ -927,5 +930,41 @@ mod test {
         let resolved = try_get_storage_path(None).unwrap();
 
         assert_eq!(resolved, storage);
+    }
+    #[test]
+    #[serial]
+    fn test_try_get_storage_path_rejects_libra_dir_with_only_hooks() {
+        let temp = tempdir().unwrap();
+        let repo = temp.path().join("project");
+        fs::create_dir_all(&repo).unwrap();
+
+        let libra = repo.join(".libra");
+        fs::create_dir_all(libra.join("hooks")).unwrap();
+
+        let _guard = test::ChangeDirGuard::new(&repo);
+        let result = try_get_storage_path(None);
+
+        assert!(
+            result.is_err(),
+            ".libra with only hooks/ should not be treated as a valid repository"
+        );
+    }
+    #[test]
+    #[serial]
+    fn test_try_get_storage_path_rejects_libra_dir_with_only_objects() {
+        let temp = tempdir().unwrap();
+        let repo = temp.path().join("project");
+        fs::create_dir_all(&repo).unwrap();
+
+        let libra = repo.join(".libra");
+        fs::create_dir_all(libra.join("objects")).unwrap();
+
+        let _guard = test::ChangeDirGuard::new(&repo);
+        let result = try_get_storage_path(None);
+
+        assert!(
+            result.is_err(),
+            ".libra with only objects/ should not be treated as a valid repository"
+        );
     }
 }
