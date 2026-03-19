@@ -166,8 +166,8 @@ impl HookRunner {
 
                 match exit_code {
                     0 => HookResult::Allow,
-                    2 => {
-                        // Exit code 2 = block (PreToolUse only)
+                    129 => {
+                        // Exit code 129 = block (PreToolUse only)
                         let reason = if let Ok(output) = serde_json::from_str::<HookOutput>(&stdout)
                         {
                             output
@@ -239,7 +239,7 @@ mod tests {
         let (runner, _tmp) = make_runner(vec![make_hook(
             HookEvent::PreToolUse,
             "shell",
-            r#"echo "{\"message\":\"dangerous command blocked\"}" && exit 2"#,
+            r#"echo "{\"message\":\"dangerous command blocked\"}" && exit 129"#,
         )]);
 
         let action = runner
@@ -253,7 +253,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_pre_tool_use_no_matching_hooks() {
-        let (runner, _tmp) = make_runner(vec![make_hook(HookEvent::PreToolUse, "shell", "exit 2")]);
+        let (runner, _tmp) =
+            make_runner(vec![make_hook(HookEvent::PreToolUse, "shell", "exit 129")]);
 
         let action = runner
             .run_pre_tool_use("read_file", serde_json::json!({}))

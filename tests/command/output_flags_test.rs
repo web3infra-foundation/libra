@@ -1,5 +1,7 @@
 //! Integration tests for global output flags (--json, --machine, --color,
 //! --quiet, --no-pager, --exit-code-on-warning, --progress).
+//!
+//! **Layer:** L1 — deterministic, no external dependencies.
 
 use std::{
     fs,

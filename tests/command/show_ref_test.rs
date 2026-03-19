@@ -1,4 +1,6 @@
 //! Integration tests for `show-ref` command.
+//!
+//! **Layer:** L1 — deterministic, no external dependencies.
 
 use std::{fs, io::Write, process::Command};
 

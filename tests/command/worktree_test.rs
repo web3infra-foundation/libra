@@ -1,4 +1,6 @@
 //! Tests worktree subcommands for core success paths and important error branches.
+//!
+//! **Layer:** L1 — deterministic, no external dependencies.
 
 use std::fs;
 #[cfg(unix)]
@@ -19,7 +21,7 @@ use super::*;
 fn test_worktree_cli_outside_repository_returns_fatal_128() {
     let temp = tempdir().unwrap();
     let output = run_libra_command(&["worktree", "list"], temp.path());
-    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(output.status.code(), Some(128));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("fatal: not a libra repository"),

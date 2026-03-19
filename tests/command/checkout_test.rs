@@ -1,4 +1,6 @@
 //! Tests checkout behavior for switching branches and creating new ones via restore logic.
+//!
+//! **Layer:** L1 — deterministic, no external dependencies.
 
 use colored::Colorize;
 use libra::{

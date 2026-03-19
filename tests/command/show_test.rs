@@ -1,5 +1,7 @@
 //! Tests for the show command, verifying correct display of commits and tags.
 //! Tests use CLI commands via the libra binary.
+//!
+//! **Layer:** L1 — deterministic, no external dependencies.
 
 use std::process::Command;
 
@@ -132,7 +134,7 @@ fn test_show_cli_badref_returns_cli_exit_code() {
     let output = run_libra_command(&["show", "badref"], repo.path());
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(129));
     assert!(stderr.contains(
         "fatal: ambiguous argument 'badref': unknown revision or path not in the working tree."
     ));
@@ -349,7 +351,7 @@ async fn test_show_execute_safe_bad_ref_returns_cli_error() {
     let err = result.unwrap_err();
     assert_eq!(
         err.exit_code(),
-        2,
+        129,
         "bad revision should map to the invalid-target exit code"
     );
     assert_eq!(err.stable_code().as_str(), "LBR-CLI-003");

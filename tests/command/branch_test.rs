@@ -1,4 +1,6 @@
 //! Tests branch subcommand for creation, listing, deletion, and switching logic.
+//!
+//! **Layer:** L1 — deterministic, no external dependencies.
 
 #![cfg(test)]
 
@@ -18,7 +20,7 @@ fn test_branch_cli_invalid_start_point_returns_cli_exit_code() {
     let output = run_libra_command(&["branch", "new", "badref"], repo.path());
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(129));
     assert!(stderr.contains("fatal: not a valid object name: 'badref'"));
     assert!(stderr.contains("Error-Code: LBR-CLI-003"));
 }

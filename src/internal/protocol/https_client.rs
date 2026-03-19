@@ -202,18 +202,15 @@ impl HttpsClient {
 }
 #[cfg(test)]
 mod tests {
-
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
     use super::*;
-    use crate::{
-        git_protocol::ServiceType::UploadPack,
-        utils::test::{init_debug_logger, init_logger},
-    };
+    use crate::{git_protocol::ServiceType::UploadPack, utils::test::init_debug_logger};
 
     #[tokio::test]
-    #[ignore] // This test requires network connectivity
     async fn test_discover_reference_upload() {
+        if std::env::var("LIBRA_TEST_GITHUB_TOKEN").is_err() {
+            eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
+            return;
+        }
         init_debug_logger();
 
         let test_repo = "https://github.com/web3infra-foundation/mega.git/";
@@ -231,8 +228,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // This test requires network connectivity
     async fn test_post_git_upload_pack_() {
+        if std::env::var("LIBRA_TEST_GITHUB_TOKEN").is_err() {
+            eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
+            return;
+        }
         init_debug_logger();
 
         let test_repo = "https://github.com/web3infra-foundation/mega/";
@@ -268,69 +268,6 @@ mod tests {
             tracing::error!(
                 "no pack data found, stdout is :\n{}",
                 std::str::from_utf8(&buffer).unwrap()
-            );
-            panic!("no pack data found");
-        }
-    }
-
-    #[tokio::test]
-    #[ignore] // ignore this because **user should edit the `want` maurally**
-    async fn test_upload_pack_local() {
-        // use /usr/bin/git-upload-pack as a test server. if no /usr/bin/git-upload-pack, skip this test
-        if !std::path::Path::new("/usr/bin/git-upload-pack").exists() {
-            return;
-        }
-        // init_debug_logger();
-        init_logger();
-
-        let have = vec!["1c05d7f7dd70e38150bfd2d5fb8fb969e2eb9851".to_string()];
-        // **want MUST change to one of the refs in the remote repo, such as `refs/heads/main` before running the test**
-        let want = vec!["6b4e69962dbbc75e80d5263cc5c81571669db9bc".to_string()];
-        let body = generate_upload_pack_content(&have, &want, None);
-        tracing::info!("upload-pack content: {:?}", body);
-        let mut cmd = tokio::process::Command::new("/usr/bin/git-upload-pack");
-        cmd.arg("..");
-
-        // set up the pipe otherwise the `take` will get None
-        cmd.stdin(std::process::Stdio::piped());
-        cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::piped());
-        let mut child = cmd.spawn().unwrap();
-
-        // write the body to the stdin of the child process
-        let mut stdin = child.stdin.take().unwrap();
-        stdin.write_all(&body).await.unwrap();
-
-        // check the stderr of the child process
-        let mut output = child.stderr.take().unwrap();
-        let mut stderr = String::new();
-        output.read_to_string(&mut stderr).await.unwrap();
-        tracing::info!("stderr: {}", stderr);
-        assert!(!stderr.contains("protocol error"), "{}", stderr);
-        if stderr.contains("not our ref") {
-            tracing::error!(
-                "not our ref, please change the `want` to one of the refs in the target repo"
-            );
-            panic!();
-        }
-
-        let mut output = child.stdout.take().unwrap();
-        let mut stdout = vec![];
-        output.read_to_end(&mut stdout).await.unwrap();
-        assert!(stdout.len() > 100, "stdout is empty");
-        tracing::info!("stdout len: {}", stdout.len());
-
-        if let Some(pack_pos) = stdout.windows(4).position(|w| w == b"PACK") {
-            tracing::info!("pack data found at: {}", pack_pos);
-            let readable_output = std::str::from_utf8(&stdout[..pack_pos]).unwrap();
-            tracing::debug!("stdout readable: \n{}", readable_output);
-            tracing::info!("pack length: {}", stdout.len() - pack_pos);
-            // assert!(stdout[..4].eq(b"PACK"));
-            assert!(stdout[pack_pos..pack_pos + 4].eq(b"PACK"));
-        } else {
-            tracing::error!(
-                "no pack data found, stdout is {}\n",
-                std::str::from_utf8(&stdout).unwrap()
             );
             panic!("no pack data found");
         }

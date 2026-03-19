@@ -1,4 +1,6 @@
 //! Tests switch command for branch creation, switching, and dirty-state checks.
+//!
+//! **Layer:** L1 — deterministic, no external dependencies.
 
 use git_internal::internal::index::Index;
 use libra::utils::{client_storage::ClientStorage, path};
@@ -12,7 +14,7 @@ fn test_switch_cli_missing_branch_returns_cli_exit_code() {
 
     let output = run_libra_command(&["switch", "no-such"], repo.path());
 
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(129));
     assert!(String::from_utf8_lossy(&output.stderr).contains("fatal: invalid reference: no-such"));
 }
 

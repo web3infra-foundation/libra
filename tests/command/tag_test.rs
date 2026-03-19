@@ -1,4 +1,6 @@
 //! Tests tag creation and listing flows for lightweight and annotated tags.
+//!
+//! **Layer:** L1 — deterministic, no external dependencies.
 
 use std::collections::HashSet;
 
@@ -181,7 +183,7 @@ fn test_tag_cli_duplicate_tag_returns_conflict_exit_code_without_stdout() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(4));
+    assert_eq!(output.status.code(), Some(128));
     assert!(stdout.trim().is_empty(), "unexpected stdout: {stdout}");
     assert!(stderr.contains("fatal: tag 'v1' already exists"));
     assert!(stderr.contains("Error-Code: LBR-CONFLICT-002"));

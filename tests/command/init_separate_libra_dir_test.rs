@@ -1,3 +1,7 @@
+//! Tests `libra init --separate-libra-dir` for creating metadata in a custom directory.
+//!
+//! **Layer:** L1 — deterministic, no external dependencies.
+
 use std::{fs, process::Command};
 
 use libra::utils::util;

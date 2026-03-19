@@ -32,6 +32,9 @@ target
 
 .libra
 
+# Test credentials (never commit)
+.env.test
+
 # Frontend
 web/node_modules/
 web/.next/

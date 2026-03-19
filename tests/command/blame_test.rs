@@ -1,4 +1,6 @@
 //! Tests blame output to ensure line attribution and formatting for specified commits and ranges.
+//!
+//! **Layer:** L1 — deterministic, no external dependencies.
 
 use std::{fs, io::Write};
 
@@ -21,7 +23,7 @@ use super::*;
 fn test_blame_cli_outside_repository_returns_fatal_128() {
     let temp = tempdir().unwrap();
     let output = run_libra_command(&["blame", "some_file.txt"], temp.path());
-    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(output.status.code(), Some(128));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("fatal: not a libra repository"),

@@ -1,4 +1,6 @@
 //! Integration tests for the mv command covering tracked validation and move behaviors.
+//!
+//! **Layer:** L1 — deterministic, no external dependencies.
 
 use std::{fs, process::Command};
 
@@ -12,7 +14,7 @@ use super::*;
 fn test_mv_cli_outside_repository_returns_fatal_128() {
     let temp = tempdir().unwrap();
     let output = run_libra_command(&["mv", "a.txt", "b.txt"], temp.path());
-    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(output.status.code(), Some(128));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("fatal: not a libra repository"),
@@ -299,10 +301,10 @@ async fn test_mv_usage_output_matches_command_text() {
         .output()
         .expect("failed to execute libra mv");
 
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(129));
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
     assert_eq!(report.error_code, "LBR-CLI-002");
-    assert_eq!(report.exit_code, 2);
+    assert_eq!(report.exit_code, 129);
     assert!(stderr.contains("usage: libra mv [<options>] <source>... <destination>"));
     assert!(stderr.contains("-v, --verbose    be verbose"));
     assert!(stderr.contains("-n, --dry-run    dry run"));
@@ -322,7 +324,7 @@ async fn test_mv_bad_source_output_matches_command_text() {
         .output()
         .expect("failed to execute libra mv bad source case");
 
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(129));
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
     assert_eq!(report.error_code, "LBR-CLI-003");
     assert!(
@@ -351,7 +353,7 @@ async fn test_mv_rejects_source_path_outside_workdir() {
         .output()
         .expect("failed to execute libra mv outside-source case");
 
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(129));
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
     assert_eq!(report.error_code, "LBR-CLI-003");
     assert!(
@@ -385,7 +387,7 @@ async fn test_mv_rejects_destination_path_outside_workdir() {
         .output()
         .expect("failed to execute libra mv outside-destination case");
 
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(129));
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
     assert_eq!(report.error_code, "LBR-CLI-003");
     assert!(
@@ -411,7 +413,7 @@ async fn test_mv_rejects_untracked_source() {
         .output()
         .expect("failed to execute libra mv untracked case");
 
-    assert_eq!(output.status.code(), Some(4));
+    assert_eq!(output.status.code(), Some(128));
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
     assert_eq!(report.error_code, "LBR-CONFLICT-002");
     assert!(
@@ -462,7 +464,7 @@ async fn test_mv_rejects_conflicted_source_file() {
         .output()
         .expect("failed to execute libra mv conflict case");
 
-    assert_eq!(output.status.code(), Some(4));
+    assert_eq!(output.status.code(), Some(128));
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
     assert_eq!(report.error_code, "LBR-CONFLICT-001");
     assert!(
@@ -490,7 +492,7 @@ async fn test_mv_rejects_multiple_sources_with_same_target_name() {
         .output()
         .expect("failed to execute libra mv duplicate target case");
 
-    assert_eq!(output.status.code(), Some(4));
+    assert_eq!(output.status.code(), Some(128));
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
     assert_eq!(report.error_code, "LBR-CONFLICT-002");
     assert!(
@@ -582,7 +584,7 @@ async fn test_mv_rejects_directory_to_non_directory_destination() {
         .output()
         .expect("failed to execute libra mv directory->file case");
 
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(129));
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
     assert_eq!(report.error_code, "LBR-CLI-003");
     assert!(
@@ -609,7 +611,7 @@ async fn test_mv_rejects_same_source_and_destination_path() {
         .output()
         .expect("failed to execute libra mv same-path case");
 
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(129));
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
     assert_eq!(report.error_code, "LBR-CLI-003");
     assert!(
@@ -636,7 +638,7 @@ async fn test_mv_rejects_moving_directory_into_subdirectory() {
         .output()
         .expect("failed to execute libra mv directory-into-subdirectory case");
 
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(129));
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
     assert_eq!(report.error_code, "LBR-CLI-003");
     assert!(

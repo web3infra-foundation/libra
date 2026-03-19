@@ -1,4 +1,6 @@
 //! Integration tests for `libra vault` CLI commands.
+//!
+//! **Layer:** L1 — deterministic, no external dependencies.
 
 use std::{fs, process::Command};
 

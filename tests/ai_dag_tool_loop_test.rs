@@ -1,3 +1,7 @@
+//! L1 unit tests for the DAG-based tool loop using a scripted (mock) completion model.
+//!
+//! **Layer:** L1 — deterministic, no external dependencies.
+
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},

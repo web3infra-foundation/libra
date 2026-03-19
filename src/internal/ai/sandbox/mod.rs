@@ -178,7 +178,7 @@ const SANDBOX_DENIED_KEYWORDS: [&str; 7] = [
     "landlock",
     "failed to write file",
 ];
-const QUICK_REJECT_EXIT_CODES: [i32; 3] = [2, 126, 127];
+const QUICK_REJECT_EXIT_CODES: [i32; 3] = [129, 126, 127];
 
 pub async fn run_shell_command(
     command: &str,

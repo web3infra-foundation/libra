@@ -1,4 +1,6 @@
 //! Tests `libra init --from-git-repository` for converting an existing Git repository into a Libra repo.
+//!
+//! **Layer:** L1 — deterministic, no external dependencies.
 
 use std::{fs, path::Path, process::Command};
 

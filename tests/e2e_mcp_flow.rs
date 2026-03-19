@@ -1,3 +1,7 @@
+//! End-to-end MCP (Model Context Protocol) flow tests over SSE/HTTP streaming.
+//!
+//! **Layer:** L1 — uses local HTTP server on dynamically allocated ports.
+
 use std::{
     process::{Command, Stdio},
     time::Duration,

@@ -1,3 +1,7 @@
+//! Integration tests for `libra code --stdio` Claude SDK / MCP stdio transport.
+//!
+//! **Layer:** L1 — deterministic, Unix-only (`#[cfg(unix)]`).
+
 use std::{
     fs,
     io::Write,

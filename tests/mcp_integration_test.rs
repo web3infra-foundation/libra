@@ -1,3 +1,7 @@
+//! MCP server handler integration tests verifying tool listing, resource access, and prompt serving.
+//!
+//! **Layer:** L1 — deterministic, no external dependencies.
+
 use std::sync::Arc;
 
 use git_internal::internal::object::{

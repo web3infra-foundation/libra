@@ -1,4 +1,6 @@
 //! Tests pull command integration that combines fetch with merge or rebase behaviors.
+//!
+//! **Layer:** L1 — deterministic, no external dependencies.
 
 use serial_test::serial;
 
@@ -13,7 +15,7 @@ fn test_pull_cli_without_tracking_returns_repo_exit_code() {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     // Without a configured remote, fetch fails before the tracking check.
-    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(output.status.code(), Some(128));
     assert!(stderr.contains("no configured remote for the current branch"));
     assert!(stderr.contains("Error-Code: LBR-REPO-003"));
 }
