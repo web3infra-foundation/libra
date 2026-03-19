@@ -23,6 +23,7 @@ use crate::{
 pub const ROOT_DIR: &str = ".libra";
 pub const DATABASE: &str = "libra.db";
 pub const ATTRIBUTES: &str = ".libra_attributes";
+const STORAGE_MARKERS: &[&str] = &["objects", DATABASE, "info/exclude", "hooks"];
 
 /// Returns the current working directory as a `PathBuf`.
 ///
@@ -110,21 +111,29 @@ fn parse_separate_libra_dir_file(link: &Path) -> Result<PathBuf, io::Error> {
     Ok(base.join(target_path))
 }
 
+fn is_valid_storage_dir(path: &Path) -> bool {
+    STORAGE_MARKERS
+        .iter()
+        .any(|marker| path.join(marker).exists())
+}
+
 fn try_get_paths(path: Option<PathBuf>) -> Result<(PathBuf, PathBuf), io::Error> {
     let mut path = path.clone().unwrap_or_else(cur_dir);
     let orig = path.clone();
 
     loop {
         let standard_repo = path.join(ROOT_DIR);
-        if standard_repo.is_dir() {
+        if standard_repo.is_dir() && is_valid_storage_dir(&standard_repo) {
             return Ok((standard_repo, path.clone()));
         }
         if standard_repo.is_file() {
             let storage = parse_separate_libra_dir_file(&standard_repo)?;
-            return Ok((storage, path.clone()));
+            if is_valid_storage_dir(&storage) {
+                return Ok((storage, path.clone()));
+            }
         }
 
-        if path.join(DATABASE).exists() && path.join("objects").exists() {
+        if is_valid_storage_dir(&path) {
             return Ok((path.clone(), path.clone()));
         }
 
@@ -870,5 +879,53 @@ mod test {
             get_repo_name_from_url("file:///home/user/projects/repo"),
             Some("repo")
         );
+    }
+
+    #[test]
+    #[serial]
+    // Tests confirm that the global .libra directory is no longer misidentified.
+    fn test_try_get_storage_path_ignores_global_libra_dir_without_repo_markers() {
+        let temp = tempdir().unwrap();
+        let home_like = temp.path();
+        let global_libra = home_like.join(".libra");
+        fs::create_dir_all(global_libra.join("vault-keys")).unwrap();
+        fs::write(global_libra.join("config.db"), b"not a repo db").unwrap();
+
+        let workdir = home_like.join("workspace").join("project");
+        fs::create_dir_all(&workdir).unwrap();
+
+        let _guard = test::ChangeDirGuard::new(&workdir);
+        let result = try_get_storage_path(None);
+
+        assert!(
+            result.is_err(),
+            "global ~/.libra directory without repo markers must not be treated as a repository"
+        );
+    }
+    #[test]
+    #[serial]
+    // Tests confirm that normal repos are not affected.
+    fn test_try_get_storage_path_accepts_valid_repo_under_ancestor_with_global_libra_dir() {
+        let temp = tempdir().unwrap();
+        let home_like = temp.path();
+        let global_libra = home_like.join(".libra");
+        fs::create_dir_all(global_libra.join("vault-keys")).unwrap();
+        fs::write(global_libra.join("config.db"), b"not a repo db").unwrap();
+
+        let repo = home_like.join("workspace").join("repo");
+        let storage = repo.join(ROOT_DIR);
+        fs::create_dir_all(storage.join("objects")).unwrap();
+        fs::create_dir_all(storage.join("hooks")).unwrap();
+        fs::create_dir_all(storage.join("info")).unwrap();
+        fs::write(storage.join(DATABASE), b"repo db").unwrap();
+        fs::write(storage.join("info").join("exclude"), b"").unwrap();
+
+        let nested = repo.join("src");
+        fs::create_dir_all(&nested).unwrap();
+
+        let _guard = test::ChangeDirGuard::new(&nested);
+        let resolved = try_get_storage_path(None).unwrap();
+
+        assert_eq!(resolved, storage);
     }
 }
