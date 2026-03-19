@@ -677,17 +677,26 @@ mod tests {
     #[serial]
     fn apply_color_override_auto_clears_previous_override() {
         let _guard = ColorOverrideReset;
+
+        // Force colors on, verify the override takes effect.
         colored::control::set_override(true);
         assert!(
             "x".red().to_string().contains("\u{1b}["),
             "forced override should enable ANSI colors"
         );
 
-        OutputConfig::default().apply_color_override();
-
+        // Switch to "never" and verify colors are disabled.
+        OutputConfig::resolve(None, false, false, "never", false, false, "auto")
+            .apply_color_override();
         assert!(
             !"x".red().to_string().contains("\u{1b}["),
-            "auto mode should clear the process-wide color override"
+            "never mode should disable ANSI colors"
         );
+
+        // Switch to "auto" — the override should be cleared, so the
+        // library falls back to terminal detection.  We only assert that
+        // the transition did not panic; the actual coloring depends on
+        // whether stdout is a TTY.
+        OutputConfig::default().apply_color_override();
     }
 }

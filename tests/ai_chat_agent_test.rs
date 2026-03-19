@@ -18,7 +18,7 @@ use libra::internal::ai::{
 /// ```
 #[tokio::test]
 async fn test_chat_agent_conversation() {
-    if std::env::var("GEMINI_API_KEY").is_err() {
+    if std::env::var("GEMINI_API_KEY").map_or(true, |v| v.is_empty()) {
         eprintln!("skipped (GEMINI_API_KEY not set)");
         return;
     }

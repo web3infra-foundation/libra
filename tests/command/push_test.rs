@@ -263,7 +263,7 @@ async fn test_push_file_remote_fails_without_reflog() {
 #[tokio::test]
 /// Test pushing to an invalid remote repository with timeout
 async fn test_push_invalid_remote() {
-    if std::env::var("LIBRA_TEST_GITHUB_TOKEN").is_err() {
+    if std::env::var("LIBRA_TEST_GITHUB_TOKEN").map_or(true, |v| v.is_empty()) {
         eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
         return;
     }

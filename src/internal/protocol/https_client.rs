@@ -207,7 +207,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_discover_reference_upload() {
-        if std::env::var("LIBRA_TEST_GITHUB_TOKEN").is_err() {
+        if std::env::var("LIBRA_TEST_GITHUB_TOKEN").map_or(true, |v| v.is_empty()) {
             eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
             return;
         }
@@ -229,7 +229,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_post_git_upload_pack_() {
-        if std::env::var("LIBRA_TEST_GITHUB_TOKEN").is_err() {
+        if std::env::var("LIBRA_TEST_GITHUB_TOKEN").map_or(true, |v| v.is_empty()) {
             eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
             return;
         }

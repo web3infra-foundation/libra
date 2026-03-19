@@ -662,7 +662,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_github_batch() {
-        if std::env::var("LIBRA_TEST_GITHUB_TOKEN").is_err() {
+        if std::env::var("LIBRA_TEST_GITHUB_TOKEN").map_or(true, |v| v.is_empty()) {
             eprintln!("skipped (LIBRA_TEST_GITHUB_TOKEN not set)");
             return;
         }
@@ -693,7 +693,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_push_object() {
-        if std::env::var("LIBRA_TEST_MEGA_SERVER").is_err() {
+        if std::env::var("LIBRA_TEST_MEGA_SERVER").map_or(true, |v| v.is_empty()) {
             eprintln!("skipped (LIBRA_TEST_MEGA_SERVER not set)");
             return;
         }

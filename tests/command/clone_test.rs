@@ -42,8 +42,12 @@ static GITHUB_REPO: OnceLock<Option<GitHubTestRepo>> = OnceLock::new();
 fn github_test_repo() -> Option<&'static GitHubTestRepo> {
     GITHUB_REPO
         .get_or_init(|| {
-            let token = std::env::var("LIBRA_TEST_GITHUB_TOKEN").ok()?;
-            let namespace = std::env::var("LIBRA_TEST_GITHUB_NAMESPACE").ok()?;
+            let token = std::env::var("LIBRA_TEST_GITHUB_TOKEN")
+                .ok()
+                .filter(|v| !v.is_empty())?;
+            let namespace = std::env::var("LIBRA_TEST_GITHUB_NAMESPACE")
+                .ok()
+                .filter(|v| !v.is_empty())?;
             Some(setup_github_repo(&token, &namespace))
         })
         .as_ref()

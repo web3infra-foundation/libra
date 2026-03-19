@@ -269,7 +269,7 @@ mod tests {
     /// Run with: `OLLAMA_TEST_MODEL=llama3.2 cargo test -- --ignored`
     #[tokio::test]
     async fn test_ollama_live_completion() {
-        if std::env::var("OLLAMA_TEST_MODEL").is_err() {
+        if std::env::var("OLLAMA_TEST_MODEL").map_or(true, |v| v.is_empty()) {
             eprintln!("skipped (OLLAMA_TEST_MODEL not set)");
             return;
         }

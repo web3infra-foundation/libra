@@ -232,7 +232,7 @@ fn cloud_sync_fails_without_d1_env() {
 #[tokio::test]
 #[serial]
 async fn d1_connection() {
-    if std::env::var("LIBRA_D1_ACCOUNT_ID").is_err() {
+    if std::env::var("LIBRA_D1_ACCOUNT_ID").map_or(true, |v| v.is_empty()) {
         eprintln!("skipped (LIBRA_D1_ACCOUNT_ID not set)");
         return;
     }
@@ -244,7 +244,7 @@ async fn d1_connection() {
 #[tokio::test]
 #[serial]
 async fn d1_ensure_table() {
-    if std::env::var("LIBRA_D1_ACCOUNT_ID").is_err() {
+    if std::env::var("LIBRA_D1_ACCOUNT_ID").map_or(true, |v| v.is_empty()) {
         eprintln!("skipped (LIBRA_D1_ACCOUNT_ID not set)");
         return;
     }
@@ -256,7 +256,7 @@ async fn d1_ensure_table() {
 #[tokio::test]
 #[serial]
 async fn d1_upsert_and_query() {
-    if std::env::var("LIBRA_D1_ACCOUNT_ID").is_err() {
+    if std::env::var("LIBRA_D1_ACCOUNT_ID").map_or(true, |v| v.is_empty()) {
         eprintln!("skipped (LIBRA_D1_ACCOUNT_ID not set)");
         return;
     }
@@ -282,7 +282,7 @@ async fn d1_upsert_and_query() {
 #[tokio::test]
 #[serial]
 async fn d1_batch() {
-    if std::env::var("LIBRA_D1_ACCOUNT_ID").is_err() {
+    if std::env::var("LIBRA_D1_ACCOUNT_ID").map_or(true, |v| v.is_empty()) {
         eprintln!("skipped (LIBRA_D1_ACCOUNT_ID not set)");
         return;
     }
@@ -318,7 +318,7 @@ async fn d1_batch() {
 #[tokio::test]
 #[serial]
 async fn r2_connection_basic() {
-    if std::env::var("LIBRA_STORAGE_ENDPOINT").is_err() {
+    if std::env::var("LIBRA_STORAGE_ENDPOINT").map_or(true, |v| v.is_empty()) {
         eprintln!("skipped (LIBRA_STORAGE_ENDPOINT not set)");
         return;
     }
@@ -341,8 +341,8 @@ async fn r2_connection_basic() {
 #[tokio::test]
 #[serial]
 async fn cloud_full_workflow_end_to_end() {
-    if std::env::var("LIBRA_D1_ACCOUNT_ID").is_err()
-        || std::env::var("LIBRA_STORAGE_ENDPOINT").is_err()
+    if std::env::var("LIBRA_D1_ACCOUNT_ID").map_or(true, |v| v.is_empty())
+        || std::env::var("LIBRA_STORAGE_ENDPOINT").map_or(true, |v| v.is_empty())
     {
         eprintln!("skipped (LIBRA_D1_ACCOUNT_ID or LIBRA_STORAGE_ENDPOINT not set)");
         return;
@@ -618,8 +618,8 @@ async fn cloud_full_workflow_end_to_end() {
 #[tokio::test]
 #[serial]
 async fn cloud_sync_name_conflict() {
-    if std::env::var("LIBRA_D1_ACCOUNT_ID").is_err()
-        || std::env::var("LIBRA_STORAGE_ENDPOINT").is_err()
+    if std::env::var("LIBRA_D1_ACCOUNT_ID").map_or(true, |v| v.is_empty())
+        || std::env::var("LIBRA_STORAGE_ENDPOINT").map_or(true, |v| v.is_empty())
     {
         eprintln!("skipped (LIBRA_D1_ACCOUNT_ID or LIBRA_STORAGE_ENDPOINT not set)");
         return;
@@ -695,7 +695,7 @@ fn run_libra_cmd(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
         cmd.env(var, val);
     }
 
-    if std::env::var("LIBRA_STORAGE_REGION").is_err() {
+    if std::env::var("LIBRA_STORAGE_REGION").map_or(true, |v| v.is_empty()) {
         cmd.env("LIBRA_STORAGE_REGION", "auto");
     } else {
         cmd.env(

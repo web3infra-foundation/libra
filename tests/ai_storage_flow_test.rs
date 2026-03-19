@@ -160,7 +160,7 @@ async fn test_ai_flow_local() {
 /// - Connectivity to the remote storage provider works as expected
 #[tokio::test]
 async fn test_ai_flow_r2() {
-    if std::env::var("R2_ENDPOINT").is_err() {
+    if std::env::var("R2_ENDPOINT").map_or(true, |v| v.is_empty()) {
         eprintln!("skipped (R2_ENDPOINT not set)");
         return;
     }

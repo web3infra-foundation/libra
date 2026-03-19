@@ -49,7 +49,7 @@ impl Action for InputGenerator {
 /// ```
 #[test]
 fn test_gemini_agent_execution() {
-    if std::env::var("GEMINI_API_KEY").is_err() {
+    if std::env::var("GEMINI_API_KEY").map_or(true, |v| v.is_empty()) {
         eprintln!("skipped (GEMINI_API_KEY not set)");
         return;
     }
@@ -150,7 +150,7 @@ impl Tool for WeatherTool {
 /// ```
 #[test]
 fn test_gemini_agent_with_tools() {
-    if std::env::var("GEMINI_API_KEY").is_err() {
+    if std::env::var("GEMINI_API_KEY").map_or(true, |v| v.is_empty()) {
         eprintln!("skipped (GEMINI_API_KEY not set)");
         return;
     }
