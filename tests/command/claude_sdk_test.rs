@@ -10,7 +10,9 @@ use std::{
     sync::Arc,
 };
 
-use git_internal::internal::object::intent::Intent;
+use git_internal::internal::object::{
+    decision::Decision, evidence::Evidence, intent::Intent, run::Run, task::Task,
+};
 use libra::{
     internal::{
         ai::history::{AI_REF, HistoryManager},
@@ -19,6 +21,7 @@ use libra::{
     utils::{storage::local::LocalStorage, storage_ext::StorageExt, test},
 };
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use serial_test::serial;
 use tempfile::tempdir;
@@ -155,6 +158,35 @@ fn plan_task_only_artifact(repo: &Path, touched_file: &Path) -> Value {
     managed_artifact_from_template(PLAN_TASK_ONLY_TEMPLATE, repo, touched_file, PLAN_PROMPT)
 }
 
+fn test_change_type_artifact(repo: &Path, touched_file: &Path) -> Value {
+    let mut artifact = semantic_full_artifact(repo, touched_file);
+    let structured_output = artifact["resultMessage"]["structured_output"]
+        .as_object_mut()
+        .expect("semantic full artifact should contain structured_output");
+    structured_output.insert(
+        "summary".to_string(),
+        json!("Add regression coverage for Claude SDK bridge persistence"),
+    );
+    structured_output.insert(
+        "problemStatement".to_string(),
+        json!("The Claude SDK bridge needs explicit regression coverage for persisted artifacts."),
+    );
+    structured_output.insert("changeType".to_string(), json!("test"));
+    structured_output.insert(
+        "objectives".to_string(),
+        json!(["Add an integration regression test for persisted Claude SDK artifacts"]),
+    );
+    structured_output.insert(
+        "successCriteria".to_string(),
+        json!(["Regression test passes and covers persisted artifact behavior"]),
+    );
+    structured_output.insert(
+        "riskRationale".to_string(),
+        json!("The change is test-only and should not affect production behavior."),
+    );
+    artifact
+}
+
 fn timed_out_partial_artifact(repo: &Path, touched_file: &Path) -> Value {
     let mut artifact = semantic_full_artifact(repo, touched_file);
     let object = artifact
@@ -184,6 +216,193 @@ async fn load_intent_history(repo: &Path) -> (Arc<LocalStorage>, HistoryManager)
     );
     let history = HistoryManager::new(storage.clone(), libra_dir, db_conn);
     (storage, history)
+}
+
+async fn read_tracked_object<T>(repo: &Path, object_type: &str, object_id: &str) -> T
+where
+    T: DeserializeOwned + Send + Sync,
+{
+    let (storage, history) = load_intent_history(repo).await;
+    let hash = history
+        .get_object_hash(object_type, object_id)
+        .await
+        .expect("should query object hash")
+        .unwrap_or_else(|| panic!("expected {object_type} object '{object_id}' to exist"));
+    storage
+        .get_json::<T>(&hash)
+        .await
+        .unwrap_or_else(|err| panic!("failed to load {object_type} '{object_id}': {err}"))
+}
+
+fn session_messages_fixture(session_id: &str) -> Value {
+    json!([
+        {
+            "type": "system",
+            "subtype": "init",
+            "session_id": session_id,
+            "uuid": "msg-1"
+        },
+        {
+            "type": "user",
+            "session_id": session_id,
+            "message": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Inspect src/lib.rs and summarize the bridge state."
+                    }
+                ]
+            }
+        },
+        {
+            "type": "assistant",
+            "session_id": session_id,
+            "uuid": "msg-2",
+            "message": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "I will inspect src/lib.rs and then summarize the current bridge shape."
+                    },
+                    {
+                        "type": "tool_use",
+                        "name": "Read",
+                        "input": {
+                            "file_path": "src/lib.rs"
+                        }
+                    }
+                ]
+            }
+        },
+        {
+            "type": "system",
+            "subtype": "task_progress",
+            "session_id": session_id,
+            "uuid": "msg-task-1",
+            "description": "Reading provider runtime facts"
+        },
+        {
+            "type": "tool_progress",
+            "tool_use_id": "tool-1",
+            "tool_name": "Read",
+            "elapsed_time_seconds": 1,
+            "session_id": session_id,
+            "uuid": "msg-3"
+        },
+        {
+            "type": "result",
+            "subtype": "success",
+            "session_id": session_id,
+            "uuid": "msg-4",
+            "duration_ms": 10,
+            "duration_api_ms": 8,
+            "is_error": false,
+            "num_turns": 1,
+            "result": "ok",
+            "stop_reason": "end_turn",
+            "total_cost_usd": 0.01,
+            "permission_denials": [
+                {
+                    "tool_name": "Edit"
+                }
+            ],
+            "structured_output": {
+                "summary": "Separate runtime facts from semantic candidates"
+            },
+            "usage": {}
+        }
+    ])
+}
+
+fn stage_provider_session_evidence_artifacts(repo: &Path, provider_session_id: &str) {
+    let catalog_response_path = repo.join("session-catalog.json");
+    fs::write(
+        &catalog_response_path,
+        serde_json::to_vec_pretty(&json!([
+            {
+                "sessionId": provider_session_id,
+                "summary": "Claude provider session fixture",
+                "lastModified": 1742025600000i64,
+                "cwd": repo.to_string_lossy().to_string()
+            }
+        ]))
+        .expect("serialize session catalog"),
+    )
+    .expect("write session catalog response");
+    let catalog_request_path = repo.join("session-catalog-request.json");
+    let catalog_helper_path = repo.join("fake-session-catalog-helper.sh");
+    write_json_response_capture_shell_helper(
+        &catalog_helper_path,
+        &catalog_response_path,
+        &catalog_request_path,
+    );
+
+    let sync = run_libra_command(
+        &[
+            "claude-sdk",
+            "sync-sessions",
+            "--helper-path",
+            catalog_helper_path
+                .to_str()
+                .expect("catalog helper path utf-8"),
+            "--node-binary",
+            "/bin/sh",
+        ],
+        repo,
+    );
+    assert_cli_success(
+        &sync,
+        "claude-sdk sync-sessions should succeed for formal bridge tests",
+    );
+
+    let messages_response_path = repo.join("session-messages.json");
+    fs::write(
+        &messages_response_path,
+        serde_json::to_vec_pretty(&session_messages_fixture(provider_session_id))
+            .expect("serialize session messages"),
+    )
+    .expect("write session messages response");
+    let messages_request_path = repo.join("session-messages-request.json");
+    let messages_helper_path = repo.join("fake-session-messages-helper.sh");
+    write_json_response_capture_shell_helper(
+        &messages_helper_path,
+        &messages_response_path,
+        &messages_request_path,
+    );
+
+    let hydrate = run_libra_command(
+        &[
+            "claude-sdk",
+            "hydrate-session",
+            "--provider-session-id",
+            provider_session_id,
+            "--helper-path",
+            messages_helper_path
+                .to_str()
+                .expect("messages helper path utf-8"),
+            "--node-binary",
+            "/bin/sh",
+        ],
+        repo,
+    );
+    assert_cli_success(
+        &hydrate,
+        "claude-sdk hydrate-session should succeed for formal bridge tests",
+    );
+
+    let build = run_libra_command(
+        &[
+            "claude-sdk",
+            "build-evidence-input",
+            "--provider-session-id",
+            provider_session_id,
+        ],
+        repo,
+    );
+    assert_cli_success(
+        &build,
+        "claude-sdk build-evidence-input should succeed for formal bridge tests",
+    );
 }
 
 #[tokio::test]
@@ -1996,4 +2215,619 @@ async fn test_claude_sdk_persist_intent_writes_formal_intent_and_binding_artifac
         stored_intent.spec().is_some(),
         "persisted formal intent should retain the canonical IntentSpec"
     );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_persist_intent_accepts_test_change_type() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn managed_bridge() {}\n").expect("write source file");
+
+    let artifact_path = repo
+        .path()
+        .join("managed-run-artifact-test-change-type.json");
+    fs::write(
+        &artifact_path,
+        serde_json::to_vec_pretty(&test_change_type_artifact(repo.path(), &touched_file))
+            .expect("serialize test artifact"),
+    )
+    .expect("write test artifact");
+
+    let helper_path = repo.path().join("fake-managed-helper-test-change-type.sh");
+    write_shell_helper(&helper_path, &artifact_path);
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+            "--node-binary",
+            "/bin/sh",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&run, "claude-sdk run should succeed for changeType=test");
+    let run_json = parse_stdout_json(&run, "claude-sdk run changeType=test");
+    let ai_session_id = run_json["aiSessionId"]
+        .as_str()
+        .expect("aiSessionId should be present");
+
+    let resolve = run_libra_command(
+        &[
+            "claude-sdk",
+            "resolve-extraction",
+            "--ai-session-id",
+            ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &resolve,
+        "claude-sdk resolve-extraction should accept changeType=test",
+    );
+    let resolve_json = parse_stdout_json(&resolve, "claude-sdk resolve-extraction changeType=test");
+    let resolved_spec_path = PathBuf::from(
+        resolve_json["resolvedSpecPath"]
+            .as_str()
+            .expect("resolvedSpecPath should be present"),
+    );
+    let resolved_artifact = read_json_file(&resolved_spec_path);
+    assert_eq!(
+        resolved_artifact["intentspec"]["intent"]["changeType"],
+        json!("test")
+    );
+
+    let persist = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-intent",
+            "--ai-session-id",
+            ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &persist,
+        "claude-sdk persist-intent should accept changeType=test",
+    );
+    let persist_json = parse_stdout_json(&persist, "claude-sdk persist-intent changeType=test");
+    let intent_id = persist_json["intentId"]
+        .as_str()
+        .expect("intentId should be present")
+        .to_string();
+
+    let (storage, history) = load_intent_history(repo.path()).await;
+    let intents = history
+        .list_objects("intent")
+        .await
+        .expect("should list intent objects");
+    assert_eq!(intents.len(), 1, "should persist exactly one formal intent");
+    assert_eq!(intents[0].0, intent_id);
+
+    let stored_intent: Intent = storage
+        .get_json(&intents[0].1)
+        .await
+        .expect("should load persisted intent object");
+    let stored_spec = stored_intent
+        .spec()
+        .expect("persisted formal intent should retain the canonical IntentSpec");
+    assert_eq!(stored_spec.0["intent"]["changeType"], json!("test"));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_formal_bridge_persists_task_run_evidence_and_decision() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn formal_bridge() {}\n").expect("write source file");
+
+    let artifact_path = repo.path().join("managed-run-artifact.json");
+    fs::write(
+        &artifact_path,
+        serde_json::to_vec_pretty(&semantic_full_artifact(repo.path(), &touched_file))
+            .expect("serialize test artifact"),
+    )
+    .expect("write test artifact");
+    let request_path = repo.path().join("helper-request.json");
+    let helper_path = repo.path().join("capture-managed-helper.sh");
+    write_request_capture_shell_helper(&helper_path, &artifact_path, &request_path);
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+            "--node-binary",
+            "/bin/sh",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&run, "claude-sdk run should succeed for formal bridge test");
+    let run_json = parse_stdout_json(&run, "claude-sdk run formal bridge");
+    let ai_session_id = run_json["aiSessionId"]
+        .as_str()
+        .expect("aiSessionId should be present")
+        .to_string();
+    let provider_session_id = run_json["providerSessionId"]
+        .as_str()
+        .expect("providerSessionId should be present")
+        .to_string();
+
+    stage_provider_session_evidence_artifacts(repo.path(), &provider_session_id);
+
+    let resolve = run_libra_command(
+        &[
+            "claude-sdk",
+            "resolve-extraction",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&resolve, "resolve-extraction should succeed");
+
+    let persist_intent = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-intent",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&persist_intent, "persist-intent should succeed");
+    let persist_intent_json = parse_stdout_json(&persist_intent, "persist-intent output");
+    let intent_id = persist_intent_json["intentId"]
+        .as_str()
+        .expect("intentId should be present")
+        .to_string();
+
+    let bridge = run_libra_command(
+        &[
+            "claude-sdk",
+            "bridge-run",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&bridge, "bridge-run should succeed");
+    let bridge_json = parse_stdout_json(&bridge, "bridge-run output");
+    let task_id = bridge_json["taskId"]
+        .as_str()
+        .expect("taskId should be present")
+        .to_string();
+    let run_id = bridge_json["runId"]
+        .as_str()
+        .expect("runId should be present")
+        .to_string();
+    assert_eq!(bridge_json["intentId"], json!(intent_id.clone()));
+
+    let bridge_repeat = run_libra_command(
+        &[
+            "claude-sdk",
+            "bridge-run",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&bridge_repeat, "bridge-run should be idempotent");
+    let bridge_repeat_json = parse_stdout_json(&bridge_repeat, "bridge-run repeat output");
+    assert_eq!(bridge_repeat_json["taskId"], json!(task_id.clone()));
+    assert_eq!(bridge_repeat_json["runId"], json!(run_id.clone()));
+
+    let evidence = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-evidence",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&evidence, "persist-evidence should succeed");
+    let evidence_json = parse_stdout_json(&evidence, "persist-evidence output");
+    let evidence_ids = evidence_json["evidenceIds"]
+        .as_array()
+        .expect("evidenceIds should be an array")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("evidence id should be a string")
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        evidence_ids.len(),
+        3,
+        "should persist three Evidence records"
+    );
+
+    let evidence_repeat = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-evidence",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&evidence_repeat, "persist-evidence should be idempotent");
+    let evidence_repeat_json =
+        parse_stdout_json(&evidence_repeat, "persist-evidence repeat output");
+    assert_eq!(
+        evidence_repeat_json["evidenceIds"],
+        json!(evidence_ids.clone())
+    );
+
+    let decision = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-decision",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&decision, "persist-decision should succeed");
+    let decision_json = parse_stdout_json(&decision, "persist-decision output");
+    let decision_id = decision_json["decisionId"]
+        .as_str()
+        .expect("decisionId should be present")
+        .to_string();
+    assert_eq!(decision_json["decisionType"], json!("checkpoint"));
+
+    let decision_repeat = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-decision",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&decision_repeat, "persist-decision should be idempotent");
+    let decision_repeat_json =
+        parse_stdout_json(&decision_repeat, "persist-decision repeat output");
+    assert_eq!(
+        decision_repeat_json["decisionId"],
+        json!(decision_id.clone())
+    );
+
+    let task: Task = read_tracked_object(repo.path(), "task", &task_id).await;
+    assert_eq!(task.intent().map(|id| id.to_string()), Some(intent_id));
+
+    let formal_run: Run = read_tracked_object(repo.path(), "run", &run_id).await;
+    assert_eq!(formal_run.task().to_string(), task_id);
+
+    let evidence_objects = futures::future::join_all(
+        evidence_ids
+            .iter()
+            .map(|id| read_tracked_object::<Evidence>(repo.path(), "evidence", id)),
+    )
+    .await;
+    let evidence_kinds = evidence_objects
+        .iter()
+        .map(|evidence| evidence.kind().to_string())
+        .collect::<Vec<_>>();
+    assert!(evidence_kinds.contains(&"provider_session_snapshot".to_string()));
+    assert!(evidence_kinds.contains(&"evidence_input_summary".to_string()));
+    assert!(evidence_kinds.contains(&"intent_extraction_result".to_string()));
+    assert!(
+        evidence_objects
+            .iter()
+            .all(|evidence| evidence.run_id().to_string() == run_id),
+        "all Evidence records should point at the bridged run"
+    );
+
+    let stored_decision: Decision =
+        read_tracked_object(repo.path(), "decision", &decision_id).await;
+    assert_eq!(stored_decision.run_id().to_string(), run_id);
+    assert_eq!(stored_decision.decision_type().to_string(), "checkpoint");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_bridge_run_without_intent_binding_creates_standalone_task() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn standalone_bridge() {}\n").expect("write source file");
+
+    let artifact_path = repo.path().join("managed-run-artifact.json");
+    fs::write(
+        &artifact_path,
+        serde_json::to_vec_pretty(&semantic_full_artifact(repo.path(), &touched_file))
+            .expect("serialize test artifact"),
+    )
+    .expect("write test artifact");
+    let request_path = repo.path().join("helper-request.json");
+    let helper_path = repo.path().join("capture-managed-helper.sh");
+    write_request_capture_shell_helper(&helper_path, &artifact_path, &request_path);
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+            "--node-binary",
+            "/bin/sh",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&run, "claude-sdk run should succeed");
+    let run_json = parse_stdout_json(&run, "claude-sdk run output");
+    let ai_session_id = run_json["aiSessionId"]
+        .as_str()
+        .expect("aiSessionId should be present");
+
+    let bridge = run_libra_command(
+        &["claude-sdk", "bridge-run", "--ai-session-id", ai_session_id],
+        repo.path(),
+    );
+    assert_cli_success(&bridge, "bridge-run should succeed without intent binding");
+    let bridge_json = parse_stdout_json(&bridge, "bridge-run output");
+    assert!(
+        bridge_json["intentId"].is_null(),
+        "standalone bridge should not attach an intent id"
+    );
+
+    let task_id = bridge_json["taskId"]
+        .as_str()
+        .expect("taskId should be present");
+    let task: Task = read_tracked_object(repo.path(), "task", task_id).await;
+    assert!(
+        task.intent().is_none(),
+        "task should not be linked to an intent"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_formal_bridge_requires_prior_bindings() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn missing_bindings() {}\n").expect("write source file");
+
+    let artifact_path = repo.path().join("managed-run-artifact.json");
+    fs::write(
+        &artifact_path,
+        serde_json::to_vec_pretty(&semantic_full_artifact(repo.path(), &touched_file))
+            .expect("serialize test artifact"),
+    )
+    .expect("write test artifact");
+    let request_path = repo.path().join("helper-request.json");
+    let helper_path = repo.path().join("capture-managed-helper.sh");
+    write_request_capture_shell_helper(&helper_path, &artifact_path, &request_path);
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+            "--node-binary",
+            "/bin/sh",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&run, "claude-sdk run should succeed");
+    let run_json = parse_stdout_json(&run, "claude-sdk run output");
+    let ai_session_id = run_json["aiSessionId"]
+        .as_str()
+        .expect("aiSessionId should be present");
+
+    let evidence_without_bridge = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-evidence",
+            "--ai-session-id",
+            ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert!(
+        !evidence_without_bridge.status.success(),
+        "persist-evidence should reject missing bridge-run binding"
+    );
+    assert!(
+        String::from_utf8_lossy(&evidence_without_bridge.stderr).contains("bridge-run"),
+        "error should guide the user toward bridge-run first"
+    );
+
+    let bridge = run_libra_command(
+        &["claude-sdk", "bridge-run", "--ai-session-id", ai_session_id],
+        repo.path(),
+    );
+    assert_cli_success(&bridge, "bridge-run should succeed");
+
+    let decision_without_evidence = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-decision",
+            "--ai-session-id",
+            ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert!(
+        !decision_without_evidence.status.success(),
+        "persist-decision should reject missing evidence binding"
+    );
+    assert!(
+        String::from_utf8_lossy(&decision_without_evidence.stderr).contains("persist-evidence"),
+        "error should guide the user toward persist-evidence first"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_formal_decision_maps_invalid_and_timeout_cases() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let invalid_artifact_path = repo.path().join("probe-like-artifact.json");
+    fs::write(&invalid_artifact_path, PROBE_LIKE_ARTIFACT).expect("write invalid artifact");
+    let invalid_import = run_libra_command(
+        &[
+            "claude-sdk",
+            "import",
+            "--artifact",
+            invalid_artifact_path
+                .to_str()
+                .expect("invalid artifact path utf-8"),
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &invalid_import,
+        "claude-sdk import should succeed for invalid extraction",
+    );
+    let invalid_import_json = parse_stdout_json(&invalid_import, "invalid import output");
+    let invalid_ai_session_id = invalid_import_json["aiSessionId"]
+        .as_str()
+        .expect("aiSessionId should be present")
+        .to_string();
+
+    let invalid_bridge = run_libra_command(
+        &[
+            "claude-sdk",
+            "bridge-run",
+            "--ai-session-id",
+            &invalid_ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &invalid_bridge,
+        "bridge-run should succeed for invalid extraction",
+    );
+    let invalid_evidence = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-evidence",
+            "--ai-session-id",
+            &invalid_ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &invalid_evidence,
+        "persist-evidence should succeed for invalid extraction",
+    );
+    let invalid_decision = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-decision",
+            "--ai-session-id",
+            &invalid_ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &invalid_decision,
+        "persist-decision should succeed for invalid extraction",
+    );
+    let invalid_decision_json =
+        parse_stdout_json(&invalid_decision, "invalid persist-decision output");
+    assert_eq!(invalid_decision_json["decisionType"], json!("abandon"));
+
+    let touched_file = repo.path().join("src").join("timed.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn timed_out() {}\n").expect("write timed source");
+    let timed_artifact_path = repo.path().join("timed-artifact.json");
+    fs::write(
+        &timed_artifact_path,
+        serde_json::to_vec_pretty(&timed_out_partial_artifact(repo.path(), &touched_file))
+            .expect("serialize timed artifact"),
+    )
+    .expect("write timed artifact");
+
+    let timed_import = run_libra_command(
+        &[
+            "claude-sdk",
+            "import",
+            "--artifact",
+            timed_artifact_path
+                .to_str()
+                .expect("timed artifact path utf-8"),
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &timed_import,
+        "claude-sdk import should succeed for timed artifact",
+    );
+    let timed_import_json = parse_stdout_json(&timed_import, "timed import output");
+    let timed_ai_session_id = timed_import_json["aiSessionId"]
+        .as_str()
+        .expect("timed aiSessionId should be present")
+        .to_string();
+
+    let timed_bridge = run_libra_command(
+        &[
+            "claude-sdk",
+            "bridge-run",
+            "--ai-session-id",
+            &timed_ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &timed_bridge,
+        "bridge-run should succeed for timed artifact",
+    );
+    let timed_evidence = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-evidence",
+            "--ai-session-id",
+            &timed_ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &timed_evidence,
+        "persist-evidence should succeed for timed artifact",
+    );
+    let timed_decision = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-decision",
+            "--ai-session-id",
+            &timed_ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &timed_decision,
+        "persist-decision should succeed for timed artifact",
+    );
+    let timed_decision_json = parse_stdout_json(&timed_decision, "timed persist-decision output");
+    assert_eq!(timed_decision_json["decisionType"], json!("retry"));
 }

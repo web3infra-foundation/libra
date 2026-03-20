@@ -123,6 +123,7 @@ impl Intent {
 pub enum ChangeType {
     Bugfix,
     Feature,
+    Test,
     Refactor,
     Performance,
     Security,
