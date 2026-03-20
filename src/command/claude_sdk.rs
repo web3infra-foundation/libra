@@ -1323,14 +1323,22 @@ async fn persist_intent(args: PersistIntentArgs) -> Result<()> {
 async fn bridge_run(args: BridgeRunArgs) -> Result<()> {
     let storage_path = util::try_get_storage_path(None)
         .context("claude-sdk commands must be run inside a Libra repository")?;
+    validate_ai_session_id(&args.ai_session_id)?;
     if args.intent_binding.is_some() && args.intent_id.is_some() {
         bail!("pass either --intent-binding or --intent-id, not both");
     }
 
+    let intent_binding = resolve_intent_binding(&storage_path, &args).await?;
+    let requested_intent_id = args.intent_id.clone().or_else(|| {
+        intent_binding
+            .as_ref()
+            .map(|binding| binding.artifact.intent_id.clone())
+    });
     let binding_path = formal_run_binding_path(&storage_path, &args.ai_session_id);
     if let Some(existing) = read_existing_binding_if_live::<ClaudeFormalRunBindingArtifact>(
         &storage_path,
         &binding_path,
+        "Claude formal run binding",
         &[
             ("task", |binding| binding.task_id.as_str()),
             ("run", |binding| binding.run_id.as_str()),
@@ -1338,6 +1346,16 @@ async fn bridge_run(args: BridgeRunArgs) -> Result<()> {
     )
     .await?
     {
+        if let Some(intent_id) = requested_intent_id.as_deref()
+            && existing.intent_id.as_deref() != Some(intent_id)
+        {
+            bail!(
+                "existing formal run binding '{}' is linked to intent {:?}, but '{}' was requested; remove the stale binding to rebuild intentionally",
+                binding_path.display(),
+                existing.intent_id,
+                intent_id
+            );
+        }
         print_bridge_run_output(&binding_path, &existing)?;
         return Ok(());
     }
@@ -1352,8 +1370,6 @@ async fn bridge_run(args: BridgeRunArgs) -> Result<()> {
             audit_bundle_path.display()
         );
     }
-
-    let intent_binding = resolve_intent_binding(&storage_path, &args).await?;
     let summary = derive_formal_task_summary(&audit_bundle, intent_binding.as_ref());
     let description = derive_formal_task_description(&audit_bundle);
     let goal_type = derive_goal_type(&audit_bundle);
@@ -1385,11 +1401,7 @@ async fn bridge_run(args: BridgeRunArgs) -> Result<()> {
                     requested_by_kind: None,
                     requested_by_id: None,
                     dependencies: None,
-                    intent_id: args.intent_id.clone().or_else(|| {
-                        intent_binding
-                            .as_ref()
-                            .map(|binding| binding.artifact.intent_id.clone())
-                    }),
+                    intent_id: requested_intent_id.clone(),
                     parent_task_id: None,
                     origin_step_id: None,
                     status: Some(task_status_for_managed_run(&managed_run_status).to_string()),
@@ -1454,11 +1466,7 @@ async fn bridge_run(args: BridgeRunArgs) -> Result<()> {
         intent_binding_path: intent_binding
             .as_ref()
             .map(|resolved| resolved.path.to_string_lossy().to_string()),
-        intent_id: args.intent_id.or_else(|| {
-            intent_binding
-                .as_ref()
-                .map(|binding| binding.artifact.intent_id.clone())
-        }),
+        intent_id: requested_intent_id,
         managed_run_status,
         intent_extraction_status,
         summary,
@@ -1472,22 +1480,11 @@ async fn bridge_run(args: BridgeRunArgs) -> Result<()> {
 async fn persist_evidence(args: PersistEvidenceArgs) -> Result<()> {
     let storage_path = util::try_get_storage_path(None)
         .context("claude-sdk commands must be run inside a Libra repository")?;
-    let binding_path = evidence_binding_path(&storage_path, &args.ai_session_id);
-    if let Some(existing) = read_existing_binding_if_live::<ClaudeEvidenceBindingArtifact>(
-        &storage_path,
-        &binding_path,
-        &[("run", |binding| binding.run_id.as_str())],
-    )
-    .await?
-        && evidence_binding_objects_exist(&storage_path, &existing).await?
-    {
-        print_persist_evidence_output(&binding_path, &existing)?;
-        return Ok(());
-    }
+    validate_ai_session_id(&args.ai_session_id)?;
 
     let run_binding_path = formal_run_binding_path(&storage_path, &args.ai_session_id);
     let run_binding: ClaudeFormalRunBindingArtifact =
-        read_json_artifact(&run_binding_path, "formal Claude run binding")
+        read_typed_json_artifact(&run_binding_path, "formal Claude run binding")
             .await
             .with_context(|| {
                 format!(
@@ -1495,6 +1492,20 @@ async fn persist_evidence(args: PersistEvidenceArgs) -> Result<()> {
                     args.ai_session_id
                 )
             })?;
+    let binding_path = evidence_binding_path(&storage_path, &args.ai_session_id);
+    if let Some(existing) = read_existing_binding_if_live::<ClaudeEvidenceBindingArtifact>(
+        &storage_path,
+        &binding_path,
+        "Claude evidence binding",
+        &[("run", |binding| binding.run_id.as_str())],
+    )
+    .await?
+        && existing.run_id == run_binding.run_id
+        && evidence_binding_objects_exist(&storage_path, &existing).await?
+    {
+        print_persist_evidence_output(&binding_path, &existing)?;
+        return Ok(());
+    }
 
     let audit_bundle: ManagedAuditBundle = read_json_artifact(
         Path::new(&run_binding.audit_bundle_path),
@@ -1638,24 +1649,11 @@ async fn persist_evidence(args: PersistEvidenceArgs) -> Result<()> {
 async fn persist_decision(args: PersistDecisionArgs) -> Result<()> {
     let storage_path = util::try_get_storage_path(None)
         .context("claude-sdk commands must be run inside a Libra repository")?;
-    let binding_path = decision_binding_path(&storage_path, &args.ai_session_id);
-    if let Some(existing) = read_existing_binding_if_live::<ClaudeDecisionBindingArtifact>(
-        &storage_path,
-        &binding_path,
-        &[
-            ("run", |binding| binding.run_id.as_str()),
-            ("decision", |binding| binding.decision_id.as_str()),
-        ],
-    )
-    .await?
-    {
-        print_persist_decision_output(&binding_path, &existing)?;
-        return Ok(());
-    }
+    validate_ai_session_id(&args.ai_session_id)?;
 
     let run_binding_path = formal_run_binding_path(&storage_path, &args.ai_session_id);
     let run_binding: ClaudeFormalRunBindingArtifact =
-        read_json_artifact(&run_binding_path, "formal Claude run binding")
+        read_typed_json_artifact(&run_binding_path, "formal Claude run binding")
             .await
             .with_context(|| {
                 format!(
@@ -1665,7 +1663,7 @@ async fn persist_decision(args: PersistDecisionArgs) -> Result<()> {
             })?;
     let evidence_binding_path = evidence_binding_path(&storage_path, &args.ai_session_id);
     let evidence_binding: ClaudeEvidenceBindingArtifact =
-        read_json_artifact(&evidence_binding_path, "Claude evidence binding")
+        read_typed_json_artifact(&evidence_binding_path, "Claude evidence binding")
             .await
             .with_context(|| {
                 format!(
@@ -1673,6 +1671,23 @@ async fn persist_decision(args: PersistDecisionArgs) -> Result<()> {
                     args.ai_session_id
                 )
             })?;
+    let binding_path = decision_binding_path(&storage_path, &args.ai_session_id);
+    if let Some(existing) = read_existing_binding_if_live::<ClaudeDecisionBindingArtifact>(
+        &storage_path,
+        &binding_path,
+        "Claude decision binding",
+        &[
+            ("run", |binding| binding.run_id.as_str()),
+            ("decision", |binding| binding.decision_id.as_str()),
+        ],
+    )
+    .await?
+        && existing.run_id == run_binding.run_id
+        && existing.evidence_binding_path == evidence_binding_path.to_string_lossy()
+    {
+        print_persist_decision_output(&binding_path, &existing)?;
+        return Ok(());
+    }
 
     let decision_type = decision_type_for_binding(&run_binding, &evidence_binding);
     let rationale = format!(
@@ -1766,9 +1781,12 @@ fn resolve_prompt(args: &RunManagedArgs) -> Result<String> {
 fn resolve_extraction_path(storage_path: &Path, args: &ResolveExtractionArgs) -> Result<PathBuf> {
     match (&args.extraction, &args.ai_session_id) {
         (Some(path), None) => Ok(path.clone()),
-        (None, Some(ai_session_id)) => Ok(storage_path
-            .join(INTENT_EXTRACTIONS_DIR)
-            .join(format!("{ai_session_id}.json"))),
+        (None, Some(ai_session_id)) => {
+            validate_ai_session_id(ai_session_id)?;
+            Ok(storage_path
+                .join(INTENT_EXTRACTIONS_DIR)
+                .join(format!("{ai_session_id}.json")))
+        }
         (Some(_), Some(_)) => bail!("pass either --extraction or --ai-session-id, not both"),
         (None, None) => bail!("missing extraction input; pass --extraction or --ai-session-id"),
     }
@@ -1777,9 +1795,12 @@ fn resolve_extraction_path(storage_path: &Path, args: &ResolveExtractionArgs) ->
 fn resolve_resolution_path(storage_path: &Path, args: &PersistIntentArgs) -> Result<PathBuf> {
     match (&args.resolution, &args.ai_session_id) {
         (Some(path), None) => Ok(path.clone()),
-        (None, Some(ai_session_id)) => Ok(storage_path
-            .join(INTENT_RESOLUTIONS_DIR)
-            .join(format!("{ai_session_id}.json"))),
+        (None, Some(ai_session_id)) => {
+            validate_ai_session_id(ai_session_id)?;
+            Ok(storage_path
+                .join(INTENT_RESOLUTIONS_DIR)
+                .join(format!("{ai_session_id}.json")))
+        }
         (Some(_), Some(_)) => bail!("pass either --resolution or --ai-session-id, not both"),
         (None, None) => bail!("missing resolution input; pass --resolution or --ai-session-id"),
     }
@@ -1889,6 +1910,44 @@ struct PendingEvidence {
 
 type BindingObjectSelector<T> = (&'static str, fn(&T) -> &str);
 
+trait BindingArtifactSchema {
+    const SCHEMA: &'static str;
+
+    fn schema(&self) -> &str;
+}
+
+impl BindingArtifactSchema for PersistedIntentInputBindingArtifact {
+    const SCHEMA: &'static str = "libra.intent_input_binding.v1";
+
+    fn schema(&self) -> &str {
+        &self.schema
+    }
+}
+
+impl BindingArtifactSchema for ClaudeFormalRunBindingArtifact {
+    const SCHEMA: &'static str = "libra.claude_formal_run_binding.v1";
+
+    fn schema(&self) -> &str {
+        &self.schema
+    }
+}
+
+impl BindingArtifactSchema for ClaudeEvidenceBindingArtifact {
+    const SCHEMA: &'static str = "libra.claude_evidence_binding.v1";
+
+    fn schema(&self) -> &str {
+        &self.schema
+    }
+}
+
+impl BindingArtifactSchema for ClaudeDecisionBindingArtifact {
+    const SCHEMA: &'static str = "libra.claude_decision_binding.v1";
+
+    fn schema(&self) -> &str {
+        &self.schema
+    }
+}
+
 async fn read_json_artifact<T>(path: &Path, label: &str) -> Result<T>
 where
     T: DeserializeOwned,
@@ -1898,6 +1957,29 @@ where
         .with_context(|| format!("failed to read {label} '{}'", path.display()))?;
     serde_json::from_str(&content)
         .with_context(|| format!("failed to parse {label} '{}'", path.display()))
+}
+
+fn validate_binding_schema<T>(binding: &T, path: &Path, label: &str) -> Result<()>
+where
+    T: BindingArtifactSchema,
+{
+    if binding.schema() != T::SCHEMA {
+        bail!(
+            "unsupported {label} schema '{}' in '{}'",
+            binding.schema(),
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+async fn read_typed_json_artifact<T>(path: &Path, label: &str) -> Result<T>
+where
+    T: DeserializeOwned + BindingArtifactSchema,
+{
+    let artifact: T = read_json_artifact(path, label).await?;
+    validate_binding_schema(&artifact, path, label)?;
+    Ok(artifact)
 }
 
 async fn local_object_exists(
@@ -1920,16 +2002,17 @@ async fn local_object_exists(
 async fn read_existing_binding_if_live<T>(
     storage_path: &Path,
     binding_path: &Path,
+    label: &str,
     required_objects: &[BindingObjectSelector<T>],
 ) -> Result<Option<T>>
 where
-    T: DeserializeOwned,
+    T: DeserializeOwned + BindingArtifactSchema,
 {
     if !binding_path.exists() {
         return Ok(None);
     }
 
-    let binding: T = read_json_artifact(binding_path, "Claude SDK binding artifact").await?;
+    let binding: T = read_typed_json_artifact(binding_path, label).await?;
     for (object_type, selector) in required_objects {
         if !local_object_exists(storage_path, object_type, selector(&binding)).await? {
             return Ok(None);
@@ -1964,18 +2047,14 @@ async fn resolve_intent_binding(
         .clone()
         .unwrap_or_else(|| default_intent_binding_path(storage_path, &args.ai_session_id));
     if !path.exists() {
+        if args.intent_binding.is_some() {
+            bail!("intent binding '{}' does not exist", path.display());
+        }
         return Ok(None);
     }
 
     let artifact: PersistedIntentInputBindingArtifact =
-        read_json_artifact(&path, "persisted intent binding").await?;
-    if artifact.schema != "libra.intent_input_binding.v1" {
-        bail!(
-            "unsupported intent binding schema '{}' in '{}'",
-            artifact.schema,
-            path.display()
-        );
-    }
+        read_typed_json_artifact(&path, "persisted intent binding").await?;
 
     Ok(Some(ResolvedIntentBinding { path, artifact }))
 }
@@ -2184,6 +2263,19 @@ fn validate_provider_session_id(provider_session_id: &str) -> Result<()> {
         .all(|char| char.is_ascii_alphanumeric() || matches!(char, '.' | '_' | '-'))
     {
         bail!("invalid provider session id: only [A-Za-z0-9._-] is allowed");
+    }
+    Ok(())
+}
+
+fn validate_ai_session_id(ai_session_id: &str) -> Result<()> {
+    if ai_session_id.len() > 128 {
+        bail!("invalid ai session id: exceeds 128 characters");
+    }
+    if !ai_session_id
+        .chars()
+        .all(|char| char.is_ascii_alphanumeric() || matches!(char, '.' | '_' | '-'))
+    {
+        bail!("invalid ai session id: only [A-Za-z0-9._-] is allowed");
     }
     Ok(())
 }

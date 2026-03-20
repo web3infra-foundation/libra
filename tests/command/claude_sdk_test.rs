@@ -2604,6 +2604,259 @@ async fn test_claude_sdk_bridge_run_without_intent_binding_creates_standalone_ta
 
 #[tokio::test]
 #[serial]
+async fn test_claude_sdk_bridge_run_rejects_missing_explicit_intent_binding() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn missing_intent_binding() {}\n").expect("write source file");
+
+    let artifact_path = repo.path().join("managed-run-artifact.json");
+    fs::write(
+        &artifact_path,
+        serde_json::to_vec_pretty(&semantic_full_artifact(repo.path(), &touched_file))
+            .expect("serialize test artifact"),
+    )
+    .expect("write test artifact");
+    let request_path = repo.path().join("helper-request.json");
+    let helper_path = repo.path().join("capture-managed-helper.sh");
+    write_request_capture_shell_helper(&helper_path, &artifact_path, &request_path);
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+            "--node-binary",
+            "/bin/sh",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&run, "claude-sdk run should succeed");
+    let run_json = parse_stdout_json(&run, "claude-sdk run output");
+    let ai_session_id = run_json["aiSessionId"]
+        .as_str()
+        .expect("aiSessionId should be present");
+    let missing_binding = repo.path().join("missing-intent-binding.json");
+
+    let bridge = run_libra_command(
+        &[
+            "claude-sdk",
+            "bridge-run",
+            "--ai-session-id",
+            ai_session_id,
+            "--intent-binding",
+            missing_binding.to_str().expect("binding path utf-8"),
+        ],
+        repo.path(),
+    );
+    assert!(
+        !bridge.status.success(),
+        "bridge-run should reject an explicit missing intent binding"
+    );
+    assert!(
+        String::from_utf8_lossy(&bridge.stderr).contains("does not exist"),
+        "error should explain that the requested binding path is missing"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_bridge_run_rejects_mismatched_existing_intent_link() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn delayed_intent_link() {}\n").expect("write source file");
+
+    let artifact_path = repo.path().join("managed-run-artifact.json");
+    fs::write(
+        &artifact_path,
+        serde_json::to_vec_pretty(&semantic_full_artifact(repo.path(), &touched_file))
+            .expect("serialize test artifact"),
+    )
+    .expect("write test artifact");
+    let request_path = repo.path().join("helper-request.json");
+    let helper_path = repo.path().join("capture-managed-helper.sh");
+    write_request_capture_shell_helper(&helper_path, &artifact_path, &request_path);
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+            "--node-binary",
+            "/bin/sh",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&run, "claude-sdk run should succeed");
+    let run_json = parse_stdout_json(&run, "claude-sdk run output");
+    let ai_session_id = run_json["aiSessionId"]
+        .as_str()
+        .expect("aiSessionId should be present")
+        .to_string();
+
+    let standalone_bridge = run_libra_command(
+        &[
+            "claude-sdk",
+            "bridge-run",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &standalone_bridge,
+        "standalone bridge-run should succeed before intent persistence",
+    );
+
+    let resolve = run_libra_command(
+        &[
+            "claude-sdk",
+            "resolve-extraction",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&resolve, "resolve-extraction should succeed");
+
+    let persist_intent = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-intent",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&persist_intent, "persist-intent should succeed");
+    let persist_intent_json = parse_stdout_json(&persist_intent, "persist-intent output");
+    let binding_path = persist_intent_json["bindingPath"]
+        .as_str()
+        .expect("bindingPath should be present");
+
+    let bridge_with_intent = run_libra_command(
+        &[
+            "claude-sdk",
+            "bridge-run",
+            "--ai-session-id",
+            &ai_session_id,
+            "--intent-binding",
+            binding_path,
+        ],
+        repo.path(),
+    );
+    assert!(
+        !bridge_with_intent.status.success(),
+        "bridge-run should reject reusing a standalone binding when a concrete intent is requested"
+    );
+    assert!(
+        String::from_utf8_lossy(&bridge_with_intent.stderr)
+            .contains("remove the stale binding to rebuild intentionally"),
+        "error should explain how to recover from the stale standalone binding"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_bridge_run_rejects_invalid_binding_schema_on_reuse() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn invalid_binding_schema() {}\n").expect("write source file");
+
+    let artifact_path = repo.path().join("managed-run-artifact.json");
+    fs::write(
+        &artifact_path,
+        serde_json::to_vec_pretty(&semantic_full_artifact(repo.path(), &touched_file))
+            .expect("serialize test artifact"),
+    )
+    .expect("write test artifact");
+    let request_path = repo.path().join("helper-request.json");
+    let helper_path = repo.path().join("capture-managed-helper.sh");
+    write_request_capture_shell_helper(&helper_path, &artifact_path, &request_path);
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+            "--node-binary",
+            "/bin/sh",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&run, "claude-sdk run should succeed");
+    let run_json = parse_stdout_json(&run, "claude-sdk run output");
+    let ai_session_id = run_json["aiSessionId"]
+        .as_str()
+        .expect("aiSessionId should be present")
+        .to_string();
+
+    let bridge = run_libra_command(
+        &[
+            "claude-sdk",
+            "bridge-run",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&bridge, "bridge-run should succeed");
+    let bridge_json = parse_stdout_json(&bridge, "bridge-run output");
+    let binding_path = PathBuf::from(
+        bridge_json["bindingPath"]
+            .as_str()
+            .expect("bindingPath should be present"),
+    );
+
+    let mut binding_json: Value =
+        serde_json::from_slice(&fs::read(&binding_path).expect("read formal run binding"))
+            .expect("deserialize formal run binding");
+    binding_json["schema"] = json!("libra.invalid_binding.v1");
+    fs::write(
+        &binding_path,
+        serde_json::to_vec_pretty(&binding_json).expect("serialize invalid binding"),
+    )
+    .expect("write invalid binding");
+
+    let bridge_repeat = run_libra_command(
+        &[
+            "claude-sdk",
+            "bridge-run",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert!(
+        !bridge_repeat.status.success(),
+        "bridge-run should reject a cached binding with the wrong schema"
+    );
+    assert!(
+        String::from_utf8_lossy(&bridge_repeat.stderr)
+            .contains("unsupported Claude formal run binding schema"),
+        "error should name the invalid cached binding schema"
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_claude_sdk_formal_bridge_requires_prior_bindings() {
     let repo = tempdir().expect("failed to create repo root");
     test::setup_with_new_libra_in(repo.path()).await;
