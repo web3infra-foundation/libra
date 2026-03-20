@@ -10,7 +10,7 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
 use clap::{Args, Parser, Subcommand};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::{fs, io::AsyncWriteExt, process::Command};
@@ -23,9 +23,15 @@ use crate::{
                 IntentDraft, ResolveContext, RiskLevel, persist_intentspec, render_summary,
                 repair_intentspec, resolve_intentspec, validate_intentspec,
             },
-            mcp::server::LibraMcpServer,
+            mcp::{
+                resource::{
+                    CreateDecisionParams, CreateEvidenceParams, CreateRunParams, CreateTaskParams,
+                },
+                server::LibraMcpServer,
+            },
             providers::claude_sdk::managed::{
-                ClaudeManagedArtifact, PersistedManagedArtifactOutcome, persist_managed_artifact,
+                ClaudeManagedArtifact, ManagedAuditBundle, PersistedManagedArtifactOutcome,
+                persist_managed_artifact,
             },
         },
         db,
@@ -40,6 +46,10 @@ const INTENT_RESOLUTIONS_DIR: &str = "intent-resolutions";
 const INTENT_INPUTS_DIR: &str = "intent-inputs";
 const PROVIDER_SESSIONS_DIR: &str = "provider-sessions";
 const EVIDENCE_INPUTS_DIR: &str = "evidence-inputs";
+const FORMAL_RUN_BINDINGS_DIR: &str = "claude-run-bindings";
+const EVIDENCE_BINDINGS_DIR: &str = "claude-evidence-bindings";
+const DECISION_BINDINGS_DIR: &str = "claude-decision-bindings";
+const ZERO_COMMIT_SHA: &str = "0000000000000000000000000000000000000000";
 const EMBEDDED_HELPER_SOURCE: &str = include_str!("../internal/ai/providers/claude_sdk/helper.cjs");
 
 #[derive(Parser, Debug)]
@@ -81,6 +91,21 @@ enum ClaudeSdkSubcommand {
         about = "Persist a resolved IntentSpec preview into Libra intent history"
     )]
     PersistIntent(PersistIntentArgs),
+    #[command(
+        name = "bridge-run",
+        about = "Create or reuse formal Task/Run objects for a Claude SDK ai_session"
+    )]
+    BridgeRun(BridgeRunArgs),
+    #[command(
+        name = "persist-evidence",
+        about = "Persist formal Evidence objects for a bridged Claude SDK ai_session"
+    )]
+    PersistEvidence(PersistEvidenceArgs),
+    #[command(
+        name = "persist-decision",
+        about = "Persist a formal terminal Decision for a bridged Claude SDK ai_session"
+    )]
+    PersistDecision(PersistDecisionArgs),
 }
 
 #[derive(Args, Debug)]
@@ -274,6 +299,43 @@ struct PersistIntentArgs {
     output: Option<PathBuf>,
 }
 
+#[derive(Args, Debug)]
+struct BridgeRunArgs {
+    #[arg(
+        long,
+        help = "Claude SDK ai_session_id to bridge into formal Task/Run objects"
+    )]
+    ai_session_id: String,
+    #[arg(
+        long,
+        help = "Optional persisted intent binding artifact path; defaults to .libra/intent-inputs/<ai-session-id>.json when present"
+    )]
+    intent_binding: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "Optional intent UUID override; when set, skip intent binding artifact lookup"
+    )]
+    intent_id: Option<String>,
+}
+
+#[derive(Args, Debug)]
+struct PersistEvidenceArgs {
+    #[arg(
+        long,
+        help = "Claude SDK ai_session_id whose formal run should receive Evidence"
+    )]
+    ai_session_id: String,
+}
+
+#[derive(Args, Debug)]
+struct PersistDecisionArgs {
+    #[arg(
+        long,
+        help = "Claude SDK ai_session_id whose formal run should receive a terminal Decision"
+    )]
+    ai_session_id: String,
+}
+
 #[derive(Debug, Serialize)]
 struct ClaudeSdkCommandOutput {
     ok: bool,
@@ -328,6 +390,57 @@ struct PersistIntentCommandOutput {
     #[serde(rename = "bindingPath")]
     binding_path: String,
     summary: String,
+}
+
+#[derive(Debug, Serialize)]
+struct BridgeRunCommandOutput {
+    ok: bool,
+    #[serde(rename = "mode")]
+    command_mode: &'static str,
+    #[serde(rename = "aiSessionId")]
+    ai_session_id: String,
+    #[serde(rename = "providerSessionId")]
+    provider_session_id: String,
+    #[serde(rename = "taskId")]
+    task_id: String,
+    #[serde(rename = "runId")]
+    run_id: String,
+    #[serde(rename = "bindingPath")]
+    binding_path: String,
+    #[serde(rename = "intentId", skip_serializing_if = "Option::is_none")]
+    intent_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct PersistEvidenceCommandOutput {
+    ok: bool,
+    #[serde(rename = "mode")]
+    command_mode: &'static str,
+    #[serde(rename = "aiSessionId")]
+    ai_session_id: String,
+    #[serde(rename = "runId")]
+    run_id: String,
+    #[serde(rename = "evidenceIds")]
+    evidence_ids: Vec<String>,
+    #[serde(rename = "bindingPath")]
+    binding_path: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PersistDecisionCommandOutput {
+    ok: bool,
+    #[serde(rename = "mode")]
+    command_mode: &'static str,
+    #[serde(rename = "aiSessionId")]
+    ai_session_id: String,
+    #[serde(rename = "runId")]
+    run_id: String,
+    #[serde(rename = "decisionId")]
+    decision_id: String,
+    #[serde(rename = "decisionType")]
+    decision_type: String,
+    #[serde(rename = "bindingPath")]
+    binding_path: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -722,9 +835,9 @@ struct PersistedIntentResolutionArtifact {
     intentspec: crate::internal::ai::intentspec::IntentSpec,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedIntentInputBindingArtifact {
-    schema: &'static str,
+    schema: String,
     #[serde(rename = "aiSessionId", skip_serializing_if = "Option::is_none")]
     ai_session_id: Option<String>,
     #[serde(rename = "resolutionPath")]
@@ -738,6 +851,82 @@ struct PersistedIntentInputBindingArtifact {
     #[serde(rename = "intentId")]
     intent_id: String,
     summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ClaudeFormalRunBindingArtifact {
+    schema: String,
+    #[serde(rename = "aiSessionId")]
+    ai_session_id: String,
+    #[serde(rename = "providerSessionId")]
+    provider_session_id: String,
+    #[serde(rename = "taskId")]
+    task_id: String,
+    #[serde(rename = "runId")]
+    run_id: String,
+    #[serde(rename = "auditBundlePath")]
+    audit_bundle_path: String,
+    #[serde(rename = "intentBindingPath", skip_serializing_if = "Option::is_none")]
+    intent_binding_path: Option<String>,
+    #[serde(rename = "intentId", skip_serializing_if = "Option::is_none")]
+    intent_id: Option<String>,
+    #[serde(rename = "managedRunStatus")]
+    managed_run_status: String,
+    #[serde(rename = "intentExtractionStatus")]
+    intent_extraction_status: String,
+    summary: String,
+    #[serde(rename = "createdAt")]
+    created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ClaudeEvidenceBindingArtifact {
+    schema: String,
+    #[serde(rename = "aiSessionId")]
+    ai_session_id: String,
+    #[serde(rename = "providerSessionId")]
+    provider_session_id: String,
+    #[serde(rename = "runId")]
+    run_id: String,
+    #[serde(rename = "runBindingPath")]
+    run_binding_path: String,
+    #[serde(rename = "evidenceIds")]
+    evidence_ids: Vec<String>,
+    evidences: Vec<ClaudeEvidenceBindingEntry>,
+    #[serde(rename = "createdAt")]
+    created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ClaudeEvidenceBindingEntry {
+    kind: String,
+    #[serde(rename = "evidenceId")]
+    evidence_id: String,
+    #[serde(rename = "sourcePath")]
+    source_path: String,
+    summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ClaudeDecisionBindingArtifact {
+    schema: String,
+    #[serde(rename = "aiSessionId")]
+    ai_session_id: String,
+    #[serde(rename = "providerSessionId")]
+    provider_session_id: String,
+    #[serde(rename = "runId")]
+    run_id: String,
+    #[serde(rename = "decisionId")]
+    decision_id: String,
+    #[serde(rename = "decisionType")]
+    decision_type: String,
+    rationale: String,
+    #[serde(rename = "runBindingPath")]
+    run_binding_path: String,
+    #[serde(rename = "evidenceBindingPath")]
+    evidence_binding_path: String,
+    #[serde(rename = "createdAt")]
+    created_at: String,
 }
 
 #[derive(Debug)]
@@ -754,6 +943,9 @@ pub async fn execute(args: ClaudeSdkArgs) -> Result<()> {
         ClaudeSdkSubcommand::BuildEvidenceInput(args) => build_evidence_input(args).await,
         ClaudeSdkSubcommand::ResolveExtraction(args) => resolve_extraction(args).await,
         ClaudeSdkSubcommand::PersistIntent(args) => persist_intent(args).await,
+        ClaudeSdkSubcommand::BridgeRun(args) => bridge_run(args).await,
+        ClaudeSdkSubcommand::PersistEvidence(args) => persist_evidence(args).await,
+        ClaudeSdkSubcommand::PersistDecision(args) => persist_decision(args).await,
     }
 }
 
@@ -1090,7 +1282,7 @@ async fn persist_intent(args: PersistIntentArgs) -> Result<()> {
     let intent_id = persist_intentspec(&resolved.intentspec, mcp_server.as_ref()).await?;
 
     let binding_artifact = PersistedIntentInputBindingArtifact {
-        schema: "libra.intent_input_binding.v1",
+        schema: "libra.intent_input_binding.v1".to_string(),
         ai_session_id: resolved.ai_session_id.clone(),
         resolution_path: resolution_path.to_string_lossy().to_string(),
         extraction_path: resolved.extraction_path.clone(),
@@ -1125,6 +1317,426 @@ async fn persist_intent(args: PersistIntentArgs) -> Result<()> {
         serde_json::to_string_pretty(&payload)
             .context("failed to serialize persist-intent output")?
     );
+    Ok(())
+}
+
+async fn bridge_run(args: BridgeRunArgs) -> Result<()> {
+    let storage_path = util::try_get_storage_path(None)
+        .context("claude-sdk commands must be run inside a Libra repository")?;
+    validate_ai_session_id(&args.ai_session_id)?;
+    if args.intent_binding.is_some() && args.intent_id.is_some() {
+        bail!("pass either --intent-binding or --intent-id, not both");
+    }
+
+    let intent_binding = resolve_intent_binding(&storage_path, &args).await?;
+    let requested_intent_id = args.intent_id.clone().or_else(|| {
+        intent_binding
+            .as_ref()
+            .map(|binding| binding.artifact.intent_id.clone())
+    });
+    let binding_path = formal_run_binding_path(&storage_path, &args.ai_session_id);
+    if let Some(existing) = read_existing_binding_if_live::<ClaudeFormalRunBindingArtifact>(
+        &storage_path,
+        &binding_path,
+        "Claude formal run binding",
+        &[
+            ("task", |binding| binding.task_id.as_str()),
+            ("run", |binding| binding.run_id.as_str()),
+        ],
+    )
+    .await?
+    {
+        if let Some(intent_id) = requested_intent_id.as_deref()
+            && existing.intent_id.as_deref() != Some(intent_id)
+        {
+            bail!(
+                "existing formal run binding '{}' is linked to intent {:?}, but '{}' was requested; remove the stale binding to rebuild intentionally",
+                binding_path.display(),
+                existing.intent_id,
+                intent_id
+            );
+        }
+        print_bridge_run_output(&binding_path, &existing)?;
+        return Ok(());
+    }
+
+    let audit_bundle_path = managed_audit_bundle_path(&storage_path, &args.ai_session_id);
+    let audit_bundle: ManagedAuditBundle =
+        read_json_artifact(&audit_bundle_path, "managed audit bundle").await?;
+    if audit_bundle.schema != "libra.claude_managed_audit_bundle.v1" {
+        bail!(
+            "unsupported managed audit bundle schema '{}' in '{}'",
+            audit_bundle.schema,
+            audit_bundle_path.display()
+        );
+    }
+    let summary = derive_formal_task_summary(&audit_bundle, intent_binding.as_ref());
+    let description = derive_formal_task_description(&audit_bundle);
+    let goal_type = derive_goal_type(&audit_bundle);
+    let managed_run_status = audit_bundle
+        .bridge
+        .object_candidates
+        .run_event
+        .status
+        .clone();
+    let intent_extraction_status = audit_bundle.bridge.intent_extraction.status.clone();
+
+    let mcp_server = init_local_mcp_server(&storage_path).await?;
+    let actor = mcp_server
+        .resolve_actor_from_params(Some("system"), Some("claude-sdk-bridge"))
+        .map_err(|error| anyhow!("failed to resolve Claude SDK bridge actor: {error:?}"))?;
+    let task_id = parse_created_id(
+        "task",
+        &mcp_server
+            .create_task_impl(
+                CreateTaskParams {
+                    title: summary.clone(),
+                    description: Some(description),
+                    goal_type,
+                    constraints: Some(vec![format!(
+                        "claude-sdk ai_session_id={}",
+                        args.ai_session_id
+                    )]),
+                    acceptance_criteria: None,
+                    requested_by_kind: None,
+                    requested_by_id: None,
+                    dependencies: None,
+                    intent_id: requested_intent_id.clone(),
+                    parent_task_id: None,
+                    origin_step_id: None,
+                    status: Some(task_status_for_managed_run(&managed_run_status).to_string()),
+                    reason: Some(format!(
+                        "Claude SDK managed session {} bridged into formal task",
+                        args.ai_session_id
+                    )),
+                    tags: None,
+                    external_ids: None,
+                    actor_kind: Some("system".to_string()),
+                    actor_id: Some("claude-sdk-bridge".to_string()),
+                },
+                actor.clone(),
+            )
+            .await
+            .map_err(|error| anyhow!("failed to create formal Claude task: {error:?}"))?,
+    )?;
+    let run_id = parse_created_id(
+        "run",
+        &mcp_server
+            .create_run_impl(
+                CreateRunParams {
+                    task_id: task_id.clone(),
+                    base_commit_sha: current_head_sha().await,
+                    plan_id: None,
+                    status: Some(run_status_for_managed_run(&managed_run_status).to_string()),
+                    context_snapshot_id: None,
+                    error: run_error_for_managed_status(&managed_run_status),
+                    agent_instances: None,
+                    metrics_json: Some(
+                        json!({
+                            "provider": "claude",
+                            "aiSessionId": args.ai_session_id,
+                            "providerSessionId": audit_bundle.provider_session_id,
+                            "intentExtractionStatus": intent_extraction_status,
+                        })
+                        .to_string(),
+                    ),
+                    reason: Some(format!(
+                        "Claude SDK managed session {} bridged into formal run",
+                        args.ai_session_id
+                    )),
+                    orchestrator_version: None,
+                    tags: None,
+                    external_ids: None,
+                    actor_kind: Some("system".to_string()),
+                    actor_id: Some("claude-sdk-bridge".to_string()),
+                },
+                actor,
+            )
+            .await
+            .map_err(|error| anyhow!("failed to create formal Claude run: {error:?}"))?,
+    )?;
+
+    let binding = ClaudeFormalRunBindingArtifact {
+        schema: "libra.claude_formal_run_binding.v1".to_string(),
+        ai_session_id: args.ai_session_id,
+        provider_session_id: audit_bundle.provider_session_id,
+        task_id,
+        run_id,
+        audit_bundle_path: audit_bundle_path.to_string_lossy().to_string(),
+        intent_binding_path: intent_binding
+            .as_ref()
+            .map(|resolved| resolved.path.to_string_lossy().to_string()),
+        intent_id: requested_intent_id,
+        managed_run_status,
+        intent_extraction_status,
+        summary,
+        created_at: Utc::now().to_rfc3339(),
+    };
+    write_pretty_json_file(&binding_path, &binding).await?;
+    print_bridge_run_output(&binding_path, &binding)?;
+    Ok(())
+}
+
+async fn persist_evidence(args: PersistEvidenceArgs) -> Result<()> {
+    let storage_path = util::try_get_storage_path(None)
+        .context("claude-sdk commands must be run inside a Libra repository")?;
+    validate_ai_session_id(&args.ai_session_id)?;
+
+    let run_binding_path = formal_run_binding_path(&storage_path, &args.ai_session_id);
+    let run_binding: ClaudeFormalRunBindingArtifact =
+        read_typed_json_artifact(&run_binding_path, "formal Claude run binding")
+            .await
+            .with_context(|| {
+                format!(
+                    "run 'claude-sdk bridge-run --ai-session-id {}' first",
+                    args.ai_session_id
+                )
+            })?;
+    let binding_path = evidence_binding_path(&storage_path, &args.ai_session_id);
+    if let Some(existing) = read_existing_binding_if_live::<ClaudeEvidenceBindingArtifact>(
+        &storage_path,
+        &binding_path,
+        "Claude evidence binding",
+        &[("run", |binding| binding.run_id.as_str())],
+    )
+    .await?
+        && existing.run_id == run_binding.run_id
+        && evidence_binding_objects_exist(&storage_path, &existing).await?
+    {
+        print_persist_evidence_output(&binding_path, &existing)?;
+        return Ok(());
+    }
+
+    let audit_bundle: ManagedAuditBundle = read_json_artifact(
+        Path::new(&run_binding.audit_bundle_path),
+        "managed audit bundle",
+    )
+    .await?;
+    let provider_session_object_id =
+        build_provider_session_object_id(&run_binding.provider_session_id)?;
+    let provider_session_path =
+        provider_session_artifact_path(&storage_path, &provider_session_object_id);
+    let evidence_input_object_id =
+        build_evidence_input_object_id(&run_binding.provider_session_id)?;
+    let evidence_input_path =
+        evidence_input_artifact_path(&storage_path, &evidence_input_object_id);
+
+    let mut entries = Vec::new();
+    if provider_session_path.exists() {
+        let snapshot: PersistedProviderSessionSnapshot =
+            read_json_artifact(&provider_session_path, "provider session snapshot").await?;
+        let summary = format!(
+            "provider_session summary='{}'; message_count={}; first_kind={}; last_kind={}",
+            snapshot.summary,
+            snapshot
+                .message_sync
+                .as_ref()
+                .map(|sync| sync.message_count)
+                .unwrap_or(0),
+            snapshot
+                .message_sync
+                .as_ref()
+                .and_then(|sync| sync.first_message_kind.as_deref())
+                .unwrap_or("-"),
+            snapshot
+                .message_sync
+                .as_ref()
+                .and_then(|sync| sync.last_message_kind.as_deref())
+                .unwrap_or("-"),
+        );
+        entries.push(PendingEvidence {
+            kind: "provider_session_snapshot".to_string(),
+            source_path: provider_session_path.to_string_lossy().to_string(),
+            summary,
+        });
+    }
+
+    if evidence_input_path.exists() {
+        let evidence_input: PersistedEvidenceInputArtifact =
+            read_json_artifact(&evidence_input_path, "evidence input artifact").await?;
+        let summary = format!(
+            "evidence_input messages={}; assistant_messages={}; observed_tools={}; has_structured_output={}; has_permission_denials={}",
+            evidence_input.message_overview.message_count,
+            evidence_input.content_overview.assistant_message_count,
+            evidence_input.content_overview.observed_tools.len(),
+            evidence_input.runtime_signals.has_structured_output,
+            evidence_input.runtime_signals.has_permission_denials,
+        );
+        entries.push(PendingEvidence {
+            kind: "evidence_input_summary".to_string(),
+            source_path: evidence_input_path.to_string_lossy().to_string(),
+            summary,
+        });
+    }
+
+    let extraction_summary = format!(
+        "intent_extraction status={}; source={}; structured_output={}",
+        audit_bundle.bridge.intent_extraction.status,
+        audit_bundle.bridge.intent_extraction.source,
+        audit_bundle
+            .raw_artifact
+            .result_message
+            .as_ref()
+            .and_then(|result| result.structured_output.as_ref())
+            .is_some(),
+    );
+    entries.push(PendingEvidence {
+        kind: "intent_extraction_result".to_string(),
+        source_path: run_binding.audit_bundle_path.clone(),
+        summary: extraction_summary,
+    });
+
+    let mcp_server = init_local_mcp_server(&storage_path).await?;
+    let actor = mcp_server
+        .resolve_actor_from_params(Some("system"), Some("claude-sdk-evidence"))
+        .map_err(|error| anyhow!("failed to resolve Claude SDK evidence actor: {error:?}"))?;
+    let mut evidence_entries = Vec::new();
+    for entry in entries {
+        let evidence_id = parse_created_id(
+            "evidence",
+            &mcp_server
+                .create_evidence_impl(
+                    CreateEvidenceParams {
+                        run_id: run_binding.run_id.clone(),
+                        patchset_id: None,
+                        kind: entry.kind.clone(),
+                        tool: "claude-sdk".to_string(),
+                        command: None,
+                        exit_code: None,
+                        summary: Some(entry.summary.clone()),
+                        report_artifacts: None,
+                        tags: None,
+                        external_ids: None,
+                        actor_kind: Some("system".to_string()),
+                        actor_id: Some("claude-sdk-evidence".to_string()),
+                    },
+                    actor.clone(),
+                )
+                .await
+                .map_err(|error| {
+                    anyhow!(
+                        "failed to create Claude evidence '{}': {error:?}",
+                        entry.kind
+                    )
+                })?,
+        )?;
+        evidence_entries.push(ClaudeEvidenceBindingEntry {
+            kind: entry.kind,
+            evidence_id,
+            source_path: entry.source_path,
+            summary: entry.summary,
+        });
+    }
+
+    let binding = ClaudeEvidenceBindingArtifact {
+        schema: "libra.claude_evidence_binding.v1".to_string(),
+        ai_session_id: args.ai_session_id,
+        provider_session_id: run_binding.provider_session_id,
+        run_id: run_binding.run_id.clone(),
+        run_binding_path: run_binding_path.to_string_lossy().to_string(),
+        evidence_ids: evidence_entries
+            .iter()
+            .map(|entry| entry.evidence_id.clone())
+            .collect(),
+        evidences: evidence_entries,
+        created_at: Utc::now().to_rfc3339(),
+    };
+    write_pretty_json_file(&binding_path, &binding).await?;
+    print_persist_evidence_output(&binding_path, &binding)?;
+    Ok(())
+}
+
+async fn persist_decision(args: PersistDecisionArgs) -> Result<()> {
+    let storage_path = util::try_get_storage_path(None)
+        .context("claude-sdk commands must be run inside a Libra repository")?;
+    validate_ai_session_id(&args.ai_session_id)?;
+
+    let run_binding_path = formal_run_binding_path(&storage_path, &args.ai_session_id);
+    let run_binding: ClaudeFormalRunBindingArtifact =
+        read_typed_json_artifact(&run_binding_path, "formal Claude run binding")
+            .await
+            .with_context(|| {
+                format!(
+                    "run 'claude-sdk bridge-run --ai-session-id {}' first",
+                    args.ai_session_id
+                )
+            })?;
+    let evidence_binding_path = evidence_binding_path(&storage_path, &args.ai_session_id);
+    let evidence_binding: ClaudeEvidenceBindingArtifact =
+        read_typed_json_artifact(&evidence_binding_path, "Claude evidence binding")
+            .await
+            .with_context(|| {
+                format!(
+                    "run 'claude-sdk persist-evidence --ai-session-id {}' first",
+                    args.ai_session_id
+                )
+            })?;
+    let binding_path = decision_binding_path(&storage_path, &args.ai_session_id);
+    if let Some(existing) = read_existing_binding_if_live::<ClaudeDecisionBindingArtifact>(
+        &storage_path,
+        &binding_path,
+        "Claude decision binding",
+        &[
+            ("run", |binding| binding.run_id.as_str()),
+            ("decision", |binding| binding.decision_id.as_str()),
+        ],
+    )
+    .await?
+        && existing.run_id == run_binding.run_id
+        && existing.evidence_binding_path == evidence_binding_path.to_string_lossy()
+    {
+        print_persist_decision_output(&binding_path, &existing)?;
+        return Ok(());
+    }
+
+    let decision_type = decision_type_for_binding(&run_binding, &evidence_binding);
+    let rationale = format!(
+        "managed_run_status={}; intent_extraction_status={}; evidence_count={}",
+        run_binding.managed_run_status,
+        run_binding.intent_extraction_status,
+        evidence_binding.evidence_ids.len()
+    );
+
+    let mcp_server = init_local_mcp_server(&storage_path).await?;
+    let actor = mcp_server
+        .resolve_actor_from_params(Some("system"), Some("claude-sdk-decision"))
+        .map_err(|error| anyhow!("failed to resolve Claude SDK decision actor: {error:?}"))?;
+    let decision_id = parse_created_id(
+        "decision",
+        &mcp_server
+            .create_decision_impl(
+                CreateDecisionParams {
+                    run_id: run_binding.run_id.clone(),
+                    decision_type: decision_type.to_string(),
+                    chosen_patchset_id: None,
+                    result_commit_sha: None,
+                    checkpoint_id: None,
+                    rationale: Some(rationale.clone()),
+                    tags: None,
+                    external_ids: None,
+                    actor_kind: Some("system".to_string()),
+                    actor_id: Some("claude-sdk-decision".to_string()),
+                },
+                actor,
+            )
+            .await
+            .map_err(|error| anyhow!("failed to create Claude decision: {error:?}"))?,
+    )?;
+
+    let binding = ClaudeDecisionBindingArtifact {
+        schema: "libra.claude_decision_binding.v1".to_string(),
+        ai_session_id: args.ai_session_id,
+        provider_session_id: run_binding.provider_session_id,
+        run_id: run_binding.run_id,
+        decision_id,
+        decision_type: decision_type.to_string(),
+        rationale,
+        run_binding_path: run_binding_path.to_string_lossy().to_string(),
+        evidence_binding_path: evidence_binding_path.to_string_lossy().to_string(),
+        created_at: Utc::now().to_rfc3339(),
+    };
+    write_pretty_json_file(&binding_path, &binding).await?;
+    print_persist_decision_output(&binding_path, &binding)?;
     Ok(())
 }
 
@@ -1169,9 +1781,12 @@ fn resolve_prompt(args: &RunManagedArgs) -> Result<String> {
 fn resolve_extraction_path(storage_path: &Path, args: &ResolveExtractionArgs) -> Result<PathBuf> {
     match (&args.extraction, &args.ai_session_id) {
         (Some(path), None) => Ok(path.clone()),
-        (None, Some(ai_session_id)) => Ok(storage_path
-            .join(INTENT_EXTRACTIONS_DIR)
-            .join(format!("{ai_session_id}.json"))),
+        (None, Some(ai_session_id)) => {
+            validate_ai_session_id(ai_session_id)?;
+            Ok(storage_path
+                .join(INTENT_EXTRACTIONS_DIR)
+                .join(format!("{ai_session_id}.json")))
+        }
         (Some(_), Some(_)) => bail!("pass either --extraction or --ai-session-id, not both"),
         (None, None) => bail!("missing extraction input; pass --extraction or --ai-session-id"),
     }
@@ -1180,9 +1795,12 @@ fn resolve_extraction_path(storage_path: &Path, args: &ResolveExtractionArgs) ->
 fn resolve_resolution_path(storage_path: &Path, args: &PersistIntentArgs) -> Result<PathBuf> {
     match (&args.resolution, &args.ai_session_id) {
         (Some(path), None) => Ok(path.clone()),
-        (None, Some(ai_session_id)) => Ok(storage_path
-            .join(INTENT_RESOLUTIONS_DIR)
-            .join(format!("{ai_session_id}.json"))),
+        (None, Some(ai_session_id)) => {
+            validate_ai_session_id(ai_session_id)?;
+            Ok(storage_path
+                .join(INTENT_RESOLUTIONS_DIR)
+                .join(format!("{ai_session_id}.json")))
+        }
         (Some(_), Some(_)) => bail!("pass either --resolution or --ai-session-id, not both"),
         (None, None) => bail!("missing resolution input; pass --resolution or --ai-session-id"),
     }
@@ -1219,7 +1837,7 @@ async fn current_head_sha() -> String {
     Head::current_commit()
         .await
         .map(|hash| hash.to_string())
-        .unwrap_or_else(|| "HEAD".to_string())
+        .unwrap_or_else(|| ZERO_COMMIT_SHA.to_string())
 }
 
 async fn init_local_mcp_server(storage_dir: &Path) -> Result<Arc<LibraMcpServer>> {
@@ -1277,6 +1895,365 @@ where
         .with_context(|| format!("failed to write JSON artifact '{}'", path.display()))
 }
 
+#[derive(Debug, Clone)]
+struct ResolvedIntentBinding {
+    path: PathBuf,
+    artifact: PersistedIntentInputBindingArtifact,
+}
+
+#[derive(Debug, Clone)]
+struct PendingEvidence {
+    kind: String,
+    source_path: String,
+    summary: String,
+}
+
+type BindingObjectSelector<T> = (&'static str, fn(&T) -> &str);
+
+trait BindingArtifactSchema {
+    const SCHEMA: &'static str;
+
+    fn schema(&self) -> &str;
+}
+
+impl BindingArtifactSchema for PersistedIntentInputBindingArtifact {
+    const SCHEMA: &'static str = "libra.intent_input_binding.v1";
+
+    fn schema(&self) -> &str {
+        &self.schema
+    }
+}
+
+impl BindingArtifactSchema for ClaudeFormalRunBindingArtifact {
+    const SCHEMA: &'static str = "libra.claude_formal_run_binding.v1";
+
+    fn schema(&self) -> &str {
+        &self.schema
+    }
+}
+
+impl BindingArtifactSchema for ClaudeEvidenceBindingArtifact {
+    const SCHEMA: &'static str = "libra.claude_evidence_binding.v1";
+
+    fn schema(&self) -> &str {
+        &self.schema
+    }
+}
+
+impl BindingArtifactSchema for ClaudeDecisionBindingArtifact {
+    const SCHEMA: &'static str = "libra.claude_decision_binding.v1";
+
+    fn schema(&self) -> &str {
+        &self.schema
+    }
+}
+
+async fn read_json_artifact<T>(path: &Path, label: &str) -> Result<T>
+where
+    T: DeserializeOwned,
+{
+    let content = fs::read_to_string(path)
+        .await
+        .with_context(|| format!("failed to read {label} '{}'", path.display()))?;
+    serde_json::from_str(&content)
+        .with_context(|| format!("failed to parse {label} '{}'", path.display()))
+}
+
+fn validate_binding_schema<T>(binding: &T, path: &Path, label: &str) -> Result<()>
+where
+    T: BindingArtifactSchema,
+{
+    if binding.schema() != T::SCHEMA {
+        bail!(
+            "unsupported {label} schema '{}' in '{}'",
+            binding.schema(),
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+async fn read_typed_json_artifact<T>(path: &Path, label: &str) -> Result<T>
+where
+    T: DeserializeOwned + BindingArtifactSchema,
+{
+    let artifact: T = read_json_artifact(path, label).await?;
+    validate_binding_schema(&artifact, path, label)?;
+    Ok(artifact)
+}
+
+async fn local_object_exists(
+    storage_path: &Path,
+    object_type: &str,
+    object_id: &str,
+) -> Result<bool> {
+    let mcp_server = init_local_mcp_server(storage_path).await?;
+    let history = mcp_server
+        .intent_history_manager
+        .as_ref()
+        .ok_or_else(|| anyhow!("local MCP history manager is unavailable"))?;
+    Ok(history
+        .get_object_hash(object_type, object_id)
+        .await
+        .with_context(|| format!("failed to inspect {object_type} history for '{object_id}'"))?
+        .is_some())
+}
+
+async fn read_existing_binding_if_live<T>(
+    storage_path: &Path,
+    binding_path: &Path,
+    label: &str,
+    required_objects: &[BindingObjectSelector<T>],
+) -> Result<Option<T>>
+where
+    T: DeserializeOwned + BindingArtifactSchema,
+{
+    if !binding_path.exists() {
+        return Ok(None);
+    }
+
+    let binding: T = read_typed_json_artifact(binding_path, label).await?;
+    for (object_type, selector) in required_objects {
+        if !local_object_exists(storage_path, object_type, selector(&binding)).await? {
+            return Ok(None);
+        }
+    }
+
+    Ok(Some(binding))
+}
+
+async fn evidence_binding_objects_exist(
+    storage_path: &Path,
+    binding: &ClaudeEvidenceBindingArtifact,
+) -> Result<bool> {
+    for evidence_id in &binding.evidence_ids {
+        if !local_object_exists(storage_path, "evidence", evidence_id).await? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+async fn resolve_intent_binding(
+    storage_path: &Path,
+    args: &BridgeRunArgs,
+) -> Result<Option<ResolvedIntentBinding>> {
+    if args.intent_id.is_some() {
+        return Ok(None);
+    }
+
+    let path = args
+        .intent_binding
+        .clone()
+        .unwrap_or_else(|| default_intent_binding_path(storage_path, &args.ai_session_id));
+    if !path.exists() {
+        if args.intent_binding.is_some() {
+            bail!("intent binding '{}' does not exist", path.display());
+        }
+        return Ok(None);
+    }
+
+    let artifact: PersistedIntentInputBindingArtifact =
+        read_typed_json_artifact(&path, "persisted intent binding").await?;
+
+    Ok(Some(ResolvedIntentBinding { path, artifact }))
+}
+
+fn derive_formal_task_summary(
+    audit_bundle: &ManagedAuditBundle,
+    intent_binding: Option<&ResolvedIntentBinding>,
+) -> String {
+    if let Some(binding) = intent_binding {
+        return binding.artifact.summary.clone();
+    }
+
+    if let Some(extraction) = audit_bundle.bridge.intent_extraction_artifact.as_ref() {
+        return extraction.extraction.intent.summary.clone();
+    }
+
+    audit_bundle
+        .raw_artifact
+        .result_message
+        .as_ref()
+        .and_then(|result| result.structured_output.as_ref())
+        .and_then(|value| value.get("summary"))
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .unwrap_or_else(|| format!("Claude SDK session {}", audit_bundle.provider_session_id))
+}
+
+fn derive_formal_task_description(audit_bundle: &ManagedAuditBundle) -> String {
+    if let Some(extraction) = audit_bundle.bridge.intent_extraction_artifact.as_ref() {
+        return extraction.extraction.intent.problem_statement.clone();
+    }
+
+    format!(
+        "Formalized Claude SDK session {} from managed audit bundle.",
+        audit_bundle.provider_session_id
+    )
+}
+
+fn derive_goal_type(audit_bundle: &ManagedAuditBundle) -> Option<String> {
+    let extraction = audit_bundle.bridge.intent_extraction_artifact.as_ref()?;
+    let value = match extraction.extraction.intent.change_type {
+        crate::internal::ai::intentspec::types::ChangeType::Feature => "feature",
+        crate::internal::ai::intentspec::types::ChangeType::Bugfix => "bugfix",
+        crate::internal::ai::intentspec::types::ChangeType::Test => "test",
+        crate::internal::ai::intentspec::types::ChangeType::Refactor => "refactor",
+        crate::internal::ai::intentspec::types::ChangeType::Performance => "perf",
+        crate::internal::ai::intentspec::types::ChangeType::Security => "security",
+        crate::internal::ai::intentspec::types::ChangeType::Docs => "docs",
+        crate::internal::ai::intentspec::types::ChangeType::Chore => "chore",
+        crate::internal::ai::intentspec::types::ChangeType::Unknown => return None,
+    };
+    Some(value.to_string())
+}
+
+fn task_status_for_managed_run(managed_run_status: &str) -> &'static str {
+    match managed_run_status {
+        "completed" => "done",
+        "failed" | "timed_out" => "failed",
+        _ => "running",
+    }
+}
+
+fn run_status_for_managed_run(managed_run_status: &str) -> &'static str {
+    match managed_run_status {
+        "completed" => "completed",
+        "failed" | "timed_out" => "failed",
+        _ => "created",
+    }
+}
+
+fn run_error_for_managed_status(managed_run_status: &str) -> Option<String> {
+    match managed_run_status {
+        "failed" => Some("Claude SDK managed session ended in failed state".to_string()),
+        "timed_out" => Some("Claude SDK managed helper timed out".to_string()),
+        _ => None,
+    }
+}
+
+fn decision_type_for_binding(
+    run_binding: &ClaudeFormalRunBindingArtifact,
+    evidence_binding: &ClaudeEvidenceBindingArtifact,
+) -> &'static str {
+    match run_binding.managed_run_status.as_str() {
+        "failed" | "timed_out" | "running" => "retry",
+        _ if run_binding.intent_extraction_status == "accepted"
+            && !evidence_binding.evidence_ids.is_empty() =>
+        {
+            "checkpoint"
+        }
+        _ => "abandon",
+    }
+}
+
+fn parse_created_id(kind: &str, result: &rmcp::model::CallToolResult) -> Result<String> {
+    if result.is_error.unwrap_or(false) {
+        bail!("MCP create_{kind} returned an error result");
+    }
+
+    for content in &result.content {
+        if let Some(text) = content.as_text().map(|value| value.text.as_str())
+            && let Some(id) = text.split("ID:").nth(1)
+        {
+            let id = id.trim();
+            if !id.is_empty() {
+                return Ok(id.to_string());
+            }
+        }
+    }
+
+    bail!("failed to parse {kind} id from MCP response")
+}
+
+fn managed_audit_bundle_path(storage_path: &Path, ai_session_id: &str) -> PathBuf {
+    storage_path
+        .join("audit-bundles")
+        .join(format!("{ai_session_id}.json"))
+}
+
+fn default_intent_binding_path(storage_path: &Path, ai_session_id: &str) -> PathBuf {
+    storage_path
+        .join(INTENT_INPUTS_DIR)
+        .join(format!("{ai_session_id}.json"))
+}
+
+fn formal_run_binding_path(storage_path: &Path, ai_session_id: &str) -> PathBuf {
+    storage_path
+        .join(FORMAL_RUN_BINDINGS_DIR)
+        .join(format!("{ai_session_id}.json"))
+}
+
+fn evidence_binding_path(storage_path: &Path, ai_session_id: &str) -> PathBuf {
+    storage_path
+        .join(EVIDENCE_BINDINGS_DIR)
+        .join(format!("{ai_session_id}.json"))
+}
+
+fn decision_binding_path(storage_path: &Path, ai_session_id: &str) -> PathBuf {
+    storage_path
+        .join(DECISION_BINDINGS_DIR)
+        .join(format!("{ai_session_id}.json"))
+}
+
+fn print_bridge_run_output(path: &Path, binding: &ClaudeFormalRunBindingArtifact) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&BridgeRunCommandOutput {
+            ok: true,
+            command_mode: "bridge-run",
+            ai_session_id: binding.ai_session_id.clone(),
+            provider_session_id: binding.provider_session_id.clone(),
+            task_id: binding.task_id.clone(),
+            run_id: binding.run_id.clone(),
+            binding_path: path.to_string_lossy().to_string(),
+            intent_id: binding.intent_id.clone(),
+        })
+        .context("failed to serialize bridge-run output")?
+    );
+    Ok(())
+}
+
+fn print_persist_evidence_output(
+    path: &Path,
+    binding: &ClaudeEvidenceBindingArtifact,
+) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&PersistEvidenceCommandOutput {
+            ok: true,
+            command_mode: "persist-evidence",
+            ai_session_id: binding.ai_session_id.clone(),
+            run_id: binding.run_id.clone(),
+            evidence_ids: binding.evidence_ids.clone(),
+            binding_path: path.to_string_lossy().to_string(),
+        })
+        .context("failed to serialize persist-evidence output")?
+    );
+    Ok(())
+}
+
+fn print_persist_decision_output(
+    path: &Path,
+    binding: &ClaudeDecisionBindingArtifact,
+) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&PersistDecisionCommandOutput {
+            ok: true,
+            command_mode: "persist-decision",
+            ai_session_id: binding.ai_session_id.clone(),
+            run_id: binding.run_id.clone(),
+            decision_id: binding.decision_id.clone(),
+            decision_type: binding.decision_type.clone(),
+            binding_path: path.to_string_lossy().to_string(),
+        })
+        .context("failed to serialize persist-decision output")?
+    );
+    Ok(())
+}
+
 fn validate_provider_session_id(provider_session_id: &str) -> Result<()> {
     if provider_session_id.len() > 128 {
         bail!("invalid provider session id: exceeds 128 characters");
@@ -1286,6 +2263,19 @@ fn validate_provider_session_id(provider_session_id: &str) -> Result<()> {
         .all(|char| char.is_ascii_alphanumeric() || matches!(char, '.' | '_' | '-'))
     {
         bail!("invalid provider session id: only [A-Za-z0-9._-] is allowed");
+    }
+    Ok(())
+}
+
+fn validate_ai_session_id(ai_session_id: &str) -> Result<()> {
+    if ai_session_id.len() > 128 {
+        bail!("invalid ai session id: exceeds 128 characters");
+    }
+    if !ai_session_id
+        .chars()
+        .all(|char| char.is_ascii_alphanumeric() || matches!(char, '.' | '_' | '-'))
+    {
+        bail!("invalid ai session id: only [A-Za-z0-9._-] is allowed");
     }
     Ok(())
 }
