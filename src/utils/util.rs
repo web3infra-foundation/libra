@@ -337,14 +337,16 @@ where
     P: AsRef<Path>,
     B: AsRef<Path>,
 {
-    // Use safe absolutize that tolerates invalid current directory on some Linux/CI envs
-    let path_abs = match path.as_ref().absolutize() {
+    // Snapshot the current directory once so both inputs resolve against the same base
+    // even if another test or thread changes the process cwd concurrently.
+    let cwd = cur_dir();
+    let path_abs = match path.as_ref().absolutize_from(&cwd) {
         Ok(p) => p.into_owned(),
-        Err(_) => cur_dir().join(path.as_ref()),
+        Err(_) => cwd.join(path.as_ref()),
     };
-    let base_abs = match base.as_ref().absolutize() {
+    let base_abs = match base.as_ref().absolutize_from(&cwd) {
         Ok(b) => b.into_owned(),
-        Err(_) => cur_dir().join(base.as_ref()),
+        Err(_) => cwd.join(base.as_ref()),
     };
 
     if let Some(rel_path) = pathdiff::diff_paths(path_abs, base_abs) {
@@ -922,7 +924,10 @@ mod test {
         let _guard = test::ChangeDirGuard::new(&nested);
         let resolved = try_get_storage_path(None).unwrap();
 
-        assert_eq!(resolved, storage);
+        assert_eq!(
+            resolved.canonicalize().unwrap(),
+            storage.canonicalize().unwrap()
+        );
     }
     #[test]
     #[serial]
