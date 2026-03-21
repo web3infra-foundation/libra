@@ -22,6 +22,10 @@ use crate::{
     },
 };
 
+fn is_internal_switch_target(name: &str) -> bool {
+    name == repo_branch::INTENT_BRANCH
+}
+
 #[derive(Parser, Debug)]
 pub struct SwitchArgs {
     /// branch name
@@ -158,7 +162,7 @@ async fn switch_to_tracked_remote_branch(target: String, output: &OutputConfig) 
         ("origin".to_string(), target)
     };
 
-    if repo_branch::is_locked_branch(&remote_branch_name) {
+    if is_internal_switch_target(&remote_branch_name) {
         return Err(CliError::fatal(format!(
             "switching to '{}' branch is not allowed",
             remote_branch_name
@@ -255,7 +259,7 @@ async fn switch_to_commit(commit_hash: ObjectHash, output: &OutputConfig) -> Cli
 }
 
 async fn switch_to_branch(branch_name: String, output: &OutputConfig) -> CliResult<()> {
-    if repo_branch::is_locked_branch(&branch_name) {
+    if is_internal_switch_target(&branch_name) {
         return Err(CliError::fatal(format!(
             "switching to '{}' branch is not allowed",
             branch_name

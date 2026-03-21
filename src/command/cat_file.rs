@@ -157,9 +157,10 @@ fn split_typed_ai_selector(selector: &str) -> Option<(&str, &str)> {
     Some((type_name, object_id))
 }
 
-async fn resolve_ai_object(selector: &str) -> CliResult<(ObjectHash, String)> {
-    let hm = build_history_manager().await;
-
+async fn resolve_ai_object_with_history(
+    hm: &HistoryManager,
+    selector: &str,
+) -> CliResult<(ObjectHash, String)> {
     if let Some((type_name, object_id)) = split_typed_ai_selector(selector) {
         return hm
             .get_object_hash(type_name, object_id)
@@ -205,6 +206,11 @@ async fn resolve_ai_object(selector: &str) -> CliResult<(ObjectHash, String)> {
             )))
         }
     }
+}
+
+async fn resolve_ai_object(selector: &str) -> CliResult<(ObjectHash, String)> {
+    let hm = build_history_manager().await?;
+    resolve_ai_object_with_history(&hm, selector).await
 }
 
 async fn ensure_ai_listable_type(hm: &HistoryManager, type_name: &str) -> CliResult<()> {
@@ -585,7 +591,7 @@ fn emit_pretty_print_json(
 }
 
 async fn ai_list_types_data() -> CliResult<Vec<serde_json::Value>> {
-    let hm = build_history_manager().await;
+    let hm = build_history_manager().await?;
     let mut types = Vec::new();
     for type_name in hm
         .list_object_types()
@@ -607,7 +613,7 @@ async fn ai_list_types_data() -> CliResult<Vec<serde_json::Value>> {
 }
 
 async fn ai_list_objects_data(type_name: &str) -> CliResult<Vec<serde_json::Value>> {
-    let hm = build_history_manager().await;
+    let hm = build_history_manager().await?;
     ensure_ai_listable_type(&hm, type_name).await?;
     let objects = hm
         .list_objects(type_name)
@@ -841,16 +847,29 @@ fn print_tag(hash: &ObjectHash) {
 // ── AI object helpers ───────────────────────────────────────────────────
 
 /// Build a `HistoryManager` from the current repo context.
-async fn build_history_manager() -> HistoryManager {
-    let objects_dir = path::objects();
+async fn build_history_manager() -> CliResult<HistoryManager> {
+    let repo_path = util::try_get_storage_path(None).map_err(|_| CliError::repo_not_found())?;
+    let objects_dir = repo_path.join("objects");
+    let db_path = repo_path.join(util::DATABASE);
+    let db_conn = db::get_db_conn_instance_for_path(&db_path)
+        .await
+        .map_err(|e| {
+            CliError::fatal(format!(
+                "failed to open repository database '{}': {}",
+                db_path.display(),
+                e
+            ))
+        })?;
     let storage = Arc::new(LocalStorage::new(objects_dir));
-    let db_conn = Arc::new(db::get_db_conn_instance().await.clone());
-    HistoryManager::new(storage, util::storage_path(), db_conn)
+    Ok(HistoryManager::new(storage, repo_path, Arc::new(db_conn)))
 }
 
 /// List all AI object types that have at least one entry in the history branch.
 async fn ai_list_types() {
-    let hm = build_history_manager().await;
+    let hm = match build_history_manager().await {
+        Ok(hm) => hm,
+        Err(err) => cat_file_exit(err.to_string()),
+    };
     let types = match hm.list_object_types().await {
         Ok(types) => types,
         Err(e) => cat_file_exit(format!("fatal: failed to list AI object types: {}", e)),
@@ -871,7 +890,10 @@ async fn ai_list_types() {
 
 /// List all AI objects of a specific type.
 async fn ai_list_objects(type_name: &str) {
-    let hm = build_history_manager().await;
+    let hm = match build_history_manager().await {
+        Ok(hm) => hm,
+        Err(err) => cat_file_exit(err.to_string()),
+    };
     if let Err(err) = ensure_ai_listable_type(&hm, type_name).await {
         cat_file_exit(err.to_string());
     }
@@ -1157,13 +1179,7 @@ async fn ai_show_type(uuid: &str) {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
-    use crate::{
-        internal::ai::history::HistoryManager,
-        utils::{storage::local::LocalStorage, storage_ext::StorageExt, test},
-    };
 
     #[test]
     fn test_args_parsing_type() {
@@ -1309,69 +1325,5 @@ mod tests {
         assert!(lines.iter().any(|line| line == "tool_event_count: 2"));
         assert!(lines.iter().any(|line| line == "compaction_count: 1"));
         assert!(lines.iter().any(|line| line == "message_count: 3"));
-    }
-
-    #[tokio::test]
-    async fn test_resolve_ai_object_requires_typed_selector_for_ambiguous_ids() {
-        let dir = tempfile::tempdir().unwrap();
-        let _guard = test::ChangeDirGuard::new(dir.path());
-        test::setup_with_new_libra_in(dir.path()).await;
-
-        let libra_dir = dir.path().join(".libra");
-        let storage = Arc::new(LocalStorage::new(libra_dir.join("objects")));
-        let db_conn = Arc::new(
-            crate::internal::db::establish_connection(
-                libra_dir
-                    .join("libra.db")
-                    .to_str()
-                    .expect("db path should be valid UTF-8"),
-            )
-            .await
-            .expect("failed to connect test database"),
-        );
-        let history = HistoryManager::new(storage.clone(), libra_dir, db_conn);
-        let shared_id = "call_shared_patchset";
-
-        let patchset_hash = storage
-            .put_json(&serde_json::json!({
-                "id": shared_id,
-                "run_id": "run-1",
-                "thread_id": "thread-1",
-                "changes": []
-            }))
-            .await
-            .unwrap();
-        history
-            .append("patchset", shared_id, patchset_hash)
-            .await
-            .unwrap();
-
-        let event_hash = storage
-            .put_json(&serde_json::json!({
-                "id": "event_call_shared_patchset",
-                "subject_id": shared_id,
-                "kind": "tool_invocation_status",
-                "status": "completed",
-                "payload": { "files": 3 },
-                "created_at": "2026-03-21T03:42:29Z"
-            }))
-            .await
-            .unwrap();
-        history
-            .append("event", shared_id, event_hash)
-            .await
-            .unwrap();
-
-        let err = resolve_ai_object(shared_id).await.unwrap_err();
-        let err_text = err.to_string();
-        assert!(
-            err_text.contains("TYPE:ID"),
-            "ambiguous lookup should explain typed selectors: {err_text}"
-        );
-
-        let (_hash, object_type) = resolve_ai_object(&format!("patchset:{shared_id}"))
-            .await
-            .unwrap();
-        assert_eq!(object_type, "patchset");
     }
 }

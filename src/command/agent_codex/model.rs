@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::types::FileChange;
+use super::types::{FileChange, PatchStatus};
 
 // ========================= Snapshots =========================
 
@@ -74,8 +74,14 @@ pub struct PatchSetSnapshot {
     pub run_id: String,
     pub thread_id: String,
     pub created_at: DateTime<Utc>,
+    #[serde(default = "default_patchset_snapshot_status")]
+    pub status: PatchStatus,
     #[serde(default)]
     pub changes: Vec<FileChange>,
+}
+
+fn default_patchset_snapshot_status() -> PatchStatus {
+    PatchStatus::Pending
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

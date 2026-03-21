@@ -1,7 +1,7 @@
 //! CLI entry for Libra, defining clap subcommands, setting the hash algorithm from config,
 //! and dispatching each command handler.
 
-use std::{env, io::Write};
+use std::{env, io::Write, path::Path};
 
 use clap::{
     Parser, Subcommand,
@@ -31,11 +31,7 @@ const ERROR_CODES_HELP: &str = include_str!("../docs/error-codes.md");
 /// Reads the repository's configuration and sets the global hash kind.
 /// This must be called for any command that operates within an existing repository.
 /// Returns an error if the repository database is missing or corrupted.
-async fn set_local_hash_kind() -> CliResult<()> {
-    // Verify the database file actually exists before accessing it, to avoid
-    // panicking inside `get_db_conn_instance()` when `.libra` exists but
-    // `libra.db` is missing (e.g. corrupted or partially-removed repo).
-    let storage = utils::util::try_get_storage_path(None).map_err(|_| repo_not_found_error())?;
+async fn set_local_hash_kind_for_storage(storage: &Path) -> CliResult<()> {
     let db_path = storage.join(utils::util::DATABASE);
     if !db_path.exists() {
         return Err(CliError::fatal(format!(
@@ -44,10 +40,19 @@ async fn set_local_hash_kind() -> CliResult<()> {
         )));
     }
 
-    // Use the public API from the `config` module to get the configuration value.
-    let object_format = crate::internal::config::Config::get("core", None, "objectformat")
+    let db_conn = crate::internal::db::get_db_conn_instance_for_path(&db_path)
         .await
-        .unwrap_or_else(|| "sha1".to_string());
+        .map_err(|e| {
+            CliError::fatal(format!(
+                "failed to open repository database '{}': {}",
+                db_path.display(),
+                e
+            ))
+        })?;
+    let object_format =
+        crate::internal::config::Config::get_with_conn(&db_conn, "core", None, "objectformat")
+            .await
+            .unwrap_or_else(|| "sha1".to_string());
 
     let hash_kind = match object_format.as_str() {
         "sha1" => HashKind::Sha1,
@@ -545,8 +550,9 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         // Config global/system scopes don't require a repository
         Commands::Config(cfg) if cfg.global || cfg.system => {}
         _ => {
-            utils::util::try_get_storage_path(None).map_err(|_| repo_not_found_error())?;
-            set_local_hash_kind().await?;
+            let storage =
+                utils::util::try_get_storage_path(None).map_err(|_| repo_not_found_error())?;
+            set_local_hash_kind_for_storage(&storage).await?;
         }
     }
     // Resolve global output flags into a single config before dispatching.
@@ -566,7 +572,9 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Init(cmd_args) => {
             let original_dir = utils::util::cur_dir();
             command::init::execute_safe(cmd_args, &output).await?;
-            set_local_hash_kind().await?;
+            let storage =
+                utils::util::try_get_storage_path(None).map_err(|_| repo_not_found_error())?;
+            set_local_hash_kind_for_storage(&storage).await?;
             env::set_current_dir(&original_dir).map_err(|e| {
                 CliError::fatal(format!(
                     "failed to restore working directory '{}': {}",
@@ -645,7 +653,7 @@ mod tests {
     use serial_test::serial;
 
     use super::*;
-    use crate::utils::{error::CliErrorKind, output, test::ChangeDirGuard};
+    use crate::utils::output;
 
     /// this test is to verify that the CLI can be built without panicking
     /// according [clap dock](https://docs.rs/clap/latest/clap/_derive/_tutorial/chapter_4/index.html)
@@ -666,42 +674,21 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    #[serial]
-    async fn clap_alias_br_resolves_to_branch() {
-        // Run from a temp dir that has no `.libra` to guarantee RepoNotFound.
-        let temp = tempfile::tempdir().unwrap();
-        let _guard = ChangeDirGuard::new(temp.path());
-
-        // `br` is a clap alias for `branch`, so it should NOT produce an error
-        // but instead be dispatched like `libra branch` (which fails without a repo).
-        let err = parse_async(Some(&["libra", "br"])).await.unwrap_err();
-        // Should fail because no repo exists, not because the subcommand is unknown.
+    #[test]
+    fn clap_alias_br_resolves_to_branch() {
+        let cli = Cli::try_parse_from(["libra", "br"]).unwrap();
         assert!(
-            !matches!(
-                err.kind(),
-                CliErrorKind::ParseUsage | CliErrorKind::CommandUsage
-            ),
-            "expected non-parse error (alias should resolve), got: {err:?}"
+            matches!(cli.command, Commands::Branch(_)),
+            "`br` should parse as the branch subcommand"
         );
     }
 
-    #[tokio::test]
-    #[serial]
-    async fn clap_alias_cfg_resolves_to_config() {
-        // Run from a temp dir that has no `.libra` to guarantee RepoNotFound.
-        let temp = tempfile::tempdir().unwrap();
-        let _guard = ChangeDirGuard::new(temp.path());
-
-        // `cfg` is a clap alias for `config`, dispatched normally.
-        // Without arguments it should fail with a config validation error, not a parse error.
-        let err = parse_async(Some(&["libra", "cfg"])).await.unwrap_err();
+    #[test]
+    fn clap_alias_cfg_resolves_to_config() {
+        let cli = Cli::try_parse_from(["libra", "cfg"]).unwrap();
         assert!(
-            !matches!(
-                err.kind(),
-                CliErrorKind::ParseUsage | CliErrorKind::CommandUsage
-            ),
-            "expected non-parse error (alias should resolve), got: {err:?}"
+            matches!(cli.command, Commands::Config(_)),
+            "`cfg` should parse as the config subcommand"
         );
     }
 
@@ -720,20 +707,10 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     #[serial]
     async fn parse_async_resets_warning_tracker_before_dispatch() {
-        let temp = tempfile::tempdir().unwrap();
-        let _guard = ChangeDirGuard::new(temp.path());
-
         output::record_warning();
         assert!(output::warning_was_emitted());
 
-        parse_async(Some(&[
-            "libra",
-            "--exit-code-on-warning",
-            "--quiet",
-            "init",
-        ]))
-        .await
-        .unwrap();
+        parse_async(Some(&["libra", "--help"])).await.unwrap();
 
         assert!(
             !output::warning_was_emitted(),

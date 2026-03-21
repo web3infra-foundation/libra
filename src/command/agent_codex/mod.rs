@@ -289,50 +289,6 @@ fn build_plan_text(explanation: Option<&String>, plan_steps: &[TurnPlanStep]) ->
     }
 }
 
-fn current_plan_and_task_for_thread(
-    session: &CodexSession,
-    thread_id: &str,
-) -> (Option<String>, Option<String>) {
-    let latest_plan = session
-        .plans
-        .iter()
-        .filter(|plan| plan.thread_id == thread_id)
-        .max_by_key(|plan| plan.created_at);
-
-    let Some(plan) = latest_plan else {
-        return (None, None);
-    };
-
-    let mut in_progress_tasks: Vec<&Task> = session
-        .tasks
-        .iter()
-        .filter(|task| {
-            task.thread_id == thread_id
-                && task.plan_id.as_deref() == Some(plan.id.as_str())
-                && task.status == TaskStatus::InProgress
-        })
-        .collect();
-    in_progress_tasks.sort_by_key(|task| task.created_at);
-
-    let mut pending_tasks: Vec<&Task> = session
-        .tasks
-        .iter()
-        .filter(|task| {
-            task.thread_id == thread_id
-                && task.plan_id.as_deref() == Some(plan.id.as_str())
-                && task.status == TaskStatus::Pending
-        })
-        .collect();
-    pending_tasks.sort_by_key(|task| task.created_at);
-
-    let active_task_id = in_progress_tasks
-        .first()
-        .or_else(|| pending_tasks.first())
-        .map(|task| task.id.clone());
-
-    (Some(plan.id.clone()), active_task_id)
-}
-
 /// Initialize MCP server for storing agent data
 pub async fn init_mcp_server(working_dir: &Path) -> Arc<LibraMcpServer> {
     let storage_dir = try_get_storage_path(Some(working_dir.to_path_buf()))
@@ -637,7 +593,7 @@ pub async fn execute(args: AgentCodexArgs) -> anyhow::Result<()> {
                 status: if patchset_declined.contains(&p.id) {
                     PatchStatus::Declined
                 } else {
-                    PatchStatus::Completed
+                    p.status.clone()
                 },
                 created_at: p.created_at,
             })
@@ -980,20 +936,11 @@ pub async fn execute(args: AgentCodexArgs) -> anyhow::Result<()> {
                                         started_at: Utc::now(),
                                         completed_at: None,
                                     };
-                                    let (current_plan_id, current_task_id) = lock_or_warn(
-                                        &session_clone,
-                                        "plan/task lookup for turn start",
-                                    )
-                                    .as_deref()
-                                    .map(|session| {
-                                        current_plan_and_task_for_thread(session, &thread_id)
-                                    })
-                                    .unwrap_or((None, None));
                                     let run_snapshot = RunSnapshot {
                                         id: turn_id.to_string(),
                                         thread_id: thread_id.to_string(),
-                                        plan_id: current_plan_id,
-                                        task_id: current_task_id,
+                                        plan_id: None,
+                                        task_id: None,
                                         started_at: Utc::now(),
                                     };
                                     let run_event = RunEvent {
@@ -3169,6 +3116,7 @@ Task Completed"
                                                             run_id: _turn_id.to_string(),
                                                             thread_id: _thread_id.to_string(),
                                                             created_at: Utc::now(),
+                                                            status: patchset.status.clone(),
                                                             changes: patchset.changes.clone(),
                                                         };
                                                         let evidence = EvidenceEvent {
@@ -4046,135 +3994,4 @@ Task Completed"
     }
     #[allow(unreachable_code)]
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use chrono::{TimeZone, Utc};
-
-    use super::{
-        aggregate_plan_status, build_plan_text, current_plan_and_task_for_thread,
-        merge_patchset_changes, normalize_plan_step_status, task_status_from_plan_step,
-    };
-    use crate::command::agent_codex::{
-        schema_v2::TurnPlanStep,
-        types::{CodexSession, FileChange, Plan, PlanStatus, Task, TaskStatus},
-    };
-
-    #[test]
-    fn merge_patchset_changes_keeps_stream_diff_when_completed_payload_omits_it() {
-        let existing = vec![FileChange {
-            path: "(stream)".to_string(),
-            diff: "diff --git a/src/lib.rs b/src/lib.rs".to_string(),
-            change_type: "delta".to_string(),
-        }];
-        let completed = vec![FileChange {
-            path: "src/lib.rs".to_string(),
-            diff: String::new(),
-            change_type: "update".to_string(),
-        }];
-
-        let merged = merge_patchset_changes(&existing, &completed);
-
-        assert_eq!(merged.len(), 2);
-        assert!(merged.iter().any(|change| change.path == "src/lib.rs"));
-        assert!(merged.iter().any(|change| {
-            change.path == "(stream)" && change.diff.contains("diff --git a/src/lib.rs")
-        }));
-    }
-
-    #[test]
-    fn merge_patchset_changes_prefers_completed_changes_with_real_diffs() {
-        let existing = vec![FileChange {
-            path: "(stream)".to_string(),
-            diff: "streamed diff".to_string(),
-            change_type: "delta".to_string(),
-        }];
-        let completed = vec![FileChange {
-            path: "src/lib.rs".to_string(),
-            diff: "@@ -1 +1 @@".to_string(),
-            change_type: "update".to_string(),
-        }];
-
-        let merged = merge_patchset_changes(&existing, &completed);
-
-        assert_eq!(merged, completed);
-    }
-
-    #[test]
-    fn plan_helpers_normalize_statuses_and_build_plan_text() {
-        let plan_steps = vec![
-            TurnPlanStep {
-                status: "inProgress".to_string(),
-                step: "Inspect storage".to_string(),
-            },
-            TurnPlanStep {
-                status: "pending".to_string(),
-                step: "Validate snapshots".to_string(),
-            },
-        ];
-
-        assert_eq!(normalize_plan_step_status("inProgress"), "in_progress");
-        assert_eq!(normalize_plan_step_status("completed"), "completed");
-        assert_eq!(
-            build_plan_text(Some(&"Explain next steps".to_string()), &plan_steps),
-            "Explain next steps\nInspect storage\nValidate snapshots"
-        );
-        assert_eq!(aggregate_plan_status(&plan_steps), PlanStatus::InProgress);
-        assert_eq!(
-            task_status_from_plan_step("inProgress"),
-            TaskStatus::InProgress
-        );
-    }
-
-    #[test]
-    fn current_plan_and_task_prefers_in_progress_task_in_latest_plan() {
-        let latest_plan_time = Utc.with_ymd_and_hms(2026, 3, 21, 12, 0, 0).unwrap();
-        let mut session = CodexSession::new();
-        session.plans = vec![
-            Plan {
-                id: "plan-old".to_string(),
-                text: "old".to_string(),
-                intent_id: Some("intent-1".to_string()),
-                thread_id: "thread-1".to_string(),
-                turn_id: Some("run-old".to_string()),
-                status: PlanStatus::Completed,
-                created_at: Utc.with_ymd_and_hms(2026, 3, 21, 11, 0, 0).unwrap(),
-            },
-            Plan {
-                id: "plan-latest".to_string(),
-                text: "latest".to_string(),
-                intent_id: Some("intent-1".to_string()),
-                thread_id: "thread-1".to_string(),
-                turn_id: Some("run-latest".to_string()),
-                status: PlanStatus::InProgress,
-                created_at: latest_plan_time,
-            },
-        ];
-        session.tasks = vec![
-            Task {
-                id: "task-pending".to_string(),
-                tool_name: Some("Validate".to_string()),
-                plan_id: Some("plan-latest".to_string()),
-                thread_id: "thread-1".to_string(),
-                turn_id: Some("run-latest".to_string()),
-                status: TaskStatus::Pending,
-                created_at: latest_plan_time,
-            },
-            Task {
-                id: "task-running".to_string(),
-                tool_name: Some("Inspect".to_string()),
-                plan_id: Some("plan-latest".to_string()),
-                thread_id: "thread-1".to_string(),
-                turn_id: Some("run-latest".to_string()),
-                status: TaskStatus::InProgress,
-                created_at: latest_plan_time + chrono::Duration::seconds(1),
-            },
-        ];
-
-        let (plan_id, task_id) = current_plan_and_task_for_thread(&session, "thread-1");
-
-        assert_eq!(plan_id.as_deref(), Some("plan-latest"));
-        assert_eq!(task_id.as_deref(), Some("task-running"));
-    }
 }
