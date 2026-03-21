@@ -3,11 +3,15 @@
 //!
 //! **Layer:** L1 — deterministic, no external dependencies.
 
-use std::process::Command;
+use std::{path::Path, process::Command, sync::Arc};
 
+use libra::{
+    internal::ai::history::HistoryManager,
+    utils::{storage::local::LocalStorage, storage_ext::StorageExt},
+};
 use serial_test::serial;
 
-use super::parse_cli_error_stderr;
+use super::{parse_cli_error_stderr, run_libra_command};
 
 /// Initialize a temporary repository using CLI.
 fn init_temp_repo() -> tempfile::TempDir {
@@ -45,6 +49,23 @@ fn configure_user_identity(temp_path: &std::path::Path) {
         .output()
         .expect("Failed to configure user.email");
     assert!(output.status.success(), "Failed to configure user.email");
+}
+
+async fn load_intent_history(repo: &Path) -> (Arc<LocalStorage>, HistoryManager) {
+    let libra_dir = repo.join(".libra");
+    let storage = Arc::new(LocalStorage::new(libra_dir.join("objects")));
+    let db_conn = Arc::new(
+        libra::internal::db::establish_connection(
+            libra_dir
+                .join("libra.db")
+                .to_str()
+                .expect("db path should be valid UTF-8"),
+        )
+        .await
+        .expect("failed to connect test database"),
+    );
+    let history = HistoryManager::new(storage.clone(), libra_dir, db_conn);
+    (storage, history)
 }
 
 /// Create a commit with a file.
@@ -599,6 +620,73 @@ async fn test_cat_file_ai_type_nonexistent() {
     assert!(
         !output.status.success(),
         "cat-file --ai-type with non-existent UUID should fail"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_cat_file_ai_requires_typed_selector_when_id_is_ambiguous() {
+    let temp_dir = init_temp_repo();
+    let temp_path = temp_dir.path();
+
+    let (storage, history) = load_intent_history(temp_path).await;
+    let shared_id = "call_shared_patchset";
+
+    let patchset_hash = storage
+        .put_json(&serde_json::json!({
+            "id": shared_id,
+            "run_id": "run-1",
+            "thread_id": "thread-1",
+            "created_at": "2026-03-21T03:42:28Z",
+            "changes": []
+        }))
+        .await
+        .expect("should store patchset object");
+    history
+        .append("patchset", shared_id, patchset_hash)
+        .await
+        .expect("should append patchset history");
+
+    let event_hash = storage
+        .put_json(&serde_json::json!({
+            "id": format!("event_tool_invocation_status_{shared_id}_1"),
+            "subject_id": shared_id,
+            "kind": "tool_invocation_status",
+            "status": "completed",
+            "payload": { "files": 3 },
+            "created_at": "2026-03-21T03:42:29Z"
+        }))
+        .await
+        .expect("should store event object");
+    history
+        .append("event", shared_id, event_hash)
+        .await
+        .expect("should append event history");
+
+    let ambiguous = run_libra_command(&["cat-file", "--ai", shared_id], temp_path);
+    assert!(
+        !ambiguous.status.success(),
+        "plain --ai lookup should fail when the ID exists under multiple AI types"
+    );
+    let ambiguous_stderr = String::from_utf8_lossy(&ambiguous.stderr);
+    assert!(
+        ambiguous_stderr.contains("TYPE:ID"),
+        "ambiguous lookup should point the user to TYPE:ID disambiguation: {ambiguous_stderr}"
+    );
+
+    let typed = run_libra_command(
+        &["cat-file", "--ai", &format!("patchset:{shared_id}")],
+        temp_path,
+    );
+    assert!(
+        typed.status.success(),
+        "typed AI lookup should succeed: {}",
+        String::from_utf8_lossy(&typed.stderr)
+    );
+    let typed_stdout = String::from_utf8_lossy(&typed.stdout);
+    assert!(
+        typed_stdout.contains("\"object_type\": \"patchset\""),
+        "typed lookup should resolve the patchset object: {typed_stdout}"
     );
 }
 

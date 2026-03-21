@@ -10,7 +10,7 @@ use super::{
 use crate::{
     command::{branch, status::StatusArgs},
     internal::{
-        branch::{Branch, INTENT_BRANCH},
+        branch::{self as repo_branch, Branch},
         db::get_db_conn_instance,
         head::Head,
         reflog::{ReflogAction, ReflogContext, with_reflog},
@@ -74,10 +74,10 @@ pub async fn execute_safe(args: SwitchArgs, output: &OutputConfig) -> CliResult<
 
     match create {
         Some(new_branch_name) => {
-            if new_branch_name == INTENT_BRANCH {
+            if repo_branch::is_locked_branch(&new_branch_name) {
                 return Err(CliError::fatal(format!(
                     "creating/switching to '{}' branch is not allowed",
-                    INTENT_BRANCH
+                    new_branch_name
                 )));
             }
             branch::create_branch(new_branch_name.clone(), branch).await;
@@ -158,10 +158,11 @@ async fn switch_to_tracked_remote_branch(target: String, output: &OutputConfig) 
         ("origin".to_string(), target)
     };
 
-    if remote_branch_name == "intent" {
-        return Err(CliError::fatal(
-            "switching to 'intent' branch is not allowed",
-        ));
+    if repo_branch::is_locked_branch(&remote_branch_name) {
+        return Err(CliError::fatal(format!(
+            "switching to '{}' branch is not allowed",
+            remote_branch_name
+        )));
     }
 
     let remote_tracking_ref = format!("refs/remotes/{remote_name}/{remote_branch_name}");
@@ -254,10 +255,11 @@ async fn switch_to_commit(commit_hash: ObjectHash, output: &OutputConfig) -> Cli
 }
 
 async fn switch_to_branch(branch_name: String, output: &OutputConfig) -> CliResult<()> {
-    if branch_name == "intent" {
-        return Err(CliError::fatal(
-            "switching to 'intent' branch is not allowed",
-        ));
+    if repo_branch::is_locked_branch(&branch_name) {
+        return Err(CliError::fatal(format!(
+            "switching to '{}' branch is not allowed",
+            branch_name
+        )));
     }
     let db = get_db_conn_instance().await;
 

@@ -3,10 +3,13 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::model::{
-    ContextFrameEvent, ContextSnapshot, DecisionEvent, EvidenceEvent, IntentEvent, IntentSnapshot,
-    PatchSetSnapshot, PlanSnapshot, PlanStepEvent, PlanStepSnapshot, ProvenanceSnapshot, RunEvent,
-    RunSnapshot, RunUsage, TaskEvent, TaskSnapshot,
+use super::{
+    model::{
+        ContextFrameEvent, ContextSnapshot, DecisionEvent, EvidenceEvent, IntentEvent,
+        IntentSnapshot, PatchSetSnapshot, PlanSnapshot, PlanStepEvent, PlanStepSnapshot,
+        ProvenanceSnapshot, RunEvent, RunSnapshot, RunUsage, TaskEvent, TaskSnapshot,
+    },
+    types::ToolInvocation,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -51,6 +54,7 @@ pub struct ViewRebuildResult {
     pub thread: ThreadView,
     pub scheduler: SchedulerView,
     pub index: QueryIndex,
+    pub tool_invocations: Vec<ToolInvocation>,
     pub intent_events: Vec<IntentEvent>,
     pub task_events: Vec<TaskEvent>,
     pub run_events: Vec<RunEvent>,
