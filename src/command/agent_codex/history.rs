@@ -12,7 +12,9 @@ use super::{
         ContextFrameEvent, ContextSnapshot, DecisionEvent, EvidenceEvent, IntentEvent,
         IntentSnapshot, PatchSetSnapshot, PlanSnapshot, PlanStepEvent, PlanStepSnapshot,
         ProvenanceSnapshot, RunEvent, RunSnapshot, RunUsage, TaskEvent, TaskSnapshot,
+        ToolInvocationEvent,
     },
+    types::{ToolInvocation, ToolStatus},
     view::{QueryIndex, SchedulerView, ThreadView, ViewRebuildResult},
 };
 use crate::{internal::ai::mcp::server::LibraMcpServer, utils::storage_ext::StorageExt};
@@ -31,10 +33,25 @@ pub enum EventKind {
     IntentStatus,
 }
 
+impl EventKind {
+    fn storage_slug(&self) -> &'static str {
+        match self {
+            Self::RunStatus => "run_status",
+            Self::TaskStatus => "task_status",
+            Self::PlanStepStatus => "plan_step_status",
+            Self::ToolInvocationStatus => "tool_invocation_status",
+            Self::RunUsage => "run_usage",
+            Self::IntentStatus => "intent_status",
+        }
+    }
+}
+
 /// Generic event wrapper; `payload` may embed domain-specific info (e.g., status string)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventRecord {
     pub id: String,
+    #[serde(default)]
+    pub subject_id: String,
     pub kind: EventKind,
     pub status: String,
     pub payload: serde_json::Value,
@@ -65,14 +82,21 @@ impl HistoryRecorder {
         status: impl Into<String>,
         payload: serde_json::Value,
     ) {
+        let event_id = format!(
+            "event_{}_{}_{}",
+            kind.storage_slug(),
+            id,
+            Utc::now().timestamp_millis()
+        );
         let record = EventRecord {
-            id: id.to_string(),
+            id: event_id.clone(),
+            subject_id: id.to_string(),
             kind,
             status: status.into(),
             payload,
             created_at: Utc::now(),
         };
-        super::store_to_mcp(&self.mcp, "event", id, &record, self.debug).await;
+        super::store_to_mcp(&self.mcp, "event", &event_id, &record, self.debug).await;
     }
 }
 
@@ -98,6 +122,10 @@ impl HistoryWriter {
         object_id: &str,
         obj: &T,
     ) {
+        if object_id.is_empty() {
+            eprintln!("[WARN] Refusing to append {object_type} with empty object id");
+            return;
+        }
         let Some(storage) = &self.mcp.storage else {
             eprintln!("[WARN] MCP storage not available");
             return;
@@ -121,10 +149,10 @@ impl HistoryWriter {
             cache.insert(key, hash);
         }
 
-        if let Some(history) = &self.mcp.intent_history_manager
-            && let Err(e) = history.append(object_type, object_id, hash).await
+        if let Err(e) =
+            super::append_history_hash_if_changed(&self.mcp, object_type, object_id, hash).await
         {
-            eprintln!("[WARN] Failed to append {object_type}/{object_id} to history: {e}");
+            eprintln!("[WARN] {e}");
             return;
         }
 
@@ -137,6 +165,17 @@ impl HistoryWriter {
 /// Reads snapshots/events from git-internal via HistoryManager.
 pub struct HistoryReader {
     mcp: Arc<LibraMcpServer>,
+}
+
+struct LatestThreadCandidates<'a> {
+    intents: &'a [IntentSnapshot],
+    plans: &'a [PlanSnapshot],
+    tasks: &'a [TaskSnapshot],
+    runs: &'a [RunSnapshot],
+    patchsets: &'a [PatchSetSnapshot],
+    context_snapshots: &'a [ContextSnapshot],
+    run_usage: &'a [RunUsage],
+    tool_invocation_events: &'a [ToolInvocationEvent],
 }
 
 impl HistoryReader {
@@ -164,6 +203,150 @@ impl HistoryReader {
             }
         }
         out
+    }
+
+    fn latest_thread_id(candidates: LatestThreadCandidates<'_>) -> Option<String> {
+        let mut latest: Option<(String, DateTime<Utc>)> = None;
+
+        let mut observe = |thread_id: &str, at: DateTime<Utc>| {
+            if thread_id.is_empty() {
+                return;
+            }
+            if latest.as_ref().is_none_or(|(_, prev)| at > *prev) {
+                latest = Some((thread_id.to_string(), at));
+            }
+        };
+
+        for intent in candidates.intents {
+            observe(&intent.thread_id, intent.created_at);
+        }
+        for plan in candidates.plans {
+            observe(&plan.thread_id, plan.created_at);
+        }
+        for task in candidates.tasks {
+            observe(&task.thread_id, task.created_at);
+        }
+        for run in candidates.runs {
+            observe(&run.thread_id, run.started_at);
+        }
+        for patchset in candidates.patchsets {
+            observe(&patchset.thread_id, patchset.created_at);
+        }
+        for snapshot in candidates.context_snapshots {
+            observe(&snapshot.thread_id, snapshot.created_at);
+        }
+        for usage in candidates.run_usage {
+            observe(&usage.thread_id, usage.at);
+        }
+        for event in candidates.tool_invocation_events {
+            observe(&event.thread_id, event.at);
+        }
+
+        latest.map(|(thread_id, _)| thread_id)
+    }
+
+    fn compute_intent_heads(
+        intents: &HashMap<String, IntentSnapshot>,
+        intent_events: &[IntentEvent],
+    ) -> Vec<String> {
+        let mut intent_heads: HashSet<String> = intents.keys().cloned().collect();
+        for intent in intents.values() {
+            for parent_id in &intent.parents {
+                intent_heads.remove(parent_id);
+            }
+        }
+        for event in intent_events {
+            if event.next_intent_id.is_some() {
+                intent_heads.remove(&event.intent_id);
+            }
+        }
+        let mut heads: Vec<String> = intent_heads.into_iter().collect();
+        heads.sort_by_key(|intent_id| intents.get(intent_id).map(|intent| intent.created_at));
+        heads
+    }
+
+    fn compute_plan_heads<'a>(plans: impl IntoIterator<Item = &'a PlanSnapshot>) -> Vec<String> {
+        let plans: Vec<&PlanSnapshot> = plans.into_iter().collect();
+        let mut heads: HashSet<String> = plans.iter().map(|plan| plan.id.clone()).collect();
+        for plan in &plans {
+            for parent_id in &plan.parents {
+                heads.remove(parent_id);
+            }
+        }
+        let mut head_ids: Vec<String> = heads.into_iter().collect();
+        head_ids.sort_by_key(|plan_id| {
+            plans
+                .iter()
+                .find(|plan| plan.id == *plan_id)
+                .map(|plan| plan.created_at)
+        });
+        head_ids
+    }
+
+    fn collapse_tool_invocations(events: &[ToolInvocationEvent]) -> Vec<ToolInvocation> {
+        let mut sorted = events.to_vec();
+        sorted.sort_by_key(|event| event.at);
+
+        let mut by_id: HashMap<String, ToolInvocation> = HashMap::new();
+        for event in sorted {
+            let arguments = event
+                .payload
+                .get("arguments")
+                .filter(|value| !value.is_null())
+                .cloned();
+            let result = event
+                .payload
+                .get("result")
+                .filter(|value| !value.is_null())
+                .cloned();
+            let error = event
+                .payload
+                .get("error")
+                .and_then(|value| value.as_str())
+                .map(String::from);
+            let duration_ms = event
+                .payload
+                .get("duration_ms")
+                .and_then(|value| value.as_i64());
+
+            let entry = by_id
+                .entry(event.id.clone())
+                .or_insert_with(|| ToolInvocation {
+                    id: event.id.clone(),
+                    run_id: event.run_id.clone(),
+                    thread_id: event.thread_id.clone(),
+                    tool_name: event.tool.clone(),
+                    server: event.server.clone(),
+                    arguments: arguments.clone(),
+                    result: result.clone(),
+                    error: error.clone(),
+                    status: tool_status_from_str(&event.status),
+                    duration_ms,
+                    created_at: event.at,
+                });
+
+            entry.run_id = event.run_id.clone();
+            entry.thread_id = event.thread_id.clone();
+            entry.tool_name = event.tool.clone();
+            entry.server = event.server.clone();
+            if arguments.is_some() {
+                entry.arguments = arguments;
+            }
+            if result.is_some() {
+                entry.result = result;
+            }
+            if error.is_some() {
+                entry.error = error;
+            }
+            if duration_ms.is_some() {
+                entry.duration_ms = duration_ms;
+            }
+            entry.status = tool_status_from_str(&event.status);
+        }
+
+        let mut invocations: Vec<ToolInvocation> = by_id.into_values().collect();
+        invocations.sort_by_key(|invocation| invocation.created_at);
+        invocations
     }
 
     pub async fn rebuild_view(&self) -> ViewRebuildResult {
@@ -194,62 +377,188 @@ impl HistoryReader {
         let context_frames = self
             .read_objects::<ContextFrameEvent>("context_frame")
             .await;
+        let tool_invocation_events = self
+            .read_objects::<ToolInvocationEvent>("tool_invocation_event")
+            .await;
 
-        let mut thread = ThreadView::default();
-        for intent in intents {
-            thread.thread_id = intent.thread_id.clone();
+        let selected_thread_id = Self::latest_thread_id(LatestThreadCandidates {
+            intents: &intents,
+            plans: &plans,
+            tasks: &tasks,
+            runs: &runs,
+            patchsets: &patchsets,
+            context_snapshots: &context_snapshots,
+            run_usage: &run_usage,
+            tool_invocation_events: &tool_invocation_events,
+        });
+
+        let mut thread = ThreadView {
+            thread_id: selected_thread_id.clone().unwrap_or_default(),
+            ..ThreadView::default()
+        };
+
+        for intent in intents.into_iter().filter(|intent| {
+            selected_thread_id
+                .as_deref()
+                .is_none_or(|id| intent.thread_id == id)
+        }) {
             thread.intents.insert(intent.id.clone(), intent);
         }
-        for plan in plans {
-            thread.thread_id = plan.thread_id.clone();
+        for plan in plans.into_iter().filter(|plan| {
+            selected_thread_id
+                .as_deref()
+                .is_none_or(|id| plan.thread_id == id)
+        }) {
             thread.plans.insert(plan.id.clone(), plan);
         }
-        for step in plan_steps {
-            thread.plan_steps.insert(step.id.clone(), step);
-        }
-        for task in tasks {
-            thread.thread_id = task.thread_id.clone();
+        for task in tasks.into_iter().filter(|task| {
+            selected_thread_id
+                .as_deref()
+                .is_none_or(|id| task.thread_id == id)
+        }) {
             thread.tasks.insert(task.id.clone(), task);
         }
-        for run in runs {
-            thread.thread_id = run.thread_id.clone();
+        for run in runs.into_iter().filter(|run| {
+            selected_thread_id
+                .as_deref()
+                .is_none_or(|id| run.thread_id == id)
+        }) {
             thread.runs.insert(run.id.clone(), run);
         }
-        for patchset in patchsets {
-            thread.thread_id = patchset.thread_id.clone();
+        for patchset in patchsets.into_iter().filter(|patchset| {
+            selected_thread_id
+                .as_deref()
+                .is_none_or(|id| patchset.thread_id == id)
+        }) {
             thread.patchsets.insert(patchset.id.clone(), patchset);
         }
-        for snapshot in context_snapshots {
+        for snapshot in context_snapshots.into_iter().filter(|snapshot| {
+            selected_thread_id
+                .as_deref()
+                .is_none_or(|id| snapshot.thread_id == id)
+                || snapshot
+                    .run_id
+                    .as_ref()
+                    .is_some_and(|run_id| thread.runs.contains_key(run_id))
+        }) {
             thread
                 .context_snapshots
                 .insert(snapshot.id.clone(), snapshot);
         }
-        for prov in provenance {
+        for prov in provenance
+            .into_iter()
+            .filter(|prov| thread.runs.contains_key(&prov.run_id))
+        {
             thread.provenance.insert(prov.id.clone(), prov);
         }
 
-        let mut intent_events_sorted = intent_events.clone();
-        intent_events_sorted.sort_by_key(|e| e.at);
-
-        let mut intent_heads: HashSet<String> = thread.intents.keys().cloned().collect();
-        for event in &intent_events_sorted {
-            if let Some(next_id) = event.next_intent_id.as_ref() {
-                intent_heads.remove(next_id);
-            }
+        for step in plan_steps
+            .into_iter()
+            .filter(|step| thread.plans.contains_key(&step.plan_id))
+        {
+            thread.plan_steps.insert(step.id.clone(), step);
         }
-        thread.intent_heads = intent_heads.into_iter().collect();
-        thread.intent_heads.sort();
 
+        let thread_intent_ids: HashSet<String> = thread.intents.keys().cloned().collect();
+        let thread_task_ids: HashSet<String> = thread.tasks.keys().cloned().collect();
+        let thread_plan_ids: HashSet<String> = thread.plans.keys().cloned().collect();
+        let thread_run_ids: HashSet<String> = thread.runs.keys().cloned().collect();
+        let thread_patchset_ids: HashSet<String> = thread.patchsets.keys().cloned().collect();
+
+        let intent_events: Vec<IntentEvent> = intent_events
+            .into_iter()
+            .filter(|event| thread_intent_ids.contains(&event.intent_id))
+            .collect();
+        let task_events: Vec<TaskEvent> = task_events
+            .into_iter()
+            .filter(|event| thread_task_ids.contains(&event.task_id))
+            .collect();
+        let run_events: Vec<RunEvent> = run_events
+            .into_iter()
+            .filter(|event| thread_run_ids.contains(&event.run_id))
+            .collect();
+        let plan_step_events: Vec<PlanStepEvent> = plan_step_events
+            .into_iter()
+            .filter(|event| {
+                thread_plan_ids.contains(&event.plan_id)
+                    || thread_run_ids.contains(&event.run_id.clone().unwrap_or_default())
+            })
+            .collect();
+        let run_usage: Vec<RunUsage> = run_usage
+            .into_iter()
+            .filter(|usage| {
+                thread_run_ids.contains(&usage.run_id)
+                    || selected_thread_id
+                        .as_deref()
+                        .is_some_and(|id| usage.thread_id == id)
+            })
+            .collect();
+        let evidence: Vec<EvidenceEvent> = evidence
+            .into_iter()
+            .filter(|event| {
+                thread_run_ids.contains(&event.run_id)
+                    || event
+                        .patchset_id
+                        .as_ref()
+                        .is_some_and(|patchset_id| thread_patchset_ids.contains(patchset_id))
+            })
+            .collect();
+        let decisions: Vec<DecisionEvent> = decisions
+            .into_iter()
+            .filter(|event| {
+                thread_run_ids.contains(&event.run_id)
+                    || event
+                        .chosen_patchset_id
+                        .as_ref()
+                        .is_some_and(|patchset_id| thread_patchset_ids.contains(patchset_id))
+            })
+            .collect();
+        let context_frames: Vec<ContextFrameEvent> = context_frames
+            .into_iter()
+            .filter(|event| thread_run_ids.contains(&event.run_id))
+            .collect();
+        let tool_invocation_events: Vec<ToolInvocationEvent> = tool_invocation_events
+            .into_iter()
+            .filter(|event| {
+                thread_run_ids.contains(&event.run_id)
+                    || selected_thread_id
+                        .as_deref()
+                        .is_some_and(|id| event.thread_id == id)
+            })
+            .collect();
+        let tool_invocations = Self::collapse_tool_invocations(&tool_invocation_events);
+
+        let mut intent_events_sorted = intent_events.clone();
+        intent_events_sorted.sort_by_key(|event| event.at);
+
+        thread.intent_heads = Self::compute_intent_heads(&thread.intents, &intent_events_sorted);
         let latest_intent_id = thread
             .intents
             .values()
-            .max_by_key(|i| i.created_at)
-            .map(|i| i.id.clone());
-        thread.current_intent_id = intent_events_sorted
-            .last()
-            .map(|e| e.intent_id.clone())
+            .max_by_key(|intent| intent.created_at)
+            .map(|intent| intent.id.clone());
+        thread.latest_intent_id = latest_intent_id.clone();
+        thread.current_intent_id = thread
+            .intent_heads
+            .iter()
+            .filter_map(|intent_id| thread.intents.get(intent_id))
+            .max_by_key(|intent| intent.created_at)
+            .map(|intent| intent.id.clone())
             .or_else(|| latest_intent_id.clone());
-        thread.latest_intent_id = latest_intent_id;
+        thread.updated_at = thread
+            .runs
+            .values()
+            .map(|run| run.started_at)
+            .chain(
+                thread
+                    .patchsets
+                    .values()
+                    .map(|patchset| patchset.created_at),
+            )
+            .chain(thread.tasks.values().map(|task| task.created_at))
+            .chain(thread.plans.values().map(|plan| plan.created_at))
+            .chain(thread.intents.values().map(|intent| intent.created_at))
+            .max();
 
         let mut index = QueryIndex::default();
         for task in thread.tasks.values() {
@@ -277,6 +586,30 @@ impl HistoryReader {
                 }
             }
         }
+
+        let mut task_events_sorted = task_events.clone();
+        task_events_sorted.sort_by_key(|event| event.at);
+        for event in &task_events_sorted {
+            if let Some(run_id) = event.run_id.as_ref()
+                && thread_run_ids.contains(run_id)
+            {
+                let runs_for_task = index.task_run_ids.entry(event.task_id.clone()).or_default();
+                if !runs_for_task.contains(run_id) {
+                    runs_for_task.push(run_id.clone());
+                }
+                let observed_at = thread
+                    .runs
+                    .get(run_id)
+                    .map(|run| run.started_at)
+                    .unwrap_or(event.at);
+                let entry = latest_run_by_task
+                    .entry(event.task_id.clone())
+                    .or_insert((run_id.clone(), observed_at));
+                if observed_at > entry.1 {
+                    *entry = (run_id.clone(), observed_at);
+                }
+            }
+        }
         for (task_id, (run_id, _)) in latest_run_by_task {
             index.task_latest_run_id.insert(task_id, run_id);
         }
@@ -295,8 +628,6 @@ impl HistoryReader {
         }
 
         let mut scheduler = SchedulerView::default();
-        let mut task_events_sorted = task_events.clone();
-        task_events_sorted.sort_by_key(|e| e.at);
         for event in &task_events_sorted {
             if event.status == "in_progress" {
                 scheduler.active_task_id = Some(event.task_id.clone());
@@ -309,7 +640,7 @@ impl HistoryReader {
         }
 
         let mut run_events_sorted = run_events.clone();
-        run_events_sorted.sort_by_key(|e| e.at);
+        run_events_sorted.sort_by_key(|event| event.at);
         for event in &run_events_sorted {
             if event.status == "in_progress" {
                 scheduler.active_run_id = Some(event.run_id.clone());
@@ -322,7 +653,7 @@ impl HistoryReader {
         }
 
         let mut plan_step_events_sorted = plan_step_events.clone();
-        plan_step_events_sorted.sort_by_key(|e| e.at);
+        plan_step_events_sorted.sort_by_key(|event| event.at);
         for event in &plan_step_events_sorted {
             if event.status == "in_progress" {
                 scheduler.active_plan_step_id = Some(event.step_id.clone());
@@ -332,20 +663,20 @@ impl HistoryReader {
         let mut plans_for_intent: Vec<&PlanSnapshot> = thread
             .plans
             .values()
-            .filter(|p| p.intent_id.as_deref() == thread.current_intent_id.as_deref())
+            .filter(|plan| plan.intent_id.as_deref() == thread.current_intent_id.as_deref())
             .collect();
-        plans_for_intent.sort_by_key(|p| p.created_at);
-        if let Some(selected) = plans_for_intent.last() {
-            scheduler.selected_plan_id = Some(selected.id.clone());
-            scheduler.current_plan_heads = plans_for_intent.iter().map(|p| p.id.clone()).collect();
-        } else {
-            let mut all_plans: Vec<&PlanSnapshot> = thread.plans.values().collect();
-            all_plans.sort_by_key(|p| p.created_at);
-            if let Some(selected) = all_plans.last() {
-                scheduler.selected_plan_id = Some(selected.id.clone());
-                scheduler.current_plan_heads = all_plans.iter().map(|p| p.id.clone()).collect();
-            }
+        plans_for_intent.sort_by_key(|plan| plan.created_at);
+        if plans_for_intent.is_empty() {
+            plans_for_intent = thread.plans.values().collect();
+            plans_for_intent.sort_by_key(|plan| plan.created_at);
         }
+        scheduler.current_plan_heads = Self::compute_plan_heads(plans_for_intent.iter().copied());
+        scheduler.selected_plan_id = scheduler
+            .current_plan_heads
+            .iter()
+            .filter_map(|plan_id| thread.plans.get(plan_id))
+            .max_by_key(|plan| plan.created_at)
+            .map(|plan| plan.id.clone());
 
         let mut task_latest_status: HashMap<String, String> = HashMap::new();
         for event in &task_events_sorted {
@@ -355,31 +686,42 @@ impl HistoryReader {
             .tasks
             .values()
             .filter(|task| {
-                let status = task_latest_status.get(&task.id).map(|s| s.as_str());
+                let status = task_latest_status
+                    .get(&task.id)
+                    .map(|status| status.as_str());
                 let matches_plan = scheduler
                     .selected_plan_id
                     .as_deref()
                     .map(|plan_id| task.plan_id.as_deref() == Some(plan_id))
                     .unwrap_or(true);
-                matches_plan && status.is_none()
+                matches_plan && matches!(status, None | Some("pending"))
             })
             .map(|task| task.id.clone())
             .collect();
 
         let mut context_frames_sorted = context_frames.clone();
-        context_frames_sorted.sort_by_key(|f| f.at);
+        context_frames_sorted.sort_by_key(|frame| frame.at);
         let mut live_context_window: Vec<ContextFrameEvent> = context_frames_sorted
             .into_iter()
             .rev()
             .take(LIVE_CONTEXT_WINDOW_MAX)
             .collect();
         live_context_window.reverse();
-        scheduler.live_context_window = live_context_window.iter().map(|f| f.id.clone()).collect();
+        scheduler.live_context_window = live_context_window
+            .iter()
+            .map(|frame| frame.id.clone())
+            .collect();
+        scheduler.updated_at = run_events_sorted
+            .last()
+            .map(|event| event.at)
+            .or_else(|| task_events_sorted.last().map(|event| event.at))
+            .or_else(|| plan_step_events_sorted.last().map(|event| event.at));
 
         ViewRebuildResult {
             thread,
             scheduler,
             index,
+            tool_invocations,
             intent_events,
             task_events,
             run_events,
@@ -389,5 +731,14 @@ impl HistoryReader {
             decisions,
             context_frames,
         }
+    }
+}
+
+fn tool_status_from_str(status: &str) -> ToolStatus {
+    match status {
+        "completed" => ToolStatus::Completed,
+        "failed" => ToolStatus::Failed,
+        "in_progress" | "started" => ToolStatus::InProgress,
+        _ => ToolStatus::Pending,
     }
 }

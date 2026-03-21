@@ -255,7 +255,7 @@ pub struct Reasoning {
 
 /// FileChange - represents a file change
 /// Corresponds to: PatchSet[S] in agent-overview-zh.md
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FileChange {
     pub path: String,
     pub diff: String,
@@ -434,7 +434,15 @@ impl CodexSession {
                 plan.status
             );
         }
-        self.plans.push(plan);
+        if let Some(existing) = self
+            .plans
+            .iter_mut()
+            .find(|existing| existing.id == plan.id)
+        {
+            *existing = plan;
+        } else {
+            self.plans.push(plan);
+        }
     }
 
     /// Add a new task
@@ -442,7 +450,15 @@ impl CodexSession {
         if self.debug {
             eprintln!("[DEBUG] Added Task: {}", task.id);
         }
-        self.tasks.push(task);
+        if let Some(existing) = self
+            .tasks
+            .iter_mut()
+            .find(|existing| existing.id == task.id)
+        {
+            *existing = task;
+        } else {
+            self.tasks.push(task);
+        }
     }
 
     /// Add a new run
@@ -450,7 +466,11 @@ impl CodexSession {
         if self.debug {
             eprintln!("[DEBUG] Added Run: {} (status: {:?})", run.id, run.status);
         }
-        self.runs.push(run);
+        if let Some(existing) = self.runs.iter_mut().find(|existing| existing.id == run.id) {
+            *existing = run;
+        } else {
+            self.runs.push(run);
+        }
     }
 
     /// Add a new tool invocation
@@ -461,7 +481,15 @@ impl CodexSession {
                 invocation.id, invocation.tool_name
             );
         }
-        self.tool_invocations.push(invocation);
+        if let Some(existing) = self
+            .tool_invocations
+            .iter_mut()
+            .find(|existing| existing.id == invocation.id)
+        {
+            *existing = invocation;
+        } else {
+            self.tool_invocations.push(invocation);
+        }
     }
 
     /// Add a new reasoning
@@ -473,7 +501,15 @@ impl CodexSession {
                 reasoning.summary.first().map(|s| &s[..s.len().min(30)])
             );
         }
-        self.reasonings.push(reasoning);
+        if let Some(existing) = self
+            .reasonings
+            .iter_mut()
+            .find(|existing| existing.id == reasoning.id)
+        {
+            *existing = reasoning;
+        } else {
+            self.reasonings.push(reasoning);
+        }
     }
 
     /// Add a new patchset
@@ -486,7 +522,15 @@ impl CodexSession {
                 patchset.changes.len()
             );
         }
-        self.patchsets.push(patchset);
+        if let Some(existing) = self
+            .patchsets
+            .iter_mut()
+            .find(|existing| existing.id == patchset.id)
+        {
+            *existing = patchset;
+        } else {
+            self.patchsets.push(patchset);
+        }
     }
 
     /// Add a new approval request
@@ -497,7 +541,15 @@ impl CodexSession {
                 request.id, request.approval_type
             );
         }
-        self.approval_requests.push(request);
+        if let Some(existing) = self
+            .approval_requests
+            .iter_mut()
+            .find(|existing| existing.id == request.id)
+        {
+            *existing = request;
+        } else {
+            self.approval_requests.push(request);
+        }
     }
 
     /// Add a new agent message
@@ -509,7 +561,15 @@ impl CodexSession {
                 &message.content[..message.content.len().min(50)]
             );
         }
-        self.agent_messages.push(message);
+        if let Some(existing) = self
+            .agent_messages
+            .iter_mut()
+            .find(|existing| existing.id == message.id)
+        {
+            *existing = message;
+        } else {
+            self.agent_messages.push(message);
+        }
     }
 
     /// Add token usage

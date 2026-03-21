@@ -42,19 +42,21 @@ const CAT_FILE_LONG_ABOUT: &str = "Inspect Git objects or Libra AI history objec
 
 Modes:
   - Git modes: use exactly one of -t/-s/-p/-e and provide OBJECT.
-  - AI lookup modes: use exactly one of --ai/--ai-type with an AI object ID.
+  - AI lookup modes: use exactly one of --ai/--ai-type with an AI object ID or TYPE:ID.
   - AI listing modes: use --ai-list <TYPE> or --ai-list-types.
 
 Notes:
   - OBJECT is ignored for all --ai* modes.
-  - --ai and --ai-type search the AI history branch by object ID and can resolve persisted session objects such as ai_session.
+  - --ai and --ai-type search the AI history branch and can resolve persisted session objects such as ai_session.
+  - If the same ID exists under multiple AI types, pass TYPE:ID to disambiguate.
   - --ai on ai_session objects prints a unified session summary before full JSON.
-  - --ai-list only accepts the built-in TYPE names shown in --help.";
+  - --ai-list accepts built-in AI types as well as any type already present in the history branch.";
 
 const CAT_FILE_AFTER_HELP: &str = "Examples:
   libra cat-file -p HEAD
   libra cat-file -t 40d352ee7190f92dcf7883b8a81f2c730fd8a860
   libra cat-file --ai-list intent
+  libra cat-file --ai patchset:call_KjR3NB4cQaT5Rm1c7zXjsskQ
   libra cat-file --ai 5b878637-f852-4bff-adee-3354c42ae69f
   libra cat-file --ai-type debug-local-1772707227";
 
@@ -84,15 +86,15 @@ pub struct CatFileArgs {
     pub check_exist: bool,
 
     // ── AI object modes ─────────────────────────────────────────────────
-    /// Pretty-print an AI object by ID across all stored AI types.
+    /// Pretty-print an AI object by ID across all stored AI types, or disambiguate with TYPE:ID.
     #[clap(long = "ai", value_name = "ID", group = "mode")]
     pub ai_object: Option<String>,
 
-    /// Print the type of an AI object by ID across all stored AI types.
+    /// Print the type of an AI object by ID across all stored AI types, or disambiguate with TYPE:ID.
     #[clap(long = "ai-type", value_name = "ID", group = "mode")]
     pub ai_type: Option<String>,
 
-    /// List all AI objects of the given type (intent|task|run|plan|patchset|evidence|invocation|provenance|decision|snapshot)
+    /// List all AI objects of the given type (for example intent, patchset, event, patchset_snapshot)
     #[clap(long = "ai-list", value_name = "TYPE", group = "mode")]
     pub ai_list: Option<String>,
 
@@ -107,21 +109,129 @@ pub struct CatFileArgs {
 
 /// Known AI object type names stored under the `libra/intent` orphan branch.
 const AI_OBJECT_TYPES: &[&str] = &[
-    "intent",
-    "task",
-    "run",
-    "plan",
-    "patchset",
-    "evidence",
-    "invocation",
-    "provenance",
-    "decision",
-    "snapshot",
+    "agent_message",
     "ai_session",
-    "provider_session",
+    "approval_request",
+    "context_frame",
+    "context_snapshot",
+    "decision",
+    "event",
+    "evidence",
     "evidence_input",
+    "intent",
+    "intent_event",
+    "intent_snapshot",
+    "invocation",
+    "patchset",
+    "patchset_snapshot",
+    "plan",
+    "plan_snapshot",
+    "plan_step_event",
+    "plan_step_snapshot",
+    "provider_session",
+    "provenance",
+    "provenance_snapshot",
+    "reasoning",
+    "task",
+    "task_event",
+    "task_snapshot",
+    "tool_invocation",
+    "tool_invocation_event",
+    "run",
+    "run_event",
+    "run_snapshot",
+    "run_usage",
+    "snapshot",
 ];
 const TAG_REF_PREFIX: &str = "refs/tags/";
+
+fn is_known_ai_object_type(type_name: &str) -> bool {
+    AI_OBJECT_TYPES.contains(&type_name)
+}
+
+fn split_typed_ai_selector(selector: &str) -> Option<(&str, &str)> {
+    let (type_name, object_id) = selector.split_once(':')?;
+    if object_id.is_empty() || !is_known_ai_object_type(type_name) {
+        return None;
+    }
+    Some((type_name, object_id))
+}
+
+async fn resolve_ai_object_with_history(
+    hm: &HistoryManager,
+    selector: &str,
+) -> CliResult<(ObjectHash, String)> {
+    if let Some((type_name, object_id)) = split_typed_ai_selector(selector) {
+        return hm
+            .get_object_hash(type_name, object_id)
+            .await
+            .map_err(|e| {
+                CliError::fatal(format!(
+                    "failed to look up AI object {}: {}",
+                    redact_uuid(object_id),
+                    e
+                ))
+            })?
+            .map(|hash| (hash, type_name.to_string()))
+            .ok_or_else(|| {
+                CliError::fatal(format!(
+                    "AI object not found: {}:{}",
+                    type_name,
+                    redact_uuid(object_id)
+                ))
+            });
+    }
+
+    let matches = hm.find_object_hashes(selector).await.map_err(|e| {
+        CliError::fatal(format!(
+            "failed to look up AI object {}: {}",
+            redact_uuid(selector),
+            e
+        ))
+    })?;
+
+    match matches.len() {
+        0 => Err(CliError::fatal(format!(
+            "AI object not found: {}",
+            redact_uuid(selector)
+        ))),
+        1 => Ok(matches[0].clone()),
+        _ => {
+            let mut kinds: Vec<String> = matches.into_iter().map(|(_, kind)| kind).collect();
+            kinds.sort();
+            Err(CliError::fatal(format!(
+                "AI object ID {} is ambiguous across types: {}. Use TYPE:ID to disambiguate.",
+                redact_uuid(selector),
+                kinds.join(", ")
+            )))
+        }
+    }
+}
+
+async fn resolve_ai_object(selector: &str) -> CliResult<(ObjectHash, String)> {
+    let hm = build_history_manager().await?;
+    resolve_ai_object_with_history(&hm, selector).await
+}
+
+async fn ensure_ai_listable_type(hm: &HistoryManager, type_name: &str) -> CliResult<()> {
+    if is_known_ai_object_type(type_name) {
+        return Ok(());
+    }
+
+    let existing_types = hm
+        .list_object_types()
+        .await
+        .map_err(|e| CliError::fatal(format!("failed to list AI object types: {e}")))?;
+    if existing_types.iter().any(|existing| existing == type_name) {
+        return Ok(());
+    }
+
+    Err(CliError::fatal(format!(
+        "unknown AI object type '{}'. Valid built-in types: {}",
+        type_name,
+        AI_OBJECT_TYPES.join(", ")
+    )))
+}
 
 fn cat_file_exit(message: impl Into<String>) -> ! {
     exit_with_legacy_stderr(message)
@@ -481,11 +591,15 @@ fn emit_pretty_print_json(
 }
 
 async fn ai_list_types_data() -> CliResult<Vec<serde_json::Value>> {
-    let hm = build_history_manager().await;
+    let hm = build_history_manager().await?;
     let mut types = Vec::new();
-    for &type_name in AI_OBJECT_TYPES {
+    for type_name in hm
+        .list_object_types()
+        .await
+        .map_err(|e| CliError::fatal(format!("failed to list AI object types: {e}")))?
+    {
         let objects = hm
-            .list_objects(type_name)
+            .list_objects(&type_name)
             .await
             .map_err(|e| CliError::fatal(format!("failed to list {type_name} objects: {e}")))?;
         if !objects.is_empty() {
@@ -499,15 +613,8 @@ async fn ai_list_types_data() -> CliResult<Vec<serde_json::Value>> {
 }
 
 async fn ai_list_objects_data(type_name: &str) -> CliResult<Vec<serde_json::Value>> {
-    if !AI_OBJECT_TYPES.contains(&type_name) {
-        return Err(CliError::fatal(format!(
-            "unknown AI object type '{}'. Valid types: {}",
-            type_name,
-            AI_OBJECT_TYPES.join(", ")
-        )));
-    }
-
-    let hm = build_history_manager().await;
+    let hm = build_history_manager().await?;
+    ensure_ai_listable_type(&hm, type_name).await?;
     let objects = hm
         .list_objects(type_name)
         .await
@@ -525,18 +632,7 @@ async fn ai_list_objects_data(type_name: &str) -> CliResult<Vec<serde_json::Valu
 }
 
 async fn ai_pretty_print_data(uuid: &str) -> CliResult<serde_json::Value> {
-    let hm = build_history_manager().await;
-    let (hash, type_name) = hm
-        .find_object_hash(uuid)
-        .await
-        .map_err(|e| {
-            CliError::fatal(format!(
-                "failed to look up AI object {}: {}",
-                redact_uuid(uuid),
-                e
-            ))
-        })?
-        .ok_or_else(|| CliError::fatal(format!("AI object not found: {}", redact_uuid(uuid))))?;
+    let (hash, type_name) = resolve_ai_object(uuid).await?;
 
     let storage = ClientStorage::init(path::objects());
     let data = storage
@@ -567,18 +663,9 @@ async fn ai_pretty_print_data(uuid: &str) -> CliResult<serde_json::Value> {
 }
 
 async fn ai_show_type_data(uuid: &str) -> CliResult<String> {
-    let hm = build_history_manager().await;
-    hm.find_object_hash(uuid)
+    resolve_ai_object(uuid)
         .await
-        .map_err(|e| {
-            CliError::fatal(format!(
-                "failed to look up AI object {}: {}",
-                redact_uuid(uuid),
-                e
-            ))
-        })?
         .map(|(_hash, type_name)| type_name)
-        .ok_or_else(|| CliError::fatal(format!("AI object not found: {}", redact_uuid(uuid))))
 }
 
 /// Resolve a user-supplied object reference to an `ObjectHash`.
@@ -760,18 +847,35 @@ fn print_tag(hash: &ObjectHash) {
 // ── AI object helpers ───────────────────────────────────────────────────
 
 /// Build a `HistoryManager` from the current repo context.
-async fn build_history_manager() -> HistoryManager {
-    let objects_dir = path::objects();
+async fn build_history_manager() -> CliResult<HistoryManager> {
+    let repo_path = util::try_get_storage_path(None).map_err(|_| CliError::repo_not_found())?;
+    let objects_dir = repo_path.join("objects");
+    let db_path = repo_path.join(util::DATABASE);
+    let db_conn = db::get_db_conn_instance_for_path(&db_path)
+        .await
+        .map_err(|e| {
+            CliError::fatal(format!(
+                "failed to open repository database '{}': {}",
+                db_path.display(),
+                e
+            ))
+        })?;
     let storage = Arc::new(LocalStorage::new(objects_dir));
-    let db_conn = Arc::new(db::get_db_conn_instance().await.clone());
-    HistoryManager::new(storage, util::storage_path(), db_conn)
+    Ok(HistoryManager::new(storage, repo_path, Arc::new(db_conn)))
 }
 
 /// List all AI object types that have at least one entry in the history branch.
 async fn ai_list_types() {
-    let hm = build_history_manager().await;
-    for &type_name in AI_OBJECT_TYPES {
-        match hm.list_objects(type_name).await {
+    let hm = match build_history_manager().await {
+        Ok(hm) => hm,
+        Err(err) => cat_file_exit(err.to_string()),
+    };
+    let types = match hm.list_object_types().await {
+        Ok(types) => types,
+        Err(e) => cat_file_exit(format!("fatal: failed to list AI object types: {}", e)),
+    };
+    for type_name in types {
+        match hm.list_objects(&type_name).await {
             Ok(objects) if !objects.is_empty() => {
                 println!("{}\t({} objects)", type_name, objects.len());
             }
@@ -786,15 +890,13 @@ async fn ai_list_types() {
 
 /// List all AI objects of a specific type.
 async fn ai_list_objects(type_name: &str) {
-    if !AI_OBJECT_TYPES.contains(&type_name) {
-        cat_file_exit(format!(
-            "fatal: unknown AI object type '{}'. Valid types: {}",
-            type_name,
-            AI_OBJECT_TYPES.join(", ")
-        ));
+    let hm = match build_history_manager().await {
+        Ok(hm) => hm,
+        Err(err) => cat_file_exit(err.to_string()),
+    };
+    if let Err(err) = ensure_ai_listable_type(&hm, type_name).await {
+        cat_file_exit(err.to_string());
     }
-
-    let hm = build_history_manager().await;
     let objects = match hm.list_objects(type_name).await {
         Ok(o) => o,
         Err(e) => cat_file_exit(format!(
@@ -825,15 +927,9 @@ fn redact_uuid(uuid: &str) -> String {
 
 /// Pretty-print an AI object by UUID (auto-detects type).
 async fn ai_pretty_print(uuid: &str) {
-    let hm = build_history_manager().await;
-    let (hash, type_name) = match hm.find_object_hash(uuid).await {
-        Ok(Some(pair)) => pair,
-        Ok(None) => cat_file_exit(format!("fatal: AI object not found: {}", redact_uuid(uuid))),
-        Err(e) => cat_file_exit(format!(
-            "fatal: failed to look up AI object {}: {}",
-            redact_uuid(uuid),
-            e
-        )),
+    let (hash, type_name) = match resolve_ai_object(uuid).await {
+        Ok(resolved) => resolved,
+        Err(err) => cat_file_exit(err.to_string()),
     };
 
     // Read raw blob JSON
@@ -1075,15 +1171,9 @@ fn evidence_input_summary_lines(value: &serde_json::Value) -> Vec<String> {
 
 /// Print the AI object type for a UUID.
 async fn ai_show_type(uuid: &str) {
-    let hm = build_history_manager().await;
-    match hm.find_object_hash(uuid).await {
-        Ok(Some((_hash, type_name))) => println!("{}", type_name),
-        Ok(None) => cat_file_exit(format!("fatal: AI object not found: {}", redact_uuid(uuid))),
-        Err(e) => cat_file_exit(format!(
-            "fatal: failed to look up AI object {}: {}",
-            redact_uuid(uuid),
-            e
-        )),
+    match resolve_ai_object(uuid).await {
+        Ok((_hash, type_name)) => println!("{}", type_name),
+        Err(err) => cat_file_exit(err.to_string()),
     }
 }
 
@@ -1133,12 +1223,12 @@ mod tests {
         let args = CatFileArgs::try_parse_from([
             "cat-file",
             "--ai",
-            "550e8400-e29b-41d4-a716-446655440000",
+            "patchset:550e8400-e29b-41d4-a716-446655440000",
         ])
         .unwrap();
         assert_eq!(
             args.ai_object,
-            Some("550e8400-e29b-41d4-a716-446655440000".to_string())
+            Some("patchset:550e8400-e29b-41d4-a716-446655440000".to_string())
         );
         assert!(!args.show_type);
     }
@@ -1184,7 +1274,18 @@ mod tests {
 
         assert!(help.contains("OBJECT is ignored for all --ai* modes"));
         assert!(help.contains("persisted session objects such as ai_session"));
+        assert!(help.contains("TYPE:ID"));
         assert!(help.contains("--ai-type <ID>"));
+    }
+
+    #[test]
+    fn test_split_typed_ai_selector_recognizes_known_type() {
+        assert_eq!(
+            split_typed_ai_selector("patchset:call_123"),
+            Some(("patchset", "call_123"))
+        );
+        assert_eq!(split_typed_ai_selector("unknown:call_123"), None);
+        assert_eq!(split_typed_ai_selector("plain-id"), None);
     }
 
     #[test]

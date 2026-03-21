@@ -455,3 +455,49 @@ If the formatting check fails, you can automatically fix formatting issues by ru
 ```bash
 cargo +nightly fmt --all
 ```
+
+
+## Run on Windows
+
+If you are building Libra on Windows for the first time, install OpenSSL before running
+`cargo build` or `cargo test`. The easiest setup is to use a precompiled OpenSSL package:
+<https://slproweb.com/products/Win32OpenSSL.html>
+
+Recommended setup:
+
+1. Install a 64-bit OpenSSL build that matches the default Rust Windows target
+   `x86_64-pc-windows-msvc`.
+2. Note the installation directory, for example `D:\OpenSSL-Win64`.
+3. Create `.cargo/config.toml` in the project root if it does not already exist.
+4. Add OpenSSL environment overrides so Cargo and dependent build scripts can find the
+   headers and libraries.
+
+Project layout:
+
+```text
+.cargo/
+  config.toml
+```
+
+Example `.cargo/config.toml`:
+
+```toml
+[env]
+OPENSSL_DIR = "D:\\OpenSSL-Win64"
+OPENSSL_LIB_DIR = "D:\\OpenSSL-Win64\\lib\\VC\\static"
+OPENSSL_INCLUDE_DIR = "D:\\OpenSSL-Win64\\include"
+OPENSSL_NO_VENDOR = "1"
+```
+
+Notes:
+
+- Update the paths if OpenSSL is installed in a different directory.
+- If `.cargo/config.toml` already exists, merge these entries instead of replacing the file.
+- Some OpenSSL installers place libraries in a different subdirectory. If `VC\\static` does
+  not exist in your installation, point `OPENSSL_LIB_DIR` at the directory that contains the
+  `.lib` files for your installation.
+- After updating the config, open a new terminal and verify the setup with:
+
+```bash
+cargo build
+```

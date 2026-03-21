@@ -10,22 +10,23 @@ pub mod view;
 
 use std::{
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard, OnceLock},
 };
 
 use anyhow;
 use chrono::Utc;
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
+use git_internal::hash::ObjectHash;
 use history::{HistoryReader, HistoryRecorder, HistoryWriter};
 use model::{
     ContextFrameEvent, ContextSnapshot, DecisionEvent, EvidenceEvent, IntentEvent, IntentSnapshot,
     PatchSetSnapshot, PlanSnapshot, PlanStepEvent, PlanStepSnapshot, ProvenanceSnapshot, RunEvent,
-    RunSnapshot, RunUsage, TaskEvent, TaskSnapshot,
+    RunSnapshot, RunUsage, TaskEvent, TaskSnapshot, ToolInvocationEvent,
 };
 use protocol::MethodKind;
 use schema_v2::*;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 pub use types::*;
 
@@ -38,6 +39,7 @@ use crate::{
 };
 
 const CODEX_WS_URL: &str = "ws://127.0.0.1:8080";
+static HISTORY_APPEND_LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
 
 fn lock_or_warn<'a, T>(mutex: &'a Arc<Mutex<T>>, context: &str) -> Option<MutexGuard<'a, T>> {
     match mutex.lock() {
@@ -46,6 +48,244 @@ fn lock_or_warn<'a, T>(mutex: &'a Arc<Mutex<T>>, context: &str) -> Option<MutexG
             eprintln!("[WARN] {context}: failed to lock mutex: {e}");
             None
         }
+    }
+}
+
+fn history_append_lock() -> &'static AsyncMutex<()> {
+    HISTORY_APPEND_LOCK.get_or_init(|| AsyncMutex::new(()))
+}
+
+fn merge_patchset_changes(
+    existing_changes: &[FileChange],
+    completed_changes: &[FileChange],
+) -> Vec<FileChange> {
+    if completed_changes.is_empty() {
+        return existing_changes.to_vec();
+    }
+
+    let mut merged = completed_changes.to_vec();
+
+    // Preserve any previously captured streaming diff if the completed payload
+    // only summarizes touched files and omits the actual patch text.
+    let has_completed_diff = merged.iter().any(|change| !change.diff.is_empty());
+    if !has_completed_diff {
+        for existing_change in existing_changes {
+            if merged
+                .iter()
+                .all(|change| change.path != existing_change.path)
+            {
+                merged.push(existing_change.clone());
+            }
+        }
+    }
+
+    merged
+}
+
+fn latest_thread_intent_id(
+    session: &CodexSession,
+    thread_id: &str,
+    excluding_id: Option<&str>,
+) -> Option<String> {
+    session
+        .intents
+        .iter()
+        .filter(|intent| {
+            intent.thread_id == thread_id
+                && excluding_id.is_none_or(|exclude_id| intent.id != exclude_id)
+        })
+        .max_by_key(|intent| intent.created_at)
+        .map(|intent| intent.id.clone())
+}
+
+fn build_tool_invocation_event(invocation: &ToolInvocation) -> ToolInvocationEvent {
+    ToolInvocationEvent {
+        id: invocation.id.clone(),
+        run_id: invocation.run_id.clone(),
+        thread_id: invocation.thread_id.clone(),
+        tool: invocation.tool_name.clone(),
+        server: invocation.server.clone(),
+        status: invocation.status.to_string(),
+        at: Utc::now(),
+        payload: serde_json::json!({
+            "arguments": invocation.arguments.clone(),
+            "result": invocation.result.clone(),
+            "error": invocation.error.clone(),
+            "duration_ms": invocation.duration_ms,
+        }),
+    }
+}
+
+fn next_tool_invocation_event_object_id(invocation_id: &str, status: &str) -> String {
+    format!(
+        "tool_invocation_event_{}_{}_{}",
+        invocation_id,
+        status,
+        Utc::now().timestamp_millis()
+    )
+}
+
+fn plan_status_from_event(status: &str) -> PlanStatus {
+    match status {
+        "completed" => PlanStatus::Completed,
+        "in_progress" | "inProgress" => PlanStatus::InProgress,
+        _ => PlanStatus::Pending,
+    }
+}
+
+fn task_status_from_event(status: &str) -> TaskStatus {
+    match status {
+        "completed" => TaskStatus::Completed,
+        "failed" => TaskStatus::Failed,
+        "in_progress" => TaskStatus::InProgress,
+        _ => TaskStatus::Pending,
+    }
+}
+
+fn run_status_from_event(status: &str) -> RunStatus {
+    match status {
+        "completed" => RunStatus::Completed,
+        "failed" => RunStatus::Failed,
+        "in_progress" => RunStatus::InProgress,
+        _ => RunStatus::Pending,
+    }
+}
+
+async fn append_history_hash_if_changed(
+    mcp_server: &Arc<LibraMcpServer>,
+    object_type: &str,
+    object_id: &str,
+    hash: ObjectHash,
+) -> Result<(), String> {
+    let Some(history) = &mcp_server.intent_history_manager else {
+        return Ok(());
+    };
+
+    let _guard = history_append_lock().lock().await;
+    let should_append = match history.get_object_hash(object_type, object_id).await {
+        Ok(Some(existing)) => existing != hash,
+        Ok(None) => true,
+        Err(e) => {
+            return Err(format!(
+                "Failed to check history for {object_type}/{object_id}: {e}"
+            ));
+        }
+    };
+
+    if should_append {
+        history
+            .append(object_type, object_id, hash)
+            .await
+            .map_err(|e| format!("Failed to append {object_type}/{object_id} to history: {e}"))?;
+    }
+
+    Ok(())
+}
+
+fn extract_thread_id(params: &serde_json::Value, session: Option<&CodexSession>) -> String {
+    params
+        .get("thread")
+        .and_then(|thread| {
+            thread
+                .get("id")
+                .or_else(|| thread.get("threadId"))
+                .or_else(|| thread.get("thread_id"))
+        })
+        .and_then(|value| value.as_str())
+        .map(String::from)
+        .or_else(|| {
+            params
+                .get("threadId")
+                .or_else(|| params.get("thread_id"))
+                .and_then(|value| value.as_str())
+                .map(String::from)
+        })
+        .or_else(|| {
+            session.and_then(|session| {
+                if session.thread.id.is_empty() {
+                    None
+                } else {
+                    Some(session.thread.id.clone())
+                }
+            })
+        })
+        .unwrap_or_default()
+}
+
+fn extract_task_id(params: &serde_json::Value) -> String {
+    params
+        .get("taskId")
+        .or_else(|| params.get("task_id"))
+        .or_else(|| params.get("id"))
+        .or_else(|| params.get("task").and_then(|task| task.get("id")))
+        .or_else(|| params.get("task").and_then(|task| task.get("taskId")))
+        .and_then(|value| value.as_str())
+        .map(String::from)
+        .unwrap_or_default()
+}
+
+fn extract_task_name(params: &serde_json::Value) -> String {
+    params
+        .get("taskName")
+        .or_else(|| params.get("task_name"))
+        .or_else(|| params.get("name"))
+        .or_else(|| params.get("title"))
+        .or_else(|| params.get("task").and_then(|task| task.get("name")))
+        .or_else(|| params.get("task").and_then(|task| task.get("title")))
+        .and_then(|value| value.as_str())
+        .map(String::from)
+        .unwrap_or_default()
+}
+
+fn normalize_plan_step_status(status: &str) -> &'static str {
+    match status {
+        "completed" => "completed",
+        "failed" => "failed",
+        "in_progress" | "inProgress" => "in_progress",
+        _ => "pending",
+    }
+}
+
+fn task_status_from_plan_step(status: &str) -> TaskStatus {
+    match normalize_plan_step_status(status) {
+        "completed" => TaskStatus::Completed,
+        "failed" => TaskStatus::Failed,
+        "in_progress" => TaskStatus::InProgress,
+        _ => TaskStatus::Pending,
+    }
+}
+
+fn aggregate_plan_status(plan_steps: &[TurnPlanStep]) -> PlanStatus {
+    if plan_steps
+        .iter()
+        .any(|step| normalize_plan_step_status(&step.status) == "in_progress")
+    {
+        PlanStatus::InProgress
+    } else if !plan_steps.is_empty()
+        && plan_steps
+            .iter()
+            .all(|step| normalize_plan_step_status(&step.status) == "completed")
+    {
+        PlanStatus::Completed
+    } else {
+        PlanStatus::Pending
+    }
+}
+
+fn build_plan_text(explanation: Option<&String>, plan_steps: &[TurnPlanStep]) -> String {
+    let lines: Vec<&str> = plan_steps
+        .iter()
+        .map(|step| step.step.trim())
+        .filter(|step| !step.is_empty())
+        .collect();
+
+    match explanation
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        Some(explanation) if lines.is_empty() => explanation.to_string(),
+        Some(explanation) => format!("{explanation}\n{}", lines.join("\n")),
+        None => lines.join("\n"),
     }
 }
 
@@ -144,27 +384,17 @@ pub async fn store_to_mcp<T: serde::Serialize + Send + Sync>(
     object: &T,
     debug: bool,
 ) {
+    if object_id.is_empty() {
+        eprintln!("[WARN] Refusing to store {object_type} with empty object id");
+        return;
+    }
     if let Some(storage) = &mcp_server.storage {
         match storage.put_json(object).await {
             Ok(hash) => {
-                // Also add to history if available
-                if let Some(history) = &mcp_server.intent_history_manager {
-                    let should_append = match history.get_object_hash(object_type, object_id).await
-                    {
-                        Ok(Some(existing)) => existing != hash,
-                        Ok(None) => true,
-                        Err(e) => {
-                            eprintln!(
-                                "[WARN] Failed to check history for {object_type}/{object_id}: {e}"
-                            );
-                            true
-                        }
-                    };
-                    if should_append
-                        && let Err(e) = history.append(object_type, object_id, hash).await
-                    {
-                        eprintln!("[WARN] Failed to append to history: {e}");
-                    }
+                if let Err(e) =
+                    append_history_hash_if_changed(mcp_server, object_type, object_id, hash).await
+                {
+                    eprintln!("[WARN] {e}");
                 }
                 if debug {
                     eprintln!("[DEBUG] Stored {object_type} {object_id} to MCP (hash: {hash})");
@@ -222,10 +452,74 @@ pub async fn execute(args: AgentCodexArgs) -> anyhow::Result<()> {
     let history_reader = HistoryReader::new(mcp_server.clone());
     let rebuild = history_reader.rebuild_view().await;
     if let Some(mut session_guard) = lock_or_warn(&session, "rebuild session from history") {
+        let mut latest_plan_status: std::collections::HashMap<
+            String,
+            (chrono::DateTime<Utc>, PlanStatus),
+        > = std::collections::HashMap::new();
+        for event in &rebuild.plan_step_events {
+            let status = plan_status_from_event(&event.status);
+            let entry = latest_plan_status
+                .entry(event.plan_id.clone())
+                .or_insert((event.at, status.clone()));
+            if event.at >= entry.0 {
+                *entry = (event.at, status);
+            }
+        }
+
+        let mut latest_task_status: std::collections::HashMap<
+            String,
+            (chrono::DateTime<Utc>, TaskStatus),
+        > = std::collections::HashMap::new();
+        for event in &rebuild.task_events {
+            let status = task_status_from_event(&event.status);
+            let entry = latest_task_status
+                .entry(event.task_id.clone())
+                .or_insert((event.at, status.clone()));
+            if event.at >= entry.0 {
+                *entry = (event.at, status);
+            }
+        }
+
+        let mut latest_run_status: std::collections::HashMap<
+            String,
+            (chrono::DateTime<Utc>, RunStatus),
+        > = std::collections::HashMap::new();
+        let mut latest_run_terminal_at: std::collections::HashMap<String, chrono::DateTime<Utc>> =
+            std::collections::HashMap::new();
+        for event in &rebuild.run_events {
+            let status = run_status_from_event(&event.status);
+            let entry = latest_run_status
+                .entry(event.run_id.clone())
+                .or_insert((event.at, status.clone()));
+            if event.at >= entry.0 {
+                *entry = (event.at, status.clone());
+            }
+            if matches!(status, RunStatus::Completed | RunStatus::Failed) {
+                latest_run_terminal_at.insert(event.run_id.clone(), event.at);
+            }
+        }
+
+        let mut patchset_declined: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for decision in &rebuild.decisions {
+            if !decision.approved
+                && let Some(patchset_id) = decision.chosen_patchset_id.as_ref()
+            {
+                patchset_declined.insert(patchset_id.clone());
+            }
+        }
+
         if !rebuild.thread.thread_id.is_empty() {
             session_guard.thread.id = rebuild.thread.thread_id.clone();
         }
         session_guard.thread.current_turn_id = rebuild.scheduler.active_run_id.clone();
+        session_guard.thread.status = if rebuild.scheduler.active_run_id.is_some() {
+            ThreadStatus::Running
+        } else if !rebuild.thread.thread_id.is_empty() {
+            ThreadStatus::Completed
+        } else {
+            ThreadStatus::Pending
+        };
         session_guard.intents = rebuild
             .thread
             .intents
@@ -247,7 +541,10 @@ pub async fn execute(args: AgentCodexArgs) -> anyhow::Result<()> {
                 intent_id: p.intent_id.clone(),
                 thread_id: p.thread_id.clone(),
                 turn_id: p.turn_id.clone(),
-                status: PlanStatus::Pending,
+                status: latest_plan_status
+                    .get(&p.id)
+                    .map(|(_, status)| status.clone())
+                    .unwrap_or(PlanStatus::Pending),
                 created_at: p.created_at,
             })
             .collect();
@@ -261,7 +558,10 @@ pub async fn execute(args: AgentCodexArgs) -> anyhow::Result<()> {
                 plan_id: t.plan_id.clone(),
                 thread_id: t.thread_id.clone(),
                 turn_id: t.turn_id.clone(),
-                status: TaskStatus::Pending,
+                status: latest_task_status
+                    .get(&t.id)
+                    .map(|(_, status)| status.clone())
+                    .unwrap_or(TaskStatus::Pending),
                 created_at: t.created_at,
             })
             .collect();
@@ -272,11 +572,15 @@ pub async fn execute(args: AgentCodexArgs) -> anyhow::Result<()> {
             .map(|r| Run {
                 id: r.id.clone(),
                 thread_id: r.thread_id.clone(),
-                status: RunStatus::Pending,
+                status: latest_run_status
+                    .get(&r.id)
+                    .map(|(_, status)| status.clone())
+                    .unwrap_or(RunStatus::Pending),
                 started_at: r.started_at,
-                completed_at: None,
+                completed_at: latest_run_terminal_at.get(&r.id).copied(),
             })
             .collect();
+        session_guard.tool_invocations = rebuild.tool_invocations.clone();
         session_guard.patchsets = rebuild
             .thread
             .patchsets
@@ -285,8 +589,12 @@ pub async fn execute(args: AgentCodexArgs) -> anyhow::Result<()> {
                 id: p.id.clone(),
                 run_id: p.run_id.clone(),
                 thread_id: p.thread_id.clone(),
-                changes: Vec::new(),
-                status: PatchStatus::Pending,
+                changes: p.changes.clone(),
+                status: if patchset_declined.contains(&p.id) {
+                    PatchStatus::Declined
+                } else {
+                    p.status.clone()
+                },
                 created_at: p.created_at,
             })
             .collect();
@@ -377,6 +685,13 @@ pub async fn execute(args: AgentCodexArgs) -> anyhow::Result<()> {
                                 if matches!(mk, MethodKind::ThreadStarted) {
                                     let thread_id = parse_params::<ThreadStartedParams>(&params)
                                         .map(|p| p.thread.thread_id)
+                                        .or_else(|| {
+                                            params
+                                                .get("thread")
+                                                .and_then(|t| t.get("id"))
+                                                .and_then(|t| t.as_str())
+                                                .map(String::from)
+                                        })
                                         .or_else(|| {
                                             params
                                                 .get("thread")
@@ -894,138 +1209,273 @@ pub async fn execute(args: AgentCodexArgs) -> anyhow::Result<()> {
                                         };
 
                                     if !plan_steps.is_empty() {
-                                        println!("\nPlan Updated:");
-                                        if let Some(exp) = explanation.as_ref() {
-                                            println!("  Explanation: {}", exp);
-                                        }
-                                        for item in plan_steps.iter() {
-                                            let status_string = item.status.as_str();
-                                            let step_string = item.step.as_str();
-                                            let marker = match status_string {
-                                                "completed" => "[x]",
-                                                "inProgress" => "[>]",
-                                                _ => "[ ]",
+                                        let plan_text =
+                                            build_plan_text(explanation.as_ref(), &plan_steps);
+                                        let plan_status = aggregate_plan_status(&plan_steps);
+                                        let plan_now = Utc::now();
+                                        let (
+                                            intent_id_for_plan,
+                                            plan_id,
+                                            plan_created_at,
+                                            parent_plan_ids,
+                                            persisted_plan,
+                                            persisted_plan_steps,
+                                            persisted_tasks,
+                                            persisted_plan_step_events,
+                                            persisted_task_events,
+                                        ) = if let Some(mut session) =
+                                            lock_or_warn(&session_clone, "plan update")
+                                        {
+                                            let intent_id_for_plan =
+                                                latest_thread_intent_id(&session, &thread_id, None);
+                                            let latest_plan = session
+                                                .plans
+                                                .iter()
+                                                .filter(|plan| {
+                                                    plan.thread_id == thread_id
+                                                        && plan.intent_id.as_deref()
+                                                            == intent_id_for_plan.as_deref()
+                                                })
+                                                .max_by_key(|plan| plan.created_at)
+                                                .cloned();
+                                            let reuse_latest_plan =
+                                                latest_plan.as_ref().is_some_and(|plan| {
+                                                    plan.turn_id.as_deref()
+                                                        == Some(turn_id.as_str())
+                                                        && plan.text == plan_text
+                                                });
+                                            let plan_id = if reuse_latest_plan {
+                                                latest_plan
+                                                    .as_ref()
+                                                    .map(|plan| plan.id.clone())
+                                                    .unwrap_or_default()
+                                            } else {
+                                                format!(
+                                                    "plan_{}_{}",
+                                                    turn_id,
+                                                    plan_now.timestamp_millis()
+                                                )
                                             };
-                                            println!("  {} {}", marker, step_string);
+                                            let plan_created_at = latest_plan
+                                                .as_ref()
+                                                .filter(|_| reuse_latest_plan)
+                                                .map(|plan| plan.created_at)
+                                                .unwrap_or(plan_now);
+                                            let parent_plan_ids = if reuse_latest_plan {
+                                                Vec::new()
+                                            } else {
+                                                latest_plan
+                                                    .as_ref()
+                                                    .map(|plan| vec![plan.id.clone()])
+                                                    .unwrap_or_default()
+                                            };
 
-                                            // Store each plan step as a Plan
-                                            let plan_id =
-                                                format!("plan_{}_{}", turn_id, step_string);
-                                            let plan_status = match status_string {
-                                                "completed" => PlanStatus::Completed,
-                                                "inProgress" => PlanStatus::InProgress,
-                                                _ => PlanStatus::Pending,
-                                            };
                                             let plan = Plan {
                                                 id: plan_id.clone(),
-                                                text: step_string.to_string(),
-                                                intent_id: lock_or_warn(
-                                                    &session_clone,
-                                                    "intent lookup for plan",
-                                                )
-                                                .and_then(|s| {
-                                                    s.intents.last().map(|i| i.id.clone())
-                                                }),
+                                                text: plan_text.clone(),
+                                                intent_id: intent_id_for_plan.clone(),
                                                 thread_id: thread_id.to_string(),
                                                 turn_id: Some(turn_id.to_string()),
-                                                status: plan_status,
-                                                created_at: Utc::now(),
+                                                status: plan_status.clone(),
+                                                created_at: plan_created_at,
                                             };
                                             let plan_snapshot = PlanSnapshot {
                                                 id: plan_id.clone(),
                                                 thread_id: thread_id.to_string(),
                                                 intent_id: plan.intent_id.clone(),
                                                 turn_id: Some(turn_id.to_string()),
-                                                step_text: step_string.to_string(),
-                                                created_at: Utc::now(),
+                                                step_text: plan_text.clone(),
+                                                parents: parent_plan_ids.clone(),
+                                                context_frames: Vec::new(),
+                                                created_at: plan_created_at,
                                             };
-                                            let plan_step_snapshot = PlanStepSnapshot {
-                                                id: plan_id.clone(),
-                                                plan_id: plan_id.clone(),
-                                                text: step_string.to_string(),
-                                                created_at: Utc::now(),
-                                            };
-                                            let plan_step_event = PlanStepEvent {
-                                                id: format!("plan_step_event_{}", plan_id),
-                                                plan_id: plan_id.clone(),
-                                                step_id: plan_id.clone(),
-                                                status: status_string.to_string(),
-                                                at: Utc::now(),
-                                                run_id: Some(turn_id.to_string()),
-                                            };
-                                            let history_writer = history_writer_clone.clone();
-                                            let plan_id_for_write = plan_id.clone();
-                                            tokio::spawn(async move {
-                                                history_writer
-                                                    .write(
-                                                        "plan_snapshot",
-                                                        &plan_id_for_write,
-                                                        &plan_snapshot,
-                                                    )
-                                                    .await;
-                                                history_writer
-                                                    .write(
-                                                        "plan_step_snapshot",
-                                                        &plan_id_for_write,
-                                                        &plan_step_snapshot,
-                                                    )
-                                                    .await;
-                                                history_writer
-                                                    .write(
-                                                        "plan_step_event",
-                                                        &plan_step_event.id,
-                                                        &plan_step_event,
-                                                    )
-                                                    .await;
-                                            });
-                                            let plan_for_mcp = plan.clone();
-                                            let status_for_event = status_string.to_string();
-                                            let step_for_event = step_string.to_string();
-                                            if status_string == "pending"
-                                                && let Some(mut session) = lock_or_warn(
-                                                    &session_clone,
-                                                    "scheduler ready queue update",
-                                                )
-                                                && session.tasks.iter().all(|t| t.id != plan_id)
-                                            {
-                                                session.tasks.push(Task {
-                                                    id: plan_id.clone(),
-                                                    tool_name: Some(step_string.to_string()),
+
+                                            let mut plan_step_snapshots =
+                                                Vec::with_capacity(plan_steps.len());
+                                            let mut task_snapshots =
+                                                Vec::with_capacity(plan_steps.len());
+                                            let mut plan_step_events = Vec::new();
+                                            let mut task_events = Vec::new();
+
+                                            for (ordinal, item) in plan_steps.iter().enumerate() {
+                                                let normalized_status =
+                                                    normalize_plan_step_status(&item.status);
+                                                let step_id =
+                                                    format!("{}_step_{}", plan_id, ordinal);
+                                                let task_id =
+                                                    format!("task_{}_{}", plan_id, ordinal);
+                                                let previous_task_status = session
+                                                    .tasks
+                                                    .iter()
+                                                    .find(|task| task.id == task_id)
+                                                    .map(|task| task.status.clone());
+                                                let task_status =
+                                                    task_status_from_plan_step(&item.status);
+
+                                                let plan_step_snapshot = PlanStepSnapshot {
+                                                    id: step_id.clone(),
+                                                    plan_id: plan_id.clone(),
+                                                    text: item.step.clone(),
+                                                    ordinal: ordinal as i64,
+                                                    created_at: plan_created_at,
+                                                };
+                                                let task_snapshot = TaskSnapshot {
+                                                    id: task_id.clone(),
+                                                    thread_id: thread_id.to_string(),
+                                                    plan_id: Some(plan_id.clone()),
+                                                    intent_id: intent_id_for_plan.clone(),
+                                                    turn_id: Some(turn_id.to_string()),
+                                                    title: Some(item.step.clone()),
+                                                    parent_task_id: None,
+                                                    origin_step_id: Some(step_id.clone()),
+                                                    dependencies: Vec::new(),
+                                                    created_at: plan_created_at,
+                                                };
+                                                let task = Task {
+                                                    id: task_id.clone(),
+                                                    tool_name: Some(item.step.clone()),
                                                     plan_id: Some(plan_id.clone()),
                                                     thread_id: thread_id.to_string(),
                                                     turn_id: Some(turn_id.to_string()),
-                                                    status: TaskStatus::Pending,
-                                                    created_at: Utc::now(),
-                                                });
-                                            }
-                                            if let Some(mut session) =
-                                                lock_or_warn(&session_clone, "plan update")
-                                            {
-                                                session.add_plan(plan);
+                                                    status: task_status.clone(),
+                                                    created_at: plan_created_at,
+                                                };
+
+                                                if previous_task_status.as_ref()
+                                                    != Some(&task_status)
+                                                {
+                                                    plan_step_events.push(PlanStepEvent {
+                                                        id: format!(
+                                                            "plan_step_event_{}_{}_{}",
+                                                            plan_id,
+                                                            ordinal,
+                                                            plan_now.timestamp_millis()
+                                                        ),
+                                                        plan_id: plan_id.clone(),
+                                                        step_id: step_id.clone(),
+                                                        status: normalized_status.to_string(),
+                                                        at: plan_now,
+                                                        run_id: Some(turn_id.to_string()),
+                                                    });
+                                                    if normalized_status != "pending" {
+                                                        task_events.push(TaskEvent {
+                                                            id: format!(
+                                                                "task_event_{}_{}_{}",
+                                                                task_id,
+                                                                normalized_status,
+                                                                plan_now.timestamp_millis()
+                                                            ),
+                                                            task_id: task_id.clone(),
+                                                            status: normalized_status.to_string(),
+                                                            at: plan_now,
+                                                            run_id: Some(turn_id.to_string()),
+                                                        });
+                                                    }
+                                                }
+
+                                                session.add_task(task);
+                                                plan_step_snapshots.push(plan_step_snapshot);
+                                                task_snapshots.push(task_snapshot);
                                             }
 
-                                            // Store to MCP in background
-                                            let mcp_server_for_plan = mcp_server_clone.clone();
-                                            let history = history_recorder_clone.clone();
-                                            tokio::spawn(async move {
-                                                store_to_mcp(
-                                                    &mcp_server_for_plan,
-                                                    "plan",
-                                                    &plan_id,
-                                                    &plan_for_mcp,
-                                                    debug_mode,
+                                            session.add_plan(plan.clone());
+
+                                            (
+                                                intent_id_for_plan,
+                                                plan_id,
+                                                plan_created_at,
+                                                parent_plan_ids,
+                                                plan_snapshot,
+                                                plan_step_snapshots,
+                                                task_snapshots,
+                                                plan_step_events,
+                                                task_events,
+                                            )
+                                        } else {
+                                            continue;
+                                        };
+
+                                        println!("\nPlan Updated:");
+                                        if let Some(exp) = explanation.as_ref() {
+                                            println!("  Explanation: {}", exp);
+                                        }
+                                        for item in plan_steps.iter() {
+                                            let status_string =
+                                                normalize_plan_step_status(&item.status);
+                                            let step_string = item.step.as_str();
+                                            let marker = match status_string {
+                                                "completed" => "[x]",
+                                                "in_progress" => "[>]",
+                                                _ => "[ ]",
+                                            };
+                                            println!("  {} {}", marker, step_string);
+                                        }
+
+                                        let history_writer = history_writer_clone.clone();
+                                        let plan_snapshot_id = plan_id.clone();
+                                        let mcp_server_for_plan = mcp_server_clone.clone();
+                                        let history = history_recorder_clone.clone();
+                                        let plan_for_mcp = Plan {
+                                            id: plan_id.clone(),
+                                            text: plan_text.clone(),
+                                            intent_id: intent_id_for_plan.clone(),
+                                            thread_id: thread_id.to_string(),
+                                            turn_id: Some(turn_id.to_string()),
+                                            status: plan_status,
+                                            created_at: plan_created_at,
+                                        };
+                                        tokio::spawn(async move {
+                                            history_writer
+                                                .write(
+                                                    "plan_snapshot",
+                                                    &plan_snapshot_id,
+                                                    &persisted_plan,
                                                 )
                                                 .await;
-                                                history
-                                                    .event(
-                                                        history::EventKind::PlanStepStatus,
-                                                        &plan_id,
-                                                        status_for_event,
-                                                        serde_json::json!({"step": step_for_event}),
-                                                    )
+                                            for step in persisted_plan_steps {
+                                                history_writer
+                                                    .write("plan_step_snapshot", &step.id, &step)
                                                     .await;
-                                            });
-                                        }
+                                            }
+                                            for task in persisted_tasks {
+                                                history_writer
+                                                    .write("task_snapshot", &task.id, &task)
+                                                    .await;
+                                            }
+                                            for event in persisted_plan_step_events {
+                                                history_writer
+                                                    .write("plan_step_event", &event.id, &event)
+                                                    .await;
+                                            }
+                                            for event in persisted_task_events {
+                                                history_writer
+                                                    .write("task_event", &event.id, &event)
+                                                    .await;
+                                            }
+                                            store_to_mcp(
+                                                &mcp_server_for_plan,
+                                                "plan",
+                                                &plan_id,
+                                                &plan_for_mcp,
+                                                debug_mode,
+                                            )
+                                            .await;
+                                            history
+                                                .event(
+                                                    history::EventKind::PlanStepStatus,
+                                                    &plan_id,
+                                                    match aggregate_plan_status(&plan_steps) {
+                                                        PlanStatus::Completed => "completed",
+                                                        PlanStatus::InProgress => "in_progress",
+                                                        PlanStatus::Pending => "pending",
+                                                    },
+                                                    serde_json::json!({
+                                                        "step_count": plan_steps.len(),
+                                                        "parents": parent_plan_ids
+                                                    }),
+                                                )
+                                                .await;
+                                        });
                                     }
                                 } else if matches!(mk, MethodKind::PlanDelta) {
                                     if let Some(p) =
@@ -1157,49 +1607,56 @@ pub async fn execute(args: AgentCodexArgs) -> anyhow::Result<()> {
                                     println!("[Codex] Server initialized");
                                 } else if matches!(mk, MethodKind::TaskStarted) {
                                     // Task started - top level notification
-                                    let thread_id = params
-                                        .get("threadId")
-                                        .and_then(|t| t.as_str())
-                                        .unwrap_or("")
-                                        .to_string();
-                                    let task_id = params
-                                        .get("taskId")
-                                        .and_then(|t| t.as_str())
-                                        .unwrap_or("")
-                                        .to_string();
-                                    if let Some(mut session) =
-                                        lock_or_warn(&session_clone, "task started update")
-                                        && let Some(task) =
-                                            session.tasks.iter_mut().find(|t| t.id == task_id)
-                                    {
-                                        task.status = TaskStatus::InProgress;
-                                    }
-                                    let _intent_id_for_event = if let Some(session) = lock_or_warn(
+                                    let thread_id = lock_or_warn(
                                         &session_clone,
-                                        "intent lookup for task completion",
-                                    ) {
-                                        let mut intent_id = None;
+                                        "thread lookup for task start",
+                                    )
+                                    .as_deref()
+                                    .map(|session| extract_thread_id(&params, Some(session)))
+                                    .unwrap_or_else(|| extract_thread_id(&params, None));
+                                    let task_id = extract_task_id(&params);
+                                    if task_id.is_empty() {
+                                        eprintln!(
+                                            "[WARN] TaskStarted notification missing task id: {}",
+                                            params
+                                        );
+                                        continue;
+                                    }
+                                    let (
+                                        existing_plan_id,
+                                        existing_turn_id,
+                                        intent_id_for_task,
+                                        run_id_for_task_event,
+                                    ) = if let Some(mut session) =
+                                        lock_or_warn(&session_clone, "task started update")
+                                    {
+                                        let mut plan_id = None;
+                                        let mut turn_id = None;
                                         if let Some(task) =
-                                            session.tasks.iter().find(|t| t.id == task_id)
-                                            && let Some(plan_id) = task.plan_id.as_ref()
-                                            && let Some(plan) =
-                                                session.plans.iter().find(|p| &p.id == plan_id)
+                                            session.tasks.iter_mut().find(|t| t.id == task_id)
                                         {
-                                            intent_id = plan.intent_id.clone();
+                                            task.status = TaskStatus::InProgress;
+                                            plan_id = task.plan_id.clone();
+                                            turn_id = task.turn_id.clone();
                                         }
-                                        intent_id
-                                            .or_else(|| {
-                                                session.intents.last().map(|i| i.id.clone())
+                                        let run_id = session.thread.current_turn_id.clone();
+                                        let intent_id = plan_id
+                                            .as_ref()
+                                            .and_then(|pid| {
+                                                session
+                                                    .plans
+                                                    .iter()
+                                                    .find(|plan| &plan.id == pid)
+                                                    .and_then(|plan| plan.intent_id.clone())
                                             })
-                                            .unwrap_or_default()
+                                            .or_else(|| {
+                                                latest_thread_intent_id(&session, &thread_id, None)
+                                            });
+                                        (plan_id, turn_id, intent_id, run_id)
                                     } else {
-                                        String::new()
+                                        (None, None, None, None)
                                     };
-                                    let task_name = params
-                                        .get("taskName")
-                                        .and_then(|t| t.as_str())
-                                        .unwrap_or("")
-                                        .to_string();
+                                    let task_name = extract_task_name(&params);
 
                                     println!(
                                         "\n🚀 Task Started: {} (thread: {})",
@@ -1211,18 +1668,26 @@ pub async fn execute(args: AgentCodexArgs) -> anyhow::Result<()> {
                                     let task = Task {
                                         id: task_id.clone(),
                                         tool_name: Some(task_name.clone()),
-                                        plan_id: None,
+                                        plan_id: existing_plan_id.clone(),
                                         thread_id: thread_id.clone(),
-                                        turn_id: None,
+                                        turn_id: existing_turn_id
+                                            .clone()
+                                            .or(run_id_for_task_event.clone()),
                                         status: TaskStatus::InProgress,
                                         created_at: Utc::now(),
                                     };
                                     let task_snapshot = TaskSnapshot {
                                         id: task_id.clone(),
                                         thread_id: thread_id.clone(),
-                                        plan_id: None,
-                                        turn_id: None,
+                                        plan_id: existing_plan_id.clone(),
+                                        intent_id: intent_id_for_task.clone(),
+                                        turn_id: existing_turn_id
+                                            .clone()
+                                            .or(run_id_for_task_event.clone()),
                                         title: Some(task_name.clone()),
+                                        parent_task_id: None,
+                                        origin_step_id: existing_plan_id.clone(),
+                                        dependencies: Vec::new(),
                                         created_at: Utc::now(),
                                     };
                                     let task_event = TaskEvent {
@@ -1230,7 +1695,7 @@ pub async fn execute(args: AgentCodexArgs) -> anyhow::Result<()> {
                                         task_id: task_id.clone(),
                                         status: "in_progress".to_string(),
                                         at: Utc::now(),
-                                        run_id: None,
+                                        run_id: run_id_for_task_event.clone(),
                                     };
                                     let history_writer = history_writer_clone.clone();
                                     let task_id_for_write = task_id.clone();
@@ -1282,69 +1747,54 @@ pub async fn execute(args: AgentCodexArgs) -> anyhow::Result<()> {
                                         "
 Task Completed"
                                     );
-                                    let task_id = params
-                                        .get("taskId")
-                                        .and_then(|t| t.as_str())
-                                        .unwrap_or("")
-                                        .to_string();
-                                    if let Some(mut session) =
-                                        lock_or_warn(&session_clone, "task completed update")
-                                        && let Some(task) =
-                                            session.tasks.iter_mut().find(|t| t.id == task_id)
-                                    {
-                                        task.status = TaskStatus::Completed;
+                                    let task_id = extract_task_id(&params);
+                                    if task_id.is_empty() {
+                                        eprintln!(
+                                            "[WARN] TaskCompleted notification missing task id: {}",
+                                            params
+                                        );
+                                        continue;
                                     }
-                                    let intent_id_for_event = if let Some(session) = lock_or_warn(
-                                        &session_clone,
-                                        "intent lookup for task completion",
-                                    ) {
-                                        if let Some(task) =
-                                            session.tasks.iter().find(|t| t.id == task_id)
+                                    let (intent_id_for_event, run_id_for_task_event) =
+                                        if let Some(mut session) =
+                                            lock_or_warn(&session_clone, "task completed update")
                                         {
-                                            if let Some(plan_id) = task.plan_id.as_ref() {
-                                                if let Some(plan) =
-                                                    session.plans.iter().find(|p| &p.id == plan_id)
-                                                {
-                                                    if let Some(intent_id) = plan.intent_id.as_ref()
-                                                    {
-                                                        intent_id.clone()
-                                                    } else {
-                                                        session
-                                                            .intents
-                                                            .last()
-                                                            .map(|i| i.id.clone())
-                                                            .unwrap_or_default()
-                                                    }
-                                                } else {
-                                                    session
-                                                        .intents
-                                                        .last()
-                                                        .map(|i| i.id.clone())
-                                                        .unwrap_or_default()
-                                                }
-                                            } else {
-                                                session
-                                                    .intents
-                                                    .last()
-                                                    .map(|i| i.id.clone())
-                                                    .unwrap_or_default()
+                                            let mut plan_id = None;
+                                            let mut run_id = session.thread.current_turn_id.clone();
+                                            if let Some(task) =
+                                                session.tasks.iter_mut().find(|t| t.id == task_id)
+                                            {
+                                                task.status = TaskStatus::Completed;
+                                                plan_id = task.plan_id.clone();
+                                                run_id = task.turn_id.clone().or(run_id);
                                             }
+                                            let intent_id = plan_id
+                                                .as_ref()
+                                                .and_then(|pid| {
+                                                    session
+                                                        .plans
+                                                        .iter()
+                                                        .find(|plan| &plan.id == pid)
+                                                        .and_then(|plan| plan.intent_id.clone())
+                                                })
+                                                .or_else(|| {
+                                                    latest_thread_intent_id(
+                                                        &session,
+                                                        &session.thread.id,
+                                                        None,
+                                                    )
+                                                })
+                                                .unwrap_or_default();
+                                            (intent_id, run_id)
                                         } else {
-                                            session
-                                                .intents
-                                                .last()
-                                                .map(|i| i.id.clone())
-                                                .unwrap_or_default()
-                                        }
-                                    } else {
-                                        String::new()
-                                    };
+                                            (String::new(), None)
+                                        };
                                     let task_event = TaskEvent {
                                         id: format!("task_event_completed_{}", task_id),
                                         task_id,
                                         status: "completed".to_string(),
                                         at: Utc::now(),
-                                        run_id: None,
+                                        run_id: run_id_for_task_event,
                                     };
                                     let intent_event = IntentEvent {
                                         id: format!(
@@ -1449,8 +1899,17 @@ Task Completed"
                                                     }
 
                                                     let history = history_recorder_clone.clone();
+                                                    let history_writer =
+                                                        history_writer_clone.clone();
                                                     let tool_id = item_id.clone();
                                                     let tool_for_mcp = invocation.clone();
+                                                    let tool_event =
+                                                        build_tool_invocation_event(&invocation);
+                                                    let tool_event_object_id =
+                                                        next_tool_invocation_event_object_id(
+                                                            &item_id,
+                                                            &tool_event.status,
+                                                        );
                                                     let mcp_server_for_tool =
                                                         mcp_server_clone.clone();
                                                     tokio::spawn(async move {
@@ -1468,6 +1927,13 @@ Task Completed"
                                                                 &tool_id,
                                                                 "in_progress",
                                                                 serde_json::json!({"tool": tool, "server": server}),
+                                                            )
+                                                            .await;
+                                                        history_writer
+                                                            .write(
+                                                                "tool_invocation_event",
+                                                                &tool_event_object_id,
+                                                                &tool_event,
                                                             )
                                                             .await;
                                                     });
@@ -1507,6 +1973,15 @@ Task Completed"
                                                     let mcp_server_for_tool =
                                                         mcp_server_clone.clone();
                                                     let history = history_recorder_clone.clone();
+                                                    let history_writer =
+                                                        history_writer_clone.clone();
+                                                    let tool_event =
+                                                        build_tool_invocation_event(&tool_for_mcp);
+                                                    let tool_event_object_id =
+                                                        next_tool_invocation_event_object_id(
+                                                            &tool_id,
+                                                            &tool_event.status,
+                                                        );
                                                     tokio::spawn(async move {
                                                         store_to_mcp(
                                                             &mcp_server_for_tool,
@@ -1522,6 +1997,13 @@ Task Completed"
                                                                 &tool_id,
                                                                 "in_progress",
                                                                 serde_json::json!({"tool": tool}),
+                                                            )
+                                                            .await;
+                                                        history_writer
+                                                            .write(
+                                                                "tool_invocation_event",
+                                                                &tool_event_object_id,
+                                                                &tool_event,
                                                             )
                                                             .await;
                                                     });
@@ -1563,6 +2045,15 @@ Task Completed"
                                                     let mcp_server_for_cmd =
                                                         mcp_server_clone.clone();
                                                     let history = history_recorder_clone.clone();
+                                                    let history_writer =
+                                                        history_writer_clone.clone();
+                                                    let tool_event =
+                                                        build_tool_invocation_event(&cmd_for_mcp);
+                                                    let tool_event_object_id =
+                                                        next_tool_invocation_event_object_id(
+                                                            &cmd_id,
+                                                            &tool_event.status,
+                                                        );
                                                     tokio::spawn(async move {
                                                         store_to_mcp(
                                                             &mcp_server_for_cmd,
@@ -1578,6 +2069,13 @@ Task Completed"
                                                                 &cmd_id,
                                                                 "started",
                                                                 serde_json::json!({"command": cmd}),
+                                                            )
+                                                            .await;
+                                                        history_writer
+                                                            .write(
+                                                                "tool_invocation_event",
+                                                                &tool_event_object_id,
+                                                                &tool_event,
                                                             )
                                                             .await;
                                                     });
@@ -1726,6 +2224,16 @@ Task Completed"
 
                                                     let mcp_server_for_dyn =
                                                         mcp_server_clone.clone();
+                                                    let history_writer =
+                                                        history_writer_clone.clone();
+                                                    let tool_event = build_tool_invocation_event(
+                                                        &dyn_tool_for_mcp,
+                                                    );
+                                                    let tool_event_object_id =
+                                                        next_tool_invocation_event_object_id(
+                                                            &dyn_tool_id,
+                                                            &tool_event.status,
+                                                        );
                                                     tokio::spawn(async move {
                                                         store_to_mcp(
                                                             &mcp_server_for_dyn,
@@ -1735,6 +2243,13 @@ Task Completed"
                                                             debug_mode,
                                                         )
                                                         .await;
+                                                        history_writer
+                                                            .write(
+                                                                "tool_invocation_event",
+                                                                &tool_event_object_id,
+                                                                &tool_event,
+                                                            )
+                                                            .await;
                                                     });
                                                 }
                                                 "webSearch" => {
@@ -1772,6 +2287,15 @@ Task Completed"
 
                                                     let mcp_server_for_ws =
                                                         mcp_server_clone.clone();
+                                                    let history_writer =
+                                                        history_writer_clone.clone();
+                                                    let tool_event =
+                                                        build_tool_invocation_event(&ws_for_mcp);
+                                                    let tool_event_object_id =
+                                                        next_tool_invocation_event_object_id(
+                                                            &ws_id,
+                                                            &tool_event.status,
+                                                        );
                                                     tokio::spawn(async move {
                                                         store_to_mcp(
                                                             &mcp_server_for_ws,
@@ -1781,6 +2305,13 @@ Task Completed"
                                                             debug_mode,
                                                         )
                                                         .await;
+                                                        history_writer
+                                                            .write(
+                                                                "tool_invocation_event",
+                                                                &tool_event_object_id,
+                                                                &tool_event,
+                                                            )
+                                                            .await;
                                                     });
                                                 }
                                                 "userMessage" => {
@@ -1799,6 +2330,17 @@ Task Completed"
                                                     };
                                                     println!("  User: {}", truncated);
 
+                                                    let parent_intent_id = lock_or_warn(
+                                                        &session_clone,
+                                                        "intent parent lookup",
+                                                    )
+                                                    .and_then(|session| {
+                                                        latest_thread_intent_id(
+                                                            &session,
+                                                            &thread_id,
+                                                            Some(&item_id),
+                                                        )
+                                                    });
                                                     let intent = Intent {
                                                         id: item_id.clone(),
                                                         content: content.clone(),
@@ -1809,6 +2351,11 @@ Task Completed"
                                                         id: item_id.clone(),
                                                         content: content.clone(),
                                                         thread_id: thread_id.clone(),
+                                                        parents: parent_intent_id
+                                                            .clone()
+                                                            .into_iter()
+                                                            .collect(),
+                                                        analysis_context_frames: Vec::new(),
                                                         created_at: Utc::now(),
                                                     };
                                                     let intent_event = IntentEvent {
@@ -1818,6 +2365,18 @@ Task Completed"
                                                         at: Utc::now(),
                                                         next_intent_id: None,
                                                     };
+                                                    let parent_link_event = parent_intent_id
+                                                        .clone()
+                                                        .map(|parent_id| IntentEvent {
+                                                            id: format!(
+                                                                "intent_event_link_{}_{}",
+                                                                parent_id, item_id
+                                                            ),
+                                                            intent_id: parent_id,
+                                                            status: "continued".to_string(),
+                                                            at: Utc::now(),
+                                                            next_intent_id: Some(item_id.clone()),
+                                                        });
                                                     let history_writer =
                                                         history_writer_clone.clone();
                                                     let intent_id_for_write = item_id.clone();
@@ -1836,6 +2395,16 @@ Task Completed"
                                                                 &intent_event,
                                                             )
                                                             .await;
+                                                        if let Some(link_event) = parent_link_event
+                                                        {
+                                                            history_writer
+                                                                .write(
+                                                                    "intent_event",
+                                                                    &link_event.id,
+                                                                    &link_event,
+                                                                )
+                                                                .await;
+                                                        }
                                                     });
                                                     let intent_id = item_id.clone();
                                                     let intent_for_mcp = intent.clone();
@@ -1939,6 +2508,15 @@ Task Completed"
 
                                                     let mcp_server_for_inv =
                                                         mcp_server_clone.clone();
+                                                    let history_writer =
+                                                        history_writer_clone.clone();
+                                                    let tool_event =
+                                                        build_tool_invocation_event(&inv_for_mcp);
+                                                    let tool_event_object_id =
+                                                        next_tool_invocation_event_object_id(
+                                                            &inv_id,
+                                                            &tool_event.status,
+                                                        );
                                                     tokio::spawn(async move {
                                                         store_to_mcp(
                                                             &mcp_server_for_inv,
@@ -1948,6 +2526,13 @@ Task Completed"
                                                             debug_mode,
                                                         )
                                                         .await;
+                                                        history_writer
+                                                            .write(
+                                                                "tool_invocation_event",
+                                                                &tool_event_object_id,
+                                                                &tool_event,
+                                                            )
+                                                            .await;
                                                     });
                                                 }
                                                 "enteredReviewMode" => {
@@ -2124,11 +2709,30 @@ Task Completed"
                                                     };
 
                                                     if let Some(inv) = updated_inv {
+                                                        let mcp_server_for_inv =
+                                                            mcp_server_clone.clone();
                                                         let history =
                                                             history_recorder_clone.clone();
+                                                        let history_writer =
+                                                            history_writer_clone.clone();
                                                         let inv_id = inv.id.clone();
                                                         let tool_name = tool.clone();
+                                                        let tool_event =
+                                                            build_tool_invocation_event(&inv);
+                                                        let tool_event_object_id =
+                                                            next_tool_invocation_event_object_id(
+                                                                &inv_id,
+                                                                &tool_event.status,
+                                                            );
                                                         tokio::spawn(async move {
+                                                            store_to_mcp(
+                                                                &mcp_server_for_inv,
+                                                                "tool_invocation",
+                                                                &inv_id,
+                                                                &inv,
+                                                                debug_mode,
+                                                            )
+                                                            .await;
                                                             history
                                                                 .event(
                                                                     history::EventKind::ToolInvocationStatus,
@@ -2140,6 +2744,13 @@ Task Completed"
                                                                         "error": error,
                                                                         "result": result
                                                                     }),
+                                                                )
+                                                                .await;
+                                                            history_writer
+                                                                .write(
+                                                                    "tool_invocation_event",
+                                                                    &tool_event_object_id,
+                                                                    &tool_event,
                                                                 )
                                                                 .await;
                                                         });
@@ -2204,6 +2815,13 @@ Task Completed"
                                                             history_writer_clone.clone();
                                                         let inv_id = item_id.clone();
                                                         let cmd_name = cmd.clone();
+                                                        let tool_event =
+                                                            build_tool_invocation_event(&inv);
+                                                        let tool_event_object_id =
+                                                            next_tool_invocation_event_object_id(
+                                                                &inv_id,
+                                                                &tool_event.status,
+                                                            );
                                                         let decision = DecisionEvent {
                                                             id: format!("decision_{}", inv_id),
                                                             run_id: _turn_id.to_string(),
@@ -2247,6 +2865,13 @@ Task Completed"
                                                                     &inv_id,
                                                                     inv.status.to_string(),
                                                                     serde_json::json!({"command": cmd_name, "exit": exit_code}),
+                                                                )
+                                                                .await;
+                                                            history_writer
+                                                                .write(
+                                                                    "tool_invocation_event",
+                                                                    &tool_event_object_id,
+                                                                    &tool_event,
                                                                 )
                                                                 .await;
                                                             history_writer
@@ -2425,18 +3050,36 @@ Task Completed"
                                                     if let Some(mut session) = lock_or_warn(
                                                         &session_clone,
                                                         "patchset completed update",
-                                                    ) && let Some(patchset) = session
-                                                        .patchsets
-                                                        .iter_mut()
-                                                        .find(|p| p.id == item_id)
-                                                    {
-                                                        patchset.status = match status.as_str() {
+                                                    ) {
+                                                        let patchset_status = match status.as_str()
+                                                        {
                                                             "completed" => PatchStatus::Completed,
                                                             "failed" => PatchStatus::Failed,
                                                             "declined" => PatchStatus::Declined,
                                                             _ => PatchStatus::Completed,
                                                         };
-                                                        patchset.changes = changes.clone();
+                                                        if let Some(patchset) = session
+                                                            .patchsets
+                                                            .iter_mut()
+                                                            .find(|p| p.id == item_id)
+                                                        {
+                                                            let merged_changes =
+                                                                merge_patchset_changes(
+                                                                    &patchset.changes,
+                                                                    &changes,
+                                                                );
+                                                            patchset.status = patchset_status;
+                                                            patchset.changes = merged_changes;
+                                                        } else {
+                                                            session.add_patchset(PatchSet {
+                                                                id: item_id.clone(),
+                                                                run_id: _turn_id.to_string(),
+                                                                thread_id: _thread_id.to_string(),
+                                                                changes: changes.clone(),
+                                                                status: patchset_status,
+                                                                created_at: Utc::now(),
+                                                            });
+                                                        }
                                                     }
 
                                                     let patchset_to_store = if let Some(session) =
@@ -2463,18 +3106,29 @@ Task Completed"
                                                         let history_writer =
                                                             history_writer_clone.clone();
                                                         let files = file_count;
+                                                        let touched_files: Vec<String> = patchset
+                                                            .changes
+                                                            .iter()
+                                                            .map(|change| change.path.clone())
+                                                            .collect();
                                                         let patchset_snapshot = PatchSetSnapshot {
                                                             id: ps_id.clone(),
                                                             run_id: _turn_id.to_string(),
                                                             thread_id: _thread_id.to_string(),
                                                             created_at: Utc::now(),
+                                                            status: patchset.status.clone(),
+                                                            changes: patchset.changes.clone(),
                                                         };
                                                         let evidence = EvidenceEvent {
                                                             id: format!("evidence_{}", ps_id),
                                                             run_id: _turn_id.to_string(),
+                                                            patchset_id: Some(ps_id.clone()),
                                                             at: Utc::now(),
                                                             kind: "patchset".to_string(),
-                                                            data: serde_json::json!({"files": files}),
+                                                            data: serde_json::json!({
+                                                                "files": files,
+                                                                "touched_files": touched_files
+                                                            }),
                                                         };
                                                         tokio::spawn(async move {
                                                             store_to_mcp(
@@ -2585,7 +3239,18 @@ Task Completed"
                                                     if let Some(invocation) = invocation_to_store {
                                                         let mcp_server_for_inv =
                                                             mcp_server_clone.clone();
+                                                        let history_writer =
+                                                            history_writer_clone.clone();
                                                         let inv_id = item_id.clone();
+                                                        let tool_event =
+                                                            build_tool_invocation_event(
+                                                                &invocation,
+                                                            );
+                                                        let tool_event_object_id =
+                                                            next_tool_invocation_event_object_id(
+                                                                &inv_id,
+                                                                &tool_event.status,
+                                                            );
                                                         tokio::spawn(async move {
                                                             store_to_mcp(
                                                                 &mcp_server_for_inv,
@@ -2595,6 +3260,13 @@ Task Completed"
                                                                 debug_mode,
                                                             )
                                                             .await;
+                                                            history_writer
+                                                                .write(
+                                                                    "tool_invocation_event",
+                                                                    &tool_event_object_id,
+                                                                    &tool_event,
+                                                                )
+                                                                .await;
                                                         });
                                                     }
                                                 }
@@ -2623,7 +3295,18 @@ Task Completed"
                                                     if let Some(invocation) = updated {
                                                         let mcp_server_for_inv =
                                                             mcp_server_clone.clone();
+                                                        let history_writer =
+                                                            history_writer_clone.clone();
                                                         let inv_id = item_id.clone();
+                                                        let tool_event =
+                                                            build_tool_invocation_event(
+                                                                &invocation,
+                                                            );
+                                                        let tool_event_object_id =
+                                                            next_tool_invocation_event_object_id(
+                                                                &inv_id,
+                                                                &tool_event.status,
+                                                            );
                                                         tokio::spawn(async move {
                                                             store_to_mcp(
                                                                 &mcp_server_for_inv,
@@ -2633,6 +3316,13 @@ Task Completed"
                                                                 debug_mode,
                                                             )
                                                             .await;
+                                                            history_writer
+                                                                .write(
+                                                                    "tool_invocation_event",
+                                                                    &tool_event_object_id,
+                                                                    &tool_event,
+                                                                )
+                                                                .await;
                                                         });
                                                     }
                                                 }
@@ -2642,10 +3332,14 @@ Task Completed"
                                                         .and_then(|s| s.as_str())
                                                         .unwrap_or("completed")
                                                         .to_string();
-                                                    if let Some(mut session) = lock_or_warn(
+                                                    let updated_invocation = if let Some(
+                                                        mut session,
+                                                    ) = lock_or_warn(
                                                         &session_clone,
                                                         "web search completed update",
-                                                    ) && let Some(invocation) = session
+                                                    ) && let Some(
+                                                        invocation,
+                                                    ) = session
                                                         .tool_invocations
                                                         .iter_mut()
                                                         .find(|i| i.id == item_id)
@@ -2655,6 +3349,42 @@ Task Completed"
                                                             "failed" => ToolStatus::Failed,
                                                             _ => ToolStatus::Completed,
                                                         };
+                                                        Some(invocation.clone())
+                                                    } else {
+                                                        None
+                                                    };
+                                                    if let Some(invocation) = updated_invocation {
+                                                        let mcp_server_for_inv =
+                                                            mcp_server_clone.clone();
+                                                        let history_writer =
+                                                            history_writer_clone.clone();
+                                                        let inv_id = item_id.clone();
+                                                        let tool_event =
+                                                            build_tool_invocation_event(
+                                                                &invocation,
+                                                            );
+                                                        let tool_event_object_id =
+                                                            next_tool_invocation_event_object_id(
+                                                                &inv_id,
+                                                                &tool_event.status,
+                                                            );
+                                                        tokio::spawn(async move {
+                                                            store_to_mcp(
+                                                                &mcp_server_for_inv,
+                                                                "tool_invocation",
+                                                                &inv_id,
+                                                                &invocation,
+                                                                debug_mode,
+                                                            )
+                                                            .await;
+                                                            history_writer
+                                                                .write(
+                                                                    "tool_invocation_event",
+                                                                    &tool_event_object_id,
+                                                                    &tool_event,
+                                                                )
+                                                                .await;
+                                                        });
                                                     }
                                                 }
                                                 "contextCompaction" => {
@@ -3085,7 +3815,7 @@ Task Completed"
             "model": args.model,
             "modelProvider": args.model_provider,
             "personality": args.personality,
-            "sandbox": serde_json::Value::Null,
+            "sandbox": SandboxMode::WorkspaceWrite,
             "developerInstructions": serde_json::Value::Null,
             "baseInstructions": serde_json::Value::Null,
         }),

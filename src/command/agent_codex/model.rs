@@ -1,6 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use super::types::{FileChange, PatchStatus};
+
 // ========================= Snapshots =========================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -8,6 +10,10 @@ pub struct IntentSnapshot {
     pub id: String,
     pub content: String,
     pub thread_id: String,
+    #[serde(default)]
+    pub parents: Vec<String>,
+    #[serde(default)]
+    pub analysis_context_frames: Vec<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -18,6 +24,10 @@ pub struct PlanSnapshot {
     pub intent_id: Option<String>,
     pub turn_id: Option<String>,
     pub step_text: String,
+    #[serde(default)]
+    pub parents: Vec<String>,
+    #[serde(default)]
+    pub context_frames: Vec<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -26,6 +36,8 @@ pub struct PlanStepSnapshot {
     pub id: String,
     pub plan_id: String,
     pub text: String,
+    #[serde(default)]
+    pub ordinal: i64,
     pub created_at: DateTime<Utc>,
 }
 
@@ -34,8 +46,16 @@ pub struct TaskSnapshot {
     pub id: String,
     pub thread_id: String,
     pub plan_id: Option<String>,
+    #[serde(default)]
+    pub intent_id: Option<String>,
     pub turn_id: Option<String>,
     pub title: Option<String>,
+    #[serde(default)]
+    pub parent_task_id: Option<String>,
+    #[serde(default)]
+    pub origin_step_id: Option<String>,
+    #[serde(default)]
+    pub dependencies: Vec<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -54,6 +74,14 @@ pub struct PatchSetSnapshot {
     pub run_id: String,
     pub thread_id: String,
     pub created_at: DateTime<Utc>,
+    #[serde(default = "default_patchset_snapshot_status")]
+    pub status: PatchStatus,
+    #[serde(default)]
+    pub changes: Vec<FileChange>,
+}
+
+fn default_patchset_snapshot_status() -> PatchStatus {
+    PatchStatus::Pending
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,6 +166,8 @@ pub struct ToolInvocationEvent {
 pub struct EvidenceEvent {
     pub id: String,
     pub run_id: String,
+    #[serde(default)]
+    pub patchset_id: Option<String>,
     pub at: DateTime<Utc>,
     pub kind: String,
     pub data: serde_json::Value,
