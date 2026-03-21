@@ -708,6 +708,7 @@ fn goal_type(change_type: &ChangeType) -> GoalType {
     match change_type {
         ChangeType::Bugfix => GoalType::Bugfix,
         ChangeType::Feature => GoalType::Feature,
+        ChangeType::Test => GoalType::Test,
         ChangeType::Refactor => GoalType::Refactor,
         ChangeType::Performance => GoalType::Perf,
         ChangeType::Security => GoalType::Other("security".to_string()),

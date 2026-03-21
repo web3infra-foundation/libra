@@ -230,17 +230,24 @@ impl HistoryManager {
     /// Find an object by ID across all types in the history.
     /// Returns (hash, type).
     pub async fn find_object_hash(&self, object_id: &str) -> Result<Option<(ObjectHash, String)>> {
+        Ok(self.find_object_hashes(object_id).await?.into_iter().next())
+    }
+
+    /// Find all objects that share the same object ID across history types.
+    pub async fn find_object_hashes(&self, object_id: &str) -> Result<Vec<(ObjectHash, String)>> {
         let parent_commit_id = self.resolve_history_head().await?;
         if let Some(parent_id) = parent_commit_id {
             let root_items = self.load_commit_tree(&parent_id)?;
+            let mut matches = Vec::new();
             for type_entry in root_items {
                 let type_items = self.load_tree(&type_entry.id)?;
                 if let Some(item) = type_items.iter().find(|item| item.name == object_id) {
-                    return Ok(Some((item.id, type_entry.name.clone())));
+                    matches.push((item.id, type_entry.name.clone()));
                 }
             }
+            return Ok(matches);
         }
-        Ok(None)
+        Ok(Vec::new())
     }
 
     /// List all objects of a specific type from the current history.
@@ -256,6 +263,17 @@ impl HistoryManager {
                     .map(|item| (item.name, item.id))
                     .collect());
             }
+        }
+        Ok(Vec::new())
+    }
+
+    /// List all object types present at the current history head.
+    pub async fn list_object_types(&self) -> Result<Vec<String>> {
+        let parent_commit_id = self.resolve_history_head().await?;
+        if let Some(parent_id) = parent_commit_id {
+            let mut root_items = self.load_commit_tree(&parent_id)?;
+            root_items.sort_by(|a, b| a.name.cmp(&b.name));
+            return Ok(root_items.into_iter().map(|item| item.name).collect());
         }
         Ok(Vec::new())
     }
@@ -438,5 +456,59 @@ mod tests {
         let content = String::from_utf8_lossy(&data);
         assert!(content.contains("tree "));
         assert!(content.contains("Update run/run-1"));
+    }
+
+    #[tokio::test]
+    async fn test_find_object_hashes_returns_all_matching_types() {
+        let dir = tempdir().unwrap();
+        let repo_path = dir.path().join(".libra");
+        std::fs::create_dir(&repo_path).unwrap();
+        let objects_dir = repo_path.join("objects");
+
+        let storage = Arc::new(LocalStorage::new(objects_dir));
+        let db_conn = Arc::new(setup_test_db().await);
+        let manager = HistoryManager::new(storage.clone(), repo_path.clone(), db_conn.clone());
+
+        let blob_hash = ObjectHash::from_str("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391").unwrap();
+        let other_hash = ObjectHash::from_str("f4e6d0434b8b29ae775ad8c2e48c5391e69de29b").unwrap();
+
+        manager
+            .append("patchset", "shared-id", blob_hash)
+            .await
+            .unwrap();
+        manager
+            .append("event", "shared-id", other_hash)
+            .await
+            .unwrap();
+
+        let matches = manager.find_object_hashes("shared-id").await.unwrap();
+        assert_eq!(matches.len(), 2);
+        assert!(matches.iter().any(|(_, kind)| kind == "patchset"));
+        assert!(matches.iter().any(|(_, kind)| kind == "event"));
+    }
+
+    #[tokio::test]
+    async fn test_list_object_types_returns_sorted_types() {
+        let dir = tempdir().unwrap();
+        let repo_path = dir.path().join(".libra");
+        std::fs::create_dir(&repo_path).unwrap();
+        let objects_dir = repo_path.join("objects");
+
+        let storage = Arc::new(LocalStorage::new(objects_dir));
+        let db_conn = Arc::new(setup_test_db().await);
+        let manager = HistoryManager::new(storage.clone(), repo_path.clone(), db_conn.clone());
+
+        let blob_hash = ObjectHash::from_str("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391").unwrap();
+        manager
+            .append("run_event", "run-event-1", blob_hash)
+            .await
+            .unwrap();
+        manager
+            .append("patchset", "patchset-1", blob_hash)
+            .await
+            .unwrap();
+
+        let types = manager.list_object_types().await.unwrap();
+        assert_eq!(types, vec!["patchset".to_string(), "run_event".to_string()]);
     }
 }
