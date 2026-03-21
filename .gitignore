@@ -40,3 +40,6 @@ web/node_modules/
 web/.next/
 web/out/
 web/.pnpm-store/
+
+# Mac
+.DS_Store
