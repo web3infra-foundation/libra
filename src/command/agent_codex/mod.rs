@@ -2434,11 +2434,7 @@ Task Completed"
                                                         .and_then(|t| t.as_str())
                                                         .unwrap_or("")
                                                         .to_string();
-                                                    println!(
-                                                        "
-  ?? Agent Response started
-"
-                                                    );
+                                                    println!("Agent Response started");
 
                                                     let msg = AgentMessage {
                                                         id: item_id.clone(),
@@ -3431,25 +3427,39 @@ Task Completed"
                                                         .and_then(|t| t.as_str())
                                                         .unwrap_or("")
                                                         .to_string();
-                                                    if let Some(mut session) = lock_or_warn(
-                                                        &session_clone,
-                                                        "agent message completed update",
-                                                    ) && let Some(msg) = session
-                                                        .agent_messages
-                                                        .iter_mut()
-                                                        .find(|m| m.id == item_id)
+                                                    let previous_content = if let Some(mut session) =
+                                                        lock_or_warn(
+                                                            &session_clone,
+                                                            "agent message completed update",
+                                                        )
+                                                        && let Some(msg) = session
+                                                            .agent_messages
+                                                            .iter_mut()
+                                                            .find(|m| m.id == item_id)
                                                     {
+                                                        let previous_content = msg.content.clone();
                                                         msg.content = content.clone();
-                                                        if !msg.content.is_empty() {
-                                                            println!(
-                                                                "
-                                                                ?? Agent: {}
-                                                                ",
-                                                                msg.content
-                                                            );
+                                                        previous_content
+                                                    } else {
+                                                        String::new()
+                                                    };
+                                                    if !content.is_empty() {
+                                                        if previous_content.is_empty() {
+                                                            println!("Agent: {}", content);
+                                                        } else if let Some(suffix) =
+                                                            content.strip_prefix(&previous_content)
+                                                        {
+                                                            if !suffix.is_empty() {
+                                                                print!("{}", suffix);
+                                                                if !content.ends_with('\n') {
+                                                                    println!();
+                                                                }
+                                                            }
+                                                        } else {
+                                                            println!("Agent: {}", content);
                                                         }
                                                     }
-                                                    println!("  ?? Agent Response completed");
+                                                    println!("Agent Response completed");
                                                 }
                                                 _ => {}
                                             }
