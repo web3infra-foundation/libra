@@ -43,3 +43,5 @@ web/.pnpm-store/
 
 # Mac
 .DS_Store
+.gemini/
+gha-creds-*.json
