@@ -3,15 +3,11 @@
 //!
 //! **Layer:** L1 — deterministic, no external dependencies.
 
-use std::{path::Path, process::Command, sync::Arc};
+use std::process::Command;
 
-use libra::{
-    internal::ai::history::HistoryManager,
-    utils::{storage::local::LocalStorage, storage_ext::StorageExt},
-};
 use serial_test::serial;
 
-use super::{parse_cli_error_stderr, run_libra_command};
+use super::parse_cli_error_stderr;
 
 /// Initialize a temporary repository using CLI.
 fn init_temp_repo() -> tempfile::TempDir {
@@ -49,23 +45,6 @@ fn configure_user_identity(temp_path: &std::path::Path) {
         .output()
         .expect("Failed to configure user.email");
     assert!(output.status.success(), "Failed to configure user.email");
-}
-
-async fn load_intent_history(repo: &Path) -> (Arc<LocalStorage>, HistoryManager) {
-    let libra_dir = repo.join(".libra");
-    let storage = Arc::new(LocalStorage::new(libra_dir.join("objects")));
-    let db_conn = Arc::new(
-        libra::internal::db::establish_connection(
-            libra_dir
-                .join("libra.db")
-                .to_str()
-                .expect("db path should be valid UTF-8"),
-        )
-        .await
-        .expect("failed to connect test database"),
-    );
-    let history = HistoryManager::new(storage.clone(), libra_dir, db_conn);
-    (storage, history)
 }
 
 /// Create a commit with a file.
