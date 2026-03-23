@@ -19,7 +19,7 @@ use crate::{
     command::load_object,
     internal::{
         branch::Branch,
-        config::Config,
+        config::ConfigKv,
         head::Head,
         log::{
             date_parser::parse_date,
@@ -241,8 +241,11 @@ async fn determine_decorate_option(args: &LogArgs) -> Result<DecorateOptions, St
         }
     };
 
-    if let Some(config_deco) = Config::get("log", None, "decorate")
+    if let Some(config_deco) = ConfigKv::get("log.decorate")
         .await
+        .ok()
+        .flatten()
+        .map(|e| e.value)
         .and_then(|s| str_to_decorate_option(&s).ok())
     {
         Ok(config_deco)

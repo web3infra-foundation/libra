@@ -256,18 +256,20 @@ Troubleshooting:
 Key management commands:
 
 ```bash
-# Print current vault GPG public key (for GitHub GPG key settings)
-libra vault gpg-public-key
+# Print current signing GPG public key (for GitHub GPG key settings)
+libra config get vault.gpg.pubkey
 
-# Generate an SSH key in vault and print public key (for GitHub SSH key settings)
-libra vault generate-ssh-key [--name <user>]
+# Generate a repo-local SSH key for a configured remote
+libra config generate-ssh-key --remote origin
 
-# Print current vault SSH public key
-libra vault ssh-public-key
+# Print the SSH public key for a configured remote
+libra config get vault.ssh.origin.pubkey
 
 # Generate (or rotate) vault GPG signing key and print public key
-libra vault generate-gpg-key [--name <user>] [--email <mail>]
+libra config generate-gpg-key [--name <user>] [--email <mail>]
 ```
+
+See `docs/commands/config/README.md` for the full `libra config` command reference and migration notes.
 
 ### GitHub End-to-End Verification (libvault + Git conversion)
 
@@ -292,9 +294,9 @@ libra init --from-git-repository /tmp/<repo>-git
 # 3) Export vault public keys and register them in GitHub settings:
 #    - GPG key: GitHub -> Settings -> SSH and GPG keys -> New GPG key
 #    - SSH key: GitHub -> Settings -> SSH and GPG keys -> New SSH key
-libra vault gpg-public-key
-libra vault generate-ssh-key --name "<github-username>"
-libra vault ssh-public-key
+libra config get vault.gpg.pubkey
+libra config generate-ssh-key --remote origin
+libra config get vault.ssh.origin.pubkey
 
 # 4) Make sure origin points to GitHub SSH URL in Libra config.
 libra remote set-url origin git@github.com:<owner>/<repo>.git

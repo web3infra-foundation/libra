@@ -5,8 +5,8 @@ use std::{
     collections::HashSet,
     fs,
     io::{self, Error as IoError, Write},
-    path::PathBuf,
-    time::Instant,
+    path::{Path, PathBuf},
+    time::{Duration, Instant, SystemTime},
 };
 
 use clap::Parser;
@@ -26,7 +26,7 @@ use crate::{
     git_protocol::ServiceType::{self, UploadPack},
     internal::{
         branch::Branch,
-        config::{Config, RemoteConfig},
+        config::{ConfigKv, RemoteConfig},
         db::get_db_conn_instance,
         head::Head,
         protocol::{
@@ -54,10 +54,13 @@ pub(crate) enum RemoteClient {
 }
 
 impl RemoteClient {
-    pub(crate) fn from_spec(spec: &str) -> Result<Self, String> {
+    /// Create a `RemoteClient` from a URL spec, optionally providing the
+    /// logical remote name so that vault-backed SSH keys can be resolved
+    /// via `vault.ssh.<remote>.privkey`.
+    pub(crate) fn from_spec_with_remote(spec: &str, remote: Option<&str>) -> Result<Self, String> {
         // Check for SSH-style URLs first (before Url::parse which doesn't handle SCP-style)
         if is_ssh_spec(spec) {
-            let client = configure_ssh_client(SshClient::from_ssh_spec(spec)?)?;
+            let client = configure_ssh_client(SshClient::from_ssh_spec(spec)?, remote)?;
             return Ok(Self::Ssh(client));
         }
 
@@ -84,7 +87,7 @@ impl RemoteClient {
                     Ok(Self::Git(GitClient::from_url(&url)))
                 }
                 "ssh" => {
-                    let client = configure_ssh_client(SshClient::from_ssh_spec(spec)?)?;
+                    let client = configure_ssh_client(SshClient::from_ssh_spec(spec)?, remote)?;
                     Ok(Self::Ssh(client))
                 }
                 other => Err(format!("unsupported remote scheme '{other}'")),
@@ -129,23 +132,243 @@ impl RemoteClient {
     }
 }
 
-fn configure_ssh_client(mut client: SshClient) -> Result<SshClient, String> {
+const SSH_KEY_TEMP_FILE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+fn configure_ssh_client(mut client: SshClient, remote: Option<&str>) -> Result<SshClient, String> {
+    if let Err(error) = cleanup_expired_vault_ssh_temp_files() {
+        tracing::warn!("failed to clean up expired SSH key temp files: {error}");
+    }
     if let Some(mode) = load_ssh_host_key_checking_mode() {
         client = client.with_strict_host_key_checking(mode)?;
     }
     // Try to load vault SSH key for authentication.
-    if let Some(key_path) = try_load_vault_ssh_key_path() {
+    // Priority:
+    // 1. vault.ssh.<remote>.privkey (vault-encrypted, decrypted to temp file)
+    // 2. Legacy filesystem path ~/.libra/ssh-keys/<repo-id>/id_ed25519
+    // 3. No explicit key (fall back to system default SSH agent/keys)
+    if let Some(key_file) = try_load_vault_ssh_key_for_remote(remote)? {
+        client = client.with_temp_key_file(key_file);
+    } else if let Some(key_path) = try_load_legacy_ssh_key_path() {
         client = client.with_key_path(key_path);
     }
     Ok(client)
 }
 
-/// Try to load the vault SSH key path synchronously (for use in from_spec).
-fn try_load_vault_ssh_key_path() -> Option<String> {
-    use crate::utils::util;
+/// Try to load SSH private key for a specific remote from vault config.
+///
+/// Reads `vault.ssh.<remote>.privkey` from config, decrypts it, writes
+/// to a secure temporary file, and keeps that file alive for the lifetime
+/// of the SSH client. On abnormal process termination, the 24h GC pass will
+/// clean up stale `.tmp` files under `~/.libra/tmp/`.
+fn try_load_vault_ssh_key_for_remote(
+    remote: Option<&str>,
+) -> Result<Option<tempfile::NamedTempFile>, String> {
+    let Some(remote) = remote else {
+        return Ok(None);
+    };
 
     // Only try vault key lookup inside a Libra repository.
-    if util::try_get_storage_path(None).is_err() {
+    if crate::utils::util::try_get_storage_path(None).is_err() {
+        return Ok(None);
+    }
+
+    let privkey_key = format!("vault.ssh.{remote}.privkey");
+    let Some(entry) = load_config_entry_sync(&privkey_key)? else {
+        return Ok(None);
+    };
+
+    if !entry.encrypted {
+        return Err(format!(
+            "vault SSH private key '{privkey_key}' must be encrypted"
+        ));
+    }
+
+    // Decrypt the private key using the vault unseal key.
+    let unseal_key = load_vault_unseal_key_sync()?
+        .ok_or_else(|| format!("failed to load vault unseal key for remote '{remote}'"))?;
+    let ciphertext = hex::decode(&entry.value)
+        .map_err(|e| format!("failed to decode vault SSH private key '{privkey_key}': {e}"))?;
+    let private_key = crate::internal::vault::decrypt_token(&unseal_key, &ciphertext)
+        .map_err(|e| format!("failed to decrypt vault SSH private key '{privkey_key}': {e}"))?;
+
+    // Write to a secure temporary file in ~/.libra/tmp/
+    let tmp_dir = ensure_vault_ssh_tmp_dir()?;
+    let mut tmp_file = tempfile::Builder::new()
+        .prefix("ssh-key-")
+        .suffix(".tmp")
+        .tempfile_in(&tmp_dir)
+        .map_err(|e| {
+            format!(
+                "failed to create temporary SSH key file in '{}': {e}",
+                tmp_dir.display()
+            )
+        })?;
+    tmp_file.write_all(private_key.as_bytes()).map_err(|e| {
+        format!(
+            "failed to write temporary SSH key file '{}': {e}",
+            tmp_file.path().display()
+        )
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(tmp_file.path(), std::fs::Permissions::from_mode(0o600)).map_err(
+            |e| {
+                format!(
+                    "failed to set permissions on temporary SSH key file '{}': {e}",
+                    tmp_file.path().display()
+                )
+            },
+        )?;
+    }
+
+    Ok(Some(tmp_file))
+}
+
+/// Load a full config entry (including the `encrypted` flag) synchronously.
+fn load_config_entry_sync(
+    dotted_key: &str,
+) -> Result<Option<crate::internal::config::ConfigKvEntry>, String> {
+    use crate::internal::config::ConfigKv;
+
+    fn read_entry_sync(
+        dotted_key: &str,
+    ) -> Result<Option<crate::internal::config::ConfigKvEntry>, String> {
+        let rt = tokio::runtime::Runtime::new()
+            .map_err(|e| format!("failed to create tokio runtime for config read: {e}"))?;
+        rt.block_on(ConfigKv::get(dotted_key))
+            .map_err(|e| format!("failed to read config key '{dotted_key}': {e}"))
+    }
+
+    let key = dotted_key.to_string();
+    match tokio::runtime::Handle::try_current() {
+        Ok(_) => std::thread::scope(|s| {
+            s.spawn(|| read_entry_sync(&key))
+                .join()
+                .map_err(|_| format!("failed to join config read thread for key '{key}'"))?
+        }),
+        Err(_) => read_entry_sync(&key),
+    }
+}
+
+/// Load the vault unseal key synchronously.
+fn load_vault_unseal_key_sync() -> Result<Option<Vec<u8>>, String> {
+    fn read_unseal_key_sync() -> Result<Option<Vec<u8>>, String> {
+        let rt = tokio::runtime::Runtime::new()
+            .map_err(|e| format!("failed to create tokio runtime for vault read: {e}"))?;
+        Ok(rt.block_on(crate::internal::vault::load_unseal_key()))
+    }
+
+    match tokio::runtime::Handle::try_current() {
+        Ok(_) => std::thread::scope(|s| {
+            s.spawn(read_unseal_key_sync)
+                .join()
+                .map_err(|_| "failed to join vault read thread".to_string())?
+        }),
+        Err(_) => read_unseal_key_sync(),
+    }
+}
+
+fn ensure_vault_ssh_tmp_dir() -> Result<PathBuf, String> {
+    let home = dirs::home_dir().ok_or_else(|| "cannot determine home directory".to_string())?;
+    let tmp_dir = home.join(".libra").join("tmp");
+    std::fs::create_dir_all(&tmp_dir).map_err(|e| {
+        format!(
+            "failed to create SSH temp directory '{}': {e}",
+            tmp_dir.display()
+        )
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp_dir, std::fs::Permissions::from_mode(0o700)).map_err(
+            |e| {
+                format!(
+                    "failed to set permissions on SSH temp directory '{}': {e}",
+                    tmp_dir.display()
+                )
+            },
+        )?;
+    }
+    Ok(tmp_dir)
+}
+
+fn cleanup_expired_vault_ssh_temp_files() -> Result<usize, String> {
+    let home = match dirs::home_dir() {
+        Some(home) => home,
+        None => return Ok(0),
+    };
+    cleanup_expired_vault_ssh_temp_files_in(&home.join(".libra").join("tmp"), SystemTime::now())
+}
+
+fn cleanup_expired_vault_ssh_temp_files_in(
+    tmp_dir: &Path,
+    now: SystemTime,
+) -> Result<usize, String> {
+    if !tmp_dir.exists() {
+        return Ok(0);
+    }
+
+    let entries = fs::read_dir(tmp_dir).map_err(|e| {
+        format!(
+            "failed to read SSH temp directory '{}': {e}",
+            tmp_dir.display()
+        )
+    })?;
+
+    let mut removed = 0;
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            format!(
+                "failed to iterate SSH temp directory '{}': {e}",
+                tmp_dir.display()
+            )
+        })?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("failed to inspect SSH temp entry '{}': {e}", path.display()))?;
+        if !file_type.is_file() {
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("tmp") {
+            continue;
+        }
+
+        let metadata = entry.metadata().map_err(|e| {
+            format!(
+                "failed to read metadata for SSH temp entry '{}': {e}",
+                path.display()
+            )
+        })?;
+        let modified = metadata.modified().map_err(|e| {
+            format!(
+                "failed to read modification time for SSH temp entry '{}': {e}",
+                path.display()
+            )
+        })?;
+        let age = now.duration_since(modified).unwrap_or_default();
+        if age < SSH_KEY_TEMP_FILE_MAX_AGE {
+            continue;
+        }
+
+        fs::remove_file(&path).map_err(|e| {
+            format!(
+                "failed to remove expired SSH temp file '{}': {e}",
+                path.display()
+            )
+        })?;
+        removed += 1;
+    }
+
+    Ok(removed)
+}
+
+/// Try to load SSH key from the legacy filesystem path
+/// `~/.libra/ssh-keys/<repo-id>/id_ed25519`.
+fn try_load_legacy_ssh_key_path() -> Option<String> {
+    // Only try vault key lookup inside a Libra repository.
+    if crate::utils::util::try_get_storage_path(None).is_err() {
         return None;
     }
 
@@ -189,17 +412,21 @@ fn load_ssh_host_key_checking_mode() -> Option<String> {
 }
 
 fn load_config_sync(configuration: &str, name: Option<&str>, key: &str) -> Option<String> {
-    use crate::internal::config::Config;
+    use crate::internal::config::ConfigKv;
 
-    let configuration = configuration.to_string();
-    let name = name.map(ToOwned::to_owned);
-    let key = key.to_string();
+    let dotted_key = match name {
+        Some(n) => format!("{configuration}.{n}.{key}"),
+        None => format!("{configuration}.{key}"),
+    };
 
     match tokio::runtime::Handle::try_current() {
         Ok(_) => std::thread::scope(|s| {
             s.spawn(|| {
                 let rt = tokio::runtime::Runtime::new().ok()?;
-                rt.block_on(Config::get(&configuration, name.as_deref(), &key))
+                rt.block_on(ConfigKv::get(&dotted_key))
+                    .ok()
+                    .flatten()
+                    .map(|e| e.value)
             })
             .join()
             .ok()
@@ -207,7 +434,10 @@ fn load_config_sync(configuration: &str, name: Option<&str>, key: &str) -> Optio
         }),
         Err(_) => {
             let rt = tokio::runtime::Runtime::new().ok()?;
-            rt.block_on(Config::get(&configuration, name.as_deref(), &key))
+            rt.block_on(ConfigKv::get(&dotted_key))
+                .ok()
+                .flatten()
+                .map(|e| e.value)
         }
     }
 }
@@ -279,7 +509,7 @@ pub async fn execute_safe(args: FetchArgs, output: &OutputConfig) -> CliResult<(
     tracing::debug!("`fetch` args: {:?}", args);
 
     if args.all {
-        for remote in Config::all_remote_configs().await {
+        for remote in ConfigKv::all_remote_configs().await.unwrap_or_default() {
             fetch_repository_safe(remote, None, false, None, output)
                 .await
                 .map_err(CliError::from)?;
@@ -289,7 +519,7 @@ pub async fn execute_safe(args: FetchArgs, output: &OutputConfig) -> CliResult<(
 
     let remote = match args.repository {
         Some(remote) => remote,
-        None => match Config::get_current_remote().await {
+        None => match ConfigKv::get_current_remote().await {
             Ok(Some(remote)) => remote,
             Ok(None) => {
                 return Err(CliError::fatal(
@@ -300,12 +530,16 @@ pub async fn execute_safe(args: FetchArgs, output: &OutputConfig) -> CliResult<(
         },
     };
 
-    let remote_config = Config::remote_config(&remote).await.ok_or_else(|| {
-        CliError::fatal(format!(
-            "'{}' does not appear to be a libra repository",
-            remote
-        ))
-    })?;
+    let remote_config = ConfigKv::remote_config(&remote)
+        .await
+        .ok()
+        .flatten()
+        .ok_or_else(|| {
+            CliError::fatal(format!(
+                "'{}' does not appear to be a libra repository",
+                remote
+            ))
+        })?;
 
     fetch_repository_safe(remote_config, args.refspec, false, None, output)
         .await
@@ -315,10 +549,22 @@ pub async fn execute_safe(args: FetchArgs, output: &OutputConfig) -> CliResult<(
 pub(crate) async fn discover_remote(
     remote_spec: &str,
 ) -> Result<(RemoteClient, DiscoveryResult), FetchError> {
+    discover_remote_with_name(remote_spec, None).await
+}
+
+/// Like [`discover_remote`] but accepts an optional logical remote name
+/// so that vault-backed SSH keys (`vault.ssh.<remote>.privkey`) can be
+/// resolved during transport setup.
+pub(crate) async fn discover_remote_with_name(
+    remote_spec: &str,
+    remote_name: Option<&str>,
+) -> Result<(RemoteClient, DiscoveryResult), FetchError> {
     let remote_client =
-        RemoteClient::from_spec(remote_spec).map_err(|message| FetchError::InvalidRemoteSpec {
-            spec: remote_spec.to_string(),
-            reason: format_remote_spec_error(remote_spec, &message),
+        RemoteClient::from_spec_with_remote(remote_spec, remote_name).map_err(|message| {
+            FetchError::InvalidRemoteSpec {
+                spec: remote_spec.to_string(),
+                reason: format_remote_spec_error(remote_spec, &message),
+            }
         })?;
     let discovery = remote_client
         .discovery_reference(UploadPack)
@@ -401,7 +647,8 @@ pub async fn fetch_repository_safe(
     depth: Option<usize>,
     output: &OutputConfig,
 ) -> Result<(), FetchError> {
-    let (remote_client, discovery) = discover_remote(&remote_config.url).await?;
+    let (remote_client, discovery) =
+        discover_remote_with_name(&remote_config.url, Some(&remote_config.name)).await?;
     let local_kind = get_hash_kind();
     if discovery.hash_kind != local_kind {
         return Err(FetchError::ObjectFormatMismatch {
@@ -727,8 +974,9 @@ async fn current_have_safe() -> Result<Vec<String>, FetchError> {
             });
         };
 
-    let mut remotes = Config::all_remote_configs()
+    let mut remotes = ConfigKv::all_remote_configs()
         .await
+        .unwrap_or_default()
         .iter()
         .map(|remote| Some(remote.name.to_owned()))
         .collect::<Vec<_>>();
@@ -802,4 +1050,70 @@ async fn read_pkt_line(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<(usi
     let mut data = vec![0u8; (len - 4) as usize];
     reader.read_exact(&mut data).await?;
     Ok((len as usize, data))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        time::{Duration, SystemTime},
+    };
+
+    use tempfile::tempdir;
+
+    use super::{
+        SSH_KEY_TEMP_FILE_MAX_AGE, cleanup_expired_vault_ssh_temp_files_in,
+        ensure_vault_ssh_tmp_dir,
+    };
+    use crate::utils::test::ScopedEnvVar;
+
+    #[test]
+    fn test_cleanup_expired_vault_ssh_temp_files_removes_old_tmp_files() {
+        let temp_home = tempdir().expect("failed to create temp home");
+        let tmp_dir = temp_home.path().join(".libra").join("tmp");
+        fs::create_dir_all(&tmp_dir).expect("failed to create SSH temp dir");
+
+        let expired = tmp_dir.join("ssh-key-old.tmp");
+        fs::write(&expired, "secret").expect("failed to write expired temp file");
+
+        let removed = cleanup_expired_vault_ssh_temp_files_in(
+            &tmp_dir,
+            SystemTime::now() + SSH_KEY_TEMP_FILE_MAX_AGE + Duration::from_secs(1),
+        )
+        .expect("cleanup should succeed");
+
+        assert_eq!(removed, 1);
+        assert!(!expired.exists(), "expired temp file should be removed");
+    }
+
+    #[test]
+    fn test_cleanup_expired_vault_ssh_temp_files_keeps_fresh_and_non_tmp_files() {
+        let temp_home = tempdir().expect("failed to create temp home");
+        let tmp_dir = temp_home.path().join(".libra").join("tmp");
+        fs::create_dir_all(&tmp_dir).expect("failed to create SSH temp dir");
+
+        let fresh = tmp_dir.join("ssh-key-fresh.tmp");
+        let keep = tmp_dir.join("note.txt");
+        fs::write(&fresh, "secret").expect("failed to write fresh temp file");
+        fs::write(&keep, "keep").expect("failed to write non-temp file");
+
+        let removed = cleanup_expired_vault_ssh_temp_files_in(&tmp_dir, SystemTime::now())
+            .expect("cleanup should succeed");
+
+        assert_eq!(removed, 0);
+        assert!(fresh.exists(), "fresh temp file should remain");
+        assert!(keep.exists(), "non-temp file should remain");
+    }
+
+    #[test]
+    fn test_ensure_vault_ssh_tmp_dir_uses_home_directory() {
+        let temp_home = tempdir().expect("failed to create temp home");
+        let _home = ScopedEnvVar::set("HOME", temp_home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp_home.path());
+
+        let tmp_dir = ensure_vault_ssh_tmp_dir().expect("tmp dir should be created");
+
+        assert_eq!(tmp_dir, temp_home.path().join(".libra").join("tmp"));
+        assert!(tmp_dir.exists(), "tmp dir should exist");
+    }
 }

@@ -32,7 +32,7 @@ use super::{
 use crate::{
     command::{load_object, log::get_reachable_commits},
     git_protocol::ServiceType,
-    internal::{branch::Branch, config::Config, head::Head, protocol::DiscRef, reflog},
+    internal::{branch::Branch, config::ConfigKv, head::Head, protocol::DiscRef, reflog},
     utils::{object_ext::TreeExt, util::cur_dir},
 };
 
@@ -161,7 +161,7 @@ impl LocalClient {
                 env::set_current_dir(&self.repo_path)?;
                 let local_branches = Branch::list_branches(None).await;
 
-                let remote_configs = Config::all_remote_configs().await;
+                let remote_configs = ConfigKv::all_remote_configs().await.unwrap_or_default();
                 let mut remote_branches: Vec<_> = vec![];
                 for remote in remote_configs {
                     remote_branches.extend(Branch::list_branches(Some(&remote.name)).await);

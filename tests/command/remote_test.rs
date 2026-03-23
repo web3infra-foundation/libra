@@ -11,7 +11,7 @@ use libra::{
     },
     internal::{
         branch::Branch,
-        config::{Config, RemoteConfig},
+        config::{ConfigKv, RemoteConfig},
     },
     utils::output::OutputConfig,
 };
@@ -32,7 +32,7 @@ async fn test_remote_add_creates_entry() {
     .await;
 
     // Verify the remote URL is stored as expected.
-    let remote = Config::remote_config("origin").await;
+    let remote = ConfigKv::remote_config("origin").await.ok().flatten();
     assert!(remote.is_some(), "remote should exist after add");
     assert_eq!(remote.unwrap().url, "https://example.com/repo.git");
 }
@@ -91,7 +91,7 @@ async fn test_remote_remove_deletes_entry() {
     .await;
 
     // Ensure the entry is gone from configuration.
-    let remote = Config::remote_config("origin").await;
+    let remote = ConfigKv::remote_config("origin").await.ok().flatten();
     assert!(remote.is_none(), "remote should be removed");
 }
 
@@ -109,8 +109,12 @@ async fn test_remote_rename_updates_branch_tracking() {
     .await;
 
     // Mirror Git's tracking layout for the main branch.
-    Config::insert("branch", Some("main"), "remote", "origin").await;
-    Config::insert("branch", Some("main"), "merge", "refs/heads/main").await;
+    ConfigKv::set("branch.main.remote", "origin", false)
+        .await
+        .unwrap();
+    ConfigKv::set("branch.main.merge", "refs/heads/main", false)
+        .await
+        .unwrap();
 
     remote::execute(RemoteCmds::Rename {
         old: "origin".into(),
@@ -119,12 +123,16 @@ async fn test_remote_rename_updates_branch_tracking() {
     .await;
 
     assert!(
-        Config::remote_config("origin").await.is_none(),
+        ConfigKv::remote_config("origin")
+            .await
+            .ok()
+            .flatten()
+            .is_none(),
         "old remote entry should be gone"
     );
 
     // The new remote name should retain the original URL.
-    let renamed = Config::remote_config("upstream").await;
+    let renamed = ConfigKv::remote_config("upstream").await.ok().flatten();
     assert!(renamed.is_some(), "new remote entry should exist");
     assert_eq!(
         renamed.unwrap().url,
@@ -132,7 +140,11 @@ async fn test_remote_rename_updates_branch_tracking() {
         "URL should be preserved after rename"
     );
 
-    let branch_remote = Config::get("branch", Some("main"), "remote").await;
+    let branch_remote = ConfigKv::get("branch.main.remote")
+        .await
+        .ok()
+        .flatten()
+        .map(|e| e.value);
     assert_eq!(
         branch_remote.as_deref(),
         Some("upstream"),
@@ -159,7 +171,7 @@ async fn test_remote_rename_conflict_returns_error() {
     .await;
 
     // Attempt to rename into the existing target and expect failure.
-    let result = Config::rename_remote("origin", "upstream").await;
+    let result = ConfigKv::rename_remote("origin", "upstream").await;
     assert!(result.is_err(), "rename into existing name should fail");
 }
 
@@ -188,7 +200,12 @@ async fn test_remote_set_url_add_appends_fetch_url() {
     })
     .await;
 
-    let urls = Config::get_all("remote", Some("origin"), "url").await;
+    let urls: Vec<String> = ConfigKv::get_all("remote.origin.url")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| e.value)
+        .collect();
     assert_eq!(urls.len(), 2, "should have two fetch urls after --add");
     assert!(urls.contains(&"https://example.com/repo.git".to_string()));
     assert!(urls.contains(&"https://mirror.example.com/repo.git".to_string()));
@@ -227,7 +244,12 @@ async fn test_remote_set_url_delete_removes_matching_url() {
     })
     .await;
 
-    let urls = Config::get_all("remote", Some("origin"), "url").await;
+    let urls: Vec<String> = ConfigKv::get_all("remote.origin.url")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| e.value)
+        .collect();
     assert_eq!(urls.len(), 1, "should have one fetch url after --delete");
     assert_eq!(urls[0], "https://example.com/repo.git");
 }
@@ -256,7 +278,12 @@ async fn test_remote_set_url_push_and_get_pushurl_entries() {
     })
     .await;
 
-    let pushurls = Config::get_all("remote", Some("origin"), "pushurl").await;
+    let pushurls: Vec<String> = ConfigKv::get_all("remote.origin.pushurl")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| e.value)
+        .collect();
     assert_eq!(
         pushurls.len(),
         1,
@@ -307,7 +334,12 @@ async fn test_remote_set_url_all_replaces_all_fetch_urls() {
     })
     .await;
 
-    let urls = Config::get_all("remote", Some("origin"), "url").await;
+    let urls: Vec<String> = ConfigKv::get_all("remote.origin.url")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| e.value)
+        .collect();
     assert_eq!(urls.len(), 1, "--all should leave exactly one fetch url");
     assert_eq!(urls[0], "https://replaced.example/repo.git");
 
@@ -445,7 +477,9 @@ async fn test_remote_prune_removes_stale_branches() {
     let _guard = test::ChangeDirGuard::new(&repo_dir);
 
     let remote_path = remote_dir.to_str().unwrap().to_string();
-    Config::insert("remote", Some("origin"), "url", &remote_path).await;
+    ConfigKv::set("remote.origin.url", &remote_path, false)
+        .await
+        .unwrap();
 
     // Fetch all branches to create remote-tracking branches
     fetch::fetch_repository(
@@ -635,7 +669,9 @@ async fn test_remote_prune_dry_run_previews_changes() {
     let _guard = test::ChangeDirGuard::new(&repo_dir);
 
     let remote_path = remote_dir.to_str().unwrap().to_string();
-    Config::insert("remote", Some("origin"), "url", &remote_path).await;
+    ConfigKv::set("remote.origin.url", &remote_path, false)
+        .await
+        .unwrap();
 
     // Fetch to create remote-tracking branch
     fetch::fetch_repository(

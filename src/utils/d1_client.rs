@@ -4,8 +4,6 @@
 //! via the REST API. It supports executing SQL statements, querying data,
 //! and batch operations for efficient cloud backup.
 
-use std::env;
-
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 
@@ -68,27 +66,43 @@ pub struct D1Client {
 }
 
 impl D1Client {
-    /// Create a new D1 client from environment variables
+    /// Create a new D1 client from environment variables, using
+    /// [`resolve_env`](crate::internal::config::resolve_env) so that
+    /// vault-stored secrets are picked up automatically.
     ///
-    /// Required environment variables:
+    /// Resolution order per variable:
+    /// 1. System environment variable (`std::env::var`)
+    /// 2. Local vault config (`vault.env.<VAR>`)
+    /// 3. Global vault config (`~/.libra/config.db`)
+    ///
+    /// Required variables:
     /// - `LIBRA_D1_ACCOUNT_ID`: Cloudflare Account ID
     /// - `LIBRA_D1_API_TOKEN`: Cloudflare API Token
     /// - `LIBRA_D1_DATABASE_ID`: D1 Database ID
-    pub fn from_env() -> Result<Self, D1Error> {
-        let account_id = env::var("LIBRA_D1_ACCOUNT_ID").map_err(|_| D1Error {
-            code: 1001,
-            message: "LIBRA_D1_ACCOUNT_ID environment variable not set".to_string(),
-        })?;
-        let api_token = env::var("LIBRA_D1_API_TOKEN").map_err(|_| D1Error {
-            code: 1002,
-            message: "LIBRA_D1_API_TOKEN environment variable not set".to_string(),
-        })?;
-        let database_id = env::var("LIBRA_D1_DATABASE_ID").map_err(|_| D1Error {
-            code: 1003,
-            message: "LIBRA_D1_DATABASE_ID environment variable not set".to_string(),
-        })?;
+    pub async fn from_env() -> Result<Self, D1Error> {
+        let account_id = Self::resolve_required_env("LIBRA_D1_ACCOUNT_ID", 1001, 1101).await?;
+        let api_token = Self::resolve_required_env("LIBRA_D1_API_TOKEN", 1002, 1102).await?;
+        let database_id = Self::resolve_required_env("LIBRA_D1_DATABASE_ID", 1003, 1103).await?;
 
         Ok(Self::new(account_id, api_token, database_id))
+    }
+
+    async fn resolve_required_env(
+        name: &str,
+        missing_code: i32,
+        resolution_error_code: i32,
+    ) -> Result<String, D1Error> {
+        match crate::internal::config::resolve_env(name).await {
+            Ok(Some(value)) if !value.is_empty() => Ok(value),
+            Ok(Some(_)) | Ok(None) => Err(D1Error {
+                code: missing_code,
+                message: format!("{name} not set (env or vault)"),
+            }),
+            Err(err) => Err(D1Error {
+                code: resolution_error_code,
+                message: format!("failed to resolve {name} from env or config: {err}"),
+            }),
+        }
     }
 
     /// Create a new D1 client with explicit credentials
@@ -458,7 +472,48 @@ pub struct RepositoryRow {
 
 #[cfg(test)]
 mod tests {
+    use std::{env, ffi::OsString};
+
+    use serial_test::serial;
+    use tempfile::tempdir;
+
     use super::*;
+    use crate::{
+        internal::config::ConfigKv,
+        utils::test::{ChangeDirGuard, setup_with_new_libra_in},
+    };
+
+    struct ClearedEnvVarGuard {
+        key: String,
+        previous: Option<OsString>,
+    }
+
+    impl ClearedEnvVarGuard {
+        fn new(key: &str) -> Self {
+            let previous = env::var_os(key);
+            // SAFETY: unit tests mutate process env in a controlled serial context.
+            unsafe {
+                env::remove_var(key);
+            }
+            Self {
+                key: key.to_string(),
+                previous,
+            }
+        }
+    }
+
+    impl Drop for ClearedEnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: this restores the exact previous value for the same env key.
+            unsafe {
+                if let Some(value) = &self.previous {
+                    env::set_var(&self.key, value);
+                } else {
+                    env::remove_var(&self.key);
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_d1_statement_serialization() {
@@ -480,5 +535,69 @@ mod tests {
         let json = serde_json::to_string(&stmt).unwrap();
         assert!(json.contains("SELECT"));
         assert!(!json.contains("params"));
+    }
+
+    #[test]
+    #[serial]
+    fn d1_client_from_env_reads_values_from_local_config() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let repo = tempdir().unwrap();
+        rt.block_on(setup_with_new_libra_in(repo.path()));
+        let _cwd = ChangeDirGuard::new(repo.path());
+        let _account = ClearedEnvVarGuard::new("LIBRA_D1_ACCOUNT_ID");
+        let _token = ClearedEnvVarGuard::new("LIBRA_D1_API_TOKEN");
+        let _database = ClearedEnvVarGuard::new("LIBRA_D1_DATABASE_ID");
+
+        rt.block_on(async {
+            ConfigKv::set(
+                "vault.env.LIBRA_D1_ACCOUNT_ID",
+                "account-from-config",
+                false,
+            )
+            .await
+            .unwrap();
+            ConfigKv::set("vault.env.LIBRA_D1_API_TOKEN", "token-from-config", false)
+                .await
+                .unwrap();
+            ConfigKv::set("vault.env.LIBRA_D1_DATABASE_ID", "db-from-config", false)
+                .await
+                .unwrap();
+        });
+
+        let client = rt
+            .block_on(D1Client::from_env())
+            .expect("local config values should initialize D1 client");
+        assert_eq!(client.account_id, "account-from-config");
+        assert_eq!(client.api_token, "token-from-config");
+        assert_eq!(client.database_id, "db-from-config");
+    }
+
+    #[test]
+    #[serial]
+    fn d1_client_from_env_surfaces_global_config_connection_errors() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let repo = tempdir().unwrap();
+        rt.block_on(setup_with_new_libra_in(repo.path()));
+        let _cwd = ChangeDirGuard::new(repo.path());
+        let _account = ClearedEnvVarGuard::new("LIBRA_D1_ACCOUNT_ID");
+        let _token = ClearedEnvVarGuard::new("LIBRA_D1_API_TOKEN");
+        let _database = ClearedEnvVarGuard::new("LIBRA_D1_DATABASE_ID");
+
+        let bad_global_dir = tempdir().unwrap();
+        let bad_global_db = bad_global_dir.path().join("bad-global.db");
+        std::fs::write(&bad_global_db, "not sqlite").unwrap();
+        let _global_db =
+            crate::utils::test::ScopedEnvVar::set("LIBRA_CONFIG_GLOBAL_DB", &bad_global_db);
+
+        let err = match rt.block_on(D1Client::from_env()) {
+            Ok(_) => panic!("global config resolution failure should surface"),
+            Err(err) => err,
+        };
+        assert_eq!(err.code, 1101);
+        assert!(
+            err.message.contains("failed to connect to global config"),
+            "unexpected error: {}",
+            err.message
+        );
     }
 }

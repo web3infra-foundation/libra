@@ -10,7 +10,7 @@ use crate::{
     command::{get_target_commit, load_object},
     internal::{
         branch::{self, Branch},
-        config::Config,
+        config::ConfigKv,
         head::Head,
     },
     utils::{
@@ -167,7 +167,7 @@ pub async fn set_upstream_safe_with_output(
     upstream: &str,
     output: &OutputConfig,
 ) -> CliResult<()> {
-    let branch_config = Config::branch_config(branch).await;
+    let branch_config = ConfigKv::branch_config(branch).await.ok().flatten();
     if branch_config.is_none() {
         let (remote, remote_branch) = match upstream.split_once('/') {
             Some((remote, branch)) => (remote, branch),
@@ -175,13 +175,12 @@ pub async fn set_upstream_safe_with_output(
                 return Err(CliError::fatal(format!("invalid upstream '{}'", upstream)));
             }
         };
-        Config::insert("branch", Some(branch), "remote", remote).await;
+        let _ = ConfigKv::set(&format!("branch.{branch}.remote"), remote, false).await;
         // set upstream branch (tracking branch)
-        Config::insert(
-            "branch",
-            Some(branch),
-            "merge",
+        let _ = ConfigKv::set(
+            &format!("branch.{branch}.merge"),
             &format!("refs/heads/{remote_branch}"),
+            false,
         )
         .await;
     }
@@ -525,7 +524,7 @@ async fn collect_branch_names(
     let mut remote_branches = vec![];
     match list_mode {
         BranchListMode::Remote | BranchListMode::All => {
-            let remote_configs = Config::all_remote_configs().await;
+            let remote_configs = ConfigKv::all_remote_configs().await.unwrap_or_default();
             for remote in remote_configs {
                 remote_branches.extend(Branch::list_branches(Some(&remote.name)).await);
             }
@@ -566,7 +565,7 @@ pub async fn list_branches(
     let mut remote_branches = vec![];
     match list_mode {
         BranchListMode::Remote | BranchListMode::All => {
-            let remote_configs = Config::all_remote_configs().await;
+            let remote_configs = ConfigKv::all_remote_configs().await.unwrap_or_default();
             for remote in remote_configs {
                 remote_branches.extend(Branch::list_branches(Some(&remote.name)).await);
             }

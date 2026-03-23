@@ -5,7 +5,7 @@ use lazy_static::lazy_static;
 use regex::Regex;
 
 use crate::{
-    internal::config::Config,
+    internal::config::ConfigKv,
     utils::{
         error::{CliError, CliResult},
         output::OutputConfig,
@@ -38,9 +38,9 @@ pub async fn execute_safe(args: OpenArgs, _output: &OutputConfig) -> CliResult<(
 
     let remote_url = if let Some(input) = args.remote {
         if in_repo {
-            let remotes = Config::all_remote_configs().await;
+            let remotes = ConfigKv::all_remote_configs().await.unwrap_or_default();
             if remotes.iter().any(|r| r.name == input) {
-                Config::get_remote_url(&input).await
+                ConfigKv::get_remote_url(&input).await.unwrap_or_default()
             } else {
                 input
             }
@@ -53,10 +53,10 @@ pub async fn execute_safe(args: OpenArgs, _output: &OutputConfig) -> CliResult<(
                 "not a libra repository (or any of the parent directories): .libra",
             ));
         }
-        match Config::get_current_remote_url().await {
+        match ConfigKv::get_current_remote_url().await.ok().flatten() {
             Some(url) => url,
             None => {
-                let remotes = Config::all_remote_configs().await;
+                let remotes = ConfigKv::all_remote_configs().await.unwrap_or_default();
                 if let Some(origin) = remotes.iter().find(|r| r.name == "origin") {
                     origin.url.clone()
                 } else if let Some(first) = remotes.first() {

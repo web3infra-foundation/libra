@@ -7,7 +7,7 @@ use git_internal::hash::get_hash_kind;
 
 use crate::{
     command::fetch::RemoteClient,
-    internal::{branch::Branch, config::Config, protocol::set_wire_hash_kind},
+    internal::{branch::Branch, config::ConfigKv, protocol::set_wire_hash_kind},
     utils::{
         error::{CliError, CliResult},
         output::OutputConfig,
@@ -108,40 +108,55 @@ pub async fn execute(command: RemoteCmds) {
 pub async fn execute_safe(command: RemoteCmds, _output: &OutputConfig) -> CliResult<()> {
     match command {
         RemoteCmds::Add { name, url } => {
-            if Config::remote_config(&name).await.is_some() {
+            if ConfigKv::remote_config(&name)
+                .await
+                .ok()
+                .flatten()
+                .is_some()
+            {
                 return Err(CliError::fatal(format!("remote {name} already exists")));
             }
-            Config::insert("remote", Some(&name), "url", &url).await;
+            let _ = ConfigKv::set(&format!("remote.{name}.url"), &url, false).await;
         }
         RemoteCmds::Remove { name } => {
-            Config::remove_remote(&name)
+            ConfigKv::remove_remote(&name)
                 .await
                 .map_err(|e| CliError::failure(e.to_string()))?;
         }
         RemoteCmds::Rename { old, new } => {
-            Config::rename_remote(&old, &new)
+            ConfigKv::rename_remote(&old, &new)
                 .await
                 .map_err(|e| CliError::failure(e.to_string()))?;
         }
         RemoteCmds::List => {
-            let remotes = Config::all_remote_configs().await;
+            let remotes = ConfigKv::all_remote_configs().await.unwrap_or_default();
             for remote in remotes {
                 show_remote_verbose(&remote.name).await?;
             }
         }
         RemoteCmds::Show => {
-            let remotes = Config::all_remote_configs().await;
+            let remotes = ConfigKv::all_remote_configs().await.unwrap_or_default();
             for remote in remotes {
                 println!("{}", remote.name);
             }
         }
         RemoteCmds::GetUrl { push, all, name } => {
-            if Config::remote_config(&name).await.is_none() {
+            if ConfigKv::remote_config(&name)
+                .await
+                .ok()
+                .flatten()
+                .is_none()
+            {
                 return Err(CliError::fatal(format!("no such remote: {name}")));
             }
             // If --push, prefer explicit pushurl entries; fall back to url if none.
             if push {
-                let push_urls = Config::get_all("remote", Some(&name), "pushurl").await;
+                let push_urls = ConfigKv::get_all(&format!("remote.{name}.pushurl"))
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|e| e.value)
+                    .collect::<Vec<_>>();
                 if !push_urls.is_empty() {
                     if all {
                         for u in push_urls {
@@ -155,7 +170,12 @@ pub async fn execute_safe(command: RemoteCmds, _output: &OutputConfig) -> CliRes
                 // fall through to read regular url if no pushurl configured
             }
 
-            let urls = Config::get_all("remote", Some(&name), "url").await;
+            let urls = ConfigKv::get_all(&format!("remote.{name}.url"))
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|e| e.value)
+                .collect::<Vec<_>>();
             if urls.is_empty() {
                 return Err(CliError::fatal(format!(
                     "no URL configured for remote '{name}'"
@@ -177,7 +197,12 @@ pub async fn execute_safe(command: RemoteCmds, _output: &OutputConfig) -> CliRes
             name,
             value,
         } => {
-            if Config::remote_config(&name).await.is_none() {
+            if ConfigKv::remote_config(&name)
+                .await
+                .ok()
+                .flatten()
+                .is_none()
+            {
                 return Err(CliError::fatal(format!("no such remote: {name}")));
             }
             // Determine which config key to operate on
@@ -185,33 +210,34 @@ pub async fn execute_safe(command: RemoteCmds, _output: &OutputConfig) -> CliRes
 
             if add {
                 // Insert a new URL entry
-                Config::insert("remote", Some(&name), key, &value).await;
+                let _ = ConfigKv::add(&format!("remote.{name}.{key}"), &value, false).await;
                 return Ok(());
             }
 
             if delete {
-                // Delete matching entries; if --all then delete all matching, else delete first matching
-                Config::remove_config("remote", Some(&name), key, Some(&value), all)
-                    .await
-                    .map_err(|e| CliError::fatal(format!("failed to remove config: {e}")))?;
+                // Delete only entries whose value contains the pattern
+                let full_key = format!("remote.{name}.{key}");
+                let entries = ConfigKv::get_all(&full_key).await.unwrap_or_default();
+                let remaining: Vec<_> = entries
+                    .into_iter()
+                    .filter(|e| !e.value.contains(&value))
+                    .collect();
+                let _ = ConfigKv::unset_all(&full_key).await;
+                for r in remaining {
+                    let _ = ConfigKv::add(&full_key, &r.value, r.encrypted).await;
+                }
                 return Ok(());
             }
 
             // Default: replace behavior
             if all {
                 // Remove all existing entries for this key, then insert the new value once
-                Config::remove_config("remote", Some(&name), key, None, true)
-                    .await
-                    .map_err(|e| CliError::fatal(format!("failed to remove config: {e}")))?;
-                Config::insert("remote", Some(&name), key, &value).await;
+                let _ = ConfigKv::unset_all(&format!("remote.{name}.{key}")).await;
+                let _ = ConfigKv::set(&format!("remote.{name}.{key}"), &value, false).await;
             } else {
-                // Replace first existing entry: remove first occurrence then insert new value.
-                // If no URL existed initially, the removal is a no-op and the insert will add the new URL.
-                // This handles both the 'replace existing' and 'set new URL when none exists' cases.
-                Config::remove_config("remote", Some(&name), key, None, false)
-                    .await
-                    .map_err(|e| CliError::fatal(format!("failed to remove config: {e}")))?;
-                Config::insert("remote", Some(&name), key, &value).await;
+                // Replace first existing entry: remove all then set new value.
+                let _ = ConfigKv::unset_all(&format!("remote.{name}.{key}")).await;
+                let _ = ConfigKv::set(&format!("remote.{name}.{key}"), &value, false).await;
             }
         }
         RemoteCmds::Prune { name, dry_run } => {
@@ -223,7 +249,12 @@ pub async fn execute_safe(command: RemoteCmds, _output: &OutputConfig) -> CliRes
 
 async fn show_remote_verbose(remote: &str) -> CliResult<()> {
     // There can be multiple URLs for a remote, like Gitee & GitHub
-    let urls = Config::get_all("remote", Some(remote), "url").await;
+    let urls = ConfigKv::get_all(&format!("remote.{remote}.url"))
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|e| e.value)
+        .collect::<Vec<_>>();
     match urls.first() {
         Some(url) => {
             println!("{remote} {url} (fetch)");
@@ -242,17 +273,18 @@ async fn show_remote_verbose(remote: &str) -> CliResult<()> {
 
 async fn prune_remote(name: &str, dry_run: bool) -> Result<(), CliError> {
     // Check if the remote exists
-    let Some(remote_config) = Config::remote_config(name).await else {
+    let Some(remote_config) = ConfigKv::remote_config(name).await.ok().flatten() else {
         return Err(CliError::fatal(format!("no such remote: {}", name)));
     };
 
     // Get remote client
-    let remote_client = RemoteClient::from_spec(&remote_config.url).map_err(|e| {
-        CliError::fatal(format!(
-            "Failed to create remote client from '{}': {}",
-            remote_config.url, e
-        ))
-    })?;
+    let remote_client = RemoteClient::from_spec_with_remote(&remote_config.url, Some(name))
+        .map_err(|e| {
+            CliError::fatal(format!(
+                "Failed to create remote client from '{}': {}",
+                remote_config.url, e
+            ))
+        })?;
 
     // Discover remote references
     let discovery = remote_client

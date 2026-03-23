@@ -175,11 +175,17 @@ impl Reflog {
     ) -> Result<(), ReflogError> {
         // considering that there are many commands that have not yet used user configs,
         // we just set default user info.
-        let name = config::Config::get_with_conn(db, "user", None, "name")
+        let name = config::ConfigKv::get_with_conn(db, "user.name")
             .await
+            .ok()
+            .flatten()
+            .map(|e| e.value)
             .unwrap_or("mega".to_string());
-        let email = config::Config::get_with_conn(db, "user", None, "email")
+        let email = config::ConfigKv::get_with_conn(db, "user.email")
             .await
+            .ok()
+            .flatten()
+            .map(|e| e.value)
             .unwrap_or("admin@mega.org".to_string());
         let message = context.to_string();
 

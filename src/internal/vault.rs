@@ -82,7 +82,7 @@ pub fn encrypt_token(unseal_key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// Decrypt `nonce || ciphertext || tag` with AES-256-GCM.
-fn decrypt_token(unseal_key: &[u8], data: &[u8]) -> Result<String> {
+pub fn decrypt_token(unseal_key: &[u8], data: &[u8]) -> Result<String> {
     use ring::aead;
 
     if data.len() < 12 + aead::AES_256_GCM.tag_len() {
@@ -191,7 +191,7 @@ pub async fn generate_pgp_key(
 
     // Store in config so it can be exported without requiring backend-specific
     // read-path support.
-    upsert_config_value("vault", None, "gpg_pubkey", &public_key).await;
+    upsert_config_value("vault.gpg.pubkey", &public_key).await;
 
     vault
         .seal()
@@ -333,37 +333,128 @@ pub async fn generate_ssh_key(
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("no public_key in vault SSH response"))?;
 
-    // Store private key to filesystem for SSH client usage
+    // Store private key to filesystem for backward compat (will be removed in future)
     store_ssh_private_key(private_key).await?;
 
     // Store public key in config for easy retrieval.
-    // Use upsert so rotating keys cannot leave stale duplicates that shadow
-    // the newest value in `Config::get`.
-    upsert_config_value("vault", None, "ssh_pubkey", public_key).await;
+    upsert_config_value("vault.ssh_pubkey", public_key).await;
 
     vault
         .seal()
         .await
         .map_err(|e| anyhow!("vault seal failed: {e}"))?;
 
+    // Return both public and private keys so callers can store them per-remote
     Ok(public_key.to_string())
+}
+
+/// Generate an SSH key pair and return (public_key, private_key) without
+/// storing them. The caller is responsible for per-remote storage.
+#[allow(dead_code)]
+pub async fn generate_ssh_key_pair(
+    root_dir: &Path,
+    unseal_key: &[u8],
+    user_name: &str,
+) -> Result<(String, String)> {
+    let vault = create_vault(root_dir).await?;
+    vault
+        .unseal(&[unseal_key])
+        .await
+        .map_err(|e| anyhow!("vault unseal failed: {e}"))?;
+    let root_token = recover_root_token(unseal_key).await?;
+    vault.set_token(&root_token);
+
+    // Configure SSH CA
+    let ca_data = serde_json::json!({ "key_type": "ed25519" });
+    vault
+        .write(
+            Some(root_token.clone()),
+            format!("{PKI_MOUNT_PATH}/config/ca/ssh"),
+            ca_data.as_object().cloned(),
+        )
+        .await
+        .map_err(|e| anyhow!("vault SSH CA configuration failed: {e}"))?;
+
+    // Create SSH role
+    let role_data = serde_json::json!({
+        "key_type": "rsa",
+        "key_bits": 3072,
+        "cert_type_ssh": "user",
+        "default_user": "git",
+        "allowed_users": "git",
+        "ttl": "3650d",
+        "max_ttl": "3650d",
+    });
+    vault
+        .write(
+            Some(root_token.clone()),
+            format!("{PKI_MOUNT_PATH}/roles/ssh/{SSH_ROLE_NAME}"),
+            role_data.as_object().cloned(),
+        )
+        .await
+        .map_err(|e| anyhow!("vault SSH role creation failed: {e}"))?;
+
+    // Issue SSH certificate
+    let issue_data = serde_json::json!({
+        "key_type": "rsa",
+        "key_bits": 3072,
+        "valid_principals": ["git"],
+        "ttl": "3650d",
+        "key_id": format!("libra-{user_name}"),
+    });
+    let resp = vault
+        .write(
+            Some(root_token),
+            format!("{PKI_MOUNT_PATH}/issue/ssh/{SSH_ROLE_NAME}"),
+            issue_data.as_object().cloned(),
+        )
+        .await
+        .map_err(|e| anyhow!("vault SSH key issuance failed: {e}"))?;
+
+    let data = resp
+        .and_then(|r| r.data)
+        .ok_or_else(|| anyhow!("no data in vault SSH issue response"))?;
+    let private_key = data
+        .get("private_key")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("no private_key in vault SSH response"))?
+        .to_string();
+    let public_key = data
+        .get("public_key")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("no public_key in vault SSH response"))?
+        .to_string();
+
+    vault
+        .seal()
+        .await
+        .map_err(|e| anyhow!("vault seal failed: {e}"))?;
+
+    Ok((public_key, private_key))
 }
 
 /// Retrieve the SSH public key from config.
 #[allow(dead_code)]
 pub async fn get_ssh_public_key() -> Option<String> {
-    use crate::internal::config::Config;
-    Config::get("vault", None, "ssh_pubkey").await
+    use crate::internal::config::ConfigKv;
+    ConfigKv::get("vault.ssh_pubkey")
+        .await
+        .ok()
+        .flatten()
+        .map(|e| e.value)
 }
 
 /// Retrieve the GPG (PGP) public key from the vault.
 #[allow(dead_code)]
 pub async fn get_gpg_public_key(root_dir: &Path, unseal_key: &[u8]) -> Result<String> {
-    use crate::internal::config::Config;
+    use crate::internal::config::ConfigKv;
 
     // Prefer cached value from config, populated during key generation.
-    if let Some(pk) = Config::get("vault", None, "gpg_pubkey").await {
-        return Ok(pk);
+    if let Some(entry) = ConfigKv::get("vault.gpg.pubkey").await.ok().flatten() {
+        return Ok(entry.value);
+    }
+    if let Some(entry) = ConfigKv::get("vault.gpg_pubkey").await.ok().flatten() {
+        return Ok(entry.value);
     }
 
     let vault = create_vault(root_dir).await?;
@@ -407,10 +498,11 @@ pub async fn get_gpg_public_key(root_dir: &Path, unseal_key: &[u8]) -> Result<St
 
 /// Get the path to the SSH private key file for the current repo.
 pub async fn ssh_key_path() -> Result<std::path::PathBuf> {
-    use crate::internal::config::Config;
+    use crate::internal::config::ConfigKv;
     let home = dirs::home_dir().ok_or_else(|| anyhow!("cannot determine home directory"))?;
-    let repo_id = Config::get("libra", None, "repoid")
-        .await
+    let repo_id = ConfigKv::get("libra.repoid")
+        .await?
+        .map(|e| e.value)
         .ok_or_else(|| anyhow!("libra.repoid not set — was the repo initialized?"))?;
     Ok(home
         .join(".libra")
@@ -501,6 +593,71 @@ pub fn vault_exists(root_dir: &Path) -> bool {
     root_dir.join(VAULT_DB_NAME).exists()
 }
 
+/// Load the unseal key for a specific configuration scope.
+/// - Local scope: reads from `~/.libra/vault-keys/<repo-id>`
+/// - Global scope: reads from `~/.libra/vault-unseal-key`
+pub async fn load_unseal_key_for_scope(scope: &str) -> Option<Vec<u8>> {
+    match scope {
+        "global" => load_global_unseal_key().await,
+        _ => load_unseal_key().await, // "local" or default
+    }
+}
+
+/// Load global unseal key from `~/.libra/vault-unseal-key`.
+async fn load_global_unseal_key() -> Option<Vec<u8>> {
+    let home = dirs::home_dir()?;
+    let path = home.join(".libra").join("vault-unseal-key");
+    let hex_key = tokio::fs::read_to_string(&path).await.ok()?;
+    hex::decode(hex_key.trim()).ok()
+}
+
+/// Store global unseal key to `~/.libra/vault-unseal-key` with 0o600 permissions.
+async fn store_global_unseal_key(unseal_key: &[u8]) -> Result<()> {
+    let home = dirs::home_dir().ok_or_else(|| anyhow!("cannot determine home directory"))?;
+    let dir = home.join(".libra");
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .context("failed to create ~/.libra/")?;
+    let path = dir.join("vault-unseal-key");
+    tokio::fs::write(&path, hex::encode(unseal_key))
+        .await
+        .context("failed to write global unseal key")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .context("failed to set permissions on global unseal key")?;
+    }
+    Ok(())
+}
+
+/// Lazy-initialize vault for a given scope and return the unseal key.
+/// For local scope, initializes the repo vault (.libra/vault.db).
+/// For global scope, creates a standalone AES key at ~/.libra/vault-unseal-key.
+pub async fn lazy_init_vault_for_scope(scope: &str) -> Result<Vec<u8>> {
+    match scope {
+        "global" => {
+            // Global scope: just generate a random unseal key (no vault.db needed,
+            // we use the raw AES-256-GCM key directly for encrypt_token/decrypt_token)
+            use ring::rand::{SecureRandom, SystemRandom};
+            let rng = SystemRandom::new();
+            let mut key = vec![0u8; 32];
+            rng.fill(&mut key)
+                .map_err(|_| anyhow!("failed to generate random key"))?;
+            store_global_unseal_key(&key).await?;
+            Ok(key)
+        }
+        _ => {
+            // Local scope: use the full vault init
+            let storage = crate::utils::util::try_get_storage_path(None)
+                .map_err(|_| anyhow!("not a libra repository"))?;
+            let (unseal_key, enc_token) = init_vault(&storage).await?;
+            store_credentials(&unseal_key, &enc_token).await?;
+            Ok(unseal_key)
+        }
+    }
+}
+
 /// Read the stored unseal key from the user's home directory.
 ///
 /// The key is stored at `~/.libra/vault-keys/<repo-id>` to keep it
@@ -513,32 +670,28 @@ pub async fn load_unseal_key() -> Option<Vec<u8>> {
         return hex::decode(hex_key).ok();
     }
     // Fallback: legacy repo-config location
-    use crate::internal::config::Config;
-    let hex_key = Config::get("vault", None, "unsealkey").await?;
-    hex::decode(hex_key).ok()
+    use crate::internal::config::ConfigKv;
+    let entry = ConfigKv::get("vault.unsealkey").await.ok()??;
+    hex::decode(entry.value).ok()
 }
 
 /// Store the unseal key in `~/.libra/vault-keys/<repo-id>` and the
 /// encrypted root token in the repo config.
 #[allow(dead_code)]
 pub async fn store_credentials(unseal_key: &[u8], encrypted_token: &[u8]) -> Result<()> {
-    use crate::internal::config::Config;
+    use crate::internal::config::ConfigKv;
     // Store unseal key outside the repo; do not silently downgrade to repo config.
     store_unseal_key_to_home(unseal_key)
         .await
         .context("failed to store vault unseal key in ~/.libra/")?;
 
     // Clean up any legacy insecure storage if present.
-    let _ = Config::remove("vault", None, "unsealkey").await;
+    let _ = ConfigKv::unset_all("vault.unsealkey").await;
 
     // Encrypted token always goes in repo config
-    Config::insert(
-        "vault",
-        None,
-        "roottoken_enc",
-        &hex::encode(encrypted_token),
-    )
-    .await;
+    ConfigKv::set("vault.roottoken_enc", &hex::encode(encrypted_token), false)
+        .await
+        .context("failed to store encrypted root token")?;
     Ok(())
 }
 
@@ -548,12 +701,12 @@ pub async fn store_credentials(unseal_key: &[u8], encrypted_token: &[u8]) -> Res
 /// are stored but PGP key generation fails).
 #[allow(dead_code)]
 pub async fn remove_credentials() {
-    use crate::internal::config::Config;
+    use crate::internal::config::ConfigKv;
     // Remove from home dir
     let _ = remove_unseal_key_from_home().await;
     // Remove legacy repo-config entries
-    let _ = Config::remove("vault", None, "unsealkey").await;
-    let _ = Config::remove("vault", None, "roottoken_enc").await;
+    let _ = ConfigKv::unset_all("vault.unsealkey").await;
+    let _ = ConfigKv::unset_all("vault.roottoken_enc").await;
 }
 
 // ── Internal helpers ──
@@ -705,21 +858,18 @@ async fn create_vault(root_dir: &Path) -> Result<RustyVault> {
     Ok(vault)
 }
 
-async fn upsert_config_value(configuration: &str, name: Option<&str>, key: &str, value: &str) {
-    use crate::internal::config::Config;
-
-    if Config::get(configuration, name, key).await.is_some() {
-        let _ = Config::update(configuration, name, key, value).await;
-    } else {
-        Config::insert(configuration, name, key, value).await;
-    }
+async fn upsert_config_value(dotted_key: &str, value: &str) {
+    use crate::internal::config::ConfigKv;
+    // set does upsert for single-value keys; ignore errors for vault internals
+    let _ = ConfigKv::set(dotted_key, value, false).await;
 }
 
 /// Recover the root token by decrypting the stored encrypted token with the unseal key.
 async fn recover_root_token(unseal_key: &[u8]) -> Result<String> {
-    use crate::internal::config::Config;
-    let enc_hex = Config::get("vault", None, "roottoken_enc")
-        .await
+    use crate::internal::config::ConfigKv;
+    let enc_hex = ConfigKv::get("vault.roottoken_enc")
+        .await?
+        .map(|e| e.value)
         .ok_or_else(|| anyhow!("vault encrypted root token not found in config"))?;
     let enc_bytes = hex::decode(&enc_hex).context("failed to decode encrypted root token hex")?;
     decrypt_token(unseal_key, &enc_bytes)
@@ -729,10 +879,11 @@ async fn recover_root_token(unseal_key: &[u8]) -> Result<String> {
 
 /// Resolve the path `~/.libra/vault-keys/<repo-id>` for the current repo.
 async fn unseal_key_path() -> Result<std::path::PathBuf> {
-    use crate::internal::config::Config;
+    use crate::internal::config::ConfigKv;
     let home = dirs::home_dir().ok_or_else(|| anyhow!("cannot determine home directory"))?;
-    let repo_id = Config::get("libra", None, "repoid")
-        .await
+    let repo_id = ConfigKv::get("libra.repoid")
+        .await?
+        .map(|e| e.value)
         .ok_or_else(|| anyhow!("libra.repoid not set — was the repo initialized?"))?;
     Ok(home.join(".libra").join("vault-keys").join(repo_id))
 }

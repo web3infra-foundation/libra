@@ -6,7 +6,7 @@
 
 use std::collections::HashSet;
 
-use libra::internal::config::Config;
+use libra::internal::config::ConfigKv;
 use serial_test::serial;
 use tempfile::tempdir;
 
@@ -517,13 +517,9 @@ async fn test_list_all_branches() {
     };
     execute(args).await;
 
-    Config::insert(
-        "remote",
-        Some("origin"),
-        "url",
-        "https://example.com/repo.git",
-    )
-    .await;
+    ConfigKv::set("remote.origin.url", "https://example.com/repo.git", false)
+        .await
+        .unwrap();
 
     // Create remote branch
     let hash = Head::current_commit().await.unwrap();

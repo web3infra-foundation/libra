@@ -14,6 +14,7 @@ pub mod ai_thread;
 pub mod ai_thread_intent;
 pub mod ai_thread_participant;
 pub mod config;
+pub mod config_kv;
 pub mod object_index;
 pub mod reference;
 pub mod reflog;

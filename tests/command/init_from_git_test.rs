@@ -5,7 +5,7 @@
 use std::{fs, path::Path, process::Command};
 
 use libra::{
-    internal::{branch::Branch, config::Config, head::Head},
+    internal::{branch::Branch, config::ConfigKv, head::Head},
     utils::test::ChangeDirGuard,
 };
 use serial_test::serial;
@@ -92,7 +92,7 @@ async fn test_init_from_git_repository_converts_repo() {
 
     let _guard = ChangeDirGuard::new(&libra_dir);
 
-    let remote = Config::remote_config("origin").await;
+    let remote = ConfigKv::remote_config("origin").await.ok().flatten();
     assert!(remote.is_some(), "origin remote should be configured");
     let remote = remote.unwrap();
     let expected_remote = git_dir.join(".git").canonicalize().unwrap();
@@ -504,7 +504,7 @@ async fn test_init_from_git_repository_bare_source_repo() {
 
     let _guard = ChangeDirGuard::new(&libra_dir);
 
-    let remote = Config::remote_config("origin").await;
+    let remote = ConfigKv::remote_config("origin").await.ok().flatten();
     assert!(remote.is_some(), "origin remote should be configured");
 }
 
@@ -528,7 +528,7 @@ async fn test_init_from_git_repository_bare_target_repo() {
 
     let _guard = ChangeDirGuard::new(&libra_dir);
 
-    let remote = Config::remote_config("origin").await;
+    let remote = ConfigKv::remote_config("origin").await.ok().flatten();
     assert!(
         remote.is_some(),
         "origin remote should be configured for bare init"

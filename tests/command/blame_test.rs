@@ -12,7 +12,7 @@ use libra::{
         get_target_commit,
         init::{self, InitArgs},
     },
-    internal::config::Config,
+    internal::config::ConfigKv,
 };
 use tempfile::tempdir;
 
@@ -52,8 +52,12 @@ async fn setup_repo_with_hash(
     .await
     .unwrap();
     let guard = test::ChangeDirGuard::new(temp.path());
-    Config::insert("user", None, "name", "Blame Test User").await;
-    Config::insert("user", None, "email", "blame-test@example.com").await;
+    ConfigKv::set("user.name", "Blame Test User", false)
+        .await
+        .unwrap();
+    ConfigKv::set("user.email", "blame-test@example.com", false)
+        .await
+        .unwrap();
     guard
 }
 

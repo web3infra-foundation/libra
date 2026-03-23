@@ -191,6 +191,20 @@ fn successful_clone_initializes_vault() {
         "true",
         "clone should enable vault.signing"
     );
+
+    let gpg_output = run_libra_with_home(&["config", "--get", "vault.gpg.pubkey"], &dest, &home);
+    assert_eq!(
+        gpg_output.status.code(),
+        Some(0),
+        "failed to read vault.gpg.pubkey: {}",
+        String::from_utf8_lossy(&gpg_output.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&gpg_output.stdout)
+            .trim()
+            .is_empty(),
+        "clone should populate vault.gpg.pubkey"
+    );
 }
 
 #[test]

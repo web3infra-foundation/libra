@@ -27,13 +27,7 @@ use uuid::Uuid;
 
 use crate::{
     command::load_object,
-    internal::{
-        branch::Branch,
-        config::Config,
-        db,
-        head::Head,
-        model::{config as config_model, object_index},
-    },
+    internal::{branch::Branch, config::ConfigKv, db, head::Head, model::object_index},
     utils::storage::{Storage, local::LocalStorage, remote::RemoteStorage, tiered::TieredStorage},
 };
 
@@ -120,97 +114,192 @@ impl ClientStorage {
     /// If not found (e.g., during init before config exists), it defaults to no prefix (root of bucket),
     /// which might be risky for multi-tenant buckets but acceptable for single-repo buckets.
     fn create_storage_backend(base_path: PathBuf) -> Arc<dyn Storage> {
-        // Check for object storage configuration
-        if let Ok(storage_type) = std::env::var("LIBRA_STORAGE_TYPE") {
-            let bucket =
-                std::env::var("LIBRA_STORAGE_BUCKET").unwrap_or_else(|_| "libra".to_string());
-            if bucket.is_empty() {
+        // Check for object storage configuration.
+        // Uses resolve_env_sync() so vault-stored secrets are picked up.
+        let storage_type = match resolve_env_sync("LIBRA_STORAGE_TYPE") {
+            Ok(Some(storage_type)) => storage_type,
+            Ok(None) => {
+                return Arc::new(LocalStorage::new(base_path));
+            }
+            Err(err) => {
+                return Self::storage_config_resolution_fallback(
+                    &base_path,
+                    "LIBRA_STORAGE_TYPE",
+                    &err,
+                );
+            }
+        };
+
+        let bucket = match resolve_env_sync("LIBRA_STORAGE_BUCKET") {
+            Ok(Some(bucket)) => bucket,
+            Ok(None) => "libra".to_string(),
+            Err(err) => {
+                return Self::storage_config_resolution_fallback(
+                    &base_path,
+                    "LIBRA_STORAGE_BUCKET",
+                    &err,
+                );
+            }
+        };
+        if bucket.is_empty() {
+            eprintln!(
+                "Error: LIBRA_STORAGE_BUCKET cannot be empty. Falling back to local storage."
+            );
+            return Arc::new(LocalStorage::new(base_path));
+        }
+
+        // Build ObjectStore
+        let object_store: Arc<dyn object_store::ObjectStore> = match storage_type.as_str() {
+            "s3" | "r2" => {
+                let mut builder =
+                    object_store::aws::AmazonS3Builder::new().with_bucket_name(&bucket);
+
+                let endpoint = match resolve_env_sync("LIBRA_STORAGE_ENDPOINT") {
+                    Ok(endpoint) => endpoint,
+                    Err(err) => {
+                        return Self::storage_config_resolution_fallback(
+                            &base_path,
+                            "LIBRA_STORAGE_ENDPOINT",
+                            &err,
+                        );
+                    }
+                };
+                if let Some(endpoint) = endpoint {
+                    if url::Url::parse(&endpoint).is_err() {
+                        eprintln!(
+                            "Error: Invalid LIBRA_STORAGE_ENDPOINT URL: {}. Falling back to local storage.",
+                            endpoint
+                        );
+                        return Arc::new(LocalStorage::new(base_path));
+                    }
+                    builder = builder.with_endpoint(endpoint);
+                }
+                let region = match resolve_env_sync("LIBRA_STORAGE_REGION") {
+                    Ok(region) => region,
+                    Err(err) => {
+                        return Self::storage_config_resolution_fallback(
+                            &base_path,
+                            "LIBRA_STORAGE_REGION",
+                            &err,
+                        );
+                    }
+                };
+                if let Some(region) = region {
+                    builder = builder.with_region(region);
+                }
+                let key = match resolve_env_sync("LIBRA_STORAGE_ACCESS_KEY") {
+                    Ok(key) => key,
+                    Err(err) => {
+                        return Self::storage_config_resolution_fallback(
+                            &base_path,
+                            "LIBRA_STORAGE_ACCESS_KEY",
+                            &err,
+                        );
+                    }
+                };
+                if let Some(key) = key {
+                    if key.is_empty() {
+                        eprintln!(
+                            "Error: LIBRA_STORAGE_ACCESS_KEY cannot be empty. Falling back to local storage."
+                        );
+                        return Arc::new(LocalStorage::new(base_path));
+                    }
+                    builder = builder.with_access_key_id(key);
+                }
+                let secret = match resolve_env_sync("LIBRA_STORAGE_SECRET_KEY") {
+                    Ok(secret) => secret,
+                    Err(err) => {
+                        return Self::storage_config_resolution_fallback(
+                            &base_path,
+                            "LIBRA_STORAGE_SECRET_KEY",
+                            &err,
+                        );
+                    }
+                };
+                if let Some(secret) = secret {
+                    if secret.is_empty() {
+                        eprintln!(
+                            "Error: LIBRA_STORAGE_SECRET_KEY cannot be empty. Falling back to local storage."
+                        );
+                        return Arc::new(LocalStorage::new(base_path));
+                    }
+                    builder = builder.with_secret_access_key(secret);
+                }
+
+                let allow_http = match resolve_env_sync("LIBRA_STORAGE_ALLOW_HTTP") {
+                    Ok(allow_http) => allow_http,
+                    Err(err) => {
+                        return Self::storage_config_resolution_fallback(
+                            &base_path,
+                            "LIBRA_STORAGE_ALLOW_HTTP",
+                            &err,
+                        );
+                    }
+                };
+                if allow_http.as_deref() == Some("true") {
+                    builder = builder.with_allow_http(true);
+                }
+
+                Arc::new(builder.build().expect("Failed to build S3 storage"))
+            }
+            _ => {
                 eprintln!(
-                    "Error: LIBRA_STORAGE_BUCKET cannot be empty. Falling back to local storage."
+                    "Error: Unsupported storage type: {}. Falling back to local storage.",
+                    storage_type
                 );
                 return Arc::new(LocalStorage::new(base_path));
             }
+        };
 
-            // Build ObjectStore
-            let object_store: Arc<dyn object_store::ObjectStore> = match storage_type.as_str() {
-                "s3" | "r2" => {
-                    let mut builder =
-                        object_store::aws::AmazonS3Builder::new().with_bucket_name(&bucket);
+        let remote = match get_or_create_repo_id_for_prefix() {
+            Some(repo_id) => RemoteStorage::new_with_prefix(object_store, repo_id),
+            None => RemoteStorage::new(object_store),
+        };
+        let local = LocalStorage::new(base_path.clone());
 
-                    if let Ok(endpoint) = std::env::var("LIBRA_STORAGE_ENDPOINT") {
-                        if url::Url::parse(&endpoint).is_err() {
-                            eprintln!(
-                                "Error: Invalid LIBRA_STORAGE_ENDPOINT URL: {}. Falling back to local storage.",
-                                endpoint
-                            );
-                            return Arc::new(LocalStorage::new(base_path));
-                        }
-                        builder = builder.with_endpoint(endpoint);
-                    }
-                    if let Ok(region) = std::env::var("LIBRA_STORAGE_REGION") {
-                        builder = builder.with_region(region);
-                    }
-                    if let Ok(key) = std::env::var("LIBRA_STORAGE_ACCESS_KEY") {
-                        if key.is_empty() {
-                            eprintln!(
-                                "Error: LIBRA_STORAGE_ACCESS_KEY cannot be empty. Falling back to local storage."
-                            );
-                            return Arc::new(LocalStorage::new(base_path));
-                        }
-                        builder = builder.with_access_key_id(key);
-                    }
-                    if let Ok(secret) = std::env::var("LIBRA_STORAGE_SECRET_KEY") {
-                        if secret.is_empty() {
-                            eprintln!(
-                                "Error: LIBRA_STORAGE_SECRET_KEY cannot be empty. Falling back to local storage."
-                            );
-                            return Arc::new(LocalStorage::new(base_path));
-                        }
-                        builder = builder.with_secret_access_key(secret);
-                    }
+        let threshold = match resolve_env_sync("LIBRA_STORAGE_THRESHOLD") {
+            Ok(Some(raw_threshold)) => raw_threshold.parse().unwrap_or(1024 * 1024),
+            Ok(None) => 1024 * 1024,
+            Err(err) => {
+                return Self::storage_config_resolution_fallback(
+                    &base_path,
+                    "LIBRA_STORAGE_THRESHOLD",
+                    &err,
+                );
+            }
+        };
 
-                    if std::env::var("LIBRA_STORAGE_ALLOW_HTTP").ok().as_deref() == Some("true") {
-                        builder = builder.with_allow_http(true);
-                    }
+        // Parse cache size (previously hardcoded/magic number)
+        let disk_cache_limit_bytes = match resolve_env_sync("LIBRA_STORAGE_CACHE_SIZE") {
+            Ok(Some(raw_size)) => raw_size.parse().unwrap_or(200 * 1024 * 1024),
+            Ok(None) => 200 * 1024 * 1024,
+            Err(err) => {
+                return Self::storage_config_resolution_fallback(
+                    &base_path,
+                    "LIBRA_STORAGE_CACHE_SIZE",
+                    &err,
+                );
+            }
+        };
 
-                    Arc::new(builder.build().expect("Failed to build S3 storage"))
-                }
-                _ => {
-                    eprintln!(
-                        "Error: Unsupported storage type: {}. Falling back to local storage.",
-                        storage_type
-                    );
-                    return Arc::new(LocalStorage::new(base_path));
-                }
-            };
+        Arc::new(TieredStorage::new(
+            local,
+            remote,
+            threshold,
+            disk_cache_limit_bytes,
+        ))
+    }
 
-            let remote = match get_or_create_repo_id_for_prefix() {
-                Some(repo_id) => RemoteStorage::new_with_prefix(object_store, repo_id),
-                None => RemoteStorage::new(object_store),
-            };
-            let local = LocalStorage::new(base_path.clone());
-
-            let threshold = std::env::var("LIBRA_STORAGE_THRESHOLD")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(1024 * 1024); // 1MB default
-
-            // Parse cache size (previously hardcoded/magic number)
-            let disk_cache_limit_bytes = std::env::var("LIBRA_STORAGE_CACHE_SIZE")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(200 * 1024 * 1024); // 200MB default
-
-            Arc::new(TieredStorage::new(
-                local,
-                remote,
-                threshold,
-                disk_cache_limit_bytes,
-            ))
-        } else {
-            // Default to local storage
-            Arc::new(LocalStorage::new(base_path))
-        }
+    fn storage_config_resolution_fallback(
+        base_path: &Path,
+        name: &str,
+        error: &str,
+    ) -> Arc<dyn Storage> {
+        eprintln!(
+            "Error: failed to resolve {}: {}. Falling back to local storage.",
+            name, error
+        );
+        Arc::new(LocalStorage::new(base_path.to_path_buf()))
     }
 
     /// Helper to execute async task on dedicated runtime and block waiting for result
@@ -491,6 +580,124 @@ impl ClientStorage {
     }
 }
 
+/// Resolve an environment variable, checking both system env and vault config.
+///
+/// First checks `std::env::var` (fast, sync). If the system env var is absent,
+/// it reuses the async `resolve_env()` path on a dedicated thread so local/global
+/// config and vault-backed values share exactly the same semantics.
+///
+/// This avoids deadlocks from nested tokio runtimes during storage init, which
+/// runs synchronously and may be called from within async test contexts.
+fn resolve_env_sync(name: &str) -> Result<Option<String>, String> {
+    // Always check system environment first.
+    if let Ok(val) = std::env::var(name) {
+        return Ok(Some(val));
+    }
+
+    let owned = name.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = resolve_env_sync_worker(&owned);
+        let _ = tx.send(result);
+    });
+    match rx.recv() {
+        Ok(result) => result,
+        Err(_) => Err(format!(
+            "env resolution worker for '{name}' exited before returning a result"
+        )),
+    }
+}
+
+fn resolve_env_sync_worker(name: &str) -> Result<Option<String>, String> {
+    let runtime = tokio::runtime::Runtime::new().map_err(|err| {
+        format!("failed to create tokio runtime for env resolution of '{name}': {err}")
+    })?;
+    runtime.block_on(resolve_env_for_storage_init(name))
+}
+
+async fn resolve_env_for_storage_init(name: &str) -> Result<Option<String>, String> {
+    let vault_key = format!("vault.env.{name}");
+
+    if let Ok(storage_path) = crate::utils::util::try_get_storage_path(None) {
+        let local_db_path = storage_path.join(crate::utils::util::DATABASE);
+        if local_db_path.exists()
+            && let Some(value) =
+                read_config_env_value(name, &vault_key, &local_db_path, "local").await?
+        {
+            return Ok(Some(value));
+        }
+    }
+
+    if let Some(global_db_path) = storage_global_config_path()
+        && global_db_path.exists()
+        && let Some(value) =
+            read_config_env_value(name, &vault_key, &global_db_path, "global").await?
+    {
+        return Ok(Some(value));
+    }
+
+    Ok(None)
+}
+
+async fn read_config_env_value(
+    env_name: &str,
+    vault_key: &str,
+    db_path: &Path,
+    scope: &str,
+) -> Result<Option<String>, String> {
+    let db_path_str = db_path.to_str().ok_or_else(|| {
+        format!(
+            "database path is not valid UTF-8 for {scope} config: {}",
+            db_path.display()
+        )
+    })?;
+    let conn = crate::internal::db::establish_connection_with_busy_timeout(
+        db_path_str,
+        Duration::from_millis(200),
+    )
+    .await
+    .map_err(|err| match scope {
+        "global" => format!(
+            "failed to connect to global config '{}': {}",
+            db_path.display(),
+            err
+        ),
+        _ => format!(
+            "failed to connect to local config '{}': {}",
+            db_path.display(),
+            err
+        ),
+    })?;
+
+    let entry = ConfigKv::get_with_conn(&conn, vault_key)
+        .await
+        .map_err(|err| format!("failed to read '{env_name}' from {scope} config: {err}"))?;
+
+    match entry {
+        Some(entry) if entry.encrypted => {
+            crate::internal::config::decrypt_value(&entry.value, scope)
+                .await
+                .map(Some)
+                .map_err(|err| {
+                    if scope == "global" {
+                        format!("failed to decrypt vault.env.{env_name} from global config: {err}")
+                    } else {
+                        format!("failed to decrypt vault.env.{env_name}: {err}")
+                    }
+                })
+        }
+        Some(entry) => Ok(Some(entry.value)),
+        None => Ok(None),
+    }
+}
+
+fn storage_global_config_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("LIBRA_CONFIG_GLOBAL_DB") {
+        return Some(PathBuf::from(path));
+    }
+    dirs::home_dir().map(|home| home.join(".libra").join("config.db"))
+}
+
 fn get_or_create_repo_id_for_prefix() -> Option<String> {
     let storage_path = crate::utils::util::try_get_storage_path(None).ok()?;
     let db_path = storage_path.join(crate::utils::util::DATABASE);
@@ -500,14 +707,18 @@ fn get_or_create_repo_id_for_prefix() -> Option<String> {
 
     let (tx, rx) = mpsc::channel();
     RUNTIME.spawn(async move {
-        let mut repo_id = Config::get("libra", None, "repoid").await;
+        let mut repo_id = ConfigKv::get("libra.repoid")
+            .await
+            .ok()
+            .flatten()
+            .map(|e| e.value);
         let needs_init = repo_id
             .as_deref()
             .map(|s| s.is_empty() || s == "unknown-repo")
             .unwrap_or(true);
         if needs_init {
             let new_id = Uuid::new_v4().to_string();
-            Config::insert("libra", None, "repoid", &new_id).await;
+            let _ = ConfigKv::set("libra.repoid", &new_id, false).await;
             repo_id = Some(new_id);
         }
         let _ = tx.send(repo_id);
@@ -521,16 +732,8 @@ fn get_or_create_repo_id_for_prefix() -> Option<String> {
 /// Best effort only: if config cannot be read (e.g. temp repo already removed),
 /// use a stable fallback to avoid panicking background tasks.
 async fn resolve_repo_id_for_index(db_conn: &DatabaseConnection) -> String {
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
-
-    match config_model::Entity::find()
-        .filter(config_model::Column::Configuration.eq("libra"))
-        .filter(config_model::Column::Name.is_null())
-        .filter(config_model::Column::Key.eq("repoid"))
-        .one(db_conn)
-        .await
-    {
-        Ok(Some(row)) if !row.value.trim().is_empty() => row.value,
+    match ConfigKv::get_with_conn(db_conn, "libra.repoid").await {
+        Ok(Some(entry)) if !entry.value.trim().is_empty() => entry.value,
         Ok(_) => "unknown-repo".to_string(),
         Err(err) => {
             tracing::debug!("Failed to resolve repo id for object index update: {}", err);
@@ -649,6 +852,7 @@ async fn update_object_index_once(
 #[cfg(test)]
 mod tests {
     use std::{
+        ffi::OsString,
         fs,
         path::PathBuf,
         time::{SystemTime, UNIX_EPOCH},
@@ -668,11 +872,40 @@ mod tests {
     use tempfile::tempdir;
     use tokio::sync::mpsc;
 
-    use super::{ClientStorage, update_object_index};
+    use super::{ClientStorage, resolve_env_sync, update_object_index};
     use crate::{
-        internal::{config::Config, db, model::object_index},
-        utils::test::ChangeDirGuard,
+        internal::{config::ConfigKv, db, model::object_index},
+        utils::test::{ChangeDirGuard, ScopedEnvVar, setup_with_new_libra_in},
     };
+
+    struct ClearedEnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl ClearedEnvVarGuard {
+        fn new(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: these tests are `#[serial]`, so process env mutation is isolated.
+            unsafe {
+                std::env::remove_var(key);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for ClearedEnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: this restores the exact previous value for the same process env key.
+            unsafe {
+                if let Some(value) = &self.previous {
+                    std::env::set_var(self.key, value);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
 
     // Helper to build packs (copied from previous version for tests)
     async fn encode_entries_to_pack_bytes(entries: Vec<Entry>) -> Result<Vec<u8>, GitError> {
@@ -813,9 +1046,9 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn background_index_update_uses_storage_database_instead_of_cwd() {
-        let storage_root = tempdir().unwrap();
-        let unrelated_dir = tempdir().unwrap();
-        let storage_path = storage_root.path();
+        let workspace = tempdir().unwrap();
+        let storage_path = workspace.path().join(".libra");
+        fs::create_dir_all(&storage_path).unwrap();
         let objects_dir = storage_path.join("objects");
         fs::create_dir_all(&objects_dir).unwrap();
 
@@ -823,9 +1056,10 @@ mod tests {
         let db_conn = db::create_database(db_path.to_str().unwrap())
             .await
             .unwrap();
-        Config::insert_with_conn(&db_conn, "libra", None, "repoid", "repo-from-storage").await;
+        let _ = ConfigKv::set_with_conn(&db_conn, "libra.repoid", "repo-from-storage", false).await;
 
-        let _guard = ChangeDirGuard::new(unrelated_dir.path());
+        // CWD must be the workspace so `try_get_storage_path` can find `.libra/`.
+        let _guard = ChangeDirGuard::new(workspace.path());
 
         let blob = Blob::from_content("index from explicit storage db");
         let storage = ClientStorage::init(objects_dir);
@@ -849,5 +1083,50 @@ mod tests {
 
         let result = update_object_index(&missing_db, "deadbeef", "blob", 12).await;
         assert!(result.is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn resolve_env_sync_reads_non_allowlisted_local_config_values() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let repo = tempdir().unwrap();
+        rt.block_on(setup_with_new_libra_in(repo.path()));
+        let _guard = ChangeDirGuard::new(repo.path());
+        let _endpoint = ClearedEnvVarGuard::new("LIBRA_STORAGE_ENDPOINT");
+
+        rt.block_on(async {
+            ConfigKv::set(
+                "vault.env.LIBRA_STORAGE_ENDPOINT",
+                "https://storage.example.com",
+                false,
+            )
+            .await
+            .unwrap();
+        });
+
+        let value = resolve_env_sync("LIBRA_STORAGE_ENDPOINT").unwrap();
+        assert_eq!(value.as_deref(), Some("https://storage.example.com"));
+    }
+
+    #[test]
+    #[serial]
+    fn resolve_env_sync_surfaces_global_config_connection_errors() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let repo = tempdir().unwrap();
+        rt.block_on(setup_with_new_libra_in(repo.path()));
+        let _guard = ChangeDirGuard::new(repo.path());
+        let _threshold = ClearedEnvVarGuard::new("LIBRA_STORAGE_THRESHOLD");
+
+        let bad_global_dir = tempdir().unwrap();
+        let bad_global_db = bad_global_dir.path().join("bad-global.db");
+        fs::write(&bad_global_db, "not sqlite").unwrap();
+        let _global_db = ScopedEnvVar::set("LIBRA_CONFIG_GLOBAL_DB", &bad_global_db);
+
+        let err = resolve_env_sync("LIBRA_STORAGE_THRESHOLD")
+            .expect_err("global config connection failure should surface");
+        assert!(
+            err.contains("failed to connect to global config"),
+            "unexpected error: {err}"
+        );
     }
 }

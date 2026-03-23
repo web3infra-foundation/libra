@@ -1,18 +1,806 @@
 //! Config storage helpers backed by SeaORM to insert, update, and retrieve values, manage remote/branch settings, and merge scoped configs.
+//!
+//! ## New `ConfigKv` API
+//!
+//! The `ConfigKv` struct provides flat key/value access to the `config_kv` table,
+//! with optional vault encryption. All new code should use `ConfigKv` instead of
+//! the deprecated `Config` struct.
 
 use std::{collections::HashSet, mem::swap};
 
+use anyhow::{Context, Result, anyhow};
 use sea_orm::{
     ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, ModelTrait,
-    QueryFilter, entity::ActiveModelTrait,
+    QueryFilter, QueryOrder, entity::ActiveModelTrait,
 };
 
 use crate::internal::{
     db::get_db_conn_instance,
     head::Head,
-    model::config::{self, ActiveModel, Model},
+    model::{
+        config::{self, ActiveModel, Model},
+        config_kv,
+    },
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ConfigKv — new flat key/value API backed by the `config_kv` table
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A single entry from the `config_kv` table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigKvEntry {
+    pub key: String,
+    pub value: String,
+    pub encrypted: bool,
+}
+
+impl ConfigKvEntry {
+    fn from_model(m: &config_kv::Model) -> Self {
+        Self {
+            key: m.key.clone(),
+            value: m.value.clone(),
+            encrypted: m.encrypted != 0,
+        }
+    }
+}
+
+/// Flat key/value configuration access backed by the `config_kv` table.
+///
+/// All methods follow the `_with_conn` pattern for transaction safety.
+/// See the module-level documentation on [`Config`] for details.
+pub struct ConfigKv;
+
+impl ConfigKv {
+    // ── Core CRUD (_with_conn) ───────────────────────────────────────────
+
+    /// Get the last value for a key (last-one-wins for multi-value keys).
+    pub async fn get_with_conn<C: ConnectionTrait>(
+        db: &C,
+        key: &str,
+    ) -> Result<Option<ConfigKvEntry>> {
+        let row = config_kv::Entity::find()
+            .filter(config_kv::Column::Key.eq(key))
+            .order_by_desc(config_kv::Column::Id)
+            .one(db)
+            .await
+            .context("failed to query config_kv")?;
+        Ok(row.as_ref().map(ConfigKvEntry::from_model))
+    }
+
+    /// Get all values for a key (preserves insertion order).
+    pub async fn get_all_with_conn<C: ConnectionTrait>(
+        db: &C,
+        key: &str,
+    ) -> Result<Vec<ConfigKvEntry>> {
+        let rows = config_kv::Entity::find()
+            .filter(config_kv::Column::Key.eq(key))
+            .order_by_asc(config_kv::Column::Id)
+            .all(db)
+            .await
+            .context("failed to query config_kv")?;
+        Ok(rows.iter().map(ConfigKvEntry::from_model).collect())
+    }
+
+    /// Count values for a key.
+    pub async fn count_values_with_conn<C: ConnectionTrait>(db: &C, key: &str) -> Result<usize> {
+        let rows = config_kv::Entity::find()
+            .filter(config_kv::Column::Key.eq(key))
+            .all(db)
+            .await
+            .context("failed to count config_kv entries")?;
+        Ok(rows.len())
+    }
+
+    /// Set a config value (upsert). Errors with exit-code 5 if the key has
+    /// multiple values — caller must use `unset_all` first or use `add`.
+    pub async fn set_with_conn<C: ConnectionTrait>(
+        db: &C,
+        key: &str,
+        value: &str,
+        encrypted: bool,
+    ) -> Result<()> {
+        let existing = config_kv::Entity::find()
+            .filter(config_kv::Column::Key.eq(key))
+            .all(db)
+            .await
+            .context("failed to query config_kv for set")?;
+
+        if existing.len() > 1 {
+            return Err(anyhow!(
+                "cannot set '{}': {} values exist for this key",
+                key,
+                existing.len()
+            ));
+        }
+
+        if let Some(row) = existing.into_iter().next() {
+            // Inherit encryption from existing entry if not explicitly set
+            let effective_encrypted = encrypted || row.encrypted != 0;
+            // Update existing row
+            let mut active: config_kv::ActiveModel = row.into();
+            active.value = Set(value.to_owned());
+            active.encrypted = Set(if effective_encrypted { 1 } else { 0 });
+            active
+                .update(db)
+                .await
+                .context("failed to update config_kv")?;
+        } else {
+            // Insert new row
+            let entry = config_kv::ActiveModel {
+                key: Set(key.to_owned()),
+                value: Set(value.to_owned()),
+                encrypted: Set(if encrypted { 1 } else { 0 }),
+                ..Default::default()
+            };
+            entry.save(db).await.context("failed to insert config_kv")?;
+        }
+        Ok(())
+    }
+
+    /// Add a value for a key (allows duplicates, for multi-value keys).
+    ///
+    /// Enforces same-key-same-state: if existing entries for this key have a
+    /// different encryption state, the insert is rejected. If existing entries
+    /// are encrypted and `encrypted` is false, the encryption state is
+    /// inherited (auto-promoted to encrypted).
+    pub async fn add_with_conn<C: ConnectionTrait>(
+        db: &C,
+        key: &str,
+        value: &str,
+        encrypted: bool,
+    ) -> Result<()> {
+        // Check existing entries for encryption state inheritance / conflict
+        let existing = config_kv::Entity::find()
+            .filter(config_kv::Column::Key.eq(key))
+            .all(db)
+            .await
+            .context("failed to query config_kv for add")?;
+
+        let has_encrypted = existing.iter().any(|e| e.encrypted != 0);
+        let has_plaintext = existing.iter().any(|e| e.encrypted == 0);
+
+        // Inherit encryption from existing entries
+        let effective_encrypted = encrypted || has_encrypted;
+
+        // Reject mixed encryption states
+        if !existing.is_empty()
+            && ((effective_encrypted && has_plaintext) || (!effective_encrypted && has_encrypted))
+        {
+            return Err(anyhow!(
+                "cannot mix encrypted and plaintext values for the same key"
+            ));
+        }
+
+        let entry = config_kv::ActiveModel {
+            key: Set(key.to_owned()),
+            value: Set(value.to_owned()),
+            encrypted: Set(if effective_encrypted { 1 } else { 0 }),
+            ..Default::default()
+        };
+        entry
+            .save(db)
+            .await
+            .context("failed to add config_kv entry")?;
+        Ok(())
+    }
+
+    /// Delete the first matching entry for a key.
+    /// Returns the number of rows deleted (0 or 1).
+    pub async fn unset_with_conn<C: ConnectionTrait>(db: &C, key: &str) -> Result<usize> {
+        let rows = config_kv::Entity::find()
+            .filter(config_kv::Column::Key.eq(key))
+            .all(db)
+            .await
+            .context("failed to query config_kv for unset")?;
+
+        if rows.len() > 1 {
+            return Err(anyhow!(
+                "cannot unset '{}': {} values exist for this key",
+                key,
+                rows.len()
+            ));
+        }
+
+        if let Some(row) = rows.into_iter().next() {
+            row.delete(db)
+                .await
+                .context("failed to delete config_kv entry")?;
+            Ok(1)
+        } else {
+            Ok(0)
+        }
+    }
+
+    /// Delete all matching entries for a key.
+    /// Returns the number of rows deleted.
+    pub async fn unset_all_with_conn<C: ConnectionTrait>(db: &C, key: &str) -> Result<usize> {
+        let rows = config_kv::Entity::find()
+            .filter(config_kv::Column::Key.eq(key))
+            .all(db)
+            .await
+            .context("failed to query config_kv for unset_all")?;
+
+        let count = rows.len();
+        for row in rows {
+            row.delete(db)
+                .await
+                .context("failed to delete config_kv entry")?;
+        }
+        Ok(count)
+    }
+
+    /// List all config entries.
+    pub async fn list_all_with_conn<C: ConnectionTrait>(db: &C) -> Result<Vec<ConfigKvEntry>> {
+        let rows = config_kv::Entity::find()
+            .order_by_asc(config_kv::Column::Key)
+            .all(db)
+            .await
+            .context("failed to list config_kv")?;
+        Ok(rows.iter().map(ConfigKvEntry::from_model).collect())
+    }
+
+    /// Get all entries whose key starts with the given prefix.
+    pub async fn get_by_prefix_with_conn<C: ConnectionTrait>(
+        db: &C,
+        prefix: &str,
+    ) -> Result<Vec<ConfigKvEntry>> {
+        let rows = config_kv::Entity::find()
+            .filter(config_kv::Column::Key.starts_with(prefix))
+            .order_by_asc(config_kv::Column::Key)
+            .all(db)
+            .await
+            .context("failed to query config_kv by prefix")?;
+        Ok(rows.iter().map(ConfigKvEntry::from_model).collect())
+    }
+
+    /// Get all entries whose key matches a regex pattern.
+    pub async fn get_regexp_with_conn<C: ConnectionTrait>(
+        db: &C,
+        pattern: &str,
+    ) -> Result<Vec<ConfigKvEntry>> {
+        // SQLite doesn't have native regex, so we fetch all and filter in Rust.
+        let re = regex::Regex::new(pattern)
+            .map_err(|e| anyhow!("invalid regex pattern '{}': {}", pattern, e))?;
+        let rows = config_kv::Entity::find()
+            .order_by_asc(config_kv::Column::Key)
+            .all(db)
+            .await
+            .context("failed to query config_kv for regexp")?;
+        Ok(rows
+            .iter()
+            .filter(|r| re.is_match(&r.key))
+            .map(ConfigKvEntry::from_model)
+            .collect())
+    }
+
+    // ── Convenience wrappers (acquire DB conn from pool) ─────────────────
+
+    pub async fn get(key: &str) -> Result<Option<ConfigKvEntry>> {
+        let db = get_db_conn_instance().await;
+        Self::get_with_conn(&db, key).await
+    }
+
+    pub async fn get_all(key: &str) -> Result<Vec<ConfigKvEntry>> {
+        let db = get_db_conn_instance().await;
+        Self::get_all_with_conn(&db, key).await
+    }
+
+    pub async fn set(key: &str, value: &str, encrypted: bool) -> Result<()> {
+        let db = get_db_conn_instance().await;
+        Self::set_with_conn(&db, key, value, encrypted).await
+    }
+
+    pub async fn add(key: &str, value: &str, encrypted: bool) -> Result<()> {
+        let db = get_db_conn_instance().await;
+        Self::add_with_conn(&db, key, value, encrypted).await
+    }
+
+    pub async fn unset(key: &str) -> Result<usize> {
+        let db = get_db_conn_instance().await;
+        Self::unset_with_conn(&db, key).await
+    }
+
+    pub async fn unset_all(key: &str) -> Result<usize> {
+        let db = get_db_conn_instance().await;
+        Self::unset_all_with_conn(&db, key).await
+    }
+
+    pub async fn list_all() -> Result<Vec<ConfigKvEntry>> {
+        let db = get_db_conn_instance().await;
+        Self::list_all_with_conn(&db).await
+    }
+
+    pub async fn get_by_prefix(prefix: &str) -> Result<Vec<ConfigKvEntry>> {
+        let db = get_db_conn_instance().await;
+        Self::get_by_prefix_with_conn(&db, prefix).await
+    }
+
+    // ── Type helpers ─────────────────────────────────────────────────────
+
+    /// Get a boolean config value. Normalises `true/yes/on/1` → `true`,
+    /// `false/no/off/0` → `false`.
+    pub async fn get_bool_with_conn<C: ConnectionTrait>(db: &C, key: &str) -> Result<Option<bool>> {
+        let entry = Self::get_with_conn(db, key).await?;
+        match entry {
+            None => Ok(None),
+            Some(e) => {
+                let v = e.value.to_ascii_lowercase();
+                match v.as_str() {
+                    "true" | "yes" | "on" | "1" => Ok(Some(true)),
+                    "false" | "no" | "off" | "0" => Ok(Some(false)),
+                    _ => Err(anyhow!(
+                        "invalid value '{}' for key '{}': expected bool (true/false)",
+                        if e.encrypted { "<REDACTED>" } else { &e.value },
+                        key
+                    )),
+                }
+            }
+        }
+    }
+
+    /// Get an integer config value. Supports `k`/`m`/`g` suffixes.
+    pub async fn get_int_with_conn<C: ConnectionTrait>(db: &C, key: &str) -> Result<Option<i64>> {
+        let entry = Self::get_with_conn(db, key).await?;
+        match entry {
+            None => Ok(None),
+            Some(e) => {
+                let s = e.value.trim().to_ascii_lowercase();
+                let (num_str, multiplier) = if s.ends_with('k') {
+                    (&s[..s.len() - 1], 1024i64)
+                } else if s.ends_with('m') {
+                    (&s[..s.len() - 1], 1024 * 1024)
+                } else if s.ends_with('g') {
+                    (&s[..s.len() - 1], 1024 * 1024 * 1024)
+                } else {
+                    (s.as_str(), 1i64)
+                };
+                let n: i64 = num_str.parse().map_err(|_| {
+                    anyhow!(
+                        "invalid value '{}' for key '{}': expected integer",
+                        if e.encrypted { "<REDACTED>" } else { &e.value },
+                        key
+                    )
+                })?;
+                Ok(Some(n * multiplier))
+            }
+        }
+    }
+
+    // ── Domain helpers (replace old Config methods) ──────────────────────
+
+    /// Get the value of `remote.<remote>.url`.
+    pub async fn get_remote_url_with_conn<C: ConnectionTrait>(
+        db: &C,
+        remote: &str,
+    ) -> Result<String> {
+        let key = format!("remote.{remote}.url");
+        match Self::get_with_conn(db, &key).await? {
+            Some(entry) => Ok(entry.value),
+            None => Err(anyhow!("fatal: No URL configured for remote '{remote}'.")),
+        }
+    }
+
+    pub async fn get_remote_url(remote: &str) -> Result<String> {
+        let db = get_db_conn_instance().await;
+        Self::get_remote_url_with_conn(&db, remote).await
+    }
+
+    /// Get remote name for a branch from `branch.<branch>.remote`.
+    pub async fn get_remote_with_conn<C: ConnectionTrait>(
+        db: &C,
+        branch: &str,
+    ) -> Result<Option<String>> {
+        let key = format!("branch.{branch}.remote");
+        Ok(Self::get_with_conn(db, &key).await?.map(|e| e.value))
+    }
+
+    pub async fn get_remote(branch: &str) -> Result<Option<String>> {
+        let db = get_db_conn_instance().await;
+        Self::get_remote_with_conn(&db, branch).await
+    }
+
+    /// Get remote for the current HEAD branch.
+    pub async fn get_current_remote_with_conn<C: ConnectionTrait>(
+        db: &C,
+    ) -> Result<Option<String>> {
+        match Head::current_with_conn(db).await {
+            Head::Branch(name) => Self::get_remote_with_conn(db, &name).await,
+            Head::Detached(_) => Err(anyhow!("fatal: HEAD is detached, cannot get remote")),
+        }
+    }
+
+    pub async fn get_current_remote() -> Result<Option<String>> {
+        let db = get_db_conn_instance().await;
+        Self::get_current_remote_with_conn(&db).await
+    }
+
+    /// Get remote URL for the current HEAD branch.
+    pub async fn get_current_remote_url_with_conn<C: ConnectionTrait>(
+        db: &C,
+    ) -> Result<Option<String>> {
+        match Self::get_current_remote_with_conn(db).await? {
+            Some(remote) => Ok(Some(Self::get_remote_url_with_conn(db, &remote).await?)),
+            None => Ok(None),
+        }
+    }
+
+    pub async fn get_current_remote_url() -> Result<Option<String>> {
+        let db = get_db_conn_instance().await;
+        Self::get_current_remote_url_with_conn(&db).await
+    }
+
+    /// Get all remote configs.
+    pub async fn all_remote_configs_with_conn<C: ConnectionTrait>(
+        db: &C,
+    ) -> Result<Vec<RemoteConfig>> {
+        let entries = Self::get_by_prefix_with_conn(db, "remote.").await?;
+        let mut remote_names: Vec<String> = Vec::new();
+        for e in &entries {
+            // Parse "remote.<name>.url" to extract <name>
+            if let Some(rest) = e.key.strip_prefix("remote.")
+                && let Some((name, suffix)) = rest.rsplit_once('.')
+                && suffix == "url"
+                && !remote_names.contains(&name.to_string())
+            {
+                remote_names.push(name.to_string());
+            }
+        }
+        let mut configs = Vec::new();
+        for name in remote_names {
+            let url_key = format!("remote.{name}.url");
+            if let Some(entry) = entries.iter().find(|e| e.key == url_key) {
+                configs.push(RemoteConfig {
+                    name: name.clone(),
+                    url: entry.value.clone(),
+                });
+            }
+        }
+        Ok(configs)
+    }
+
+    pub async fn all_remote_configs() -> Result<Vec<RemoteConfig>> {
+        let db = get_db_conn_instance().await;
+        Self::all_remote_configs_with_conn(&db).await
+    }
+
+    /// Get a specific remote's config.
+    pub async fn remote_config_with_conn<C: ConnectionTrait>(
+        db: &C,
+        name: &str,
+    ) -> Result<Option<RemoteConfig>> {
+        let url_key = format!("remote.{name}.url");
+        match Self::get_with_conn(db, &url_key).await? {
+            Some(entry) => Ok(Some(RemoteConfig {
+                name: name.to_owned(),
+                url: entry.value,
+            })),
+            None => Ok(None),
+        }
+    }
+
+    pub async fn remote_config(name: &str) -> Result<Option<RemoteConfig>> {
+        let db = get_db_conn_instance().await;
+        Self::remote_config_with_conn(&db, name).await
+    }
+
+    /// Get branch tracking configuration.
+    pub async fn branch_config_with_conn<C: ConnectionTrait>(
+        db: &C,
+        name: &str,
+    ) -> Result<Option<BranchConfig>> {
+        let remote_key = format!("branch.{name}.remote");
+        let merge_key = format!("branch.{name}.merge");
+        let remote = Self::get_with_conn(db, &remote_key).await?;
+        let merge = Self::get_with_conn(db, &merge_key).await?;
+        match (remote, merge) {
+            (Some(r), Some(m)) => {
+                let mut merge_val = m.value;
+                // Strip refs/heads/ prefix if present
+                if let Some(stripped) = merge_val.strip_prefix("refs/heads/") {
+                    merge_val = stripped.to_string();
+                }
+                Ok(Some(BranchConfig {
+                    name: name.to_owned(),
+                    merge: merge_val,
+                    remote: r.value,
+                }))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    pub async fn branch_config(name: &str) -> Result<Option<BranchConfig>> {
+        let db = get_db_conn_instance().await;
+        Self::branch_config_with_conn(&db, name).await
+    }
+
+    /// Remove all config entries for a remote.
+    pub async fn remove_remote_with_conn<C: ConnectionTrait>(db: &C, name: &str) -> Result<()> {
+        let prefix = format!("remote.{name}.");
+        let entries = config_kv::Entity::find()
+            .filter(config_kv::Column::Key.starts_with(&prefix))
+            .all(db)
+            .await
+            .context("failed to query remote entries for removal")?;
+
+        if entries.is_empty() {
+            return Err(anyhow!("fatal: No such remote: {name}"));
+        }
+
+        for entry in entries {
+            entry
+                .delete(db)
+                .await
+                .context("failed to delete remote entry")?;
+        }
+
+        // Also clean up SSH keys for this remote
+        let ssh_prefix = format!("vault.ssh.{name}.");
+        let ssh_entries = config_kv::Entity::find()
+            .filter(config_kv::Column::Key.starts_with(&ssh_prefix))
+            .all(db)
+            .await
+            .context("failed to query SSH key entries for removal")?;
+        for entry in ssh_entries {
+            entry
+                .delete(db)
+                .await
+                .context("failed to delete SSH key entry")?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn remove_remote(name: &str) -> Result<()> {
+        let db = get_db_conn_instance().await;
+        Self::remove_remote_with_conn(&db, name).await
+    }
+
+    /// Rename a remote, updating all related config entries.
+    pub async fn rename_remote_with_conn<C: ConnectionTrait>(
+        db: &C,
+        old: &str,
+        new: &str,
+    ) -> Result<()> {
+        // Validate source exists and target doesn't
+        if Self::remote_config_with_conn(db, old).await?.is_none() {
+            return Err(anyhow!("fatal: No such remote: {old}"));
+        }
+        if Self::remote_config_with_conn(db, new).await?.is_some() {
+            return Err(anyhow!("fatal: remote {new} already exists."));
+        }
+
+        // Rename remote.old.* → remote.new.*
+        let old_prefix = format!("remote.{old}.");
+        let new_prefix = format!("remote.{new}.");
+        let entries = config_kv::Entity::find()
+            .filter(config_kv::Column::Key.starts_with(&old_prefix))
+            .all(db)
+            .await
+            .context("failed to query remote entries for rename")?;
+        for entry in entries {
+            let new_key = entry.key.replacen(&old_prefix, &new_prefix, 1);
+            let mut active: config_kv::ActiveModel = entry.into();
+            active.key = Set(new_key);
+            active
+                .update(db)
+                .await
+                .context("failed to rename remote entry")?;
+        }
+
+        // Update branch.*.remote values that reference the old name
+        let branch_entries = Self::get_by_prefix_with_conn(db, "branch.").await?;
+        for be in branch_entries {
+            if be.key.ends_with(".remote") && be.value == old {
+                let rows = config_kv::Entity::find()
+                    .filter(config_kv::Column::Key.eq(&be.key))
+                    .filter(config_kv::Column::Value.eq(old))
+                    .all(db)
+                    .await
+                    .context("failed to query branch remote entries")?;
+                for row in rows {
+                    let mut active: config_kv::ActiveModel = row.into();
+                    active.value = Set(new.to_owned());
+                    active
+                        .update(db)
+                        .await
+                        .context("failed to update branch remote")?;
+                }
+            }
+        }
+
+        // Cascade SSH key rename: vault.ssh.old.* → vault.ssh.new.*
+        let ssh_old_prefix = format!("vault.ssh.{old}.");
+        let ssh_new_prefix = format!("vault.ssh.{new}.");
+        let ssh_entries = config_kv::Entity::find()
+            .filter(config_kv::Column::Key.starts_with(&ssh_old_prefix))
+            .all(db)
+            .await
+            .context("failed to query SSH key entries for rename")?;
+        for entry in ssh_entries {
+            let new_key = entry.key.replacen(&ssh_old_prefix, &ssh_new_prefix, 1);
+            let mut active: config_kv::ActiveModel = entry.into();
+            active.key = Set(new_key);
+            active
+                .update(db)
+                .await
+                .context("failed to rename SSH key entry")?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn rename_remote(old: &str, new: &str) -> Result<()> {
+        let db = get_db_conn_instance().await;
+        Self::rename_remote_with_conn(&db, old, new).await
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Environment variable resolution
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Decrypt a hex-encoded ciphertext using the vault unseal key for the given scope.
+/// `scope` should be `"local"` or `"global"`.
+pub async fn decrypt_value(hex_ciphertext: &str, scope: &str) -> Result<String> {
+    let unseal_key = crate::internal::vault::load_unseal_key_for_scope(scope)
+        .await
+        .ok_or_else(|| anyhow!("vault not initialized for {scope} scope — cannot decrypt value"))?;
+    let ciphertext =
+        hex::decode(hex_ciphertext).context("failed to decode encrypted config value hex")?;
+    crate::internal::vault::decrypt_token(&unseal_key, &ciphertext)
+}
+
+/// Encrypt a value using the vault unseal key for the given scope.
+/// Returns the hex-encoded ciphertext.
+pub async fn encrypt_value(value: &str, scope: &str) -> Result<String> {
+    let unseal_key = crate::internal::vault::load_unseal_key_for_scope(scope)
+        .await
+        .ok_or_else(|| anyhow!("vault not initialized for {scope} scope — cannot encrypt value"))?;
+    let ciphertext = crate::internal::vault::encrypt_token(&unseal_key, value.as_bytes())?;
+    Ok(hex::encode(ciphertext))
+}
+
+/// Resolve an environment variable by priority chain:
+/// 1. System environment variable (`std::env::var`)
+/// 2. Local config (`vault.env.<name>` in `.libra/libra.db`)
+/// 3. Global config (`vault.env.<name>` in `~/.libra/config.db`)
+///
+/// `name` is the raw env var name (e.g. `"GEMINI_API_KEY"`).
+/// Returns `Err` if a vault/DB query fails (not the same as "not configured").
+pub async fn resolve_env(name: &str) -> Result<Option<String>> {
+    // 1. System environment variable — per-process override (12-Factor)
+    if let Ok(val) = std::env::var(name) {
+        return Ok(Some(val));
+    }
+
+    // 2. Local config (vault.env.*)
+    let vault_key = format!("vault.env.{name}");
+    match ConfigKv::get(&vault_key).await {
+        Ok(Some(entry)) => {
+            if entry.encrypted {
+                // Decrypt the stored value using local-scope unseal key
+                let plaintext = decrypt_value(&entry.value, "local")
+                    .await
+                    .context(format!("failed to decrypt vault.env.{name}"))?;
+                return Ok(Some(plaintext));
+            }
+            return Ok(Some(entry.value));
+        }
+        Ok(None) => {}
+        Err(e) => {
+            return Err(e.context(format!("failed to read '{name}' from local config")));
+        }
+    }
+
+    // 3. Global config — lowest priority
+    if let Some(global_path) = global_config_path()
+        && global_path.exists()
+    {
+        let conn = crate::internal::db::establish_connection(&global_path.to_string_lossy())
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to connect to global config '{}'",
+                    global_path.display()
+                )
+            })?;
+        match ConfigKv::get_with_conn(&conn, &vault_key).await {
+            Ok(Some(entry)) => {
+                if entry.encrypted {
+                    let plaintext =
+                        decrypt_value(&entry.value, "global")
+                            .await
+                            .context(format!(
+                                "failed to decrypt vault.env.{name} from global config"
+                            ))?;
+                    return Ok(Some(plaintext));
+                }
+                return Ok(Some(entry.value));
+            }
+            Ok(None) => {}
+            Err(e) => {
+                return Err(e.context(format!("failed to read '{name}' from global config")));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+/// Resolve the global config database path.
+///
+/// Checks `LIBRA_CONFIG_GLOBAL_DB` env var first, then falls back to
+/// `~/.libra/config.db`.
+fn global_config_path() -> Option<std::path::PathBuf> {
+    if let Some(p) = std::env::var_os("LIBRA_CONFIG_GLOBAL_DB") {
+        return Some(std::path::PathBuf::from(p));
+    }
+    dirs::home_dir().map(|home| home.join(".libra").join("config.db"))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sensitive key detection
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Returns `true` if the key holds sensitive material that should be
+/// encrypted and redacted by default.
+pub fn is_sensitive_key(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+
+    // Exact-match vault internals
+    if lower.starts_with("vault.env.") {
+        return true;
+    }
+    if lower.ends_with(".privkey") {
+        return true;
+    }
+    if lower == "vault.unsealkey" || lower == "vault.roottoken" || lower == "vault.roottoken_enc" {
+        return true;
+    }
+
+    // Normalize the last segment: remove `_` and `-`, lowercase
+    let last_segment = lower.rsplit('.').next().unwrap_or(&lower);
+    let normalized: String = last_segment
+        .chars()
+        .filter(|c| *c != '_' && *c != '-')
+        .collect();
+
+    // Explicit exclusion for public keys
+    if normalized.ends_with("pubkey") || normalized.ends_with("publickey") {
+        return false;
+    }
+
+    // Check for sensitive substrings in the normalized last segment
+    const SENSITIVE_SUBSTRINGS: &[&str] = &[
+        "secret",
+        "token",
+        "password",
+        "credential",
+        "privatekey",
+        "accesskey",
+        "apikey",
+        "secretkey",
+    ];
+    SENSITIVE_SUBSTRINGS.iter().any(|s| normalized.contains(s))
+}
+
+/// Returns `true` if the key is a vault internal credential that cannot
+/// be `--reveal`ed or stored with `--plaintext`.
+pub fn is_vault_internal_key(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    lower.ends_with(".privkey")
+        || lower == "vault.unsealkey"
+        || lower == "vault.roottoken"
+        || lower == "vault.roottoken_enc"
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Legacy Config API (deprecated)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[deprecated(note = "use ConfigKv instead")]
 pub struct Config;
 
 trait DatabaseConnectionRef {
@@ -65,6 +853,7 @@ pub struct BranchConfig {
  * Correct Usage (in a transaction): `Config::update_with_conn(txn, ...).await;`
  * Incorrect Usage (in a transaction): `Config::update(...).await;` // DEADLOCK!
  */
+#[allow(deprecated)]
 impl Config {
     // _with_conn version for insert
     pub async fn insert_with_conn<C: ConnectionTrait>(

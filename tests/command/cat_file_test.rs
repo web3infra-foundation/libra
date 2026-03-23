@@ -5,13 +5,10 @@
 
 use std::{path::Path, process::Command, sync::Arc};
 
-use libra::{
-    internal::ai::history::HistoryManager,
-    utils::{storage::local::LocalStorage, storage_ext::StorageExt},
-};
+use libra::{internal::ai::history::HistoryManager, utils::storage::local::LocalStorage};
 use serial_test::serial;
 
-use super::{parse_cli_error_stderr, run_libra_command};
+use super::parse_cli_error_stderr;
 
 /// Initialize a temporary repository using CLI.
 fn init_temp_repo() -> tempfile::TempDir {
@@ -51,6 +48,7 @@ fn configure_user_identity(temp_path: &std::path::Path) {
     assert!(output.status.success(), "Failed to configure user.email");
 }
 
+#[allow(dead_code)]
 async fn load_intent_history(repo: &Path) -> (Arc<LocalStorage>, HistoryManager) {
     let libra_dir = repo.join(".libra");
     let storage = Arc::new(LocalStorage::new(libra_dir.join("objects")));

@@ -251,7 +251,7 @@ fn json_config_get_returns_structured_value() {
     assert_eq!(parsed["command"], "config");
     assert_eq!(parsed["data"]["action"], "get");
     assert_eq!(parsed["data"]["key"], "user.name");
-    assert_eq!(parsed["data"]["values"][0], "Alice");
+    assert_eq!(parsed["data"]["value"], "Alice");
 }
 
 #[test]

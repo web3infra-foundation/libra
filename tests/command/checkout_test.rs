@@ -11,15 +11,19 @@ use libra::{
         commit, init,
         restore::{self, RestoreArgs},
     },
-    internal::{config::Config, head::Head},
+    internal::{config::ConfigKv, head::Head},
     utils::{output::OutputConfig, test, util},
 };
 use serial_test::serial;
 use tempfile::tempdir;
 
 async fn configure_identity_for_test() {
-    Config::insert("user", None, "name", "Checkout Test User").await;
-    Config::insert("user", None, "email", "checkout-test@example.com").await;
+    ConfigKv::set("user.name", "Checkout Test User", false)
+        .await
+        .unwrap();
+    ConfigKv::set("user.email", "checkout-test@example.com", false)
+        .await
+        .unwrap();
 }
 async fn test_check_branch() {
     println!("\n\x1b[1mTest check_branch function.\x1b[0m");
@@ -267,7 +271,7 @@ async fn test_checkout_new_branch_with_dirty_worktree_returns_error() {
             checkout::{self, CheckoutArgs},
             commit,
         },
-        internal::config::Config,
+        internal::config::ConfigKv,
         utils::test::{self, ChangeDirGuard},
     };
 
@@ -275,8 +279,12 @@ async fn test_checkout_new_branch_with_dirty_worktree_returns_error() {
     test::setup_with_new_libra_in(temp_path.path()).await;
     let _guard = ChangeDirGuard::new(temp_path.path());
 
-    Config::insert("user", None, "name", "Checkout Tester").await;
-    Config::insert("user", None, "email", "checkout@test.com").await;
+    ConfigKv::set("user.name", "Checkout Tester", false)
+        .await
+        .unwrap();
+    ConfigKv::set("user.email", "checkout@test.com", false)
+        .await
+        .unwrap();
 
     // Create initial commit so HEAD exists
     test::ensure_file("base.txt", Some("base"));
@@ -361,7 +369,7 @@ async fn test_checkout_current_branch_with_dirty_worktree_succeeds() {
             checkout::{self, CheckoutArgs},
             commit,
         },
-        internal::config::Config,
+        internal::config::ConfigKv,
         utils::test::{self, ChangeDirGuard},
     };
 
@@ -369,8 +377,12 @@ async fn test_checkout_current_branch_with_dirty_worktree_succeeds() {
     test::setup_with_new_libra_in(temp_path.path()).await;
     let _guard = ChangeDirGuard::new(temp_path.path());
 
-    Config::insert("user", None, "name", "Checkout Tester").await;
-    Config::insert("user", None, "email", "checkout@test.com").await;
+    ConfigKv::set("user.name", "Checkout Tester", false)
+        .await
+        .unwrap();
+    ConfigKv::set("user.email", "checkout@test.com", false)
+        .await
+        .unwrap();
 
     test::ensure_file("base.txt", Some("base"));
     add::execute_safe(

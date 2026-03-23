@@ -27,11 +27,7 @@ async fn test_cli_config_global_without_repo() {
     let _guard = test::ChangeDirGuard::new(temp_dir.path());
 
     let global_db_dir = tempdir().unwrap();
-    let system_db_dir = tempdir().unwrap();
-    let _scoped = ScopedConfigPathGuard::new(
-        &global_db_dir.path().join("global_config_cli.db"),
-        &system_db_dir.path().join("system_config_cli.db"),
-    );
+    let _scoped = ScopedConfigPathGuard::new(&global_db_dir.path().join("global_config_cli.db"));
 
     let result = exec_async(vec!["config", "--global", "user.name", "cli_global_user"]).await;
     assert!(result.is_ok());
@@ -47,11 +43,8 @@ async fn test_cli_config_list_global_without_repo() {
     let _guard = test::ChangeDirGuard::new(temp_dir.path());
 
     let global_db_dir = tempdir().unwrap();
-    let system_db_dir = tempdir().unwrap();
-    let _scoped = ScopedConfigPathGuard::new(
-        &global_db_dir.path().join("global_config_cli_list.db"),
-        &system_db_dir.path().join("system_config_cli_list.db"),
-    );
+    let _scoped =
+        ScopedConfigPathGuard::new(&global_db_dir.path().join("global_config_cli_list.db"));
 
     let result = exec_async(vec!["config", "--list", "--global"]).await;
     assert!(result.is_ok());
@@ -59,39 +52,23 @@ async fn test_cli_config_list_global_without_repo() {
 
 #[tokio::test]
 #[serial]
-async fn test_cli_config_system_without_repo() {
+async fn test_cli_config_system_returns_error() {
     let temp_dir = tempdir().unwrap();
     let _guard = test::ChangeDirGuard::new(temp_dir.path());
 
     let global_db_dir = tempdir().unwrap();
-    let system_db_dir = tempdir().unwrap();
-    let _scoped = ScopedConfigPathGuard::new(
-        &global_db_dir.path().join("global_config_cli_sys.db"),
-        &system_db_dir.path().join("system_config_cli_sys.db"),
-    );
+    let _scoped =
+        ScopedConfigPathGuard::new(&global_db_dir.path().join("global_config_cli_sys.db"));
 
+    // --system scope is removed and should always error
     let result = exec_async(vec!["config", "--system", "user.name", "cli_system_user"]).await;
-    assert!(result.is_ok());
+    assert!(result.is_err(), "--system should be rejected");
 
-    let read_result = exec_async(vec!["config", "--system", "--get", "user.name"]).await;
-    assert!(read_result.is_ok());
-}
-
-#[tokio::test]
-#[serial]
-async fn test_cli_config_list_system_without_repo() {
-    let temp_dir = tempdir().unwrap();
-    let _guard = test::ChangeDirGuard::new(temp_dir.path());
-
-    let global_db_dir = tempdir().unwrap();
-    let system_db_dir = tempdir().unwrap();
-    let _scoped = ScopedConfigPathGuard::new(
-        &global_db_dir.path().join("global_config_cli_sys_list.db"),
-        &system_db_dir.path().join("system_config_cli_sys_list.db"),
-    );
+    let result = exec_async(vec!["config", "--system", "--get", "user.name"]).await;
+    assert!(result.is_err(), "--system --get should be rejected");
 
     let result = exec_async(vec!["config", "--list", "--system"]).await;
-    assert!(result.is_ok());
+    assert!(result.is_err(), "--system --list should be rejected");
 }
 
 #[tokio::test]
@@ -113,11 +90,7 @@ async fn test_config_import_global_from_git() {
     let _guard = test::ChangeDirGuard::new(temp_dir.path());
 
     let global_db_dir = tempdir().unwrap();
-    let system_db_dir = tempdir().unwrap();
-    let _scoped = ScopedConfigPathGuard::new(
-        &global_db_dir.path().join("global_config_import.db"),
-        &system_db_dir.path().join("system_config_import.db"),
-    );
+    let _scoped = ScopedConfigPathGuard::new(&global_db_dir.path().join("global_config_import.db"));
 
     let fake_home = tempdir().unwrap();
     let _home_guard = EnvVarGuard::set("HOME", fake_home.path().as_os_str());
@@ -146,17 +119,18 @@ async fn test_config_import_global_from_git() {
     let result = exec_async(vec!["config", "--global", "import"]).await;
     assert!(result.is_ok());
 
-    let imported_name =
-        config::ScopedConfig::get(config::ConfigScope::Global, "user", None, "name")
-            .await
-            .unwrap();
-    let imported_email =
-        config::ScopedConfig::get(config::ConfigScope::Global, "user", None, "email")
-            .await
-            .unwrap();
-    assert_eq!(imported_name.as_deref(), Some("Git Global Import User"));
+    let imported_name = config::ScopedConfig::get(config::ConfigScope::Global, "user.name")
+        .await
+        .unwrap();
+    let imported_email = config::ScopedConfig::get(config::ConfigScope::Global, "user.email")
+        .await
+        .unwrap();
     assert_eq!(
-        imported_email.as_deref(),
+        imported_name.map(|e| e.value).as_deref(),
+        Some("Git Global Import User")
+    );
+    assert_eq!(
+        imported_email.map(|e| e.value).as_deref(),
         Some("git-global-import@example.com")
     );
 }
@@ -168,13 +142,9 @@ async fn test_config_import_local_from_git_repository() {
     test::setup_with_new_libra_in(temp_path.path()).await;
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
-    use libra::internal::config::Config;
-    Config::remove_config("user", None, "name", None, true)
-        .await
-        .unwrap();
-    Config::remove_config("user", None, "email", None, true)
-        .await
-        .unwrap();
+    use libra::internal::config::ConfigKv;
+    ConfigKv::unset_all("user.name").await.unwrap();
+    ConfigKv::unset_all("user.email").await.unwrap();
 
     let git_init = Command::new("git").args(["init"]).output().unwrap();
     assert!(git_init.status.success());
@@ -194,14 +164,20 @@ async fn test_config_import_local_from_git_repository() {
     let result = exec_async(vec!["config", "import"]).await;
     assert!(result.is_ok());
 
-    let imported_names =
-        config::ScopedConfig::get_all(config::ConfigScope::Local, "user", None, "name")
+    let imported_names: Vec<String> =
+        config::ScopedConfig::get_all(config::ConfigScope::Local, "user.name")
             .await
-            .unwrap();
-    let imported_emails =
-        config::ScopedConfig::get_all(config::ConfigScope::Local, "user", None, "email")
+            .unwrap()
+            .into_iter()
+            .map(|e| e.value)
+            .collect();
+    let imported_emails: Vec<String> =
+        config::ScopedConfig::get_all(config::ConfigScope::Local, "user.email")
             .await
-            .unwrap();
+            .unwrap()
+            .into_iter()
+            .map(|e| e.value)
+            .collect();
     assert!(imported_names.iter().any(|v| v == "Git Local Import User"));
     assert!(
         imported_emails
@@ -229,19 +205,17 @@ impl Drop for EnvVarGuard {
     }
 }
 
-/// Sets `LIBRA_CONFIG_GLOBAL_DB` and `LIBRA_CONFIG_SYSTEM_DB` to point at temp files for isolation.
+/// Sets `LIBRA_CONFIG_GLOBAL_DB` to point at a temp file for isolation.
 ///
-/// This prevents tests from touching real host paths like `~/.libra/config.db` or `/etc/libra/config.db`.
+/// This prevents tests from touching real host paths like `~/.libra/config.db`.
 struct ScopedConfigPathGuard {
     _global: EnvVarGuard,
-    _system: EnvVarGuard,
 }
 
 impl ScopedConfigPathGuard {
-    fn new(global_db_path: &std::path::Path, system_db_path: &std::path::Path) -> Self {
+    fn new(global_db_path: &std::path::Path) -> Self {
         let _global = EnvVarGuard::set("LIBRA_CONFIG_GLOBAL_DB", global_db_path.as_os_str());
-        let _system = EnvVarGuard::set("LIBRA_CONFIG_SYSTEM_DB", system_db_path.as_os_str());
-        Self { _global, _system }
+        Self { _global }
     }
 }
 
@@ -251,30 +225,19 @@ async fn test_config_get_failed() {
     let temp_path = tempdir().unwrap();
     // start a new libra repository in a temporary directory
     test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
 
-    let args = config::ConfigArgs {
-        add: true,
-        get: false,
-        get_all: false,
-        unset: false,
-        unset_all: false,
-        list: false,
-        local: false,
-        global: false,
-        system: false,
-        import: false,
-        key: Some("user.name".to_string()),
-        valuepattern: Some("value".to_string()),
-        default: Some("erasernoob".to_string()),
-        name_only: false,
-    };
-
-    // `execute()` prints errors and returns (), so assert on `validate()` directly.
-    let err = args.validate().unwrap_err();
-    assert_eq!(
-        err,
-        "--default is only valid when --get or --get-all is set".to_string()
-    );
+    // --default with --add (no --get or --get-all) should error
+    let result = exec_async(vec![
+        "config",
+        "--add",
+        "-d",
+        "erasernoob",
+        "user.name",
+        "value",
+    ])
+    .await;
+    assert!(result.is_err());
 }
 
 #[tokio::test]
@@ -288,41 +251,11 @@ async fn test_config_get_all() {
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
     // Add the config first
-    let arg1 = config::ConfigArgs {
-        add: true,
-        get: false,
-        get_all: false,
-        unset: false,
-        unset_all: false,
-        list: false,
-        local: false,
-        global: false,
-        system: false,
-        import: false,
-        key: Some("user.name".to_string()),
-        valuepattern: Some("erasernoob".to_string()),
-        default: None,
-        name_only: false,
-    };
-    config::execute(arg1).await;
+    let result = exec_async(vec!["config", "--add", "user.name", "erasernoob"]).await;
+    assert!(result.is_ok());
 
-    let args = config::ConfigArgs {
-        add: false,
-        get: true,
-        get_all: false,
-        unset: false,
-        unset_all: false,
-        list: false,
-        local: false,
-        global: false,
-        system: false,
-        import: false,
-        key: Some("user.name".to_string()),
-        valuepattern: None,
-        default: None,
-        name_only: false,
-    };
-    config::execute(args).await;
+    let result = exec_async(vec!["config", "--get", "user.name"]).await;
+    assert!(result.is_ok());
 }
 
 #[tokio::test]
@@ -335,23 +268,8 @@ async fn test_config_get_all_with_default() {
     // set the current working directory to the temporary path
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
-    let args = config::ConfigArgs {
-        add: false,
-        get: false,
-        get_all: true,
-        unset: false,
-        unset_all: false,
-        list: false,
-        local: false,
-        global: false,
-        system: false,
-        import: false,
-        key: Some("user.name".to_string()),
-        valuepattern: Some("value".to_string()),
-        default: Some("erasernoob".to_string()),
-        name_only: false,
-    };
-    config::execute(args).await;
+    let result = exec_async(vec!["config", "--get-all", "-d", "erasernoob", "user.name"]).await;
+    assert!(result.is_ok());
 }
 
 #[tokio::test]
@@ -365,41 +283,11 @@ async fn test_config_get() {
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
     // Add the config first
-    let arg1 = config::ConfigArgs {
-        add: true,
-        get: false,
-        get_all: false,
-        unset: false,
-        unset_all: false,
-        list: false,
-        local: false,
-        global: false,
-        system: false,
-        import: false,
-        key: Some("user.name".to_string()),
-        valuepattern: Some("erasernoob".to_string()),
-        default: None,
-        name_only: false,
-    };
-    config::execute(arg1).await;
+    let result = exec_async(vec!["config", "--add", "user.name", "erasernoob"]).await;
+    assert!(result.is_ok());
 
-    let args = config::ConfigArgs {
-        add: false,
-        get: true,
-        get_all: false,
-        unset: false,
-        unset_all: false,
-        list: false,
-        local: false,
-        global: false,
-        system: false,
-        import: false,
-        key: Some("user.name".to_string()),
-        valuepattern: None,
-        default: None,
-        name_only: false,
-    };
-    config::execute(args).await;
+    let result = exec_async(vec!["config", "--get", "user.name"]).await;
+    assert!(result.is_ok());
 }
 
 #[tokio::test]
@@ -411,23 +299,8 @@ async fn test_config_get_with_default() {
 
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
-    let args = config::ConfigArgs {
-        add: false,
-        get: true,
-        get_all: false,
-        unset: false,
-        unset_all: false,
-        list: false,
-        local: false,
-        global: false,
-        system: false,
-        import: false,
-        key: Some("user.name".to_string()),
-        valuepattern: None,
-        default: Some("erasernoob".to_string()),
-        name_only: false,
-    };
-    config::execute(args).await;
+    let result = exec_async(vec!["config", "--get", "-d", "erasernoob", "user.name"]).await;
+    assert!(result.is_ok());
 }
 
 #[tokio::test]
@@ -441,61 +314,21 @@ async fn test_config_list() {
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
     // Add the config first
-    let arg1 = config::ConfigArgs {
-        add: true,
-        get: false,
-        get_all: false,
-        unset: false,
-        unset_all: false,
-        list: false,
-        local: false,
-        global: false,
-        system: false,
-        import: false,
-        key: Some("user.name".to_string()),
-        valuepattern: Some("erasernoob".to_string()),
-        default: None,
-        name_only: false,
-    };
-    config::execute(arg1).await;
+    let result = exec_async(vec!["config", "--add", "user.name", "erasernoob"]).await;
+    assert!(result.is_ok());
 
-    let arg2 = config::ConfigArgs {
-        add: true,
-        get: false,
-        get_all: false,
-        unset: false,
-        unset_all: false,
-        list: false,
-        local: false,
-        global: false,
-        system: false,
-        import: false,
-        key: Some("user.email".to_string()),
-        valuepattern: Some("erasernoob@example.com".to_string()),
-        default: None,
-        name_only: false,
-    };
-    config::execute(arg2).await;
+    let result = exec_async(vec![
+        "config",
+        "--add",
+        "user.email",
+        "erasernoob@example.com",
+    ])
+    .await;
+    assert!(result.is_ok());
 
     // List configs
-    let args = config::ConfigArgs {
-        add: false,
-        get: false,
-        get_all: false,
-        unset: false,
-        unset_all: false,
-        list: true,
-        local: false,
-        global: false,
-        system: false,
-        import: false,
-        key: None,
-        valuepattern: None,
-        default: None,
-        name_only: false,
-    };
-    assert!(args.validate().is_ok());
-    config::execute(args).await;
+    let result = exec_async(vec!["config", "--list"]).await;
+    assert!(result.is_ok());
 }
 
 #[tokio::test]
@@ -509,90 +342,21 @@ async fn test_config_list_name_only() {
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
     // Add the config first
-    let arg1 = config::ConfigArgs {
-        add: true,
-        get: false,
-        get_all: false,
-        unset: false,
-        unset_all: false,
-        list: false,
-        local: false,
-        global: false,
-        system: false,
-        import: false,
-        key: Some("user.name".to_string()),
-        valuepattern: Some("erasernoob".to_string()),
-        default: None,
-        name_only: false,
-    };
-    config::execute(arg1).await;
+    let result = exec_async(vec!["config", "--add", "user.name", "erasernoob"]).await;
+    assert!(result.is_ok());
 
-    let arg2 = config::ConfigArgs {
-        add: true,
-        get: false,
-        get_all: false,
-        unset: false,
-        unset_all: false,
-        list: false,
-        local: false,
-        global: false,
-        system: false,
-        import: false,
-        key: Some("user.email".to_string()),
-        valuepattern: Some("erasernoob@example.com".to_string()),
-        default: None,
-        name_only: false,
-    };
-    config::execute(arg2).await;
+    let result = exec_async(vec![
+        "config",
+        "--add",
+        "user.email",
+        "erasernoob@example.com",
+    ])
+    .await;
+    assert!(result.is_ok());
 
-    // List configs with name_only set to true
-    let args = config::ConfigArgs {
-        add: false,
-        get: false,
-        get_all: false,
-        unset: false,
-        unset_all: false,
-        list: true,
-        local: false,
-        global: false,
-        system: false,
-        import: false,
-        key: None,
-        valuepattern: None,
-        default: None,
-        name_only: true,
-    };
-    assert!(args.validate().is_ok());
-    config::execute(args).await;
-}
-
-#[tokio::test]
-#[serial]
-async fn test_config_list_name_only_without_list() {
-    let temp_path = tempdir().unwrap();
-    // start a new libra repository in a temporary directory
-    test::setup_with_new_libra_in(temp_path.path()).await;
-
-    // set the current working directory to the temporary path
-    let _guard = test::ChangeDirGuard::new(temp_path.path());
-
-    let args = config::ConfigArgs {
-        add: false,
-        get: false,
-        get_all: false,
-        unset: false,
-        unset_all: false,
-        list: false,
-        local: false,
-        global: false,
-        system: false,
-        import: false,
-        key: None,
-        valuepattern: None,
-        default: None,
-        name_only: true,
-    };
-    assert!(args.validate().is_err());
+    // List configs with name_only via subcommand
+    let result = exec_async(vec!["config", "list", "--name-only"]).await;
+    assert!(result.is_ok());
 }
 
 // New tests for scope functionality
@@ -604,46 +368,12 @@ async fn test_config_scope_local_default() {
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
     // Test that no scope specified defaults to local
-    let args = config::ConfigArgs {
-        add: true,
-        get: false,
-        get_all: false,
-        unset: false,
-        unset_all: false,
-        list: false,
-        local: false, // No scope specified, should default to local
-        global: false,
-        system: false,
-        import: false,
-        key: Some("user.name".to_string()),
-        valuepattern: Some("test_user_local_default".to_string()),
-        default: None,
-        name_only: false,
-    };
-
-    assert_eq!(args.get_scope(), config::ConfigScope::Local);
-    config::execute(args).await;
+    let result = exec_async(vec!["config", "user.name", "test_user_local_default"]).await;
+    assert!(result.is_ok());
 
     // Verify the value was written to local scope by reading it back
-    let read_args = config::ConfigArgs {
-        add: false,
-        get: true,
-        get_all: false,
-        unset: false,
-        unset_all: false,
-        list: false,
-        local: false, // Default to local
-        global: false,
-        system: false,
-        import: false,
-        key: Some("user.name".to_string()),
-        valuepattern: None,
-        default: None,
-        name_only: false,
-    };
-
-    // This should succeed and print the value we just set
-    config::execute(read_args).await;
+    let result = exec_async(vec!["config", "--get", "user.name"]).await;
+    assert!(result.is_ok());
 }
 
 #[tokio::test]
@@ -653,111 +383,53 @@ async fn test_config_scope_global() {
     test::setup_with_new_libra_in(temp_path.path()).await;
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
-    // Isolate global/system DB paths to temp files (no host pollution).
+    // Isolate global DB paths to temp files (no host pollution).
     let global_db_dir = tempdir().unwrap();
-    let system_db_dir = tempdir().unwrap();
-    let _scoped = ScopedConfigPathGuard::new(
-        &global_db_dir.path().join("global_config.db"),
-        &system_db_dir.path().join("system_config.db"),
-    );
+    let _scoped = ScopedConfigPathGuard::new(&global_db_dir.path().join("global_config.db"));
 
     // Set a value in global scope
-    let set_args = config::ConfigArgs {
-        add: true,
-        get: false,
-        get_all: false,
-        unset: false,
-        unset_all: false,
-        list: false,
-        local: false,
-        global: true,
-        system: false,
-        import: false,
-        key: Some("user.email".to_string()),
-        valuepattern: Some("global_user@example.com".to_string()),
-        default: None,
-        name_only: false,
-    };
-
-    assert_eq!(set_args.get_scope(), config::ConfigScope::Global);
-    config::execute(set_args).await;
+    let result = exec_async(vec![
+        "config",
+        "--global",
+        "user.email",
+        "global_user@example.com",
+    ])
+    .await;
+    assert!(result.is_ok());
 
     // Verify the value was written to global scope by reading it back
-    let read_global_args = config::ConfigArgs {
-        add: false,
-        get: true,
-        get_all: false,
-        unset: false,
-        unset_all: false,
-        list: false,
-        local: false,
-        global: true,
-        system: false,
-        import: false,
-        key: Some("user.email".to_string()),
-        valuepattern: None,
-        default: None,
-        name_only: false,
-    };
-
-    config::execute(read_global_args).await;
+    let result = exec_async(vec!["config", "--global", "--get", "user.email"]).await;
+    assert!(result.is_ok());
 
     // Verify that the global value is NOT accessible from local scope
-    let read_local_args = config::ConfigArgs {
-        add: false,
-        get: true,
-        get_all: false,
-        unset: false,
-        unset_all: false,
-        list: false,
-        local: true, // Explicitly local
-        global: false,
-        system: false,
-        import: false,
-        key: Some("user.email".to_string()),
-        valuepattern: None,
-        default: Some("not_found".to_string()), // Should return this default
-        name_only: false,
-    };
-
-    // This should return the default value since the key doesn't exist in local scope
-    config::execute(read_local_args).await;
+    let result = exec_async(vec![
+        "config",
+        "--local",
+        "--get",
+        "-d",
+        "not_found",
+        "user.email",
+    ])
+    .await;
+    assert!(result.is_ok());
 }
 
 #[tokio::test]
 #[serial]
-async fn test_config_scope_system() {
+async fn test_config_scope_system_errors() {
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
-    // Isolate global/system DB paths to temp files (no host pollution).
-    let global_db_dir = tempdir().unwrap();
-    let system_db_dir = tempdir().unwrap();
-    let _scoped = ScopedConfigPathGuard::new(
-        &global_db_dir.path().join("global_config.db"),
-        &system_db_dir.path().join("system_config.db"),
+    // --system scope is removed and should always error
+    let result = exec_async(vec!["config", "--system", "user.name", "system_user"]).await;
+    assert!(result.is_err(), "--system should be rejected");
+    let err = result.unwrap_err();
+    assert!(
+        err.message().contains("--system scope is not supported"),
+        "unexpected error: {}",
+        err.message()
     );
-
-    let args = config::ConfigArgs {
-        add: false,
-        get: false,
-        get_all: false,
-        unset: false,
-        unset_all: false,
-        list: false,
-        local: false,
-        global: false,
-        system: true,
-        import: false,
-        key: Some("user.name".to_string()),
-        valuepattern: Some("system_user".to_string()),
-        default: None,
-        name_only: false,
-    };
-
-    assert_eq!(args.get_scope(), config::ConfigScope::System);
-    config::execute(args).await;
 }
 
 #[tokio::test]
@@ -768,45 +440,18 @@ async fn test_config_scope_explicit_local() {
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
     // Set a value explicitly in local scope
-    let set_args = config::ConfigArgs {
-        add: true,
-        get: false,
-        get_all: false,
-        unset: false,
-        unset_all: false,
-        list: false,
-        local: true,
-        global: false,
-        system: false,
-        import: false,
-        key: Some("user.name".to_string()),
-        valuepattern: Some("explicit_local_user".to_string()),
-        default: None,
-        name_only: false,
-    };
-
-    assert_eq!(set_args.get_scope(), config::ConfigScope::Local);
-    config::execute(set_args).await;
+    let result = exec_async(vec![
+        "config",
+        "--local",
+        "user.name",
+        "explicit_local_user",
+    ])
+    .await;
+    assert!(result.is_ok());
 
     // Verify the value was written to local scope by reading it back
-    let read_args = config::ConfigArgs {
-        add: false,
-        get: true,
-        get_all: false,
-        unset: false,
-        unset_all: false,
-        list: false,
-        local: true,
-        global: false,
-        system: false,
-        import: false,
-        key: Some("user.name".to_string()),
-        valuepattern: None,
-        default: None,
-        name_only: false,
-    };
-
-    config::execute(read_args).await;
+    let result = exec_async(vec!["config", "--local", "--get", "user.name"]).await;
+    assert!(result.is_ok());
 }
 
 #[tokio::test]
@@ -816,90 +461,342 @@ async fn test_config_scope_isolation() {
     test::setup_with_new_libra_in(temp_path.path()).await;
     let _guard = test::ChangeDirGuard::new(temp_path.path());
 
-    // Isolate global/system DB paths to temp files (no host pollution).
+    // Isolate global DB paths to temp files (no host pollution).
     let global_db_dir = tempdir().unwrap();
-    let system_db_dir = tempdir().unwrap();
-    let _scoped = ScopedConfigPathGuard::new(
-        &global_db_dir.path().join("global_config.db"),
-        &system_db_dir.path().join("system_config.db"),
-    );
+    let _scoped = ScopedConfigPathGuard::new(&global_db_dir.path().join("global_config.db"));
 
     // Set the same key with different values in different scopes
-    let local_args = config::ConfigArgs {
-        add: true,
-        get: false,
-        get_all: false,
-        unset: false,
-        unset_all: false,
-        list: false,
-        local: true,
-        global: false,
-        system: false,
-        import: false,
-        key: Some("test.isolation".to_string()),
-        valuepattern: Some("local_value".to_string()),
-        default: None,
-        name_only: false,
-    };
-    config::execute(local_args).await;
+    let result = exec_async(vec!["config", "--local", "test.isolation", "local_value"]).await;
+    assert!(result.is_ok());
 
-    let global_args = config::ConfigArgs {
-        add: true,
-        get: false,
-        get_all: false,
-        unset: false,
-        unset_all: false,
-        list: false,
-        local: false,
-        global: true,
-        system: false,
-        import: false,
-        key: Some("test.isolation".to_string()),
-        valuepattern: Some("global_value".to_string()),
-        default: None,
-        name_only: false,
-    };
-
-    config::execute(global_args).await;
+    let result = exec_async(vec!["config", "--global", "test.isolation", "global_value"]).await;
+    assert!(result.is_ok());
 
     // Verify that each scope returns its own value
-    let read_local_args = config::ConfigArgs {
-        add: false,
-        get: true,
-        get_all: false,
-        unset: false,
-        unset_all: false,
-        list: false,
-        local: true,
-        global: false,
-        system: false,
-        import: false,
-        key: Some("test.isolation".to_string()),
-        valuepattern: None,
-        default: None,
-        name_only: false,
-    };
     println!("Reading from local scope:");
-    config::execute(read_local_args).await;
+    let result = exec_async(vec!["config", "--local", "--get", "test.isolation"]).await;
+    assert!(result.is_ok());
 
-    let read_global_args = config::ConfigArgs {
-        add: false,
-        get: true,
-        get_all: false,
-        unset: false,
-        unset_all: false,
-        list: false,
-        local: false,
-        global: true,
-        system: false,
-        import: false,
-        key: Some("test.isolation".to_string()),
-        valuepattern: None,
-        default: None,
-        name_only: false,
-    };
     println!("Reading from global scope:");
-    config::execute(read_global_args).await;
+    let result = exec_async(vec!["config", "--global", "--get", "test.isolation"]).await;
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_get_reveal_decrypt_failure_returns_error() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    libra::internal::vault::lazy_init_vault_for_scope("local")
+        .await
+        .unwrap();
+    libra::internal::config::ConfigKv::set("vault.env.TEST_SECRET", "not-valid-hex", true)
+        .await
+        .unwrap();
+
+    let result = exec_async(vec!["config", "get", "--reveal", "vault.env.TEST_SECRET"]).await;
+    let err = result.expect_err("decrypt failure should surface as an error");
+    assert_eq!(err.kind(), CliErrorKind::Fatal);
+    assert_eq!(err.exit_code(), 128);
+    assert!(
+        err.message()
+            .contains("failed to decrypt value for key 'vault.env.TEST_SECRET'")
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_get_cascaded_global_read_failure_returns_error() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    let bad_global_db = temp_path.path().join("bad-global.db");
+    std::fs::write(&bad_global_db, "definitely-not-a-sqlite-database").unwrap();
+    let _scoped = ScopedConfigPathGuard::new(&bad_global_db);
+
+    let result = exec_async(vec!["config", "get", "user.missing"]).await;
+    let err = result.expect_err("broken cascaded scope should not be ignored");
+    assert_eq!(err.kind(), CliErrorKind::Fatal);
+    assert_eq!(err.exit_code(), 128);
+    assert!(err.message().contains("failed to read global config"));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_add_rejects_implicit_encryption_mixed_with_existing_plaintext() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    let result = exec_async(vec![
+        "config",
+        "set",
+        "--plaintext",
+        "custom.token",
+        "plaintext-token",
+    ])
+    .await;
+    assert!(result.is_ok());
+
+    let result = exec_async(vec![
+        "config",
+        "set",
+        "--add",
+        "custom.token",
+        "second-token",
+    ])
+    .await;
+    let err = result.expect_err("implicit auto-encryption should not mix with plaintext values");
+    assert!(
+        err.message()
+            .contains("cannot mix encrypted and plaintext values for the same key"),
+        "unexpected error: {}",
+        err.message()
+    );
+
+    let entries = config::ScopedConfig::get_all(config::ConfigScope::Local, "custom.token")
+        .await
+        .unwrap();
+    assert_eq!(entries.len(), 1, "mixed-state insert should be rejected");
+    assert!(
+        !entries[0].encrypted,
+        "original plaintext entry should remain"
+    );
+    assert_eq!(entries[0].value, "plaintext-token");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_set_read_failure_does_not_silently_skip_existing_state_check() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    let bad_global_dir = tempdir().unwrap();
+    let bad_global_db = bad_global_dir.path().join("bad-global.db");
+    std::fs::write(&bad_global_db, "definitely-not-a-sqlite-database").unwrap();
+    let _scoped = ScopedConfigPathGuard::new(&bad_global_db);
+
+    let fake_home = tempdir().unwrap();
+    let _home_guard = EnvVarGuard::set("HOME", fake_home.path().as_os_str());
+    let _userprofile_guard = EnvVarGuard::set("USERPROFILE", fake_home.path().as_os_str());
+
+    let result = exec_async(vec![
+        "config",
+        "set",
+        "--global",
+        "vault.env.TEST_SECRET",
+        "super-secret",
+    ])
+    .await;
+    let err = result.expect_err("broken config read should surface before write/lazy-init");
+    assert_eq!(err.kind(), CliErrorKind::Fatal);
+    assert_eq!(err.exit_code(), 128);
+    assert!(
+        err.message()
+            .contains("failed to read global config while checking existing values"),
+        "unexpected error: {}",
+        err.message()
+    );
+
+    assert!(
+        !fake_home
+            .path()
+            .join(".libra")
+            .join("vault-unseal-key")
+            .exists(),
+        "failed existing-state lookup should not trigger global vault lazy init"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_set_missing_value_uses_protected_input_when_existing_key_is_encrypted() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    let result = exec_async(vec![
+        "config",
+        "set",
+        "--encrypt",
+        "custom.value",
+        "encrypted-value",
+    ])
+    .await;
+    assert!(result.is_ok());
+
+    let result = exec_async(vec!["config", "set", "custom.value"]).await;
+    let err = result.expect_err("existing encrypted state should require protected input");
+    assert_eq!(err.exit_code(), 2);
+    assert!(
+        err.message()
+            .contains("missing value for protected key 'custom.value'"),
+        "unexpected error: {}",
+        err.message()
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_list_defaults_to_local_scope_without_global_entries() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    libra::internal::config::ConfigKv::set("user.name", "local-user", false)
+        .await
+        .unwrap();
+
+    let child_home = temp_path.path().join(".libra-test-home");
+    let child_global_dir = child_home.join(".libra");
+    std::fs::create_dir_all(&child_global_dir).unwrap();
+    let child_global_db = child_global_dir.join("config.db");
+    let global_conn =
+        libra::internal::db::create_database(child_global_db.to_string_lossy().as_ref())
+            .await
+            .unwrap();
+    libra::internal::config::ConfigKv::set_with_conn(&global_conn, "core.editor", "vim", false)
+        .await
+        .unwrap();
+
+    let output = run_libra_command(&["config", "list"], temp_path.path());
+    assert!(
+        output.status.success(),
+        "config list should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("user.name=local-user"),
+        "local entry should be listed, stdout: {stdout}"
+    );
+    assert!(
+        !stdout.contains("core.editor"),
+        "default list should not include global entries, stdout: {stdout}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_list_ssh_keys_outputs_configured_public_keys() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    libra::internal::config::ConfigKv::set(
+        "vault.ssh.origin.pubkey",
+        "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC origin-key",
+        false,
+    )
+    .await
+    .unwrap();
+    libra::internal::config::ConfigKv::set(
+        "vault.ssh.upstream.pubkey",
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA upstream-key",
+        false,
+    )
+    .await
+    .unwrap();
+    libra::internal::config::ConfigKv::set("vault.ssh.origin.privkey", "ciphertext", true)
+        .await
+        .unwrap();
+
+    let output = run_libra_command(&["config", "list", "--ssh-keys"], temp_path.path());
+    assert!(
+        output.status.success(),
+        "config list --ssh-keys should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("SSH keys:"), "stdout: {stdout}");
+    assert!(stdout.contains("origin"), "stdout: {stdout}");
+    assert!(stdout.contains("upstream"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC origin-key"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        !stdout.contains("ciphertext"),
+        "private key entries must not be listed, stdout: {stdout}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_list_gpg_keys_outputs_configured_key_namespaces() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = test::ChangeDirGuard::new(temp_path.path());
+
+    libra::internal::config::ConfigKv::set(
+        "vault.gpg.pubkey",
+        "-----BEGIN PGP PUBLIC KEY BLOCK-----\nSIGNING\n-----END PGP PUBLIC KEY BLOCK-----",
+        false,
+    )
+    .await
+    .unwrap();
+    libra::internal::config::ConfigKv::set(
+        "vault.gpg.encrypt.pubkey",
+        "-----BEGIN PGP PUBLIC KEY BLOCK-----\nENCRYPT\n-----END PGP PUBLIC KEY BLOCK-----",
+        false,
+    )
+    .await
+    .unwrap();
+    libra::internal::config::ConfigKv::set("vault.signing", "true", false)
+        .await
+        .unwrap();
+
+    let output = run_libra_command(&["config", "list", "--gpg-keys"], temp_path.path());
+    assert!(
+        output.status.success(),
+        "config list --gpg-keys should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("GPG keys:"), "stdout: {stdout}");
+    assert!(stdout.contains("signing"), "stdout: {stdout}");
+    assert!(stdout.contains("encrypt"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("vault.gpg.pubkey"),
+        "signing pubkey key should be listed, stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("vault.gpg.encrypt.pubkey"),
+        "encrypt pubkey key should be listed, stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("vault.signing = true"),
+        "signing-enabled hint should be listed, stdout: {stdout}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_config_generate_gpg_key_rejects_invalid_usage() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+
+    let output = run_libra_command(
+        &["config", "generate-gpg-key", "--usage", "archive"],
+        temp_path.path(),
+    );
+    assert!(
+        !output.status.success(),
+        "generate-gpg-key should reject unsupported usage"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("invalid value 'archive'"),
+        "stderr should explain invalid usage, stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("signing") && stderr.contains("encrypt"),
+        "stderr should list supported usages, stderr: {stderr}"
+    );
 }
 
 #[tokio::test]
@@ -920,104 +817,6 @@ async fn test_config_scope_path_logic() {
     } else {
         // In environments without home directory, should return None
         assert_eq!(global_path, None);
-    }
-
-    // System scope should return the appropriate system path for the platform
-    let system_path = config::ConfigScope::System.get_config_path();
-
-    #[cfg(unix)]
-    {
-        assert!(system_path.is_some());
-        assert_eq!(
-            system_path.unwrap(),
-            std::path::PathBuf::from("/etc/libra/config.db")
-        );
-    }
-
-    #[cfg(windows)]
-    {
-        // On Windows, should use PROGRAMDATA if available
-        if std::env::var_os("PROGRAMDATA").is_some() {
-            assert!(system_path.is_some());
-            let path = system_path.unwrap();
-            assert!(path.to_string_lossy().contains("libra"));
-            assert!(path.to_string_lossy().ends_with("config.db"));
-        } else {
-            assert_eq!(system_path, None);
-        }
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    {
-        // On unsupported platforms, should return None
-        assert_eq!(system_path, None);
-    }
-}
-
-#[tokio::test]
-#[serial]
-async fn test_config_windows_system_path() {
-    // Test Windows-specific system path behavior
-    #[cfg(windows)]
-    {
-        // Test with PROGRAMDATA environment variable
-        let original_programdata = std::env::var_os("PROGRAMDATA");
-
-        // Test with PROGRAMDATA set
-        unsafe {
-            std::env::set_var("PROGRAMDATA", "C:\\ProgramData");
-        }
-        let system_path = config::ConfigScope::System.get_config_path();
-        assert!(system_path.is_some());
-        assert_eq!(
-            system_path.unwrap(),
-            std::path::PathBuf::from("C:\\ProgramData\\libra\\config.db")
-        );
-
-        // Test with PROGRAMDATA unset
-        unsafe {
-            std::env::remove_var("PROGRAMDATA");
-        }
-        let system_path_none = config::ConfigScope::System.get_config_path();
-        assert_eq!(system_path_none, None);
-
-        // Restore original PROGRAMDATA
-        if let Some(original) = original_programdata {
-            unsafe {
-                std::env::set_var("PROGRAMDATA", original);
-            }
-        } else {
-            unsafe {
-                std::env::remove_var("PROGRAMDATA");
-            }
-        }
-    }
-
-    #[cfg(not(windows))]
-    {
-        // On non-Windows platforms, this test is skipped
-        println!("Skipping Windows-specific test on non-Windows platform");
-    }
-}
-
-#[tokio::test]
-#[serial]
-async fn test_config_unix_system_path() {
-    // Test Unix-specific system path behavior
-    #[cfg(unix)]
-    {
-        let system_path = config::ConfigScope::System.get_config_path();
-        assert!(system_path.is_some());
-        assert_eq!(
-            system_path.unwrap(),
-            std::path::PathBuf::from("/etc/libra/config.db")
-        );
-    }
-
-    #[cfg(not(unix))]
-    {
-        // On non-Unix platforms, this test is skipped
-        println!("Skipping Unix-specific test on non-Unix platform");
     }
 }
 
@@ -1050,43 +849,4 @@ async fn test_config_cross_platform_paths() {
             assert!(path.to_string_lossy().contains("/"));
         }
     }
-
-    // System scope should return a path on supported platforms
-    let system_path = config::ConfigScope::System.get_config_path();
-
-    #[cfg(any(unix, windows))]
-    {
-        // On supported platforms, should return a path (if environment allows)
-        #[cfg(unix)]
-        {
-            assert!(system_path.is_some());
-        }
-
-        #[cfg(windows)]
-        {
-            // On Windows, depends on PROGRAMDATA availability
-            if std::env::var_os("PROGRAMDATA").is_some() {
-                assert!(system_path.is_some());
-            }
-        }
-
-        if let Some(path) = system_path {
-            assert!(path.to_string_lossy().contains("libra"));
-            assert!(path.to_string_lossy().ends_with("config.db"));
-        }
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    {
-        // On unsupported platforms, should return None
-        assert_eq!(system_path, None);
-    }
-}
-
-#[cfg(windows)]
-#[test]
-#[serial]
-fn test_config_system_rejects_relative_programdata() {
-    let _guard = EnvVarGuard::set("PROGRAMDATA", std::ffi::OsStr::new("relative/path"));
-    assert_eq!(config::ConfigScope::System.get_config_path(), None);
 }

@@ -31,7 +31,7 @@ use crate::{
     git_protocol::{ServiceType::ReceivePack, add_pkt_line_string, read_pkt_line},
     internal::{
         branch::Branch,
-        config::Config,
+        config::ConfigKv,
         db::get_db_conn_instance,
         head::Head,
         protocol::{
@@ -98,7 +98,7 @@ pub async fn execute_safe(args: PushArgs, _output: &OutputConfig) -> CliResult<(
         Some(repo) => repo,
         None => {
             // e.g. [branch "master"].remote = origin
-            let remote = Config::get_remote(&branch).await;
+            let remote = ConfigKv::get_remote(&branch).await.ok().flatten();
             if let Some(remote) = remote {
                 remote
             } else {
@@ -110,7 +110,9 @@ pub async fn execute_safe(args: PushArgs, _output: &OutputConfig) -> CliResult<(
             }
         }
     };
-    let repo_url = Config::get_remote_url(&repository).await;
+    let repo_url = ConfigKv::get_remote_url(&repository)
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
 
     let branch = args.refspec.unwrap_or(branch);
     let commit_hash = match Branch::find_branch(&branch, None).await {
@@ -132,7 +134,7 @@ pub async fn execute_safe(args: PushArgs, _output: &OutputConfig) -> CliResult<(
     // Determine transport: SSH or HTTPS
     let is_ssh = is_ssh_spec(&repo_url);
 
-    let remote_client = match RemoteClient::from_spec(&repo_url) {
+    let remote_client = match RemoteClient::from_spec_with_remote(&repo_url, Some(&repository)) {
         Ok(client) => client,
         Err(e) => {
             return Err(CliError::fatal(format!(
@@ -158,8 +160,11 @@ pub async fn execute_safe(args: PushArgs, _output: &OutputConfig) -> CliResult<(
     set_wire_hash_kind(discovery.hash_kind);
     let refs = discovery.refs;
 
-    let tracked_branch = Config::get("branch", Some(&branch), "merge")
-        .await // New branch may not have tracking branch
+    let tracked_branch = ConfigKv::get(&format!("branch.{branch}.merge"))
+        .await
+        .ok()
+        .flatten()
+        .map(|e| e.value) // New branch may not have tracking branch
         .unwrap_or_else(|| format!("refs/heads/{branch}"));
 
     let tracked_ref = refs.iter().find(|r| r._ref == tracked_branch);

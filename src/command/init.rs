@@ -28,7 +28,7 @@ const DEFAULT_BRANCH: &str = "main";
 // NOTE: `src/command/init.rs` lines 3-20 are a protected merge-conflict block in this workspace.
 // The imports inside that block must stay as-is. To avoid `unused_imports` warnings without
 // changing that block, we reference the imported symbols here in a private, dead-code helper.
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 fn _touch_conflict_imports() {
     // std::env (imported in the protected block)
     let _ = env::current_dir;
@@ -772,48 +772,46 @@ async fn init_config(
         ("ignorecase", "true"), // ignorecase on windows
     ];
 
-    // Insert each configuration entry into the database
-    for (key, value) in entries {
-        // tip: Set(None) == NotSet == default == NULL
-        let entry = config::ActiveModel {
-            configuration: Set("core".to_owned()),
-            key: Set(key.to_owned()),
-            value: Set(value.to_owned()),
-            ..Default::default() // id & name NotSet
-        };
-        entry.insert(&txn).await?;
-    }
-    // Insert the object format, defaulting to "sha1" if not specified.
-    let object_format_entry = config::ActiveModel {
-        configuration: Set("core".to_owned()),
-        key: Set("objectformat".to_owned()),
-        value: Set(object_format.unwrap_or("sha1").to_owned()),
-        ..Default::default() // id & name NotSet
-    };
-    object_format_entry.insert(&txn).await?;
-    // Insert the initial ref format used during init
+    // Determine the initial ref format
     let ref_format_value = match ref_format {
         Some(RefFormat::Strict) => "strict",
         Some(RefFormat::Filesystem) => "filesystem",
         None => "strict", // default
     };
-    let init_ref_format_entry = config::ActiveModel {
-        configuration: Set("core".to_owned()),
-        key: Set("initrefformat".to_owned()),
-        value: Set(ref_format_value.to_owned()),
-        ..Default::default()
-    };
-    init_ref_format_entry.insert(&txn).await?;
 
-    // Generate and insert unique repository ID for cloud backup identification
+    // Generate unique repository ID for cloud backup identification
     let repo_id = uuid::Uuid::new_v4().to_string();
-    let repo_id_entry = config::ActiveModel {
-        configuration: Set("libra".to_owned()),
-        key: Set("repoid".to_owned()),
-        value: Set(repo_id),
-        ..Default::default()
-    };
-    repo_id_entry.insert(&txn).await?;
+
+    // Insert all configuration entries into config_kv (the canonical store).
+    for (key, value) in &entries {
+        crate::internal::config::ConfigKv::set_with_conn(
+            &txn,
+            &format!("core.{key}"),
+            value,
+            false,
+        )
+        .await
+        .map_err(|e| DbErr::Custom(e.to_string()))?;
+    }
+    crate::internal::config::ConfigKv::set_with_conn(
+        &txn,
+        "core.objectformat",
+        object_format.unwrap_or("sha1"),
+        false,
+    )
+    .await
+    .map_err(|e| DbErr::Custom(e.to_string()))?;
+    crate::internal::config::ConfigKv::set_with_conn(
+        &txn,
+        "core.initrefformat",
+        ref_format_value,
+        false,
+    )
+    .await
+    .map_err(|e| DbErr::Custom(e.to_string()))?;
+    crate::internal::config::ConfigKv::set_with_conn(&txn, "libra.repoid", &repo_id, false)
+        .await
+        .map_err(|e| DbErr::Custom(e.to_string()))?;
 
     // Commit the transaction
     txn.commit().await?;
@@ -843,14 +841,20 @@ fn set_dir_hidden(_dir: &str) -> io::Result<()> {
 /// or the separate-libra-dir path). The vault database and credentials are
 /// created inside this directory.
 async fn init_vault_for_repo(root_dir: &Path) -> anyhow::Result<()> {
-    use crate::internal::{config::Config as UserConfig, vault};
+    use crate::internal::{config::ConfigKv, vault};
 
     // Get user name/email from config (or defaults)
-    let user_name = UserConfig::get("user", None, "name")
+    let user_name = ConfigKv::get("user.name")
         .await
+        .ok()
+        .flatten()
+        .map(|e| e.value)
         .unwrap_or_else(|| "Libra User".to_string());
-    let user_email = UserConfig::get("user", None, "email")
+    let user_email = ConfigKv::get("user.email")
         .await
+        .ok()
+        .flatten()
+        .map(|e| e.value)
         .unwrap_or_else(|| "user@libra.local".to_string());
 
     // Initialize vault (creates vault.db, seals after setup)
@@ -872,7 +876,7 @@ async fn init_vault_for_repo(root_dir: &Path) -> anyhow::Result<()> {
     }
 
     // Only mark signing as enabled after key generation succeeded
-    UserConfig::insert("vault", None, "signing", "true").await;
+    let _ = ConfigKv::set("vault.signing", "true", false).await;
 
     Ok(())
 }

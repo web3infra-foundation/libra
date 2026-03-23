@@ -9,6 +9,13 @@ CREATE TABLE IF NOT EXISTS `config` (
     `key` TEXT NOT NULL,
     `value` TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS `config_kv` (
+    `id` INTEGER PRIMARY KEY AUTOINCREMENT,
+    `key` TEXT NOT NULL,
+    `value` TEXT NOT NULL,
+    `encrypted` INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_config_kv_key ON config_kv(`key`);
 CREATE TABLE IF NOT EXISTS `reference` (
     `id` INTEGER PRIMARY KEY AUTOINCREMENT,
     -- name can't be ''

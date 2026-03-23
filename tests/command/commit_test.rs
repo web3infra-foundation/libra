@@ -53,14 +53,12 @@ async fn test_commit_requires_configured_identity_in_strict_mode() {
         std::env::set_var("LIBRA_CONFIG_SYSTEM_DB", &fake_system);
     }
 
-    use libra::internal::config::Config;
-    Config::remove_config("user", None, "name", None, true)
+    use libra::internal::config::ConfigKv;
+    ConfigKv::unset_all("user.name").await.unwrap();
+    ConfigKv::unset_all("user.email").await.unwrap();
+    ConfigKv::set("user.useConfigOnly", "true", false)
         .await
         .unwrap();
-    Config::remove_config("user", None, "email", None, true)
-        .await
-        .unwrap();
-    Config::insert("user", None, "useConfigOnly", "true").await;
 
     test::ensure_file("identity.txt", Some("identity"));
     add::execute(AddArgs {
@@ -476,9 +474,13 @@ async fn test_commit_sha256() {
     })
     .await
     .unwrap();
-    use libra::internal::config::Config;
-    Config::insert("user", None, "name", "SHA256 User").await;
-    Config::insert("user", None, "email", "sha256@example.com").await;
+    use libra::internal::config::ConfigKv;
+    ConfigKv::set("user.name", "SHA256 User", false)
+        .await
+        .unwrap();
+    ConfigKv::set("user.email", "sha256@example.com", false)
+        .await
+        .unwrap();
 
     // Create and add a file
     test::ensure_file("a.txt", Some("hello sha256"));
@@ -556,15 +558,15 @@ async fn test_commit_with_custom_author() {
     let _guard = ChangeDirGuard::new(temp_path.path());
 
     // Set default user config using libra's internal config
-    use libra::internal::config::Config;
-    Config::remove_config("user", None, "name", None, true)
+    use libra::internal::config::ConfigKv;
+    ConfigKv::unset_all("user.name").await.unwrap();
+    ConfigKv::unset_all("user.email").await.unwrap();
+    ConfigKv::set("user.name", "Default User", false)
         .await
         .unwrap();
-    Config::remove_config("user", None, "email", None, true)
+    ConfigKv::set("user.email", "default@example.com", false)
         .await
         .unwrap();
-    Config::insert("user", None, "name", "Default User").await;
-    Config::insert("user", None, "email", "default@example.com").await;
 
     // Create a file and add it
     test::ensure_file("test.txt", Some("test content"));
@@ -619,15 +621,15 @@ async fn test_commit_amend_with_custom_author() {
     let _guard = ChangeDirGuard::new(temp_path.path());
 
     // Set default user config
-    use libra::internal::config::Config;
-    Config::remove_config("user", None, "name", None, true)
+    use libra::internal::config::ConfigKv;
+    ConfigKv::unset_all("user.name").await.unwrap();
+    ConfigKv::unset_all("user.email").await.unwrap();
+    ConfigKv::set("user.name", "Default User", false)
         .await
         .unwrap();
-    Config::remove_config("user", None, "email", None, true)
+    ConfigKv::set("user.email", "default@example.com", false)
         .await
         .unwrap();
-    Config::insert("user", None, "name", "Default User").await;
-    Config::insert("user", None, "email", "default@example.com").await;
 
     // Create initial commit with default author
     commit::execute(CommitArgs {
@@ -805,7 +807,7 @@ async fn test_commit_amend_without_changes() {
 #[tokio::test]
 #[serial]
 async fn test_commit_without_identity_fails_by_default() {
-    use libra::internal::config::Config;
+    use libra::internal::config::ConfigKv;
 
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
@@ -829,12 +831,8 @@ async fn test_commit_without_identity_fails_by_default() {
     }
 
     // Ensure useConfigOnly is NOT set (default)
-    Config::remove_config("user", None, "name", None, true)
-        .await
-        .unwrap();
-    Config::remove_config("user", None, "email", None, true)
-        .await
-        .unwrap();
+    ConfigKv::unset_all("user.name").await.unwrap();
+    ConfigKv::unset_all("user.email").await.unwrap();
 
     test::ensure_file("autodetect.txt", Some("content"));
     add::execute(add::AddArgs {
