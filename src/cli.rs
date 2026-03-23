@@ -50,8 +50,11 @@ async fn set_local_hash_kind_for_storage(storage: &Path) -> CliResult<()> {
             ))
         })?;
     let object_format =
-        crate::internal::config::Config::get_with_conn(&db_conn, "core", None, "objectformat")
+        crate::internal::config::ConfigKv::get_with_conn(&db_conn, "core.objectformat")
             .await
+            .ok()
+            .flatten()
+            .map(|e| e.value)
             .unwrap_or_else(|| "sha1".to_string());
 
     let hash_kind = match object_format.as_str() {
@@ -232,8 +235,6 @@ enum Commands {
     Open(command::open::OpenArgs),
     #[command(about = "Manage repository configurations", alias = "cfg")]
     Config(command::config::ConfigArgs),
-    #[command(about = "Manage vault-backed signing and SSH keys")]
-    Vault(command::vault::VaultArgs),
     #[command(about = "Manage the log of reference changes (e.g., HEAD, branches)")]
     Reflog(command::reflog::ReflogArgs),
     #[command(
@@ -619,7 +620,6 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
         Commands::Open(cmd_args) => command::open::execute_safe(cmd_args, &output).await?,
         Commands::Pull(cmd_args) => command::pull::execute_safe(cmd_args, &output).await?,
         Commands::Config(cmd_args) => command::config::execute_safe(cmd_args, &output).await?,
-        Commands::Vault(cmd_args) => command::vault::execute_safe(cmd_args, &output).await?,
         Commands::Checkout(cmd_args) => command::checkout::execute_safe(cmd_args, &output).await?,
         Commands::Reflog(cmd_args) => command::reflog::execute_safe(cmd_args, &output).await?,
         Commands::Worktree(cmd_args) => command::worktree::execute_safe(cmd_args, &output).await?,

@@ -22,7 +22,7 @@ use uuid::Uuid;
 use crate::{
     cli_error,
     internal::{
-        config::Config,
+        config::ConfigKv,
         db,
         model::{object_index, reference},
     },
@@ -122,10 +122,12 @@ async fn execute_sync(args: SyncArgs) -> Result<(), String> {
 
     println!("Starting cloud sync...");
 
-    validate_cloud_backup_env(false)?;
+    validate_cloud_backup_env(false).await?;
 
     // Initialize D1 client
-    let d1_client = D1Client::from_env().map_err(|e| format!("D1 client error: {}", e.message))?;
+    let d1_client = D1Client::from_env()
+        .await
+        .map_err(|e| format!("D1 client error: {}", e.message))?;
 
     // Ensure D1 table exists before any operations
     d1_client
@@ -149,12 +151,17 @@ async fn execute_sync(args: SyncArgs) -> Result<(), String> {
     let repo_id = ensure_repo_id().await?;
 
     // Determine project name from config 'cloud.name' or current directory name
-    let project_name = Config::get("cloud", None, "name").await.unwrap_or_else(|| {
-        util::working_dir()
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "unknown-project".to_string())
-    });
+    let project_name = ConfigKv::get("cloud.name")
+        .await
+        .ok()
+        .flatten()
+        .map(|e| e.value)
+        .unwrap_or_else(|| {
+            util::working_dir()
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "unknown-project".to_string())
+        });
 
     // Ensure repositories table exists
     d1_client
@@ -191,7 +198,7 @@ async fn execute_sync(args: SyncArgs) -> Result<(), String> {
         .map_err(|e| format!("Database query failed: {}", e))?;
 
     // Initialize R2 storage
-    let r2_storage = create_r2_storage(&repo_id)?;
+    let r2_storage = create_r2_storage(&repo_id).await?;
 
     if unsynced_objects.is_empty() {
         println!("No objects to sync.");
@@ -303,10 +310,12 @@ async fn sync_single_object(
 
 /// Execute restore command - resolves project name (if provided) and restores from D1/R2
 async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
-    validate_cloud_backup_env(args.metadata_only)?;
+    validate_cloud_backup_env(args.metadata_only).await?;
 
     // Initialize D1 client
-    let d1_client = D1Client::from_env().map_err(|e| format!("D1 client error: {}", e.message))?;
+    let d1_client = D1Client::from_env()
+        .await
+        .map_err(|e| format!("D1 client error: {}", e.message))?;
 
     let repo_id = if let Some(name) = &args.name {
         // Ensure repositories table exists before resolving name
@@ -383,11 +392,7 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
     );
 
     // Update local config with restored repo_id
-    if Config::get("libra", None, "repoid").await.is_some() {
-        Config::update("libra", None, "repoid", &repo_id).await;
-    } else {
-        Config::insert("libra", None, "repoid", &repo_id).await;
-    }
+    let _ = ConfigKv::set("libra.repoid", &repo_id, false).await;
 
     if args.metadata_only {
         println!("Metadata-only restore complete.");
@@ -395,7 +400,7 @@ async fn execute_restore(args: RestoreArgs) -> Result<(), String> {
     }
 
     // Download objects from R2
-    let r2_storage = create_r2_storage(&repo_id)?;
+    let r2_storage = create_r2_storage(&repo_id).await?;
     let objects_path = path::objects();
     let local_storage = LocalStorage::new(objects_path);
 
@@ -523,8 +528,11 @@ async fn execute_status(args: StatusArgs) -> Result<(), String> {
     let db_conn = db::get_db_conn_instance().await;
 
     // Count total and synced objects
-    let repo_id = Config::get("libra", None, "repoid")
+    let repo_id = ConfigKv::get("libra.repoid")
         .await
+        .ok()
+        .flatten()
+        .map(|e| e.value)
         .unwrap_or_else(|| "unknown-repo".to_string());
 
     let all_objects = object_index::Entity::find()
@@ -579,17 +587,29 @@ async fn execute_status(args: StatusArgs) -> Result<(), String> {
     Ok(())
 }
 
-/// Create R2 remote storage from environment variables
-fn create_r2_storage(repo_id: &str) -> Result<RemoteStorage, String> {
-    let endpoint =
-        std::env::var("LIBRA_STORAGE_ENDPOINT").map_err(|_| "LIBRA_STORAGE_ENDPOINT not set")?;
-    let bucket =
-        std::env::var("LIBRA_STORAGE_BUCKET").map_err(|_| "LIBRA_STORAGE_BUCKET not set")?;
-    let access_key = std::env::var("LIBRA_STORAGE_ACCESS_KEY")
-        .map_err(|_| "LIBRA_STORAGE_ACCESS_KEY not set")?;
-    let secret_key = std::env::var("LIBRA_STORAGE_SECRET_KEY")
-        .map_err(|_| "LIBRA_STORAGE_SECRET_KEY not set")?;
-    let region = std::env::var("LIBRA_STORAGE_REGION").unwrap_or_else(|_| "auto".to_string());
+async fn resolve_cloud_env(name: &str) -> Result<Option<String>, String> {
+    crate::internal::config::resolve_env(name)
+        .await
+        .map_err(|e| format!("failed to resolve '{name}' from env or config: {e}"))
+}
+
+async fn resolve_required_cloud_env(name: &str) -> Result<String, String> {
+    match resolve_cloud_env(name).await? {
+        Some(value) if !value.is_empty() => Ok(value),
+        _ => Err(format!("{name} not set")),
+    }
+}
+
+/// Create R2 remote storage from environment variables and config.
+async fn create_r2_storage(repo_id: &str) -> Result<RemoteStorage, String> {
+    let endpoint = resolve_required_cloud_env("LIBRA_STORAGE_ENDPOINT").await?;
+    let bucket = resolve_required_cloud_env("LIBRA_STORAGE_BUCKET").await?;
+    let access_key = resolve_required_cloud_env("LIBRA_STORAGE_ACCESS_KEY").await?;
+    let secret_key = resolve_required_cloud_env("LIBRA_STORAGE_SECRET_KEY").await?;
+    let region = resolve_cloud_env("LIBRA_STORAGE_REGION")
+        .await?
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "auto".to_string());
 
     let s3 = object_store::aws::AmazonS3Builder::new()
         .with_bucket_name(&bucket)
@@ -607,7 +627,7 @@ fn create_r2_storage(repo_id: &str) -> Result<RemoteStorage, String> {
     ))
 }
 
-fn validate_cloud_backup_env(skip_r2: bool) -> Result<(), String> {
+async fn validate_cloud_backup_env(skip_r2: bool) -> Result<(), String> {
     let mut required = vec![
         "LIBRA_D1_ACCOUNT_ID",
         "LIBRA_D1_API_TOKEN",
@@ -623,10 +643,13 @@ fn validate_cloud_backup_env(skip_r2: bool) -> Result<(), String> {
         ]);
     }
 
-    let missing: Vec<&str> = required
-        .into_iter()
-        .filter(|k| std::env::var(k).ok().map(|v| v.is_empty()).unwrap_or(true))
-        .collect();
+    let mut missing = Vec::new();
+    for key in required {
+        match resolve_cloud_env(key).await? {
+            Some(value) if !value.is_empty() => {}
+            _ => missing.push(key),
+        }
+    }
 
     if missing.is_empty() {
         Ok(())
@@ -640,15 +663,15 @@ fn validate_cloud_backup_env(skip_r2: bool) -> Result<(), String> {
 }
 
 async fn ensure_repo_id() -> Result<String, String> {
-    if let Some(existing) = Config::get("libra", None, "repoid").await
-        && !existing.is_empty()
-        && existing != "unknown-repo"
+    if let Some(entry) = ConfigKv::get("libra.repoid").await.ok().flatten()
+        && !entry.value.is_empty()
+        && entry.value != "unknown-repo"
     {
-        return Ok(existing);
+        return Ok(entry.value);
     }
 
     let repo_id = Uuid::new_v4().to_string();
-    Config::insert("libra", None, "repoid", &repo_id).await;
+    let _ = ConfigKv::set("libra.repoid", &repo_id, false).await;
 
     let db_conn = db::get_db_conn_instance().await;
     let _ = object_index::Entity::update_many()
@@ -692,7 +715,11 @@ async fn sync_metadata(
     let current_hash = calculate_metadata_hash(&json);
 
     // Check if hash matches last sync
-    if let Some(stored) = Config::get("cloud", None, "metadata_hash").await
+    if let Some(stored) = ConfigKv::get("cloud.metadata_hash")
+        .await
+        .ok()
+        .flatten()
+        .map(|e| e.value)
         && let Ok(stored_hash) = stored.parse::<u64>()
         && stored_hash == current_hash
     {
@@ -706,7 +733,7 @@ async fn sync_metadata(
         .map_err(|e| format!("Failed to upload metadata: {}", e))?;
 
     // Update stored hash
-    Config::insert("cloud", None, "metadata_hash", &current_hash.to_string()).await;
+    let _ = ConfigKv::set("cloud.metadata_hash", &current_hash.to_string(), false).await;
 
     println!("Metadata synced ({} references).", sorted_refs.len());
     Ok(())
@@ -781,7 +808,48 @@ async fn restore_metadata(
 
 #[cfg(test)]
 mod tests {
+    use std::{env, ffi::OsString, fs};
+
+    use serial_test::serial;
+    use tempfile::tempdir;
+
     use super::*;
+    use crate::{
+        internal::config::ConfigKv,
+        utils::test::{ChangeDirGuard, ScopedEnvVar, setup_with_new_libra_in},
+    };
+
+    struct ClearedEnvVarGuard {
+        key: String,
+        previous: Option<OsString>,
+    }
+
+    impl ClearedEnvVarGuard {
+        fn new(key: &str) -> Self {
+            let previous = env::var_os(key);
+            // SAFETY: unit tests mutate process env in a controlled serial context.
+            unsafe {
+                env::remove_var(key);
+            }
+            Self {
+                key: key.to_string(),
+                previous,
+            }
+        }
+    }
+
+    impl Drop for ClearedEnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: this restores the exact previous value for the same env key.
+            unsafe {
+                if let Some(value) = &self.previous {
+                    env::set_var(&self.key, value);
+                } else {
+                    env::remove_var(&self.key);
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_restore_args_repo_id() {
@@ -801,5 +869,69 @@ mod tests {
     fn test_restore_args_missing() {
         let result = RestoreArgs::try_parse_from(["restore"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    #[serial]
+    fn create_r2_storage_reads_values_from_local_config() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let repo = tempdir().unwrap();
+        rt.block_on(setup_with_new_libra_in(repo.path()));
+        let _cwd = ChangeDirGuard::new(repo.path());
+        let _endpoint = ClearedEnvVarGuard::new("LIBRA_STORAGE_ENDPOINT");
+        let _bucket = ClearedEnvVarGuard::new("LIBRA_STORAGE_BUCKET");
+        let _access = ClearedEnvVarGuard::new("LIBRA_STORAGE_ACCESS_KEY");
+        let _secret = ClearedEnvVarGuard::new("LIBRA_STORAGE_SECRET_KEY");
+        let _region = ClearedEnvVarGuard::new("LIBRA_STORAGE_REGION");
+
+        rt.block_on(async {
+            ConfigKv::set(
+                "vault.env.LIBRA_STORAGE_ENDPOINT",
+                "https://storage.example.com",
+                false,
+            )
+            .await
+            .unwrap();
+            ConfigKv::set("vault.env.LIBRA_STORAGE_BUCKET", "test-bucket", false)
+                .await
+                .unwrap();
+            ConfigKv::set("vault.env.LIBRA_STORAGE_ACCESS_KEY", "test-access", false)
+                .await
+                .unwrap();
+            ConfigKv::set("vault.env.LIBRA_STORAGE_SECRET_KEY", "test-secret", false)
+                .await
+                .unwrap();
+            ConfigKv::set("vault.env.LIBRA_STORAGE_REGION", "auto", false)
+                .await
+                .unwrap();
+        });
+
+        rt.block_on(create_r2_storage("repo-from-config"))
+            .expect("R2 storage should initialize from local config values");
+    }
+
+    #[test]
+    #[serial]
+    fn validate_cloud_backup_env_surfaces_config_resolution_errors() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let repo = tempdir().unwrap();
+        rt.block_on(setup_with_new_libra_in(repo.path()));
+        let _cwd = ChangeDirGuard::new(repo.path());
+        let _account = ClearedEnvVarGuard::new("LIBRA_D1_ACCOUNT_ID");
+        let _token = ClearedEnvVarGuard::new("LIBRA_D1_API_TOKEN");
+        let _database = ClearedEnvVarGuard::new("LIBRA_D1_DATABASE_ID");
+
+        let bad_global_dir = tempdir().unwrap();
+        let bad_global_db = bad_global_dir.path().join("bad-global.db");
+        fs::write(&bad_global_db, "not sqlite").unwrap();
+        let _global_db = ScopedEnvVar::set("LIBRA_CONFIG_GLOBAL_DB", &bad_global_db);
+
+        let err = rt
+            .block_on(validate_cloud_backup_env(true))
+            .expect_err("global config resolution failure should surface");
+        assert!(
+            err.contains("failed to connect to global config"),
+            "unexpected error: {err}"
+        );
     }
 }

@@ -36,7 +36,6 @@ pub mod shortlog;
 pub mod show;
 pub mod show_ref;
 pub mod tag;
-pub mod vault;
 pub mod worktree;
 
 pub mod stash;
@@ -56,7 +55,7 @@ use rpassword::read_password;
 use crate::{
     internal::protocol::https_client::BasicAuth,
     utils,
-    utils::{object_ext::BlobExt, util},
+    utils::{client_storage::ClientStorage, object_ext::BlobExt, util},
 };
 
 // impl load for all objects
@@ -75,6 +74,17 @@ where
     T: ObjectTrait,
 {
     let storage = util::objects_storage();
+    save_object_to_storage(&storage, object, obj_id)
+}
+
+pub fn save_object_to_storage<T>(
+    storage: &ClientStorage,
+    object: &T,
+    obj_id: &ObjectHash,
+) -> Result<(), GitError>
+where
+    T: ObjectTrait,
+{
     let data = object.to_data()?;
     storage.put(obj_id, &data, object.get_type())?;
     Ok(())

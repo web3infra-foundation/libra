@@ -26,7 +26,6 @@ use git_internal::{
 };
 use sea_orm::ConnectionTrait;
 
-use super::save_object;
 use crate::{
     command::{
         config::{ConfigScope, ScopedConfig},
@@ -166,8 +165,8 @@ async fn get_user_config_value(key: &str) -> Option<String> {
             }
         }
 
-        if let Ok(Some(value)) = ScopedConfig::get(scope, "user", None, key).await {
-            let trimmed = value.trim();
+        if let Ok(Some(entry)) = ScopedConfig::get(scope, &format!("user.{key}")).await {
+            let trimmed = entry.value.trim();
             if !trimmed.is_empty() {
                 return Some(trimmed.to_string());
             }
@@ -631,10 +630,14 @@ async fn vault_sign_commit(
     committer: &Signature,
     message: &str,
 ) -> Result<Option<String>, String> {
-    use crate::internal::{config::Config as UserConfig, vault};
+    use crate::internal::{config::ConfigKv, vault};
 
     // Check if vault signing is enabled
-    let signing_enabled = UserConfig::get("vault", None, "signing").await;
+    let signing_enabled = ConfigKv::get("vault.signing")
+        .await
+        .ok()
+        .flatten()
+        .map(|e| e.value);
     if signing_enabled.as_deref() != Some("true") {
         return Ok(None);
     }
@@ -762,7 +765,8 @@ pub async fn create_tree(
         }
     };
     // save
-    save_object(&tree, &tree.id).map_err(|e| format!("failed to save tree object: {}", e))?;
+    crate::command::save_object_to_storage(storage, &tree, &tree.id)
+        .map_err(|e| format!("failed to save tree object: {}", e))?;
     Ok(tree)
 }
 

@@ -4,7 +4,7 @@ use clap::Parser;
 
 use super::{fetch, merge};
 use crate::{
-    internal::{config::Config, head::Head},
+    internal::{config::ConfigKv, head::Head},
     utils::{
         error::{CliError, CliResult},
         output::OutputConfig,
@@ -59,7 +59,7 @@ pub async fn execute_safe(args: PullArgs, output: &OutputConfig) -> CliResult<()
 
     let head = Head::current().await;
     match head {
-        Head::Branch(name) => match Config::branch_config(&name).await {
+        Head::Branch(name) => match ConfigKv::branch_config(&name).await.ok().flatten() {
             Some(branch_config) => {
                 let merge_args = merge::MergeArgs {
                     branch: format!("{}/{}", branch_config.remote, branch_config.merge),

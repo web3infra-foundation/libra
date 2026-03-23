@@ -24,7 +24,7 @@ use git_internal::{
 use super::stash;
 use crate::{
     command::calc_file_blob_hash,
-    internal::{config::Config, head::Head},
+    internal::{config::ConfigKv, head::Head},
     utils::{
         error::{CliError, CliResult},
         ignore::IgnorePolicy,
@@ -211,7 +211,7 @@ impl Changes {
 
 async fn is_bare_repository() -> bool {
     matches!(
-        Config::get("core", None, "bare").await,
+        ConfigKv::get("core.bare").await.ok().flatten().map(|e| e.value),
         Some(value) if value.eq_ignore_ascii_case("true")
     )
 }
@@ -749,10 +749,15 @@ pub async fn output_short_format(
 async fn should_use_colors() -> bool {
     use std::io::{self, IsTerminal};
 
-    use crate::internal::config::Config;
+    use crate::internal::config::ConfigKv;
 
     // Check color.status.short configuration
-    if let Some(color_setting) = Config::get("color", Some("status"), "short").await {
+    if let Some(color_setting) = ConfigKv::get("color.status.short")
+        .await
+        .ok()
+        .flatten()
+        .map(|e| e.value)
+    {
         match color_setting.as_str() {
             "always" => true,
             "never" | "false" => false,
@@ -764,7 +769,12 @@ async fn should_use_colors() -> bool {
         }
     } else {
         // Check color.ui configuration as fallback
-        if let Some(color_setting) = Config::get("color", None, "ui").await {
+        if let Some(color_setting) = ConfigKv::get("color.ui")
+            .await
+            .ok()
+            .flatten()
+            .map(|e| e.value)
+        {
             match color_setting.as_str() {
                 "always" => true,
                 "never" | "false" => false,

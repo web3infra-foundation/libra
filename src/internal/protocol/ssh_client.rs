@@ -8,6 +8,7 @@ use std::io::Error as IoError;
 use bytes::{Bytes, BytesMut};
 use futures_util::stream::StreamExt;
 use git_internal::errors::GitError;
+use tempfile::NamedTempFile;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -24,6 +25,7 @@ pub struct SshClient {
     port: u16,
     repo_path: String,
     key_path: Option<String>,
+    temp_key_file: Option<NamedTempFile>,
     strict_host_key_checking: String,
 }
 
@@ -40,6 +42,13 @@ impl SshClient {
     /// Set the path to the SSH private key for authentication.
     pub fn with_key_path(mut self, key_path: String) -> Self {
         self.key_path = Some(key_path);
+        self
+    }
+
+    /// Hold a temporary SSH private key file for the lifetime of the client.
+    pub fn with_temp_key_file(mut self, temp_key_file: NamedTempFile) -> Self {
+        self.temp_key_file = Some(temp_key_file);
+        self.key_path = None;
         self
     }
 
@@ -78,6 +87,7 @@ impl SshClient {
             port,
             repo_path,
             key_path: None,
+            temp_key_file: None,
             strict_host_key_checking: "yes".to_string(),
         })
     }
@@ -99,6 +109,7 @@ impl SshClient {
             port: DEFAULT_SSH_PORT,
             repo_path,
             key_path: None,
+            temp_key_file: None,
             strict_host_key_checking: "yes".to_string(),
         })
     }
@@ -117,7 +128,9 @@ impl SshClient {
             self.strict_host_key_checking
         ));
         cmd.arg("-o").arg("BatchMode=yes");
-        if let Some(ref key) = self.key_path {
+        if let Some(ref key_file) = self.temp_key_file {
+            cmd.arg("-i").arg(key_file.path());
+        } else if let Some(ref key) = self.key_path {
             cmd.arg("-i").arg(key);
         }
         if self.port != DEFAULT_SSH_PORT {

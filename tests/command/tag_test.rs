@@ -5,11 +5,8 @@
 use std::collections::HashSet;
 
 use libra::{
-    command::{
-        config::{self, ConfigArgs},
-        tag::{self, TagArgs},
-    },
-    internal::tag as internal_tag,
+    command::tag::{self, TagArgs},
+    internal::{config::ConfigKv, tag as internal_tag},
     utils::test::{ChangeDirGuard, setup_with_new_libra_in},
 };
 use serial_test::serial;
@@ -23,40 +20,12 @@ use super::*;
 
 async fn setup_user_identity() {
     // Configure a predictable user identity for annotated tag creation
-    config::execute(ConfigArgs {
-        key: Some("user.name".into()),
-        valuepattern: Some("Test User".into()),
-        add: true,
-        get: false,
-        get_all: false,
-        unset: false,
-        unset_all: false,
-        list: false,
-        local: false,
-        global: false,
-        system: false,
-        import: false,
-        name_only: false,
-        default: None,
-    })
-    .await;
-    config::execute(ConfigArgs {
-        key: Some("user.email".into()),
-        valuepattern: Some("test@example.com".into()),
-        add: true,
-        get: false,
-        get_all: false,
-        unset: false,
-        unset_all: false,
-        list: false,
-        local: false,
-        global: false,
-        system: false,
-        import: false,
-        name_only: false,
-        default: None,
-    })
-    .await;
+    ConfigKv::set("user.name", "Test User", false)
+        .await
+        .unwrap();
+    ConfigKv::set("user.email", "test@example.com", false)
+        .await
+        .unwrap();
 }
 
 /// Return the full ref name for a tag (e.g. "refs/tags/v1.0").

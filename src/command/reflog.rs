@@ -192,8 +192,10 @@ async fn parse_ref_name(partial_ref_name: &str) -> String {
         return format!("refs/heads/{partial_ref_name}");
     }
     let (ref_name, _) = partial_ref_name.split_once("/").unwrap();
-    if config::Config::get("remote", Some(ref_name), "url")
+    if config::ConfigKv::get(&format!("remote.{ref_name}.url"))
         .await
+        .ok()
+        .flatten()
         .is_some()
     {
         return format!("refs/remotes/{partial_ref_name}");

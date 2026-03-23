@@ -15,7 +15,7 @@ use crate::{
     command::{self, restore::RestoreArgs},
     internal::{
         branch::Branch,
-        config::{Config, RemoteConfig},
+        config::{ConfigKv, RemoteConfig},
         head::Head,
         reflog::{ReflogAction, ReflogContext, with_reflog},
     },
@@ -381,28 +381,25 @@ pub(crate) async fn setup_repository(
                     Head::update_with_conn(txn, Head::Branch(branch_name.to_owned()), None).await;
 
                     let merge_ref = format!("refs/heads/{}", branch_name);
-                    Config::insert_with_conn(
+                    let _ = ConfigKv::set_with_conn(
                         txn,
-                        "branch",
-                        Some(&branch_name),
-                        "merge",
+                        &format!("branch.{}.merge", branch_name),
                         &merge_ref,
+                        false,
                     )
                     .await;
-                    Config::insert_with_conn(
+                    let _ = ConfigKv::set_with_conn(
                         txn,
-                        "branch",
-                        Some(&branch_name),
-                        "remote",
+                        &format!("branch.{}.remote", branch_name),
                         &remote_config.name,
+                        false,
                     )
                     .await;
-                    Config::insert_with_conn(
+                    let _ = ConfigKv::set_with_conn(
                         txn,
-                        "remote",
-                        Some(&remote_config.name),
-                        "url",
+                        &format!("remote.{}.url", remote_config.name),
                         &remote_config.url,
+                        false,
                     )
                     .await;
                     Ok(())
@@ -427,22 +424,20 @@ pub(crate) async fn setup_repository(
     } else {
         crate::utils::error::emit_warning("You appear to have cloned an empty repository.");
 
-        Config::insert(
-            "remote",
-            Some(&remote_config.name),
-            "url",
+        let _ = ConfigKv::set(
+            &format!("remote.{}.url", remote_config.name),
             &remote_config.url,
+            false,
         )
         .await;
 
         let default_branch = "main";
         let merge_ref = format!("refs/heads/{}", default_branch);
-        Config::insert("branch", Some(default_branch), "merge", &merge_ref).await;
-        Config::insert(
-            "branch",
-            Some(default_branch),
-            "remote",
+        let _ = ConfigKv::set(&format!("branch.{default_branch}.merge"), &merge_ref, false).await;
+        let _ = ConfigKv::set(
+            &format!("branch.{default_branch}.remote"),
             &remote_config.name,
+            false,
         )
         .await;
     }

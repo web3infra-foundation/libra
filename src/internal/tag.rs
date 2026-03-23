@@ -19,7 +19,7 @@ use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 
 use crate::{
     command::load_object,
-    internal::{config::Config, db::get_db_conn_instance, head::Head, model::reference},
+    internal::{config::ConfigKv, db::get_db_conn_instance, head::Head, model::reference},
     utils::{client_storage::ClientStorage, path},
 };
 
@@ -90,11 +90,17 @@ pub async fn create(name: &str, message: Option<String>, force: bool) -> Result<
     let ref_target_id: ObjectHash;
     if let Some(msg) = message {
         // Create an annotated tag object
-        let user_name = Config::get("user", None, "name")
+        let user_name = ConfigKv::get("user.name")
             .await
+            .ok()
+            .flatten()
+            .map(|e| e.value)
             .unwrap_or_else(|| DEFAULT_USER.to_string());
-        let user_email = Config::get("user", None, "email")
+        let user_email = ConfigKv::get("user.email")
             .await
+            .ok()
+            .flatten()
+            .map(|e| e.value)
             .unwrap_or_else(|| DEFAULT_EMAIL.to_string());
         let tagger_signature = Signature::new(SignatureType::Tagger, user_name, user_email);
 

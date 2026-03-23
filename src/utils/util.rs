@@ -1,10 +1,11 @@
 //! Core utility toolbox for repo detection, path conversion, ignore checking, storage access, hashing helpers, and miscellaneous formatting/time utilities.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     env, fs, io,
     io::Write,
     path::{Path, PathBuf},
+    sync::Mutex,
 };
 
 use git_internal::{
@@ -13,6 +14,7 @@ use git_internal::{
 };
 use ignore::{Match, gitignore::Gitignore};
 use indicatif::{ProgressBar, ProgressStyle};
+use once_cell::sync::Lazy;
 use path_absolutize::*;
 
 use crate::{
@@ -23,6 +25,9 @@ use crate::{
 pub const ROOT_DIR: &str = ".libra";
 pub const DATABASE: &str = "libra.db";
 pub const ATTRIBUTES: &str = ".libra_attributes";
+
+static OBJECTS_STORAGE_CACHE: Lazy<Mutex<HashMap<PathBuf, ClientStorage>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// Returns the current working directory as a `PathBuf`.
 ///
@@ -181,7 +186,7 @@ pub fn check_repo_exist() -> bool {
 
 /// Get `ClientStorage` for the `objects` directory
 pub fn objects_storage() -> ClientStorage {
-    ClientStorage::init(path::objects())
+    cached_objects_storage(path::objects())
 }
 
 /// Get `ClientStorage` for the `objects` directory, returning a Result
@@ -196,7 +201,26 @@ pub fn try_objects_storage() -> io::Result<ClientStorage> {
             "not a libra repository",
         ));
     }
-    Ok(ClientStorage::init(path::objects()))
+    Ok(cached_objects_storage(path::objects()))
+}
+
+fn cached_objects_storage(base_path: PathBuf) -> ClientStorage {
+    let mut cache = OBJECTS_STORAGE_CACHE
+        .lock()
+        .expect("objects storage cache mutex poisoned");
+    if let Some(storage) = cache.get(&base_path) {
+        return storage.clone();
+    }
+
+    let storage = ClientStorage::init(base_path.clone());
+    cache.insert(base_path, storage.clone());
+    storage
+}
+
+pub fn reset_objects_storage_cache_for_path(base_path: &Path) {
+    if let Ok(mut cache) = OBJECTS_STORAGE_CACHE.lock() {
+        cache.remove(base_path);
+    }
 }
 
 /// Get the working directory of the repository
@@ -649,14 +673,20 @@ pub fn check_gitignore(work_dir: &PathBuf, target_file: &PathBuf) -> bool {
 
 use git_internal::internal::object::signature::{Signature, SignatureType};
 
-use crate::internal::config::Config;
+use crate::internal::config::ConfigKv;
 
 pub async fn create_signatures() -> (Signature, Signature) {
-    let user_name = Config::get("user", None, "name")
+    let user_name = ConfigKv::get("user.name")
         .await
+        .ok()
+        .flatten()
+        .map(|e| e.value)
         .unwrap_or_else(|| "Stasher".to_string());
-    let user_email = Config::get("user", None, "email")
+    let user_email = ConfigKv::get("user.email")
         .await
+        .ok()
+        .flatten()
+        .map(|e| e.value)
         .unwrap_or_else(|| "stasher@example.com".to_string());
 
     let author = Signature::new(SignatureType::Author, user_name.clone(), user_email.clone());

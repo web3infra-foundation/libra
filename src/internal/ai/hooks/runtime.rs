@@ -284,8 +284,11 @@ pub async fn process_hook_event_from_stdin(
 }
 
 async fn set_hash_kind_from_repo() -> Result<()> {
-    let object_format = crate::internal::config::Config::get("core", None, "objectformat")
+    let object_format = crate::internal::config::ConfigKv::get("core.objectformat")
         .await
+        .ok()
+        .flatten()
+        .map(|e| e.value)
         .unwrap_or_else(|| "sha1".to_string());
 
     let hash_kind = match object_format.as_str() {

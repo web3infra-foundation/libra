@@ -47,6 +47,9 @@ pub async fn establish_connection_with_busy_timeout(
     let conn = Database::connect(option)
         .await
         .map_err(|err| IOError::other(format!("Database connection error: {err:?}")))?;
+    ensure_config_kv_schema(&conn)
+        .await
+        .map_err(|err| IOError::other(format!("Failed to ensure config_kv schema: {err}")))?;
     ensure_ai_projection_schema(&conn)
         .await
         .map_err(|err| IOError::other(format!("Failed to ensure AI projection schema: {err}")))?;
@@ -235,6 +238,33 @@ async fn sqlite_schema_contains(
     Ok(row.is_some())
 }
 
+/// Ensure the `config_kv` table exists in the database.
+/// Existing databases (created before this table was added) will have the table
+/// created on first connection, similar to the AI projection schema pattern.
+async fn ensure_config_kv_schema(conn: &DatabaseConnection) -> Result<(), IOError> {
+    if sqlite_schema_contains(conn, "table", "config_kv")
+        .await
+        .map_err(|err| IOError::other(format!("Failed to inspect config_kv schema: {err}")))?
+    {
+        return Ok(());
+    }
+
+    let backend = conn.get_database_backend();
+    let ddl = r#"
+CREATE TABLE IF NOT EXISTS `config_kv` (
+    `id` INTEGER PRIMARY KEY AUTOINCREMENT,
+    `key` TEXT NOT NULL,
+    `value` TEXT NOT NULL,
+    `encrypted` INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_config_kv_key ON config_kv(`key`);
+"#;
+    conn.execute(Statement::from_string(backend, ddl))
+        .await
+        .map_err(|err| IOError::other(format!("Failed to create config_kv table: {err}")))?;
+    Ok(())
+}
+
 async fn ensure_ai_projection_schema(conn: &DatabaseConnection) -> Result<(), IOError> {
     if !sqlite_schema_contains(conn, "table", "object_index")
         .await
@@ -361,6 +391,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(deprecated)]
     async fn test_insert_config() {
         // insert into config_entry & config_section, check foreign key constraint
         let test_db = TestDbPath::new("test_insert_config.db").await;

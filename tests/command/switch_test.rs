@@ -217,8 +217,10 @@ async fn test_switch_track_sets_upstream() {
     };
     assert_eq!(branch_name, "feature");
 
-    let branch_config = libra::internal::config::Config::branch_config("feature")
+    let branch_config = libra::internal::config::ConfigKv::branch_config("feature")
         .await
+        .ok()
+        .flatten()
         .unwrap();
     assert_eq!(branch_config.remote, "origin");
     assert_eq!(branch_config.merge, "feature");

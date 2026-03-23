@@ -271,6 +271,9 @@ pub struct CliError {
     hints: Vec<Hint>,
     usage: Option<String>,
     details: BTreeMap<String, Value>,
+    /// Optional override for the process exit code. When set, this takes
+    /// precedence over the code derived from [`StableErrorCode`].
+    exit_code_override: Option<i32>,
 }
 
 impl CliError {
@@ -284,6 +287,7 @@ impl CliError {
             hints: Vec::new(),
             usage: None,
             details: BTreeMap::new(),
+            exit_code_override: None,
         }
     }
 
@@ -431,7 +435,22 @@ impl CliError {
         self
     }
 
+    /// Override the process exit code for this error instance.
+    ///
+    /// When set, this takes precedence over both the standard
+    /// [`StableErrorCode`]-derived code and the fine-grained exit code.
+    /// Use sparingly for cases where Git-compatible exit codes differ from
+    /// the Libra category mapping (e.g. `git config --get` returns 1 when
+    /// a key is not found).
+    pub fn with_exit_code(mut self, code: i32) -> Self {
+        self.exit_code_override = Some(code);
+        self
+    }
+
     pub fn exit_code(&self) -> i32 {
+        if let Some(code) = self.exit_code_override {
+            return code;
+        }
         if fine_exit_codes_enabled() {
             return self.stable_code.fine_exit_code();
         }

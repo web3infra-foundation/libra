@@ -1,107 +1,57 @@
-//! Config command for reading and writing settings across scopes, supporting key/value parsing and remote/branch associations.
+//! Config command for reading and writing settings across scopes.
+//!
+//! Supports subcommand style (`libra config set/get/list/unset/import/path`)
+//! and Git-compatible flag style (`--get`, `--list`, etc.).
 
-use std::{path::PathBuf, process::Command};
+use std::{io::IsTerminal, path::PathBuf, process::Command};
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use once_cell::sync::Lazy;
 use sea_orm::DatabaseConnection;
 use serde::Serialize;
 use tokio::sync::Mutex;
 
 use crate::{
-    internal::config,
+    internal::config::{ConfigKv, ConfigKvEntry, is_sensitive_key, is_vault_internal_key},
     utils::{
-        error::{CliError, CliResult},
+        error::{CliError, CliResult, StableErrorCode},
         output::OutputConfig,
     },
 };
 
 /// Cached database connection for Global scope, paired with the resolved DB path.
-///
-/// We cache the connection to avoid reconnect overhead, but we must invalidate it if
-/// the resolved path changes (e.g., tests override `LIBRA_CONFIG_GLOBAL_DB`).
 static GLOBAL_CONFIG_CONN: Lazy<Mutex<Option<(PathBuf, DatabaseConnection)>>> =
     Lazy::new(|| Mutex::new(None));
 
-/// Cached database connection for System scope, paired with the resolved DB path.
-///
-/// We cache the connection to avoid reconnect overhead, but we must invalidate it if
-/// the resolved path changes (e.g., tests override `LIBRA_CONFIG_SYSTEM_DB`).
-static SYSTEM_CONFIG_CONN: Lazy<Mutex<Option<(PathBuf, DatabaseConnection)>>> =
-    Lazy::new(|| Mutex::new(None));
+const EXAMPLES: &str = r#"EXAMPLES:
+    libra config set user.name "John Doe"              Set local config value
+    libra config get user.name                         Get value (cascade lookup)
+    libra config list                                  List all local entries
+    libra config list --show-origin                    List with scope labels
+    libra config set --global user.email "j@x.com"     Set global config
+    libra config unset user.signingkey                 Remove a key
+    libra config import --global                       Import from Git global config
+    libra config set vault.env.GEMINI_API_KEY          Store API key (interactive)
+    echo "$SECRET" | libra config set --stdin vault.env.KEY  Set from stdin (CI/CD)
+    libra config set --encrypt custom.key "value"      Force-encrypt a value
+    libra config list --vault                          List vault env entries
+    libra config list --name-only                      List all key names
+    libra config path                                  Show config DB path"#;
 
-/// Configuration scope that determines where configuration values are stored and retrieved from.
-///
-/// This enum defines the three levels of configuration storage, following Git's configuration
-/// hierarchy model. Each scope has its own database file and isolation boundaries.
+/// Configuration scope that determines where values are stored and retrieved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigScope {
-    /// Repository-specific configuration stored in the current repository's `.libra` directory.
-    ///
-    /// This is the default scope when no explicit scope is specified. Configuration values
-    /// set at this level only affect the current repository and are stored in:
-    /// - `<repository>/.libra/libra.db`
-    ///
-    /// Local configuration has the highest precedence and overrides global and system settings.
+    /// Repository-specific (`.libra/libra.db`). Default for writes.
     Local,
-
-    /// User-specific configuration stored in the user's home directory.
-    ///
-    /// Configuration values set at this level affect all repositories for the current user
-    /// and are stored in:
-    /// - Unix/Linux/macOS: `~/.libra/config.db`
-    /// - Windows: `%USERPROFILE%\.libra\config.db`
-    ///
-    /// Global configuration has medium precedence and overrides system settings but is
-    /// overridden by local settings.
+    /// User-level (`~/.libra/config.db`).
     Global,
-
-    /// System-wide configuration stored in a system directory.
-    ///
-    /// Configuration values set at this level affect all users and repositories on the system.
-    /// Requires administrative privileges to modify and is stored in:
-    /// - Unix/Linux/macOS: `/etc/libra/config.db`
-    /// - Windows: `%PROGRAMDATA%\libra\config.db`
-    ///
-    /// System configuration has the lowest precedence and is overridden by both global
-    /// and local settings.
-    System,
 }
 
 impl ConfigScope {
-    /// The cascade order for configuration lookup (highest to lowest precedence).
-    ///
-    /// When no explicit scope is specified for read operations, configuration values
-    /// are searched in this order. The first scope that contains the requested key
-    /// will provide the value, following Git's configuration precedence model.
-    pub const CASCADE_ORDER: [ConfigScope; 3] =
-        [ConfigScope::Local, ConfigScope::Global, ConfigScope::System];
+    /// Cascade order for reads (highest to lowest precedence).
+    pub const CASCADE_ORDER: [ConfigScope; 2] = [ConfigScope::Local, ConfigScope::Global];
 
-    /// Get the configuration file path for this scope.
-    ///
-    /// Returns the absolute path where the configuration database should be stored
-    /// for this scope. The path is platform-specific and follows standard conventions.
-    ///
-    /// Test/CI can override the location using:
-    /// - `LIBRA_CONFIG_GLOBAL_DB` for `Global`
-    /// - `LIBRA_CONFIG_SYSTEM_DB` for `System`
-    ///
-    /// # Returns
-    ///
-    /// - `Some(PathBuf)` - The path to the configuration database file
-    /// - `None` - For `Local` scope (uses repository database), or when a path
-    ///   cannot be determined (e.g. missing home directory, unsupported
-    ///   platform, or invalid environment configuration)
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// use libra::command::config::ConfigScope;
-    ///
-    /// assert_eq!(ConfigScope::Local.get_config_path(), None);
-    /// let _ = ConfigScope::Global.get_config_path();
-    /// let _ = ConfigScope::System.get_config_path();
-    /// ```
+    /// Get the config database path for this scope.
     pub fn get_config_path(&self) -> Option<PathBuf> {
         match self {
             ConfigScope::Local => None,
@@ -109,95 +59,28 @@ impl ConfigScope {
                 if let Some(p) = std::env::var_os("LIBRA_CONFIG_GLOBAL_DB") {
                     return Some(PathBuf::from(p));
                 }
-
-                dirs::home_dir().map(|home_dir| home_dir.join(".libra").join("config.db"))
-            }
-            ConfigScope::System => {
-                if let Some(p) = std::env::var_os("LIBRA_CONFIG_SYSTEM_DB") {
-                    return Some(PathBuf::from(p));
-                }
-
-                #[cfg(unix)]
-                {
-                    Some(PathBuf::from("/etc/libra/config.db"))
-                }
-                #[cfg(windows)]
-                {
-                    std::env::var_os("PROGRAMDATA").and_then(|path| {
-                        let base = PathBuf::from(path);
-                        if !base.is_absolute() {
-                            // Reject non-absolute PROGRAMDATA values
-                            return None;
-                        }
-                        Some(base.join("libra").join("config.db"))
-                    })
-                }
-                #[cfg(not(any(unix, windows)))]
-                {
-                    None
-                }
+                dirs::home_dir().map(|home| home.join(".libra").join("config.db"))
             }
         }
     }
 
-    /// Ensure the configuration directory and database exist for this scope.
-    ///
-    /// Creates the necessary directory structure and initializes the configuration database
-    /// if it doesn't already exist. This method handles the setup required before any
-    /// configuration operations can be performed.
-    ///
-    /// # Returns
-    ///
-    /// - `Ok(())` - Configuration database is ready for use
-    /// - `Err(String)` - Failed to create directory or database, with error description
-    ///
-    /// # Errors
-    ///
-    /// This method can fail in several scenarios:
-    /// - Insufficient permissions to create directories or files
-    /// - Disk space issues
-    /// - Invalid or inaccessible paths
-    /// - Database initialization failures
-    ///
-    /// For System scope, this typically requires administrative privileges.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// use libra::command::config::ConfigScope;
-    ///
-    /// # async fn example() -> Result<(), String> {
-    /// // Ensure global config is ready
-    /// ConfigScope::Global.ensure_config_exists().await?;
-    ///
-    /// // Now we can safely perform config operations
-    /// # Ok(())
-    /// # }
-    /// ```
     pub async fn ensure_config_exists(&self) -> Result<(), String> {
         match self {
-            ConfigScope::Local => {
-                // Local config uses the repository database, which should already exist
-                Ok(())
-            }
+            ConfigScope::Local => Ok(()),
             ConfigScope::Global => {
                 if let Some(config_path) = self.get_config_path() {
                     if let Some(parent_dir) = config_path.parent()
                         && !parent_dir.exists()
                     {
                         std::fs::create_dir_all(parent_dir).map_err(|e| {
-                            format!("Failed to create global config directory: {}", e)
+                            format!("Failed to create global config directory: {e}")
                         })?;
                     }
-
                     if !config_path.exists() {
-                        // Create the global config database
                         let config_path_str = config_path.to_string_lossy();
                         crate::internal::db::create_database(&config_path_str)
                             .await
-                            .map_err(|e| {
-                                format!("Failed to create global config database: {}", e)
-                            })?;
+                            .map_err(|e| format!("Failed to create global config database: {e}"))?;
                     }
                     Ok(())
                 } else {
@@ -207,252 +90,18 @@ impl ConfigScope {
                     )
                 }
             }
-            ConfigScope::System => {
-                if let Some(config_path) = self.get_config_path() {
-                    if let Some(parent_dir) = config_path.parent()
-                        && !parent_dir.exists()
-                    {
-                        std::fs::create_dir_all(parent_dir).map_err(|e| {
-                            format!(
-                                "Failed to create system config directory (may need sudo): {}",
-                                e
-                            )
-                        })?;
-                    }
-
-                    if !config_path.exists() {
-                        // Create the system config database
-                        let config_path_str = config_path.to_string_lossy();
-                        crate::internal::db::create_database(&config_path_str)
-                            .await
-                            .map_err(|e| {
-                                format!(
-                                    "Failed to create system config database (may need sudo): {}",
-                                    e
-                                )
-                            })?;
-                    }
-                    Ok(())
-                } else {
-                    Err("Could not determine system config path".to_string())
-                }
-            }
         }
     }
 }
 
-/// Command-line arguments for the config command.
-///
-/// This structure defines all the possible options and flags that can be used with
-/// the config command, following Git's config command interface closely.
-///
-/// # Scope Selection
-///
-/// Only one scope flag should be specified at a time:
-/// - `--local`: Repository-specific configuration (default)
-/// - `--global`: User-specific configuration
-/// - `--system`: System-wide configuration
-///
-/// # Operation Modes
-///
-/// The command supports several mutually exclusive operation modes:
-/// - `--add`: Add a new configuration entry (allows duplicates)
-/// - `--get`: Get the first matching configuration value
-/// - `--get-all`: Get all matching configuration values
-/// - `--unset`: Remove the first matching configuration entry
-/// - `--unset-all`: Remove all matching configuration entries
-/// - `--list`: List all configuration entries
-/// - Default (no mode): Set configuration value (update if exists, create if not)
-#[derive(Parser, Debug)]
-pub struct ConfigArgs {
-    /// Add a configuration entry to database
-    #[clap(long, group("mode"), requires("valuepattern"))]
-    pub add: bool,
-    /// Get a single configuration entry that satisfied key and value pattern from database
-    #[clap(long, group("mode"))]
-    pub get: bool,
-    /// Get all configuration entries that satisfied key and value pattern from database
-    #[clap(long("get-all"), group("mode"))]
-    pub get_all: bool,
-    /// Remove a single configuration entry from database
-    #[clap(long, group("mode"))]
-    pub unset: bool,
-    /// Remove all the configuration entries that satisfied key and valuepattern from database
-    #[clap(long("unset-all"), group("mode"))]
-    pub unset_all: bool,
-    /// List all the configuration entries from database
-    #[clap(long, short, group("mode"))]
-    pub list: bool,
-    /// If set, only print the key string of the configuration entry instead of the key=value.
-    /// This is only valid when `list` is set.
-    #[clap(long("name-only"), requires = "list")]
-    pub name_only: bool,
-    /// Import configuration values from Git
-    #[clap(long, group("mode"))]
-    pub import: bool,
-    /// Use repository config file only (default)
-    #[clap(long, group("scope"))]
-    pub local: bool,
-    /// Use global config file
-    #[clap(long, group("scope"))]
-    pub global: bool,
-    /// Use system config file
-    #[clap(long, group("scope"))]
-    pub system: bool,
-    /// The key string of the configuration entry, should be like configuration.[name].key
-    #[clap(value_name("key"))]
-    pub key: Option<String>,
-    /// the value or the possible value pattern of the configuration entry
-    #[clap(value_name("value_pattern"))]
-    pub valuepattern: Option<String>,
-    /// If the target key is not present, return the given default value.
-    /// This is only valid when `get` or `get-all` is set.
-    #[clap(long, short = 'd')]
-    pub default: Option<String>,
-}
-
-// argument-level tests live in the args_tests module near ConfigArgs
-
-impl ConfigArgs {
-    fn has_mode(&self) -> bool {
-        self.add
-            || self.get
-            || self.get_all
-            || self.unset
-            || self.unset_all
-            || self.list
-            || self.import
-    }
-
-    fn is_import_mode(&self) -> bool {
-        self.import || (!self.has_mode() && self.key.as_deref() == Some("import"))
-    }
-
-    pub fn validate(&self) -> Result<(), String> {
-        // validate the default value is only present when get or get_all is set
-        if self.default.is_some() && !(self.get || self.get_all) {
-            return Err("--default is only valid when --get or --get-all is set".to_string());
-        }
-        // validate that name_only is only valid when list is set
-        if self.name_only && !self.list {
-            return Err("--name-only is only valid when --list is set".to_string());
-        }
-        if self.is_import_mode() {
-            // Explicit flag form: `libra config --import` must not accept <key>.
-            if self.import && self.key.is_some() {
-                return Err("`libra config --import` does not accept <key>".to_string());
-            }
-            // Reject value_pattern for both explicit and implicit import forms.
-            if self.valuepattern.is_some() {
-                return Err("`libra config import` does not accept <value_pattern>".to_string());
-            }
-            return Ok(());
-        }
-
-        if !self.list && self.key.is_none() {
-            return Err("missing required argument: <key>".to_string());
-        }
-
-        // Default mode is `set`, which requires both key and value.
-        if !self.has_mode() && self.valuepattern.is_none() {
-            return Err("missing required argument: <value_pattern>".to_string());
-        }
-
-        Ok(())
-    }
-
-    /// Get the configuration scope from the command line arguments.
-    ///
-    /// Determines which configuration scope should be used based on the scope flags.
-    /// If no explicit scope is specified, defaults to Local scope.
-    ///
-    /// # Returns
-    ///
-    /// - `ConfigScope::Local` - Default when no scope flags are set, or when `--local` is specified
-    /// - `ConfigScope::Global` - When `--global` flag is specified
-    /// - `ConfigScope::System` - When `--system` flag is specified
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use libra::command::config::{ConfigArgs, ConfigScope};
-    ///
-    /// let args = ConfigArgs {
-    ///     add: false,
-    ///     get: false,
-    ///     get_all: false,
-    ///     unset: false,
-    ///     unset_all: false,
-    ///     list: false,
-    ///     name_only: false,
-    ///     import: false,
-    ///     local: false,
-    ///     global: true,
-    ///     system: false,
-    ///     key: None,
-    ///     valuepattern: None,
-    ///     default: None,
-    /// };
-    ///
-    /// assert_eq!(args.get_scope(), ConfigScope::Global);
-    /// ```
-    pub fn get_scope(&self) -> ConfigScope {
-        if self.global {
-            ConfigScope::Global
-        } else if self.system {
-            ConfigScope::System
-        } else {
-            ConfigScope::Local // default
-        }
-    }
-
-    /// Returns true if any of `--local`, `--global`, or `--system` was explicitly provided.
-    pub fn has_explicit_scope(&self) -> bool {
-        self.local || self.global || self.system
-    }
-}
-
-/// Configuration manager that handles different configuration scopes (Local/Global/System).
-///
-/// # Architecture overview
-///
-/// Libra stores configuration entries in SQLite databases. This command supports multiple
-/// scopes that map to different database files:
-///
-/// - **Local**: repository database (existing behavior; repo-specific)
-/// - **Global**: user-level database (applies across repos)
-/// - **System**: system-level database (applies across users/repos; may require elevated privileges)
-///
-/// # Read semantics (Git-compatible precedence)
-///
-/// For read-oriented operations (e.g. `get`, `get-all`, `list`) when **no explicit scope flag**
-/// (`--local/--global/--system`) is provided, the command uses a cascading lookup order:
-///
-/// `Local → Global → System`
-///
-/// This matches Git’s precedence model: local overrides global, which overrides system.
-///
-/// When an explicit scope flag is provided, the operation targets that single scope only.
-///
-/// # Write semantics
-///
-/// For write-oriented operations (e.g. `add`, default `set`, `unset`, `unset-all`), the command
-/// always targets the selected scope. When no scope flag is provided, the default write scope is
-/// **Local** (repository database).
-///
-/// # Connection management
-///
-/// Global/System operations may require opening a separate database connection. Implementations
-/// may cache those connections to reduce reconnect overhead, but must invalidate caches if the
-/// resolved database path changes (e.g., via test/CI overrides).
+/// Scoped config access layer — resolves the correct database for each scope.
 pub struct ScopedConfig;
 
 impl ScopedConfig {
-    /// Get a database connection for the specified scope
-    async fn get_connection(scope: ConfigScope) -> Result<DatabaseConnection, String> {
+    /// Get a database connection for the specified scope.
+    pub async fn get_connection(scope: ConfigScope) -> Result<DatabaseConnection, String> {
         match scope {
             ConfigScope::Local => {
-                // Use try_get_storage_path to avoid panics when no repo exists.
                 let storage = crate::utils::util::try_get_storage_path(None).map_err(|_| {
                     "fatal: not a libra repository (or any of the parent directories): .libra"
                         .to_string()
@@ -469,158 +118,284 @@ impl ScopedConfig {
             ConfigScope::Global => {
                 Self::get_or_create_cached_connection(&GLOBAL_CONFIG_CONN, scope, "global").await
             }
-            ConfigScope::System => {
-                Self::get_or_create_cached_connection(&SYSTEM_CONFIG_CONN, scope, "system").await
-            }
         }
     }
 
-    /// Get or create a cached database connection for the given scope.
-    ///
-    /// If the resolved config DB path changes (e.g., due to env overrides in tests),
-    /// the cached connection is invalidated and rebuilt.
     async fn get_or_create_cached_connection(
         cache: &Lazy<Mutex<Option<(PathBuf, DatabaseConnection)>>>,
         scope: ConfigScope,
         scope_name: &str,
     ) -> Result<DatabaseConnection, String> {
-        // Resolve path first so we can validate/invalidate cache deterministically.
         let Some(config_path) = scope.get_config_path() else {
             return Err(format!(
-                "Could not determine config path for {:?} scope",
-                scope
+                "Could not determine config path for {scope_name} scope"
             ));
         };
-
         let mut guard = cache.lock().await;
-
-        // Return cached connection if available and path matches
         if let Some((cached_path, cached_conn)) = guard.as_ref() {
             if cached_path == &config_path {
                 return Ok(cached_conn.clone());
             }
-            // Path changed: invalidate cached connection.
             *guard = None;
         }
-
-        // Ensure the config exists first
         scope.ensure_config_exists().await?;
-
         let config_path_str = config_path.to_string_lossy();
         let conn = crate::internal::db::establish_connection(&config_path_str)
             .await
-            .map_err(|e| format!("Failed to connect to {} config database: {}", scope_name, e))?;
-
-        // Cache the connection for future use
+            .map_err(|e| format!("Failed to connect to {scope_name} config database: {e}"))?;
         *guard = Some((config_path, conn.clone()));
         Ok(conn)
     }
 
-    /// Insert configuration with scope
-    pub async fn insert(
+    // ── ConfigKv wrappers with scope ─────────────────────────────────
+
+    pub async fn get(scope: ConfigScope, key: &str) -> Result<Option<ConfigKvEntry>, String> {
+        let conn = Self::get_connection(scope).await?;
+        ConfigKv::get_with_conn(&conn, key)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    pub async fn get_all(scope: ConfigScope, key: &str) -> Result<Vec<ConfigKvEntry>, String> {
+        let conn = Self::get_connection(scope).await?;
+        ConfigKv::get_all_with_conn(&conn, key)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    pub async fn set(
         scope: ConfigScope,
-        configuration: &str,
-        name: Option<&str>,
         key: &str,
         value: &str,
+        encrypted: bool,
     ) -> Result<(), String> {
         let conn = Self::get_connection(scope).await?;
-        config::Config::insert_with_conn(&conn, configuration, name, key, value).await;
-        Ok(())
+        ConfigKv::set_with_conn(&conn, key, value, encrypted)
+            .await
+            .map_err(|e| e.to_string())
     }
 
-    /// Update configuration with scope
-    pub async fn update(
+    pub async fn add(
         scope: ConfigScope,
-        configuration: &str,
-        name: Option<&str>,
         key: &str,
         value: &str,
+        encrypted: bool,
     ) -> Result<(), String> {
         let conn = Self::get_connection(scope).await?;
-        config::Config::update_with_conn(&conn, configuration, name, key, value).await;
-        Ok(())
+        ConfigKv::add_with_conn(&conn, key, value, encrypted)
+            .await
+            .map_err(|e| e.to_string())
     }
 
-    /// Get configuration with scope
-    pub async fn get(
+    pub async fn unset(scope: ConfigScope, key: &str) -> Result<usize, String> {
+        let conn = Self::get_connection(scope).await?;
+        ConfigKv::unset_with_conn(&conn, key)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    pub async fn unset_all(scope: ConfigScope, key: &str) -> Result<usize, String> {
+        let conn = Self::get_connection(scope).await?;
+        ConfigKv::unset_all_with_conn(&conn, key)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    pub async fn list_all(scope: ConfigScope) -> Result<Vec<ConfigKvEntry>, String> {
+        let conn = Self::get_connection(scope).await?;
+        ConfigKv::list_all_with_conn(&conn)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    pub async fn get_by_prefix(
         scope: ConfigScope,
-        configuration: &str,
-        name: Option<&str>,
-        key: &str,
-    ) -> Result<Option<String>, String> {
+        prefix: &str,
+    ) -> Result<Vec<ConfigKvEntry>, String> {
         let conn = Self::get_connection(scope).await?;
-        Ok(config::Config::get_with_conn(&conn, configuration, name, key).await)
+        ConfigKv::get_by_prefix_with_conn(&conn, prefix)
+            .await
+            .map_err(|e| e.to_string())
     }
 
-    /// Get all configurations with scope
-    pub async fn get_all(
+    pub async fn get_regexp(
         scope: ConfigScope,
-        configuration: &str,
-        name: Option<&str>,
-        key: &str,
-    ) -> Result<Vec<String>, String> {
+        pattern: &str,
+    ) -> Result<Vec<ConfigKvEntry>, String> {
         let conn = Self::get_connection(scope).await?;
-        Ok(config::Config::get_all_with_conn(&conn, configuration, name, key).await)
-    }
-
-    /// List all configurations with scope
-    pub async fn list_all(scope: ConfigScope) -> Result<Vec<(String, String)>, String> {
-        let conn = Self::get_connection(scope).await?;
-        Ok(config::Config::list_all_with_conn(&conn).await)
-    }
-
-    /// Remove configuration with scope
-    pub async fn remove_config(
-        scope: ConfigScope,
-        configuration: &str,
-        name: Option<&str>,
-        key: &str,
-        valuepattern: Option<&str>,
-        delete_all: bool,
-    ) -> Result<(), String> {
-        let conn = Self::get_connection(scope).await?;
-        config::Config::remove_config_with_conn(
-            &conn,
-            configuration,
-            name,
-            key,
-            valuepattern,
-            delete_all,
-        )
-        .await
-        .map_err(|e| format!("failed to remove config entry: {e}"))?;
-        Ok(())
+        ConfigKv::get_regexp_with_conn(&conn, pattern)
+            .await
+            .map_err(|e| e.to_string())
     }
 }
 
-/// Parsed configuration key broken into `configuration`, optional `name`, and
-/// leaf `key` components.
-pub struct Key {
-    configuration: String,
-    name: Option<String>,
-    key: String,
+// ─────────────────────────────────────────────────────────────────────────────
+// CLI argument definitions
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Parser, Debug)]
+#[command(
+    about = "Manage repository configurations",
+    after_help = EXAMPLES
+)]
+pub struct ConfigArgs {
+    #[command(subcommand)]
+    pub command: Option<ConfigCommand>,
+
+    // ── Git-compat flags (hidden, translated to subcommands) ─────────
+    /// Get a configuration value
+    #[clap(long, hide = true)]
+    pub get: bool,
+    /// Get all values for a key
+    #[clap(long("get-all"), hide = true)]
+    pub get_all: bool,
+    /// Remove a configuration entry
+    #[clap(long, hide = true)]
+    pub unset: bool,
+    /// Remove all entries for a key
+    #[clap(long("unset-all"), hide = true)]
+    pub unset_all: bool,
+    /// List all entries
+    #[clap(long, short, hide = true)]
+    pub list: bool,
+    /// Add a value (allows duplicates)
+    #[clap(long, hide = true)]
+    pub add: bool,
+    /// Import from Git config
+    #[clap(long, hide = true)]
+    pub import: bool,
+    /// Get entries matching a regex
+    #[clap(long("get-regexp"), hide = true)]
+    pub get_regexp: bool,
+    /// Show which scope each value comes from
+    #[clap(long("show-origin"), hide = true)]
+    pub show_origin: bool,
+
+    // ── Scope flags ──────────────────────────────────────────────────
+    /// Use repository config (default)
+    #[clap(long, global = true, group("scope"))]
+    pub local: bool,
+    /// Use global user config
+    #[clap(long, global = true, group("scope"))]
+    pub global: bool,
+    /// System scope (removed — always errors)
+    #[clap(long, global = true, group("scope"))]
+    pub system: bool,
+
+    // ── Positional args (Git-compat mode) ────────────────────────────
+    /// Configuration key
+    #[clap(value_name = "key")]
+    pub key: Option<String>,
+    /// Value or value pattern
+    #[clap(value_name = "value")]
+    pub valuepattern: Option<String>,
+    /// Default value when key not found
+    #[clap(long, short = 'd')]
+    pub default: Option<String>,
 }
 
-impl Key {
-    fn display(&self) -> String {
-        match &self.name {
-            Some(name) => format!("{}.{}.{}", self.configuration, name, self.key),
-            None => format!("{}.{}", self.configuration, self.key),
-        }
-    }
+#[derive(Subcommand, Debug)]
+pub enum ConfigCommand {
+    /// Set a configuration value
+    Set {
+        /// Configuration key (dotted format, e.g. user.name)
+        key: String,
+        /// Value to set (interactive input for sensitive keys if omitted)
+        value: Option<String>,
+        /// Add as additional value (allows duplicates)
+        #[clap(long)]
+        add: bool,
+        /// Force vault encryption
+        #[clap(long)]
+        encrypt: bool,
+        /// Force plaintext storage (skip auto-encryption)
+        #[clap(long)]
+        plaintext: bool,
+        /// Read value from stdin
+        #[clap(long)]
+        stdin: bool,
+    },
+    /// Get a configuration value
+    Get {
+        /// Configuration key (or regex pattern with --regexp)
+        key: String,
+        /// Get all values for this key
+        #[clap(long)]
+        all: bool,
+        /// Show actual value for encrypted entries
+        #[clap(long)]
+        reveal: bool,
+        /// Treat key as regex pattern
+        #[clap(long)]
+        regexp: bool,
+        /// Default value if key not found
+        #[clap(long, short = 'd')]
+        default: Option<String>,
+    },
+    /// List configuration entries
+    List {
+        /// Show only key names
+        #[clap(long("name-only"))]
+        name_only: bool,
+        /// Show scope origin for each entry
+        #[clap(long("show-origin"))]
+        show_origin: bool,
+        /// Show only vault.env.* entries
+        #[clap(long)]
+        vault: bool,
+        /// Show SSH keys
+        #[clap(long("ssh-keys"))]
+        ssh_keys: bool,
+        /// Show GPG keys
+        #[clap(long("gpg-keys"))]
+        gpg_keys: bool,
+    },
+    /// Remove a configuration entry
+    Unset {
+        /// Configuration key to remove
+        key: String,
+        /// Remove all values for this key
+        #[clap(long)]
+        all: bool,
+    },
+    /// Import configuration from Git
+    Import,
+    /// Show config database file path
+    Path,
+    /// Open config in editor (not supported — SQLite storage)
+    Edit,
+    /// Generate SSH key for a remote
+    GenerateSshKey {
+        /// Remote name to generate key for
+        #[clap(long)]
+        remote: String,
+    },
+    /// Generate GPG key for signing
+    GenerateGpgKey {
+        /// User name for the key
+        #[clap(long)]
+        name: Option<String>,
+        /// User email for the key
+        #[clap(long)]
+        email: Option<String>,
+        /// Key usage (signing or encrypt)
+        #[clap(long)]
+        usage: Option<String>,
+    },
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct ConfigValueResult {
-    values: Vec<String>,
-    default_applied: bool,
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// Serializable output types
+// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
 struct ConfigListEntry {
     key: String,
     value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    origin: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    encrypted: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -629,255 +404,1496 @@ struct ConfigImportSummary {
     imported: usize,
     skipped_duplicates: usize,
     ignored_invalid: usize,
+    auto_encrypted: usize,
+    collapsed_multivalue_warnings: usize,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct ConfigSshKeyEntry {
+    remote: String,
+    #[serde(rename = "type")]
+    key_type: String,
+    public_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ConfigGpgKeyEntry {
+    usage: String,
+    #[serde(rename = "type")]
+    key_type: String,
+    pubkey_config_key: String,
+    signing_enabled: bool,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Entry points
+// ─────────────────────────────────────────────────────────────────────────────
+
 /// Execute the `config` command, printing any error to stderr.
-///
-/// **Note:** Prefer [`execute_safe`] for programmatic / embedded callers so
-/// errors can be handled without terminating the process.
 pub async fn execute(args: ConfigArgs) {
     if let Err(e) = execute_safe(args, &OutputConfig::default()).await {
         e.print_stderr();
     }
 }
 
-/// Safe entry point that returns structured [`CliResult`] instead of printing
-/// errors and exiting. This is the preferred entry point for CLI dispatch,
-/// library consumers, and tests.
+/// Safe entry point returning structured [`CliResult`].
 pub async fn execute_safe(args: ConfigArgs, output: &OutputConfig) -> CliResult<()> {
     execute_inner(args, output).await
 }
 
-/// Inner implementation that resolves config operations and renders success
-/// output according to the global [`OutputConfig`].
+// ─────────────────────────────────────────────────────────────────────────────
+// Dispatch logic
+// ─────────────────────────────────────────────────────────────────────────────
+
 async fn execute_inner(args: ConfigArgs, output: &OutputConfig) -> CliResult<()> {
-    args.validate()
-        .map_err(|e| CliError::from_legacy_string(format!("error: {e}")))?;
+    // Reject --system early
+    if args.system {
+        return Err(CliError::from_legacy_string(
+            "error: --system scope is not supported\n\nhint: use --local or --global",
+        ));
+    }
 
-    let scope = args.get_scope();
-    let use_cascade = !args.has_explicit_scope();
+    let scope = get_scope(&args);
+    let use_cascade = !has_explicit_scope(&args);
 
-    if args.is_import_mode() {
-        let summary = import_git_config(scope)
+    // Resolve subcommand: either explicit or translated from Git-compat flags
+    let cmd = resolve_command(&args)?;
+
+    match cmd {
+        ResolvedCommand::Set {
+            key,
+            value,
+            add,
+            encrypt,
+            plaintext,
+            stdin,
+        } => {
+            handle_set(
+                &key,
+                value.as_deref(),
+                add,
+                encrypt,
+                plaintext,
+                stdin,
+                scope,
+                output,
+            )
+            .await
+        }
+        ResolvedCommand::Get {
+            key,
+            all,
+            reveal,
+            regexp,
+            default,
+        } => {
+            handle_get(
+                &key,
+                all,
+                reveal,
+                regexp,
+                default.as_deref(),
+                scope,
+                use_cascade,
+                output,
+            )
+            .await
+        }
+        ResolvedCommand::List {
+            name_only,
+            show_origin,
+            vault,
+            ssh_keys,
+            gpg_keys,
+        } => {
+            handle_list(
+                name_only,
+                show_origin,
+                vault,
+                ssh_keys,
+                gpg_keys,
+                scope,
+                use_cascade,
+                output,
+            )
+            .await
+        }
+        ResolvedCommand::Unset { key, all } => handle_unset(&key, all, scope, output).await,
+        ResolvedCommand::Import => handle_import(scope, output).await,
+        ResolvedCommand::Path => handle_path(scope, output).await,
+        ResolvedCommand::Edit => Err(CliError::from_legacy_string(
+            "error: config edit is not supported (SQLite storage does not support text-based editing)\n\nhint: use libra config set/unset/list to manage configuration\nhint: use libra config list --name-only to see all keys",
+        )),
+        ResolvedCommand::GenerateSshKey { remote } => {
+            handle_generate_ssh_key(&remote, scope, output).await
+        }
+        ResolvedCommand::GenerateGpgKey { name, email, usage } => {
+            handle_generate_gpg_key(
+                name.as_deref(),
+                email.as_deref(),
+                usage.as_deref(),
+                scope,
+                output,
+            )
+            .await
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Command resolution (subcommand ↔ flag translation)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug)]
+enum ResolvedCommand {
+    Set {
+        key: String,
+        value: Option<String>,
+        add: bool,
+        encrypt: bool,
+        plaintext: bool,
+        stdin: bool,
+    },
+    Get {
+        key: String,
+        all: bool,
+        reveal: bool,
+        regexp: bool,
+        default: Option<String>,
+    },
+    List {
+        name_only: bool,
+        show_origin: bool,
+        vault: bool,
+        ssh_keys: bool,
+        gpg_keys: bool,
+    },
+    Unset {
+        key: String,
+        all: bool,
+    },
+    Import,
+    Path,
+    Edit,
+    GenerateSshKey {
+        remote: String,
+    },
+    GenerateGpgKey {
+        name: Option<String>,
+        email: Option<String>,
+        usage: Option<String>,
+    },
+}
+
+fn resolve_command(args: &ConfigArgs) -> CliResult<ResolvedCommand> {
+    // If an explicit subcommand was provided, use it directly
+    if let Some(ref cmd) = args.command {
+        return Ok(match cmd {
+            ConfigCommand::Set {
+                key,
+                value,
+                add,
+                encrypt,
+                plaintext,
+                stdin,
+            } => ResolvedCommand::Set {
+                key: key.clone(),
+                value: value.clone(),
+                add: *add,
+                encrypt: *encrypt,
+                plaintext: *plaintext,
+                stdin: *stdin,
+            },
+            ConfigCommand::Get {
+                key,
+                all,
+                reveal,
+                regexp,
+                default,
+            } => ResolvedCommand::Get {
+                key: key.clone(),
+                all: *all,
+                reveal: *reveal,
+                regexp: *regexp,
+                default: default.clone(),
+            },
+            ConfigCommand::List {
+                name_only,
+                show_origin,
+                vault,
+                ssh_keys,
+                gpg_keys,
+            } => ResolvedCommand::List {
+                name_only: *name_only,
+                show_origin: *show_origin,
+                vault: *vault,
+                ssh_keys: *ssh_keys,
+                gpg_keys: *gpg_keys,
+            },
+            ConfigCommand::Unset { key, all } => ResolvedCommand::Unset {
+                key: key.clone(),
+                all: *all,
+            },
+            ConfigCommand::Import => ResolvedCommand::Import,
+            ConfigCommand::Path => ResolvedCommand::Path,
+            ConfigCommand::Edit => ResolvedCommand::Edit,
+            ConfigCommand::GenerateSshKey { remote } => ResolvedCommand::GenerateSshKey {
+                remote: remote.clone(),
+            },
+            ConfigCommand::GenerateGpgKey { name, email, usage } => {
+                ResolvedCommand::GenerateGpgKey {
+                    name: name.clone(),
+                    email: email.clone(),
+                    usage: usage.clone(),
+                }
+            }
+        });
+    }
+
+    // Git-compat flag translation
+    if args.list {
+        return Ok(ResolvedCommand::List {
+            name_only: false,
+            show_origin: args.show_origin,
+            vault: false,
+            ssh_keys: false,
+            gpg_keys: false,
+        });
+    }
+    if args.import || args.key.as_deref() == Some("import") {
+        if args.import && args.key.is_some() {
+            return Err(CliError::from_legacy_string(
+                "error: `libra config --import` does not accept <key>",
+            ));
+        }
+        return Ok(ResolvedCommand::Import);
+    }
+
+    // Check for "edit" positional
+    if args.key.as_deref() == Some("edit") {
+        return Ok(ResolvedCommand::Edit);
+    }
+    // Check for "path" positional
+    if args.key.as_deref() == Some("path") {
+        return Ok(ResolvedCommand::Path);
+    }
+
+    // All remaining modes need a key
+    let key = args.key.as_deref().ok_or_else(|| {
+        CliError::from_legacy_string("error: missing required argument: <key>").with_exit_code(2)
+    })?;
+
+    // Validate key format (must contain at least one dot)
+    if !key.contains('.') {
+        let mut msg = format!("error: key does not contain a section: {key}");
+        if key == "init" || key == "clone" {
+            msg.push_str(&format!(
+                "\n\nhint: `{key}` is a top-level command. Try `libra {key}`."
+            ));
+        }
+        return Err(CliError::from_legacy_string(msg).with_exit_code(1));
+    }
+
+    // --default (-d) is only valid with --get, --get-all, or get-regexp
+    if args.default.is_some() && !args.get && !args.get_all && !args.get_regexp {
+        return Err(CliError::from_legacy_string(
+            "error: --default (-d) can only be used with --get, --get-all, or --get-regexp",
+        )
+        .with_exit_code(2));
+    }
+
+    if args.get_regexp {
+        return Ok(ResolvedCommand::Get {
+            key: key.to_string(),
+            all: false,
+            reveal: false,
+            regexp: true,
+            default: args.default.clone(),
+        });
+    }
+    if args.get {
+        return Ok(ResolvedCommand::Get {
+            key: key.to_string(),
+            all: false,
+            reveal: false,
+            regexp: false,
+            default: args.default.clone(),
+        });
+    }
+    if args.get_all {
+        return Ok(ResolvedCommand::Get {
+            key: key.to_string(),
+            all: true,
+            reveal: false,
+            regexp: false,
+            default: args.default.clone(),
+        });
+    }
+    if args.unset {
+        return Ok(ResolvedCommand::Unset {
+            key: key.to_string(),
+            all: false,
+        });
+    }
+    if args.unset_all {
+        return Ok(ResolvedCommand::Unset {
+            key: key.to_string(),
+            all: true,
+        });
+    }
+    if args.add {
+        let value = args.valuepattern.as_deref().ok_or_else(|| {
+            CliError::from_legacy_string("error: missing required argument: <value>")
+                .with_exit_code(2)
+        })?;
+        return Ok(ResolvedCommand::Set {
+            key: key.to_string(),
+            value: Some(value.to_string()),
+            add: true,
+            encrypt: false,
+            plaintext: false,
+            stdin: false,
+        });
+    }
+
+    // Default: set mode (key + optional value).
+    // When value is omitted, handle_set will trigger interactive input for
+    // sensitive keys or report a missing-value error for ordinary keys.
+    Ok(ResolvedCommand::Set {
+        key: key.to_string(),
+        value: args.valuepattern.clone(),
+        add: false,
+        encrypt: false,
+        plaintext: false,
+        stdin: false,
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Handler implementations
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_set(
+    key: &str,
+    value: Option<&str>,
+    add: bool,
+    encrypt: bool,
+    plaintext: bool,
+    stdin: bool,
+    scope: ConfigScope,
+    output: &OutputConfig,
+) -> CliResult<()> {
+    // Validate key format
+    if !key.contains('.') {
+        return Err(CliError::from_legacy_string(format!(
+            "error: key does not contain a section: {key}"
+        ))
+        .with_exit_code(1));
+    }
+
+    // --encrypt and --plaintext are mutually exclusive
+    if encrypt && plaintext {
+        return Err(CliError::from_legacy_string(
+            "error: --encrypt and --plaintext are mutually exclusive",
+        ));
+    }
+
+    // --plaintext must not be used with vault internal/secret keys
+    if plaintext && (is_vault_internal_key(key) || key.starts_with("vault.env.")) {
+        return Err(CliError::from_legacy_string(
+            "error: --plaintext cannot be used with vault internal/secret keys",
+        ));
+    }
+
+    // Check encryption state inheritance from existing entries.
+    let existing_entries = ScopedConfig::get_all(scope, key).await.map_err(|e| {
+        config_read_cli_error(format!(
+            "failed to read {} config while checking existing values for key '{}': {e}",
+            scope_name(scope),
+            key
+        ))
+    })?;
+    let has_encrypted = existing_entries.iter().any(|e| e.encrypted);
+    let has_plaintext = existing_entries.iter().any(|e| !e.encrypted);
+
+    // Resolve the value
+    let resolved_value = if stdin {
+        if value.is_some() {
+            return Err(CliError::from_legacy_string(
+                "error: cannot use both value argument and --stdin",
+            ));
+        }
+        let mut buf = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf).map_err(|e| {
+            CliError::from_legacy_string(format!("error: failed to read from stdin: {e}"))
+        })?;
+        // Strip trailing newline (like Git)
+        if buf.ends_with('\n') {
+            buf.pop();
+            if buf.ends_with('\r') {
+                buf.pop();
+            }
+        }
+        buf
+    } else if let Some(v) = value {
+        v.to_string()
+    } else {
+        // No value provided
+        let needs_protected_input =
+            !plaintext && (encrypt || is_sensitive_key(key) || has_encrypted);
+
+        if needs_protected_input {
+            // Check if interactive mode is available
+            if output.is_json() || !std::io::stdin().is_terminal() {
+                return Err(CliError::from_legacy_string(format!(
+                    "error: missing value for protected key '{key}' (non-interactive environment)"
+                ))
+                .with_exit_code(2));
+            }
+            // Interactive secure input (no echo)
+            eprint!("Enter value for {key}: ");
+            rpassword::read_password().map_err(|e| {
+                CliError::from_legacy_string(format!("error: failed to read input: {e}"))
+            })?
+        } else {
+            return Err(CliError::from_legacy_string(format!(
+                "error: missing value for key '{key}'"
+            ))
+            .with_exit_code(2));
+        }
+    };
+
+    // Determine encryption
+    let should_encrypt = if encrypt {
+        true
+    } else if plaintext {
+        false
+    } else if has_encrypted {
+        true // Inherit encryption from existing entries
+    } else {
+        is_sensitive_key(key)
+    };
+
+    // Same-key-same-state constraint for --add.
+    if add && ((should_encrypt && has_plaintext) || (!should_encrypt && has_encrypted)) {
+        return Err(CliError::from_legacy_string(
+            "error: cannot mix encrypted and plaintext values for the same key",
+        ));
+    }
+
+    // Encrypt the value if needed
+    let store_value = if should_encrypt {
+        let sn = scope_name(scope);
+        let unseal_key = match crate::internal::vault::load_unseal_key_for_scope(sn).await {
+            Some(key) => key,
+            None => {
+                // Lazy init
+                let key = crate::internal::vault::lazy_init_vault_for_scope(sn)
+                    .await
+                    .map_err(|e| {
+                        CliError::from_legacy_string(format!(
+                            "error: failed to initialize vault for {sn} scope: {e}"
+                        ))
+                    })?;
+                if !output.quiet && !output.is_json() {
+                    println!("Initialized vault for {sn} scope");
+                }
+                key
+            }
+        };
+        let ciphertext =
+            crate::internal::vault::encrypt_token(&unseal_key, resolved_value.as_bytes()).map_err(
+                |e| CliError::from_legacy_string(format!("error: encryption failed: {e}")),
+            )?;
+        hex::encode(ciphertext)
+    } else {
+        resolved_value.clone()
+    };
+
+    if add {
+        ScopedConfig::add(scope, key, &store_value, should_encrypt)
             .await
             .map_err(CliError::from_legacy_string)?;
+        emit_set_ack("add", scope, key, should_encrypt, output)?;
+    } else {
+        ScopedConfig::set(scope, key, &store_value, should_encrypt)
+            .await
+            .map_err(|e| {
+                let err = CliError::from_legacy_string(&e);
+                if e.contains("values exist") {
+                    err.with_exit_code(5)
+                } else {
+                    err
+                }
+            })?;
+        emit_set_ack("set", scope, key, should_encrypt, output)?;
+    }
+    Ok(())
+}
+
+/// Decrypt a hex-encoded ciphertext from a config value using the vault unseal key.
+/// The `scope` parameter determines which unseal key to load (local or global).
+async fn decrypt_config_value(hex_value: &str, scope: &str) -> Result<String, String> {
+    let unseal_key = crate::internal::vault::load_unseal_key_for_scope(scope)
+        .await
+        .ok_or_else(|| format!("vault not initialized for {scope} scope — cannot decrypt"))?;
+    let ciphertext =
+        hex::decode(hex_value).map_err(|e| format!("failed to decode encrypted value: {e}"))?;
+    crate::internal::vault::decrypt_token(&unseal_key, &ciphertext)
+        .map_err(|e| format!("decryption failed: {e}"))
+}
+
+fn config_read_cli_error(message: impl Into<String>) -> CliError {
+    CliError::fatal(message)
+        .with_stable_code(StableErrorCode::IoReadFailed)
+        .with_exit_code(128)
+}
+
+fn config_decrypt_cli_error(key: &str, scope_label: &str, error: impl Into<String>) -> CliError {
+    CliError::fatal(format!(
+        "failed to decrypt value for key '{key}' from {scope_label} config: {}",
+        error.into()
+    ))
+    .with_stable_code(StableErrorCode::RepoStateInvalid)
+    .with_exit_code(128)
+}
+
+async fn render_get_value(
+    entry: &ConfigKvEntry,
+    reveal: bool,
+    scope: ConfigScope,
+    _use_cascade: bool,
+) -> CliResult<String> {
+    if !entry.encrypted {
+        return Ok(entry.value.clone());
+    }
+
+    if !reveal || is_vault_internal_key(&entry.key) {
+        return Ok("<REDACTED>".to_string());
+    }
+
+    let scope_label = scope_name(scope);
+    let decrypted = decrypt_config_value(&entry.value, scope_label)
+        .await
+        .map_err(|e| config_decrypt_cli_error(&entry.key, scope_label, e))?;
+
+    Ok(decrypted)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_get(
+    key: &str,
+    all: bool,
+    reveal: bool,
+    regexp: bool,
+    default: Option<&str>,
+    scope: ConfigScope,
+    use_cascade: bool,
+    output: &OutputConfig,
+) -> CliResult<()> {
+    // Block --reveal for vault internal keys on exact-key queries
+    if reveal && !regexp && !all && is_vault_internal_key(key) {
+        return Err(CliError::from_legacy_string(format!(
+            "error: key '{}' is a vault internal credential and cannot be revealed",
+            key
+        )));
+    }
+
+    if regexp {
+        // Regex search across all keys
+        let entries: Vec<(ConfigKvEntry, ConfigScope)> = if use_cascade {
+            let mut all_entries = Vec::new();
+            for s in ConfigScope::CASCADE_ORDER {
+                if s != ConfigScope::Local {
+                    let Some(path) = s.get_config_path() else {
+                        continue;
+                    };
+                    if !path.exists() {
+                        continue;
+                    }
+                }
+                let scope_entries = ScopedConfig::get_regexp(s, key).await.map_err(|e| {
+                    config_read_cli_error(format!("failed to read {} config: {e}", scope_name(s)))
+                })?;
+                for e in scope_entries {
+                    all_entries.push((e, s));
+                }
+            }
+            all_entries
+        } else {
+            ScopedConfig::get_regexp(scope, key)
+                .await
+                .map_err(CliError::from_legacy_string)?
+                .into_iter()
+                .map(|e| (e, scope))
+                .collect()
+        };
+
+        // Build display values with decryption support
+        let mut display_entries = Vec::new();
+        for (e, s) in &entries {
+            let val = render_get_value(e, reveal, *s, use_cascade).await?;
+            display_entries.push((e, s, val));
+        }
+
         if output.is_json() {
             crate::utils::output::emit_json_data(
                 "config",
                 &serde_json::json!({
-                    "action": "import",
-                    "scope": summary.scope,
-                    "imported": summary.imported,
-                    "skipped_duplicates": summary.skipped_duplicates,
-                    "ignored_invalid": summary.ignored_invalid,
+                    "action": "get-regexp",
+                    "pattern": key,
+                    "entries": display_entries.iter().map(|(e, s, val)| serde_json::json!({
+                        "key": e.key,
+                        "value": val,
+                        "origin": scope_name(**s),
+                        "encrypted": e.encrypted,
+                    })).collect::<Vec<_>>(),
                 }),
                 output,
             )?;
-        } else {
-            print_import_summary(&summary, output);
+        } else if !output.quiet {
+            for (e, _, val) in &display_entries {
+                println!("{} = {val}", e.key);
+            }
         }
         return Ok(());
     }
 
-    if args.list {
-        let entries = list_config(args.name_only, scope, use_cascade)
+    if all {
+        // Get all values for a specific key
+        let entries: Vec<(ConfigKvEntry, ConfigScope)> = if use_cascade {
+            get_all_cascaded(key).await.map_err(config_read_cli_error)?
+        } else {
+            ScopedConfig::get_all(scope, key)
+                .await
+                .map_err(CliError::from_legacy_string)?
+                .into_iter()
+                .map(|e| (e, scope))
+                .collect()
+        };
+
+        if entries.is_empty()
+            && let Some(d) = default
+        {
+            if output.is_json() {
+                crate::utils::output::emit_json_data(
+                    "config",
+                    &serde_json::json!({
+                        "action": "get-all",
+                        "key": key,
+                        "entries": [{"value": d, "origin": serde_json::Value::Null}],
+                        "default_applied": true,
+                    }),
+                    output,
+                )?;
+            } else if !output.quiet {
+                println!("{d}");
+            }
+            return Ok(());
+        }
+
+        // Build display values with decryption support
+        let mut display_entries = Vec::new();
+        for (e, s) in &entries {
+            let val = render_get_value(e, reveal, *s, use_cascade).await?;
+            display_entries.push((e, s, val));
+        }
+
+        if output.is_json() {
+            crate::utils::output::emit_json_data(
+                "config",
+                &serde_json::json!({
+                    "action": "get-all",
+                    "key": key,
+                    "entries": display_entries.iter().map(|(e, s, val)| serde_json::json!({
+                        "value": val,
+                        "origin": scope_name(**s),
+                        "encrypted": e.encrypted,
+                    })).collect::<Vec<_>>(),
+                    "default_applied": false,
+                }),
+                output,
+            )?;
+        } else if !output.quiet {
+            for (_, _, val) in &display_entries {
+                println!("{val}");
+            }
+        }
+    } else {
+        // Get single value (last-one-wins)
+        let entry: Option<(ConfigKvEntry, ConfigScope)> = if use_cascade {
+            get_cascaded(key).await.map_err(config_read_cli_error)?
+        } else {
+            ScopedConfig::get(scope, key)
+                .await
+                .map_err(CliError::from_legacy_string)?
+                .map(|e| (e, scope))
+        };
+
+        let (display_value, default_applied, origin_scope) = match entry {
+            Some((ref e, s)) => {
+                let val = render_get_value(e, reveal, s, use_cascade).await?;
+                (val, false, Some(s))
+            }
+            None => {
+                if let Some(d) = default {
+                    (d.to_string(), true, None)
+                } else {
+                    // Spell correction: find closest matching key
+                    let all_keys = if use_cascade {
+                        let mut keys = Vec::new();
+                        for s in ConfigScope::CASCADE_ORDER {
+                            if s != ConfigScope::Local {
+                                let Some(path) = s.get_config_path() else {
+                                    continue;
+                                };
+                                if !path.exists() {
+                                    continue;
+                                }
+                            }
+                            if let Ok(entries) = ScopedConfig::list_all(s).await {
+                                for e in entries {
+                                    if !keys.contains(&e.key) {
+                                        keys.push(e.key);
+                                    }
+                                }
+                            }
+                        }
+                        keys
+                    } else {
+                        ScopedConfig::list_all(scope)
+                            .await
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|e| e.key)
+                            .collect()
+                    };
+
+                    let mut best_match = None;
+                    let mut best_dist = usize::MAX;
+                    for k in &all_keys {
+                        let dist = levenshtein(key, k);
+                        if dist < best_dist && dist <= 3 {
+                            best_dist = dist;
+                            best_match = Some(k.clone());
+                        }
+                    }
+
+                    let mut msg = format!("key '{key}' not found in any scope");
+                    if let Some(suggestion) = best_match {
+                        msg.push_str(&format!("\n\nhint: did you mean '{suggestion}'?"));
+                    }
+                    msg.push_str("\nhint: use libra config list to see all configured keys");
+                    return Err(CliError::failure(msg)
+                        .with_stable_code(StableErrorCode::CliInvalidArguments)
+                        .with_exit_code(1));
+                }
+            }
+        };
+
+        if output.is_json() {
+            crate::utils::output::emit_json_data(
+                "config",
+                &serde_json::json!({
+                    "action": "get",
+                    "key": key,
+                    "value": display_value,
+                    "origin": origin_scope.map(scope_name),
+                    "default_applied": default_applied,
+                }),
+                output,
+            )?;
+        } else if !output.quiet {
+            println!("{display_value}");
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_list(
+    name_only: bool,
+    show_origin: bool,
+    vault: bool,
+    ssh_keys: bool,
+    gpg_keys: bool,
+    scope: ConfigScope,
+    use_cascade: bool,
+    output: &OutputConfig,
+) -> CliResult<()> {
+    if ssh_keys {
+        let entries = list_ssh_key_entries(scope).await?;
+        if output.is_json() {
+            crate::utils::output::emit_json_data(
+                "config",
+                &serde_json::json!({
+                    "action": "list-ssh-keys",
+                    "keys": entries,
+                    "count": entries.len(),
+                }),
+                output,
+            )?;
+        } else if !output.quiet {
+            if entries.is_empty() {
+                println!("No SSH keys configured.");
+            } else {
+                println!("SSH keys:");
+                for entry in &entries {
+                    println!("  {:<10} {}", entry.remote, entry.public_key);
+                }
+                println!();
+                println!("{} keys configured", entries.len());
+                println!();
+                println!("Tip: use libra config generate-ssh-key --remote <name> to add more");
+            }
+        }
+        return Ok(());
+    }
+
+    if gpg_keys {
+        let entries = list_gpg_key_entries(scope).await?;
+        if output.is_json() {
+            crate::utils::output::emit_json_data(
+                "config",
+                &serde_json::json!({
+                    "action": "list-gpg-keys",
+                    "keys": entries,
+                    "count": entries.len(),
+                }),
+                output,
+            )?;
+        } else if !output.quiet {
+            if entries.is_empty() {
+                println!("No GPG keys configured.");
+            } else {
+                println!("GPG keys:");
+                for entry in &entries {
+                    let signing_suffix = if entry.usage == "signing" && entry.signing_enabled {
+                        "  (vault.signing = true)"
+                    } else {
+                        ""
+                    };
+                    println!(
+                        "  {:<10} {}{}",
+                        entry.usage, entry.pubkey_config_key, signing_suffix
+                    );
+                }
+                println!();
+                println!("{} keys configured", entries.len());
+            }
+        }
+        return Ok(());
+    }
+
+    if vault {
+        // List vault.env.* entries across scopes
+        let mut entries = Vec::new();
+        for s in ConfigScope::CASCADE_ORDER {
+            if s != ConfigScope::Local {
+                let Some(path) = s.get_config_path() else {
+                    continue;
+                };
+                if !path.exists() {
+                    continue;
+                }
+            }
+            if let Ok(scope_entries) = ScopedConfig::get_by_prefix(s, "vault.env.").await {
+                for e in scope_entries {
+                    let plaintext_warning = if !e.encrypted && is_sensitive_key(&e.key) {
+                        " [PLAINTEXT]"
+                    } else {
+                        ""
+                    };
+                    entries.push(ConfigListEntry {
+                        key: e.key,
+                        value: Some(if e.encrypted {
+                            "<REDACTED>".to_string()
+                        } else {
+                            format!("{}{plaintext_warning}", e.value)
+                        }),
+                        origin: Some(scope_name(s).to_string()),
+                        encrypted: Some(e.encrypted),
+                    });
+                }
+            }
+        }
+
+        if output.is_json() {
+            crate::utils::output::emit_json_data(
+                "config",
+                &serde_json::json!({
+                    "action": "list-vault",
+                    "entries": entries,
+                    "encrypted_count": entries.len(),
+                }),
+                output,
+            )?;
+        } else if !output.quiet {
+            if entries.is_empty() {
+                println!("No vault environment variables configured.");
+            } else {
+                println!("Vault environment variables (cascade):");
+                for e in &entries {
+                    let origin = e.origin.as_deref().unwrap_or("?");
+                    let val = e.value.as_deref().unwrap_or("");
+                    println!("  {:<8} {} = {}  (encrypted)", origin, e.key, val);
+                }
+                println!("\n{} encrypted entries", entries.len());
+                println!("\nNext steps:");
+                println!("  - add:     libra config set vault.env.<ENV_VAR_NAME>");
+                println!("  - remove:  libra config unset vault.env.<name>");
+            }
+        }
+        return Ok(());
+    }
+
+    if show_origin {
+        // Show all entries with scope labels
+        let mut entries = Vec::new();
+        for s in ConfigScope::CASCADE_ORDER {
+            if s != ConfigScope::Local {
+                let Some(path) = s.get_config_path() else {
+                    continue;
+                };
+                if !path.exists() {
+                    continue;
+                }
+            }
+            if let Ok(scope_entries) = ScopedConfig::list_all(s).await {
+                for e in scope_entries {
+                    let plaintext_warning = if !e.encrypted && is_sensitive_key(&e.key) {
+                        " [PLAINTEXT]"
+                    } else {
+                        ""
+                    };
+                    entries.push(ConfigListEntry {
+                        key: e.key.clone(),
+                        value: if name_only {
+                            None
+                        } else if e.encrypted {
+                            Some("<REDACTED>".to_string())
+                        } else {
+                            Some(format!("{}{plaintext_warning}", e.value))
+                        },
+                        origin: if show_origin {
+                            Some(scope_name(s).to_string())
+                        } else {
+                            None
+                        },
+                        encrypted: Some(e.encrypted),
+                    });
+                }
+            }
+        }
+
+        if output.is_json() {
+            crate::utils::output::emit_json_data(
+                "config",
+                &serde_json::json!({
+                    "action": "list",
+                    "scope": if show_origin { "all" } else { scope_name(scope) },
+                    "cascade": use_cascade,
+                    "entries": entries,
+                    "count": entries.len(),
+                }),
+                output,
+            )?;
+        } else if !output.quiet {
+            for e in &entries {
+                match (&e.origin, &e.value) {
+                    (Some(origin), Some(val)) => println!("  {:<8} {} = {val}", origin, e.key),
+                    (Some(origin), None) => println!("  {:<8} {}", origin, e.key),
+                    (None, Some(val)) => println!("{}={val}", e.key),
+                    (None, None) => println!("{}", e.key),
+                }
+            }
+        }
+    } else {
+        // Single scope list
+        let scope_entries = ScopedConfig::list_all(scope)
             .await
             .map_err(CliError::from_legacy_string)?;
+
+        let entries: Vec<ConfigListEntry> = scope_entries
+            .into_iter()
+            .map(|e| {
+                let plaintext_warning = if !e.encrypted && is_sensitive_key(&e.key) {
+                    " [PLAINTEXT]"
+                } else {
+                    ""
+                };
+                ConfigListEntry {
+                    key: e.key.clone(),
+                    value: if name_only {
+                        None
+                    } else if e.encrypted {
+                        Some("<REDACTED>".to_string())
+                    } else {
+                        Some(format!("{}{plaintext_warning}", e.value))
+                    },
+                    origin: None,
+                    encrypted: Some(e.encrypted),
+                }
+            })
+            .collect();
+
         if output.is_json() {
             crate::utils::output::emit_json_data(
                 "config",
                 &serde_json::json!({
                     "action": "list",
                     "scope": scope_name(scope),
-                    "use_cascade": use_cascade,
-                    "name_only": args.name_only,
                     "entries": entries,
+                    "count": entries.len(),
                 }),
                 output,
             )?;
-        } else {
-            print_config_entries(&entries, output);
-        }
-        Ok(())
-    } else {
-        let origin_key = args.key.as_deref().ok_or_else(|| {
-            CliError::from_legacy_string("error: missing required argument: <key>")
-        })?;
-        let key = parse_key(origin_key).map_err(CliError::from_legacy_string)?;
-        let key_display = key.display();
-        if args.add {
-            let value = args.valuepattern.as_deref().ok_or_else(|| {
-                CliError::from_legacy_string("error: missing required argument: <value_pattern>")
-            })?;
-            add_config(&key, value, scope)
-                .await
-                .map_err(CliError::from_legacy_string)?;
-            emit_config_ack("add", scope, &key_display, output)?;
-            Ok(())
-        } else if args.get {
-            let result = get_config(
-                &key,
-                args.default.as_deref(),
-                args.valuepattern.as_deref(),
-                scope,
-                use_cascade,
-            )
-            .await
-            .map_err(CliError::from_legacy_string)?;
-            if output.is_json() {
-                crate::utils::output::emit_json_data(
-                    "config",
-                    &serde_json::json!({
-                        "action": "get",
-                        "scope": scope_name(scope),
-                        "use_cascade": use_cascade,
-                        "key": key_display,
-                        "values": result.values,
-                        "default_applied": result.default_applied,
-                    }),
-                    output,
-                )?;
-            } else {
-                print_config_values(&result, output);
+        } else if !output.quiet {
+            for e in &entries {
+                match &e.value {
+                    Some(val) => println!("{}={val}", e.key),
+                    None => println!("{}", e.key),
+                }
             }
-            Ok(())
-        } else if args.get_all {
-            let result = get_all_config(
-                &key,
-                args.default.as_deref(),
-                args.valuepattern.as_deref(),
-                scope,
-                use_cascade,
-            )
-            .await
-            .map_err(CliError::from_legacy_string)?;
-            if output.is_json() {
-                crate::utils::output::emit_json_data(
-                    "config",
-                    &serde_json::json!({
-                        "action": "get_all",
-                        "scope": scope_name(scope),
-                        "use_cascade": use_cascade,
-                        "key": key_display,
-                        "values": result.values,
-                        "default_applied": result.default_applied,
-                    }),
-                    output,
-                )?;
-            } else {
-                print_config_values(&result, output);
-            }
-            Ok(())
-        } else if args.unset {
-            unset_config(&key, args.valuepattern.as_deref(), scope)
-                .await
-                .map_err(CliError::from_legacy_string)?;
-            emit_config_ack("unset", scope, &key_display, output)?;
-            Ok(())
-        } else if args.unset_all {
-            unset_all_config(&key, args.valuepattern.as_deref(), scope)
-                .await
-                .map_err(CliError::from_legacy_string)?;
-            emit_config_ack("unset_all", scope, &key_display, output)?;
-            Ok(())
-        } else {
-            // If none of the above flags are present, then default to setting a config
-            let value = args.valuepattern.as_deref().ok_or_else(|| {
-                CliError::from_legacy_string("error: missing required argument: <value_pattern>")
-            })?;
-            set_config(&key, value, scope)
-                .await
-                .map_err(CliError::from_legacy_string)?;
-            emit_config_ack("set", scope, &key_display, output)?;
-            Ok(())
         }
-    }
-}
-
-fn scope_to_git_flag(scope: ConfigScope) -> &'static str {
-    match scope {
-        ConfigScope::Local => "--local",
-        ConfigScope::Global => "--global",
-        ConfigScope::System => "--system",
-    }
-}
-
-fn scope_name(scope: ConfigScope) -> &'static str {
-    match scope {
-        ConfigScope::Local => "local",
-        ConfigScope::Global => "global",
-        ConfigScope::System => "system",
-    }
-}
-
-fn print_import_summary(summary: &ConfigImportSummary, output: &OutputConfig) {
-    if output.quiet {
-        return;
-    }
-
-    if summary.imported > 0 {
-        println!(
-            "Imported {} entries from Git {} config.",
-            summary.imported, summary.scope
-        );
-    } else {
-        println!(
-            "No new entries to import from Git {} config.",
-            summary.scope
-        );
-    }
-    if summary.skipped_duplicates > 0 {
-        println!("  (skipped {} duplicates)", summary.skipped_duplicates);
-    }
-}
-
-fn print_config_values(result: &ConfigValueResult, output: &OutputConfig) {
-    if output.quiet {
-        return;
-    }
-
-    for value in &result.values {
-        println!("{value}");
-    }
-}
-
-fn print_config_entries(entries: &[ConfigListEntry], output: &OutputConfig) {
-    if output.quiet {
-        return;
-    }
-
-    for entry in entries {
-        match &entry.value {
-            Some(value) => println!("{}={value}", entry.key),
-            None => println!("{}", entry.key),
-        }
-    }
-}
-
-fn emit_config_ack(
-    action: &str,
-    scope: ConfigScope,
-    key: &str,
-    output: &OutputConfig,
-) -> CliResult<()> {
-    if output.is_json() {
-        crate::utils::output::emit_json_data(
-            "config",
-            &serde_json::json!({
-                "action": action,
-                "scope": scope_name(scope),
-                "key": key,
-            }),
-            output,
-        )?;
     }
     Ok(())
 }
 
+async fn list_ssh_key_entries(scope: ConfigScope) -> CliResult<Vec<ConfigSshKeyEntry>> {
+    let mut entries = ScopedConfig::get_by_prefix(scope, "vault.ssh.")
+        .await
+        .map_err(CliError::from_legacy_string)?
+        .into_iter()
+        .filter_map(|entry| {
+            let remote = entry
+                .key
+                .strip_prefix("vault.ssh.")?
+                .strip_suffix(".pubkey")?;
+            let mut parts = entry.value.split_whitespace();
+            let key_type = parts.next().unwrap_or("ssh").to_string();
+            let _material = parts.next()?;
+            let key_id = parts.collect::<Vec<_>>().join(" ");
+            Some(ConfigSshKeyEntry {
+                remote: remote.to_string(),
+                key_type,
+                public_key: entry.value,
+                key_id: (!key_id.is_empty()).then_some(key_id),
+            })
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.remote.cmp(&right.remote));
+    Ok(entries)
+}
+
+async fn list_gpg_key_entries(scope: ConfigScope) -> CliResult<Vec<ConfigGpgKeyEntry>> {
+    let mut entries = ScopedConfig::list_all(scope)
+        .await
+        .map_err(CliError::from_legacy_string)?
+        .into_iter()
+        .filter_map(|entry| {
+            let usage = match entry.key.as_str() {
+                "vault.gpg.pubkey" | "vault.gpg_pubkey" => "signing".to_string(),
+                key if key.starts_with("vault.gpg.") && key.ends_with(".pubkey") => key
+                    .strip_prefix("vault.gpg.")?
+                    .strip_suffix(".pubkey")?
+                    .to_string(),
+                _ => return None,
+            };
+            Some((usage, entry.key))
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    entries.dedup_by(|left, right| left.0 == right.0);
+
+    let signing_enabled = ScopedConfig::get(scope, "vault.signing")
+        .await
+        .map_err(CliError::from_legacy_string)?
+        .map(|entry| entry.value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    Ok(entries
+        .into_iter()
+        .map(|(usage, pubkey_config_key)| ConfigGpgKeyEntry {
+            signing_enabled: usage == "signing" && signing_enabled,
+            usage,
+            key_type: "PGP 2048".to_string(),
+            pubkey_config_key,
+        })
+        .collect())
+}
+
+async fn handle_unset(
+    key: &str,
+    all: bool,
+    scope: ConfigScope,
+    output: &OutputConfig,
+) -> CliResult<()> {
+    let count = if all {
+        ScopedConfig::unset_all(scope, key)
+            .await
+            .map_err(CliError::from_legacy_string)?
+    } else {
+        ScopedConfig::unset(scope, key).await.map_err(|e| {
+            let err = CliError::from_legacy_string(&e);
+            if e.contains("values exist") {
+                err.with_exit_code(5)
+            } else {
+                err
+            }
+        })?
+    };
+
+    if output.is_json() {
+        crate::utils::output::emit_json_data(
+            "config",
+            &serde_json::json!({
+                "action": if all { "unset-all" } else { "unset" },
+                "scope": scope_name(scope),
+                "key": key,
+                "removed_count": count,
+            }),
+            output,
+        )?;
+    } else if !output.quiet {
+        if all && count > 1 {
+            println!(
+                "Unset {}: {} (removed {} values)",
+                scope_name(scope),
+                key,
+                count
+            );
+        } else {
+            println!("Unset {}: {}", scope_name(scope), key);
+        }
+    }
+    Ok(())
+}
+
+async fn handle_import(scope: ConfigScope, output: &OutputConfig) -> CliResult<()> {
+    let summary = import_git_config(scope)
+        .await
+        .map_err(CliError::from_legacy_string)?;
+
+    if output.is_json() {
+        crate::utils::output::emit_json_data(
+            "config",
+            &serde_json::json!({
+                "action": "import",
+                "source": format!("git-{}", summary.scope),
+                "target_scope": summary.scope,
+                "imported": summary.imported,
+                "skipped_duplicates": summary.skipped_duplicates,
+                "auto_encrypted": summary.auto_encrypted,
+                "collapsed_multivalue_warnings": summary.collapsed_multivalue_warnings,
+                "ignored_invalid": summary.ignored_invalid,
+            }),
+            output,
+        )?;
+    } else if !output.quiet {
+        print_import_summary(&summary);
+    }
+    Ok(())
+}
+
+async fn handle_path(scope: ConfigScope, output: &OutputConfig) -> CliResult<()> {
+    let path = match scope {
+        ConfigScope::Local => {
+            let storage = crate::utils::util::try_get_storage_path(None).map_err(|_| {
+                CliError::from_legacy_string(
+                    "error: not a libra repository (or any parent up to /)\n\nhint: use --global to read/write user-level config without a repository\nhint: use libra init to create a repository here",
+                )
+            })?;
+            storage.join(crate::utils::util::DATABASE)
+        }
+        ConfigScope::Global => scope.get_config_path().ok_or_else(|| {
+            CliError::from_legacy_string("error: could not determine global config path")
+        })?,
+    };
+
+    let exists = path.exists();
+
+    if output.is_json() {
+        crate::utils::output::emit_json_data(
+            "config",
+            &serde_json::json!({
+                "action": "path",
+                "scope": scope_name(scope),
+                "path": path.to_string_lossy(),
+                "exists": exists,
+            }),
+            output,
+        )?;
+    } else if !output.quiet {
+        println!("{}", path.display());
+    }
+    Ok(())
+}
+
+async fn handle_generate_ssh_key(
+    remote: &str,
+    _scope: ConfigScope,
+    output: &OutputConfig,
+) -> CliResult<()> {
+    // Validate remote name
+    if !remote
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        || remote.is_empty()
+        || remote.len() > 64
+    {
+        return Err(CliError::from_legacy_string(format!(
+            "error: invalid remote name '{remote}': only [a-zA-Z0-9_-] allowed, 1-64 chars"
+        )));
+    }
+
+    // Verify remote exists
+    let remote_exists = ConfigKv::remote_config(remote)
+        .await
+        .map_err(|e| CliError::from_legacy_string(e.to_string()))?;
+    if remote_exists.is_none() {
+        return Err(CliError::from_legacy_string(format!(
+            "error: remote '{remote}' not found, add it first with libra remote add"
+        )));
+    }
+
+    // Get vault root dir and unseal key
+    let storage = crate::utils::util::try_get_storage_path(None)
+        .map_err(|_| CliError::from_legacy_string("error: not a libra repository"))?;
+
+    let unseal_key = match crate::internal::vault::load_unseal_key_for_scope("local").await {
+        Some(key) => key,
+        None => {
+            let key = crate::internal::vault::lazy_init_vault_for_scope("local")
+                .await
+                .map_err(|e| {
+                    CliError::from_legacy_string(format!(
+                        "error: failed to initialize vault for local scope: {e}"
+                    ))
+                })?;
+            if !output.quiet {
+                println!("Initialized vault for local scope");
+            }
+            key
+        }
+    };
+
+    // Get user name for key ID
+    let user_name = ConfigKv::get("user.name")
+        .await
+        .ok()
+        .flatten()
+        .map(|e| e.value)
+        .unwrap_or_else(|| "Libra User".to_string());
+
+    // Generate key pair via vault (returns both pub and priv)
+    let (public_key, private_key) =
+        crate::internal::vault::generate_ssh_key_pair(&storage, &unseal_key, &user_name)
+            .await
+            .map_err(|e| {
+                CliError::from_legacy_string(format!("error: SSH key generation failed: {e}"))
+            })?;
+
+    // Store public key plaintext in config_kv
+    let pubkey_key = format!("vault.ssh.{remote}.pubkey");
+    let _ = ConfigKv::set(&pubkey_key, &public_key, false).await;
+
+    // Store private key encrypted in config_kv (vault-backed, no persistent file)
+    let privkey_key = format!("vault.ssh.{remote}.privkey");
+    let encrypted_privkey = crate::internal::vault::encrypt_token(
+        &unseal_key,
+        private_key.as_bytes(),
+    )
+    .map_err(|e| {
+        CliError::from_legacy_string(format!("error: failed to encrypt SSH private key: {e}"))
+    })?;
+    let _ = ConfigKv::set(&privkey_key, &hex::encode(encrypted_privkey), true).await;
+
+    if output.is_json() {
+        crate::utils::output::emit_json_data(
+            "config",
+            &serde_json::json!({
+                "action": "generate-ssh-key",
+                "remote": remote,
+                "type": "RSA",
+                "bits": 3072,
+                "public_key": public_key,
+                "pubkey_config_key": pubkey_key,
+                "privkey_config_key": privkey_key,
+                "storage": "vault-encrypted",
+            }),
+            output,
+        )?;
+    } else if !output.quiet {
+        println!("Generated SSH key for remote '{remote}':");
+        println!("  Type:       RSA 3072");
+        println!("  Public key: {public_key}");
+        println!();
+        println!("Stored:");
+        println!("  public key:  {pubkey_key} (in config)");
+        println!("  private key: {privkey_key} (vault-encrypted, temp file on use)");
+        println!();
+        println!("Next steps:");
+        println!("  - add to GitHub:  copy the public key above to your GitHub SSH settings");
+        println!("  - push:           libra push {remote} main");
+    }
+    Ok(())
+}
+
+async fn handle_generate_gpg_key(
+    name: Option<&str>,
+    email: Option<&str>,
+    usage: Option<&str>,
+    _scope: ConfigScope,
+    output: &OutputConfig,
+) -> CliResult<()> {
+    let usage = match usage.unwrap_or("signing") {
+        "signing" => "signing",
+        "encrypt" => "encrypt",
+        other => {
+            return Err(CliError::from_legacy_string(format!(
+                "error: invalid value '{other}' for '--usage <USAGE>' (expected 'signing' or 'encrypt')"
+            )));
+        }
+    };
+    let is_signing = usage == "signing";
+
+    let storage = crate::utils::util::try_get_storage_path(None)
+        .map_err(|_| CliError::from_legacy_string("error: not a libra repository"))?;
+
+    let unseal_key = match crate::internal::vault::load_unseal_key_for_scope("local").await {
+        Some(key) => key,
+        None => {
+            let key = crate::internal::vault::lazy_init_vault_for_scope("local")
+                .await
+                .map_err(|e| {
+                    CliError::from_legacy_string(format!(
+                        "error: failed to initialize vault for local scope: {e}"
+                    ))
+                })?;
+            if !output.quiet {
+                println!("Initialized vault for local scope");
+            }
+            key
+        }
+    };
+
+    let user_name = name
+        .map(String::from)
+        .unwrap_or_else(|| "Libra User".to_string());
+
+    let user_email = email
+        .map(String::from)
+        .unwrap_or_else(|| "user@libra.local".to_string());
+
+    let public_key =
+        crate::internal::vault::generate_pgp_key(&storage, &unseal_key, &user_name, &user_email)
+            .await
+            .map_err(|e| {
+                CliError::from_legacy_string(format!("error: GPG key generation failed: {e}"))
+            })?;
+
+    // Store pubkey under usage-specific dotted key
+    let pubkey_config_key = if is_signing {
+        "vault.gpg.pubkey".to_string()
+    } else {
+        format!("vault.gpg.{usage}.pubkey")
+    };
+    let _ = ConfigKv::set(&pubkey_config_key, &public_key, false).await;
+
+    // Only enable vault.signing for signing usage
+    if is_signing {
+        let _ = ConfigKv::set("vault.signing", "true", false).await;
+    }
+
+    if output.is_json() {
+        crate::utils::output::emit_json_data(
+            "config",
+            &serde_json::json!({
+                "action": "generate-gpg-key",
+                "usage": usage,
+                "type": "PGP",
+                "bits": 2048,
+                "user": format!("{user_name} <{user_email}>"),
+                "pubkey_config_key": pubkey_config_key,
+                "signing_enabled": is_signing,
+            }),
+            output,
+        )?;
+    } else if !output.quiet {
+        if is_signing {
+            println!("Generated GPG key:");
+        } else {
+            println!("Generated GPG key (usage: {usage}):");
+        }
+        println!("  Type:    PGP 2048-bit");
+        println!("  User:    {user_name} <{user_email}>");
+        println!("  Valid:   10 years");
+        println!();
+        println!("Stored:");
+        println!("  public key: {pubkey_config_key} (in config)");
+        if is_signing {
+            println!();
+            println!("Tip: commit signing is now enabled (vault.signing = true)");
+        }
+    }
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Import from Git
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Known multi-value keys that should use --add semantics during import.
+const KNOWN_MULTI_VALUE_PREFIXES: &[&str] = &[
+    "remote.", // remote.*.fetch, remote.*.push, remote.*.pushurl
+    "branch.", // branch.*.merge
+    "url.",    // url.*.insteadOf, url.*.pushInsteadOf
+    "http.",   // http.*.extraHeader
+];
+
+const KNOWN_MULTI_VALUE_KEYS: &[&str] = &["credential.helper"];
+
+fn is_known_multi_value_key(key: &str) -> bool {
+    if KNOWN_MULTI_VALUE_KEYS.contains(&key) {
+        return true;
+    }
+    for prefix in KNOWN_MULTI_VALUE_PREFIXES {
+        if let Some(suffix) = key.strip_prefix(prefix)
+            && let Some((_name, leaf)) = suffix.rsplit_once('.')
+            && matches!(
+                leaf,
+                "fetch"
+                    | "push"
+                    | "pushurl"
+                    | "merge"
+                    | "insteadOf"
+                    | "pushInsteadOf"
+                    | "extraHeader"
+            )
+        {
+            return true;
+        }
+    }
+    false
+}
+
 async fn import_git_config(scope: ConfigScope) -> Result<ConfigImportSummary, String> {
-    let git_flag = scope_to_git_flag(scope);
+    let git_flag = match scope {
+        ConfigScope::Local => "--local",
+        ConfigScope::Global => "--global",
+    };
+
+    let mut git_args = vec!["config", git_flag, "--list", "-z"];
+    if scope == ConfigScope::Global {
+        git_args.push("--no-includes");
+    }
+
     let output = Command::new("git")
-        .args(["config", git_flag, "--list", "-z"])
+        .args(&git_args)
         .output()
         .map_err(|e| format!("failed to run `git config`: {e}"))?;
 
@@ -886,14 +1902,11 @@ async fn import_git_config(scope: ConfigScope) -> Result<ConfigImportSummary, St
         let scope_label = scope_name(scope);
         let mut msg = format!("error: failed to import Git {scope_label} config");
         if !stderr.is_empty() {
-            // Strip Git's own "fatal: " prefix to avoid "error: ... fatal: ..." duplication.
             let detail = stderr.strip_prefix("fatal: ").unwrap_or(&stderr);
             msg.push_str(&format!("\n  {detail}"));
         }
         if scope == ConfigScope::Local {
-            msg.push_str(
-                "\nHint: Run this command inside a Git repository, or use `--global` / `--system`.",
-            );
+            msg.push_str("\n\nhint: Run this command inside a Git repository, or use `--global`.");
         }
         return Err(msg);
     }
@@ -901,247 +1914,144 @@ async fn import_git_config(scope: ConfigScope) -> Result<ConfigImportSummary, St
     let mut imported = 0usize;
     let mut skipped = 0usize;
     let mut ignored_invalid = 0usize;
+    let mut auto_encrypted = 0usize;
+    let mut collapsed_warnings = 0usize;
 
+    // Track multi-value collapse for non-known keys
+    let mut last_value_wins: std::collections::HashMap<String, (String, usize)> =
+        std::collections::HashMap::new();
+
+    // First pass: collect all entries
+    let mut all_entries: Vec<(String, String)> = Vec::new();
     for entry in output
         .stdout
         .split(|b| *b == 0)
         .filter(|chunk| !chunk.is_empty())
     {
         let raw = String::from_utf8_lossy(entry);
-        let Some((key_raw, value)) = raw.split_once('\n') else {
-            ignored_invalid += 1;
-            continue;
-        };
-        let key_raw = key_raw.trim();
-        let key = match parse_key(key_raw) {
-            Ok(key) => key,
-            Err(_) => {
-                ignored_invalid += 1;
-                continue;
+        let (key_raw, value) = match raw.split_once('\n') {
+            Some((k, v)) => (k.trim().to_string(), v.to_string()),
+            None => {
+                // Implicit boolean value
+                let trimmed = raw.trim().to_string();
+                if trimmed.contains('.') {
+                    (trimmed, "true".to_string())
+                } else {
+                    ignored_invalid += 1;
+                    continue;
+                }
             }
         };
 
-        let existing =
-            ScopedConfig::get_all(scope, &key.configuration, key.name.as_deref(), &key.key).await?;
-        if existing.iter().any(|v| v == value) {
+        // Validate key format
+        if !key_raw.contains('.') {
+            ignored_invalid += 1;
+            continue;
+        }
+        all_entries.push((key_raw, value));
+    }
+
+    // Process entries
+    for (key, value) in &all_entries {
+        if is_known_multi_value_key(key) {
+            // Multi-value: use add semantics, skip exact duplicates
+            let existing = ScopedConfig::get_all(scope, key).await?;
+            if existing.iter().any(|e| &e.value == value) {
+                skipped += 1;
+                continue;
+            }
+            let should_encrypt = is_sensitive_key(key);
+            let store_value = if should_encrypt {
+                if let Some(unseal_key) =
+                    crate::internal::vault::load_unseal_key_for_scope(scope_name(scope)).await
+                {
+                    if let Ok(ct) =
+                        crate::internal::vault::encrypt_token(&unseal_key, value.as_bytes())
+                    {
+                        hex::encode(ct)
+                    } else {
+                        value.clone()
+                    }
+                } else {
+                    value.clone()
+                }
+            } else {
+                value.clone()
+            };
+            ScopedConfig::add(scope, key, &store_value, should_encrypt).await?;
+            imported += 1;
+            if should_encrypt {
+                auto_encrypted += 1;
+            }
+        } else {
+            // Single-value: track for last-one-wins
+            let count = last_value_wins
+                .entry(key.clone())
+                .or_insert_with(|| (String::new(), 0));
+            count.0 = value.clone();
+            count.1 += 1;
+        }
+    }
+
+    // Apply last-one-wins entries
+    for (key, (value, count)) in &last_value_wins {
+        if *count > 1 {
+            collapsed_warnings += 1;
+            crate::utils::error::emit_warning(format!(
+                "key '{key}' has {count} values in Git config, only last value kept (not in known multi-value list)"
+            ));
+        }
+
+        let existing = ScopedConfig::get(scope, key).await?;
+        if existing.as_ref().map(|e| &e.value) == Some(value) {
             skipped += 1;
             continue;
         }
-
-        ScopedConfig::insert(
-            scope,
-            &key.configuration,
-            key.name.as_deref(),
-            &key.key,
-            value,
-        )
-        .await?;
+        let should_encrypt = is_sensitive_key(key);
+        let store_value = if should_encrypt {
+            if let Some(unseal_key) =
+                crate::internal::vault::load_unseal_key_for_scope(scope_name(scope)).await
+            {
+                if let Ok(ct) = crate::internal::vault::encrypt_token(&unseal_key, value.as_bytes())
+                {
+                    hex::encode(ct)
+                } else {
+                    value.clone()
+                }
+            } else {
+                value.clone()
+            }
+        } else {
+            value.clone()
+        };
+        ScopedConfig::set(scope, key, &store_value, should_encrypt).await?;
         imported += 1;
+        if should_encrypt {
+            auto_encrypted += 1;
+        }
     }
 
-    let scope_label = scope_name(scope);
     if ignored_invalid > 0 {
         crate::utils::error::emit_warning(format!(
             "ignored {ignored_invalid} unsupported Git config entries"
         ));
     }
+
     Ok(ConfigImportSummary {
-        scope: scope_label,
+        scope: scope_name(scope),
         imported,
         skipped_duplicates: skipped,
         ignored_invalid,
+        auto_encrypted,
+        collapsed_multivalue_warnings: collapsed_warnings,
     })
 }
 
-/// Parse the original key string to three fields: configuration, name and key
-/// The parsing strategy for the three parameters configuration, name, and key is as follows:
-/// If the original key parameter string does not contain a . symbol, an error is directly raised.
-/// If the original key parameter string contains exactly one . symbol, the entire key parameter string is parsed as configuration.key.
-/// If the original key parameter string contains more than one . symbol, the entire key parameter string is parsed as configuration.name.key, where the two . symbols correspond to the first . and the last . in the original parameter string.
-fn parse_key(mut origin_key: &str) -> Result<Key, String> {
-    let configuration: String;
-    let name: Option<String>;
-    (configuration, origin_key) = match origin_key.split_once('.') {
-        Some((first_part, remainer)) => (first_part.to_string(), remainer),
-        None => {
-            let mut message = format!("error: key does not contain a section: {origin_key}");
-            if origin_key == "init" || origin_key == "clone" {
-                message.push_str(&format!(
-                    "\nHint: `{origin_key}` is a top-level command. Try `libra {origin_key}`."
-                ));
-            }
-            if origin_key == "import" {
-                message.push_str(
-                    "\nHint: Run `libra config --import` without extra key/value arguments.",
-                );
-            }
-            return Err(message);
-        }
-    };
-    let key: String;
-    (name, key) = match origin_key.rsplit_once('.') {
-        Some((first_part, remainer)) => (Some(first_part.to_string()), remainer.to_string()),
-        None => (None, origin_key.to_string()),
-    };
-    Ok(Key {
-        configuration,
-        name,
-        key,
-    })
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// Cascade helpers
+// ─────────────────────────────────────────────────────────────────────────────
 
-/// Add a configuration entry by the given key and value (create new one no matter old one is present or not)
-async fn add_config(key: &Key, value: &str, scope: ConfigScope) -> Result<(), String> {
-    ScopedConfig::insert(
-        scope,
-        &key.configuration,
-        key.name.as_deref(),
-        &key.key,
-        value,
-    )
-    .await
-}
-
-/// Set a configuration entry by the given key and value (if old one is present, overwrites its value, otherwise create new one)
-async fn set_config(key: &Key, value: &str, scope: ConfigScope) -> Result<(), String> {
-    // First, check whether given key has multiple values
-    let values =
-        ScopedConfig::get_all(scope, &key.configuration, key.name.as_deref(), &key.key).await?;
-
-    if values.len() >= 2 {
-        Err(format!(
-            "warning: {}.{} has multiple values\nerror: cannot overwrite multiple values with a single value",
-            &key.configuration,
-            match &key.name {
-                Some(str) => str.to_string() + ".",
-                None => "".to_string(),
-            } + &key.key
-        ))
-    } else if values.len() == 1 {
-        ScopedConfig::update(
-            scope,
-            &key.configuration,
-            key.name.as_deref(),
-            &key.key,
-            value,
-        )
-        .await
-    } else {
-        ScopedConfig::insert(
-            scope,
-            &key.configuration,
-            key.name.as_deref(),
-            &key.key,
-            value,
-        )
-        .await
-    }
-}
-
-/// Get the first configuration by the given key and value pattern
-async fn get_config(
-    key: &Key,
-    default: Option<&str>,
-    valuepattern: Option<&str>,
-    scope: ConfigScope,
-    use_cascade: bool,
-) -> Result<ConfigValueResult, String> {
-    let value = if use_cascade {
-        get_config_cascaded(&key.configuration, key.name.as_deref(), &key.key).await?
-    } else {
-        ScopedConfig::get(scope, &key.configuration, key.name.as_deref(), &key.key).await?
-    };
-
-    let mut values = Vec::new();
-    let mut default_applied = false;
-
-    if let Some(v) = value {
-        // Build the full dotted key for secret detection
-        let full_key = key.display();
-        let redact = is_secret_key(&full_key);
-        // Match against the raw value, but display redacted if needed
-        if let Some(vp) = valuepattern {
-            if v.contains(vp) {
-                values.push(if redact { "<REDACTED>".to_string() } else { v });
-            }
-        } else {
-            values.push(if redact { "<REDACTED>".to_string() } else { v });
-        }
-    } else if let Some(default_value) = default {
-        // if value does not exist just return the default value if it's present
-        values.push(default_value.to_string());
-        default_applied = true;
-    }
-
-    Ok(ConfigValueResult {
-        values,
-        default_applied,
-    })
-}
-
-/// Get all the configurations by the given key and value pattern
-async fn get_all_config(
-    key: &Key,
-    default: Option<&str>,
-    valuepattern: Option<&str>,
-    scope: ConfigScope,
-    use_cascade: bool,
-) -> Result<ConfigValueResult, String> {
-    let values = if use_cascade {
-        get_all_config_cascaded(&key.configuration, key.name.as_deref(), &key.key).await?
-    } else {
-        ScopedConfig::get_all(scope, &key.configuration, key.name.as_deref(), &key.key).await?
-    };
-
-    // Build the full dotted key for secret detection
-    let full_key = key.display();
-    let redact = is_secret_key(&full_key);
-
-    let mut matched_values = Vec::new();
-    let mut matched_any = false;
-    for value in values {
-        let display_value = if redact {
-            "<REDACTED>".to_string()
-        } else {
-            value.clone()
-        };
-        if let Some(vp) = valuepattern {
-            // When redacting, match against the original value but display redacted
-            if value.contains(vp) {
-                matched_values.push(display_value);
-                matched_any = true;
-            }
-        } else {
-            matched_any = true;
-            matched_values.push(display_value);
-        }
-    }
-    let default_applied = if !matched_any {
-        if let Some(default_value) = default {
-            matched_values.push(default_value.to_string());
-            true
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-
-    Ok(ConfigValueResult {
-        values: matched_values,
-        default_applied,
-    })
-}
-
-/// Get the first matching configuration value using `CASCADE_ORDER`
-/// (`Local → Global → System`), skipping scopes whose backing storage is
-/// missing or invalid. Errors from individual scopes are ignored so that a
-/// later scope can still satisfy the lookup.
-async fn get_config_cascaded(
-    configuration: &str,
-    name: Option<&str>,
-    key: &str,
-) -> Result<Option<String>, String> {
+async fn get_cascaded(key: &str) -> Result<Option<(ConfigKvEntry, ConfigScope)>, String> {
     for scope in ConfigScope::CASCADE_ORDER {
         if scope != ConfigScope::Local {
             let Some(path) = scope.get_config_path() else {
@@ -1151,24 +2061,18 @@ async fn get_config_cascaded(
                 continue;
             }
         }
-
-        match ScopedConfig::get(scope, configuration, name, key).await {
-            Ok(Some(v)) => return Ok(Some(v)),
+        match ScopedConfig::get(scope, key).await {
+            Ok(Some(v)) => return Ok(Some((v, scope))),
             Ok(None) => continue,
-            Err(_) => continue,
+            Err(e) => {
+                return Err(format!("failed to read {} config: {e}", scope_name(scope)));
+            }
         }
     }
     Ok(None)
 }
 
-/// Get all configuration values for a key across every scope in
-/// `CASCADE_ORDER`, skipping scopes whose backing storage is missing or
-/// invalid. Values from all scopes are appended in precedence order.
-async fn get_all_config_cascaded(
-    configuration: &str,
-    name: Option<&str>,
-    key: &str,
-) -> Result<Vec<String>, String> {
+async fn get_all_cascaded(key: &str) -> Result<Vec<(ConfigKvEntry, ConfigScope)>, String> {
     let mut out = Vec::new();
     for scope in ConfigScope::CASCADE_ORDER {
         if scope != ConfigScope::Local {
@@ -1179,116 +2083,130 @@ async fn get_all_config_cascaded(
                 continue;
             }
         }
-
-        if let Ok(mut v) = ScopedConfig::get_all(scope, configuration, name, key).await {
-            out.append(&mut v);
+        match ScopedConfig::get_all(scope, key).await {
+            Ok(values) => {
+                for v in values {
+                    out.push((v, scope));
+                }
+            }
+            Err(e) => return Err(format!("failed to read {} config: {e}", scope_name(scope))),
         }
     }
     Ok(out)
 }
 
-/// Remove one configuration by given key and value pattern
-async fn unset_config(
-    key: &Key,
-    valuepattern: Option<&str>,
-    scope: ConfigScope,
-) -> Result<(), String> {
-    ScopedConfig::remove_config(
-        scope,
-        &key.configuration,
-        key.name.as_deref(),
-        &key.key,
-        valuepattern,
-        false,
-    )
-    .await
+// ─────────────────────────────────────────────────────────────────────────────
+// Output helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn scope_name(scope: ConfigScope) -> &'static str {
+    match scope {
+        ConfigScope::Local => "local",
+        ConfigScope::Global => "global",
+    }
 }
 
-/// Remove all configurations by given key and value pattern
-async fn unset_all_config(
-    key: &Key,
-    valuepattern: Option<&str>,
-    scope: ConfigScope,
-) -> Result<(), String> {
-    ScopedConfig::remove_config(
-        scope,
-        &key.configuration,
-        key.name.as_deref(),
-        &key.key,
-        valuepattern,
-        true,
-    )
-    .await
-}
-
-/// List all configurations
-async fn list_config(
-    name_only: bool,
-    scope: ConfigScope,
-    use_cascade: bool,
-) -> Result<Vec<ConfigListEntry>, String> {
-    let configurations = if use_cascade {
-        list_all_config_cascaded().await?
+fn get_scope(args: &ConfigArgs) -> ConfigScope {
+    if args.global {
+        ConfigScope::Global
     } else {
-        ScopedConfig::list_all(scope).await?
-    };
-
-    Ok(configurations
-        .into_iter()
-        .map(|(key, value)| ConfigListEntry {
-            value: if name_only {
-                None
-            } else if is_secret_key(&key) {
-                Some("<REDACTED>".to_string())
-            } else {
-                Some(value)
-            },
-            key,
-        })
-        .collect())
+        ConfigScope::Local
+    }
 }
 
-/// Returns true if the config key holds sensitive material that should not be
-/// printed in plaintext (e.g. vault unseal key, encrypted root token).
-fn is_secret_key(key: &str) -> bool {
-    let lower = key.to_ascii_lowercase();
-    lower.starts_with("vault.unsealkey")
-        || lower.starts_with("vault.roottoken")
-        || lower.contains("secret")
-        || lower.contains("token")
+fn has_explicit_scope(args: &ConfigArgs) -> bool {
+    args.local || args.global || args.system
 }
 
-/// List an effective, precedence-aware view of all configuration entries
-/// merged across scopes. Lower precedence entries are loaded first so that
-/// higher precedence scopes can overwrite them, then the result is returned
-/// sorted by key.
-async fn list_all_config_cascaded() -> Result<Vec<(String, String)>, String> {
-    use std::collections::HashMap;
-
-    let mut merged: HashMap<String, String> = HashMap::new();
-
-    // Iterate low->high precedence so higher precedence overwrites.
-    for scope in ConfigScope::CASCADE_ORDER.iter().rev() {
-        if *scope != ConfigScope::Local {
-            let Some(path) = scope.get_config_path() else {
-                continue;
-            };
-            if !path.exists() {
-                continue;
-            }
-        }
-
-        if let Ok(entries) = ScopedConfig::list_all(*scope).await {
-            for (k, v) in entries {
-                merged.insert(k, v);
-            }
+/// Simple Levenshtein edit distance for spell correction suggestions.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let m = a.len();
+    let n = b.len();
+    let mut dp = vec![vec![0usize; n + 1]; m + 1];
+    for (i, row) in dp.iter_mut().enumerate() {
+        row[0] = i;
+    }
+    for (j, val) in dp[0].iter_mut().enumerate() {
+        *val = j;
+    }
+    for (i, ca) in a.chars().enumerate() {
+        for (j, cb) in b.chars().enumerate() {
+            let cost = if ca == cb { 0 } else { 1 };
+            dp[i + 1][j + 1] = (dp[i][j + 1] + 1)
+                .min(dp[i + 1][j] + 1)
+                .min(dp[i][j] + cost);
         }
     }
-
-    let mut out: Vec<(String, String)> = merged.into_iter().collect();
-    out.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(out)
+    dp[m][n]
 }
+
+fn emit_set_ack(
+    action: &str,
+    scope: ConfigScope,
+    key: &str,
+    encrypted: bool,
+    output: &OutputConfig,
+) -> CliResult<()> {
+    if output.is_json() {
+        crate::utils::output::emit_json_data(
+            "config",
+            &serde_json::json!({
+                "action": action,
+                "scope": scope_name(scope),
+                "key": key,
+                "encrypted": encrypted,
+            }),
+            output,
+        )?;
+    } else if !output.quiet {
+        let scope_label = scope_name(scope);
+        let enc_label = if encrypted { " (encrypted)" } else { "" };
+        let action_label = if action == "add" { "Added" } else { "Set" };
+        println!("{action_label} {scope_label}{enc_label}: {key}");
+    }
+    Ok(())
+}
+
+fn print_import_summary(summary: &ConfigImportSummary) {
+    if summary.imported > 0 {
+        println!(
+            "Imported {} entries from Git {} config → libra {} config",
+            summary.imported, summary.scope, summary.scope
+        );
+    } else {
+        println!(
+            "No new entries to import from Git {} config.",
+            summary.scope
+        );
+    }
+    let mut details = Vec::new();
+    if summary.skipped_duplicates > 0 {
+        details.push(format!("{} duplicates", summary.skipped_duplicates));
+    }
+    if summary.ignored_invalid > 0 {
+        details.push(format!("{} invalid keys", summary.ignored_invalid));
+    }
+    if !details.is_empty() {
+        println!("  skipped: {}", details.join(", "));
+    }
+    if summary.auto_encrypted > 0 {
+        println!(
+            "  encrypted: {} sensitive key{} auto-encrypted",
+            summary.auto_encrypted,
+            if summary.auto_encrypted == 1 { "" } else { "s" }
+        );
+    }
+    if summary.collapsed_multivalue_warnings > 0 {
+        println!(
+            "  warnings: {} multi-value keys collapsed",
+            summary.collapsed_multivalue_warnings
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests
+// ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod args_tests {
@@ -1297,49 +2215,39 @@ mod args_tests {
     use super::*;
 
     #[test]
-    fn default_works_with_get_all() {
-        let args =
-            ConfigArgs::try_parse_from(["config", "--get-all", "-d", "fallback", "user.name"])
-                .unwrap();
-
-        assert!(args.get_all);
-        assert_eq!(args.default.as_deref(), Some("fallback"));
-    }
-
-    #[test]
     fn scope_flags_are_mutually_exclusive() {
-        let args = ConfigArgs::try_parse_from(["config", "--global", "--system", "user.name"]);
+        let args = ConfigArgs::try_parse_from([
+            "config",
+            "--global",
+            "--local",
+            "set",
+            "user.name",
+            "test",
+        ]);
         assert!(args.is_err());
-        assert!(matches!(
-            args.err().unwrap().kind(),
-            clap::error::ErrorKind::ArgumentConflict
-        ));
     }
 
     #[test]
-    fn import_mode_is_valid_without_value() {
-        let args = ConfigArgs::try_parse_from(["config", "import"]).unwrap();
-        assert!(args.validate().is_ok());
+    fn subcommand_set_parses() {
+        let args = ConfigArgs::try_parse_from(["config", "set", "user.name", "John"]).unwrap();
+        assert!(matches!(args.command, Some(ConfigCommand::Set { .. })));
     }
 
     #[test]
-    fn set_mode_requires_value() {
-        let args = ConfigArgs::try_parse_from(["config", "user.name"]).unwrap();
-        let err = args.validate().unwrap_err();
-        assert_eq!(err, "missing required argument: <value_pattern>");
+    fn subcommand_get_parses() {
+        let args = ConfigArgs::try_parse_from(["config", "get", "user.name"]).unwrap();
+        assert!(matches!(args.command, Some(ConfigCommand::Get { .. })));
     }
 
     #[test]
-    fn import_flag_rejects_positional_key() {
-        let args = ConfigArgs::try_parse_from(["config", "--import", "user.name"]).unwrap();
-        let err = args.validate().unwrap_err();
-        assert_eq!(err, "`libra config --import` does not accept <key>");
+    fn subcommand_list_parses() {
+        let args = ConfigArgs::try_parse_from(["config", "list"]).unwrap();
+        assert!(matches!(args.command, Some(ConfigCommand::List { .. })));
     }
 
     #[test]
-    fn import_implicit_rejects_value_pattern() {
-        let args = ConfigArgs::try_parse_from(["config", "import", "extra"]).unwrap();
-        let err = args.validate().unwrap_err();
-        assert_eq!(err, "`libra config import` does not accept <value_pattern>");
+    fn git_compat_list_flag() {
+        let args = ConfigArgs::try_parse_from(["config", "-l"]).unwrap();
+        assert!(args.list);
     }
 }

@@ -17,7 +17,7 @@ use url::Url;
 use crate::{
     command,
     internal::{
-        config::Config,
+        config::ConfigKv,
         protocol::{ProtocolClient, https_client::BasicAuth},
     },
     lfs_structs::{
@@ -76,7 +76,7 @@ impl ProtocolClient for LFSClient {
 impl LFSClient {
     /// Construct LFSClient from current remote URL.
     pub async fn new() -> Self {
-        let url = Config::get_current_remote_url().await;
+        let url = ConfigKv::get_current_remote_url().await.ok().flatten();
         match url {
             Some(url) => LFSClient::from_url(&Url::parse(&url).unwrap()),
             None => panic!(

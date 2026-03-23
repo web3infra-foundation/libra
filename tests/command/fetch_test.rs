@@ -10,9 +10,10 @@ use libra::{
     command::fetch,
     internal::{
         branch::Branch,
-        config::{Config, RemoteConfig},
+        config::{ConfigKv, RemoteConfig},
+        vault,
     },
-    utils::test::{ChangeDirGuard, setup_with_new_libra_in},
+    utils::test::{ChangeDirGuard, ScopedEnvVar, setup_with_new_libra_in},
 };
 use serial_test::serial;
 use tempfile::{TempDir, tempdir};
@@ -320,7 +321,9 @@ async fn test_fetch_local_repository() {
     let _guard = ChangeDirGuard::new(&repo_dir);
 
     let remote_path = remote_dir.to_str().unwrap().to_string();
-    Config::insert("remote", Some("origin"), "url", &remote_path).await;
+    ConfigKv::set("remote.origin.url", &remote_path, false)
+        .await
+        .unwrap();
 
     fetch::fetch_repository(
         RemoteConfig {
@@ -449,7 +452,9 @@ async fn test_fetch_ssh_remote_via_fake_ssh() {
     let _guard = ChangeDirGuard::new(&repo_dir);
 
     let ssh_remote = format!("git@fakehost:{}", remote_dir.to_string_lossy());
-    Config::insert("remote", Some("origin"), "url", &ssh_remote).await;
+    ConfigKv::set("remote.origin.url", &ssh_remote, false)
+        .await
+        .unwrap();
 
     let fetch_out = libra_command(&repo_dir)
         .env("LIBRA_SSH_COMMAND", &ssh_script)
@@ -579,8 +584,12 @@ async fn test_fetch_ssh_respects_strict_host_key_checking_config_casing() {
     let _guard = ChangeDirGuard::new(&repo_dir);
 
     let ssh_remote = format!("git@fakehost:{}", remote_dir.to_string_lossy());
-    Config::insert("remote", Some("origin"), "url", &ssh_remote).await;
-    Config::insert("ssh", None, "strictHostKeyChecking", "accept-new").await;
+    ConfigKv::set("remote.origin.url", &ssh_remote, false)
+        .await
+        .unwrap();
+    ConfigKv::set("ssh.strictHostKeyChecking", "accept-new", false)
+        .await
+        .unwrap();
 
     let fetch_out = libra_command(&repo_dir)
         .env("LIBRA_SSH_COMMAND", &ssh_script)
@@ -626,7 +635,9 @@ async fn test_fetch_ssh_host_key_failure_is_reported() {
 
     let ssh_remote = format!("git@fakehost:{}", remote_dir.to_string_lossy());
     let _guard = ChangeDirGuard::new(&repo_dir);
-    Config::insert("remote", Some("origin"), "url", &ssh_remote).await;
+    ConfigKv::set("remote.origin.url", &ssh_remote, false)
+        .await
+        .unwrap();
 
     let fetch_out = libra_command(&repo_dir)
         .env("LIBRA_SSH_COMMAND", &ssh_script)
@@ -638,5 +649,67 @@ async fn test_fetch_ssh_host_key_failure_is_reported() {
     assert!(
         stderr.contains("Host key verification failed."),
         "fetch should surface SSH host-key failures, stderr: {stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn test_fetch_ssh_invalid_vault_key_fails_without_fallback() {
+    let temp_root = tempdir().expect("failed to create temp root");
+    let remote_dir = temp_root.path().join("remote.git");
+    let repo_dir = temp_root.path().join("libra_repo");
+    let home_dir = repo_dir.join(".libra-test-home");
+    let config_home = home_dir.join(".config");
+    let log_path = temp_root.path().join("fake_ssh.log");
+    let ssh_script = create_fake_ssh_script(temp_root.path());
+
+    assert!(
+        Command::new("git")
+            .args(["init", "--bare", remote_dir.to_str().unwrap()])
+            .status()
+            .expect("failed to init bare remote")
+            .success()
+    );
+    fs::create_dir_all(&repo_dir).expect("failed to create repo dir");
+    setup_with_new_libra_in(&repo_dir).await;
+    fs::create_dir_all(&config_home).expect("failed to create config home");
+
+    let ssh_remote = format!("git@fakehost:{}", remote_dir.to_string_lossy());
+    let _home = ScopedEnvVar::set("HOME", &home_dir);
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", &home_dir);
+    let _xdg = ScopedEnvVar::set("XDG_CONFIG_HOME", &config_home);
+    let _guard = ChangeDirGuard::new(&repo_dir);
+    vault::lazy_init_vault_for_scope("local")
+        .await
+        .expect("failed to initialize local vault");
+    ConfigKv::set("remote.origin.url", &ssh_remote, false)
+        .await
+        .unwrap();
+    ConfigKv::set("vault.ssh.origin.privkey", "not-valid-hex", true)
+        .await
+        .unwrap();
+
+    let fetch_out = libra_command(&repo_dir)
+        .env("HOME", &home_dir)
+        .env("USERPROFILE", &home_dir)
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("LIBRA_SSH_COMMAND", &ssh_script)
+        .env("LIBRA_TEST_SSH_LOG", &log_path)
+        .args(["fetch", "origin"])
+        .output()
+        .expect("failed to run libra fetch over fake ssh");
+    let stderr = String::from_utf8_lossy(&fetch_out.stderr);
+    assert!(
+        !fetch_out.status.success(),
+        "fetch should fail when configured vault SSH key is invalid"
+    );
+    assert!(
+        stderr.contains("failed to decode vault SSH private key 'vault.ssh.origin.privkey'"),
+        "fetch should report invalid configured vault SSH key, stderr: {stderr}"
+    );
+    assert!(
+        !log_path.exists(),
+        "fetch should fail before invoking SSH when vault key is invalid"
     );
 }
