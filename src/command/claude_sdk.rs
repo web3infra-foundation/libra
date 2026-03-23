@@ -1350,7 +1350,7 @@ async fn bridge_run(args: BridgeRunArgs) -> Result<()> {
     .await?
     {
         validate_formal_run_binding_consistency(&existing, &args.ai_session_id)?;
-        load_audit_bundle_for_run_binding(&existing, &args.ai_session_id).await?;
+        load_audit_bundle_for_run_binding(&storage_path, &existing, &args.ai_session_id).await?;
         if let Some(intent_id) = requested_intent_id.as_deref()
             && existing.intent_id.as_deref() != Some(intent_id)
         {
@@ -1498,7 +1498,8 @@ async fn persist_evidence(args: PersistEvidenceArgs) -> Result<()> {
                 )
             })?;
     validate_formal_run_binding_consistency(&run_binding, &args.ai_session_id)?;
-    let audit_bundle = load_audit_bundle_for_run_binding(&run_binding, &args.ai_session_id).await?;
+    let (resolved_audit_bundle_path, audit_bundle) =
+        load_audit_bundle_for_run_binding(&storage_path, &run_binding, &args.ai_session_id).await?;
     let provider_session_object_id =
         build_provider_session_object_id(&run_binding.provider_session_id)?;
     let provider_session_path =
@@ -1569,12 +1570,12 @@ async fn persist_evidence(args: PersistEvidenceArgs) -> Result<()> {
     );
     entries.push(PendingEvidence {
         kind: "intent_extraction_result".to_string(),
-        source_path: run_binding.audit_bundle_path.clone(),
+        source_path: resolved_audit_bundle_path.to_string_lossy().to_string(),
         summary: extraction_summary,
     });
     entries.extend(build_managed_runtime_evidence_entries(
         AuditBundleSummaryContext {
-            audit_bundle_path: Path::new(&run_binding.audit_bundle_path),
+            audit_bundle_path: &resolved_audit_bundle_path,
             audit_bundle: &audit_bundle,
         },
     ));
@@ -1589,15 +1590,9 @@ async fn persist_evidence(args: PersistEvidenceArgs) -> Result<()> {
     )
     .await?
         && existing.run_id == run_binding.run_id
-        && existing.run_binding_path == run_binding_path.to_string_lossy()
         && evidence_binding_objects_exist(&storage_path, &existing).await?
     {
-        validate_evidence_binding_consistency(
-            &existing,
-            &args.ai_session_id,
-            &run_binding,
-            &run_binding_path,
-        )?;
+        validate_evidence_binding_consistency(&existing, &args.ai_session_id, &run_binding)?;
         if evidence_binding_matches_expected(&existing, &expected_entries) {
             print_persist_evidence_output(&binding_path, &existing)?;
             return Ok(());
@@ -1680,7 +1675,7 @@ async fn persist_decision(args: PersistDecisionArgs) -> Result<()> {
                 )
             })?;
     validate_formal_run_binding_consistency(&run_binding, &args.ai_session_id)?;
-    load_audit_bundle_for_run_binding(&run_binding, &args.ai_session_id).await?;
+    load_audit_bundle_for_run_binding(&storage_path, &run_binding, &args.ai_session_id).await?;
     let evidence_binding_path = evidence_binding_path(&storage_path, &args.ai_session_id);
     let evidence_binding: ClaudeEvidenceBindingArtifact =
         read_typed_json_artifact(&evidence_binding_path, "Claude evidence binding")
@@ -1691,12 +1686,13 @@ async fn persist_decision(args: PersistDecisionArgs) -> Result<()> {
                     args.ai_session_id
                 )
             })?;
-    validate_evidence_binding_consistency(
-        &evidence_binding,
-        &args.ai_session_id,
-        &run_binding,
-        &run_binding_path,
-    )?;
+    validate_evidence_binding_consistency(&evidence_binding, &args.ai_session_id, &run_binding)?;
+    if !evidence_binding_objects_exist(&storage_path, &evidence_binding).await? {
+        bail!(
+            "Claude evidence binding references missing Evidence objects; run 'claude-sdk persist-evidence --ai-session-id {}' again",
+            args.ai_session_id
+        );
+    }
     let decision_type = decision_type_for_binding(&run_binding, &evidence_binding);
     let rationale = format!(
         "managed_run_status={}; intent_extraction_status={}; evidence_count={}",
@@ -1716,15 +1712,8 @@ async fn persist_decision(args: PersistDecisionArgs) -> Result<()> {
     )
     .await?
         && existing.run_id == run_binding.run_id
-        && existing.evidence_binding_path == evidence_binding_path.to_string_lossy()
     {
-        validate_decision_binding_consistency(
-            &existing,
-            &args.ai_session_id,
-            &run_binding,
-            &run_binding_path,
-            &evidence_binding_path,
-        )?;
+        validate_decision_binding_consistency(&existing, &args.ai_session_id, &run_binding)?;
         if decision_binding_matches_expected(
             &existing,
             decision_type,
@@ -2209,21 +2198,26 @@ fn decision_type_for_binding(
 }
 
 async fn load_audit_bundle_for_run_binding(
+    storage_path: &Path,
     run_binding: &ClaudeFormalRunBindingArtifact,
     expected_ai_session_id: &str,
-) -> Result<ManagedAuditBundle> {
-    let audit_bundle_path = Path::new(&run_binding.audit_bundle_path);
-    let audit_bundle: ManagedAuditBundle = read_json_artifact(
-        audit_bundle_path,
-        "managed audit bundle",
-    )
-    .await
-    .with_context(|| {
-        format!(
-            "failed to load managed audit bundle referenced by Claude formal run binding '{}'",
-            audit_bundle_path.display()
-        )
-    })?;
+) -> Result<(PathBuf, ManagedAuditBundle)> {
+    let preferred_path = managed_audit_bundle_path(storage_path, expected_ai_session_id);
+    let stored_path = PathBuf::from(&run_binding.audit_bundle_path);
+    let audit_bundle_path = if preferred_path.exists() {
+        preferred_path
+    } else {
+        stored_path
+    };
+    let audit_bundle: ManagedAuditBundle =
+        read_json_artifact(&audit_bundle_path, "managed audit bundle")
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to load managed audit bundle at '{}'",
+                    audit_bundle_path.display()
+                )
+            })?;
     if audit_bundle.schema != "libra.claude_managed_audit_bundle.v1" {
         bail!(
             "unsupported managed audit bundle schema '{}' in '{}'",
@@ -2247,7 +2241,7 @@ async fn load_audit_bundle_for_run_binding(
             run_binding.provider_session_id
         );
     }
-    Ok(audit_bundle)
+    Ok((audit_bundle_path, audit_bundle))
 }
 
 fn validate_formal_run_binding_consistency(
@@ -2270,7 +2264,6 @@ fn validate_evidence_binding_consistency(
     binding: &ClaudeEvidenceBindingArtifact,
     expected_ai_session_id: &str,
     run_binding: &ClaudeFormalRunBindingArtifact,
-    run_binding_path: &Path,
 ) -> Result<()> {
     if binding.ai_session_id != expected_ai_session_id {
         bail!(
@@ -2293,13 +2286,6 @@ fn validate_evidence_binding_consistency(
             run_binding.run_id
         );
     }
-    if binding.run_binding_path != run_binding_path.to_string_lossy() {
-        bail!(
-            "Claude evidence binding references run binding '{}', not '{}'",
-            binding.run_binding_path,
-            run_binding_path.display()
-        );
-    }
     Ok(())
 }
 
@@ -2307,8 +2293,6 @@ fn validate_decision_binding_consistency(
     binding: &ClaudeDecisionBindingArtifact,
     expected_ai_session_id: &str,
     run_binding: &ClaudeFormalRunBindingArtifact,
-    run_binding_path: &Path,
-    evidence_binding_path: &Path,
 ) -> Result<()> {
     if binding.ai_session_id != expected_ai_session_id {
         bail!(
@@ -2329,20 +2313,6 @@ fn validate_decision_binding_consistency(
             "Claude decision binding belongs to run '{}', not '{}'",
             binding.run_id,
             run_binding.run_id
-        );
-    }
-    if binding.run_binding_path != run_binding_path.to_string_lossy() {
-        bail!(
-            "Claude decision binding references run binding '{}', not '{}'",
-            binding.run_binding_path,
-            run_binding_path.display()
-        );
-    }
-    if binding.evidence_binding_path != evidence_binding_path.to_string_lossy() {
-        bail!(
-            "Claude decision binding references evidence binding '{}', not '{}'",
-            binding.evidence_binding_path,
-            evidence_binding_path.display()
         );
     }
     Ok(())
@@ -2489,6 +2459,7 @@ fn summarize_run_usage(run_usage_event: &ManagedRunUsageEvent) -> String {
 
 fn summarize_tool_runtime(audit_bundle: &ManagedAuditBundle) -> Option<String> {
     let object_candidates = &audit_bundle.bridge.object_candidates;
+    let repo_root = audit_bundle.bridge.session_state.working_dir.as_str();
     let tool_names = audit_bundle
         .bridge
         .tool_invocations
@@ -2499,7 +2470,7 @@ fn summarize_tool_runtime(audit_bundle: &ManagedAuditBundle) -> Option<String> {
         .bridge
         .touch_hints
         .iter()
-        .cloned()
+        .filter_map(|hint| persistable_touch_hint(hint, repo_root))
         .collect::<BTreeSet<_>>();
     if object_candidates.tool_invocation_events.is_empty()
         && object_candidates.tool_runtime_events.is_empty()
@@ -2540,6 +2511,152 @@ fn usage_counter(value: &Value, keys: &[&str]) -> u64 {
     keys.iter()
         .find_map(|key| value.get(*key).and_then(Value::as_u64))
         .unwrap_or(0)
+}
+
+fn persistable_touch_hint(hint: &str, repo_root: &str) -> Option<String> {
+    let normalized_repo_root = normalize_portable_path(repo_root)?;
+    if !is_platform_agnostic_absolute_hint(&normalized_repo_root) {
+        return None;
+    }
+
+    let trimmed = hint.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let normalized_hint = if is_platform_agnostic_absolute_hint(trimmed) {
+        normalize_portable_path(trimmed)?
+    } else {
+        join_portable_path(&normalized_repo_root, trimmed)?
+    };
+    if normalized_hint == normalized_repo_root {
+        return None;
+    }
+
+    strip_portable_prefix(&normalized_hint, &normalized_repo_root)
+}
+
+fn normalize_portable_path(path: &str) -> Option<String> {
+    let normalized = path.trim().replace('\\', "/");
+    if normalized.is_empty() {
+        return None;
+    }
+
+    let (prefix, absolute, rest) = if let Some(rest) = normalized.strip_prefix("//") {
+        let mut parts = rest.split('/').filter(|part| !part.is_empty());
+        let server = parts.next()?;
+        let share = parts.next()?;
+        (
+            format!("//{server}/{share}"),
+            true,
+            parts.collect::<Vec<_>>().join("/"),
+        )
+    } else if normalized.len() >= 2
+        && normalized.as_bytes()[0].is_ascii_alphabetic()
+        && normalized.as_bytes()[1] == b':'
+    {
+        let prefix = normalized[..2].to_string();
+        let rest = normalized[2..].trim_start_matches('/').to_string();
+        (prefix, true, rest)
+    } else if let Some(rest) = normalized.strip_prefix('/') {
+        (String::new(), true, rest.to_string())
+    } else {
+        (String::new(), false, normalized)
+    };
+
+    let mut components = Vec::new();
+    for component in rest.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                if !components.is_empty() {
+                    components.pop();
+                }
+            }
+            part => components.push(part),
+        }
+    }
+
+    let mut result = prefix;
+    if absolute && !result.ends_with('/') {
+        result.push('/');
+    }
+    if !components.is_empty() {
+        result.push_str(&components.join("/"));
+    }
+
+    if result.is_empty() && absolute {
+        Some("/".to_string())
+    } else if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
+}
+
+fn join_portable_path(base: &str, relative: &str) -> Option<String> {
+    let normalized_base = normalize_portable_path(base)?;
+    let normalized_relative = relative.trim().replace('\\', "/");
+    if normalized_relative.is_empty() {
+        return None;
+    }
+
+    let joined = if normalized_base.ends_with('/') {
+        format!("{normalized_base}{normalized_relative}")
+    } else {
+        format!("{normalized_base}/{normalized_relative}")
+    };
+    normalize_portable_path(&joined)
+}
+
+fn is_platform_agnostic_absolute_hint(path: &str) -> bool {
+    let normalized = path.trim().replace('\\', "/");
+    if normalized.starts_with('/') {
+        return true;
+    }
+
+    let bytes = normalized.as_bytes();
+    bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/'
+}
+
+fn strip_portable_prefix(path: &str, root: &str) -> Option<String> {
+    if portable_path_eq(path, root) {
+        return None;
+    }
+
+    let prefix = if root.ends_with('/') {
+        root.to_string()
+    } else {
+        format!("{root}/")
+    };
+    if should_compare_portable_paths_case_insensitively(root) {
+        let path_lower = path.to_ascii_lowercase();
+        let prefix_lower = prefix.to_ascii_lowercase();
+        return path_lower.strip_prefix(&prefix_lower).and_then(|relative| {
+            (!relative.is_empty()).then_some(path[prefix.len()..].to_string())
+        });
+    }
+
+    path.strip_prefix(&prefix)
+        .and_then(|relative| (!relative.is_empty()).then_some(relative.to_string()))
+}
+
+fn portable_path_eq(left: &str, right: &str) -> bool {
+    if should_compare_portable_paths_case_insensitively(left)
+        || should_compare_portable_paths_case_insensitively(right)
+    {
+        left.eq_ignore_ascii_case(right)
+    } else {
+        left == right
+    }
+}
+
+fn should_compare_portable_paths_case_insensitively(path: &str) -> bool {
+    let normalized = path.trim().replace('\\', "/");
+    normalized.starts_with("//")
+        || (normalized.len() >= 2
+            && normalized.as_bytes()[0].is_ascii_alphabetic()
+            && normalized.as_bytes()[1] == b':')
 }
 
 fn parse_created_id(kind: &str, result: &rmcp::model::CallToolResult) -> Result<String> {

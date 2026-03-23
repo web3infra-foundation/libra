@@ -3026,7 +3026,7 @@ async fn test_claude_sdk_bridge_run_rejects_invalid_binding_schema_on_reuse() {
 
 #[tokio::test]
 #[serial]
-async fn test_claude_sdk_bridge_run_rejects_missing_audit_bundle_on_reuse() {
+async fn test_claude_sdk_bridge_run_reuses_binding_when_stored_audit_bundle_path_is_stale() {
     let repo = tempdir().expect("failed to create repo root");
     test::setup_with_new_libra_in(repo.path()).await;
 
@@ -3076,6 +3076,14 @@ async fn test_claude_sdk_bridge_run_rejects_missing_audit_bundle_on_reuse() {
     );
     assert_cli_success(&bridge, "bridge-run should succeed");
     let bridge_json = parse_stdout_json(&bridge, "bridge-run output");
+    let original_task_id = bridge_json["taskId"]
+        .as_str()
+        .expect("taskId should be present")
+        .to_string();
+    let original_run_id = bridge_json["runId"]
+        .as_str()
+        .expect("runId should be present")
+        .to_string();
     let binding_path = PathBuf::from(
         bridge_json["bindingPath"]
             .as_str()
@@ -3108,16 +3116,13 @@ async fn test_claude_sdk_bridge_run_rejects_missing_audit_bundle_on_reuse() {
         ],
         repo.path(),
     );
-    assert!(
-        !bridge_repeat.status.success(),
-        "bridge-run should reject a cached binding with a missing audit bundle"
+    assert_cli_success(
+        &bridge_repeat,
+        "bridge-run should keep reusing the binding when the stored audit bundle path is stale but the current bundle exists",
     );
-    assert!(
-        String::from_utf8_lossy(&bridge_repeat.stderr).contains(
-            "failed to load managed audit bundle referenced by Claude formal run binding"
-        ),
-        "error should mention the missing audit bundle path"
-    );
+    let bridge_repeat_json = parse_stdout_json(&bridge_repeat, "bridge-run repeat output");
+    assert_eq!(bridge_repeat_json["taskId"], json!(original_task_id));
+    assert_eq!(bridge_repeat_json["runId"], json!(original_run_id));
 }
 
 #[tokio::test]
@@ -3613,6 +3618,678 @@ async fn test_claude_sdk_persist_decision_rejects_mismatched_evidence_binding() 
             "Claude evidence binding belongs to run '11111111-1111-7111-8111-111111111111', not '{run_id}'"
         )),
         "error should explain the binding/run mismatch"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_persist_decision_rejects_missing_evidence_objects() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn missing_evidence_objects() {}\n").expect("write source file");
+
+    let artifact_path = repo.path().join("managed-run-artifact.json");
+    fs::write(
+        &artifact_path,
+        serde_json::to_vec_pretty(&semantic_full_artifact(repo.path(), &touched_file))
+            .expect("serialize test artifact"),
+    )
+    .expect("write test artifact");
+    let request_path = repo.path().join("helper-request.json");
+    let helper_path = repo.path().join("capture-managed-helper.sh");
+    write_request_capture_shell_helper(&helper_path, &artifact_path, &request_path);
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+            "--node-binary",
+            "/bin/sh",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&run, "claude-sdk run should succeed");
+    let run_json = parse_stdout_json(&run, "claude-sdk run output");
+    let ai_session_id = run_json["aiSessionId"]
+        .as_str()
+        .expect("aiSessionId should be present")
+        .to_string();
+    let provider_session_id = run_json["providerSessionId"]
+        .as_str()
+        .expect("providerSessionId should be present");
+    stage_provider_session_evidence_artifacts(repo.path(), provider_session_id);
+
+    let bridge = run_libra_command(
+        &[
+            "claude-sdk",
+            "bridge-run",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&bridge, "bridge-run should succeed");
+
+    let evidence = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-evidence",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&evidence, "persist-evidence should succeed");
+    let evidence_json = parse_stdout_json(&evidence, "persist-evidence output");
+    let evidence_binding_path = PathBuf::from(
+        evidence_json["bindingPath"]
+            .as_str()
+            .expect("bindingPath should be present"),
+    );
+
+    let mut binding_json: Value =
+        serde_json::from_slice(&fs::read(&evidence_binding_path).expect("read evidence binding"))
+            .expect("deserialize evidence binding");
+    binding_json["evidenceIds"] = json!(vec!["11111111-1111-7111-8111-111111111111".to_string()]);
+    fs::write(
+        &evidence_binding_path,
+        serde_json::to_vec_pretty(&binding_json).expect("serialize missing evidenceIds binding"),
+    )
+    .expect("write missing evidenceIds binding");
+
+    let decision = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-decision",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert!(
+        !decision.status.success(),
+        "persist-decision should reject when evidenceIds no longer point at all persisted Evidence objects"
+    );
+    assert!(
+        String::from_utf8_lossy(&decision.stderr)
+            .contains("Claude evidence binding references missing Evidence objects"),
+        "error should guide the user to rerun persist-evidence"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_persist_evidence_redacts_repo_external_touch_hints() {
+    let repo = tempdir().expect("failed to create repo root");
+    let external = tempdir().expect("failed to create external root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = external.path().join("external.rs");
+    fs::write(&touched_file, "pub fn external_touch() {}\n").expect("write external file");
+
+    let artifact_path = repo.path().join("managed-run-artifact.json");
+    fs::write(
+        &artifact_path,
+        serde_json::to_vec_pretty(&semantic_full_artifact(repo.path(), &touched_file))
+            .expect("serialize test artifact"),
+    )
+    .expect("write test artifact");
+    let request_path = repo.path().join("helper-request.json");
+    let helper_path = repo.path().join("capture-managed-helper.sh");
+    write_request_capture_shell_helper(&helper_path, &artifact_path, &request_path);
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+            "--node-binary",
+            "/bin/sh",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&run, "claude-sdk run should succeed");
+    let run_json = parse_stdout_json(&run, "claude-sdk run output");
+    let ai_session_id = run_json["aiSessionId"]
+        .as_str()
+        .expect("aiSessionId should be present")
+        .to_string();
+    let provider_session_id = run_json["providerSessionId"]
+        .as_str()
+        .expect("providerSessionId should be present");
+    stage_provider_session_evidence_artifacts(repo.path(), provider_session_id);
+
+    let bridge = run_libra_command(
+        &[
+            "claude-sdk",
+            "bridge-run",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&bridge, "bridge-run should succeed");
+
+    let evidence = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-evidence",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&evidence, "persist-evidence should succeed");
+    let evidence_json = parse_stdout_json(&evidence, "persist-evidence output");
+    let evidence_binding_path = PathBuf::from(
+        evidence_json["bindingPath"]
+            .as_str()
+            .expect("bindingPath should be present"),
+    );
+    let evidence_binding = read_json_file(&evidence_binding_path);
+    let tool_runtime_summary = evidence_binding["evidences"]
+        .as_array()
+        .expect("evidences should be an array")
+        .iter()
+        .find(|entry| entry["kind"] == json!("managed_tool_runtime_summary"))
+        .and_then(|entry| entry["summary"].as_str())
+        .expect("managed_tool_runtime_summary should exist");
+    assert!(
+        !tool_runtime_summary.contains(&touched_file.to_string_lossy().to_string()),
+        "repo-external absolute touch hints should not be persisted into formal Evidence summaries"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_persist_evidence_redacts_repo_external_relative_touch_hints() {
+    let repo = tempdir().expect("failed to create repo root");
+    let external = tempdir().expect("failed to create external root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn relative_escape_touch() {}\n").expect("write source file");
+
+    let escaped_path = external.path().join("outside.rs");
+    fs::write(&escaped_path, "pub fn escaped_touch() {}\n").expect("write external file");
+
+    let mut artifact = semantic_full_artifact(repo.path(), &touched_file);
+    artifact["hookEvents"][1]["input"]["tool_input"]["file_path"] = json!("../outside.rs");
+    artifact["hookEvents"][2]["input"]["tool_input"]["file_path"] = json!("../outside.rs");
+    artifact["hookEvents"][2]["input"]["tool_response"]["file"]["filePath"] =
+        json!("../outside.rs");
+
+    let artifact_path = repo.path().join("managed-run-artifact.json");
+    fs::write(
+        &artifact_path,
+        serde_json::to_vec_pretty(&artifact).expect("serialize test artifact"),
+    )
+    .expect("write test artifact");
+    let request_path = repo.path().join("helper-request.json");
+    let helper_path = repo.path().join("capture-managed-helper.sh");
+    write_request_capture_shell_helper(&helper_path, &artifact_path, &request_path);
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+            "--node-binary",
+            "/bin/sh",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&run, "claude-sdk run should succeed");
+    let run_json = parse_stdout_json(&run, "claude-sdk run output");
+    let ai_session_id = run_json["aiSessionId"]
+        .as_str()
+        .expect("aiSessionId should be present")
+        .to_string();
+    let provider_session_id = run_json["providerSessionId"]
+        .as_str()
+        .expect("providerSessionId should be present");
+    stage_provider_session_evidence_artifacts(repo.path(), provider_session_id);
+
+    let bridge = run_libra_command(
+        &[
+            "claude-sdk",
+            "bridge-run",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&bridge, "bridge-run should succeed");
+
+    let evidence = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-evidence",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&evidence, "persist-evidence should succeed");
+    let evidence_json = parse_stdout_json(&evidence, "persist-evidence output");
+    let evidence_binding_path = PathBuf::from(
+        evidence_json["bindingPath"]
+            .as_str()
+            .expect("bindingPath should be present"),
+    );
+    let evidence_binding = read_json_file(&evidence_binding_path);
+    let tool_runtime_summary = evidence_binding["evidences"]
+        .as_array()
+        .expect("evidences should be an array")
+        .iter()
+        .find(|entry| entry["kind"] == json!("managed_tool_runtime_summary"))
+        .and_then(|entry| entry["summary"].as_str())
+        .expect("managed_tool_runtime_summary should exist");
+    assert!(
+        !tool_runtime_summary.contains("../outside.rs"),
+        "repo-external relative touch hints should not be persisted into formal Evidence summaries"
+    );
+    assert!(
+        !tool_runtime_summary.contains(&escaped_path.to_string_lossy().to_string()),
+        "repo-external relative touch hints should not resolve into leaked absolute paths"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_persist_evidence_redacts_windows_style_absolute_touch_hints() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn windows_absolute_touch() {}\n").expect("write source file");
+
+    let mut artifact = semantic_full_artifact(repo.path(), &touched_file);
+    artifact["hookEvents"][1]["input"]["tool_input"]["file_path"] = json!("C:/external/outside.rs");
+    artifact["hookEvents"][2]["input"]["tool_input"]["file_path"] = json!("C:/external/outside.rs");
+    artifact["hookEvents"][2]["input"]["tool_response"]["file"]["filePath"] =
+        json!("C:/external/outside.rs");
+
+    let artifact_path = repo.path().join("managed-run-artifact.json");
+    fs::write(
+        &artifact_path,
+        serde_json::to_vec_pretty(&artifact).expect("serialize test artifact"),
+    )
+    .expect("write test artifact");
+    let request_path = repo.path().join("helper-request.json");
+    let helper_path = repo.path().join("capture-managed-helper.sh");
+    write_request_capture_shell_helper(&helper_path, &artifact_path, &request_path);
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+            "--node-binary",
+            "/bin/sh",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&run, "claude-sdk run should succeed");
+    let run_json = parse_stdout_json(&run, "claude-sdk run output");
+    let ai_session_id = run_json["aiSessionId"]
+        .as_str()
+        .expect("aiSessionId should be present")
+        .to_string();
+    let provider_session_id = run_json["providerSessionId"]
+        .as_str()
+        .expect("providerSessionId should be present");
+    stage_provider_session_evidence_artifacts(repo.path(), provider_session_id);
+
+    let bridge = run_libra_command(
+        &[
+            "claude-sdk",
+            "bridge-run",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&bridge, "bridge-run should succeed");
+
+    let evidence = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-evidence",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&evidence, "persist-evidence should succeed");
+    let evidence_json = parse_stdout_json(&evidence, "persist-evidence output");
+    let evidence_binding_path = PathBuf::from(
+        evidence_json["bindingPath"]
+            .as_str()
+            .expect("bindingPath should be present"),
+    );
+    let evidence_binding = read_json_file(&evidence_binding_path);
+    let tool_runtime_summary = evidence_binding["evidences"]
+        .as_array()
+        .expect("evidences should be an array")
+        .iter()
+        .find(|entry| entry["kind"] == json!("managed_tool_runtime_summary"))
+        .and_then(|entry| entry["summary"].as_str())
+        .expect("managed_tool_runtime_summary should exist");
+    assert!(
+        !tool_runtime_summary.contains("C:/external/outside.rs"),
+        "Windows-style absolute touch hints should not be persisted into formal Evidence summaries"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_persist_evidence_preserves_relative_touch_hints_for_windows_bundle() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn windows_bundle_relative_touch() {}\n")
+        .expect("write source file");
+
+    let mut artifact = semantic_full_artifact(repo.path(), &touched_file);
+    replace_template_slots(
+        &mut artifact,
+        &[
+            (
+                repo.path().to_string_lossy().as_ref(),
+                json!("C:/workspace/libra"),
+            ),
+            (touched_file.to_string_lossy().as_ref(), json!("src/lib.rs")),
+        ],
+    );
+
+    let artifact_path = repo.path().join("managed-run-artifact.json");
+    fs::write(
+        &artifact_path,
+        serde_json::to_vec_pretty(&artifact).expect("serialize test artifact"),
+    )
+    .expect("write test artifact");
+    let request_path = repo.path().join("helper-request.json");
+    let helper_path = repo.path().join("capture-managed-helper.sh");
+    write_request_capture_shell_helper(&helper_path, &artifact_path, &request_path);
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+            "--node-binary",
+            "/bin/sh",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&run, "claude-sdk run should succeed");
+    let run_json = parse_stdout_json(&run, "claude-sdk run output");
+    let ai_session_id = run_json["aiSessionId"]
+        .as_str()
+        .expect("aiSessionId should be present")
+        .to_string();
+    let provider_session_id = run_json["providerSessionId"]
+        .as_str()
+        .expect("providerSessionId should be present");
+    stage_provider_session_evidence_artifacts(repo.path(), provider_session_id);
+
+    let bridge = run_libra_command(
+        &[
+            "claude-sdk",
+            "bridge-run",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&bridge, "bridge-run should succeed");
+
+    let evidence = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-evidence",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&evidence, "persist-evidence should succeed");
+    let evidence_json = parse_stdout_json(&evidence, "persist-evidence output");
+    let evidence_binding_path = PathBuf::from(
+        evidence_json["bindingPath"]
+            .as_str()
+            .expect("bindingPath should be present"),
+    );
+    let evidence_binding = read_json_file(&evidence_binding_path);
+    let tool_runtime_summary = evidence_binding["evidences"]
+        .as_array()
+        .expect("evidences should be an array")
+        .iter()
+        .find(|entry| entry["kind"] == json!("managed_tool_runtime_summary"))
+        .and_then(|entry| entry["summary"].as_str())
+        .expect("managed_tool_runtime_summary should exist");
+    assert!(
+        tool_runtime_summary.contains("src/lib.rs"),
+        "relative touch hints from Windows-origin bundles should still be preserved"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_persist_evidence_preserves_relative_touch_hints_for_windows_drive_root_bundle()
+ {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn windows_drive_root_touch() {}\n").expect("write source file");
+
+    let mut artifact = semantic_full_artifact(repo.path(), &touched_file);
+    replace_template_slots(
+        &mut artifact,
+        &[
+            (repo.path().to_string_lossy().as_ref(), json!("C:/")),
+            (touched_file.to_string_lossy().as_ref(), json!("src/lib.rs")),
+        ],
+    );
+
+    let artifact_path = repo.path().join("managed-run-artifact.json");
+    fs::write(
+        &artifact_path,
+        serde_json::to_vec_pretty(&artifact).expect("serialize test artifact"),
+    )
+    .expect("write test artifact");
+    let request_path = repo.path().join("helper-request.json");
+    let helper_path = repo.path().join("capture-managed-helper.sh");
+    write_request_capture_shell_helper(&helper_path, &artifact_path, &request_path);
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+            "--node-binary",
+            "/bin/sh",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&run, "claude-sdk run should succeed");
+    let run_json = parse_stdout_json(&run, "claude-sdk run output");
+    let ai_session_id = run_json["aiSessionId"]
+        .as_str()
+        .expect("aiSessionId should be present")
+        .to_string();
+    let provider_session_id = run_json["providerSessionId"]
+        .as_str()
+        .expect("providerSessionId should be present");
+    stage_provider_session_evidence_artifacts(repo.path(), provider_session_id);
+
+    let bridge = run_libra_command(
+        &[
+            "claude-sdk",
+            "bridge-run",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&bridge, "bridge-run should succeed");
+
+    let evidence = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-evidence",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&evidence, "persist-evidence should succeed");
+    let evidence_json = parse_stdout_json(&evidence, "persist-evidence output");
+    let evidence_binding_path = PathBuf::from(
+        evidence_json["bindingPath"]
+            .as_str()
+            .expect("bindingPath should be present"),
+    );
+    let evidence_binding = read_json_file(&evidence_binding_path);
+    let tool_runtime_summary = evidence_binding["evidences"]
+        .as_array()
+        .expect("evidences should be an array")
+        .iter()
+        .find(|entry| entry["kind"] == json!("managed_tool_runtime_summary"))
+        .and_then(|entry| entry["summary"].as_str())
+        .expect("managed_tool_runtime_summary should exist");
+    assert!(
+        tool_runtime_summary.contains("src/lib.rs"),
+        "relative touch hints from Windows drive-root bundles should still be preserved"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_persist_evidence_preserves_mixed_case_windows_absolute_touch_hints() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn mixed_case_windows_touch() {}\n").expect("write source file");
+
+    let mut artifact = semantic_full_artifact(repo.path(), &touched_file);
+    replace_template_slots(
+        &mut artifact,
+        &[
+            (
+                repo.path().to_string_lossy().as_ref(),
+                json!("C:/Workspace/Libra"),
+            ),
+            (
+                touched_file.to_string_lossy().as_ref(),
+                json!("c:/workspace/libra/src/lib.rs"),
+            ),
+        ],
+    );
+
+    let artifact_path = repo.path().join("managed-run-artifact.json");
+    fs::write(
+        &artifact_path,
+        serde_json::to_vec_pretty(&artifact).expect("serialize test artifact"),
+    )
+    .expect("write test artifact");
+    let request_path = repo.path().join("helper-request.json");
+    let helper_path = repo.path().join("capture-managed-helper.sh");
+    write_request_capture_shell_helper(&helper_path, &artifact_path, &request_path);
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+            "--node-binary",
+            "/bin/sh",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&run, "claude-sdk run should succeed");
+    let run_json = parse_stdout_json(&run, "claude-sdk run output");
+    let ai_session_id = run_json["aiSessionId"]
+        .as_str()
+        .expect("aiSessionId should be present")
+        .to_string();
+    let provider_session_id = run_json["providerSessionId"]
+        .as_str()
+        .expect("providerSessionId should be present");
+    stage_provider_session_evidence_artifacts(repo.path(), provider_session_id);
+
+    let bridge = run_libra_command(
+        &[
+            "claude-sdk",
+            "bridge-run",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&bridge, "bridge-run should succeed");
+
+    let evidence = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-evidence",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&evidence, "persist-evidence should succeed");
+    let evidence_json = parse_stdout_json(&evidence, "persist-evidence output");
+    let evidence_binding_path = PathBuf::from(
+        evidence_json["bindingPath"]
+            .as_str()
+            .expect("bindingPath should be present"),
+    );
+    let evidence_binding = read_json_file(&evidence_binding_path);
+    let tool_runtime_summary = evidence_binding["evidences"]
+        .as_array()
+        .expect("evidences should be an array")
+        .iter()
+        .find(|entry| entry["kind"] == json!("managed_tool_runtime_summary"))
+        .and_then(|entry| entry["summary"].as_str())
+        .expect("managed_tool_runtime_summary should exist");
+    assert!(
+        tool_runtime_summary.contains("src/lib.rs"),
+        "mixed-case Windows absolute touch hints inside the repo should still collapse to repo-relative paths"
     );
 }
 
