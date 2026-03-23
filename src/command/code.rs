@@ -7,18 +7,26 @@
 
 use std::{
     net::SocketAddr,
+    path::{Path, PathBuf},
+    process::Stdio,
     sync::{Arc, Mutex},
 };
 
 use axum::{Router, response::IntoResponse, routing::get};
 use clap::{Parser, ValueEnum};
-use tokio::sync::oneshot;
+use tokio::{
+    process::{Child, Command},
+    sync::oneshot,
+    time::{Duration, Instant, sleep},
+};
+use tokio_tungstenite::connect_async;
 use url::Url;
 
 // use uuid::Uuid;
 use crate::internal::{
     ai::{
         client::CompletionClient,
+        codex as agent_codex,
         history::HistoryManager,
         mcp::server::LibraMcpServer,
         providers::{
@@ -51,6 +59,9 @@ use crate::{
 const DEFAULT_WEB_PORT: u16 = 3000;
 const DEFAULT_MCP_PORT: u16 = 6789;
 const DEFAULT_BIND_HOST: &str = "127.0.0.1";
+const DEFAULT_CODEX_BIN: &str = "codex";
+const CODEX_STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
+const CODEX_STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(200);
 #[expect(
     dead_code,
     reason = "Embedded browse page is reserved for the web/TUI code flow"
@@ -65,6 +76,7 @@ pub enum CodeProvider {
     Deepseek,
     Zhipu,
     Ollama,
+    Codex,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -117,6 +129,10 @@ pub struct CodeArgs {
     #[arg(long, default_value = DEFAULT_BIND_HOST)]
     pub host: String,
 
+    /// Working directory for the code session.
+    #[arg(long)]
+    pub cwd: Option<PathBuf>,
+
     /// AI provider backend
     #[arg(long, value_enum, default_value_t = CodeProvider::Gemini)]
     pub provider: CodeProvider,
@@ -156,14 +172,26 @@ pub struct CodeArgs {
     /// Provider API base URL (e.g. http://remote-host:11434/v1 for remote Ollama)
     #[arg(long)]
     pub api_base: Option<String>,
+
+    /// Codex executable used to launch the managed app-server.
+    #[arg(long, default_value = DEFAULT_CODEX_BIN)]
+    pub codex_bin: String,
+
+    /// Override the Codex app-server port. Omit to use a random local free port.
+    #[arg(long)]
+    pub codex_port: Option<u16>,
+
+    /// In Codex mode, require the agent to produce a plan before execution.
+    #[arg(long, default_value_t = false)]
+    pub plan_mode: bool,
 }
 
 pub async fn execute(args: CodeArgs) -> CliResult<()> {
     validate_mode_args(&args).map_err(CliError::command_usage)?;
     if args.stdio {
-        execute_stdio().await
+        execute_stdio(&args).await
     } else if args.web_only {
-        execute_web_only(args).await
+        execute_web_only(&args).await
     } else {
         execute_tui(args).await
     }
@@ -284,7 +312,7 @@ async fn start_web_server(host: &str, port: u16) -> anyhow::Result<WebServerHand
     })
 }
 
-async fn execute_web_only(args: CodeArgs) -> CliResult<()> {
+async fn execute_web_only(args: &CodeArgs) -> CliResult<()> {
     let web_handle = match start_web_server(&args.host, args.port).await {
         Ok(handle) => handle,
         Err(err) => {
@@ -296,9 +324,7 @@ async fn execute_web_only(args: CodeArgs) -> CliResult<()> {
     };
     println!("Libra Code server running at http://{}", web_handle.addr);
 
-    // Prepare MCP server instance shared between the HTTP transport and TUI bridge
-    // Use repository working directory to ensure correct initialization of .libra resources.
-    let working_dir = crate::utils::util::working_dir();
+    let working_dir = resolve_code_working_dir(args)?;
 
     let mcp_server = init_mcp_server(&working_dir).await;
 
@@ -324,8 +350,11 @@ async fn execute_web_only(args: CodeArgs) -> CliResult<()> {
 }
 
 async fn execute_tui(args: CodeArgs) -> CliResult<()> {
-    // Use repository working directory to ensure correct initialization of .libra resources.
-    let working_dir = crate::utils::util::working_dir();
+    let working_dir = resolve_code_working_dir(&args)?;
+
+    if args.provider == CodeProvider::Codex {
+        return execute_codex_mode(args, working_dir).await;
+    }
 
     // Validate --api-base: only honored for Ollama via CLI flag. Other providers
     // accept custom base URLs through their respective environment variables.
@@ -465,9 +494,205 @@ async fn execute_tui(args: CodeArgs) -> CliResult<()> {
             let model = client.completion_model(&model_name);
             run_tui_with_model(model, launch_config, model_name, provider_name).await?;
         }
+        CodeProvider::Codex => {
+            unreachable!("codex provider is handled before the TUI provider match")
+        }
     }
 
     Ok(())
+}
+
+struct ManagedCodexServer {
+    ws_url: String,
+    child: Child,
+}
+
+impl ManagedCodexServer {
+    async fn shutdown(&mut self) {
+        if self.child.id().is_none() {
+            return;
+        }
+        let _ = self.child.start_kill();
+        let _ = tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await;
+    }
+}
+
+async fn execute_codex_mode(args: CodeArgs, working_dir: PathBuf) -> CliResult<()> {
+    let mut server =
+        start_managed_codex_server(&args.codex_bin, args.codex_port, &working_dir).await?;
+    println!("Starting Libra Code with Codex provider");
+    println!("Working directory: {}", working_dir.display());
+    println!("Codex WebSocket: {}", server.ws_url);
+    println!("Codex app-server: auto-started");
+    if args.plan_mode {
+        println!("Plan Mode: enabled (plan required before execution)");
+    }
+
+    let agent_args = agent_codex::AgentCodexArgs {
+        url: server.ws_url.clone(),
+        cwd: working_dir.to_string_lossy().to_string(),
+        approval: approval_policy_to_codex(args.approval_policy).to_string(),
+        model_provider: None,
+        service_tier: None,
+        personality: None,
+        model: args.model.clone(),
+        plan_mode: args.plan_mode,
+        debug: false,
+    };
+
+    let result = agent_codex::execute(agent_args)
+        .await
+        .map_err(|e| CliError::fatal(e.to_string()));
+
+    server.shutdown().await;
+    result
+}
+
+fn approval_policy_to_codex(policy: CodeApprovalPolicy) -> &'static str {
+    match policy {
+        CodeApprovalPolicy::Never => "accept",
+        CodeApprovalPolicy::OnFailure
+        | CodeApprovalPolicy::OnRequest
+        | CodeApprovalPolicy::Untrusted => "ask",
+    }
+}
+
+async fn start_managed_codex_server(
+    codex_bin: &str,
+    requested_port: Option<u16>,
+    working_dir: &Path,
+) -> CliResult<ManagedCodexServer> {
+    let ws_url = resolve_codex_ws_url(requested_port)?;
+    let mut child = spawn_codex_app_server(codex_bin, &ws_url, working_dir)?;
+
+    if let Err(err) = wait_for_codex_ready(&ws_url).await {
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        return Err(err);
+    }
+
+    Ok(ManagedCodexServer { ws_url, child })
+}
+
+fn build_codex_command(program: &str, ws_url: &str, working_dir: &Path) -> Command {
+    let mut command = Command::new(program);
+    command
+        .arg("app-server")
+        .arg("--listen")
+        .arg(ws_url)
+        .current_dir(working_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
+}
+
+#[cfg(target_os = "windows")]
+fn build_windows_shell_codex_command(codex_bin: &str, ws_url: &str, working_dir: &Path) -> Command {
+    let mut command = Command::new("cmd");
+    command
+        .arg("/C")
+        .arg(codex_bin)
+        .arg("app-server")
+        .arg("--listen")
+        .arg(ws_url)
+        .current_dir(working_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
+}
+
+fn spawn_codex_app_server(codex_bin: &str, ws_url: &str, working_dir: &Path) -> CliResult<Child> {
+    match build_codex_command(codex_bin, ws_url, working_dir).spawn() {
+        Ok(child) => Ok(child),
+        #[cfg(target_os = "windows")]
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            build_windows_shell_codex_command(codex_bin, ws_url, working_dir)
+                .spawn()
+                .map_err(|shell_err| {
+                    CliError::io(format!(
+                        "failed to start Codex app-server using '{}': {}. Direct spawn error: {}. Make sure the Codex CLI is installed and available in PATH.",
+                        codex_bin, shell_err, err
+                    ))
+                })
+        }
+        Err(err) => Err(CliError::io(format!(
+            "failed to start Codex app-server using '{}': {}. Make sure the Codex CLI is installed and available in PATH.",
+            codex_bin, err
+        ))),
+    }
+}
+
+fn resolve_codex_ws_url(requested_port: Option<u16>) -> CliResult<String> {
+    let port = match requested_port {
+        Some(0) => {
+            return Err(CliError::command_usage(
+                "--codex-port must be a non-zero TCP port; omit it to auto-select a free port",
+            ));
+        }
+        Some(port) => port,
+        None => pick_free_local_port(DEFAULT_BIND_HOST)?,
+    };
+    Ok(format!("ws://{DEFAULT_BIND_HOST}:{port}"))
+}
+
+fn pick_free_local_port(host: &str) -> CliResult<u16> {
+    let listener = std::net::TcpListener::bind((host, 0)).map_err(|e| {
+        CliError::network(format!(
+            "failed to reserve a local port for the Codex app-server on {}: {}",
+            host, e
+        ))
+    })?;
+    listener.local_addr().map(|addr| addr.port()).map_err(|e| {
+        CliError::network(format!(
+            "failed to determine the reserved Codex app-server port: {}",
+            e
+        ))
+    })
+}
+
+async fn wait_for_codex_ready(ws_url: &str) -> CliResult<()> {
+    let deadline = Instant::now() + CODEX_STARTUP_TIMEOUT;
+
+    loop {
+        match connect_async(ws_url).await {
+            Ok((stream, _)) => {
+                drop(stream);
+                return Ok(());
+            }
+            Err(err) => {
+                let detail = err.to_string();
+                if Instant::now() >= deadline {
+                    return Err(CliError::network(format!(
+                        "timed out waiting for Codex app-server at {}: {}",
+                        ws_url, detail
+                    )));
+                }
+                sleep(CODEX_STARTUP_POLL_INTERVAL).await;
+            }
+        }
+    }
+}
+
+fn resolve_code_working_dir(args: &CodeArgs) -> CliResult<PathBuf> {
+    let working_dir = args
+        .cwd
+        .clone()
+        .unwrap_or_else(crate::utils::util::working_dir);
+    if !working_dir.exists() {
+        return Err(CliError::command_usage(format!(
+            "--cwd path does not exist: {}",
+            working_dir.display()
+        )));
+    }
+    if !working_dir.is_dir() {
+        return Err(CliError::command_usage(format!(
+            "--cwd must point to a directory: {}",
+            working_dir.display()
+        )));
+    }
+    Ok(working_dir)
 }
 
 struct TuiLaunchConfig {
@@ -772,9 +997,8 @@ fn resolve_storage_root(working_dir: &std::path::Path) -> std::path::PathBuf {
         .unwrap_or_else(|_| working_dir.join(".libra"))
 }
 
-async fn execute_stdio() -> CliResult<()> {
-    // Use repository working directory to ensure correct initialization of .libra resources.
-    let working_dir = crate::utils::util::working_dir();
+async fn execute_stdio(args: &CodeArgs) -> CliResult<()> {
+    let working_dir = resolve_code_working_dir(args)?;
 
     let mcp_server = init_mcp_server(&working_dir).await;
 
@@ -821,6 +1045,22 @@ fn validate_mode_args(args: &CodeArgs) -> Result<(), String> {
         reject_mode_flag(args.mcp_port != DEFAULT_MCP_PORT, "--mcp-port", "--stdio")?;
     }
 
+    if args.provider != CodeProvider::Codex {
+        if args.codex_port.is_some() {
+            return Err("--codex-port is only supported with --provider=codex".to_string());
+        }
+        if args.codex_bin != DEFAULT_CODEX_BIN {
+            return Err("--codex-bin is only supported with --provider=codex".to_string());
+        }
+        if args.plan_mode {
+            return Err("--plan-mode is only supported with --provider=codex".to_string());
+        }
+    }
+
+    if args.provider == CodeProvider::Codex && args.api_base.is_some() {
+        return Err("--api-base is not supported with --provider=codex".to_string());
+    }
+
     Ok(())
 }
 
@@ -855,6 +1095,7 @@ mod tests {
             web_only: false,
             port: DEFAULT_WEB_PORT,
             host: DEFAULT_BIND_HOST.to_string(),
+            cwd: None,
             provider: CodeProvider::Gemini,
             model: None,
             temperature: None,
@@ -864,6 +1105,9 @@ mod tests {
             mcp_port: DEFAULT_MCP_PORT,
             stdio: false,
             api_base: None,
+            codex_bin: DEFAULT_CODEX_BIN.to_string(),
+            codex_port: None,
+            plan_mode: false,
         }
     }
 
