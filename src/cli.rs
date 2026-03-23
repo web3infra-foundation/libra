@@ -158,9 +158,6 @@ enum Commands {
     ClaudeSdk(command::claude_sdk::ClaudeSdkArgs),
     #[command(about = "Start Libra Code interactive TUI (with background web server)")]
     Code(command::code::CodeArgs),
-    #[command(about = "Connect to Codex app-server via WebSocket")]
-    AgentCodex(command::agent_codex::AgentCodexArgs),
-
     // The rest of the commands require a repository to be present
     #[command(about = "Add file contents to the index")]
     Add(command::add::AddArgs),
@@ -584,9 +581,6 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
             })?;
         }
         Commands::Clone(cmd_args) => command::clone::execute_safe(cmd_args, &output).await?,
-        Commands::AgentCodex(cmd_args) => command::agent_codex::execute(cmd_args)
-            .await
-            .map_err(|e| CliError::fatal(e.to_string()))?,
         Commands::ClaudeSdk(cmd_args) => command::claude_sdk::execute(cmd_args)
             .await
             .map_err(|e| CliError::fatal(e.to_string()))?,

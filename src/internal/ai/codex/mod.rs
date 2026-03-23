@@ -246,6 +246,13 @@ fn normalize_plan_step_status(status: &str) -> &'static str {
     }
 }
 
+fn truncate_for_display(text: &str, max_chars: usize) -> (String, bool) {
+    match text.char_indices().nth(max_chars) {
+        Some((idx, _)) => (text[..idx].to_string(), true),
+        None => (text.to_string(), false),
+    }
+}
+
 fn task_status_from_plan_step(status: &str) -> TaskStatus {
     match normalize_plan_step_status(status) {
         "completed" => TaskStatus::Completed,
@@ -371,9 +378,42 @@ pub struct AgentCodexArgs {
     #[arg(long)]
     pub model: Option<String>,
 
+    /// Require Codex to produce a plan before attempting execution.
+    #[arg(long, default_value_t = false)]
+    pub plan_mode: bool,
+
     /// Debug mode: print collected data
     #[arg(long, default_value = "false")]
     pub debug: bool,
+}
+
+fn plan_mode_developer_instructions() -> &'static str {
+    concat!(
+        "You are in strict plan-first mode. ",
+        "Your first responsibility is to generate a structured plan update for the task. ",
+        "Do not treat a normal conversational response as sufficient planning output. ",
+        "You are replying in a plain terminal interface without Markdown rendering. ",
+        "Do not use Markdown headings, bullet markers like '-' or '*', fenced code blocks, tables, or emphasis markers such as '**'. ",
+        "Use plain text only. ",
+        "Rules: ",
+        "First produce a structured step-by-step plan/checklist. ",
+        "Do not only explain the plan in prose. ",
+        "Use the planning mechanism as the primary planning output whenever possible. ",
+        "Do not execute tools, run commands, edit files, or create patches before the user approves the plan. ",
+        "After the plan is produced, wait for explicit approval. ",
+        "If the task appears simple, still provide a short structured plan first. ",
+        "If you are uncertain, favor planning before acting. ",
+        "Keep replies compact, readable, and suitable for direct CLI display. ",
+        "The user must see a plan before any execution begins."
+    )
+}
+
+fn plan_mode_base_instructions() -> &'static str {
+    concat!(
+        "Current mode: strict structured planning first. ",
+        "Produce a structured plan before execution, prefer the planning system over prose-only planning, ",
+        "wait for user approval before taking action, and reply in plain text without Markdown."
+    )
 }
 
 /// Store an object to MCP storage
@@ -425,6 +465,9 @@ pub async fn execute(args: AgentCodexArgs) -> anyhow::Result<()> {
 
     println!("Connected to Codex!");
     println!("Initializing...");
+    if args.plan_mode {
+        println!("Plan Mode: enabled (plan required before execution)");
+    }
 
     let (mut write, read) = ws_stream.split();
 
@@ -1866,10 +1909,12 @@ Task Completed"
                                                     println!(" started");
                                                     if let Some(arguments) = &args {
                                                         let args_str = arguments.to_string();
-                                                        if args_str.len() > 200 {
+                                                        let (truncated_args, was_truncated) =
+                                                            truncate_for_display(&args_str, 200);
+                                                        if was_truncated {
                                                             println!(
                                                                 "    Args: {}...",
-                                                                &args_str[..200]
+                                                                truncated_args
                                                             );
                                                         } else {
                                                             println!("    Args: {}", args_str);
@@ -2323,11 +2368,8 @@ Task Completed"
                                                         .and_then(|t| t.as_str())
                                                         .unwrap_or("")
                                                         .to_string();
-                                                    let truncated = if content.len() > 50 {
-                                                        content[..50].to_string()
-                                                    } else {
-                                                        content.clone()
-                                                    };
+                                                    let (truncated, _) =
+                                                        truncate_for_display(&content, 50);
                                                     println!("  User: {}", truncated);
 
                                                     let parent_intent_id = lock_or_warn(
@@ -2655,10 +2697,12 @@ Task Completed"
                                                     print!("  MCP Tool: {} - {}", tool, status);
                                                     if let Some(result_val) = result.as_ref() {
                                                         let result_str = result_val.to_string();
-                                                        if result_str.len() > 100 {
+                                                        let (truncated_result, was_truncated) =
+                                                            truncate_for_display(&result_str, 100);
+                                                        if was_truncated {
                                                             println!(
                                                                 " | Result: {}...",
-                                                                &result_str[..100]
+                                                                truncated_result
                                                             );
                                                         } else if !result_str.is_empty()
                                                             && result_str != "null"
@@ -3184,10 +3228,12 @@ Task Completed"
                                                     print!("  Tool: {} - {}", tool, status);
                                                     if let Some(result_val) = result.as_ref() {
                                                         let result_str = result_val.to_string();
-                                                        if result_str.len() > 100 {
+                                                        let (truncated_result, was_truncated) =
+                                                            truncate_for_display(&result_str, 100);
+                                                        if was_truncated {
                                                             println!(
                                                                 " | Result: {}...",
-                                                                &result_str[..100]
+                                                                truncated_result
                                                             );
                                                         } else if !result_str.is_empty()
                                                             && result_str != "null"
@@ -3826,8 +3872,16 @@ Task Completed"
             "modelProvider": args.model_provider,
             "personality": args.personality,
             "sandbox": SandboxMode::WorkspaceWrite,
-            "developerInstructions": serde_json::Value::Null,
-            "baseInstructions": serde_json::Value::Null,
+            "developerInstructions": if args.plan_mode {
+                serde_json::json!(plan_mode_developer_instructions())
+            } else {
+                serde_json::Value::Null
+            },
+            "baseInstructions": if args.plan_mode {
+                serde_json::json!(plan_mode_base_instructions())
+            } else {
+                serde_json::Value::Null
+            },
         }),
     )
     .await
