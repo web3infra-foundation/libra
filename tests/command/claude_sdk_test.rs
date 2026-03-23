@@ -2500,8 +2500,8 @@ async fn test_claude_sdk_formal_bridge_persists_task_run_evidence_and_decision()
         .collect::<Vec<_>>();
     assert_eq!(
         evidence_ids.len(),
-        3,
-        "should persist three Evidence records"
+        9,
+        "should persist the expected native/runtime Evidence records"
     );
     let evidence_binding_path = PathBuf::from(
         evidence_json["bindingPath"]
@@ -2574,9 +2574,15 @@ async fn test_claude_sdk_formal_bridge_persists_task_run_evidence_and_decision()
     assert_eq!(
         bound_evidence_kinds,
         BTreeSet::from([
-            "provider_session_snapshot".to_string(),
             "evidence_input_summary".to_string(),
             "intent_extraction_result".to_string(),
+            "managed_context_runtime_summary".to_string(),
+            "managed_decision_runtime_summary".to_string(),
+            "managed_provenance_summary".to_string(),
+            "managed_task_runtime_summary".to_string(),
+            "managed_tool_runtime_summary".to_string(),
+            "managed_usage_summary".to_string(),
+            "provider_session_snapshot".to_string(),
         ]),
         "binding should preserve the expected evidence kinds"
     );
@@ -2647,6 +2653,7 @@ async fn test_claude_sdk_formal_bridge_persists_task_run_evidence_and_decision()
         decision_binding["evidenceBindingPath"],
         json!(evidence_binding_path.to_string_lossy().to_string())
     );
+    assert_eq!(decision_binding["evidenceIds"], json!(evidence_ids.clone()));
 
     let decision_repeat = run_libra_command(
         &[
@@ -2684,6 +2691,12 @@ async fn test_claude_sdk_formal_bridge_persists_task_run_evidence_and_decision()
     assert!(evidence_kinds.contains(&"provider_session_snapshot".to_string()));
     assert!(evidence_kinds.contains(&"evidence_input_summary".to_string()));
     assert!(evidence_kinds.contains(&"intent_extraction_result".to_string()));
+    assert!(evidence_kinds.contains(&"managed_provenance_summary".to_string()));
+    assert!(evidence_kinds.contains(&"managed_usage_summary".to_string()));
+    assert!(evidence_kinds.contains(&"managed_tool_runtime_summary".to_string()));
+    assert!(evidence_kinds.contains(&"managed_task_runtime_summary".to_string()));
+    assert!(evidence_kinds.contains(&"managed_decision_runtime_summary".to_string()));
+    assert!(evidence_kinds.contains(&"managed_context_runtime_summary".to_string()));
     assert!(
         evidence_objects
             .iter()
@@ -3013,6 +3026,405 @@ async fn test_claude_sdk_bridge_run_rejects_invalid_binding_schema_on_reuse() {
 
 #[tokio::test]
 #[serial]
+async fn test_claude_sdk_bridge_run_rejects_missing_audit_bundle_on_reuse() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn missing_audit_bundle() {}\n").expect("write source file");
+
+    let artifact_path = repo.path().join("managed-run-artifact.json");
+    fs::write(
+        &artifact_path,
+        serde_json::to_vec_pretty(&semantic_full_artifact(repo.path(), &touched_file))
+            .expect("serialize test artifact"),
+    )
+    .expect("write test artifact");
+    let request_path = repo.path().join("helper-request.json");
+    let helper_path = repo.path().join("capture-managed-helper.sh");
+    write_request_capture_shell_helper(&helper_path, &artifact_path, &request_path);
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+            "--node-binary",
+            "/bin/sh",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&run, "claude-sdk run should succeed");
+    let run_json = parse_stdout_json(&run, "claude-sdk run output");
+    let ai_session_id = run_json["aiSessionId"]
+        .as_str()
+        .expect("aiSessionId should be present")
+        .to_string();
+
+    let bridge = run_libra_command(
+        &[
+            "claude-sdk",
+            "bridge-run",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&bridge, "bridge-run should succeed");
+    let bridge_json = parse_stdout_json(&bridge, "bridge-run output");
+    let binding_path = PathBuf::from(
+        bridge_json["bindingPath"]
+            .as_str()
+            .expect("bindingPath should be present"),
+    );
+
+    let mut binding_json: Value =
+        serde_json::from_slice(&fs::read(&binding_path).expect("read formal run binding"))
+            .expect("deserialize formal run binding");
+    binding_json["auditBundlePath"] = json!(
+        repo.path()
+            .join(".libra")
+            .join("audit-bundles")
+            .join("missing.json")
+            .to_string_lossy()
+            .to_string()
+    );
+    fs::write(
+        &binding_path,
+        serde_json::to_vec_pretty(&binding_json).expect("serialize invalid binding"),
+    )
+    .expect("write invalid binding");
+
+    let bridge_repeat = run_libra_command(
+        &[
+            "claude-sdk",
+            "bridge-run",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert!(
+        !bridge_repeat.status.success(),
+        "bridge-run should reject a cached binding with a missing audit bundle"
+    );
+    assert!(
+        String::from_utf8_lossy(&bridge_repeat.stderr).contains(
+            "failed to load managed audit bundle referenced by Claude formal run binding"
+        ),
+        "error should mention the missing audit bundle path"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_formal_bridge_rebuilds_stale_evidence_and_decision_bindings() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn stale_binding_upgrade() {}\n").expect("write source file");
+
+    let artifact_path = repo.path().join("managed-run-artifact.json");
+    fs::write(
+        &artifact_path,
+        serde_json::to_vec_pretty(&semantic_full_artifact(repo.path(), &touched_file))
+            .expect("serialize test artifact"),
+    )
+    .expect("write test artifact");
+    let request_path = repo.path().join("helper-request.json");
+    let helper_path = repo.path().join("capture-managed-helper.sh");
+    write_request_capture_shell_helper(&helper_path, &artifact_path, &request_path);
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+            "--node-binary",
+            "/bin/sh",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&run, "claude-sdk run should succeed");
+    let run_json = parse_stdout_json(&run, "claude-sdk run output");
+    let ai_session_id = run_json["aiSessionId"]
+        .as_str()
+        .expect("aiSessionId should be present")
+        .to_string();
+    let provider_session_id = run_json["providerSessionId"]
+        .as_str()
+        .expect("providerSessionId should be present");
+    stage_provider_session_evidence_artifacts(repo.path(), provider_session_id);
+
+    let bridge = run_libra_command(
+        &[
+            "claude-sdk",
+            "bridge-run",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&bridge, "bridge-run should succeed");
+
+    let evidence = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-evidence",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&evidence, "persist-evidence should succeed");
+    let evidence_json = parse_stdout_json(&evidence, "persist-evidence output");
+    let original_evidence_ids = evidence_json["evidenceIds"]
+        .as_array()
+        .expect("evidenceIds should be an array")
+        .iter()
+        .map(|value| value.as_str().expect("evidence id").to_string())
+        .collect::<Vec<_>>();
+    let evidence_binding_path = PathBuf::from(
+        evidence_json["bindingPath"]
+            .as_str()
+            .expect("bindingPath should be present"),
+    );
+
+    let decision = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-decision",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&decision, "persist-decision should succeed");
+    let decision_json = parse_stdout_json(&decision, "persist-decision output");
+    let original_decision_id = decision_json["decisionId"]
+        .as_str()
+        .expect("decisionId should be present")
+        .to_string();
+
+    let mut stale_evidence_binding: Value =
+        serde_json::from_slice(&fs::read(&evidence_binding_path).expect("read evidence binding"))
+            .expect("deserialize evidence binding");
+    stale_evidence_binding["evidenceIds"] = json!(
+        original_evidence_ids
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+    );
+    stale_evidence_binding["evidences"] = Value::Array(
+        stale_evidence_binding["evidences"]
+            .as_array()
+            .expect("evidences should be an array")
+            .iter()
+            .take(3)
+            .cloned()
+            .collect(),
+    );
+    fs::write(
+        &evidence_binding_path,
+        serde_json::to_vec_pretty(&stale_evidence_binding)
+            .expect("serialize stale evidence binding"),
+    )
+    .expect("write stale evidence binding");
+
+    let evidence_rebuild = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-evidence",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &evidence_rebuild,
+        "persist-evidence should rebuild a stale binding at the same path",
+    );
+    let evidence_rebuild_json =
+        parse_stdout_json(&evidence_rebuild, "persist-evidence rebuild output");
+    let rebuilt_evidence_ids = evidence_rebuild_json["evidenceIds"]
+        .as_array()
+        .expect("evidenceIds should be an array")
+        .iter()
+        .map(|value| value.as_str().expect("evidence id").to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rebuilt_evidence_ids.len(),
+        9,
+        "rebuild should restore the full native/runtime evidence set"
+    );
+    assert_ne!(
+        rebuilt_evidence_ids,
+        original_evidence_ids
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>(),
+        "persist-evidence should not reuse the stale subset binding"
+    );
+
+    let decision_rebuild = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-decision",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &decision_rebuild,
+        "persist-decision should rebuild when evidence binding content changes at the same path",
+    );
+    let decision_rebuild_json =
+        parse_stdout_json(&decision_rebuild, "persist-decision rebuild output");
+    let rebuilt_decision_id = decision_rebuild_json["decisionId"]
+        .as_str()
+        .expect("decisionId should be present")
+        .to_string();
+    assert_ne!(
+        rebuilt_decision_id, original_decision_id,
+        "persist-decision should not reuse a stale decision bound to old evidence ids"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_persist_evidence_rebuilds_when_evidence_ids_are_stale() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn stale_evidence_ids() {}\n").expect("write source file");
+
+    let artifact_path = repo.path().join("managed-run-artifact.json");
+    fs::write(
+        &artifact_path,
+        serde_json::to_vec_pretty(&semantic_full_artifact(repo.path(), &touched_file))
+            .expect("serialize test artifact"),
+    )
+    .expect("write test artifact");
+    let request_path = repo.path().join("helper-request.json");
+    let helper_path = repo.path().join("capture-managed-helper.sh");
+    write_request_capture_shell_helper(&helper_path, &artifact_path, &request_path);
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+            "--node-binary",
+            "/bin/sh",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&run, "claude-sdk run should succeed");
+    let run_json = parse_stdout_json(&run, "claude-sdk run output");
+    let ai_session_id = run_json["aiSessionId"]
+        .as_str()
+        .expect("aiSessionId should be present")
+        .to_string();
+    let provider_session_id = run_json["providerSessionId"]
+        .as_str()
+        .expect("providerSessionId should be present");
+    stage_provider_session_evidence_artifacts(repo.path(), provider_session_id);
+
+    let bridge = run_libra_command(
+        &[
+            "claude-sdk",
+            "bridge-run",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&bridge, "bridge-run should succeed");
+
+    let evidence = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-evidence",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&evidence, "persist-evidence should succeed");
+    let evidence_json = parse_stdout_json(&evidence, "persist-evidence output");
+    let evidence_binding_path = PathBuf::from(
+        evidence_json["bindingPath"]
+            .as_str()
+            .expect("bindingPath should be present"),
+    );
+
+    let mut stale_binding: Value =
+        serde_json::from_slice(&fs::read(&evidence_binding_path).expect("read evidence binding"))
+            .expect("deserialize evidence binding");
+    stale_binding["evidenceIds"] = json!(vec![
+        "11111111-1111-7111-8111-111111111111",
+        "22222222-2222-7222-8222-222222222222"
+    ]);
+    fs::write(
+        &evidence_binding_path,
+        serde_json::to_vec_pretty(&stale_binding).expect("serialize stale evidenceIds"),
+    )
+    .expect("write stale evidenceIds");
+
+    let rebuilt = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-evidence",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &rebuilt,
+        "persist-evidence should rebuild when evidenceIds diverge from evidence entries",
+    );
+    let rebuilt_json = parse_stdout_json(&rebuilt, "persist-evidence rebuild output");
+    let rebuilt_ids = rebuilt_json["evidenceIds"]
+        .as_array()
+        .expect("evidenceIds should be an array")
+        .iter()
+        .map(|value| value.as_str().expect("evidence id").to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rebuilt_ids.len(),
+        9,
+        "rebuild should restore the full evidence binding"
+    );
+    assert_ne!(
+        rebuilt_ids,
+        vec![
+            "11111111-1111-7111-8111-111111111111".to_string(),
+            "22222222-2222-7222-8222-222222222222".to_string()
+        ],
+        "persist-evidence should not reuse stale evidenceIds"
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_claude_sdk_formal_bridge_requires_prior_bindings() {
     let repo = tempdir().expect("failed to create repo root");
     test::setup_with_new_libra_in(repo.path()).await;
@@ -3091,6 +3503,116 @@ async fn test_claude_sdk_formal_bridge_requires_prior_bindings() {
     assert!(
         String::from_utf8_lossy(&decision_without_evidence.stderr).contains("persist-evidence"),
         "error should guide the user toward persist-evidence first"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_persist_decision_rejects_mismatched_evidence_binding() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn mismatched_evidence_binding() {}\n")
+        .expect("write source file");
+
+    let artifact_path = repo.path().join("managed-run-artifact.json");
+    fs::write(
+        &artifact_path,
+        serde_json::to_vec_pretty(&semantic_full_artifact(repo.path(), &touched_file))
+            .expect("serialize test artifact"),
+    )
+    .expect("write test artifact");
+    let request_path = repo.path().join("helper-request.json");
+    let helper_path = repo.path().join("capture-managed-helper.sh");
+    write_request_capture_shell_helper(&helper_path, &artifact_path, &request_path);
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+            "--node-binary",
+            "/bin/sh",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&run, "claude-sdk run should succeed");
+    let run_json = parse_stdout_json(&run, "claude-sdk run output");
+    let ai_session_id = run_json["aiSessionId"]
+        .as_str()
+        .expect("aiSessionId should be present")
+        .to_string();
+    let provider_session_id = run_json["providerSessionId"]
+        .as_str()
+        .expect("providerSessionId should be present");
+    stage_provider_session_evidence_artifacts(repo.path(), provider_session_id);
+
+    let bridge = run_libra_command(
+        &[
+            "claude-sdk",
+            "bridge-run",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&bridge, "bridge-run should succeed");
+    let bridge_json = parse_stdout_json(&bridge, "bridge-run output");
+    let run_id = bridge_json["runId"]
+        .as_str()
+        .expect("runId should be present")
+        .to_string();
+
+    let evidence = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-evidence",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&evidence, "persist-evidence should succeed");
+    let evidence_json = parse_stdout_json(&evidence, "persist-evidence output");
+    let evidence_binding_path = PathBuf::from(
+        evidence_json["bindingPath"]
+            .as_str()
+            .expect("bindingPath should be present"),
+    );
+
+    let mut binding_json: Value =
+        serde_json::from_slice(&fs::read(&evidence_binding_path).expect("read evidence binding"))
+            .expect("deserialize evidence binding");
+    binding_json["runId"] = json!("11111111-1111-7111-8111-111111111111");
+    fs::write(
+        &evidence_binding_path,
+        serde_json::to_vec_pretty(&binding_json).expect("serialize mismatched evidence binding"),
+    )
+    .expect("write mismatched evidence binding");
+
+    let decision = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-decision",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert!(
+        !decision.status.success(),
+        "persist-decision should reject an evidence binding that points to a different run"
+    );
+    assert!(
+        String::from_utf8_lossy(&decision.stderr).contains(&format!(
+            "Claude evidence binding belongs to run '11111111-1111-7111-8111-111111111111', not '{run_id}'"
+        )),
+        "error should explain the binding/run mismatch"
     );
 }
 
