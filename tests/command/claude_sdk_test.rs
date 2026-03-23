@@ -3,6 +3,7 @@
 //! **Layer:** L1 — deterministic, Unix-only (`#[cfg(unix)]`).
 
 use std::{
+    collections::BTreeSet,
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -2394,6 +2395,15 @@ async fn test_claude_sdk_formal_bridge_persists_task_run_evidence_and_decision()
         .as_str()
         .expect("intentId should be present")
         .to_string();
+    let intent_binding_path = PathBuf::from(
+        persist_intent_json["bindingPath"]
+            .as_str()
+            .expect("bindingPath should be present"),
+    );
+    assert!(
+        intent_binding_path.exists(),
+        "persist-intent should materialize its binding artifact"
+    );
 
     let bridge = run_libra_command(
         &[
@@ -2415,6 +2425,42 @@ async fn test_claude_sdk_formal_bridge_persists_task_run_evidence_and_decision()
         .expect("runId should be present")
         .to_string();
     assert_eq!(bridge_json["intentId"], json!(intent_id.clone()));
+    let bridge_binding_path = PathBuf::from(
+        bridge_json["bindingPath"]
+            .as_str()
+            .expect("bridge-run bindingPath should be present"),
+    );
+    assert!(
+        bridge_binding_path.exists(),
+        "bridge-run should materialize a formal run binding artifact"
+    );
+    let bridge_binding = read_json_file(&bridge_binding_path);
+    assert_eq!(
+        bridge_binding["schema"],
+        json!("libra.claude_formal_run_binding.v1")
+    );
+    assert_eq!(bridge_binding["aiSessionId"], json!(ai_session_id.clone()));
+    assert_eq!(
+        bridge_binding["providerSessionId"],
+        json!(provider_session_id.clone())
+    );
+    assert_eq!(bridge_binding["taskId"], json!(task_id.clone()));
+    assert_eq!(bridge_binding["runId"], json!(run_id.clone()));
+    assert_eq!(bridge_binding["intentId"], json!(intent_id.clone()));
+    assert_eq!(
+        bridge_binding["intentBindingPath"],
+        json!(intent_binding_path.to_string_lossy().to_string())
+    );
+    let run_audit_bundle_path = run_json["auditBundlePath"]
+        .as_str()
+        .expect("run output should include auditBundlePath");
+    let bridge_audit_bundle_path = bridge_binding["auditBundlePath"]
+        .as_str()
+        .expect("formal run binding should include auditBundlePath");
+    assert_eq!(
+        bridge_audit_bundle_path, run_audit_bundle_path,
+        "formal run binding should point back to the managed audit bundle"
+    );
 
     let bridge_repeat = run_libra_command(
         &[
@@ -2457,6 +2503,83 @@ async fn test_claude_sdk_formal_bridge_persists_task_run_evidence_and_decision()
         3,
         "should persist three Evidence records"
     );
+    let evidence_binding_path = PathBuf::from(
+        evidence_json["bindingPath"]
+            .as_str()
+            .expect("persist-evidence bindingPath should be present"),
+    );
+    assert!(
+        evidence_binding_path.exists(),
+        "persist-evidence should materialize an evidence binding artifact"
+    );
+    let evidence_binding = read_json_file(&evidence_binding_path);
+    assert_eq!(
+        evidence_binding["schema"],
+        json!("libra.claude_evidence_binding.v1")
+    );
+    assert_eq!(
+        evidence_binding["aiSessionId"],
+        json!(ai_session_id.clone())
+    );
+    assert_eq!(
+        evidence_binding["providerSessionId"],
+        json!(provider_session_id.clone())
+    );
+    assert_eq!(evidence_binding["runId"], json!(run_id.clone()));
+    assert_eq!(
+        evidence_binding["runBindingPath"],
+        json!(bridge_binding_path.to_string_lossy().to_string())
+    );
+    assert_eq!(evidence_binding["evidenceIds"], json!(evidence_ids.clone()));
+    assert_eq!(
+        evidence_binding["evidences"]
+            .as_array()
+            .expect("evidences should be an array")
+            .len(),
+        evidence_ids.len(),
+        "binding should retain one entry per persisted Evidence object"
+    );
+    let evidence_entries = evidence_binding["evidences"]
+        .as_array()
+        .expect("evidences should be an array");
+    let bound_evidence_ids = evidence_entries
+        .iter()
+        .map(|entry| {
+            entry["evidenceId"]
+                .as_str()
+                .expect("evidence entry should include evidenceId")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    let bound_evidence_kinds = evidence_entries
+        .iter()
+        .map(|entry| {
+            assert!(
+                entry["sourcePath"]
+                    .as_str()
+                    .is_some_and(|path| !path.is_empty()),
+                "evidence entry should include a non-empty sourcePath"
+            );
+            entry["kind"]
+                .as_str()
+                .expect("evidence entry should include kind")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        bound_evidence_ids,
+        evidence_ids.iter().cloned().collect::<BTreeSet<_>>(),
+        "binding entries should reference exactly the persisted Evidence ids"
+    );
+    assert_eq!(
+        bound_evidence_kinds,
+        BTreeSet::from([
+            "provider_session_snapshot".to_string(),
+            "evidence_input_summary".to_string(),
+            "intent_extraction_result".to_string(),
+        ]),
+        "binding should preserve the expected evidence kinds"
+    );
 
     let evidence_repeat = run_libra_command(
         &[
@@ -2491,6 +2614,39 @@ async fn test_claude_sdk_formal_bridge_persists_task_run_evidence_and_decision()
         .expect("decisionId should be present")
         .to_string();
     assert_eq!(decision_json["decisionType"], json!("checkpoint"));
+    let decision_binding_path = PathBuf::from(
+        decision_json["bindingPath"]
+            .as_str()
+            .expect("persist-decision bindingPath should be present"),
+    );
+    assert!(
+        decision_binding_path.exists(),
+        "persist-decision should materialize a decision binding artifact"
+    );
+    let decision_binding = read_json_file(&decision_binding_path);
+    assert_eq!(
+        decision_binding["schema"],
+        json!("libra.claude_decision_binding.v1")
+    );
+    assert_eq!(
+        decision_binding["aiSessionId"],
+        json!(ai_session_id.clone())
+    );
+    assert_eq!(
+        decision_binding["providerSessionId"],
+        json!(provider_session_id.clone())
+    );
+    assert_eq!(decision_binding["runId"], json!(run_id.clone()));
+    assert_eq!(decision_binding["decisionId"], json!(decision_id.clone()));
+    assert_eq!(decision_binding["decisionType"], json!("checkpoint"));
+    assert_eq!(
+        decision_binding["runBindingPath"],
+        json!(bridge_binding_path.to_string_lossy().to_string())
+    );
+    assert_eq!(
+        decision_binding["evidenceBindingPath"],
+        json!(evidence_binding_path.to_string_lossy().to_string())
+    );
 
     let decision_repeat = run_libra_command(
         &[
