@@ -1,6 +1,8 @@
 //! Data types for Agent Codex command.
 //! Contains all data structures used for Codex protocol communication and session management.
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -274,6 +276,12 @@ pub struct PatchSet {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone)]
+pub struct CommandExecutionBaseline {
+    pub cwd: String,
+    pub files: HashMap<String, String>,
+}
+
 /// ApprovalRequest - approval request record
 /// Corresponds to: Decision[E] in agent-overview-zh.md (pre-decision)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -317,6 +325,8 @@ pub struct CodexSession {
     pub tool_invocations: Vec<ToolInvocation>,
     pub reasonings: Vec<Reasoning>,
     pub patchsets: Vec<PatchSet>,
+    #[serde(skip)]
+    pub command_baselines: HashMap<String, CommandExecutionBaseline>,
     pub approval_requests: Vec<ApprovalRequest>,
     pub agent_messages: Vec<AgentMessage>,
     pub token_usages: Vec<TurnTokenUsage>,
@@ -335,6 +345,7 @@ impl Default for CodexSession {
             tool_invocations: Vec::new(),
             reasonings: Vec::new(),
             patchsets: Vec::new(),
+            command_baselines: HashMap::new(),
             approval_requests: Vec::new(),
             agent_messages: Vec::new(),
             token_usages: Vec::new(),
