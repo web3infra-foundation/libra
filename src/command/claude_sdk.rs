@@ -30,7 +30,8 @@ use crate::{
                 server::LibraMcpServer,
             },
             providers::claude_sdk::managed::{
-                ClaudeManagedArtifact, ManagedAuditBundle, PersistedManagedArtifactOutcome,
+                ClaudeManagedArtifact, ManagedAuditBundle, ManagedRunUsageEvent,
+                ManagedSemanticRuntimeEvent, PersistedManagedArtifactOutcome,
                 persist_managed_artifact,
             },
         },
@@ -925,6 +926,8 @@ struct ClaudeDecisionBindingArtifact {
     run_binding_path: String,
     #[serde(rename = "evidenceBindingPath")]
     evidence_binding_path: String,
+    #[serde(rename = "evidenceIds", default, skip_serializing_if = "Vec::is_empty")]
+    evidence_ids: Vec<String>,
     #[serde(rename = "createdAt")]
     created_at: String,
 }
@@ -1346,6 +1349,8 @@ async fn bridge_run(args: BridgeRunArgs) -> Result<()> {
     )
     .await?
     {
+        validate_formal_run_binding_consistency(&existing, &args.ai_session_id)?;
+        load_audit_bundle_for_run_binding(&storage_path, &existing, &args.ai_session_id).await?;
         if let Some(intent_id) = requested_intent_id.as_deref()
             && existing.intent_id.as_deref() != Some(intent_id)
         {
@@ -1492,26 +1497,9 @@ async fn persist_evidence(args: PersistEvidenceArgs) -> Result<()> {
                     args.ai_session_id
                 )
             })?;
-    let binding_path = evidence_binding_path(&storage_path, &args.ai_session_id);
-    if let Some(existing) = read_existing_binding_if_live::<ClaudeEvidenceBindingArtifact>(
-        &storage_path,
-        &binding_path,
-        "Claude evidence binding",
-        &[("run", |binding| binding.run_id.as_str())],
-    )
-    .await?
-        && existing.run_id == run_binding.run_id
-        && evidence_binding_objects_exist(&storage_path, &existing).await?
-    {
-        print_persist_evidence_output(&binding_path, &existing)?;
-        return Ok(());
-    }
-
-    let audit_bundle: ManagedAuditBundle = read_json_artifact(
-        Path::new(&run_binding.audit_bundle_path),
-        "managed audit bundle",
-    )
-    .await?;
+    validate_formal_run_binding_consistency(&run_binding, &args.ai_session_id)?;
+    let (resolved_audit_bundle_path, audit_bundle) =
+        load_audit_bundle_for_run_binding(&storage_path, &run_binding, &args.ai_session_id).await?;
     let provider_session_object_id =
         build_provider_session_object_id(&run_binding.provider_session_id)?;
     let provider_session_path =
@@ -1582,9 +1570,34 @@ async fn persist_evidence(args: PersistEvidenceArgs) -> Result<()> {
     );
     entries.push(PendingEvidence {
         kind: "intent_extraction_result".to_string(),
-        source_path: run_binding.audit_bundle_path.clone(),
+        source_path: resolved_audit_bundle_path.to_string_lossy().to_string(),
         summary: extraction_summary,
     });
+    entries.extend(build_managed_runtime_evidence_entries(
+        AuditBundleSummaryContext {
+            audit_bundle_path: &resolved_audit_bundle_path,
+            audit_bundle: &audit_bundle,
+        },
+    ));
+    let expected_entries = entries.clone();
+
+    let binding_path = evidence_binding_path(&storage_path, &args.ai_session_id);
+    if let Some(existing) = read_existing_binding_if_live::<ClaudeEvidenceBindingArtifact>(
+        &storage_path,
+        &binding_path,
+        "Claude evidence binding",
+        &[("run", |binding| binding.run_id.as_str())],
+    )
+    .await?
+        && existing.run_id == run_binding.run_id
+        && evidence_binding_objects_exist(&storage_path, &existing).await?
+    {
+        validate_evidence_binding_consistency(&existing, &args.ai_session_id, &run_binding)?;
+        if evidence_binding_matches_expected(&existing, &expected_entries) {
+            print_persist_evidence_output(&binding_path, &existing)?;
+            return Ok(());
+        }
+    }
 
     let mcp_server = init_local_mcp_server(&storage_path).await?;
     let actor = mcp_server
@@ -1661,6 +1674,8 @@ async fn persist_decision(args: PersistDecisionArgs) -> Result<()> {
                     args.ai_session_id
                 )
             })?;
+    validate_formal_run_binding_consistency(&run_binding, &args.ai_session_id)?;
+    load_audit_bundle_for_run_binding(&storage_path, &run_binding, &args.ai_session_id).await?;
     let evidence_binding_path = evidence_binding_path(&storage_path, &args.ai_session_id);
     let evidence_binding: ClaudeEvidenceBindingArtifact =
         read_typed_json_artifact(&evidence_binding_path, "Claude evidence binding")
@@ -1671,6 +1686,20 @@ async fn persist_decision(args: PersistDecisionArgs) -> Result<()> {
                     args.ai_session_id
                 )
             })?;
+    validate_evidence_binding_consistency(&evidence_binding, &args.ai_session_id, &run_binding)?;
+    if !evidence_binding_objects_exist(&storage_path, &evidence_binding).await? {
+        bail!(
+            "Claude evidence binding references missing Evidence objects; run 'claude-sdk persist-evidence --ai-session-id {}' again",
+            args.ai_session_id
+        );
+    }
+    let decision_type = decision_type_for_binding(&run_binding, &evidence_binding);
+    let rationale = format!(
+        "managed_run_status={}; intent_extraction_status={}; evidence_count={}",
+        run_binding.managed_run_status,
+        run_binding.intent_extraction_status,
+        evidence_binding.evidence_ids.len()
+    );
     let binding_path = decision_binding_path(&storage_path, &args.ai_session_id);
     if let Some(existing) = read_existing_binding_if_live::<ClaudeDecisionBindingArtifact>(
         &storage_path,
@@ -1683,19 +1712,18 @@ async fn persist_decision(args: PersistDecisionArgs) -> Result<()> {
     )
     .await?
         && existing.run_id == run_binding.run_id
-        && existing.evidence_binding_path == evidence_binding_path.to_string_lossy()
     {
-        print_persist_decision_output(&binding_path, &existing)?;
-        return Ok(());
+        validate_decision_binding_consistency(&existing, &args.ai_session_id, &run_binding)?;
+        if decision_binding_matches_expected(
+            &existing,
+            decision_type,
+            &rationale,
+            &evidence_binding.evidence_ids,
+        ) {
+            print_persist_decision_output(&binding_path, &existing)?;
+            return Ok(());
+        }
     }
-
-    let decision_type = decision_type_for_binding(&run_binding, &evidence_binding);
-    let rationale = format!(
-        "managed_run_status={}; intent_extraction_status={}; evidence_count={}",
-        run_binding.managed_run_status,
-        run_binding.intent_extraction_status,
-        evidence_binding.evidence_ids.len()
-    );
 
     let mcp_server = init_local_mcp_server(&storage_path).await?;
     let actor = mcp_server
@@ -1733,6 +1761,7 @@ async fn persist_decision(args: PersistDecisionArgs) -> Result<()> {
         rationale,
         run_binding_path: run_binding_path.to_string_lossy().to_string(),
         evidence_binding_path: evidence_binding_path.to_string_lossy().to_string(),
+        evidence_ids: evidence_binding.evidence_ids.clone(),
         created_at: Utc::now().to_rfc3339(),
     };
     write_pretty_json_file(&binding_path, &binding).await?;
@@ -1901,11 +1930,16 @@ struct ResolvedIntentBinding {
     artifact: PersistedIntentInputBindingArtifact,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct PendingEvidence {
     kind: String,
     source_path: String,
     summary: String,
+}
+
+struct AuditBundleSummaryContext<'a> {
+    audit_bundle_path: &'a Path,
+    audit_bundle: &'a ManagedAuditBundle,
 }
 
 type BindingObjectSelector<T> = (&'static str, fn(&T) -> &str);
@@ -2055,6 +2089,16 @@ async fn resolve_intent_binding(
 
     let artifact: PersistedIntentInputBindingArtifact =
         read_typed_json_artifact(&path, "persisted intent binding").await?;
+    if let Some(binding_ai_session_id) = artifact.ai_session_id.as_deref()
+        && binding_ai_session_id != args.ai_session_id
+    {
+        bail!(
+            "intent binding '{}' belongs to ai session '{}', not '{}'",
+            path.display(),
+            binding_ai_session_id,
+            args.ai_session_id
+        );
+    }
 
     Ok(Some(ResolvedIntentBinding { path, artifact }))
 }
@@ -2069,6 +2113,11 @@ fn derive_formal_task_summary(
 
     if let Some(extraction) = audit_bundle.bridge.intent_extraction_artifact.as_ref() {
         return extraction.extraction.intent.summary.clone();
+    }
+
+    let native_summary = audit_bundle.bridge.session_state.summary.trim();
+    if !native_summary.is_empty() {
+        return native_summary.to_string();
     }
 
     audit_bundle
@@ -2146,6 +2195,468 @@ fn decision_type_for_binding(
         }
         _ => "abandon",
     }
+}
+
+async fn load_audit_bundle_for_run_binding(
+    storage_path: &Path,
+    run_binding: &ClaudeFormalRunBindingArtifact,
+    expected_ai_session_id: &str,
+) -> Result<(PathBuf, ManagedAuditBundle)> {
+    let preferred_path = managed_audit_bundle_path(storage_path, expected_ai_session_id);
+    let stored_path = PathBuf::from(&run_binding.audit_bundle_path);
+    let audit_bundle_path = if preferred_path.exists() {
+        preferred_path
+    } else {
+        stored_path
+    };
+    let audit_bundle: ManagedAuditBundle =
+        read_json_artifact(&audit_bundle_path, "managed audit bundle")
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to load managed audit bundle at '{}'",
+                    audit_bundle_path.display()
+                )
+            })?;
+    if audit_bundle.schema != "libra.claude_managed_audit_bundle.v1" {
+        bail!(
+            "unsupported managed audit bundle schema '{}' in '{}'",
+            audit_bundle.schema,
+            audit_bundle_path.display()
+        );
+    }
+    if audit_bundle.ai_session_id != expected_ai_session_id {
+        bail!(
+            "managed audit bundle '{}' belongs to ai session '{}', not '{}'",
+            audit_bundle_path.display(),
+            audit_bundle.ai_session_id,
+            expected_ai_session_id
+        );
+    }
+    if audit_bundle.provider_session_id != run_binding.provider_session_id {
+        bail!(
+            "managed audit bundle '{}' belongs to provider session '{}', not '{}'",
+            audit_bundle_path.display(),
+            audit_bundle.provider_session_id,
+            run_binding.provider_session_id
+        );
+    }
+    Ok((audit_bundle_path, audit_bundle))
+}
+
+fn validate_formal_run_binding_consistency(
+    binding: &ClaudeFormalRunBindingArtifact,
+    expected_ai_session_id: &str,
+) -> Result<()> {
+    if binding.ai_session_id != expected_ai_session_id {
+        bail!(
+            "Claude formal run binding belongs to ai session '{}', not '{}'",
+            binding.ai_session_id,
+            expected_ai_session_id
+        );
+    }
+    validate_provider_session_id(&binding.provider_session_id)
+        .context("formal run binding contains an invalid provider session id")?;
+    Ok(())
+}
+
+fn validate_evidence_binding_consistency(
+    binding: &ClaudeEvidenceBindingArtifact,
+    expected_ai_session_id: &str,
+    run_binding: &ClaudeFormalRunBindingArtifact,
+) -> Result<()> {
+    if binding.ai_session_id != expected_ai_session_id {
+        bail!(
+            "Claude evidence binding belongs to ai session '{}', not '{}'",
+            binding.ai_session_id,
+            expected_ai_session_id
+        );
+    }
+    if binding.provider_session_id != run_binding.provider_session_id {
+        bail!(
+            "Claude evidence binding belongs to provider session '{}', not '{}'",
+            binding.provider_session_id,
+            run_binding.provider_session_id
+        );
+    }
+    if binding.run_id != run_binding.run_id {
+        bail!(
+            "Claude evidence binding belongs to run '{}', not '{}'",
+            binding.run_id,
+            run_binding.run_id
+        );
+    }
+    Ok(())
+}
+
+fn validate_decision_binding_consistency(
+    binding: &ClaudeDecisionBindingArtifact,
+    expected_ai_session_id: &str,
+    run_binding: &ClaudeFormalRunBindingArtifact,
+) -> Result<()> {
+    if binding.ai_session_id != expected_ai_session_id {
+        bail!(
+            "Claude decision binding belongs to ai session '{}', not '{}'",
+            binding.ai_session_id,
+            expected_ai_session_id
+        );
+    }
+    if binding.provider_session_id != run_binding.provider_session_id {
+        bail!(
+            "Claude decision binding belongs to provider session '{}', not '{}'",
+            binding.provider_session_id,
+            run_binding.provider_session_id
+        );
+    }
+    if binding.run_id != run_binding.run_id {
+        bail!(
+            "Claude decision binding belongs to run '{}', not '{}'",
+            binding.run_id,
+            run_binding.run_id
+        );
+    }
+    Ok(())
+}
+
+fn evidence_binding_matches_expected(
+    binding: &ClaudeEvidenceBindingArtifact,
+    expected_entries: &[PendingEvidence],
+) -> bool {
+    if binding.evidence_ids.len() != binding.evidences.len() {
+        return false;
+    }
+
+    let binding_entry_ids = binding
+        .evidences
+        .iter()
+        .map(|entry| entry.evidence_id.clone())
+        .collect::<Vec<_>>();
+    if binding.evidence_ids != binding_entry_ids {
+        return false;
+    }
+
+    let existing_entries = binding
+        .evidences
+        .iter()
+        .map(|entry| PendingEvidence {
+            kind: entry.kind.clone(),
+            source_path: entry.source_path.clone(),
+            summary: entry.summary.clone(),
+        })
+        .collect::<Vec<_>>();
+    let mut expected_sorted = expected_entries.to_vec();
+    let mut existing_sorted = existing_entries;
+    expected_sorted.sort();
+    existing_sorted.sort();
+    existing_sorted == expected_sorted
+}
+
+fn decision_binding_matches_expected(
+    binding: &ClaudeDecisionBindingArtifact,
+    decision_type: &str,
+    rationale: &str,
+    evidence_ids: &[String],
+) -> bool {
+    binding.decision_type == decision_type
+        && binding.rationale == rationale
+        && binding.evidence_ids == evidence_ids
+}
+
+fn build_managed_runtime_evidence_entries(
+    context: AuditBundleSummaryContext<'_>,
+) -> Vec<PendingEvidence> {
+    let object_candidates = &context.audit_bundle.bridge.object_candidates;
+    let source_path = context.audit_bundle_path.to_string_lossy().to_string();
+    let mut entries = vec![PendingEvidence {
+        kind: "managed_provenance_summary".to_string(),
+        source_path: source_path.clone(),
+        summary: summarize_managed_provenance(context.audit_bundle),
+    }];
+
+    if let Some(run_usage_event) = object_candidates.run_usage_event.as_ref() {
+        entries.push(PendingEvidence {
+            kind: "managed_usage_summary".to_string(),
+            source_path: source_path.clone(),
+            summary: summarize_run_usage(run_usage_event),
+        });
+    }
+
+    if let Some(summary) = summarize_tool_runtime(context.audit_bundle) {
+        entries.push(PendingEvidence {
+            kind: "managed_tool_runtime_summary".to_string(),
+            source_path: source_path.clone(),
+            summary,
+        });
+    }
+
+    if !object_candidates.task_runtime_events.is_empty() {
+        entries.push(PendingEvidence {
+            kind: "managed_task_runtime_summary".to_string(),
+            source_path: source_path.clone(),
+            summary: summarize_semantic_runtime_events(
+                "task_events",
+                &object_candidates.task_runtime_events,
+            ),
+        });
+    }
+
+    if !object_candidates.decision_runtime_events.is_empty() {
+        entries.push(PendingEvidence {
+            kind: "managed_decision_runtime_summary".to_string(),
+            source_path: source_path.clone(),
+            summary: summarize_semantic_runtime_events(
+                "decision_events",
+                &object_candidates.decision_runtime_events,
+            ),
+        });
+    }
+
+    if !object_candidates.context_runtime_events.is_empty() {
+        entries.push(PendingEvidence {
+            kind: "managed_context_runtime_summary".to_string(),
+            source_path,
+            summary: summarize_semantic_runtime_events(
+                "context_events",
+                &object_candidates.context_runtime_events,
+            ),
+        });
+    }
+
+    entries
+}
+
+fn summarize_managed_provenance(audit_bundle: &ManagedAuditBundle) -> String {
+    let object_candidates = &audit_bundle.bridge.object_candidates;
+    let provider_init = &object_candidates.provider_init_snapshot;
+    let provenance = &object_candidates.provenance_snapshot;
+    format!(
+        "provider=claude; model={}; permission_mode={}; agents={}; skills={}; mcp_servers={}; plugins={}",
+        provenance.model.as_deref().unwrap_or("-"),
+        provenance
+            .parameters
+            .get("permissionMode")
+            .and_then(Value::as_str)
+            .unwrap_or("-"),
+        provider_init.agents.len(),
+        provider_init.skills.len(),
+        provider_init.mcp_servers.len(),
+        provider_init.plugins.len(),
+    )
+}
+
+fn summarize_run_usage(run_usage_event: &ManagedRunUsageEvent) -> String {
+    let input_tokens = usage_counter(&run_usage_event.usage, &["input_tokens", "inputTokens"]);
+    let output_tokens = usage_counter(&run_usage_event.usage, &["output_tokens", "outputTokens"]);
+    let total_tokens = usage_counter(
+        &run_usage_event.usage,
+        &["total_tokens", "totalTokens", "total"],
+    );
+    format!(
+        "usage input_tokens={}; output_tokens={}; total_tokens={}",
+        input_tokens, output_tokens, total_tokens
+    )
+}
+
+fn summarize_tool_runtime(audit_bundle: &ManagedAuditBundle) -> Option<String> {
+    let object_candidates = &audit_bundle.bridge.object_candidates;
+    let repo_root = audit_bundle.bridge.session_state.working_dir.as_str();
+    let tool_names = audit_bundle
+        .bridge
+        .tool_invocations
+        .iter()
+        .filter_map(|invocation| invocation.tool_name.clone())
+        .collect::<BTreeSet<_>>();
+    let touched_paths = audit_bundle
+        .bridge
+        .touch_hints
+        .iter()
+        .filter_map(|hint| persistable_touch_hint(hint, repo_root))
+        .collect::<BTreeSet<_>>();
+    if object_candidates.tool_invocation_events.is_empty()
+        && object_candidates.tool_runtime_events.is_empty()
+        && tool_names.is_empty()
+    {
+        return None;
+    }
+
+    Some(format!(
+        "tool_invocations={}; tool_runtime_events={}; tools={}; touched_paths={}",
+        object_candidates.tool_invocation_events.len(),
+        object_candidates.tool_runtime_events.len(),
+        join_set(&tool_names),
+        join_set(&touched_paths),
+    ))
+}
+
+fn summarize_semantic_runtime_events(
+    label: &str,
+    events: &[ManagedSemanticRuntimeEvent],
+) -> String {
+    let kinds = events
+        .iter()
+        .map(|event| event.kind.clone())
+        .collect::<BTreeSet<_>>();
+    format!("{label} count={}; kinds={}", events.len(), join_set(&kinds))
+}
+
+fn join_set(values: &BTreeSet<String>) -> String {
+    if values.is_empty() {
+        "-".to_string()
+    } else {
+        values.iter().cloned().collect::<Vec<_>>().join(",")
+    }
+}
+
+fn usage_counter(value: &Value, keys: &[&str]) -> u64 {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(Value::as_u64))
+        .unwrap_or(0)
+}
+
+fn persistable_touch_hint(hint: &str, repo_root: &str) -> Option<String> {
+    let normalized_repo_root = normalize_portable_path(repo_root)?;
+    if !is_platform_agnostic_absolute_hint(&normalized_repo_root) {
+        return None;
+    }
+
+    let trimmed = hint.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let normalized_hint = if is_platform_agnostic_absolute_hint(trimmed) {
+        normalize_portable_path(trimmed)?
+    } else {
+        join_portable_path(&normalized_repo_root, trimmed)?
+    };
+    if normalized_hint == normalized_repo_root {
+        return None;
+    }
+
+    strip_portable_prefix(&normalized_hint, &normalized_repo_root)
+}
+
+fn normalize_portable_path(path: &str) -> Option<String> {
+    let normalized = path.trim().replace('\\', "/");
+    if normalized.is_empty() {
+        return None;
+    }
+
+    let (prefix, absolute, rest) = if let Some(rest) = normalized.strip_prefix("//") {
+        let mut parts = rest.split('/').filter(|part| !part.is_empty());
+        let server = parts.next()?;
+        let share = parts.next()?;
+        (
+            format!("//{server}/{share}"),
+            true,
+            parts.collect::<Vec<_>>().join("/"),
+        )
+    } else if normalized.len() >= 2
+        && normalized.as_bytes()[0].is_ascii_alphabetic()
+        && normalized.as_bytes()[1] == b':'
+    {
+        let prefix = normalized[..2].to_string();
+        let rest = normalized[2..].trim_start_matches('/').to_string();
+        (prefix, true, rest)
+    } else if let Some(rest) = normalized.strip_prefix('/') {
+        (String::new(), true, rest.to_string())
+    } else {
+        (String::new(), false, normalized)
+    };
+
+    let mut components = Vec::new();
+    for component in rest.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                if !components.is_empty() {
+                    components.pop();
+                }
+            }
+            part => components.push(part),
+        }
+    }
+
+    let mut result = prefix;
+    if absolute && !result.ends_with('/') {
+        result.push('/');
+    }
+    if !components.is_empty() {
+        result.push_str(&components.join("/"));
+    }
+
+    if result.is_empty() && absolute {
+        Some("/".to_string())
+    } else if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
+}
+
+fn join_portable_path(base: &str, relative: &str) -> Option<String> {
+    let normalized_base = normalize_portable_path(base)?;
+    let normalized_relative = relative.trim().replace('\\', "/");
+    if normalized_relative.is_empty() {
+        return None;
+    }
+
+    let joined = if normalized_base.ends_with('/') {
+        format!("{normalized_base}{normalized_relative}")
+    } else {
+        format!("{normalized_base}/{normalized_relative}")
+    };
+    normalize_portable_path(&joined)
+}
+
+fn is_platform_agnostic_absolute_hint(path: &str) -> bool {
+    let normalized = path.trim().replace('\\', "/");
+    if normalized.starts_with('/') {
+        return true;
+    }
+
+    let bytes = normalized.as_bytes();
+    bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/'
+}
+
+fn strip_portable_prefix(path: &str, root: &str) -> Option<String> {
+    if portable_path_eq(path, root) {
+        return None;
+    }
+
+    let prefix = if root.ends_with('/') {
+        root.to_string()
+    } else {
+        format!("{root}/")
+    };
+    if should_compare_portable_paths_case_insensitively(root) {
+        let path_lower = path.to_ascii_lowercase();
+        let prefix_lower = prefix.to_ascii_lowercase();
+        return path_lower.strip_prefix(&prefix_lower).and_then(|relative| {
+            (!relative.is_empty()).then_some(path[prefix.len()..].to_string())
+        });
+    }
+
+    path.strip_prefix(&prefix)
+        .and_then(|relative| (!relative.is_empty()).then_some(relative.to_string()))
+}
+
+fn portable_path_eq(left: &str, right: &str) -> bool {
+    if should_compare_portable_paths_case_insensitively(left)
+        || should_compare_portable_paths_case_insensitively(right)
+    {
+        left.eq_ignore_ascii_case(right)
+    } else {
+        left == right
+    }
+}
+
+fn should_compare_portable_paths_case_insensitively(path: &str) -> bool {
+    let normalized = path.trim().replace('\\', "/");
+    normalized.starts_with("//")
+        || (normalized.len() >= 2
+            && normalized.as_bytes()[0].is_ascii_alphabetic()
+            && normalized.as_bytes()[1] == b':')
 }
 
 fn parse_created_id(kind: &str, result: &rmcp::model::CallToolResult) -> Result<String> {

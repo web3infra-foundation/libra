@@ -24,6 +24,7 @@
 
 pub mod agent;
 pub mod client;
+pub mod codex;
 pub mod commands;
 pub mod completion;
 pub mod history;

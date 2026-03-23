@@ -9,6 +9,8 @@ pub mod types;
 pub mod view;
 
 use std::{
+    collections::{BTreeSet, HashMap},
+    fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard, OnceLock},
 };
@@ -16,6 +18,7 @@ use std::{
 use anyhow;
 use chrono::Utc;
 use clap::Parser;
+use diffy::create_patch;
 use futures_util::{SinkExt, StreamExt};
 use git_internal::hash::ObjectHash;
 use history::{HistoryReader, HistoryRecorder, HistoryWriter};
@@ -29,6 +32,7 @@ use schema_v2::*;
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 pub use types::*;
+use walkdir::WalkDir;
 
 use crate::{
     internal::{
@@ -40,6 +44,8 @@ use crate::{
 
 const CODEX_WS_URL: &str = "ws://127.0.0.1:8080";
 static HISTORY_APPEND_LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
+const COMMAND_DIFF_MAX_FILE_SIZE: u64 = 256 * 1024;
+const COMMAND_DIFF_MAX_FILES: usize = 512;
 
 fn lock_or_warn<'a, T>(mutex: &'a Arc<Mutex<T>>, context: &str) -> Option<MutexGuard<'a, T>> {
     match mutex.lock() {
@@ -80,6 +86,224 @@ fn merge_patchset_changes(
     }
 
     merged
+}
+
+fn patch_status_from_str(status: &str) -> PatchStatus {
+    match status {
+        "in_progress" | "inProgress" | "started" => PatchStatus::InProgress,
+        "completed" => PatchStatus::Completed,
+        "failed" => PatchStatus::Failed,
+        "declined" => PatchStatus::Declined,
+        _ => PatchStatus::Pending,
+    }
+}
+
+fn parse_patchset_changes_from_array(changes: Option<&serde_json::Value>) -> Vec<FileChange> {
+    changes
+        .and_then(|value| value.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|change| {
+                    let path = change.get("path")?.as_str()?.to_string();
+                    let diff = change
+                        .get("diff")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let change_type = change
+                        .get("change_type")
+                        .or_else(|| change.get("changeType"))
+                        .or_else(|| change.get("kind").and_then(|k| k.get("type")))
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("update")
+                        .to_string();
+                    Some(FileChange {
+                        path,
+                        diff,
+                        change_type,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_patchset_changes_from_map(changes: Option<&serde_json::Value>) -> Vec<FileChange> {
+    changes
+        .and_then(|value| value.as_object())
+        .map(|map| {
+            map.iter()
+                .map(|(path, change)| FileChange {
+                    path: path.clone(),
+                    diff: change
+                        .get("unified_diff")
+                        .or_else(|| change.get("unifiedDiff"))
+                        .or_else(|| change.get("diff"))
+                        .or_else(|| change.get("content"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    change_type: change
+                        .get("type")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("update")
+                        .to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn persist_patchset_snapshot_and_evidence(
+    mcp_server: Arc<LibraMcpServer>,
+    history: Arc<HistoryRecorder>,
+    history_writer: Arc<HistoryWriter>,
+    patchset: PatchSet,
+    status: String,
+    debug_mode: bool,
+) {
+    let patchset_id = patchset.id.clone();
+    let files = patchset.changes.len();
+    let touched_files: Vec<String> = patchset
+        .changes
+        .iter()
+        .map(|change| change.path.clone())
+        .collect();
+    let patchset_snapshot = PatchSetSnapshot {
+        id: patchset_id.clone(),
+        run_id: patchset.run_id.clone(),
+        thread_id: patchset.thread_id.clone(),
+        created_at: Utc::now(),
+        status: patchset.status.clone(),
+        changes: patchset.changes.clone(),
+    };
+    let evidence = EvidenceEvent {
+        id: format!("evidence_{}", patchset_id),
+        run_id: patchset.run_id.clone(),
+        patchset_id: Some(patchset_id.clone()),
+        at: Utc::now(),
+        kind: "patchset".to_string(),
+        data: serde_json::json!({
+            "files": files,
+            "touched_files": touched_files,
+        }),
+    };
+
+    tokio::spawn(async move {
+        store_to_mcp(&mcp_server, "patchset", &patchset_id, &patchset, debug_mode).await;
+        history
+            .event(
+                history::EventKind::ToolInvocationStatus,
+                &patchset_id,
+                status,
+                serde_json::json!({ "files": files }),
+            )
+            .await;
+        history_writer
+            .write("patchset_snapshot", &patchset_id, &patchset_snapshot)
+            .await;
+        history_writer
+            .write("evidence", &evidence.id, &evidence)
+            .await;
+    });
+}
+
+fn should_skip_diff_path(relative_path: &Path) -> bool {
+    relative_path.components().any(|component| {
+        let name = component.as_os_str().to_string_lossy();
+        matches!(
+            name.as_ref(),
+            ".git" | ".libra" | "node_modules" | "target" | "dist" | "build"
+        )
+    })
+}
+
+fn is_probably_text(bytes: &[u8]) -> bool {
+    !bytes.contains(&0) && std::str::from_utf8(bytes).is_ok()
+}
+
+fn capture_workspace_snapshot(cwd: &Path) -> HashMap<String, String> {
+    let mut snapshot = HashMap::new();
+    if !cwd.exists() || !cwd.is_dir() {
+        return snapshot;
+    }
+
+    for entry in WalkDir::new(cwd).into_iter().filter_map(Result::ok) {
+        let path = entry.path();
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        let Ok(relative_path) = path.strip_prefix(cwd) else {
+            continue;
+        };
+        if relative_path.as_os_str().is_empty() || should_skip_diff_path(relative_path) {
+            continue;
+        }
+
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if metadata.len() > COMMAND_DIFF_MAX_FILE_SIZE {
+            continue;
+        }
+
+        let Ok(bytes) = fs::read(path) else {
+            continue;
+        };
+        if !is_probably_text(&bytes) {
+            continue;
+        }
+
+        let Ok(content) = String::from_utf8(bytes) else {
+            continue;
+        };
+        let relative_key = relative_path.to_string_lossy().replace('\\', "/");
+        snapshot.insert(relative_key, content);
+
+        if snapshot.len() >= COMMAND_DIFF_MAX_FILES {
+            break;
+        }
+    }
+
+    snapshot
+}
+
+fn render_snapshot_diff(before: &str, after: &str) -> String {
+    create_patch(before, after).to_string()
+}
+
+fn build_file_changes_from_snapshots(
+    before: &HashMap<String, String>,
+    after: &HashMap<String, String>,
+) -> Vec<FileChange> {
+    let all_paths: BTreeSet<String> = before.keys().chain(after.keys()).cloned().collect();
+
+    let mut changes = Vec::new();
+    for path in all_paths {
+        match (before.get(&path), after.get(&path)) {
+            (None, Some(after_content)) => changes.push(FileChange {
+                path,
+                diff: render_snapshot_diff("", after_content),
+                change_type: "add".to_string(),
+            }),
+            (Some(before_content), None) => changes.push(FileChange {
+                path,
+                diff: render_snapshot_diff(before_content, ""),
+                change_type: "delete".to_string(),
+            }),
+            (Some(before_content), Some(after_content)) if before_content != after_content => {
+                changes.push(FileChange {
+                    path,
+                    diff: render_snapshot_diff(before_content, after_content),
+                    change_type: "update".to_string(),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    changes
 }
 
 fn latest_thread_intent_id(
@@ -246,6 +470,13 @@ fn normalize_plan_step_status(status: &str) -> &'static str {
     }
 }
 
+fn truncate_for_display(text: &str, max_chars: usize) -> (String, bool) {
+    match text.char_indices().nth(max_chars) {
+        Some((idx, _)) => (text[..idx].to_string(), true),
+        None => (text.to_string(), false),
+    }
+}
+
 fn task_status_from_plan_step(status: &str) -> TaskStatus {
     match normalize_plan_step_status(status) {
         "completed" => TaskStatus::Completed,
@@ -371,9 +602,58 @@ pub struct AgentCodexArgs {
     #[arg(long)]
     pub model: Option<String>,
 
+    /// Require Codex to produce a plan before attempting execution.
+    #[arg(long, default_value_t = false)]
+    pub plan_mode: bool,
+
     /// Debug mode: print collected data
     #[arg(long, default_value = "false")]
     pub debug: bool,
+}
+
+fn plan_mode_developer_instructions() -> &'static str {
+    concat!(
+        "You are in strict plan-first mode. ",
+        "Your first responsibility is to generate a structured plan update for the task. ",
+        "Do not treat a normal conversational response as sufficient planning output. ",
+        "You are replying in a plain terminal interface without Markdown rendering. ",
+        "Do not use Markdown headings, bullet markers like '-' or '*', fenced code blocks, tables, or emphasis markers such as '**'. ",
+        "Use plain text only. ",
+        "Rules: ",
+        "First produce a structured step-by-step plan/checklist. ",
+        "Do not only explain the plan in prose. ",
+        "Use the planning mechanism as the primary planning output whenever possible. ",
+        "Do not execute tools, run commands, edit files, or create patches before the user approves the plan. ",
+        "After the plan is produced, wait for explicit approval. ",
+        "After approval, when files must be created or modified, choose Codex's structured file editing mode that emits fileChange callbacks/events. ",
+        "Do not frame this as calling a fileChange tool; instead, choose the editing path that causes the session to produce item.type=fileChange updates. ",
+        "Do not use patch-apply style editing or any path that emits apply_patch style events for file edits. ",
+        "Prefer the structured edit path that produces fileChange events over commandExecution-based writes. ",
+        "CommandExecution may still be used when necessary, but file edits should preferentially use the path that emits fileChange callbacks/events. ",
+        "Use commandExecution primarily for inspection, validation, or running the project/tests. ",
+        "If you need to change files, prefer the structured edit path that produces fileChange events rather than apply_patch. ",
+        "Do not speculate that fileChange is unavailable just because no tool list is shown. ",
+        "When the user approves execution and file edits are needed, attempt the structured edit path that should produce fileChange callbacks/events. ",
+        "Only say that file writing is blocked if the system explicitly rejects the edit or explicitly reports that the structured fileChange-style path is unavailable. ",
+        "Do not ask the user to manually copy code into files unless a real fileChange failure has already happened. ",
+        "If the task appears simple, still provide a short structured plan first. ",
+        "If you are uncertain, favor planning before acting. ",
+        "Keep replies compact, readable, and suitable for direct CLI display. ",
+        "The user must see a plan before any execution begins."
+    )
+}
+
+fn plan_mode_base_instructions() -> &'static str {
+    concat!(
+        "Current mode: strict structured planning first. ",
+        "Produce a structured plan before execution, prefer the planning system over prose-only planning, ",
+        "wait for user approval before taking action, ",
+        "and when modifying files choose the structured editing path that emits fileChange callbacks/events. ",
+        "Do not use apply_patch-style editing. ",
+        "Prefer the fileChange-emitting path over commandExecution-based file writes. ",
+        "Do not claim that the fileChange-style path is unavailable unless the system explicitly reports that failure. ",
+        "Reply in plain text without Markdown."
+    )
 }
 
 /// Store an object to MCP storage
@@ -425,6 +705,9 @@ pub async fn execute(args: AgentCodexArgs) -> anyhow::Result<()> {
 
     println!("Connected to Codex!");
     println!("Initializing...");
+    if args.plan_mode {
+        println!("Plan Mode: enabled (plan required before execution)");
+    }
 
     let (mut write, read) = ws_stream.split();
 
@@ -631,6 +914,7 @@ pub async fn execute(args: AgentCodexArgs) -> anyhow::Result<()> {
     let model_provider_for_run = args.model_provider.clone();
     let service_tier_for_run = args.service_tier.clone();
     let personality_for_run = args.personality.clone();
+    let default_command_cwd = args.cwd.clone();
     let _reader_task = tokio::spawn(async move {
         let mut read = read;
         #[allow(clippy::while_let_loop)]
@@ -1866,10 +2150,12 @@ Task Completed"
                                                     println!(" started");
                                                     if let Some(arguments) = &args {
                                                         let args_str = arguments.to_string();
-                                                        if args_str.len() > 200 {
+                                                        let (truncated_args, was_truncated) =
+                                                            truncate_for_display(&args_str, 200);
+                                                        if was_truncated {
                                                             println!(
                                                                 "    Args: {}...",
-                                                                &args_str[..200]
+                                                                truncated_args
                                                             );
                                                         } else {
                                                             println!("    Args: {}", args_str);
@@ -2014,6 +2300,18 @@ Task Completed"
                                                         .and_then(|c| c.as_str())
                                                         .unwrap_or("")
                                                         .to_string();
+                                                    let command_cwd = item
+                                                        .get("cwd")
+                                                        .and_then(|c| c.as_str())
+                                                        .map(String::from)
+                                                        .filter(|cwd| !cwd.is_empty())
+                                                        .unwrap_or_else(|| {
+                                                            default_command_cwd.clone()
+                                                        });
+                                                    let command_snapshot =
+                                                        capture_workspace_snapshot(Path::new(
+                                                            &command_cwd,
+                                                        ));
                                                     println!("  Command: {} started", cmd);
 
                                                     let invocation = ToolInvocation {
@@ -2040,6 +2338,13 @@ Task Completed"
                                                         "tool invocation started update",
                                                     ) {
                                                         session.add_tool_invocation(invocation);
+                                                        session.command_baselines.insert(
+                                                            item_id.clone(),
+                                                            CommandExecutionBaseline {
+                                                                cwd: command_cwd.clone(),
+                                                                files: command_snapshot,
+                                                            },
+                                                        );
                                                     }
 
                                                     let mcp_server_for_cmd =
@@ -2323,11 +2628,8 @@ Task Completed"
                                                         .and_then(|t| t.as_str())
                                                         .unwrap_or("")
                                                         .to_string();
-                                                    let truncated = if content.len() > 50 {
-                                                        content[..50].to_string()
-                                                    } else {
-                                                        content.clone()
-                                                    };
+                                                    let (truncated, _) =
+                                                        truncate_for_display(&content, 50);
                                                     println!("  User: {}", truncated);
 
                                                     let parent_intent_id = lock_or_warn(
@@ -2655,10 +2957,12 @@ Task Completed"
                                                     print!("  MCP Tool: {} - {}", tool, status);
                                                     if let Some(result_val) = result.as_ref() {
                                                         let result_str = result_val.to_string();
-                                                        if result_str.len() > 100 {
+                                                        let (truncated_result, was_truncated) =
+                                                            truncate_for_display(&result_str, 100);
+                                                        if was_truncated {
                                                             println!(
                                                                 " | Result: {}...",
-                                                                &result_str[..100]
+                                                                truncated_result
                                                             );
                                                         } else if !result_str.is_empty()
                                                             && result_str != "null"
@@ -2758,6 +3062,11 @@ Task Completed"
                                                         .and_then(|c| c.as_str())
                                                         .unwrap_or("")
                                                         .to_string();
+                                                    let command_cwd_from_item = item
+                                                        .get("cwd")
+                                                        .and_then(|c| c.as_str())
+                                                        .map(String::from)
+                                                        .filter(|cwd| !cwd.is_empty());
                                                     let exit_code = item
                                                         .get("exitCode")
                                                         .and_then(|c| c.as_i64());
@@ -2773,6 +3082,17 @@ Task Completed"
                                                         "  Command: {} exit={:?}",
                                                         cmd, exit_code
                                                     );
+
+                                                    let command_baseline = if let Some(
+                                                        mut session,
+                                                    ) = lock_or_warn(
+                                                        &session_clone,
+                                                        "command execution baseline read",
+                                                    ) {
+                                                        session.command_baselines.remove(&item_id)
+                                                    } else {
+                                                        None
+                                                    };
 
                                                     let updated_invocation = if let Some(
                                                         mut session,
@@ -2803,6 +3123,72 @@ Task Completed"
                                                     };
 
                                                     if let Some(inv) = updated_invocation {
+                                                        let invocation_status = inv.status.clone();
+                                                        let patchset_status_string =
+                                                            match invocation_status {
+                                                                ToolStatus::Completed => {
+                                                                    "completed".to_string()
+                                                                }
+                                                                ToolStatus::Failed => {
+                                                                    "failed".to_string()
+                                                                }
+                                                                ToolStatus::InProgress => {
+                                                                    "in_progress".to_string()
+                                                                }
+                                                                ToolStatus::Pending => {
+                                                                    "pending".to_string()
+                                                                }
+                                                            };
+                                                        let command_patchset =
+                                                            command_baseline.and_then(
+                                                                |baseline| {
+                                                                    let effective_cwd =
+                                                                        command_cwd_from_item
+                                                                            .clone()
+                                                                            .unwrap_or(
+                                                                                baseline.cwd,
+                                                                            );
+                                                                    let after_snapshot =
+                                                                        capture_workspace_snapshot(
+                                                                            Path::new(
+                                                                                &effective_cwd,
+                                                                            ),
+                                                                        );
+                                                                    let changes =
+                                                                        build_file_changes_from_snapshots(
+                                                                            &baseline.files,
+                                                                            &after_snapshot,
+                                                                        );
+                                                                    if changes.is_empty() {
+                                                                        None
+                                                                    } else {
+                                                                        Some(PatchSet {
+                                                                            id: format!(
+                                                                                "command_patchset_{}",
+                                                                                item_id
+                                                                            ),
+                                                                            run_id: _turn_id
+                                                                                .to_string(),
+                                                                            thread_id: _thread_id
+                                                                                .to_string(),
+                                                                            changes,
+                                                                            status: match invocation_status
+                                                                            {
+                                                                                ToolStatus::Completed => {
+                                                                                    PatchStatus::Completed
+                                                                                }
+                                                                                ToolStatus::Failed => {
+                                                                                    PatchStatus::Failed
+                                                                                }
+                                                                                _ => {
+                                                                                    PatchStatus::Pending
+                                                                                }
+                                                                            },
+                                                                            created_at: Utc::now(),
+                                                                        })
+                                                                    }
+                                                                },
+                                                            );
                                                         let mcp_server_for_inv =
                                                             mcp_server_clone.clone();
                                                         let history =
@@ -2887,6 +3273,26 @@ Task Completed"
                                                                     .await;
                                                             }
                                                         });
+
+                                                        if let Some(patchset) =
+                                                            command_patchset.clone()
+                                                        {
+                                                            if let Some(mut session) = lock_or_warn(
+                                                                &session_clone,
+                                                                "command patchset update",
+                                                            ) {
+                                                                session
+                                                                    .add_patchset(patchset.clone());
+                                                            }
+                                                            persist_patchset_snapshot_and_evidence(
+                                                                mcp_server_clone.clone(),
+                                                                history_recorder_clone.clone(),
+                                                                history_writer_clone.clone(),
+                                                                patchset,
+                                                                patchset_status_string,
+                                                                debug_mode,
+                                                            );
+                                                        }
                                                     }
                                                 }
                                                 "reasoning" => {
@@ -2960,45 +3366,10 @@ Task Completed"
                                                         );
                                                     }
 
-                                                    let changes: Vec<FileChange> = item
-                                                        .get("changes")
-                                                        .and_then(|c| c.as_array())
-                                                        .map(|arr| {
-                                                            arr.iter()
-                                                                .filter_map(|change| {
-                                                                    let path = change
-                                                                        .get("path")?
-                                                                        .as_str()?
-                                                                        .to_string();
-                                                                    let diff = change
-                                                                        .get("diff")
-                                                                        .and_then(|d| d.as_str())
-                                                                        .unwrap_or("")
-                                                                        .to_string();
-                                                                    let change_type = change
-                                                                        .get("change_type")
-                                                                        .or_else(|| {
-                                                                            change.get("changeType")
-                                                                        })
-                                                                        .or_else(|| {
-                                                                            change
-                                                                                .get("kind")
-                                                                                .and_then(|k| {
-                                                                                    k.get("type")
-                                                                                })
-                                                                        })
-                                                                        .and_then(|c| c.as_str())
-                                                                        .unwrap_or("update")
-                                                                        .to_string();
-                                                                    Some(FileChange {
-                                                                        path,
-                                                                        diff,
-                                                                        change_type,
-                                                                    })
-                                                                })
-                                                                .collect()
-                                                        })
-                                                        .unwrap_or_default();
+                                                    let changes: Vec<FileChange> =
+                                                        parse_patchset_changes_from_array(
+                                                            item.get("changes"),
+                                                        );
 
                                                     if debug_mode {
                                                         eprintln!(
@@ -3047,13 +3418,8 @@ Task Completed"
                                                         &session_clone,
                                                         "patchset completed update",
                                                     ) {
-                                                        let patchset_status = match status.as_str()
-                                                        {
-                                                            "completed" => PatchStatus::Completed,
-                                                            "failed" => PatchStatus::Failed,
-                                                            "declined" => PatchStatus::Declined,
-                                                            _ => PatchStatus::Completed,
-                                                        };
+                                                        let patchset_status =
+                                                            patch_status_from_str(&status);
                                                         if let Some(patchset) = session
                                                             .patchsets
                                                             .iter_mut()
@@ -3093,71 +3459,30 @@ Task Completed"
                                                     };
 
                                                     if let Some(patchset) = patchset_to_store {
-                                                        let mcp_server_for_ps =
-                                                            mcp_server_clone.clone();
-                                                        let ps_id = item_id.clone();
-                                                        let status_string = status.clone();
-                                                        let history =
-                                                            history_recorder_clone.clone();
-                                                        let history_writer =
-                                                            history_writer_clone.clone();
-                                                        let files = file_count;
-                                                        let touched_files: Vec<String> = patchset
-                                                            .changes
-                                                            .iter()
-                                                            .map(|change| change.path.clone())
-                                                            .collect();
-                                                        let patchset_snapshot = PatchSetSnapshot {
-                                                            id: ps_id.clone(),
-                                                            run_id: _turn_id.to_string(),
-                                                            thread_id: _thread_id.to_string(),
-                                                            created_at: Utc::now(),
-                                                            status: patchset.status.clone(),
-                                                            changes: patchset.changes.clone(),
+                                                        let patchset = PatchSet {
+                                                            run_id: if patchset.run_id.is_empty() {
+                                                                _turn_id.to_string()
+                                                            } else {
+                                                                patchset.run_id.clone()
+                                                            },
+                                                            thread_id: if patchset
+                                                                .thread_id
+                                                                .is_empty()
+                                                            {
+                                                                _thread_id.to_string()
+                                                            } else {
+                                                                patchset.thread_id.clone()
+                                                            },
+                                                            ..patchset
                                                         };
-                                                        let evidence = EvidenceEvent {
-                                                            id: format!("evidence_{}", ps_id),
-                                                            run_id: _turn_id.to_string(),
-                                                            patchset_id: Some(ps_id.clone()),
-                                                            at: Utc::now(),
-                                                            kind: "patchset".to_string(),
-                                                            data: serde_json::json!({
-                                                                "files": files,
-                                                                "touched_files": touched_files
-                                                            }),
-                                                        };
-                                                        tokio::spawn(async move {
-                                                            store_to_mcp(
-                                                                &mcp_server_for_ps,
-                                                                "patchset",
-                                                                &ps_id,
-                                                                &patchset,
-                                                                debug_mode,
-                                                            )
-                                                            .await;
-                                                            history
-                                                                .event(
-                                                                    history::EventKind::ToolInvocationStatus,
-                                                                    &ps_id,
-                                                                    status_string,
-                                                                    serde_json::json!({"files": files}),
-                                                                )
-                                                                .await;
-                                                            history_writer
-                                                                .write(
-                                                                    "patchset_snapshot",
-                                                                    &ps_id,
-                                                                    &patchset_snapshot,
-                                                                )
-                                                                .await;
-                                                            history_writer
-                                                                .write(
-                                                                    "evidence",
-                                                                    &evidence.id,
-                                                                    &evidence,
-                                                                )
-                                                                .await;
-                                                        });
+                                                        persist_patchset_snapshot_and_evidence(
+                                                            mcp_server_clone.clone(),
+                                                            history_recorder_clone.clone(),
+                                                            history_writer_clone.clone(),
+                                                            patchset,
+                                                            status.clone(),
+                                                            debug_mode,
+                                                        );
                                                     }
                                                 }
                                                 "toolCall" => {
@@ -3184,10 +3509,12 @@ Task Completed"
                                                     print!("  Tool: {} - {}", tool, status);
                                                     if let Some(result_val) = result.as_ref() {
                                                         let result_str = result_val.to_string();
-                                                        if result_str.len() > 100 {
+                                                        let (truncated_result, was_truncated) =
+                                                            truncate_for_display(&result_str, 100);
+                                                        if was_truncated {
                                                             println!(
                                                                 " | Result: {}...",
-                                                                &result_str[..100]
+                                                                truncated_result
                                                             );
                                                         } else if !result_str.is_empty()
                                                             && result_str != "null"
@@ -3506,6 +3833,7 @@ Task Completed"
                                     let item_id = approval_params
                                         .get("itemId")
                                         .or_else(|| approval_params.get("call_id"))
+                                        .or_else(|| approval_params.get("callId"))
                                         .and_then(|v| v.as_str())
                                         .map(String::from)
                                         .unwrap_or_default();
@@ -3513,6 +3841,7 @@ Task Completed"
                                     // Get thread_id if available
                                     let thread_id = approval_params
                                         .get("threadId")
+                                        .or_else(|| approval_params.get("conversationId"))
                                         .and_then(|v| v.as_str())
                                         .map(String::from)
                                         .unwrap_or_default();
@@ -3522,14 +3851,28 @@ Task Completed"
                                         .get("command")
                                         .and_then(|v| v.as_str())
                                         .map(String::from);
-                                    let changes = approval_params
-                                        .get("changes")
-                                        .and_then(|c| c.as_array())
-                                        .map(|arr| {
-                                            arr.iter()
-                                                .filter_map(|v| v.as_str().map(String::from))
-                                                .collect()
-                                        });
+                                    let approval_patch_changes = parse_patchset_changes_from_map(
+                                        approval_params
+                                            .get("fileChanges")
+                                            .or_else(|| approval_params.get("changes")),
+                                    );
+                                    let changes = if approval_patch_changes.is_empty() {
+                                        approval_params
+                                            .get("changes")
+                                            .and_then(|c| c.as_array())
+                                            .map(|arr| {
+                                                arr.iter()
+                                                    .filter_map(|v| v.as_str().map(String::from))
+                                                    .collect()
+                                            })
+                                    } else {
+                                        Some(
+                                            approval_patch_changes
+                                                .iter()
+                                                .map(|change| change.path.clone())
+                                                .collect(),
+                                        )
+                                    };
                                     let description: Option<String> = approval_params
                                         .get("description")
                                         .and_then(|v| v.as_str())
@@ -3826,8 +4169,16 @@ Task Completed"
             "modelProvider": args.model_provider,
             "personality": args.personality,
             "sandbox": SandboxMode::WorkspaceWrite,
-            "developerInstructions": serde_json::Value::Null,
-            "baseInstructions": serde_json::Value::Null,
+            "developerInstructions": if args.plan_mode {
+                serde_json::json!(plan_mode_developer_instructions())
+            } else {
+                serde_json::Value::Null
+            },
+            "baseInstructions": if args.plan_mode {
+                serde_json::json!(plan_mode_base_instructions())
+            } else {
+                serde_json::Value::Null
+            },
         }),
     )
     .await
