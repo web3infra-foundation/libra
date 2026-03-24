@@ -74,7 +74,7 @@ async fn set_local_hash_kind_for_storage(storage: &Path) -> CliResult<()> {
 #[derive(Parser, Debug)]
 #[command(
     about = "Libra: An AI native version control system for monorepo and trunk-based development.",
-    version = "0.1.0",
+    version = env!("CARGO_PKG_VERSION"),
     after_help = ROOT_AFTER_HELP
 )]
 struct Cli {
@@ -569,9 +569,18 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
     match args.command {
         Commands::Init(cmd_args) => {
             let original_dir = utils::util::cur_dir();
+            let init_target = if Path::new(&cmd_args.repo_directory).is_absolute() {
+                Path::new(&cmd_args.repo_directory).to_path_buf()
+            } else {
+                original_dir.join(&cmd_args.repo_directory)
+            };
+            let storage = if cmd_args.bare {
+                init_target
+            } else {
+                init_target.join(utils::util::ROOT_DIR)
+            };
+
             command::init::execute_safe(cmd_args, &output).await?;
-            let storage =
-                utils::util::try_get_storage_path(None).map_err(|_| repo_not_found_error())?;
             set_local_hash_kind_for_storage(&storage).await?;
             env::set_current_dir(&original_dir).map_err(|e| {
                 CliError::fatal(format!(

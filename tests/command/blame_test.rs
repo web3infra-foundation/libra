@@ -46,7 +46,6 @@ async fn setup_repo_with_hash(
         object_format: Some(object_format.to_string()),
         ref_format: None,
         from_git_repository: None,
-        separate_libra_dir: None,
         vault: false,
     })
     .await

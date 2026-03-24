@@ -9,51 +9,51 @@ use std::{
 use clap::{Parser, ValueEnum};
 use git_internal::hash::{HashKind, set_hash_kind};
 use sea_orm::{ActiveModelTrait, DbConn, DbErr, Set, TransactionTrait};
+use serde::Serialize;
 
 use crate::{
     internal::{
+        config::{ConfigKv, LocalIdentityTarget, resolve_user_identity_sources},
         db,
         model::{config, reference},
     },
     utils::{
         convert,
         error::{CliError, CliResult},
-        output::OutputConfig,
+        output::{OutputConfig, ProgressMode, emit_json_data},
         util::{DATABASE, ROOT_DIR, cur_dir},
     },
 };
 
 const DEFAULT_BRANCH: &str = "main";
+const ISSUE_URL: &str = "https://github.com/web3infra-foundation/libra/issues";
+const EXAMPLES: &str = r#"EXAMPLES:
+    libra init                                 Initialize in current directory
+    libra init my-project                      Initialize in a new directory
+    libra init --bare my-repo.git              Create a bare repository
+    libra init -b develop                      Use 'develop' as initial branch
+    libra init --from-git-repository ../old    Convert from existing Git repo
+    libra init --vault false                   Skip vault / GPG setup
+    libra init --object-format sha256          Use SHA-256 hashing"#;
 
 // NOTE: `src/command/init.rs` lines 3-20 are a protected merge-conflict block in this workspace.
 // The imports inside that block must stay as-is. To avoid `unused_imports` warnings without
 // changing that block, we reference the imported symbols here in a private, dead-code helper.
 #[allow(dead_code, deprecated)]
 fn _touch_conflict_imports() {
-    // std::env (imported in the protected block)
     let _ = env::current_dir;
-
-    // crate::utils::util::{DATABASE, cur_dir}
     let _ = DATABASE;
     let _ = cur_dir();
-
-    // crate::internal::db
     let _ = db::create_database;
-
-    // crate::internal::model::{config, reference}
     let _ = std::mem::size_of::<config::Model>();
     let _ = std::mem::size_of::<reference::Model>();
-
-    // sea_orm imports from the protected block
     let _ = std::mem::size_of::<DbConn>();
-    // `Set` is a tuple-variant constructor (not a type); just construct a value to mark it used.
     let _ = Set(1i32);
 
     fn _needs_active_model_trait<T: ActiveModelTrait>() {}
     fn _needs_transaction_trait<T: TransactionTrait>() {}
 }
 
-// Branch name validation constants
 const MAX_BRANCH_NAME_LENGTH: usize = 255;
 const LOCK_SUFFIX: &str = ".lock";
 const HEAD_REF: &str = "HEAD";
@@ -64,270 +64,542 @@ const SLASH: char = '/';
 const DOUBLE_SLASH: &str = "//";
 const DOUBLE_DOT: &str = "..";
 
-/// Errors that can occur during repository initialization
 #[derive(thiserror::Error, Debug)]
 pub enum InitError {
-    #[error("branch name cannot be empty")]
-    EmptyBranchName,
+    #[error("{message}")]
+    InvalidArgument {
+        message: String,
+        hint: Option<String>,
+    },
 
-    #[error("branch name cannot be 'HEAD'")]
-    BranchNameIsHead,
+    #[error("repository already initialized at '{path}'")]
+    AlreadyInitialized { path: PathBuf },
 
-    #[error("branch name cannot be '@'")]
-    BranchNameIsAt,
+    #[error("source git repository '{path}' does not exist")]
+    SourcePathNotFound { path: PathBuf },
 
-    #[error("branch name contains invalid characters: {0}")]
-    InvalidCharacters(String),
+    #[error("'{path}' is not a valid Git repository")]
+    InvalidGitRepository { path: PathBuf },
 
-    #[error("branch name contains filesystem-invalid characters: {0}")]
-    FilesystemInvalidCharacters(String),
+    #[error("template directory '{path}' does not exist")]
+    TemplateNotFound { path: PathBuf },
 
-    #[error("branch name cannot start or end with '/'")]
-    StartsOrEndsWithSlash,
+    #[error("path '{path}' is not valid UTF-8")]
+    InvalidUtf8Path { path: PathBuf },
 
-    #[error("branch name cannot contain consecutive slashes")]
-    ConsecutiveSlashes,
+    #[error("conversion from git repository '{repo}' failed during {stage}: {message}")]
+    ConversionFailed {
+        repo: PathBuf,
+        stage: &'static str,
+        message: String,
+    },
 
-    #[error("branch name cannot contain '..'")]
-    ContainsDoubleDots,
-
-    #[error("branch name cannot end with '.lock'")]
-    EndsWithLock,
-
-    #[error("branch name cannot end with '.'")]
-    EndsWithDot,
-
-    #[error("branch name cannot be '.' or '..'")]
-    IsDotOrDoubleDot,
-
-    #[error("branch name is too long (max {MAX_BRANCH_NAME_LENGTH} characters)")]
-    BranchNameTooLong,
+    #[error("vault initialization failed: {message}")]
+    VaultInitializationFailed { message: String },
 
     #[error("{0}")]
     Io(#[from] io::Error),
 
-    #[error("initialization failed due to a storage error")]
+    #[error("initialization failed due to a storage error: {0}")]
     Database(#[from] DbErr),
-
-    #[error("conversion from git repository failed: {0}")]
-    ConversionFailed(String),
 }
 
-/// Reference format validation modes
+impl From<InitError> for CliError {
+    fn from(error: InitError) -> Self {
+        match error {
+            InitError::InvalidArgument { message, hint } => {
+                let mut cli = CliError::command_usage(message)
+                    .with_stable_code(crate::utils::error::StableErrorCode::CliInvalidArguments);
+                if let Some(hint) = hint {
+                    cli = cli.with_hint(hint);
+                }
+                cli
+            }
+            InitError::AlreadyInitialized { path } => {
+                let remove_target = if path.file_name() == Some(std::ffi::OsStr::new(ROOT_DIR)) {
+                    ".libra/".to_string()
+                } else {
+                    path.display().to_string()
+                };
+                CliError::fatal(format!(
+                    "repository already initialized at '{}'",
+                    path.display()
+                ))
+                .with_stable_code(crate::utils::error::StableErrorCode::RepoStateInvalid)
+                .with_hint(format!("remove {remove_target} to reinitialize."))
+            }
+            InitError::SourcePathNotFound { path } => CliError::fatal(format!(
+                "source git repository '{}' does not exist",
+                path.display()
+            ))
+            .with_stable_code(crate::utils::error::StableErrorCode::IoReadFailed),
+            InitError::InvalidGitRepository { path } => CliError::command_usage(format!(
+                "'{}' is not a valid Git repository",
+                path.display()
+            ))
+            .with_stable_code(crate::utils::error::StableErrorCode::CliInvalidTarget)
+            .with_hint("a valid Git repository must contain HEAD, config, and objects."),
+            InitError::TemplateNotFound { path } => CliError::fatal(format!(
+                "template directory '{}' does not exist",
+                path.display()
+            ))
+            .with_stable_code(crate::utils::error::StableErrorCode::IoReadFailed),
+            InitError::InvalidUtf8Path { path } => {
+                CliError::fatal(format!("path '{}' is not valid UTF-8", path.display()))
+                    .with_stable_code(crate::utils::error::StableErrorCode::IoReadFailed)
+            }
+            InitError::ConversionFailed {
+                repo,
+                stage,
+                message,
+            } => CliError::fatal(format!(
+                "conversion from git repository '{}' failed during {stage}: {message}",
+                repo.display()
+            ))
+            .with_stable_code(crate::utils::error::StableErrorCode::RepoStateInvalid),
+            InitError::VaultInitializationFailed { message } => {
+                CliError::fatal(format!("vault initialization failed: {message}"))
+                    .with_stable_code(crate::utils::error::StableErrorCode::InternalInvariant)
+                    .with_hint(format!("please report this issue at: {ISSUE_URL}"))
+            }
+            InitError::Io(error) => match error.kind() {
+                io::ErrorKind::InvalidInput => CliError::command_usage(error.to_string())
+                    .with_stable_code(crate::utils::error::StableErrorCode::CliInvalidArguments),
+                _ => CliError::fatal(error.to_string())
+                    .with_stable_code(crate::utils::error::StableErrorCode::IoReadFailed),
+            },
+            InitError::Database(error) => {
+                CliError::fatal(format!("database initialization failed: {error}"))
+                    .with_stable_code(crate::utils::error::StableErrorCode::InternalInvariant)
+                    .with_hint(format!("please report this issue at: {ISSUE_URL}"))
+            }
+        }
+    }
+}
+
 #[derive(ValueEnum, Debug, Clone, PartialEq)]
 pub enum RefFormat {
-    /// Strict reference name validation (Git-compatible)
     Strict,
-    /// Filesystem-friendly reference name validation
     Filesystem,
 }
 
-#[derive(Parser, Debug, Clone)]
-pub struct InitArgs {
-    /// Create a bare repository
-    #[clap(long, required = false)]
-    pub bare: bool, // Default is false
+impl RefFormat {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Strict => "strict",
+            Self::Filesystem => "filesystem",
+        }
+    }
+}
 
-    /// directory from which templates will be used
+#[derive(Debug, Clone, Serialize)]
+pub struct InitOutput {
+    pub path: String,
+    pub bare: bool,
+    pub initial_branch: String,
+    pub object_format: String,
+    pub ref_format: String,
+    pub repo_id: String,
+    pub vault_signing: bool,
+    pub converted_from: Option<String>,
+    pub ssh_key_detected: Option<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Parser, Debug, Clone)]
+#[command(after_help = EXAMPLES)]
+pub struct InitArgs {
+    #[clap(long, required = false)]
+    pub bare: bool,
+
     #[clap(long = "template", name = "template-directory", required = false)]
     pub template: Option<String>,
 
-    /// Set the initial branch name
     #[clap(short = 'b', long, required = false)]
     pub initial_branch: Option<String>,
 
-    /// Create a repository in the specified directory
     #[clap(default_value = ".")]
     pub repo_directory: String,
 
-    /// Suppress all output
     #[clap(long, short = 'q', required = false)]
     pub quiet: bool,
 
-    /// Specify repository sharing mode
-    ///
-    /// Supported values:
-    /// - `umask`: Default behavior (permissions depend on the user's umask).
-    /// - `group`: Makes the repository group-writable so multiple users
-    ///   in the same group can collaborate more easily.
-    /// - `all`: Makes the repository readable by all users on the system.
-    ///
-    /// Note: On Windows, this option is ignored.
     #[clap(long, required = false, value_name = "MODE")]
     pub shared: Option<String>,
 
-    /// Use a separate directory for repository storage instead of `.libra` inside the working tree
-    #[clap(
-        long = "separate-libra-dir",
-        visible_alias = "separate-git-dir",
-        value_name = "dir",
-        required = false
-    )]
-    pub separate_libra_dir: Option<String>,
-
-    /// Specify the object format (hash algorithm) for the repository.
-    ///
-    /// Supported values:
-    /// - `sha1`: The default and currently the only supported format.
-    /// - `sha256`: An alternative format using SHA-256 hashing.
     #[clap(long = "object-format", name = "format", required = false)]
     pub object_format: Option<String>,
 
-    /// Specify the reference format validation mode.
-    ///
-    /// Supported values:
-    /// - `strict`: Use strict Git-compatible reference name validation.
-    /// - `filesystem`: Use filesystem-friendly reference name validation.
     #[clap(long = "ref-format", value_enum, required = false)]
     pub ref_format: Option<RefFormat>,
 
-    /// Convert from an existing local Git repository during initialization.
-    ///
-    /// When provided, Libra will fetch objects and references from the given
-    /// Git repository and configure the current repository to track it as
-    /// `origin` after the basic Libra layout and database are created.
     #[clap(long = "from-git-repository", value_name = "path", required = false)]
     pub from_git_repository: Option<String>,
 
-    /// Enable libvault for PGP commit signing (enabled by default).
-    ///
-    /// A vault database is created inside `.libra/` and a PGP key pair is
-    /// generated automatically. Subsequent `libra commit` calls will detect
-    /// the vault and sign commits with the generated key.
-    ///
-    /// Use `--vault false` to skip vault initialisation.
     #[clap(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub vault: bool,
 }
 
-/// Execute the init function
-pub async fn execute(args: InitArgs) {
-    if let Err(e) = execute_safe(args, &OutputConfig::default()).await {
-        e.print_stderr();
+struct InitProgress {
+    enabled: bool,
+}
+
+impl InitProgress {
+    fn enabled() -> Self {
+        Self { enabled: true }
+    }
+
+    fn disabled() -> Self {
+        Self { enabled: false }
+    }
+
+    fn emit(&self, message: impl AsRef<str>) {
+        if self.enabled {
+            eprintln!("{}", message.as_ref());
+        }
     }
 }
-/// Safe entry point that returns structured [`CliResult`] instead of printing
-/// errors and exiting. Creates `.libra` storage, seeds HEAD and default
-/// refs/config, and initialises the backing SQLite database.
-pub async fn execute_safe(args: InitArgs, _output: &OutputConfig) -> CliResult<()> {
-    let from_git = args.from_git_repository.clone();
-    let is_bare = args.bare;
-    let enable_vault = args.vault;
-    let separate_libra_dir = args.separate_libra_dir.clone();
 
-    let used_separate_git_dir = std::env::args()
-        .any(|arg| arg == "--separate-git-dir" || arg.starts_with("--separate-git-dir="));
-    if used_separate_git_dir {
-        eprintln!(
-            "warning: `--separate-git-dir` is deprecated; use `--separate-libra-dir` instead"
-        );
+struct CurrentDirGuard {
+    original_dir: PathBuf,
+}
+
+impl CurrentDirGuard {
+    fn change_to(target: &Path) -> io::Result<Self> {
+        let original_dir = env::current_dir()?;
+        env::set_current_dir(target)?;
+        Ok(Self { original_dir })
+    }
+}
+
+impl Drop for CurrentDirGuard {
+    fn drop(&mut self) {
+        let _ = env::set_current_dir(&self.original_dir);
+    }
+}
+
+pub async fn execute(args: InitArgs) {
+    if let Err(error) = execute_safe(args, &OutputConfig::default()).await {
+        error.print_stderr();
+    }
+}
+
+pub async fn execute_safe(args: InitArgs, output: &OutputConfig) -> CliResult<()> {
+    let mut effective_output = output.clone();
+    if args.quiet {
+        effective_output.quiet = true;
+        effective_output.progress = ProgressMode::None;
     }
 
-    let current_dir = cur_dir();
-    let target_path = current_dir.join(Path::new(&args.repo_directory));
+    let progress = if effective_output.is_json() || effective_output.quiet {
+        InitProgress::disabled()
+    } else {
+        InitProgress::enabled()
+    };
+    let result = run_init_internal(args, &progress).await?;
+    render_init_result(&result, &effective_output)
+}
 
-    let from_git_abs = if let Some(p) = from_git {
-        let path = Path::new(&p);
-        let joined = if path.is_absolute() {
-            path.to_path_buf()
+fn render_init_result(result: &InitOutput, output: &OutputConfig) -> CliResult<()> {
+    if output.is_json() {
+        return emit_json_data("init", result, output);
+    }
+    if output.quiet {
+        return Ok(());
+    }
+
+    let repo_type = if result.bare { " bare" } else { "" };
+    println!(
+        "Initialized empty{repo_type} Libra repository in {}",
+        result.path
+    );
+    println!("  branch: {}", result.initial_branch);
+    println!(
+        "  signing: {}",
+        if result.vault_signing {
+            "enabled"
         } else {
-            current_dir.join(path)
-        };
-        let canonical = joined.canonicalize().map_err(|e| {
-            CliError::fatal(format!(
-                "failed to resolve from-git-repository path '{}': {}",
-                p, e
-            ))
-        })?;
-        Some(canonical)
+            "disabled"
+        }
+    );
+
+    if !result.vault_signing {
+        println!();
+        println!("Tip: to enable commit signing later, run: libra config generate-gpg-key");
+    }
+
+    println!();
+    match &result.ssh_key_detected {
+        Some(path) => {
+            println!(
+                "Tip: using existing SSH key at {}",
+                display_home_relative(path)
+            );
+            println!(
+                "     to generate a repo-specific key later, run: libra config generate-ssh-key --remote origin"
+            );
+        }
+        None => {
+            println!("Tip: no SSH key found at ~/.ssh/");
+            println!("     push/pull via SSH will require a key");
+            println!("     generate one with: libra config generate-ssh-key --remote origin");
+            println!("     or create a system key: ssh-keygen -t ed25519");
+        }
+    }
+
+    Ok(())
+}
+
+fn display_home_relative(path: &str) -> String {
+    let Some(home) = dirs::home_dir() else {
+        return path.to_string();
+    };
+    let home = home.to_string_lossy().to_string();
+    if let Some(rest) = path.strip_prefix(&home) {
+        return format!("~{rest}");
+    }
+    path.to_string()
+}
+
+pub(crate) async fn run_init(args: InitArgs) -> Result<InitOutput, InitError> {
+    run_init_internal(args, &InitProgress::disabled()).await
+}
+
+#[allow(dead_code)]
+pub async fn init(args: InitArgs) -> Result<(), InitError> {
+    run_init(args).await.map(|_| ())
+}
+
+async fn run_init_internal(
+    args: InitArgs,
+    progress: &InitProgress,
+) -> Result<InitOutput, InitError> {
+    let current_dir = cur_dir();
+    let target_dir = resolve_cli_path(&current_dir, &args.repo_directory);
+    let root_dir = storage_root(&target_dir, args.bare);
+    let from_git = args
+        .from_git_repository
+        .as_ref()
+        .map(|path| resolve_existing_cli_path(&current_dir, path))
+        .transpose()?;
+    let template_dir = args
+        .template
+        .as_ref()
+        .map(|path| resolve_template_path(&current_dir, path))
+        .transpose()?;
+    let object_format = resolve_object_format(args.object_format.as_deref())?;
+    let ref_format = args.ref_format.clone().unwrap_or(RefFormat::Strict);
+    let initial_branch_name = args
+        .initial_branch
+        .clone()
+        .unwrap_or_else(|| DEFAULT_BRANCH.to_string());
+
+    validate_branch_name(&initial_branch_name, &ref_format)?;
+    validate_shared_mode(args.shared.as_deref())?;
+
+    if is_reinit(&target_dir, args.bare) {
+        return Err(InitError::AlreadyInitialized {
+            path: root_dir.clone(),
+        });
+    }
+
+    if target_dir.exists() {
+        is_writable(&target_dir)?;
+    }
+
+    progress.emit("Creating repository layout ...");
+    fs::create_dir_all(&root_dir)?;
+    prepare_repository_layout(&root_dir, template_dir.as_deref())?;
+
+    progress.emit("Initializing database ...");
+    let database_path = root_dir.join(DATABASE);
+    let conn = create_database_connection(&database_path).await?;
+    let repo_id = init_config(&conn, args.bare, &object_format, &ref_format).await?;
+
+    progress.emit("Setting up refs ...");
+    initialize_refs(&conn, &initial_branch_name).await?;
+
+    set_dir_hidden(&root_dir)?;
+    if let Some(shared_mode) = args.shared.as_deref() {
+        apply_shared(&root_dir, shared_mode)?;
+    }
+
+    let target_guard_path = target_dir
+        .canonicalize()
+        .unwrap_or_else(|_| target_dir.clone());
+
+    let converted_from = if let Some(source) = from_git {
+        let source_git_dir = convert::resolve_git_source_dir(&source)?;
+        progress.emit(format!(
+            "Converting from Git repository at {} ...",
+            source_git_dir.display()
+        ));
+        let _guard = CurrentDirGuard::change_to(&target_guard_path)?;
+        Some(
+            convert::convert_from_git_repository(&source_git_dir, args.bare)
+                .await?
+                .source_git_dir,
+        )
     } else {
         None
     };
 
-    init(args)
-        .await
-        .and_then(|_| Ok(env::set_current_dir(&target_path)?))
-        .map_err(|e| CliError::fatal(e.to_string()))?;
-
-    if let Some(source_git) = from_git_abs
-        && let Err(e) = convert::convert_from_git_repository(&source_git, is_bare).await
-    {
-        // Best-effort cwd restore before surfacing the error so in-process
-        // callers (tests, MCP, multi-command sessions) don't continue in the
-        // wrong directory.
-        let _ = env::set_current_dir(&current_dir);
-        return Err(CliError::fatal(e.to_string()));
+    if args.vault {
+        progress.emit("Generating PGP signing key ...");
+        let _guard = CurrentDirGuard::change_to(&target_guard_path)?;
+        init_vault_for_repo(&root_dir, &database_path).await?;
+    } else {
+        set_vault_signing_value(&database_path, false).await?;
     }
 
-    // Initialize vault for PGP signing if requested
-    if enable_vault {
-        // Resolve the actual storage root. After chdir to target_path, a relative
-        // --separate-libra-dir would resolve incorrectly, so we use the canonical
-        // storage path that init() already created on disk.
-        let vault_root = if is_bare {
-            target_path.clone()
-        } else if separate_libra_dir.is_some() {
-            // The init() function already created and canonicalized the storage dir;
-            // read the gitdir link to get the real path.
-            let link_path = target_path.join(ROOT_DIR);
-            if link_path.is_file() {
-                let content = std::fs::read_to_string(&link_path).unwrap_or_default();
-                let gitdir = content.trim_start_matches("gitdir:").trim();
-                PathBuf::from(gitdir)
-            } else {
-                target_path.join(ROOT_DIR)
-            }
-        } else {
-            target_path.join(ROOT_DIR)
-        };
-        if let Err(e) = init_vault_for_repo(&vault_root).await {
-            // Keep process-local cwd stable for in-process callers.
-            let _ = env::set_current_dir(&current_dir);
-            return Err(CliError::fatal(e.to_string()));
-        }
+    set_hash_kind(match object_format.as_str() {
+        "sha1" => HashKind::Sha1,
+        "sha256" => HashKind::Sha256,
+        _ => HashKind::Sha1,
+    });
+
+    let path = root_dir
+        .canonicalize()
+        .unwrap_or_else(|_| root_dir.clone())
+        .to_string_lossy()
+        .to_string();
+    Ok(InitOutput {
+        path,
+        bare: args.bare,
+        initial_branch: initial_branch_name,
+        object_format,
+        ref_format: ref_format.as_str().to_string(),
+        repo_id,
+        vault_signing: args.vault,
+        converted_from,
+        ssh_key_detected: detect_system_ssh_key(),
+        warnings: Vec::new(),
+    })
+}
+
+fn resolve_cli_path(base: &Path, raw: &str) -> PathBuf {
+    let path = Path::new(raw);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
     }
-
-    Ok(())
 }
 
-/// Check if the repository has already been initialized based on the presence of the .libra directory.
-fn is_reinit(cur_dir: &Path) -> bool {
-    cur_dir.join(ROOT_DIR).exists()
+fn resolve_existing_cli_path(base: &Path, raw: &str) -> Result<PathBuf, InitError> {
+    let path = resolve_cli_path(base, raw);
+    if !path.exists() {
+        return Err(InitError::SourcePathNotFound { path });
+    }
+    path.canonicalize().map_err(InitError::Io)
 }
 
-/// Check if the target directory is writable
-fn is_writable(cur_dir: &Path) -> io::Result<()> {
-    match fs::metadata(cur_dir) {
+fn resolve_template_path(base: &Path, raw: &str) -> Result<PathBuf, InitError> {
+    let path = resolve_cli_path(base, raw);
+    if !path.is_dir() {
+        return Err(InitError::TemplateNotFound { path });
+    }
+    path.canonicalize().map_err(InitError::Io)
+}
+
+fn storage_root(target_dir: &Path, bare: bool) -> PathBuf {
+    if bare {
+        target_dir.to_path_buf()
+    } else {
+        target_dir.join(ROOT_DIR)
+    }
+}
+
+fn invalid_argument(message: impl Into<String>, hint: Option<String>) -> InitError {
+    InitError::InvalidArgument {
+        message: message.into(),
+        hint,
+    }
+}
+
+fn resolve_object_format(raw: Option<&str>) -> Result<String, InitError> {
+    let object_format = raw
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_else(|| "sha1".to_string());
+    match object_format.as_str() {
+        "sha1" | "sha256" => Ok(object_format),
+        _ => Err(invalid_argument(
+            format!("unsupported object format '{object_format}'"),
+            suggest_object_format(&object_format)
+                .map(|suggestion| format!("did you mean '{suggestion}'?")),
+        )),
+    }
+}
+
+fn suggest_object_format(value: &str) -> Option<&'static str> {
+    (value == "sha265").then_some("sha256")
+}
+
+fn is_reinit(target_dir: &Path, bare: bool) -> bool {
+    if bare {
+        return target_dir.join(DATABASE).exists()
+            || target_dir.join("objects").exists()
+            || target_dir.join("info").exists()
+            || target_dir.join("hooks").exists();
+    }
+    target_dir.join(ROOT_DIR).exists()
+}
+
+fn is_writable(path: &Path) -> io::Result<()> {
+    match fs::metadata(path) {
         Ok(metadata) => {
-            // Check if the target directory is a directory
             if !metadata.is_dir() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "The target directory is not a directory.",
+                    "the target directory is not a directory",
                 ));
             }
-            // Check permissions
             if metadata.permissions().readonly() {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
-                    "The target directory is read-only.",
+                    "the target directory is read-only",
                 ));
             }
         }
-        Err(e) if e.kind() != ErrorKind::NotFound => {
-            return Err(e);
-        }
-        _ => {}
+        Err(error) if error.kind() != ErrorKind::NotFound => return Err(error),
+        Err(_) => {}
     }
     Ok(())
 }
 
-/// Recursively copy the contents of the template directory to the destination directory.
-///
-/// # Behavior
-/// - Directories are created as needed.
-/// - Existing files in `dst` are NOT overwritten.
-/// - Subdirectories are copied recursively.
+fn prepare_repository_layout(root_dir: &Path, template_dir: Option<&Path>) -> io::Result<()> {
+    if let Some(template_dir) = template_dir {
+        copy_template(template_dir, root_dir)?;
+    } else {
+        for dir in ["info", "hooks"] {
+            fs::create_dir_all(root_dir.join(dir))?;
+        }
+        fs::write(
+            root_dir.join("info/exclude"),
+            include_str!("../../template/exclude"),
+        )?;
+        fs::write(
+            root_dir.join("hooks").join("pre-commit.sh"),
+            include_str!("../../template/pre-commit.sh"),
+        )?;
+        #[cfg(not(target_os = "windows"))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = fs::Permissions::from_mode(0o755);
+            fs::set_permissions(root_dir.join("hooks").join("pre-commit.sh"), perms)?;
+        }
+        fs::write(
+            root_dir.join("hooks").join("pre-commit.ps1"),
+            include_str!("../../template/pre-commit.ps1"),
+        )?;
+    }
+
+    for dir in ["objects/pack", "objects/info"] {
+        fs::create_dir_all(root_dir.join(dir))?;
+    }
+    Ok(())
+}
+
 fn copy_template(src: &Path, dst: &Path) -> io::Result<()> {
     for entry in fs::read_dir(src)? {
         let entry = entry?;
@@ -338,19 +610,38 @@ fn copy_template(src: &Path, dst: &Path) -> io::Result<()> {
             fs::create_dir_all(&dest_path)?;
             copy_template(&entry.path(), &dest_path)?;
         } else if !dest_path.exists() {
-            // Only copy if the file does not already exist
             fs::copy(entry.path(), &dest_path)?;
         }
     }
     Ok(())
 }
 
-/// Apply repository with sharing mode
+fn validate_shared_mode(shared_mode: Option<&str>) -> Result<(), InitError> {
+    let Some(shared_mode) = shared_mode else {
+        return Ok(());
+    };
+
+    match shared_mode {
+        "false" | "true" | "umask" | "group" | "all" | "world" | "everybody" => Ok(()),
+        mode if mode.starts_with('0') && mode.len() == 4 => {
+            u32::from_str_radix(&mode[1..], 8)
+                .map_err(|_| invalid_argument(format!("invalid shared mode '{mode}'"), None))?;
+            Ok(())
+        }
+        other => Err(invalid_argument(
+            format!("invalid shared mode '{other}'"),
+            Some(
+                "supported values: umask, group, all, true, false, or a 4-digit octal mode."
+                    .to_string(),
+            ),
+        )),
+    }
+}
+
 #[cfg(not(target_os = "windows"))]
 fn apply_shared(root_dir: &Path, shared_mode: &str) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
-    // Help function: recursively set permission bits for all files and dirs
     fn set_recursive(dir: &Path, mode: u32) -> io::Result<()> {
         for entry in walkdir::WalkDir::new(dir) {
             let entry = entry?;
@@ -362,56 +653,26 @@ fn apply_shared(root_dir: &Path, shared_mode: &str) -> io::Result<()> {
         }
         Ok(())
     }
-    // Match the shared_mode argument and apply permissions accordingly
+
     match shared_mode {
-        "false" | "umask" => {} // default
+        "false" | "umask" => {}
         "true" | "group" => set_recursive(root_dir, 0o2775)?,
         "all" | "world" | "everybody" => set_recursive(root_dir, 0o2777)?,
         mode if mode.starts_with('0') && mode.len() == 4 => {
             if let Ok(bits) = u32::from_str_radix(&mode[1..], 8) {
                 set_recursive(root_dir, bits)?;
-            } else {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("invalid shared mode: {}", mode),
-                ));
             }
         }
-        other => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("Invalid shared mode: {}", other),
-            ));
-        }
+        _ => {}
     }
     Ok(())
 }
 
-/// Only verify the shared_mode
 #[cfg(target_os = "windows")]
-fn apply_shared(_root_dir: &Path, shared_mode: &str) -> io::Result<()> {
-    match shared_mode {
-        "true" | "false" | "umask" | "group" | "all" | "world" | "everybody" => {} // Valid string input
-        mode if mode.starts_with('0') && mode.len() == 4 => {
-            if let Ok(_bits) = u32::from_str_radix(&mode[1..], 8) { //Valid perm input
-            } else {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("invalid shared mode: {}", mode),
-                ));
-            }
-        }
-        other => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("Invalid shared mode: {}", other),
-            ));
-        }
-    }
+fn apply_shared(_root_dir: &Path, _shared_mode: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// Validate branch name according to the specified ref format mode
 fn validate_branch_name(branch_name: &str, ref_format: &RefFormat) -> Result<(), InitError> {
     match ref_format {
         RefFormat::Strict => validate_strict_branch_name(branch_name),
@@ -419,25 +680,22 @@ fn validate_branch_name(branch_name: &str, ref_format: &RefFormat) -> Result<(),
     }
 }
 
-/// Validate branch name with strict Git-compatible rules
 fn validate_strict_branch_name(branch_name: &str) -> Result<(), InitError> {
     if branch_name.is_empty() {
-        return Err(InitError::EmptyBranchName);
+        return Err(invalid_argument("branch name cannot be empty", None));
     }
-
     if branch_name.len() > MAX_BRANCH_NAME_LENGTH {
-        return Err(InitError::BranchNameTooLong);
+        return Err(invalid_argument(
+            format!("branch name is too long (max {MAX_BRANCH_NAME_LENGTH} characters)"),
+            None,
+        ));
     }
-
     if branch_name == HEAD_REF {
-        return Err(InitError::BranchNameIsHead);
+        return Err(invalid_argument("branch name cannot be 'HEAD'", None));
     }
-
     if branch_name == AT_REF {
-        return Err(InitError::BranchNameIsAt);
+        return Err(invalid_argument("branch name cannot be '@'", None));
     }
-
-    // Check for control characters and other invalid characters
     if branch_name.chars().any(|c| {
         c.is_control()
             || c == ' '
@@ -452,48 +710,48 @@ fn validate_strict_branch_name(branch_name: &str) -> Result<(), InitError> {
             || c == '@'
             || c == '\0'
     }) {
-        return Err(InitError::InvalidCharacters(branch_name.to_string()));
+        return Err(invalid_argument(
+            format!("branch name contains invalid characters: {branch_name}"),
+            None,
+        ));
     }
-
-    // Cannot start or end with '/'
     if branch_name.starts_with(SLASH) || branch_name.ends_with(SLASH) {
-        return Err(InitError::StartsOrEndsWithSlash);
+        return Err(invalid_argument(
+            "branch name cannot start or end with '/'",
+            None,
+        ));
     }
-
-    // Cannot contain consecutive slashes
     if branch_name.contains(DOUBLE_SLASH) {
-        return Err(InitError::ConsecutiveSlashes);
+        return Err(invalid_argument(
+            "branch name cannot contain consecutive slashes",
+            None,
+        ));
     }
-
-    // Cannot contain ".."
     if branch_name.contains(DOUBLE_DOT) {
-        return Err(InitError::ContainsDoubleDots);
+        return Err(invalid_argument("branch name cannot contain '..'", None));
     }
-
-    // Cannot end with ".lock"
     if branch_name.ends_with(LOCK_SUFFIX) {
-        return Err(InitError::EndsWithLock);
+        return Err(invalid_argument(
+            "branch name cannot end with '.lock'",
+            None,
+        ));
     }
-
-    // Cannot end with "."
     if branch_name.ends_with(DOT_REF) {
-        return Err(InitError::EndsWithDot);
+        return Err(invalid_argument("branch name cannot end with '.'", None));
     }
-
     Ok(())
 }
 
-/// Validate branch name with filesystem-friendly rules
 fn validate_filesystem_branch_name(branch_name: &str) -> Result<(), InitError> {
     if branch_name.is_empty() {
-        return Err(InitError::EmptyBranchName);
+        return Err(invalid_argument("branch name cannot be empty", None));
     }
-
     if branch_name.len() > MAX_BRANCH_NAME_LENGTH {
-        return Err(InitError::BranchNameTooLong);
+        return Err(invalid_argument(
+            format!("branch name is too long (max {MAX_BRANCH_NAME_LENGTH} characters)"),
+            None,
+        ));
     }
-
-    // Basic filesystem restrictions
     if branch_name.chars().any(|c| {
         c.is_control()
             || c == '<'
@@ -506,253 +764,70 @@ fn validate_filesystem_branch_name(branch_name: &str) -> Result<(), InitError> {
             || c == '\0'
             || (cfg!(windows) && (c == '\\' || c == '/' || c == '\n' || c == '\r'))
     }) {
-        return Err(InitError::FilesystemInvalidCharacters(
-            branch_name.to_string(),
+        return Err(invalid_argument(
+            format!("branch name contains filesystem-invalid characters: {branch_name}"),
+            None,
         ));
     }
-
-    // Cannot be "." or ".."
     if branch_name == DOT_REF || branch_name == DOUBLE_DOT_REF {
-        return Err(InitError::IsDotOrDoubleDot);
+        return Err(invalid_argument("branch name cannot be '.' or '..'", None));
     }
-
     Ok(())
 }
 
-#[allow(dead_code)]
-pub async fn init(args: InitArgs) -> Result<(), InitError> {
-    // Get the current directory
-    let cur_dir = Path::new(&args.repo_directory).to_path_buf();
-    if args.bare && args.separate_libra_dir.is_some() {
-        return Err(InitError::Io(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "cannot specify both --bare and --separate-libra-dir",
-        )));
-    }
-    // Determine storage root directory
-    let root_dir = if args.bare {
-        cur_dir.clone()
-    } else if let Some(ref separate) = args.separate_libra_dir {
-        Path::new(separate).to_path_buf()
-    } else {
-        cur_dir.join(ROOT_DIR)
-    };
-    // Check if format is supported. Currently, SHA-1 and SHA-256 are supported.
-    let object_format_value = args
-        .object_format
-        .as_ref()
-        .map(|s| s.to_ascii_lowercase())
-        .unwrap_or_else(|| "sha1".to_string());
-
-    if object_format_value != "sha1" && object_format_value != "sha256" {
-        return Err(InitError::Io(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "unsupported object format: '{}'. Supported formats are 'sha1' and 'sha256'.",
-                object_format_value
-            ),
-        )));
-    }
-
-    // Check if the root directory already exists
-    if is_reinit(&cur_dir) {
-        return Err(InitError::Io(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!(
-                "the repository is already initialized at '{}'\n\
-                 hint: if you wish to reinitialize, please remove the existing directory or file.",
-                root_dir.display()
-            ),
-        )));
-    }
-
-    match is_writable(&cur_dir) {
-        Ok(_) => {}
-        Err(e) => {
-            return Err(InitError::Io(e));
-        }
-    }
-
-    if !args.bare && args.separate_libra_dir.is_some() && !cur_dir.exists() {
-        fs::create_dir_all(&cur_dir)?;
-    }
-
-    fs::create_dir_all(&root_dir)?;
-
-    if !args.bare && args.separate_libra_dir.is_some() {
-        let link_path = cur_dir.join(ROOT_DIR);
-        let storage_abs = root_dir.canonicalize().map_err(|e| {
-            InitError::Io(io::Error::new(
-                e.kind(),
-                format!(
-                    "failed to resolve storage directory {}: {e}",
-                    root_dir.display()
-                ),
-            ))
-        })?;
-        let content = format!("gitdir: {}\n", storage_abs.display());
-        fs::write(link_path, content)?;
-    }
-
-    // If a template path is provided, copy the template files to the root directory
-    if let Some(template_path) = &args.template {
-        let template_dir = Path::new(template_path);
-        if template_dir.exists() {
-            copy_template(template_dir, &root_dir)?;
-        } else {
-            return Err(InitError::Io(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("template directory '{}' does not exist", template_path),
-            )));
-        }
-    } else {
-        // Create info & hooks
-        let dirs = ["info", "hooks"];
-        for dir in dirs {
-            fs::create_dir_all(root_dir.join(dir))?;
-        }
-        // Create info/exclude
-        // `include_str!` includes the file content while compiling
-        fs::write(
-            root_dir.join("info/exclude"),
-            include_str!("../../template/exclude"),
-        )?;
-        // Create .libra/hooks/pre-commit.sh
-        fs::write(
-            root_dir.join("hooks").join("pre-commit.sh"),
-            include_str!("../../template/pre-commit.sh"),
-        )?;
-
-        // Set Permission
-        #[cfg(not(target_os = "windows"))]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = fs::Permissions::from_mode(0o755);
-            fs::set_permissions(root_dir.join("hooks").join("pre-commit.sh"), perms)?;
-        }
-
-        // Create .libra/hooks/pre-commit.ps1
-        fs::write(
-            root_dir.join("hooks").join("pre-commit.ps1"),
-            include_str!("../../template/pre-commit.ps1"),
-        )?;
-    }
-
-    // Complete .libra and sub-directories
-    let dirs = ["objects/pack", "objects/info"];
-    for dir in dirs {
-        fs::create_dir_all(root_dir.join(dir))?;
-    }
-
-    // Create database: .libra/libra.db
-    let conn;
-    let database = root_dir.join(DATABASE);
-
+async fn create_database_connection(database: &Path) -> Result<DbConn, InitError> {
     #[cfg(target_os = "windows")]
     {
-        // On Windows, we need to convert the path to a UNC path
         let database = database
             .to_str()
-            .ok_or_else(|| {
-                InitError::ConversionFailed(format!(
-                    "database path contains invalid UTF-8: {}",
-                    database.display()
-                ))
+            .ok_or_else(|| InitError::InvalidUtf8Path {
+                path: database.to_path_buf(),
             })?
-            .replace("\\", "/");
-        conn = db::create_database(database.as_str()).await?;
+            .replace('\\', "/");
+        db::create_database(&database).await.map_err(InitError::Io)
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        // On Unix-like systems, we do no more
-        let db_str = database.to_str().ok_or_else(|| {
-            InitError::ConversionFailed(format!(
-                "database path contains invalid UTF-8: {}",
-                database.display()
-            ))
-        })?;
-        conn = db::create_database(db_str).await?;
+        let database = database
+            .to_str()
+            .ok_or_else(|| InitError::InvalidUtf8Path {
+                path: database.to_path_buf(),
+            })?;
+        db::create_database(database).await.map_err(InitError::Io)
     }
+}
 
-    // Create config table with bare parameter consideration and store ref format
-    init_config(
-        &conn,
-        args.bare,
-        Some(object_format_value.as_str()),
-        args.ref_format.as_ref(),
-    )
-    .await?;
-
-    // Determine the initial branch name: use provided name or default
-    let initial_branch_name = args
-        .initial_branch
-        .unwrap_or_else(|| DEFAULT_BRANCH.to_owned());
-
-    // Validate branch name based on ref-format mode
-    let ref_format_mode = args.ref_format.as_ref().unwrap_or(&RefFormat::Strict);
-
-    // Validate branch name according to the selected ref format
-    validate_branch_name(&initial_branch_name, ref_format_mode)?;
-
-    // Initialize HEAD reference pointing to the initial branch.
-    // The branch name is stored in the 'name' field.
+async fn initialize_refs(conn: &DbConn, initial_branch_name: &str) -> Result<(), InitError> {
     reference::ActiveModel {
-        name: Set(Some(initial_branch_name.clone())),
+        name: Set(Some(initial_branch_name.to_string())),
         kind: Set(reference::ConfigKind::Head),
-        ..Default::default() // all others are `NotSet`
+        ..Default::default()
     }
-    .insert(&conn)
+    .insert(conn)
     .await?;
 
-    // Initialize 'intent' branch as an unborn branch (placeholder)
     reference::ActiveModel {
-        name: Set(Some("intent".to_owned())),
+        name: Set(Some("intent".to_string())),
         kind: Set(reference::ConfigKind::Branch),
-        commit: Set(None), // Unborn
+        commit: Set(None),
         remote: Set(None),
         ..Default::default()
     }
-    .insert(&conn)
+    .insert(conn)
     .await?;
-
-    // Set .libra as hidden
-    set_dir_hidden(root_dir.to_str().unwrap())?;
-
-    // Apply shared permissions if requested
-    if let Some(shared_mode) = &args.shared {
-        apply_shared(&root_dir, shared_mode)?;
-    }
-
-    if !args.quiet {
-        let repo_type = if args.bare { "bare " } else { "" };
-        println!(
-            "Initializing empty {repo_type}Libra repository in {} with initial branch '{initial_branch_name}'",
-            root_dir.display()
-        );
-    }
-    // Set the global hash kind for the repository
-    set_hash_kind(match object_format_value.as_str() {
-        "sha1" => HashKind::Sha1,
-        "sha256" => HashKind::Sha256,
-        _ => HashKind::Sha1,
-    });
 
     Ok(())
 }
 
-/// Initialize the configuration for the Libra repository
-/// This function creates the necessary configuration entries in the database.
 async fn init_config(
     conn: &DbConn,
     is_bare: bool,
-    object_format: Option<&str>,
-    ref_format: Option<&RefFormat>,
-) -> Result<(), DbErr> {
-    // Begin a new transaction
+    object_format: &str,
+    ref_format: &RefFormat,
+) -> Result<String, DbErr> {
     let txn = conn.begin().await?;
 
-    // Define the configuration entries for non-Windows systems
     #[cfg(not(target_os = "windows"))]
     let entries = [
         ("repositoryformatversion", "0"),
@@ -761,129 +836,115 @@ async fn init_config(
         ("logallrefupdates", "true"),
     ];
 
-    // Define the configuration entries for Windows systems
     #[cfg(target_os = "windows")]
     let entries = [
         ("repositoryformatversion", "0"),
-        ("filemode", "false"), // no filemode on windows
+        ("filemode", "false"),
         ("bare", if is_bare { "true" } else { "false" }),
         ("logallrefupdates", "true"),
-        ("symlinks", "false"),  // no symlinks on windows
-        ("ignorecase", "true"), // ignorecase on windows
+        ("symlinks", "false"),
+        ("ignorecase", "true"),
     ];
 
-    // Determine the initial ref format
-    let ref_format_value = match ref_format {
-        Some(RefFormat::Strict) => "strict",
-        Some(RefFormat::Filesystem) => "filesystem",
-        None => "strict", // default
-    };
-
-    // Generate unique repository ID for cloud backup identification
     let repo_id = uuid::Uuid::new_v4().to_string();
 
-    // Insert all configuration entries into config_kv (the canonical store).
     for (key, value) in &entries {
-        crate::internal::config::ConfigKv::set_with_conn(
-            &txn,
-            &format!("core.{key}"),
-            value,
-            false,
-        )
-        .await
-        .map_err(|e| DbErr::Custom(e.to_string()))?;
+        ConfigKv::set_with_conn(&txn, &format!("core.{key}"), value, false)
+            .await
+            .map_err(|error| DbErr::Custom(error.to_string()))?;
     }
-    crate::internal::config::ConfigKv::set_with_conn(
-        &txn,
-        "core.objectformat",
-        object_format.unwrap_or("sha1"),
-        false,
-    )
-    .await
-    .map_err(|e| DbErr::Custom(e.to_string()))?;
-    crate::internal::config::ConfigKv::set_with_conn(
-        &txn,
-        "core.initrefformat",
-        ref_format_value,
-        false,
-    )
-    .await
-    .map_err(|e| DbErr::Custom(e.to_string()))?;
-    crate::internal::config::ConfigKv::set_with_conn(&txn, "libra.repoid", &repo_id, false)
+    ConfigKv::set_with_conn(&txn, "core.objectformat", object_format, false)
         .await
-        .map_err(|e| DbErr::Custom(e.to_string()))?;
+        .map_err(|error| DbErr::Custom(error.to_string()))?;
+    ConfigKv::set_with_conn(&txn, "core.initrefformat", ref_format.as_str(), false)
+        .await
+        .map_err(|error| DbErr::Custom(error.to_string()))?;
+    ConfigKv::set_with_conn(&txn, "libra.repoid", &repo_id, false)
+        .await
+        .map_err(|error| DbErr::Custom(error.to_string()))?;
 
-    // Commit the transaction
     txn.commit().await?;
-    Ok(())
+    Ok(repo_id)
 }
 
-/// Set a directory as hidden on Windows systems
-/// This function uses the `attrib` command to set the directory as hidden.
 #[cfg(target_os = "windows")]
-fn set_dir_hidden(dir: &str) -> io::Result<()> {
+fn set_dir_hidden(dir: &Path) -> io::Result<()> {
     use std::process::Command;
-    Command::new("attrib").arg("+H").arg(dir).spawn()?.wait()?; // Wait for command execution to complete
+
+    let dir = dir.to_str().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("path '{}' is not valid UTF-8", dir.display()),
+        )
+    })?;
+    Command::new("attrib").arg("+H").arg(dir).spawn()?.wait()?;
     Ok(())
 }
 
-/// On Unix-like systems, directories starting with a dot are hidden by default
-/// Therefore, this function does nothing.
 #[cfg(not(target_os = "windows"))]
-fn set_dir_hidden(_dir: &str) -> io::Result<()> {
-    // on unix-like systems, dotfiles are hidden by default
+fn set_dir_hidden(_dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Initialize a libvault instance for PGP commit signing.
-///
-/// `root_dir` is the resolved storage root (e.g. `.libra/`, the bare repo dir,
-/// or the separate-libra-dir path). The vault database and credentials are
-/// created inside this directory.
-async fn init_vault_for_repo(root_dir: &Path) -> anyhow::Result<()> {
-    use crate::internal::{config::ConfigKv, vault};
+async fn init_vault_for_repo(root_dir: &Path, database_path: &Path) -> Result<(), InitError> {
+    use crate::internal::vault;
 
-    // Get user name/email from config (or defaults)
-    let user_name = ConfigKv::get("user.name")
-        .await
-        .ok()
-        .flatten()
-        .map(|e| e.value)
+    let identity_sources =
+        resolve_user_identity_sources(LocalIdentityTarget::ExplicitDb(database_path))
+            .await
+            .map_err(|error| InitError::VaultInitializationFailed {
+                message: error.to_string(),
+            })?;
+    let user_name = identity_sources
+        .config_name
+        .or(identity_sources.env_name)
         .unwrap_or_else(|| "Libra User".to_string());
-    let user_email = ConfigKv::get("user.email")
-        .await
-        .ok()
-        .flatten()
-        .map(|e| e.value)
+    let user_email = identity_sources
+        .config_email
+        .or(identity_sources.env_email)
         .unwrap_or_else(|| "user@libra.local".to_string());
 
-    // Initialize vault (creates vault.db, seals after setup)
-    let (unseal_key, enc_token) = vault::init_vault(root_dir).await?;
+    let (unseal_key, enc_token) = vault::init_vault(root_dir).await.map_err(|error| {
+        InitError::VaultInitializationFailed {
+            message: error.to_string(),
+        }
+    })?;
 
-    // Persist credentials needed for follow-up signing operations.
-    if let Err(err) = vault::store_credentials(&unseal_key, &enc_token).await {
+    if let Err(error) = vault::store_credentials(&unseal_key, &enc_token).await {
         rollback_failed_vault_init(root_dir).await;
-        return Err(err.context("failed to persist vault credentials"));
+        return Err(InitError::VaultInitializationFailed {
+            message: error.to_string(),
+        });
     }
 
-    // Generate PGP key for commit signing — only enable signing on success.
-    // If key generation fails, roll back the persisted vault credentials so the
-    // repo is not left in a half-configured state.
-    if let Err(e) = vault::generate_pgp_key(root_dir, &unseal_key, &user_name, &user_email).await {
-        // Roll back both credentials and vault.db so init remains atomic.
+    if let Err(error) =
+        vault::generate_pgp_key(root_dir, &unseal_key, &user_name, &user_email).await
+    {
         rollback_failed_vault_init(root_dir).await;
-        return Err(e);
+        return Err(InitError::VaultInitializationFailed {
+            message: error.to_string(),
+        });
     }
 
-    // Only mark signing as enabled after key generation succeeded
-    let _ = ConfigKv::set("vault.signing", "true", false).await;
-
-    Ok(())
+    set_vault_signing_value(database_path, true).await
 }
 
-/// Best-effort cleanup when vault initialization fails before credentials are persisted.
-///
-/// This avoids leaving an unrecoverable `vault.db` without a stored unseal key.
+async fn set_vault_signing_value(database_path: &Path, enabled: bool) -> Result<(), InitError> {
+    let conn = crate::internal::db::get_db_conn_instance_for_path(database_path)
+        .await
+        .map_err(InitError::Io)?;
+    ConfigKv::set_with_conn(
+        &conn,
+        "vault.signing",
+        if enabled { "true" } else { "false" },
+        false,
+    )
+    .await
+    .map_err(|error| InitError::VaultInitializationFailed {
+        message: error.to_string(),
+    })
+}
+
 async fn rollback_failed_vault_init(root_dir: &Path) {
     use crate::internal::vault;
 
@@ -891,14 +952,98 @@ async fn rollback_failed_vault_init(root_dir: &Path) {
 
     for suffix in ["", "-wal", "-shm"] {
         let path = root_dir.join(format!("vault.db{suffix}"));
-        if let Err(err) = std::fs::remove_file(&path)
-            && err.kind() != io::ErrorKind::NotFound
+        if let Err(error) = fs::remove_file(&path)
+            && error.kind() != io::ErrorKind::NotFound
         {
             tracing::warn!(
                 "failed to remove partially initialized vault database '{}': {}",
                 path.display(),
-                err
+                error
             );
         }
+    }
+}
+
+fn detect_system_ssh_key() -> Option<String> {
+    let home = dirs::home_dir()?;
+    let ssh_dir = home.join(".ssh");
+    for name in ["id_ed25519", "id_ecdsa", "id_rsa"] {
+        let path = ssh_dir.join(name);
+        if path.exists() {
+            return Some(path.to_string_lossy().to_string());
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Read, Write};
+
+    use gag::BufferRedirect;
+    use serial_test::serial;
+    use tempfile::tempdir;
+
+    use super::{DEFAULT_BRANCH, InitArgs, run_init};
+    use crate::utils::test::{self, ChangeDirGuard};
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial]
+    async fn run_init_is_silent_for_internal_callers() {
+        let repo = tempdir().expect("failed to create temp repo");
+        test::setup_clean_testing_env_in(repo.path());
+        let _guard = ChangeDirGuard::new(repo.path());
+
+        let mut stdout = BufferRedirect::stdout().expect("failed to redirect stdout");
+        let mut stderr = BufferRedirect::stderr().expect("failed to redirect stderr");
+
+        let result = run_init(InitArgs {
+            bare: false,
+            template: None,
+            initial_branch: None,
+            repo_directory: ".".to_string(),
+            quiet: false,
+            shared: None,
+            object_format: None,
+            ref_format: None,
+            from_git_repository: None,
+            vault: false,
+        })
+        .await
+        .expect("run_init should succeed without rendering side effects");
+
+        std::io::stdout()
+            .flush()
+            .expect("failed to flush captured stdout");
+        std::io::stderr()
+            .flush()
+            .expect("failed to flush captured stderr");
+
+        let mut captured_stdout = String::new();
+        stdout
+            .read_to_string(&mut captured_stdout)
+            .expect("failed to read captured stdout");
+
+        let mut captured_stderr = String::new();
+        stderr
+            .read_to_string(&mut captured_stderr)
+            .expect("failed to read captured stderr");
+
+        assert_eq!(result.initial_branch, DEFAULT_BRANCH);
+        assert!(!result.vault_signing);
+        assert!(
+            !captured_stdout.contains("Initialized empty ")
+                && !captured_stdout.contains("branch: ")
+                && !captured_stdout.contains("signing: "),
+            "run_init must not render init summary to stdout for internal callers, got: {captured_stdout:?}"
+        );
+        assert!(
+            !captured_stderr.contains("Creating repository layout ...")
+                && !captured_stderr.contains("Initializing database ...")
+                && !captured_stderr.contains("Setting up refs ...")
+                && !captured_stderr.contains("Converting from Git repository")
+                && !captured_stderr.contains("Generating PGP signing key ..."),
+            "run_init must not render init progress to stderr for internal callers, got: {captured_stderr:?}"
+        );
     }
 }

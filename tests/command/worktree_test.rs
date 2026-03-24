@@ -65,7 +65,7 @@ fn worktree_paths() -> Vec<String> {
 
 #[tokio::test]
 #[serial]
-/// `worktree add` creates a linked directory with a `.libra` link file.
+/// `worktree add` creates a linked directory with a `.libra` storage link.
 async fn test_worktree_add_creates_linked_directory() {
     let repo_dir = tempdir().unwrap();
     test::setup_with_new_libra_in(repo_dir.path()).await;
@@ -78,13 +78,14 @@ async fn test_worktree_add_creates_linked_directory() {
     assert!(wt_path.is_dir(), "worktree directory should exist");
 
     let link = wt_path.join(".libra");
-    assert!(link.is_file(), ".libra link file should exist in worktree");
-
-    let content = fs::read_to_string(&link).unwrap();
     assert!(
-        content.trim_start().starts_with("gitdir:"),
-        "link file should start with gitdir:, got: {}",
-        content
+        link.exists(),
+        ".libra storage link should exist in worktree"
+    );
+    let metadata = fs::symlink_metadata(&link).unwrap();
+    assert!(
+        metadata.file_type().is_symlink() || link.is_dir(),
+        ".libra should be a directory symlink or a shared storage directory"
     );
 }
 
@@ -1212,253 +1213,5 @@ async fn test_worktree_main_flag_remains_single_and_stable() {
         main_entries[0].path,
         repo_main.to_string_lossy(),
         "main worktree entry should remain the original repo directory"
-    );
-}
-
-#[tokio::test]
-#[serial]
-/// With `--separate-libra-dir`, the main worktree entry should stay anchored to the original workdir.
-async fn test_worktree_main_flag_stable_with_separate_libra_dir() {
-    let temp_root = tempdir().unwrap();
-    let workdir = temp_root.path().join("work");
-    let storage = temp_root.path().join("storage");
-    fs::create_dir_all(&workdir).unwrap();
-
-    init(InitArgs {
-        bare: false,
-        template: None,
-        initial_branch: None,
-        repo_directory: workdir.to_string_lossy().to_string(),
-        quiet: true,
-        shared: None,
-        object_format: None,
-        ref_format: None,
-        from_git_repository: None,
-        separate_libra_dir: Some(storage.to_string_lossy().to_string()),
-        vault: false,
-    })
-    .await
-    .expect("init with separate-libra-dir should succeed");
-
-    let _guard = test::ChangeDirGuard::new(&workdir);
-    exec_async(vec!["worktree", "add", "wt_sep_main"])
-        .await
-        .expect("worktree add should succeed");
-
-    let original_main = workdir.canonicalize().unwrap();
-    let wt_path = workdir.join("wt_sep_main");
-    let _guard_wt = test::ChangeDirGuard::new(&wt_path);
-    exec_async(vec!["worktree", "list"])
-        .await
-        .expect("worktree list from linked worktree should succeed");
-
-    let state = read_worktree_state();
-    let main_entries: Vec<_> = state.worktrees.iter().filter(|w| w.is_main).collect();
-    assert_eq!(
-        main_entries.len(),
-        1,
-        "there should be exactly one main worktree entry"
-    );
-    assert_eq!(
-        main_entries[0].path,
-        original_main.to_string_lossy(),
-        "main worktree entry should remain the original workdir with separate storage"
-    );
-}
-
-#[tokio::test]
-#[serial]
-/// In `--separate-libra-dir` layout, main designation stays stable when commands run from both worktrees.
-async fn test_worktree_main_flag_stable_across_both_worktrees_in_separate_layout() {
-    let temp_root = tempdir().unwrap();
-    let workdir = temp_root.path().join("work");
-    let storage = temp_root.path().join("storage");
-    fs::create_dir_all(&workdir).unwrap();
-
-    init(InitArgs {
-        bare: false,
-        template: None,
-        initial_branch: None,
-        repo_directory: workdir.to_string_lossy().to_string(),
-        quiet: true,
-        shared: None,
-        object_format: None,
-        ref_format: None,
-        from_git_repository: None,
-        separate_libra_dir: Some(storage.to_string_lossy().to_string()),
-        vault: false,
-    })
-    .await
-    .expect("init with separate-libra-dir should succeed");
-
-    let expected_main = workdir.canonicalize().unwrap();
-    let assert_main_stable = || {
-        let state = read_worktree_state();
-        let main_entries: Vec<_> = state.worktrees.iter().filter(|w| w.is_main).collect();
-        assert_eq!(
-            main_entries.len(),
-            1,
-            "there should be exactly one main entry"
-        );
-        assert_eq!(
-            main_entries[0].path,
-            expected_main.to_string_lossy(),
-            "main entry should always be the original workdir"
-        );
-    };
-
-    let _guard_main = test::ChangeDirGuard::new(&workdir);
-    exec_async(vec!["worktree", "add", "wt_sep_dual"])
-        .await
-        .expect("worktree add should succeed");
-    exec_async(vec!["worktree", "list"])
-        .await
-        .expect("worktree list from main worktree should succeed");
-    assert_main_stable();
-
-    let linked = workdir.join("wt_sep_dual");
-    {
-        let _guard_linked = test::ChangeDirGuard::new(&linked);
-        exec_async(vec!["worktree", "list"])
-            .await
-            .expect("worktree list from linked worktree should succeed");
-        exec_async(vec!["worktree", "lock", "."])
-            .await
-            .expect("worktree lock from linked worktree should succeed");
-        exec_async(vec!["worktree", "unlock", "."])
-            .await
-            .expect("worktree unlock from linked worktree should succeed");
-        assert_main_stable();
-    }
-
-    exec_async(vec!["worktree", "list"])
-        .await
-        .expect("worktree list from main worktree should still succeed");
-    assert_main_stable();
-}
-
-#[tokio::test]
-#[serial]
-/// In `--separate-libra-dir` layout, removing the real main worktree from a linked worktree is rejected.
-async fn test_worktree_remove_main_is_rejected_with_separate_libra_dir() {
-    let temp_root = tempdir().unwrap();
-    let workdir = temp_root.path().join("work");
-    let storage = temp_root.path().join("storage");
-    fs::create_dir_all(&workdir).unwrap();
-
-    init(InitArgs {
-        bare: false,
-        template: None,
-        initial_branch: None,
-        repo_directory: workdir.to_string_lossy().to_string(),
-        quiet: true,
-        shared: None,
-        object_format: None,
-        ref_format: None,
-        from_git_repository: None,
-        separate_libra_dir: Some(storage.to_string_lossy().to_string()),
-        vault: false,
-    })
-    .await
-    .expect("init with separate-libra-dir should succeed");
-
-    let _guard = test::ChangeDirGuard::new(&workdir);
-    exec_async(vec!["worktree", "add", "wt_sep_guard"])
-        .await
-        .expect("worktree add should succeed");
-
-    let main_path = workdir.canonicalize().unwrap();
-    let main_path_str = main_path.to_string_lossy().to_string();
-
-    let wt_path = workdir.join("wt_sep_guard");
-    let _guard_wt = test::ChangeDirGuard::new(&wt_path);
-    let before_paths = worktree_paths();
-
-    assert!(
-        exec_async(vec!["worktree", "remove", main_path_str.as_str()])
-            .await
-            .is_err(),
-        "removing main worktree should fail"
-    );
-
-    let after_paths = worktree_paths();
-    assert_eq!(
-        before_paths, after_paths,
-        "remove main should not mutate worktree state in separate-libra-dir layout"
-    );
-
-    let state = read_worktree_state();
-    let main_entries: Vec<_> = state.worktrees.iter().filter(|w| w.is_main).collect();
-    assert_eq!(main_entries.len(), 1);
-    assert_eq!(main_entries[0].path, main_path.to_string_lossy());
-}
-
-#[tokio::test]
-#[serial]
-/// If main is corrupted to storage parent in separate-libra-dir layout, loading from linked worktree repairs it.
-async fn test_worktree_recovers_invalid_main_storage_parent_in_separate_layout() {
-    let temp_root = tempdir().unwrap();
-    let workdir = temp_root.path().join("work");
-    let storage = temp_root.path().join("storage");
-    fs::create_dir_all(&workdir).unwrap();
-
-    init(InitArgs {
-        bare: false,
-        template: None,
-        initial_branch: None,
-        repo_directory: workdir.to_string_lossy().to_string(),
-        quiet: true,
-        shared: None,
-        object_format: None,
-        ref_format: None,
-        from_git_repository: None,
-        separate_libra_dir: Some(storage.to_string_lossy().to_string()),
-        vault: false,
-    })
-    .await
-    .expect("init with separate-libra-dir should succeed");
-
-    let _guard = test::ChangeDirGuard::new(&workdir);
-    exec_async(vec!["worktree", "add", "wt_sep_recover"])
-        .await
-        .expect("worktree add should succeed");
-
-    let original_main = workdir.canonicalize().unwrap();
-    let linked = workdir.join("wt_sep_recover").canonicalize().unwrap();
-    let storage_parent = storage.parent().unwrap().canonicalize().unwrap();
-
-    let mut state = read_worktree_state();
-    state.worktrees.push(TestWorktreeEntry {
-        path: storage_parent.to_string_lossy().to_string(),
-        is_main: true,
-        locked: false,
-        lock_reason: None,
-    });
-    for w in &mut state.worktrees {
-        if w.path != storage_parent.to_string_lossy() {
-            w.is_main = false;
-        }
-    }
-
-    let state_path = util::storage_path().join("worktrees.json");
-    let data = serde_json::to_string_pretty(&state).unwrap();
-    fs::write(&state_path, data).unwrap();
-
-    let _guard_wt = test::ChangeDirGuard::new(&linked);
-    exec_async(vec!["worktree", "list"])
-        .await
-        .expect("worktree list should repair invalid main marker");
-
-    let repaired = read_worktree_state();
-    let main_entries: Vec<_> = repaired.worktrees.iter().filter(|w| w.is_main).collect();
-    assert_eq!(
-        main_entries.len(),
-        1,
-        "there should be one repaired main entry"
-    );
-    assert_eq!(
-        main_entries[0].path,
-        original_main.to_string_lossy(),
-        "main should be repaired back to the original workdir"
     );
 }

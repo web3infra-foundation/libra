@@ -1,5 +1,7 @@
 ## Config 命令改进详细计划
 
+> 最后编写时间：2026-03-24
+
 同时落地 Cross-Cutting Improvements A/B/F/G。
 
 ### 设计原则
@@ -1264,6 +1266,8 @@ EXAMPLES:
 ---
 
 ## 验证方式
+
+> 每次提交前必须先通过 [README.md 统一质量验收](README.md#每次改进质量验收)（fmt / clippy / test / 测试覆盖规则），再执行以下 config 专项验收。
 
 ### 架构验收
 - 运行时主路径不再依赖旧 `Config` 公共 API；旧 `config` 表不在本批处理范围内

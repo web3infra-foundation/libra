@@ -212,7 +212,6 @@ mod tests {
             repo_directory: ".".to_string(),
             quiet: false,
             shared: None,
-            separate_libra_dir: None,
             object_format: None,
             ref_format: None,
             from_git_repository: None,

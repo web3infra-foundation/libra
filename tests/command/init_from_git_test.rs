@@ -11,6 +11,8 @@ use libra::{
 use serial_test::serial;
 use tempfile::tempdir;
 
+use super::parse_cli_error_stderr;
+
 /// Helper to create a simple local Git repository with a single commit and return its path.
 fn create_simple_git_repo() -> (tempfile::TempDir, std::path::PathBuf) {
     let temp_root = tempdir().unwrap();
@@ -70,10 +72,14 @@ fn libra_command(cwd: &Path) -> Command {
 
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_libra"));
     cmd.current_dir(cwd)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
         .env("HOME", &home)
-        .env("XDG_CONFIG_HOME", &config_home);
-    #[cfg(windows)]
-    cmd.env("USERPROFILE", &home);
+        .env("USERPROFILE", &home)
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("LANG", "C")
+        .env("LC_ALL", "C")
+        .env("LIBRA_TEST", "1");
     cmd
 }
 
@@ -120,14 +126,22 @@ async fn test_init_from_git_repository_missing_source_fails() {
 
     let missing = temp_root.path().join("missing-git");
 
-    let status = libra_command(&libra_dir)
+    let output = libra_command(&libra_dir)
         .args(["init", "--from-git-repository", missing.to_str().unwrap()])
-        .status()
+        .output()
         .expect("failed to execute libra init");
     assert!(
-        !status.success(),
+        !output.status.success(),
         "libra init should fail for missing source repository"
     );
+
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert!(
+        stderr.contains("source git repository"),
+        "expected missing-source error, got: {stderr}"
+    );
+    assert_eq!(report.error_code, "LBR-IO-001");
+    assert_eq!(report.exit_code, 128);
 }
 
 #[tokio::test]
@@ -140,17 +154,29 @@ async fn test_init_from_git_repository_non_git_path_fails() {
     let libra_dir = temp_root.path().join("libra-repo");
     fs::create_dir_all(&libra_dir).unwrap();
 
-    let status = libra_command(&libra_dir)
+    let output = libra_command(&libra_dir)
         .args([
             "init",
             "--from-git-repository",
             non_git_dir.to_str().unwrap(),
         ])
-        .status()
+        .output()
         .expect("failed to execute libra init");
     assert!(
-        !status.success(),
+        !output.status.success(),
         "libra init should fail when source path is not a git repository"
+    );
+
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert!(
+        stderr.contains("is not a valid Git repository"),
+        "expected invalid-git error, got: {stderr}"
+    );
+    assert_eq!(report.error_code, "LBR-CLI-003");
+    assert_eq!(report.exit_code, 129);
+    assert_eq!(
+        report.hints,
+        vec!["a valid Git repository must contain HEAD, config, and objects.".to_string()]
     );
 }
 
@@ -172,14 +198,22 @@ async fn test_init_from_git_repository_empty_git_repo_fails() {
     let libra_dir = temp_root.path().join("libra-repo");
     fs::create_dir_all(&libra_dir).unwrap();
 
-    let status = libra_command(&libra_dir)
+    let output = libra_command(&libra_dir)
         .args(["init", "--from-git-repository", git_dir.to_str().unwrap()])
-        .status()
+        .output()
         .expect("failed to execute libra init");
     assert!(
-        !status.success(),
+        !output.status.success(),
         "libra init should fail for empty git repository"
     );
+
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert!(
+        stderr.contains("no refs fetched from source git repository"),
+        "expected empty-git conversion failure, got: {stderr}"
+    );
+    assert_eq!(report.error_code, "LBR-REPO-003");
+    assert_eq!(report.exit_code, 128);
 }
 
 #[tokio::test]
@@ -532,5 +566,87 @@ async fn test_init_from_git_repository_bare_target_repo() {
     assert!(
         remote.is_some(),
         "origin remote should be configured for bare init"
+    );
+}
+
+#[test]
+#[serial]
+fn test_init_from_git_repository_json_reports_converted_from_without_stderr_noise() {
+    let (temp_root, git_dir) = create_simple_git_repo();
+    let libra_dir = temp_root.path().join("libra-repo-json");
+    fs::create_dir_all(&libra_dir).unwrap();
+
+    let output = libra_command(&libra_dir)
+        .args([
+            "--json",
+            "init",
+            "--vault",
+            "false",
+            "--from-git-repository",
+            git_dir.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to execute libra init");
+    assert!(
+        output.status.success(),
+        "json init failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.trim().is_empty(),
+        "json init should not leak fetch progress to stderr, got: {stderr}"
+    );
+
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|error| panic!("expected JSON output, got: {stdout}\nerror: {error}"));
+    let converted_from = parsed["data"]["converted_from"]
+        .as_str()
+        .expect("converted_from should be a string");
+    assert!(
+        converted_from.ends_with("/.git"),
+        "converted_from should point at the canonical .git directory, got: {converted_from}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_init_from_git_repository_human_progress_is_only_init_stage_text() {
+    let (temp_root, git_dir) = create_simple_git_repo();
+    let libra_dir = temp_root.path().join("libra-repo-human");
+    fs::create_dir_all(&libra_dir).unwrap();
+    let canonical_git_dir = git_dir.join(".git").canonicalize().unwrap();
+
+    let output = libra_command(&libra_dir)
+        .args([
+            "init",
+            "--vault",
+            "false",
+            "--from-git-repository",
+            git_dir.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to execute libra init");
+    assert!(
+        output.status.success(),
+        "human init failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "Converting from Git repository at {} ...",
+            canonical_git_dir.display()
+        )),
+        "expected init-owned conversion progress, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Receiving objects:")
+            && !stderr.contains("remote:")
+            && !stderr.contains("\"ok\""),
+        "nested fetch output should stay suppressed during init, got: {stderr}"
     );
 }

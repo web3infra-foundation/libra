@@ -1,608 +1,365 @@
-//! Initializes a repository by creating .libra storage, seeding HEAD and default refs, and preparing the backing database.
+//! Integration tests for the `init` command core behavior.
 //!
 //! **Layer:** L1 — deterministic, no external dependencies.
 
 use std::{
     fs,
-    io::{self, ErrorKind},
     path::Path,
+    process::{Command, Output},
 };
 
-use clap::{Parser, ValueEnum};
-use git_internal::hash::{HashKind, set_hash_kind};
-use libra::{
-    internal::model::{config, reference},
-    utils::util::{DATABASE, ROOT_DIR},
-};
-use sea_orm::{ActiveModelTrait, Database, DbConn, DbErr, Set, TransactionTrait};
-const DEFAULT_BRANCH: &str = "main";
+use libra::internal::{config::ConfigKv, db::get_db_conn_instance_for_path, model::config};
+use pgp::composed::{Deserializable, SignedPublicKey};
+use sea_orm::EntityTrait;
+use serial_test::serial;
+use tempfile::tempdir;
 
-/// Reference format validation modes
-#[derive(ValueEnum, Debug, Clone, PartialEq)]
-pub enum RefFormat {
-    /// Strict reference name validation (Git-compatible)
-    Strict,
-    /// Filesystem-friendly reference name validation
-    Filesystem,
-}
+use super::{assert_cli_success, run_libra_command};
 
-#[derive(Parser, Debug, Clone)]
-pub struct InitArgs {
-    /// Create a bare repository
-    #[clap(long, required = false)]
-    pub bare: bool, // Default is false
-
-    /// directory from which templates will be used
-    #[clap(long = "template", name = "template-directory", required = false)]
-    pub template: Option<String>,
-
-    /// Set the initial branch name
-    #[clap(short = 'b', long, required = false)]
-    pub initial_branch: Option<String>,
-
-    /// Create a repository in the specified directory
-    #[clap(default_value = ".")]
-    pub repo_directory: String,
-
-    /// Suppress all output
-    #[clap(long, short = 'q', required = false)]
-    pub quiet: bool,
-
-    /// Specify repository sharing mode
-    ///
-    /// Supported values:
-    /// - `umask`: Default behavior (permissions depend on the user's umask).
-    /// - `group`: Makes the repository group-writable so multiple users
-    ///   in the same group can collaborate more easily.
-    /// - `all`: Makes the repository readable by all users on the system.
-    ///
-    /// Note: On Windows, this option is ignored.
-    #[clap(long, required = false, value_name = "MODE")]
-    pub shared: Option<String>,
-
-    /// Specify the object format (hash algorithm) for the repository.
-    ///
-    /// Supported values:
-    /// - `sha1`: The default and currently the only supported format.
-    /// - `sha256`: An alternative format using SHA-256 hashing.
-    #[clap(long = "object-format", name = "format", required = false)]
-    pub object_format: Option<String>,
-
-    /// Specify the reference format validation mode.
-    ///
-    /// Supported values:
-    /// - `strict`: Use strict Git-compatible reference name validation.
-    /// - `filesystem`: Use filesystem-friendly reference name validation.
-    #[clap(long = "ref-format", value_enum, required = false)]
-    pub ref_format: Option<RefFormat>,
-}
-
-/// Check if the repository has already been initialized based on the presence of the description file.
-fn is_reinit(cur_dir: &Path) -> bool {
-    let bare_head_path = cur_dir.join("description");
-    let head_path = cur_dir.join(".libra/description");
-    // Check the presence of the description file
-    head_path.exists() || bare_head_path.exists()
-}
-
-/// Check if the target directory is writable
-fn is_writable(cur_dir: &Path) -> io::Result<()> {
-    match fs::metadata(cur_dir) {
-        Ok(metadata) => {
-            // Check if the target directory is a directory
-            if !metadata.is_dir() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "The target directory is not a directory.",
-                ));
-            }
-            // Check permissions
-            if metadata.permissions().readonly() {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "The target directory is read-only.",
-                ));
-            }
-        }
-        Err(e) if e.kind() != ErrorKind::NotFound => {
-            return Err(e);
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-/// Recursively copy the contents of the template directory to the destination directory.
-///
-/// # Behavior
-/// - Directories are created as needed.
-/// - Existing files in `dst` are NOT overwritten.
-/// - Subdirectories are copied recursively.
-fn copy_template(src: &Path, dst: &Path) -> io::Result<()> {
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        let dest_path = dst.join(entry.file_name());
-
-        if file_type.is_dir() {
-            fs::create_dir_all(&dest_path)?;
-            copy_template(&entry.path(), &dest_path)?;
-        } else if !dest_path.exists() {
-            // Only copy if the file does not already exist
-            fs::copy(entry.path(), &dest_path)?;
-        }
-    }
-    Ok(())
-}
-
-/// Apply repository with sharing mode
-#[cfg(not(target_os = "windows"))]
-fn apply_shared(root_dir: &Path, shared_mode: &str) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    // Help function: recursively set permission bits for all files and dirs
-    fn set_recursive(dir: &Path, mode: u32) -> io::Result<()> {
-        for entry in walkdir::WalkDir::new(dir) {
-            let entry = entry?;
-            let path = entry.path();
-            let metadata = fs::metadata(path)?;
-            let mut perms = metadata.permissions();
-            perms.set_mode(mode);
-            fs::set_permissions(path, perms)?;
-        }
-        Ok(())
-    }
-    // Match the shared_mode argument and apply permissions accordingly
-    match shared_mode {
-        "false" | "umask" => {} // default
-        "true" | "group" => set_recursive(root_dir, 0o2775)?,
-        "all" | "world" | "everybody" => set_recursive(root_dir, 0o2777)?,
-        mode if mode.starts_with('0') && mode.len() == 4 => {
-            if let Ok(bits) = u32::from_str_radix(&mode[1..], 8) {
-                set_recursive(root_dir, bits)?;
-            } else {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("invalid shared mode: {}", mode),
-                ));
-            }
-        }
-        other => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("Invalid shared mode: {}", other),
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Only verify the shared_mode
-#[cfg(target_os = "windows")]
-fn apply_shared(_root_dir: &Path, shared_mode: &str) -> io::Result<()> {
-    match shared_mode {
-        "true" | "false" | "umask" | "group" | "all" | "world" | "everybody" => {} // Valid string input
-        mode if mode.starts_with('0') && mode.len() == 4 => {
-            if let Ok(_bits) = u32::from_str_radix(&mode[1..], 8) { //Valid perm input
-            } else {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("invalid shared mode: {}", mode),
-                ));
-            }
-        }
-        other => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("Invalid shared mode: {}", other),
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Initialize a new Libra repository
-/// This function creates the necessary directories and files for a new Libra repository.
-/// It also sets up the database and the initial configuration.
-/// Validate branch name according to the specified ref format mode
-fn validate_branch_name(branch_name: &str, ref_format: &RefFormat) -> io::Result<()> {
-    match ref_format {
-        RefFormat::Strict => validate_strict_branch_name(branch_name),
-        RefFormat::Filesystem => validate_filesystem_branch_name(branch_name),
-    }
-}
-
-/// Validate branch name with strict Git-compatible rules
-fn validate_strict_branch_name(branch_name: &str) -> io::Result<()> {
-    if branch_name.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "branch name cannot be empty",
-        ));
-    }
-
-    if branch_name == "HEAD" {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "branch name cannot be 'HEAD'",
-        ));
-    }
-
-    if branch_name == "@" {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "branch name cannot be '@'",
-        ));
-    }
-
-    // Check for control characters and other invalid characters
-    if branch_name.chars().any(|c| {
-        c.is_control()
-            || c == ' '
-            || c == '~'
-            || c == '^'
-            || c == ':'
-            || c == '\\'
-            || c == '*'
-            || c == '['
-            || c == '?'
-            || c == '"'
-            || c == '@'
-            || c == '\0'
-    }) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "branch name contains invalid characters",
-        ));
-    }
-
-    // Cannot start or end with '/'
-    if branch_name.starts_with('/') || branch_name.ends_with('/') {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "branch name contains invalid characters",
-        ));
-    }
-
-    // Cannot contain consecutive slashes
-    if branch_name.contains("//") {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "branch name contains invalid characters",
-        ));
-    }
-
-    // Cannot contain ".."
-    if branch_name.contains("..") {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "branch name contains invalid characters",
-        ));
-    }
-
-    // Cannot end with ".lock"
-    if branch_name.ends_with(".lock") {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "branch name contains invalid characters",
-        ));
-    }
-
-    // Cannot end with "."
-    if branch_name.ends_with('.') {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "branch name contains invalid characters",
-        ));
-    }
-
-    Ok(())
-}
-
-/// Validate branch name with filesystem-friendly rules
-fn validate_filesystem_branch_name(branch_name: &str) -> io::Result<()> {
-    if branch_name.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "branch name cannot be empty",
-        ));
-    }
-
-    // Basic filesystem restrictions
-    if branch_name.chars().any(|c| {
-        c.is_control()
-            || c == '<'
-            || c == '>'
-            || c == ':'
-            || c == '"'
-            || c == '|'
-            || c == '?'
-            || c == '*'
-            || c == '\0'
-            || (cfg!(windows) && (c == '\\' || c == '/' || c == '\n' || c == '\r'))
-    }) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "branch name contains filesystem-invalid characters",
-        ));
-    }
-
-    // Cannot be "." or ".."
-    if branch_name == "." || branch_name == ".." {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "branch name contains invalid characters",
-        ));
-    }
-
-    Ok(())
-}
-
-#[allow(dead_code)]
-pub async fn init(args: InitArgs) -> io::Result<()> {
-    // Get the current directory
-    // let cur_dir = env::current_dir()?;
-    let cur_dir = Path::new(&args.repo_directory).to_path_buf();
-    // Join the current directory with the root directory
-    let root_dir = if args.bare {
-        cur_dir.clone()
+async fn open_repo_conn(repo: &std::path::Path, bare: bool) -> sea_orm::DatabaseConnection {
+    let db_path = if bare {
+        repo.join("libra.db")
     } else {
-        cur_dir.join(ROOT_DIR)
+        repo.join(".libra").join("libra.db")
     };
-    // check if format is supported,Now SHA-1 and SHA-256 are supported.
-    let object_format_value = args
-        .object_format
-        .as_ref()
-        .map(|s| s.to_ascii_lowercase())
-        .unwrap_or_else(|| "sha1".to_string());
+    get_db_conn_instance_for_path(&db_path)
+        .await
+        .expect("failed to open repository database")
+}
 
-    if object_format_value != "sha1" && object_format_value != "sha256" {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "unsupported object format: '{}'. Supported formats are 'sha1' and 'sha256'.",
-                object_format_value
-            ),
-        ));
+async fn config_value(conn: &sea_orm::DatabaseConnection, key: &str) -> Option<String> {
+    ConfigKv::get_with_conn(conn, key)
+        .await
+        .expect("failed to query config_kv")
+        .map(|entry| entry.value)
+}
+
+fn public_key_user_ids(public_key: &str) -> Vec<String> {
+    let (signed_key, _headers) =
+        SignedPublicKey::from_string(public_key).expect("failed to parse armored public key");
+    signed_key
+        .details
+        .users
+        .into_iter()
+        .map(|user| {
+            user.id
+                .as_str()
+                .expect("public key user id should be valid UTF-8")
+                .to_string()
+        })
+        .collect()
+}
+
+fn run_libra_command_with_env(args: &[&str], cwd: &Path, envs: &[(&str, &str)]) -> Output {
+    let home = cwd.join(".libra-test-home");
+    let config_home = home.join(".config");
+    fs::create_dir_all(&config_home).expect("failed to create isolated config directory");
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_libra"));
+    command
+        .args(args)
+        .current_dir(cwd)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("LANG", "C")
+        .env("LC_ALL", "C")
+        .env("LIBRA_TEST", "1");
+
+    for (key, value) in envs {
+        command.env(key, value);
     }
 
-    // Check if the root directory already exists
-    if is_reinit(&cur_dir) {
-        if !args.quiet {
-            eprintln!("Already initialized - [{}]", root_dir.display());
-        }
-        return Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "Initialization failed: The repository is already initialized at the specified location.
-            If you wish to reinitialize, please remove the existing directory or file.",
-        ));
-    }
+    command
+        .output()
+        .expect("failed to execute libra command with extra env")
+}
 
-    // Check if the target directory is writable
-    match is_writable(&cur_dir) {
-        Ok(_) => {}
-        Err(e) => {
-            return Err(e);
-        }
-    }
+#[tokio::test]
+#[serial]
+async fn init_vault_false_writes_seed_keys_and_human_summary() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
 
-    // ensure root dir exists
-    fs::create_dir_all(&root_dir)?;
+    let output = run_libra_command(&["init", "--vault", "false"], &repo);
+    assert_cli_success(&output, "init --vault false");
 
-    // If a template path is provided, copy the template files to the root directory
-    if let Some(template_path) = &args.template {
-        let template_dir = Path::new(template_path);
-        if template_dir.exists() {
-            copy_template(template_dir, &root_dir)?;
-        } else {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("template directory '{}' does not exist", template_path),
-            ));
-        }
-    } else {
-        // Create info & hooks
-        let dirs = ["info", "hooks"];
-        for dir in dirs {
-            fs::create_dir_all(root_dir.join(dir))?;
-        }
-        // Create info/exclude
-        // `include_str!` includes the file content while compiling
-        fs::write(
-            root_dir.join("info/exclude"),
-            include_str!("../../template/exclude"),
-        )?;
-        // Create .libra/description
-        fs::write(
-            root_dir.join("description"),
-            include_str!("../../template/description"),
-        )?;
-        // Create .libra/hooks/pre-commit.sh
-        fs::write(
-            root_dir.join("hooks").join("pre-commit.sh"),
-            include_str!("../../template/pre-commit.sh"),
-        )?;
-
-        // Set Permission
-        #[cfg(not(target_os = "windows"))]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = fs::Permissions::from_mode(0o755);
-            fs::set_permissions(root_dir.join("hooks").join("pre-commit.sh"), perms)?;
-        }
-
-        // Create .libra/hooks/pre-commit.ps1
-        fs::write(
-            root_dir.join("hooks").join("pre-commit.ps1"),
-            include_str!("../../template/pre-commit.ps1"),
-        )?;
-    }
-
-    // Complete .libra and sub-directories
-    let dirs = ["objects/pack", "objects/info"];
-    for dir in dirs {
-        fs::create_dir_all(root_dir.join(dir))?;
-    }
-
-    // Create database: .libra/libra.db
-    let database_path = root_dir.join(DATABASE);
-
-    #[cfg(target_os = "windows")]
-    let database_url = format!(
-        "sqlite://{}?mode=rwc",
-        database_path.to_str().unwrap().replace("\\", "/")
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("Initialized empty Libra repository in"),
+        "expected past-tense success summary, got: {stdout}"
+    );
+    assert!(
+        stderr.contains("Creating repository layout ..."),
+        "expected human progress on stderr, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("Initializing database ..."),
+        "expected database progress on stderr, got: {stderr}"
     );
 
-    #[cfg(not(target_os = "windows"))]
-    let database_url = format!("sqlite://{}", database_path.to_str().unwrap());
+    let conn = open_repo_conn(&repo, false).await;
+    assert_eq!(
+        config_value(&conn, "core.repositoryformatversion")
+            .await
+            .as_deref(),
+        Some("0")
+    );
+    assert_eq!(
+        config_value(&conn, "core.filemode").await.as_deref(),
+        Some(if cfg!(windows) { "false" } else { "true" })
+    );
+    assert_eq!(
+        config_value(&conn, "core.bare").await.as_deref(),
+        Some("false")
+    );
+    assert_eq!(
+        config_value(&conn, "core.logallrefupdates")
+            .await
+            .as_deref(),
+        Some("true")
+    );
+    assert_eq!(
+        config_value(&conn, "core.objectformat").await.as_deref(),
+        Some("sha1")
+    );
+    assert_eq!(
+        config_value(&conn, "core.initrefformat").await.as_deref(),
+        Some("strict")
+    );
+    assert_eq!(
+        config_value(&conn, "vault.signing").await.as_deref(),
+        Some("false")
+    );
 
-    let conn = Database::connect(&database_url)
+    let repo_id = config_value(&conn, "libra.repoid")
         .await
-        .map_err(|e| io::Error::other(format!("Failed to connect to database: {}", e)))?;
+        .expect("libra.repoid should exist");
+    uuid::Uuid::parse_str(&repo_id).expect("libra.repoid should be a valid UUID");
 
-    // Create config table with bare parameter consideration and store ref format
-    init_config(
-        &conn,
-        args.bare,
-        Some(object_format_value.as_str()),
-        args.ref_format.as_ref(),
-    )
-    .await
-    .map_err(|e| io::Error::other(format!("Failed to initialize config: {}", e)))?;
-
-    // Determine the initial branch name: use provided name or default
-    let initial_branch_name = args
-        .initial_branch
-        .unwrap_or_else(|| DEFAULT_BRANCH.to_owned());
-
-    // Validate branch name based on ref-format mode
-    let ref_format_mode = args.ref_format.as_ref().unwrap_or(&RefFormat::Strict);
-
-    // Validate branch name according to the selected ref format
-    validate_branch_name(&initial_branch_name, ref_format_mode)?;
-
-    // For custom mode, we use refs/heads/%s format, for others we also use refs/heads/%s
-    // but with different validation rules applied above
-    let _initial_ref_name = format!("refs/heads/{}", initial_branch_name);
-
-    // Create HEAD (store the branch name as before; ref format stored in config)
-    let head_reference = reference::ActiveModel {
-        name: Set(Some(initial_branch_name.clone())),
-        kind: Set(reference::ConfigKind::Head),
-        ..Default::default() // all others are `NotSet`
-    };
-    head_reference
-        .insert(&conn)
+    let legacy_rows = config::Entity::find()
+        .all(&conn)
         .await
-        .map_err(|e| io::Error::other(format!("Failed to insert HEAD reference: {}", e)))?;
-
-    // Set .libra as hidden
-    set_dir_hidden(root_dir.to_str().unwrap())?;
-
-    // Apply shared permissions if requested
-    if let Some(shared_mode) = &args.shared {
-        apply_shared(&root_dir, shared_mode)?;
-    }
-
-    if !args.quiet {
-        let repo_type = if args.bare { "bare " } else { "" };
-        println!(
-            "Initializing empty {repo_type}Libra repository in {} with initial branch '{initial_branch_name}'",
-            root_dir.display()
-        );
-    }
-    // Set the global hash kind for the repository
-    set_hash_kind(match object_format_value.as_str() {
-        "sha1" => HashKind::Sha1,
-        "sha256" => HashKind::Sha256,
-        _ => HashKind::Sha1,
-    });
-
-    Ok(())
+        .expect("failed to inspect legacy config table");
+    assert!(
+        legacy_rows.is_empty(),
+        "init should not seed the legacy config table"
+    );
 }
 
-/// Initialize the configuration for the Libra repository
-/// This function creates the necessary configuration entries in the database.
-async fn init_config(
-    conn: &DbConn,
-    is_bare: bool,
-    object_format: Option<&str>,
-    ref_format: Option<&RefFormat>,
-) -> Result<(), DbErr> {
-    // Begin a new transaction
-    let txn = conn.begin().await?;
+#[tokio::test]
+#[serial]
+async fn init_vault_true_records_signing_state_and_uses_global_identity_fallback() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
 
-    // Define the configuration entries for non-Windows systems
-    #[cfg(not(target_os = "windows"))]
-    let entries = [
-        ("repositoryformatversion", "0"),
-        ("filemode", "true"),
-        ("bare", if is_bare { "true" } else { "false" }),
-        ("logallrefupdates", "true"),
-    ];
+    let set_name = run_libra_command(&["config", "--global", "user.name", "Global Name"], &repo);
+    assert_cli_success(&set_name, "set global user.name");
+    let set_email = run_libra_command(
+        &["config", "--global", "user.email", "global@example.com"],
+        &repo,
+    );
+    assert_cli_success(&set_email, "set global user.email");
 
-    // Define the configuration entries for Windows systems
-    #[cfg(target_os = "windows")]
-    let entries = [
-        ("repositoryformatversion", "0"),
-        ("filemode", "false"), // no filemode on windows
-        ("bare", if is_bare { "true" } else { "false" }),
-        ("logallrefupdates", "true"),
-        ("symlinks", "false"),  // no symlinks on windows
-        ("ignorecase", "true"), // ignorecase on windows
-    ];
+    let output = run_libra_command(&["init"], &repo);
+    assert_cli_success(&output, "init with global identity fallback");
 
-    // Insert each configuration entry into the database
-    for (key, value) in entries {
-        // tip: Set(None) == NotSet == default == NULL
-        let entry = config::ActiveModel {
-            configuration: Set("core".to_owned()),
-            key: Set(key.to_owned()),
-            value: Set(value.to_owned()),
-            ..Default::default() // id & name NotSet
-        };
-        entry.insert(&txn).await?;
-    }
-    // Insert the object format, defaulting to "sha1" if not specified.
-    let object_format_entry = config::ActiveModel {
-        configuration: Set("core".to_owned()),
-        key: Set("objectformat".to_owned()),
-        value: Set(object_format.unwrap_or("sha1").to_owned()),
-        ..Default::default() // id & name NotSet
-    };
-    object_format_entry.insert(&txn).await?;
-    // Insert the initial ref format used during init
-    let ref_format_value = match ref_format {
-        Some(RefFormat::Strict) => "strict",
-        Some(RefFormat::Filesystem) => "filesystem",
-        None => "strict", // default
-    };
-    let init_ref_format_entry = config::ActiveModel {
-        configuration: Set("core".to_owned()),
-        key: Set("initrefformat".to_owned()),
-        value: Set(ref_format_value.to_owned()),
-        ..Default::default()
-    };
-    init_ref_format_entry.insert(&txn).await?;
+    let conn = open_repo_conn(&repo, false).await;
+    assert_eq!(
+        config_value(&conn, "vault.signing").await.as_deref(),
+        Some("true")
+    );
 
-    // Commit the transaction
-    txn.commit().await?;
-    Ok(())
+    let pubkey = config_value(&conn, "vault.gpg.pubkey")
+        .await
+        .expect("vault.gpg.pubkey should exist after init");
+    let user_ids = public_key_user_ids(&pubkey);
+    assert!(
+        user_ids
+            .iter()
+            .any(|user_id| user_id == "Global Name <global@example.com>"),
+        "expected PGP public key to use global identity, got user IDs: {user_ids:?}"
+    );
 }
 
-/// Set a directory as hidden on Windows systems
-/// This function uses the `attrib` command to set the directory as hidden.
-#[cfg(target_os = "windows")]
-fn set_dir_hidden(dir: &str) -> io::Result<()> {
-    use std::process::Command;
-    Command::new("attrib").arg("+H").arg(dir).spawn()?.wait()?; // Wait for command execution to complete
-    Ok(())
+#[tokio::test]
+#[serial]
+async fn init_vault_true_uses_env_identity_fallback_when_config_is_missing() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+
+    let output = run_libra_command_with_env(
+        &["init"],
+        &repo,
+        &[
+            ("GIT_COMMITTER_NAME", "Env Committer"),
+            ("EMAIL", "env@example.com"),
+        ],
+    );
+    assert_cli_success(&output, "init with env identity fallback");
+
+    let conn = open_repo_conn(&repo, false).await;
+    let pubkey = config_value(&conn, "vault.gpg.pubkey")
+        .await
+        .expect("vault.gpg.pubkey should exist after init");
+    let user_ids = public_key_user_ids(&pubkey);
+    assert!(
+        user_ids
+            .iter()
+            .any(|user_id| user_id == "Env Committer <env@example.com>"),
+        "expected PGP public key to use env fallback identity, got user IDs: {user_ids:?}"
+    );
 }
 
-/// On Unix-like systems, directories starting with a dot are hidden by default
-/// Therefore, this function does nothing.
-#[cfg(not(target_os = "windows"))]
-fn set_dir_hidden(_dir: &str) -> io::Result<()> {
-    // on unix-like systems, dotfiles are hidden by default
-    Ok(())
+#[tokio::test]
+#[serial]
+async fn init_target_repo_does_not_inherit_local_identity_from_current_repo() {
+    let temp = tempdir().unwrap();
+    let repo_a = temp.path().join("repo-a");
+    let repo_b = temp.path().join("repo-b");
+    fs::create_dir_all(&repo_a).unwrap();
+
+    let init_a = run_libra_command(&["init", "--vault", "false"], &repo_a);
+    assert_cli_success(&init_a, "init repo-a");
+
+    let set_name = run_libra_command(&["config", "user.name", "Repo A Name"], &repo_a);
+    assert_cli_success(&set_name, "set repo-a local user.name");
+    let set_email = run_libra_command(&["config", "user.email", "repo-a@example.com"], &repo_a);
+    assert_cli_success(&set_email, "set repo-a local user.email");
+
+    let init_b = run_libra_command_with_env(
+        &["init", "../repo-b"],
+        &repo_a,
+        &[
+            ("GIT_COMMITTER_NAME", "Repo B Env"),
+            ("EMAIL", "repo-b@example.com"),
+        ],
+    );
+    assert_cli_success(&init_b, "init repo-b from inside repo-a");
+
+    let conn_b = open_repo_conn(&repo_b, false).await;
+    let pubkey_b = config_value(&conn_b, "vault.gpg.pubkey")
+        .await
+        .expect("vault.gpg.pubkey should exist in repo-b");
+    let user_ids = public_key_user_ids(&pubkey_b);
+    assert!(
+        user_ids
+            .iter()
+            .any(|user_id| user_id == "Repo B Env <repo-b@example.com>"),
+        "repo-b should use env/global/default fallback for its own target, got user IDs: {user_ids:?}"
+    );
+    assert!(
+        user_ids
+            .iter()
+            .all(|user_id| user_id != "Repo A Name <repo-a@example.com>"),
+        "repo-b should not inherit repo-a local identity, got user IDs: {user_ids:?}"
+    );
+}
+
+#[test]
+#[serial]
+fn init_bare_reinit_returns_repo_state_invalid() {
+    let temp = tempdir().unwrap();
+
+    let first = run_libra_command(
+        &["init", "--bare", "repo.git", "--vault", "false"],
+        temp.path(),
+    );
+    assert_cli_success(&first, "initial bare init");
+
+    let bare_repo = temp.path().join("repo.git");
+    let second = run_libra_command(&["init", "--bare", "--vault", "false"], &bare_repo);
+    assert_eq!(second.status.code(), Some(128));
+
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        stderr.contains("repository already initialized"),
+        "expected reinit failure, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("LBR-REPO-003"),
+        "expected stable repo-state code, got: {stderr}"
+    );
+}
+
+#[test]
+#[serial]
+fn init_worktree_reinit_returns_repo_state_invalid() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+
+    let first = run_libra_command(&["init", "--vault", "false"], &repo);
+    assert_cli_success(&first, "initial worktree init");
+
+    let second = run_libra_command(&["init", "--vault", "false"], &repo);
+    assert_eq!(second.status.code(), Some(128));
+
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        stderr.contains("repository already initialized"),
+        "expected worktree reinit failure, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("remove .libra/ to reinitialize."),
+        "expected worktree reinit hint, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("LBR-REPO-003"),
+        "expected stable repo-state code, got: {stderr}"
+    );
+}
+
+#[test]
+#[serial]
+fn init_invalid_object_format_suggests_sha256() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+
+    let output = run_libra_command(&["init", "--object-format", "sha265"], &repo);
+    assert_eq!(output.status.code(), Some(129));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unsupported object format 'sha265'"),
+        "expected object-format error, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("did you mean 'sha256'?"),
+        "expected fuzzy-match hint, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("LBR-CLI-002"),
+        "expected CLI invalid-arguments code, got: {stderr}"
+    );
+}
+
+#[test]
+#[serial]
+fn init_vault_true_ignores_commit_use_config_only_strictness() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+
+    let set = run_libra_command(&["config", "--global", "user.useConfigOnly", "true"], &repo);
+    assert_cli_success(&set, "set user.useConfigOnly");
+
+    let output = run_libra_command(&["init"], &repo);
+    assert_cli_success(
+        &output,
+        "init should still succeed even when user.useConfigOnly=true and identity is missing",
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Generating PGP signing key ..."),
+        "expected vault key generation progress, got: {stderr}"
+    );
 }

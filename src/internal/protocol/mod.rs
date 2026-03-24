@@ -200,7 +200,11 @@ pub fn generate_upload_pack_content(
         if !write_first_line {
             add_pkt_line_string(
                 &mut buf,
-                format!("want {w} {capability} agent=libra/0.1.0\n").to_string(),
+                format!(
+                    "want {w} {capability} agent=libra/{}\n",
+                    env!("CARGO_PKG_VERSION")
+                )
+                .to_string(),
             );
             write_first_line = true;
         } else {

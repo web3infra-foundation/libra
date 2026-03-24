@@ -2253,6 +2253,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gag"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a713bee13966e9fbffdf7193af71d54a6b35a0bb34997cd6c9519ebeb5005972"
+dependencies = [
+ "filedescriptor",
+ "tempfile",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3191,7 +3201,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libra"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -3215,6 +3225,7 @@ dependencies = [
  "futures",
  "futures-core",
  "futures-util",
+ "gag",
  "git-internal",
  "hex",
  "http",
@@ -3232,6 +3243,7 @@ dependencies = [
  "pager",
  "path-absolutize",
  "pathdiff",
+ "pgp",
  "pulldown-cmark",
  "ratatui",
  "regex",

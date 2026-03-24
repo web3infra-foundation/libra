@@ -388,7 +388,7 @@ fn find_entry<'a>(state: &'a WorktreeState, path: &Path) -> Option<&'a WorktreeE
 /// - creates the target directory if it does not exist,
 /// - rejects paths that canonicalize inside `.libra` (with cleanup),
 /// - ensures the worktree is not already registered,
-/// - writes a `.libra` link file pointing at the shared storage, and
+/// - creates a `.libra` directory symlink pointing at the shared storage, and
 /// - when `HEAD` exists, populates the new worktree from committed `HEAD`
 ///   content (not staged-only index changes).
 async fn add_worktree(path: String) -> io::Result<()> {
@@ -438,12 +438,10 @@ async fn add_worktree(path: String) -> io::Result<()> {
         return Err(io::Error::other("target already contains a .libra entry"));
     }
 
-    let storage_str = storage.to_string_lossy().to_string();
-    let content = format!("gitdir: {}\n", storage_str);
-    fs::write(&link_path, content)?;
+    create_worktree_storage_link(&storage, &link_path)?;
 
     let rollback_partial_add = || {
-        let _ = fs::remove_file(&link_path);
+        let _ = remove_worktree_storage_link(&link_path);
         if created_target {
             let _ = fs::remove_dir_all(&target);
         } else if let Ok(entries) = fs::read_dir(&target) {
@@ -497,6 +495,24 @@ async fn add_worktree(path: String) -> io::Result<()> {
     println!("{}", canonical_target.display());
 
     Ok(())
+}
+
+#[cfg(unix)]
+fn create_worktree_storage_link(storage: &Path, link_path: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(storage, link_path)
+}
+
+#[cfg(windows)]
+fn create_worktree_storage_link(storage: &Path, link_path: &Path) -> io::Result<()> {
+    std::os::windows::fs::symlink_dir(storage, link_path)
+}
+
+fn remove_worktree_storage_link(link_path: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(link_path)?;
+    if metadata.file_type().is_symlink() {
+        return fs::remove_file(link_path);
+    }
+    fs::remove_dir(link_path)
 }
 
 /// Implements `worktree list`.

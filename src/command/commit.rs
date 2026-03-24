@@ -2,7 +2,6 @@
 
 use std::{
     collections::HashSet,
-    env,
     io::Write,
     path::PathBuf,
     process::{Command, Stdio},
@@ -27,13 +26,11 @@ use git_internal::{
 use sea_orm::ConnectionTrait;
 
 use crate::{
-    command::{
-        config::{ConfigScope, ScopedConfig},
-        load_object, status,
-    },
+    command::{load_object, status},
     common_utils::{check_conventional_commits_message, format_commit_msg},
     internal::{
         branch::Branch,
+        config::{LocalIdentityTarget, read_cascaded_config_value, resolve_user_identity_sources},
         head::Head,
         reflog::{ReflogAction, ReflogContext, with_reflog},
     },
@@ -155,34 +152,10 @@ impl CommitExecError {
 }
 
 async fn get_user_config_value(key: &str) -> Option<String> {
-    for scope in ConfigScope::CASCADE_ORDER {
-        if scope != ConfigScope::Local {
-            let Some(config_path) = scope.get_config_path() else {
-                continue;
-            };
-            if !config_path.exists() {
-                continue;
-            }
-        }
-
-        if let Ok(Some(entry)) = ScopedConfig::get(scope, &format!("user.{key}")).await {
-            let trimmed = entry.value.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
-            }
-        }
-    }
-
-    None
-}
-
-fn env_first_non_empty(keys: &[&str]) -> Option<String> {
-    keys.iter().find_map(|k| {
-        env::var(k)
-            .ok()
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty())
-    })
+    read_cascaded_config_value(LocalIdentityTarget::CurrentRepo, &format!("user.{key}"))
+        .await
+        .ok()
+        .flatten()
 }
 
 fn missing_identity_error(name_missing: bool, email_missing: bool) -> CliError {
@@ -221,9 +194,9 @@ fn classify_commit_error(message: String) -> CliError {
 }
 
 async fn resolve_committer_identity() -> Result<UserIdentity, CliError> {
-    // Step 1: check libra config (highest precedence after explicit --author)
-    let config_name = get_user_config_value("name").await;
-    let config_email = get_user_config_value("email").await;
+    let identity_sources = resolve_user_identity_sources(LocalIdentityTarget::CurrentRepo)
+        .await
+        .map_err(|error| CliError::fatal(error.to_string()))?;
 
     // Step 2: check user.useConfigOnly BEFORE falling back to env vars.
     // When useConfigOnly is true, only config values are acceptable — env vars are
@@ -236,32 +209,22 @@ async fn resolve_committer_identity() -> Result<UserIdentity, CliError> {
         .unwrap_or(false);
 
     if use_config_only {
-        if let (Some(name), Some(email)) = (config_name.clone(), config_email.clone()) {
+        if let (Some(name), Some(email)) = (
+            identity_sources.config_name.clone(),
+            identity_sources.config_email.clone(),
+        ) {
             return Ok(UserIdentity { name, email });
         }
         // Report which field(s) are missing — using *config-only* perspective.
         // Reuse the already-fetched values instead of querying config again.
-        let name_missing = config_name.is_none();
-        let email_missing = config_email.is_none();
+        let name_missing = identity_sources.config_name.is_none();
+        let email_missing = identity_sources.config_email.is_none();
         return Err(missing_identity_error(name_missing, email_missing));
     }
 
     // Step 3: env-var fallback (GIT_COMMITTER_*, GIT_AUTHOR_*, EMAIL, LIBRA_COMMITTER_*)
-    let name = config_name.or_else(|| {
-        env_first_non_empty(&[
-            "GIT_COMMITTER_NAME",
-            "GIT_AUTHOR_NAME",
-            "LIBRA_COMMITTER_NAME",
-        ])
-    });
-    let email = config_email.or_else(|| {
-        env_first_non_empty(&[
-            "GIT_COMMITTER_EMAIL",
-            "GIT_AUTHOR_EMAIL",
-            "EMAIL",
-            "LIBRA_COMMITTER_EMAIL",
-        ])
-    });
+    let name = identity_sources.config_name.or(identity_sources.env_name);
+    let email = identity_sources.config_email.or(identity_sources.env_email);
 
     if let (Some(name), Some(email)) = (name.clone(), email.clone()) {
         return Ok(UserIdentity { name, email });

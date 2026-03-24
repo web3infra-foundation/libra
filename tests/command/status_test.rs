@@ -137,7 +137,6 @@ async fn test_status_rejects_bare_repository() {
         object_format: None,
         ref_format: None,
         from_git_repository: None,
-        separate_libra_dir: None,
         vault: false,
     })
     .await

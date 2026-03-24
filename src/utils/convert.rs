@@ -1,11 +1,18 @@
 //! Utilities for converting existing Git repositories into Libra repositories by reusing fetch and clone logic.
 
-use std::{io, path::Path};
+use std::path::{Path, PathBuf};
 
 use crate::{
     command::{clone, fetch},
     internal::{branch::Branch, config::RemoteConfig},
+    utils::output::{OutputConfig, ProgressMode},
 };
+
+#[derive(Debug, Clone)]
+pub struct ConversionReport {
+    pub source_git_dir: String,
+    pub remote_url: String,
+}
 
 /// Convert an existing local Git repository into the current Libra repository.
 ///
@@ -18,69 +25,78 @@ use crate::{
 pub async fn convert_from_git_repository(
     git_repo: &Path,
     is_bare: bool,
-) -> Result<(), crate::command::init::InitError> {
-    if !git_repo.exists() {
-        return Err(crate::command::init::InitError::Io(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!(
-                "source git repository '{}' does not exist",
-                git_repo.display()
-            ),
-        )));
-    }
+) -> Result<ConversionReport, crate::command::init::InitError> {
+    let git_dir = resolve_git_source_dir(git_repo)?;
 
-    let git_dir = if git_repo.join(".git").exists() {
-        let dot_git = git_repo.join(".git");
-        if !dot_git.join("HEAD").exists()
-            || !dot_git.join("config").exists()
-            || !dot_git.join("objects").exists()
-        {
-            return Err(crate::command::init::InitError::Io(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("'{}' is not a valid git repository", git_repo.display()),
-            )));
-        }
-        dot_git
-    } else if git_repo.join("HEAD").exists()
-        && git_repo.join("config").exists()
-        && git_repo.join("objects").exists()
-    {
-        git_repo.to_path_buf()
-    } else {
-        return Err(crate::command::init::InitError::Io(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("'{}' is not a valid git repository", git_repo.display()),
-        )));
-    };
-
-    let url = git_dir.to_str().ok_or_else(|| {
-        crate::command::init::InitError::Io(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "source git repository path '{}' contains invalid UTF-8",
-                git_dir.display()
-            ),
-        ))
-    })?;
+    let url = git_dir
+        .to_str()
+        .ok_or_else(|| crate::command::init::InitError::InvalidUtf8Path {
+            path: git_dir.clone(),
+        })?;
 
     let remote = RemoteConfig {
         name: "origin".to_string(),
         url: url.to_string(),
     };
 
-    eprintln!("Converting from Git repository...");
-    fetch::fetch_repository(remote.clone(), None, false, None).await;
+    let child_output = OutputConfig {
+        quiet: true,
+        progress: ProgressMode::None,
+        json_format: None,
+        pager: false,
+        ..Default::default()
+    };
+
+    fetch::fetch_repository_safe(remote.clone(), None, false, None, &child_output)
+        .await
+        .map_err(|error| crate::command::init::InitError::ConversionFailed {
+            repo: git_dir.clone(),
+            stage: "fetch",
+            message: error.to_string(),
+        })?;
 
     let remote_branches = Branch::list_branches(Some(&remote.name)).await;
     if remote_branches.is_empty() {
-        return Err(crate::command::init::InitError::ConversionFailed(
-            "no refs fetched from source git repository".to_string(),
-        ));
+        return Err(crate::command::init::InitError::ConversionFailed {
+            repo: git_dir.clone(),
+            stage: "setup",
+            message: "no refs fetched from source git repository".to_string(),
+        });
     }
 
     clone::setup_repository(remote, None, !is_bare)
         .await
-        .map_err(|e| crate::command::init::InitError::ConversionFailed(e.to_string()))?;
+        .map_err(|error| crate::command::init::InitError::ConversionFailed {
+            repo: git_dir.clone(),
+            stage: "setup",
+            message: error.to_string(),
+        })?;
 
-    Ok(())
+    Ok(ConversionReport {
+        source_git_dir: git_dir.to_string_lossy().to_string(),
+        remote_url: url.to_string(),
+    })
+}
+
+pub(crate) fn resolve_git_source_dir(
+    git_repo: &Path,
+) -> Result<PathBuf, crate::command::init::InitError> {
+    let git_dir = if git_repo.join(".git").exists() {
+        git_repo.join(".git")
+    } else {
+        git_repo.to_path_buf()
+    };
+
+    let valid = git_dir.join("HEAD").exists()
+        && git_dir.join("config").exists()
+        && git_dir.join("objects").exists();
+    if !valid {
+        return Err(crate::command::init::InitError::InvalidGitRepository {
+            path: git_repo.to_path_buf(),
+        });
+    }
+
+    git_dir
+        .canonicalize()
+        .map_err(crate::command::init::InitError::Io)
 }
