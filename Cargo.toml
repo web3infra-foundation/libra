@@ -1,6 +1,6 @@
 [package]
 name = "libra"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 
 [features]
@@ -124,3 +124,5 @@ testcontainers = { version = "0.27.1", features = [
 ] }
 reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "rustls-tls"] }
 assert_cmd = "2.2.0"
+pgp = "0.19.0"
+gag = "1.0.0"

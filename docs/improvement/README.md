@@ -18,6 +18,26 @@
 
 ## 改进顺序
 
+### 批次依赖约束（避免文档状态冲突）
+
+为避免子计划把“已确定方案”误写成“代码已落地”，第一批及后续批次统一遵循以下表述规则：
+
+- **已完成/已落地**：仅表示当前代码库已经具备该能力，可被后续批次直接调用或复用。
+- **前置依赖/由前一批次交付**：表示该能力已经在上游计划中确定，但必须等前一批次实施完成后，下一批次才能把它当作现成能力使用。
+- **本批新增**：表示能力在当前批次内交付，不应被同一时点的其他文档写成“现已存在”，除非明确注明“依赖本批先落地后复用”。
+
+第一批中的关键依赖链必须按以下顺序显式引用，而不是隐含假设：
+
+- `config` 先交付 `config_kv`、`resolve_env()`、vault key 管理与 `vault` 命令吸收；`init`、`clone`、`push/pull` 等命令只能在此基础上切换读取链路。
+- `init` 再交付 `run_init()`、顶层渲染层拆分、separate-layout 全链路移除，以及嵌套 fetch 的静默子级 `OutputConfig` 约束；`clone` 只能把这些能力写成“前置依赖”，不能提前写成“当前代码已具备”。
+- `clone` 复用 `init` 的纯执行层与 `config` 的解析/认证基础设施，但 clone 自己的 JSON schema、错误码和渲染行为仍由 clone 批次独立定义。
+
+后续各命令子计划如依赖前一批次交付项，应在“已完成前置条件与当前代码状态”中明确区分：
+
+- 哪些能力是当前仓库已存在的基线。
+- 哪些能力是上游批次的**前置依赖**。
+- 哪些约束只是沿用上游批次已确定的对外契约，而不是当前批次重新设计。
+
 ### 第一批：核心高频命令 + config（P0 阻断性）
 
 这些命令覆盖最基本的工作流（config → init → clone → add → status → commit → push/pull），使用频率最高，审计报告指出的问题最严重。config 放在首位，因为它是 vault 加密基础设施和环境变量解析的根基，其他命令依赖 config 提供的 `resolve_env()` 等能力。
@@ -34,6 +54,12 @@
 | **8** | `pull` | 级联失败/无 JSON | 修复 upstream tracking；JSON 输出；错误码 |
 
 **理由：** config 是基础设施层，vault 加密存储和 `resolve_env()` 被其他命令（push 认证、code AI provider）依赖，必须最先完成。init/clone 是入口命令（审计指出 init 耗时 ~6s 严重违反 CLIG "100ms 内打印内容"原则）；add 是 commit 前的必经步骤；push 是审计中"最严重的三个缺陷"之一。
+
+**第一批内部依赖说明：**
+
+- `config` 是第一批内部的最上游前置项；在 `config_kv`、`resolve_env()`、vault key 管理与 `vault` 命令吸收完成前，`init`/`clone` 文档不得把这些能力写成“当前代码已具备”。
+- `init` 是 `clone` 的直接前置项；`clone` 对 `run_init()`、separate-layout 移除、嵌套 fetch 静默规则的引用，应统一写成“由 init 批次交付的前置依赖”。
+- `clone` 的性能优化目标虽在总表中保留，但不应覆盖其子计划中“本批不做性能优化”的执行边界；总表表达优先级，子计划表达本批范围。
 
 ### 第二批：状态变更确认命令（P0 消灭"沉默"）
 
@@ -111,6 +137,33 @@
 
 - [Config 命令改进详细计划](config.md)
 - [Init 命令改进详细计划](init.md)
+- [Clone 命令改进详细计划](clone.md)
+
+---
+
+## 收尾工作（所有命令改进完成后）
+
+以下工作依赖所有命令批次全部完成，作为改进计划的最终收口：
+
+### Legacy Config 清理
+
+| 清理项 | 说明 | 来源 |
+|--------|------|------|
+| 删除旧 `config` 表 schema | 从 `sql/sqlite_20260309_init.sql` 中移除 `CREATE TABLE config` 定义 | config.md 特性 1 |
+| 删除旧 `Config` API | 移除 `src/internal/config.rs` 中所有标记 `#[deprecated]` 的旧公共 API（`get`/`get_all`/`insert`/`update`/`remove`/`remove_config`/`list_all`/`remote_config`/`all_remote_configs`/`get_remote`/`get_remote_url`/`branch_config` 等） | config.md 验证方式 |
+| 删除旧 SeaORM entity | 移除 `src/internal/model/config.rs` 中标记 `#[deprecated]` 的 `Model`/`Entity`/`Column`/`ActiveModel` | config.md 验证方式 |
+| 原始 SQL 最终清扫 | `rg -i '(FROM\|INTO\|UPDATE\|DELETE\s+FROM)\s+["\x60]?config["\x60]?\b' src/ --type rust` 确认零结果（deprecated 定义文件一并删除后不再有例外） | config.md 验证方式 |
+
+### AI Provider `from_env()` → `resolve_env()` 改造
+
+config.md 设计原则 #5 明确将 `src/internal/ai/providers/*/client.rs` 的 `from_env()` → `resolve_env()` 改造**留到后续批次**。当前涉及 6 个 provider（gemini、openai、anthropic、deepseek、zhipu、ollama）共 12 个文件。所有命令改进完成后，应统一将 AI provider 的 API key / base URL 读取切换到 `resolve_env()`，使 `vault.env.*` 配置对 AI provider 生效。
+
+### 验收标准
+
+- `cargo clippy --all-targets --all-features -- -D warnings` 通过（旧 API 删除后不再有 deprecated 引用）
+- 原始 SQL 检查零结果
+- `cargo test --all` 全部通过
+- 旧 `config` 表在新建仓库中不再被创建
 
 ---
 

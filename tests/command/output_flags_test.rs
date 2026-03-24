@@ -843,6 +843,59 @@ fn quiet_init_suppresses_output() {
         stdout.trim().is_empty() || !stdout.contains("Initialized"),
         "expected quiet init to suppress informational output, got: {stdout}"
     );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.trim().is_empty(),
+        "quiet init should suppress progress on stderr, got: {stderr}"
+    );
+}
+
+#[test]
+fn json_init_suppresses_progress_and_returns_one_envelope() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("json-init-repo");
+    fs::create_dir_all(&repo).unwrap();
+
+    let output = run(&["--json", "init", "--vault", "false"], &repo);
+    assert_cli_success(&output, "json init");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.trim().is_empty(),
+        "json init should suppress progress stderr, got: {stderr}"
+    );
+
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("expected JSON on stdout, got: {stdout}\nerror: {e}"));
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["command"], "init");
+}
+
+#[test]
+fn human_init_writes_progress_to_stderr_and_summary_to_stdout() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("human-init-repo");
+    fs::create_dir_all(&repo).unwrap();
+
+    let output = run(&["init", "--vault", "false"], &repo);
+    assert_cli_success(&output, "human init");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("Initialized empty Libra repository"),
+        "human init should write final summary to stdout, got: {stdout}"
+    );
+    assert!(
+        stderr.contains("Creating repository layout ..."),
+        "human init should write progress to stderr, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("Initializing database ..."),
+        "human init should write progress to stderr, got: {stderr}"
+    );
 }
 
 // ─── --no-pager ──────────────────────────────────────────────────────────────

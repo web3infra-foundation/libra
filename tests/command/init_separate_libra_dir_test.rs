@@ -1,148 +1,97 @@
-//! Tests `libra init --separate-libra-dir` for creating metadata in a custom directory.
+//! Regression tests for removed `init` separate-directory flags.
 //!
 //! **Layer:** L1 — deterministic, no external dependencies.
 
-use std::{fs, process::Command};
+use std::fs;
 
-use libra::utils::util;
 use serial_test::serial;
 use tempfile::tempdir;
 
-use super::*;
+use super::{assert_cli_success, init_repo_via_cli, run_libra_command};
 
-#[tokio::test]
+#[test]
 #[serial]
-async fn test_init_with_separate_git_dir_creates_link_and_uses_storage() {
+fn init_rejects_separate_libra_dir_flag() {
     let temp_root = tempdir().unwrap();
-    let workdir = temp_root.path().join("work");
+    let repo = temp_root.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
     let storage = temp_root.path().join("storage");
 
-    let args = InitArgs {
-        bare: false,
-        template: None,
-        initial_branch: None,
-        repo_directory: workdir.to_str().unwrap().to_string(),
-        quiet: false,
-        shared: None,
-        object_format: None,
-        ref_format: None,
-        from_git_repository: None,
-        separate_libra_dir: Some(storage.to_str().unwrap().to_string()),
-        vault: false,
-    };
+    let output = run_libra_command(
+        &["init", "--separate-libra-dir", storage.to_str().unwrap()],
+        &repo,
+    );
+    assert_ne!(output.status.code(), Some(0));
 
-    init(args).await.unwrap();
-
-    let link_path = workdir.join(".libra");
-    assert!(link_path.is_file());
-
-    let content = fs::read_to_string(&link_path).unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        content.trim_start().starts_with("gitdir:"),
-        "link file should start with 'gitdir:'"
+        stderr.contains("unexpected argument '--separate-libra-dir'"),
+        "expected clap parse error, got: {stderr}"
     );
-
-    assert!(storage.join("objects").is_dir());
-    assert!(storage.join("libra.db").is_file());
-}
-
-#[tokio::test]
-#[serial]
-async fn test_repository_detection_with_separate_git_dir() {
-    let temp_root = tempdir().unwrap();
-    let workdir = temp_root.path().join("work");
-    let storage = temp_root.path().join("storage");
-
-    fs::create_dir_all(&workdir).unwrap();
-
-    let args = InitArgs {
-        bare: false,
-        template: None,
-        initial_branch: None,
-        repo_directory: workdir.to_str().unwrap().to_string(),
-        quiet: true,
-        shared: None,
-        object_format: None,
-        ref_format: None,
-        from_git_repository: None,
-        separate_libra_dir: Some(storage.to_str().unwrap().to_string()),
-        vault: false,
-    };
-
-    init(args).await.unwrap();
-
-    let _guard = ChangeDirGuard::new(&workdir);
-    let storage_path = fs::canonicalize(util::storage_path()).unwrap();
-    let expected_storage = fs::canonicalize(&storage).unwrap();
-    let working_dir = fs::canonicalize(util::working_dir()).unwrap();
-    let expected_workdir = fs::canonicalize(&workdir).unwrap();
-
-    assert_eq!(
-        storage_path, expected_storage,
-        "storage_path should resolve to separate storage directory"
-    );
-    assert_eq!(
-        working_dir, expected_workdir,
-        "working_dir should be the work tree when using --separate-libra-dir"
-    );
-}
-
-#[tokio::test]
-#[serial]
-async fn test_init_rejects_bare_with_separate_git_dir() {
-    let temp_root = tempdir().unwrap();
-    let dir = temp_root.path().join("repo.git");
-
-    fs::create_dir_all(&dir).unwrap();
-
-    let args = InitArgs {
-        bare: true,
-        template: None,
-        initial_branch: None,
-        repo_directory: dir.to_str().unwrap().to_string(),
-        quiet: true,
-        shared: None,
-        object_format: None,
-        ref_format: None,
-        from_git_repository: None,
-        separate_libra_dir: Some(dir.join("storage").to_str().unwrap().to_string()),
-        vault: false,
-    };
-
-    let res: Result<_, _> = init(args).await;
     assert!(
-        res.is_err(),
-        "init should error when both --bare and --separate-libra-dir are specified"
+        !repo.join(".libra").exists(),
+        "init should not create .libra when parse fails"
     );
 }
 
 #[test]
 #[serial]
-fn test_init_warns_on_separate_git_dir_alias() {
+fn init_rejects_separate_git_dir_alias() {
     let temp_root = tempdir().unwrap();
-    let workdir = temp_root.path().join("work");
+    let repo = temp_root.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
     let storage = temp_root.path().join("storage");
 
-    fs::create_dir_all(&workdir).unwrap();
-
-    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
-        .current_dir(&workdir)
-        .args(["init", "--separate-git-dir"])
-        .arg(storage.to_str().unwrap())
-        .output()
-        .expect("Failed to execute libra binary");
-
-    assert!(
-        output.status.success(),
-        "init with --separate-git-dir should succeed, stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
+    let output = run_libra_command(
+        &["init", "--separate-git-dir", storage.to_str().unwrap()],
+        &repo,
     );
+    assert_ne!(output.status.code(), Some(0));
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains(
-            "warning: `--separate-git-dir` is deprecated; use `--separate-libra-dir` instead"
-        ),
-        "expected deprecation warning in stderr, got: {stderr}"
+        stderr.contains("unexpected argument '--separate-git-dir'"),
+        "expected clap parse error, got: {stderr}"
     );
+    assert!(
+        !repo.join(".libra").exists(),
+        "init should not create .libra when parse fails"
+    );
+}
+
+#[test]
+#[serial]
+fn legacy_separate_layout_repo_is_no_longer_detected() {
+    let temp_root = tempdir().unwrap();
+    let storage_holder = temp_root.path().join("storage-holder");
+    init_repo_via_cli(&storage_holder);
+
+    let workdir = temp_root.path().join("legacy-worktree");
+    fs::create_dir_all(&workdir).unwrap();
+
+    let storage_dir = storage_holder.join(".libra").canonicalize().unwrap();
+    fs::write(
+        workdir.join(".libra"),
+        format!("gitdir: {}\n", storage_dir.display()),
+    )
+    .unwrap();
+
+    let status = run_libra_command(&["status"], &workdir);
+    assert_ne!(status.status.code(), Some(0));
+    let status_stderr = String::from_utf8_lossy(&status.stderr);
+    assert!(
+        status_stderr.contains("not a libra repository"),
+        "legacy layout should no longer be recognized: {status_stderr}"
+    );
+
+    let config = run_libra_command(&["config", "list"], &workdir);
+    assert_ne!(config.status.code(), Some(0));
+    let config_stderr = String::from_utf8_lossy(&config.stderr);
+    assert!(
+        config_stderr.contains("not a libra repository"),
+        "legacy layout should fail for config commands as well: {config_stderr}"
+    );
+
+    let sanity = run_libra_command(&["status"], &storage_holder);
+    assert_cli_success(&sanity, "storage-holder repo should remain healthy");
 }

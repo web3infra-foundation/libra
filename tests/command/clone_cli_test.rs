@@ -238,3 +238,39 @@ fn machine_clone_suppresses_decorative_stderr() {
     );
     assert!(dest.join("README.md").exists());
 }
+
+#[test]
+fn json_clone_does_not_leak_init_output() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("clone-json");
+
+    let output = run_libra(
+        &[
+            "--json",
+            "clone",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "json clone failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.trim().is_empty(),
+        "clone should not forward init's JSON envelope, got: {stdout}"
+    );
+    assert!(
+        !stderr.contains("\"command\":\"init\"")
+            && !stderr.contains("Creating repository layout ..."),
+        "clone stderr should not leak init output, got: {stderr}"
+    );
+    assert!(dest.join("README.md").exists());
+}

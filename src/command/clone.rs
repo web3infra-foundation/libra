@@ -242,22 +242,18 @@ async fn clone_into_destination(
         git_internal::hash::HashKind::Sha256 => "sha256".to_string(),
     };
 
-    command::init::execute_safe(
-        command::init::InitArgs {
-            bare: args.bare,
-            template: None,
-            initial_branch: args.branch.clone(),
-            repo_directory: local_path.to_string_lossy().into_owned(),
-            quiet: true,
-            shared: None,
-            object_format: Some(object_format),
-            ref_format: None,
-            from_git_repository: None,
-            separate_libra_dir: None,
-            vault: true,
-        },
-        output,
-    )
+    command::init::run_init(command::init::InitArgs {
+        bare: args.bare,
+        template: None,
+        initial_branch: args.branch.clone(),
+        repo_directory: local_path.to_string_lossy().into_owned(),
+        quiet: true,
+        shared: None,
+        object_format: Some(object_format),
+        ref_format: None,
+        from_git_repository: None,
+        vault: true,
+    })
     .await
     .map_err(|error| CloneError::InitializeRepository {
         message: error.to_string(),

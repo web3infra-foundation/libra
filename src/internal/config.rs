@@ -6,7 +6,7 @@
 //! with optional vault encryption. All new code should use `ConfigKv` instead of
 //! the deprecated `Config` struct.
 
-use std::{collections::HashSet, mem::swap};
+use std::{collections::HashSet, mem::swap, path::Path};
 
 use anyhow::{Context, Result, anyhow};
 use sea_orm::{
@@ -15,7 +15,7 @@ use sea_orm::{
 };
 
 use crate::internal::{
-    db::get_db_conn_instance,
+    db::{get_db_conn_instance, get_db_conn_instance_for_path},
     head::Head,
     model::{
         config::{self, ActiveModel, Model},
@@ -738,6 +738,122 @@ fn global_config_path() -> Option<std::path::PathBuf> {
         return Some(std::path::PathBuf::from(p));
     }
     dirs::home_dir().map(|home| home.join(".libra").join("config.db"))
+}
+
+/// Identity sources resolved for commands that need name/email defaults.
+///
+/// `config_*` contains the cascaded local/global result for each field, while
+/// `env_*` preserves the environment fallback separately so callers like
+/// `commit` can still enforce `user.useConfigOnly`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UserIdentitySources {
+    pub config_name: Option<String>,
+    pub config_email: Option<String>,
+    pub env_name: Option<String>,
+    pub env_email: Option<String>,
+}
+
+/// Which local repository, if any, should participate in config resolution.
+#[derive(Debug, Clone, Copy)]
+pub enum LocalIdentityTarget<'a> {
+    /// Read local config from the current repository discovered from cwd.
+    CurrentRepo,
+    /// Read local config from an explicit repository database path.
+    ExplicitDb(&'a Path),
+    /// Skip local scope entirely and only read global/env values.
+    None,
+}
+
+/// Return the first non-empty environment variable value from `keys`.
+pub fn env_first_non_empty(keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        std::env::var(key)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
+}
+
+/// Read a config value for the given target using local-first, then global.
+pub async fn read_cascaded_config_value(
+    local_target: LocalIdentityTarget<'_>,
+    key: &str,
+) -> Result<Option<String>> {
+    if let Some(value) = local_config_value_for_target(local_target, key).await? {
+        return Ok(Some(value));
+    }
+    global_config_value(key).await
+}
+
+/// Resolve user identity values from config and environment while preserving
+/// the source boundary between the two.
+pub async fn resolve_user_identity_sources(
+    local_target: LocalIdentityTarget<'_>,
+) -> Result<UserIdentitySources> {
+    Ok(UserIdentitySources {
+        config_name: read_cascaded_config_value(local_target, "user.name").await?,
+        config_email: read_cascaded_config_value(local_target, "user.email").await?,
+        env_name: env_first_non_empty(&[
+            "GIT_COMMITTER_NAME",
+            "GIT_AUTHOR_NAME",
+            "LIBRA_COMMITTER_NAME",
+        ]),
+        env_email: env_first_non_empty(&[
+            "GIT_COMMITTER_EMAIL",
+            "GIT_AUTHOR_EMAIL",
+            "EMAIL",
+            "LIBRA_COMMITTER_EMAIL",
+        ]),
+    })
+}
+
+async fn local_config_value_for_target(
+    local_target: LocalIdentityTarget<'_>,
+    key: &str,
+) -> Result<Option<String>> {
+    match local_target {
+        LocalIdentityTarget::CurrentRepo => {
+            let storage = crate::utils::util::try_get_storage_path(None)
+                .context("failed to resolve current repository storage")?;
+            let db_path = storage.join(crate::utils::util::DATABASE);
+            read_config_value_from_db_path(&db_path, key).await
+        }
+        LocalIdentityTarget::ExplicitDb(db_path) => {
+            read_config_value_from_db_path(db_path, key).await
+        }
+        LocalIdentityTarget::None => Ok(None),
+    }
+}
+
+async fn global_config_value(key: &str) -> Result<Option<String>> {
+    let Some(db_path) = global_config_path() else {
+        return Ok(None);
+    };
+    if !db_path.exists() {
+        return Ok(None);
+    }
+    read_config_value_from_db_path(&db_path, key).await
+}
+
+async fn read_config_value_from_db_path(db_path: &Path, key: &str) -> Result<Option<String>> {
+    if !db_path.exists() {
+        return Ok(None);
+    }
+
+    let conn = get_db_conn_instance_for_path(db_path)
+        .await
+        .with_context(|| format!("failed to open config database '{}'", db_path.display()))?;
+    let entry = ConfigKv::get_with_conn(&conn, key).await.with_context(|| {
+        format!(
+            "failed to query '{key}' from config database '{}'",
+            db_path.display()
+        )
+    })?;
+
+    Ok(entry.and_then(|entry| {
+        let trimmed = entry.value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    }))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
