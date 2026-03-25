@@ -211,7 +211,9 @@ pub async fn execute_checked_typed(args: RestoreArgs) -> Result<(), RestoreError
     let storage = util::objects_storage();
     let target_blobs: Vec<(PathBuf, ObjectHash)> = match source.as_ref() {
         None => {
-            assert!(!staged);
+            if staged {
+                return Err(RestoreError::ResolveSource);
+            }
             let index = Index::load(path::index()).map_err(|_| RestoreError::ReadIndex)?;
             index
                 .tracked_entries(0)
