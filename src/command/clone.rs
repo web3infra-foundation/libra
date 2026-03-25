@@ -174,13 +174,9 @@ impl From<CloneError> for CliError {
             ))
             .with_stable_code(StableErrorCode::RepoStateInvalid)
             .with_hint("the destination already contains a libra repository"),
-            CloneError::CreateDestinationFailed { ref path, .. } => CliError::fatal(format!(
-                "could not create directory '{}': {}",
-                path.display(),
-                error
-            ))
-            .with_stable_code(StableErrorCode::IoWriteFailed)
-            .with_hint("check directory permissions and disk space"),
+            CloneError::CreateDestinationFailed { .. } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::IoWriteFailed)
+                .with_hint("check directory permissions and disk space"),
             CloneError::DiscoverRemote { source } => map_discover_remote_error(source),
             CloneError::ChangeDirectory { .. } | CloneError::RestoreDirectory { .. } => {
                 CliError::fatal(error.to_string())
