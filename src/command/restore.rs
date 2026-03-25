@@ -461,7 +461,7 @@ async fn restore_worktree_typed(
             if target_blobs.contains_key(path_wd) {
                 restore_to_file_typed(&target_blobs[path_wd], path_wd).await?;
             } else {
-                unreachable!("pathspec validity is checked above");
+                return Err(RestoreError::ResolveSource);
             }
         } else {
             let path_wd_str = path_to_utf8_typed(path_wd)?;
