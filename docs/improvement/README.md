@@ -12,7 +12,7 @@
 - 错误码文档 (`docs/error-codes.md`)
 - `init` 命令主改造已落地：`run_init()`、顶层 human/JSON/machine 渲染、`InitProgress`、显式 `StableErrorCode`、嵌套 fetch 输出隔离均已就绪
 
-**已有 JSON 输出的命令（面向终端用户的高层命令）：** commit, switch, status, branch, config, init（底层命令如 `cat-file`、`show-ref` 也已支持 JSON，但未纳入本优先级列表）
+**已有 JSON 输出的命令（面向终端用户的高层命令）：** commit, status, branch, config, init（底层命令如 `cat-file`、`show-ref` 也已支持 JSON，但未纳入本优先级列表；`switch` 仅用 `is_json()` 抑制 human 输出，但 `--json` 模式下不产生结构化 stdout，不计入）
 **已用 StableErrorCode 的命令：** commit, init, shortlog, lfs, code（共 5 个）
 
 ---

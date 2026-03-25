@@ -494,8 +494,7 @@ command::restore::execute_checked_typed(RestoreArgs {
     pathspec: vec![util::working_dir_string()],
 })
 .await
-.map_err(|e| CloneError::CheckoutFailed { source: e })?;
-```
+.map_err(|e| CloneError::CheckoutFailed { message: e.to_string() })?;
 ```
 
 **`DiscoverRemote` 映射实现说明：**
