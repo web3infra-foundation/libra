@@ -228,13 +228,16 @@ fn map_discover_remote_error(source: fetch::FetchError) -> CliError {
                     .with_stable_code(StableErrorCode::AuthPermissionDenied)
                     .with_hint("check SSH key / HTTP credentials and repository access rights")
             }
-            GitError::NetworkError(_) | GitError::IOError(_) => {
+            GitError::NetworkError(_) => {
                 CliError::fatal(format!("remote discovery failed: {source}"))
                     .with_stable_code(StableErrorCode::NetworkUnavailable)
                     .with_hint(
                         "check the remote host, DNS, VPN/proxy, and network connectivity",
                     )
             }
+            GitError::IOError(_) => CliError::fatal(format!("remote discovery failed: {source}"))
+                .with_stable_code(StableErrorCode::IoReadFailed)
+                .with_hint("check filesystem permissions and repository integrity"),
             _ => CliError::fatal(format!("remote discovery failed: {source}"))
                 .with_stable_code(StableErrorCode::NetworkProtocol)
                 .with_hint(
@@ -886,6 +889,21 @@ mod tests {
         assert_eq!(
             cli.hints()[0].as_str(),
             "check the remote host, DNS, VPN/proxy, and network connectivity"
+        );
+    }
+
+    #[test]
+    fn discover_remote_io_error_maps_to_io_read_failed() {
+        let cli = map_discover_remote_error(fetch::FetchError::Discovery {
+            remote: "/local/repo".to_string(),
+            source: GitError::IOError(std::io::Error::other("permission denied")),
+        });
+
+        assert_eq!(cli.stable_code(), StableErrorCode::IoReadFailed);
+        assert_eq!(cli.exit_code(), 128);
+        assert_eq!(
+            cli.hints()[0].as_str(),
+            "check filesystem permissions and repository integrity"
         );
     }
 
