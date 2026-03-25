@@ -10,25 +10,38 @@ use super::parse_cli_error_stderr;
 
 fn run_libra(args: &[&str], cwd: &Path) -> std::process::Output {
     let home = cwd.join(".home");
+    let config_home = home.join(".config");
     fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&config_home).unwrap();
 
     Command::new(env!("CARGO_BIN_EXE_libra"))
         .args(args)
         .current_dir(cwd)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
         .env("HOME", home)
-        .env_remove("RUST_LOG")
-        .env_remove("LIBRA_LOG")
+        .env("USERPROFILE", cwd.join(".home"))
+        .env("XDG_CONFIG_HOME", config_home)
+        .env("LANG", "C")
+        .env("LC_ALL", "C")
         .output()
         .unwrap()
 }
 
 fn run_libra_with_home(args: &[&str], cwd: &Path, home: &Path) -> std::process::Output {
+    let config_home = home.join(".config");
+    fs::create_dir_all(&config_home).unwrap();
+
     Command::new(env!("CARGO_BIN_EXE_libra"))
         .args(args)
         .current_dir(cwd)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
         .env("HOME", home)
-        .env_remove("RUST_LOG")
-        .env_remove("LIBRA_LOG")
+        .env("USERPROFILE", home)
+        .env("XDG_CONFIG_HOME", config_home)
+        .env("LANG", "C")
+        .env("LC_ALL", "C")
         .output()
         .unwrap()
 }
@@ -79,7 +92,6 @@ fn create_remote_with_main(base: &Path) -> std::path::PathBuf {
         .success()
     );
     assert!(run_git(&["push", "origin", "main"], &work).status.success());
-    // Ensure bare repo HEAD points to main regardless of init.defaultBranch config.
     assert!(
         run_git(&["symbolic-ref", "HEAD", "refs/heads/main"], &remote)
             .status
@@ -88,16 +100,39 @@ fn create_remote_with_main(base: &Path) -> std::path::PathBuf {
     remote
 }
 
+fn create_empty_remote(base: &Path) -> std::path::PathBuf {
+    let remote = base.join("empty-remote.git");
+    assert!(
+        run_git(&["init", "--bare", remote.to_str().unwrap()], base)
+            .status
+            .success()
+    );
+    remote
+}
+
+// =========================================================================
+// Existing tests (updated for new output behavior)
+// =========================================================================
+
 #[test]
 fn invalid_source_does_not_panic() {
     let temp = tempdir().unwrap();
-    let output = run_libra(&["clone", "/"], temp.path());
+    let dest = temp.path().join("dest");
+    let output = run_libra(&["clone", "/", dest.to_str().unwrap()], temp.path());
     assert_eq!(output.status.code(), Some(128));
 
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
-    assert_eq!(
-        stderr,
-        "fatal: '/' does not appear to be a libra repository\nError-Code: LBR-REPO-001"
+    assert!(
+        stderr.contains("fatal:"),
+        "expected fatal message, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("LBR-REPO-001"),
+        "expected error code, got: {stderr}"
+    );
+    assert!(
+        stderr.to_ascii_lowercase().contains("hint"),
+        "expected hint, got: {stderr}"
     );
     assert_eq!(report.error_code, "LBR-REPO-001");
     assert_eq!(report.exit_code, 128);
@@ -124,8 +159,9 @@ fn missing_branch_keeps_preexisting_empty_destination() {
     assert_eq!(output.status.code(), Some(128));
 
     let (stderr, report) = parse_cli_error_stderr(&output.stderr);
-    assert!(stderr.contains("fatal: remote branch nope not found in upstream origin"));
-    assert!(stderr.contains("Error-Code: LBR-REPO-003"));
+    assert!(stderr.contains("remote branch"));
+    assert!(stderr.contains("nope"));
+    assert!(stderr.contains("LBR-REPO-003"));
     assert_eq!(report.error_code, "LBR-REPO-003");
     assert!(existing.is_dir());
     assert_eq!(fs::read_dir(&existing).unwrap().count(), 0);
@@ -145,8 +181,15 @@ fn successful_clone_output_has_no_debug_noise() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stdout.is_empty(), "unexpected stdout: {stdout}");
-    assert!(stderr.contains("Cloning into 'clone'..."));
+    assert!(
+        stdout.contains("Cloned into"),
+        "expected clone summary on stdout, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("branch: main"),
+        "expected branch info, got: {stdout}"
+    );
+    assert!(stderr.contains("Connecting to"));
     assert!(!stderr.contains(" INFO "));
     assert!(!stderr.contains(" WARN "));
     assert!(!stderr.contains("fatal: fatal:"));
@@ -189,21 +232,14 @@ fn successful_clone_initializes_vault() {
     assert_eq!(
         String::from_utf8_lossy(&signing_output.stdout).trim(),
         "true",
-        "clone should enable vault.signing"
     );
 
     let gpg_output = run_libra_with_home(&["config", "--get", "vault.gpg.pubkey"], &dest, &home);
-    assert_eq!(
-        gpg_output.status.code(),
-        Some(0),
-        "failed to read vault.gpg.pubkey: {}",
-        String::from_utf8_lossy(&gpg_output.stderr)
-    );
+    assert_eq!(gpg_output.status.code(), Some(0));
     assert!(
         !String::from_utf8_lossy(&gpg_output.stdout)
             .trim()
-            .is_empty(),
-        "clone should populate vault.gpg.pubkey"
+            .is_empty()
     );
 }
 
@@ -231,7 +267,14 @@ fn machine_clone_suppresses_decorative_stderr() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stdout.trim().is_empty(), "unexpected stdout: {stdout}");
+    assert!(
+        !stdout.trim().is_empty(),
+        "machine clone should emit JSON on stdout"
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout should be valid JSON");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["command"], "clone");
     assert!(
         stderr.trim().is_empty(),
         "machine clone should suppress decorative stderr, got: {stderr}"
@@ -263,14 +306,271 @@ fn json_clone_does_not_leak_init_output() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stdout.trim().is_empty(),
-        "clone should not forward init's JSON envelope, got: {stdout}"
-    );
+    let json: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout should be valid JSON");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["command"], "clone");
     assert!(
         !stderr.contains("\"command\":\"init\"")
             && !stderr.contains("Creating repository layout ..."),
         "clone stderr should not leak init output, got: {stderr}"
     );
     assert!(dest.join("README.md").exists());
+}
+
+// =========================================================================
+// New tests
+// =========================================================================
+
+#[test]
+fn json_clone_success_schema() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("clone-schema");
+
+    let output = run_libra(
+        &[
+            "--json",
+            "clone",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(output.status.code(), Some(0));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["command"], "clone");
+    let data = &json["data"];
+    assert!(data["path"].is_string());
+    assert_eq!(data["bare"], false);
+    assert!(data["remote_url"].is_string());
+    assert_eq!(data["branch"], "main");
+    assert!(data["object_format"].is_string());
+    assert!(data["repo_id"].is_string());
+    assert!(data["vault_signing"].is_boolean());
+    assert_eq!(data["shallow"], false);
+    assert!(data["warnings"].is_array());
+    assert_eq!(data["warnings"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn json_clone_empty_remote() {
+    let temp = tempdir().unwrap();
+    let remote = create_empty_remote(temp.path());
+    let dest = temp.path().join("clone-empty");
+
+    let output = run_libra(
+        &[
+            "--json",
+            "clone",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "json clone of empty repo failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+
+    assert_eq!(json["ok"], true);
+    let data = &json["data"];
+    assert!(
+        data["branch"].is_null(),
+        "empty remote should have branch: null"
+    );
+    let warnings = data["warnings"].as_array().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("empty repository")),
+        "expected empty repo warning, got: {warnings:?}"
+    );
+}
+
+#[test]
+fn machine_clone_single_line_json() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("clone-machine-line");
+
+    let output = run_libra(
+        &[
+            "--machine",
+            "clone",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(output.status.code(), Some(0));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let non_empty_lines: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(
+        non_empty_lines.len(),
+        1,
+        "machine stdout should be exactly 1 non-empty line, got: {non_empty_lines:?}"
+    );
+    let _json: serde_json::Value =
+        serde_json::from_str(non_empty_lines[0]).expect("single line should be valid JSON");
+}
+
+#[test]
+fn quiet_clone_no_output_on_success() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("clone-quiet");
+
+    let output = run_libra(
+        &[
+            "--quiet",
+            "clone",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(output.status.code(), Some(0));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.trim().is_empty(),
+        "quiet clone should produce no stdout, got: {stdout}"
+    );
+    assert!(
+        stderr.trim().is_empty(),
+        "quiet clone should produce no stderr, got: {stderr}"
+    );
+    assert!(dest.join("README.md").exists());
+}
+
+#[test]
+fn error_code_cannot_infer_destination() {
+    let temp = tempdir().unwrap();
+    let output = run_libra(&["clone", "///"], temp.path());
+    assert_eq!(output.status.code(), Some(129));
+
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert!(
+        stderr.contains("LBR-CLI-002"),
+        "expected LBR-CLI-002, got: {stderr}"
+    );
+    assert_eq!(report.error_code, "LBR-CLI-002");
+    assert_eq!(report.exit_code, 129);
+}
+
+#[test]
+fn error_code_destination_exists_non_empty() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("non-empty-dest");
+    fs::create_dir_all(&dest).unwrap();
+    fs::write(dest.join("blocker.txt"), "exists").unwrap();
+
+    let output = run_libra(
+        &["clone", remote.to_str().unwrap(), dest.to_str().unwrap()],
+        temp.path(),
+    );
+    assert_ne!(output.status.code(), Some(0));
+
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert!(
+        stderr.contains("LBR-CLI-003"),
+        "expected LBR-CLI-003, got: {stderr}"
+    );
+    assert_eq!(report.exit_code, 129);
+}
+
+#[test]
+fn error_code_missing_local_repo() {
+    let temp = tempdir().unwrap();
+    let output = run_libra(&["clone", "/nonexistent/path/to/repo"], temp.path());
+    assert_eq!(output.status.code(), Some(128));
+
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert!(
+        stderr.contains("LBR-REPO-001"),
+        "expected LBR-REPO-001 for missing local repo, got: {stderr}"
+    );
+    assert_eq!(report.error_code, "LBR-REPO-001");
+}
+
+#[test]
+fn error_code_remote_branch_not_found() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("clone-bad-branch");
+
+    let output = run_libra(
+        &[
+            "clone",
+            "-b",
+            "nonexistent-branch",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(output.status.code(), Some(128));
+
+    let (stderr, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-REPO-003");
+    assert!(stderr.contains("nonexistent-branch"));
+}
+
+#[test]
+fn hint_present_on_network_like_errors() {
+    let temp = tempdir().unwrap();
+    let output = run_libra(&["clone", "/nonexistent/path/to/repo"], temp.path());
+    assert_ne!(output.status.code(), Some(0));
+
+    let (stderr, _report) = parse_cli_error_stderr(&output.stderr);
+    assert!(
+        stderr.to_ascii_lowercase().contains("hint"),
+        "expected a hint in error output, got: {stderr}"
+    );
+}
+
+#[test]
+fn json_clone_init_output_isolation() {
+    let temp = tempdir().unwrap();
+    let remote = create_remote_with_main(temp.path());
+    let dest = temp.path().join("clone-isolation");
+
+    let output = run_libra(
+        &[
+            "--json",
+            "clone",
+            remote.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+    assert_eq!(output.status.code(), Some(0));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout should be a single valid JSON object");
+    assert_eq!(
+        json["command"], "clone",
+        "unexpected command in JSON envelope"
+    );
+    assert_eq!(json["ok"], true);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("\"progress\""),
+        "json clone stderr should not contain fetch NDJSON progress, got: {stderr}"
+    );
 }

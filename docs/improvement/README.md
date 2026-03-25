@@ -12,8 +12,8 @@
 - 错误码文档 (`docs/error-codes.md`)
 - `init` 命令主改造已落地：`run_init()`、顶层 human/JSON/machine 渲染、`InitProgress`、显式 `StableErrorCode`、嵌套 fetch 输出隔离均已就绪
 
-**已有 JSON 输出的命令（面向终端用户的高层命令）：** commit, status, branch, config, init（底层命令如 `cat-file`、`show-ref` 也已支持 JSON，但未纳入本优先级列表；`switch` 仅用 `is_json()` 抑制 human 输出，但 `--json` 模式下不产生结构化 stdout，不计入）
-**已用 StableErrorCode 的命令：** commit, init, shortlog, lfs, code（共 5 个）
+**已有 JSON 输出的命令（面向终端用户的高层命令）：** commit, status, branch, config, init, clone（底层命令如 `cat-file`、`show-ref` 也已支持 JSON，但未纳入本优先级列表；`switch` 仅用 `is_json()` 抑制 human 输出，但 `--json` 模式下不产生结构化 stdout，不计入）
+**已用 StableErrorCode 的命令：** commit, init, clone, shortlog, lfs, code（共 6 个）
 
 ---
 
@@ -31,7 +31,7 @@
 
 - `config` 已交付 `config_kv`、`resolve_env()`、vault key 管理与 `vault` 命令吸收；`init`、`clone`、`push/pull` 等命令已在此基础上切换读取链路。
 - `init` 已交付 `run_init()`、顶层渲染层拆分、separate-layout 全链路移除，以及嵌套 fetch 的静默子级 `OutputConfig` 约束；后续文档可直接把这些能力写成“当前代码已具备”。
-- `clone` 已开始复用 `init` 的纯执行层与 `config` 的解析/认证基础设施，但 clone 命令**整体尚未落地**；其成功 schema、错误码、checkout 失败传播与 cleanup 收尾项继续在 `clone.md` 中维护。
+- `clone` 已整体落地，复用 `init` 的纯执行层与 `config` 的解析/认证基础设施。成功 schema（`CloneOutput`）、显式错误码、typed checkout 失败传播与 cleanup warning 可见性均已完成；详见 [commands/clone.md](commands/clone.md) 实施记录。性能优化留后续批次。
 
 后续各命令子计划如依赖前一批次交付项，应在“已完成前置条件与当前代码状态”中明确区分：
 
@@ -47,7 +47,7 @@
 |------|------|--------|--------|
 | **1** | `config` | ✅ 已落地 | vault-backed 存储；子命令风格；SSH/GPG key 管理；env vault；吸收 vault 命令功能（详见下方专节） |
 | **2** | `init` | ✅ 已落地 | 作为 `clone` / 转发路径的已交付基线；后续仅维护回归测试与文档同步 |
-| **3** | `clone` | 进行中：已切换到 `run_init()`，但成功 JSON / 显式错误码 / checkout 失败传播尚未落地 | 结构化成功输出；显式 `StableErrorCode`；network/auth hint；checkout 失败传播；cleanup warning |
+| **3** | `clone` | ✅ 已落地 | 结构化成功输出（`--json`/`--machine`）；显式 `StableErrorCode`；network/auth hint；checkout 失败传播；cleanup warning 可见性；阶段性 human 进度（详见 [commands/clone.md](commands/clone.md)） |
 | **4** | `add` | 与 Git 一致，无 JSON | JSON 输出（变更文件列表）；--dry-run 支持；错误信息包含文件名 |
 | **5** | `status` | 有 JSON + porcelain，无 hint | 添加下一步命令建议（"use libra add..."）；补齐 StableErrorCode |
 | **6** | `commit` | ✅ 已完成（金标准） | 作为参考模板，无需改动 |
@@ -60,8 +60,7 @@
 
 - `config` 已是第一批内部的已落地基线；`init`/`clone` 文档应直接在其上描述现状与剩余收尾项。
 - `init` 已落地并成为 `clone` 的直接基线；`clone` 对 `run_init()`、separate-layout 移除、嵌套 fetch 静默规则的引用，应统一写成“当前代码已具备”。
-- `clone` 尚未整体落地；README 只把它视为“已接入 init/config 基线、仍在收尾”的命令，不应写成已完成。
-- `clone` 的性能优化目标仍保留为后续独立批次，不覆盖 `clone.md` 中“本批不做性能优化”的执行边界。
+- `clone` 已整体落地：执行层/渲染层拆分、`CloneOutput` 结构化输出、显式 `StableErrorCode` 映射、typed `RestoreError` checkout、`RemoteSpecErrorKind` 分类、cleanup warning 可见性均已完成。性能优化目标仍保留为后续独立批次。
 
 ### 第二批：状态变更确认命令（P0 消灭"沉默"）
 
@@ -140,6 +139,10 @@
 - [Config 命令改进详细计划](config.md)
 - [Init 命令改进详细计划](init.md)
 - [Clone 命令改进详细计划](clone.md)
+
+## 命令改进实施记录
+
+- [Clone 命令改进实施记录](commands/clone.md)
 
 ---
 

@@ -456,10 +456,29 @@ pub struct FetchArgs {
     pub all: bool,
 }
 
+/// Typed classification for [`FetchError::InvalidRemoteSpec`] so that callers
+/// can map each sub-category to a distinct stable error code without parsing
+/// the `reason` string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteSpecErrorKind {
+    /// The local path does not exist.
+    MissingLocalRepo,
+    /// The local path exists but is not a valid libra/git repository.
+    InvalidLocalRepo,
+    /// The URL is syntactically malformed.
+    MalformedUrl,
+    /// The URL scheme is not supported (e.g. `ftp://`).
+    UnsupportedScheme,
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum FetchError {
     #[error("{reason}")]
-    InvalidRemoteSpec { spec: String, reason: String },
+    InvalidRemoteSpec {
+        spec: String,
+        kind: RemoteSpecErrorKind,
+        reason: String,
+    },
     #[error("failed to discover references from '{remote}': {source}")]
     Discovery { remote: String, source: GitError },
     #[error("remote object format '{remote}' does not match local '{local}'")]
@@ -561,9 +580,11 @@ pub(crate) async fn discover_remote_with_name(
 ) -> Result<(RemoteClient, DiscoveryResult), FetchError> {
     let remote_client =
         RemoteClient::from_spec_with_remote(remote_spec, remote_name).map_err(|message| {
+            let (kind, reason) = classify_remote_spec_error(remote_spec, &message);
             FetchError::InvalidRemoteSpec {
                 spec: remote_spec.to_string(),
-                reason: format_remote_spec_error(remote_spec, &message),
+                kind,
+                reason,
             }
         })?;
     let discovery = remote_client
@@ -576,7 +597,9 @@ pub(crate) async fn discover_remote_with_name(
     Ok((remote_client, discovery))
 }
 
-fn format_remote_spec_error(remote_spec: &str, message: &str) -> String {
+/// Classify a remote-spec construction failure into a typed kind and a
+/// human-readable reason string.
+fn classify_remote_spec_error(remote_spec: &str, message: &str) -> (RemoteSpecErrorKind, String) {
     if message.starts_with("invalid local repository") {
         let display = if remote_spec == "/" {
             "/".to_string()
@@ -588,11 +611,22 @@ fn format_remote_spec_error(remote_spec: &str, message: &str) -> String {
             || lower.contains("does not exist")
             || lower.contains("not found")
         {
-            return format!("repository '{}' does not exist", display);
+            return (
+                RemoteSpecErrorKind::MissingLocalRepo,
+                format!("repository '{}' does not exist", display),
+            );
         }
-        return format!("'{}' does not appear to be a libra repository", display);
+        return (
+            RemoteSpecErrorKind::InvalidLocalRepo,
+            format!("'{}' does not appear to be a libra repository", display),
+        );
     }
-    message.to_string()
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("unsupported") && lower.contains("scheme") {
+        return (RemoteSpecErrorKind::UnsupportedScheme, message.to_string());
+    }
+    // Default to MalformedUrl for other spec errors (bad syntax, etc.)
+    (RemoteSpecErrorKind::MalformedUrl, message.to_string())
 }
 
 pub(crate) fn normalize_branch_ref(branch: &str) -> String {

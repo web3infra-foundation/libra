@@ -16,7 +16,7 @@ use git_internal::{
 };
 
 use crate::{
-    command::calc_file_blob_hash,
+    command::{calc_file_blob_hash, load_object},
     internal::{branch::Branch, head::Head, protocol::lfs_client::LFSClient},
     utils::{
         error::{CliError, CliResult},
@@ -28,6 +28,27 @@ use crate::{
         util,
     },
 };
+
+/// Typed error for checkout / restore operations, providing enough detail for
+/// callers (e.g. `clone`) to map each failure into a stable error code without
+/// resorting to string matching on `io::Error` messages.
+#[derive(thiserror::Error, Debug)]
+pub enum RestoreError {
+    #[error("failed to resolve checkout source")]
+    ResolveSource,
+    #[error("reference is not a commit")]
+    ReferenceNotCommit,
+    #[error("failed to read index")]
+    ReadIndex,
+    #[error("failed to read object")]
+    ReadObject,
+    #[error("invalid path encoding")]
+    InvalidPathEncoding,
+    #[error("failed to write worktree file")]
+    WriteWorktree,
+    #[error("failed to download LFS content")]
+    LfsDownload,
+}
 
 #[derive(Parser, Debug)]
 pub struct RestoreArgs {
@@ -166,6 +187,78 @@ pub async fn execute_checked(args: RestoreArgs) -> io::Result<()> {
     Ok(())
 }
 
+/// Typed checkout entry point that returns [`RestoreError`] instead of
+/// `io::Error`, allowing callers like `clone` to map each failure category
+/// into a distinct stable error code.
+///
+/// # Preconditions
+///
+/// Same as [`execute_checked`]: the caller must ensure a valid libra
+/// repository is reachable from the current working directory.
+pub async fn execute_checked_typed(args: RestoreArgs) -> Result<(), RestoreError> {
+    let staged = args.staged;
+    let mut worktree = args.worktree;
+    if !staged {
+        worktree = true;
+    }
+
+    const HEAD: &str = "HEAD";
+    let mut source = args.source;
+    if source.is_none() && staged {
+        source = Some(HEAD.to_string());
+    }
+
+    let storage = util::objects_storage();
+    let target_blobs: Vec<(PathBuf, ObjectHash)> = match source.as_ref() {
+        None => {
+            assert!(!staged);
+            let index = Index::load(path::index()).map_err(|_| RestoreError::ReadIndex)?;
+            index
+                .tracked_entries(0)
+                .into_iter()
+                .map(|entry| (PathBuf::from(&entry.name), entry.hash))
+                .collect()
+        }
+        Some(src) => {
+            let commit = if src == HEAD {
+                Head::current_commit()
+                    .await
+                    .ok_or(RestoreError::ResolveSource)?
+            } else if Branch::exists(src).await {
+                Branch::find_branch(src, None)
+                    .await
+                    .ok_or(RestoreError::ResolveSource)?
+                    .commit
+            } else {
+                let objs = storage.search(src).await;
+                if objs.len() != 1 {
+                    return Err(RestoreError::ResolveSource);
+                }
+                if !storage.is_object_type(&objs[0], ObjectType::Commit) {
+                    return Err(RestoreError::ReferenceNotCommit);
+                }
+                objs[0]
+            };
+
+            let tree_id = load_object::<Commit>(&commit)
+                .map_err(|_| RestoreError::ReadObject)?
+                .tree_id;
+            load_object::<Tree>(&tree_id)
+                .map_err(|_| RestoreError::ReadObject)?
+                .get_plain_items()
+        }
+    };
+
+    let paths = args.pathspec.iter().map(PathBuf::from).collect::<Vec<_>>();
+    if worktree {
+        restore_worktree_typed(&paths, &target_blobs).await?;
+    }
+    if staged {
+        restore_index_typed(&paths, &target_blobs)?;
+    }
+    Ok(())
+}
+
 /// to HashMap
 /// - `blobs`: to workdir
 fn preprocess_blobs(blobs: &[(PathBuf, ObjectHash)]) -> HashMap<PathBuf, ObjectHash> {
@@ -183,6 +276,38 @@ fn path_to_utf8(path: &Path) -> io::Result<&str> {
             format!("non-UTF8 path: {}", path.display()),
         )
     })
+}
+
+fn path_to_utf8_typed(path: &Path) -> Result<&str, RestoreError> {
+    path.to_str().ok_or(RestoreError::InvalidPathEncoding)
+}
+
+async fn restore_to_file_typed(hash: &ObjectHash, path: &PathBuf) -> Result<(), RestoreError> {
+    let blob = load_object::<Blob>(hash).map_err(|_| RestoreError::ReadObject)?;
+    let path_abs = util::workdir_to_absolute(path);
+    if let Some(parent) = path_abs.parent() {
+        fs::create_dir_all(parent).map_err(|_| RestoreError::WriteWorktree)?;
+    }
+
+    match lfs::parse_pointer_data(&blob.data) {
+        Some((oid, size)) => {
+            let lfs_obj_path = lfs::lfs_object_path(&oid);
+            if lfs_obj_path.exists() {
+                fs::copy(&lfs_obj_path, &path_abs).map_err(|_| RestoreError::WriteWorktree)?;
+            } else {
+                LFSClient::get()
+                    .await
+                    .download_object(&oid, size, &path_abs, None)
+                    .await
+                    .map_err(|_| RestoreError::LfsDownload)?;
+            }
+        }
+        None => {
+            util::write_file(&blob.data, &path_abs).map_err(|_| RestoreError::WriteWorktree)?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Restore a blob to file.
@@ -307,6 +432,52 @@ pub async fn restore_worktree(
     Ok(())
 }
 
+async fn restore_worktree_typed(
+    filter: &Vec<PathBuf>,
+    target_blobs: &[(PathBuf, ObjectHash)],
+) -> Result<(), RestoreError> {
+    let target_blobs = preprocess_blobs(target_blobs);
+    let deleted_files = get_worktree_deleted_files_in_filters(filter, &target_blobs);
+
+    for path in filter {
+        if !path.exists()
+            && !target_blobs
+                .iter()
+                .any(|(p, _)| util::is_sub_path(p.workdir_to_absolute(), path))
+        {
+            return Err(RestoreError::ResolveSource);
+        }
+    }
+
+    let mut file_paths = util::integrate_pathspec(filter);
+    file_paths.extend(deleted_files);
+
+    let index = Index::load(path::index()).map_err(|_| RestoreError::ReadIndex)?;
+    for path_wd in &file_paths {
+        let path_abs = util::workdir_to_absolute(path_wd);
+        if !path_abs.exists() {
+            if target_blobs.contains_key(path_wd) {
+                restore_to_file_typed(&target_blobs[path_wd], path_wd).await?;
+            } else {
+                unreachable!("pathspec validity is checked above");
+            }
+        } else {
+            let path_wd_str = path_to_utf8_typed(path_wd)?;
+            let hash = calc_file_blob_hash(&path_abs).map_err(|_| RestoreError::ReadObject)?;
+            if target_blobs.contains_key(path_wd) {
+                if hash != target_blobs[path_wd] {
+                    restore_to_file_typed(&target_blobs[path_wd], path_wd).await?;
+                }
+            } else if index.tracked(path_wd_str, 0) {
+                fs::remove_file(&path_abs).map_err(|_| RestoreError::WriteWorktree)?;
+                util::clear_empty_dir(&path_abs);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Get the deleted files in the `index`(vs target_blobs), filtered by `filters`
 fn get_index_deleted_files_in_filters(
     index: &Index,
@@ -317,6 +488,22 @@ fn get_index_deleted_files_in_filters(
     for path_wd in target_blobs.keys() {
         let path_wd_str = path_to_utf8(path_wd)?;
         let path_abs = util::workdir_to_absolute(path_wd); // to absolute path
+        if !index.tracked(path_wd_str, 0) && util::is_sub_of_paths(path_abs, filters) {
+            deleted.insert(path_wd.clone());
+        }
+    }
+    Ok(deleted)
+}
+
+fn get_index_deleted_files_in_filters_typed(
+    index: &Index,
+    filters: &Vec<PathBuf>,
+    target_blobs: &HashMap<PathBuf, ObjectHash>,
+) -> Result<HashSet<PathBuf>, RestoreError> {
+    let mut deleted = HashSet::new();
+    for path_wd in target_blobs.keys() {
+        let path_wd_str = path_to_utf8_typed(path_wd)?;
+        let path_abs = util::workdir_to_absolute(path_wd);
         if !index.tracked(path_wd_str, 0) && util::is_sub_of_paths(path_abs, filters) {
             deleted.insert(path_wd.clone());
         }
@@ -379,5 +566,54 @@ pub fn restore_index(
     index
         .save(&idx_file)
         .map_err(|e| io::Error::other(e.to_string()))?; // DO NOT forget to save
+    Ok(())
+}
+
+fn restore_index_typed(
+    filter: &Vec<PathBuf>,
+    target_blobs: &[(PathBuf, ObjectHash)],
+) -> Result<(), RestoreError> {
+    let target_blobs = preprocess_blobs(target_blobs);
+
+    let idx_file = path::index();
+    let mut index = Index::load(&idx_file).map_err(|_| RestoreError::ReadIndex)?;
+    let deleted_files_index =
+        get_index_deleted_files_in_filters_typed(&index, filter, &target_blobs)?;
+
+    let mut file_paths = util::filter_to_fit_paths(&index.tracked_files(), filter);
+    file_paths.extend(deleted_files_index);
+
+    for path in &file_paths {
+        let path_str = path_to_utf8_typed(path)?;
+        if !index.tracked(path_str, 0) {
+            if target_blobs.contains_key(path) {
+                let hash = target_blobs[path];
+                let blob = load_object::<Blob>(&hash).map_err(|_| RestoreError::ReadObject)?;
+                index.add(IndexEntry::new_from_blob(
+                    path_str.to_string(),
+                    hash,
+                    blob.data.len() as u32,
+                ));
+            } else {
+                return Err(RestoreError::ResolveSource);
+            }
+        } else if target_blobs.contains_key(path) {
+            let hash = target_blobs[path];
+            if !index.verify_hash(path_str, 0, &hash) {
+                let blob = load_object::<Blob>(&hash).map_err(|_| RestoreError::ReadObject)?;
+                index.update(IndexEntry::new_from_blob(
+                    path_str.to_string(),
+                    hash,
+                    blob.data.len() as u32,
+                ));
+            }
+        } else {
+            index.remove(path_str, 0);
+        }
+    }
+
+    index
+        .save(&idx_file)
+        .map_err(|_| RestoreError::WriteWorktree)?;
     Ok(())
 }
