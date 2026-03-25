@@ -66,6 +66,7 @@ pub async fn convert_from_git_repository(
 
     clone::setup_repository(remote, None, !is_bare)
         .await
+        .map(|_| ()) // discard SetupResult; convert only needs success/failure
         .map_err(|error| crate::command::init::InitError::ConversionFailed {
             repo: git_dir.clone(),
             stage: "setup",

@@ -422,6 +422,21 @@ impl CliError {
         self
     }
 
+    /// Insert a high-priority hint at the front.  If the hint budget (2) is
+    /// already full, the *last* (lowest-priority) hint is dropped to make room.
+    pub fn with_priority_hint(mut self, hint: impl Into<Hint>) -> Self {
+        let hint = normalize_hint_text(hint.into().0);
+        if hint.trim().is_empty() {
+            return self;
+        }
+
+        if self.hints.len() >= 2 {
+            self.hints.pop(); // drop lowest-priority
+        }
+        self.hints.insert(0, Hint::new(hint));
+        self
+    }
+
     pub fn with_detail(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
         self.details.insert(key.into(), value.into());
         self
