@@ -10,9 +10,10 @@
 - `OutputConfig` + `emit_json_data()` + `info_println!()` 输出框架 (`src/utils/output.rs`)
 - `CommandOutput` trait 支持结构化输出
 - 错误码文档 (`docs/error-codes.md`)
+- `init` 命令主改造已落地：`run_init()`、顶层 human/JSON/machine 渲染、`InitProgress`、显式 `StableErrorCode`、嵌套 fetch 输出隔离均已就绪
 
-**已有 JSON 输出的命令（面向终端用户的高层命令）：** commit, switch, status, branch, clone, config（底层命令如 `cat-file`、`show-ref` 也已支持 JSON，但未纳入本优先级列表）
-**已用 StableErrorCode 的命令：** commit, shortlog, lfs, code（仅 4 个）
+**已有 JSON 输出的命令（面向终端用户的高层命令）：** commit, switch, status, branch, config, init（底层命令如 `cat-file`、`show-ref` 也已支持 JSON，但未纳入本优先级列表）
+**已用 StableErrorCode 的命令：** commit, init, shortlog, lfs, code（共 5 个）
 
 ---
 
@@ -26,11 +27,11 @@
 - **前置依赖/由前一批次交付**：表示该能力已经在上游计划中确定，但必须等前一批次实施完成后，下一批次才能把它当作现成能力使用。
 - **本批新增**：表示能力在当前批次内交付，不应被同一时点的其他文档写成“现已存在”，除非明确注明“依赖本批先落地后复用”。
 
-第一批中的关键依赖链必须按以下顺序显式引用，而不是隐含假设：
+第一批中的关键依赖链已经按以下顺序落地，后续文档应直接以此为基线，而不是继续写成“前置依赖”：
 
-- `config` 先交付 `config_kv`、`resolve_env()`、vault key 管理与 `vault` 命令吸收；`init`、`clone`、`push/pull` 等命令只能在此基础上切换读取链路。
-- `init` 再交付 `run_init()`、顶层渲染层拆分、separate-layout 全链路移除，以及嵌套 fetch 的静默子级 `OutputConfig` 约束；`clone` 只能把这些能力写成“前置依赖”，不能提前写成“当前代码已具备”。
-- `clone` 复用 `init` 的纯执行层与 `config` 的解析/认证基础设施，但 clone 自己的 JSON schema、错误码和渲染行为仍由 clone 批次独立定义。
+- `config` 已交付 `config_kv`、`resolve_env()`、vault key 管理与 `vault` 命令吸收；`init`、`clone`、`push/pull` 等命令已在此基础上切换读取链路。
+- `init` 已交付 `run_init()`、顶层渲染层拆分、separate-layout 全链路移除，以及嵌套 fetch 的静默子级 `OutputConfig` 约束；后续文档可直接把这些能力写成“当前代码已具备”。
+- `clone` 已开始复用 `init` 的纯执行层与 `config` 的解析/认证基础设施，但 clone 命令**整体尚未落地**；其成功 schema、错误码、checkout 失败传播与 cleanup 收尾项继续在 `clone.md` 中维护。
 
 后续各命令子计划如依赖前一批次交付项，应在“已完成前置条件与当前代码状态”中明确区分：
 
@@ -44,9 +45,9 @@
 
 | 顺序 | 命令 | 当前状态 | 改进重点 |
 |------|------|--------|--------|
-| **1** | `config` | 有 JSON，语法冗长 | vault-backed 存储；子命令风格；SSH/GPG key 管理；env vault；吸收 vault 命令功能（详见下方专节） |
-| **2** | `init` | 无 JSON，确认消息不明确，耗时 ~6s | 确认消息 "Initialized empty repository in \<path\>"；JSON 输出；实时进度输出；本批不再以 `<500ms` 为目标 |
-| **3** | `clone` | 有 JSON，有进度 | 补齐 StableErrorCode；网络错误 hint；性能优化（目标 <1s） |
+| **1** | `config` | ✅ 已落地 | vault-backed 存储；子命令风格；SSH/GPG key 管理；env vault；吸收 vault 命令功能（详见下方专节） |
+| **2** | `init` | ✅ 已落地 | 作为 `clone` / 转发路径的已交付基线；后续仅维护回归测试与文档同步 |
+| **3** | `clone` | 进行中：已切换到 `run_init()`，但成功 JSON / 显式错误码 / checkout 失败传播尚未落地 | 结构化成功输出；显式 `StableErrorCode`；network/auth hint；checkout 失败传播；cleanup warning |
 | **4** | `add` | 与 Git 一致，无 JSON | JSON 输出（变更文件列表）；--dry-run 支持；错误信息包含文件名 |
 | **5** | `status` | 有 JSON + porcelain，无 hint | 添加下一步命令建议（"use libra add..."）；补齐 StableErrorCode |
 | **6** | `commit` | ✅ 已完成（金标准） | 作为参考模板，无需改动 |
@@ -57,9 +58,10 @@
 
 **第一批内部依赖说明：**
 
-- `config` 是第一批内部的最上游前置项；在 `config_kv`、`resolve_env()`、vault key 管理与 `vault` 命令吸收完成前，`init`/`clone` 文档不得把这些能力写成“当前代码已具备”。
-- `init` 是 `clone` 的直接前置项；`clone` 对 `run_init()`、separate-layout 移除、嵌套 fetch 静默规则的引用，应统一写成“由 init 批次交付的前置依赖”。
-- `clone` 的性能优化目标虽在总表中保留，但不应覆盖其子计划中“本批不做性能优化”的执行边界；总表表达优先级，子计划表达本批范围。
+- `config` 已是第一批内部的已落地基线；`init`/`clone` 文档应直接在其上描述现状与剩余收尾项。
+- `init` 已落地并成为 `clone` 的直接基线；`clone` 对 `run_init()`、separate-layout 移除、嵌套 fetch 静默规则的引用，应统一写成“当前代码已具备”。
+- `clone` 尚未整体落地；README 只把它视为“已接入 init/config 基线、仍在收尾”的命令，不应写成已完成。
+- `clone` 的性能优化目标仍保留为后续独立批次，不覆盖 `clone.md` 中“本批不做性能优化”的执行边界。
 
 ### 第二批：状态变更确认命令（P0 消灭"沉默"）
 
