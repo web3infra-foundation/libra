@@ -16,7 +16,6 @@ use tempfile::tempdir;
 use super::*;
 
 #[test]
-#[serial]
 fn test_cherry_pick_cli_outside_repository_returns_fatal_128() {
     let temp = tempdir().unwrap();
     let output = run_libra_command(&["cherry-pick", "abc123"], temp.path());

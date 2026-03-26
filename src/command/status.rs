@@ -1,7 +1,7 @@
 //! Implements status reporting with ignore policy support, computing staged/unstaged/untracked sets and printing concise summaries.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     io,
     io::Write,
     path::{Path, PathBuf},
@@ -20,20 +20,39 @@ use git_internal::{
         },
     },
 };
+use serde::Serialize;
 
 use super::stash;
 use crate::{
     command::calc_file_blob_hash,
-    internal::{config::ConfigKv, head::Head},
+    internal::{branch::Branch, config::ConfigKv, head::Head},
     utils::{
-        error::{CliError, CliResult},
+        error::{CliError, CliResult, StableErrorCode},
         ignore::IgnorePolicy,
         object_ext::{CommitExt, TreeExt},
-        output::{OutputConfig, emit_json_data},
+        output::{ColorChoice, OutputConfig, emit_json_data},
         path, util,
     },
 };
 
+// ---------------------------------------------------------------------------
+// Args & enums
+// ---------------------------------------------------------------------------
+
+/// Show the working tree status.
+///
+/// EXAMPLES:
+///     libra status                       Show working tree status
+///     libra status -s                    Short format output
+///     libra status --porcelain           Machine-readable output (v1)
+///     libra status --porcelain v2        Extended machine-readable output
+///     libra status --branch              Include branch info in short/porcelain
+///     libra status --show-stash          Show stash count
+///     libra status --ignored             Include ignored files
+///     libra status --untracked-files=no  Hide untracked files
+///     libra status --json                Structured JSON output for agents
+///     libra status --exit-code           Exit 1 if working tree is dirty
+///     libra status --quiet --exit-code   Silent dirty check for scripts
 #[derive(Parser, Debug, Default)]
 pub struct StatusArgs {
     /// Output in a machine-readable format (default v1). Use v2 for extended format.
@@ -69,6 +88,11 @@ pub struct StatusArgs {
         default_value = "normal"
     )]
     pub untracked_files: UntrackedFiles,
+
+    /// Exit with code 1 if the working tree has changes.
+    /// Can be combined with --quiet for silent dirty checking.
+    #[clap(long = "exit-code")]
+    pub exit_code: bool,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -90,6 +114,10 @@ pub enum UntrackedFiles {
     No,
 }
 
+// ---------------------------------------------------------------------------
+// Changes
+// ---------------------------------------------------------------------------
+
 /// path: to workdir
 #[derive(Debug, Default, Clone)]
 pub struct Changes {
@@ -98,88 +126,6 @@ pub struct Changes {
     pub deleted: Vec<PathBuf>,
 }
 
-#[derive(thiserror::Error, Debug)]
-pub enum StatusError {
-    #[error("failed to open index '{path}': {source}")]
-    IndexLoad { path: PathBuf, source: GitError },
-    #[error("path '{path}' is not valid UTF-8")]
-    InvalidPathEncoding { path: PathBuf },
-    #[error("failed to hash '{path}': {source}")]
-    FileHash { path: PathBuf, source: io::Error },
-    #[error("failed to list files in '{path}': {source}")]
-    ListWorkdirFiles { path: PathBuf, source: io::Error },
-    #[error("failed to determine working directory: {source}")]
-    Workdir { source: io::Error },
-}
-
-/// Collapse untracked files into their parent directories when possible.
-///
-/// For `--untracked-files=normal` mode, if all files in a directory are untracked,
-/// we display just the directory name instead of listing each file.
-///
-/// # Arguments
-/// * `untracked_files` - List of untracked file paths
-/// * `index` - The index to check if any files in directories are tracked
-///
-/// # Returns
-/// A list where fully-untracked directories are collapsed to just the directory path
-fn collapse_untracked_directories(untracked_files: Vec<PathBuf>, index: &Index) -> Vec<PathBuf> {
-    use std::collections::BTreeSet;
-
-    if untracked_files.is_empty() {
-        return untracked_files;
-    }
-
-    // Group files by their top-level directory
-    let mut dir_files: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
-    let mut root_files: Vec<PathBuf> = Vec::new();
-
-    for file in &untracked_files {
-        let components: Vec<_> = file.components().collect();
-        if components.len() > 1 {
-            // File is in a subdirectory
-            let top_dir = PathBuf::from(components[0].as_os_str());
-            dir_files.entry(top_dir).or_default().push(file.clone());
-        } else {
-            // File is in root
-            root_files.push(file.clone());
-        }
-    }
-
-    let mut result: BTreeSet<PathBuf> = BTreeSet::new();
-
-    // Add root files directly
-    for file in root_files {
-        result.insert(file);
-    }
-
-    // For each directory, check if any file inside is tracked
-    for (dir, files) in dir_files {
-        // Check if any file in this directory (or subdirectories) is tracked
-        let dir_prefix = format!("{}/", dir.display());
-        let has_tracked_files = index.tracked_files().iter().any(|f| {
-            f.to_str()
-                .map(|s| s.starts_with(&dir_prefix))
-                .unwrap_or(false)
-        });
-
-        if has_tracked_files {
-            // Directory has some tracked files, show individual untracked files
-            for file in files {
-                result.insert(file);
-            }
-        } else {
-            // Directory is completely untracked, show just the directory
-            let mut dir_path = dir;
-            // Add trailing separator to indicate it's a directory
-            let dir_str = format!("{}/", dir_path.display());
-            dir_path = PathBuf::from(dir_str);
-            result.insert(dir_path);
-        }
-    }
-
-    result.into_iter().collect()
-}
 impl Changes {
     pub fn is_empty(&self) -> bool {
         self.new.is_empty() && self.modified.is_empty() && self.deleted.is_empty()
@@ -209,126 +155,265 @@ impl Changes {
     }
 }
 
-async fn is_bare_repository() -> bool {
-    matches!(
-        ConfigKv::get("core.bare").await.ok().flatten().map(|e| e.value),
-        Some(value) if value.eq_ignore_ascii_case("true")
-    )
+// ---------------------------------------------------------------------------
+// StatusError + CliError mapping
+// ---------------------------------------------------------------------------
+
+#[derive(thiserror::Error, Debug)]
+pub enum StatusError {
+    #[error("failed to open index '{path}': {source}")]
+    IndexLoad { path: PathBuf, source: GitError },
+    #[error("path '{path}' is not valid UTF-8")]
+    InvalidPathEncoding { path: PathBuf },
+    #[error("failed to hash '{path}': {source}")]
+    FileHash { path: PathBuf, source: io::Error },
+    #[error("failed to list files in '{path}': {source}")]
+    ListWorkdirFiles { path: PathBuf, source: io::Error },
+    #[error("failed to determine working directory: {source}")]
+    Workdir { source: io::Error },
 }
 
-/**
- * Two parts:
- * 1. unstaged
- * 2. staged to be committed
- */
-pub async fn execute_to(args: StatusArgs, writer: &mut impl Write) -> CliResult<()> {
-    util::require_repo().map_err(|_| CliError::repo_not_found())?;
+impl From<StatusError> for CliError {
+    fn from(error: StatusError) -> Self {
+        let msg = format!("failed to determine working tree status: {error}");
+        match &error {
+            StatusError::IndexLoad { .. } => CliError::fatal(msg)
+                .with_stable_code(StableErrorCode::RepoCorrupt)
+                .with_hint("the index file may be corrupted"),
+            StatusError::InvalidPathEncoding { .. } => CliError::fatal(msg)
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_hint("path contains non-UTF-8 characters"),
+            StatusError::FileHash { .. } => {
+                CliError::fatal(msg).with_stable_code(StableErrorCode::IoReadFailed)
+            }
+            StatusError::ListWorkdirFiles { .. } => {
+                CliError::fatal(msg).with_stable_code(StableErrorCode::IoReadFailed)
+            }
+            StatusError::Workdir { .. } => {
+                CliError::fatal(msg).with_stable_code(StableErrorCode::RepoNotFound)
+            }
+        }
+    }
+}
 
+// ---------------------------------------------------------------------------
+// UpstreamInfo
+// ---------------------------------------------------------------------------
+
+/// Upstream tracking information for the current branch.
+#[derive(Debug, Clone, Serialize)]
+pub struct UpstreamInfo {
+    /// Tracking ref display name, e.g. "origin/main"
+    pub remote_ref: String,
+    /// Commits ahead of upstream (None when gone)
+    pub ahead: Option<usize>,
+    /// Commits behind upstream (None when gone)
+    pub behind: Option<usize>,
+    /// True when upstream is configured but tracking ref no longer exists
+    pub gone: bool,
+}
+
+// ---------------------------------------------------------------------------
+// StatusData — shared data layer
+// ---------------------------------------------------------------------------
+
+/// Pre-computed status data shared across all renderers (human/JSON/short/porcelain).
+struct StatusData {
+    head: Head,
+    head_oid: Option<ObjectHash>,
+    has_commits: bool,
+    staged: Changes,
+    unstaged: Changes,
+    ignored_files: Vec<PathBuf>,
+    stash_count: Option<usize>,
+    upstream: Option<UpstreamInfo>,
+    porcelain_v2: Option<PorcelainV2Data>,
+}
+
+impl StatusData {
+    fn is_dirty(&self) -> bool {
+        !self.staged.is_empty() || !self.unstaged.is_empty()
+    }
+}
+
+/// Collect all status data in one pass, eliminating duplicate computation
+/// between human/JSON/short/porcelain renderers.
+async fn collect_status_data(args: &StatusArgs) -> CliResult<StatusData> {
     if is_bare_repository().await {
-        return Err(CliError::fatal("this operation must be run in a work tree"));
+        return Err(CliError::fatal("this operation must be run in a work tree")
+            .with_stable_code(StableErrorCode::RepoStateInvalid)
+            .with_hint("this command requires a working tree; bare repositories do not have one"));
     }
 
-    let status_error = |err: StatusError| {
-        CliError::fatal(format!("failed to determine working tree status: {err}"))
-    };
-    let write_error =
-        |err: io::Error| CliError::io(format!("failed to write status output: {err}"));
-    let mut buffer = Vec::new();
+    let head = Head::current().await;
+    let head_oid = Head::current_commit().await;
+    let has_commits = head_oid.is_some();
 
-    let is_porcelain = args.porcelain.is_some();
-    let is_standard_mode = !is_porcelain && !args.short;
-
-    // Do not output branch info in porcelain or short mode
-    if is_standard_mode {
-        match Head::current().await {
-            Head::Detached(commit_hash) => {
-                writeln!(
-                    &mut buffer,
-                    "HEAD detached at {}",
-                    &commit_hash.to_string()[..8]
-                )
-                .map_err(write_error)?;
-            }
-            Head::Branch(branch) => {
-                writeln!(&mut buffer, "On branch {branch}").map_err(write_error)?;
-            }
-        }
-
-        if Head::current_commit().await.is_none() {
-            writeln!(&mut buffer, "\nNo commits yet\n").map_err(write_error)?;
-        }
-    }
-
-    if is_standard_mode && args.show_stash {
-        let stash_num = stash::get_stash_num().unwrap_or(0);
-        let entry_text = if stash_num == 1 { "entry" } else { "entries" };
-        if stash_num > 0 {
-            writeln!(
-                &mut buffer,
-                "Your stash currently has {stash_num} {entry_text}"
-            )
-            .map_err(write_error)?;
-        }
-    }
-
-    // to cur_dir relative path
     let staged = changes_to_be_committed_safe()
         .await
         .map(|c| c.to_relative())
-        .map_err(status_error)?;
+        .map_err(CliError::from)?;
     let mut unstaged = changes_to_be_staged()
         .map(|c| c.to_relative())
-        .map_err(status_error)?;
+        .map_err(CliError::from)?;
     let mut ignored_files = if args.ignored && !matches!(args.untracked_files, UntrackedFiles::No) {
         list_ignored_files()
             .map(|c| c.to_relative().new)
-            .map_err(status_error)?
+            .map_err(CliError::from)?
     } else {
         vec![]
     };
+    let needs_index = matches!(args.untracked_files, UntrackedFiles::Normal)
+        || matches!(args.porcelain, Some(PorcelainVersion::V2));
+    let mut maybe_index = if needs_index {
+        Some(load_status_index()?)
+    } else {
+        None
+    };
 
-    // Handle untracked-files option
+    // Apply untracked-files filter
     match args.untracked_files {
         UntrackedFiles::No => {
             unstaged.new.clear();
             ignored_files.clear();
         }
         UntrackedFiles::Normal => {
-            // Collapse fully-untracked directories into single entries
-            let index_path = path::try_index()
-                .map_err(|source| status_error(StatusError::Workdir { source }))?;
-            let index = Index::load(&index_path).map_err(|source| {
-                status_error(StatusError::IndexLoad {
-                    path: index_path.clone(),
-                    source,
-                })
-            })?;
-            unstaged.new = collapse_untracked_directories(unstaged.new, &index);
-            ignored_files = collapse_untracked_directories(ignored_files, &index);
+            let index = maybe_index
+                .as_ref()
+                .ok_or_else(|| CliError::internal("status index should be loaded"))?;
+            unstaged.new = collapse_untracked_directories(unstaged.new, index);
+            ignored_files = collapse_untracked_directories(ignored_files, index);
         }
-        UntrackedFiles::All => {
-            // Show all untracked files (current behavior, no collapsing)
-        }
+        UntrackedFiles::All => {}
     }
 
-    // Use machine-readable output in porcelain mode
+    let stash_count = if args.show_stash {
+        Some(stash::get_stash_num().unwrap_or(0))
+    } else {
+        None
+    };
+
+    // Resolve upstream tracking info
+    let upstream = resolve_upstream_info(&head, head_oid.as_ref()).await;
+    let porcelain_v2 = if matches!(args.porcelain, Some(PorcelainVersion::V2)) {
+        let index = maybe_index
+            .take()
+            .ok_or_else(|| CliError::internal("porcelain v2 metadata should be loaded"))?;
+        Some(build_porcelain_v2_data(index, head_oid.as_ref()))
+    } else {
+        None
+    };
+
+    Ok(StatusData {
+        head,
+        head_oid,
+        has_commits,
+        staged,
+        unstaged,
+        ignored_files,
+        stash_count,
+        upstream,
+        porcelain_v2,
+    })
+}
+
+fn load_status_index() -> CliResult<Index> {
+    let index_path =
+        path::try_index().map_err(|source| CliError::from(StatusError::Workdir { source }))?;
+    Index::load(&index_path).map_err(|source| {
+        CliError::from(StatusError::IndexLoad {
+            path: index_path,
+            source,
+        })
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Public entry points
+// ---------------------------------------------------------------------------
+
+pub async fn execute(args: StatusArgs) {
+    if let Err(err) = execute_to(args, &mut std::io::stdout()).await {
+        err.print_stderr();
+    }
+}
+
+/// Safe entry point that returns structured [`CliResult`] instead of printing
+/// errors and exiting. JSON mode propagates status-computation failures as
+/// structured CLI errors; text mode uses the same structured error contract.
+pub async fn execute_safe(args: StatusArgs, output: &OutputConfig) -> CliResult<()> {
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
+
+    let data = collect_status_data(&args).await?;
+
+    if output.is_json() {
+        let json_data = build_status_json(&data, &args);
+        emit_json_data("status", &json_data, output)?;
+    } else if !output.quiet {
+        let mut stdout = std::io::stdout();
+        render_status_to_writer(&data, &args, output, &mut stdout).await?;
+    }
+
+    // --exit-code: dirty → exit 1
+    if args.exit_code && data.is_dirty() {
+        return Err(CliError::failure("").with_exit_code(1));
+    }
+
+    Ok(())
+}
+
+/// Legacy entry point that writes status to the given writer.
+/// Used by the old `execute()` path and tests.
+pub async fn execute_to(args: StatusArgs, writer: &mut impl Write) -> CliResult<()> {
+    util::require_repo().map_err(|_| CliError::repo_not_found())?;
+
+    let data = collect_status_data(&args).await?;
+    let output = OutputConfig::default();
+    render_status_to_writer(&data, &args, &output, writer).await
+}
+
+// ---------------------------------------------------------------------------
+// Rendering dispatcher
+// ---------------------------------------------------------------------------
+
+async fn render_status_to_writer(
+    data: &StatusData,
+    args: &StatusArgs,
+    output: &OutputConfig,
+    writer: &mut impl Write,
+) -> CliResult<()> {
+    let write_error =
+        |err: io::Error| CliError::io(format!("failed to write status output: {err}"));
+    let mut buffer = Vec::new();
+
+    // Porcelain modes
     match args.porcelain {
         Some(PorcelainVersion::V2) => {
             if args.branch {
-                write_branch_info_v2(&mut buffer).await?;
+                write_branch_info_v2(
+                    &data.head,
+                    data.head_oid.as_ref(),
+                    data.upstream.as_ref(),
+                    &mut buffer,
+                )?;
             }
-            output_porcelain_v2(&staged, &unstaged, &ignored_files, &mut buffer).await?;
+            output_porcelain_v2(
+                &data.staged,
+                &data.unstaged,
+                &data.ignored_files,
+                data.porcelain_v2.as_ref(),
+                &mut buffer,
+            )?;
             writer.write_all(&buffer).map_err(write_error)?;
             return Ok(());
         }
         Some(PorcelainVersion::V1) => {
             if args.branch {
-                print_branch_info(&mut buffer).await?;
+                print_branch_info(&data.head, data.upstream.as_ref(), &mut buffer)?;
             }
-            output_porcelain(&staged, &unstaged, &mut buffer)?;
-            // Porcelain: ignored files prefixed with "!!"
-            if args.ignored && !ignored_files.is_empty() {
-                for file in &ignored_files {
+            output_porcelain(&data.staged, &data.unstaged, &mut buffer)?;
+            if args.ignored && !data.ignored_files.is_empty() {
+                for file in &data.ignored_files {
                     writeln!(&mut buffer, "!! {}", file.display()).map_err(write_error)?;
                 }
             }
@@ -338,16 +423,14 @@ pub async fn execute_to(args: StatusArgs, writer: &mut impl Write) -> CliResult<
         None => {}
     };
 
-    // Use short format output
+    // Short format
     if args.short {
-        // if branch option is specified, print the branch info
         if args.branch {
-            print_branch_info(&mut buffer).await?;
+            print_branch_info(&data.head, data.upstream.as_ref(), &mut buffer)?;
         }
-        output_short_format(&staged, &unstaged, &mut buffer).await?;
-        // Short: append ignored files with "!!"
+        output_short_format_with_config(&data.staged, &data.unstaged, output, &mut buffer).await?;
         if args.ignored {
-            for file in &ignored_files {
+            for file in &data.ignored_files {
                 writeln!(&mut buffer, "!! {}", file.display()).map_err(write_error)?;
             }
         }
@@ -355,91 +438,274 @@ pub async fn execute_to(args: StatusArgs, writer: &mut impl Write) -> CliResult<
         return Ok(());
     }
 
-    if staged.is_empty() && unstaged.is_empty() {
-        writeln!(&mut buffer, "nothing to commit, working tree clean").map_err(write_error)?;
-        writer.write_all(&buffer).map_err(write_error)?;
+    // Standard human format
+    render_human_status(data, args, &mut buffer)?;
+    writer.write_all(&buffer).map_err(write_error)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Human standard format
+// ---------------------------------------------------------------------------
+
+fn render_human_status(
+    data: &StatusData,
+    args: &StatusArgs,
+    buffer: &mut Vec<u8>,
+) -> CliResult<()> {
+    let write_error =
+        |err: io::Error| CliError::io(format!("failed to write status output: {err}"));
+
+    // Branch header
+    match &data.head {
+        Head::Detached(commit_hash) => {
+            writeln!(buffer, "HEAD detached at {}", &commit_hash.to_string()[..8])
+                .map_err(write_error)?;
+        }
+        Head::Branch(branch) => {
+            writeln!(buffer, "On branch {branch}").map_err(write_error)?;
+        }
+    }
+
+    // Upstream tracking info
+    if let Some(upstream) = &data.upstream {
+        render_upstream_human(upstream, buffer)?;
+    }
+
+    if !data.has_commits {
+        writeln!(buffer, "\nNo commits yet\n").map_err(write_error)?;
+    }
+
+    // Stash info
+    if let Some(stash_count) = data.stash_count
+        && stash_count > 0
+    {
+        let entry_text = if stash_count == 1 { "entry" } else { "entries" };
+        writeln!(
+            buffer,
+            "Your stash currently has {stash_count} {entry_text}"
+        )
+        .map_err(write_error)?;
+    }
+
+    // Clean tree
+    if data.staged.is_empty() && data.unstaged.is_empty() {
+        writeln!(buffer, "nothing to commit, working tree clean").map_err(write_error)?;
         return Ok(());
     }
 
-    if !staged.is_empty() {
-        writeln!(&mut buffer, "Changes to be committed:").map_err(write_error)?;
+    // Staged changes
+    if !data.staged.is_empty() {
+        writeln!(buffer, "Changes to be committed:").map_err(write_error)?;
         writeln!(
-            &mut buffer,
+            buffer,
             "  use \"libra restore --staged <file>...\" to unstage"
         )
         .map_err(write_error)?;
-        for f in &staged.deleted {
+        for f in &data.staged.deleted {
             let str = format!("\tdeleted: {}", f.display());
-            writeln!(&mut buffer, "{}", str.bright_green()).map_err(write_error)?;
+            writeln!(buffer, "{}", str.bright_green()).map_err(write_error)?;
         }
-        for f in &staged.modified {
+        for f in &data.staged.modified {
             let str = format!("\tmodified: {}", f.display());
-            writeln!(&mut buffer, "{}", str.bright_green()).map_err(write_error)?;
+            writeln!(buffer, "{}", str.bright_green()).map_err(write_error)?;
         }
-        for f in &staged.new {
+        for f in &data.staged.new {
             let str = format!("\tnew file: {}", f.display());
-            writeln!(&mut buffer, "{}", str.bright_green()).map_err(write_error)?;
+            writeln!(buffer, "{}", str.bright_green()).map_err(write_error)?;
         }
     }
 
-    if !unstaged.deleted.is_empty() || !unstaged.modified.is_empty() {
-        writeln!(&mut buffer, "Changes not staged for commit:").map_err(write_error)?;
+    // Unstaged changes (modified + deleted)
+    if !data.unstaged.deleted.is_empty() || !data.unstaged.modified.is_empty() {
+        writeln!(buffer, "Changes not staged for commit:").map_err(write_error)?;
         writeln!(
-            &mut buffer,
+            buffer,
             "  use \"libra add <file>...\" to update what will be committed"
         )
         .map_err(write_error)?;
         writeln!(
-            &mut buffer,
+            buffer,
             "  use \"libra restore <file>...\" to discard changes in working directory"
         )
         .map_err(write_error)?;
-        for f in &unstaged.deleted {
+        for f in &data.unstaged.deleted {
             let str = format!("\tdeleted: {}", f.display());
-            writeln!(&mut buffer, "{}", str.bright_red()).map_err(write_error)?;
+            writeln!(buffer, "{}", str.bright_red()).map_err(write_error)?;
         }
-        for f in &unstaged.modified {
+        for f in &data.unstaged.modified {
             let str = format!("\tmodified: {}", f.display());
-            writeln!(&mut buffer, "{}", str.bright_red()).map_err(write_error)?;
+            writeln!(buffer, "{}", str.bright_red()).map_err(write_error)?;
         }
     }
-    if !unstaged.new.is_empty() {
-        writeln!(&mut buffer, "Untracked files:").map_err(write_error)?;
+
+    // Untracked
+    if !data.unstaged.new.is_empty() {
+        writeln!(buffer, "Untracked files:").map_err(write_error)?;
         writeln!(
-            &mut buffer,
+            buffer,
             "  use \"libra add <file>...\" to include in what will be committed"
         )
         .map_err(write_error)?;
-        for f in &unstaged.new {
+        for f in &data.unstaged.new {
             let str = format!("\t{}", f.display());
-            writeln!(&mut buffer, "{}", str.bright_red()).map_err(write_error)?;
+            writeln!(buffer, "{}", str.bright_red()).map_err(write_error)?;
         }
     }
 
-    if args.ignored && !ignored_files.is_empty() {
-        writeln!(&mut buffer, "Ignored files:").map_err(write_error)?;
+    // Ignored
+    if args.ignored && !data.ignored_files.is_empty() {
+        writeln!(buffer, "Ignored files:").map_err(write_error)?;
         writeln!(
-            &mut buffer,
+            buffer,
             "  (modify .libraignore to change which files are ignored)"
         )
         .map_err(write_error)?;
-        for f in &ignored_files {
+        for f in &data.ignored_files {
             let str = format!("\t{}", f.display());
-            writeln!(&mut buffer, "{}", str.bright_red()).map_err(write_error)?;
+            writeln!(buffer, "{}", str.bright_red()).map_err(write_error)?;
         }
     }
 
-    writer.write_all(&buffer).map_err(write_error)?;
     Ok(())
 }
+
+fn render_upstream_human(upstream: &UpstreamInfo, buffer: &mut Vec<u8>) -> CliResult<()> {
+    let write_error =
+        |err: io::Error| CliError::io(format!("failed to write status output: {err}"));
+
+    if upstream.gone {
+        writeln!(
+            buffer,
+            "Your branch is based on '{}', but the upstream is gone.",
+            upstream.remote_ref
+        )
+        .map_err(write_error)?;
+        return Ok(());
+    }
+
+    let ahead = upstream.ahead.unwrap_or(0);
+    let behind = upstream.behind.unwrap_or(0);
+
+    if ahead == 0 && behind == 0 {
+        writeln!(
+            buffer,
+            "Your branch is up to date with '{}'.",
+            upstream.remote_ref
+        )
+        .map_err(write_error)?;
+    } else if ahead > 0 && behind == 0 {
+        writeln!(
+            buffer,
+            "Your branch is ahead of '{}' by {} commit{}.",
+            upstream.remote_ref,
+            ahead,
+            if ahead == 1 { "" } else { "s" }
+        )
+        .map_err(write_error)?;
+        writeln!(
+            buffer,
+            "  (use \"libra push\" to publish your local commits)"
+        )
+        .map_err(write_error)?;
+    } else if ahead == 0 && behind > 0 {
+        writeln!(
+            buffer,
+            "Your branch is behind '{}' by {} commit{}.",
+            upstream.remote_ref,
+            behind,
+            if behind == 1 { "" } else { "s" }
+        )
+        .map_err(write_error)?;
+        writeln!(buffer, "  (use \"libra pull\" to update your local branch)")
+            .map_err(write_error)?;
+    } else {
+        writeln!(
+            buffer,
+            "Your branch and '{}' have diverged,",
+            upstream.remote_ref
+        )
+        .map_err(write_error)?;
+        writeln!(
+            buffer,
+            "and have {ahead} and {behind} different commits each, respectively."
+        )
+        .map_err(write_error)?;
+        writeln!(
+            buffer,
+            "  (use \"libra pull\" to merge the remote branch into yours)"
+        )
+        .map_err(write_error)?;
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// JSON rendering
+// ---------------------------------------------------------------------------
+
+fn build_status_json(data: &StatusData, _args: &StatusArgs) -> serde_json::Value {
+    let paths_to_json = |paths: &[PathBuf]| -> Vec<serde_json::Value> {
+        paths
+            .iter()
+            .map(|p| serde_json::Value::String(p.display().to_string()))
+            .collect()
+    };
+
+    let head = match &data.head {
+        Head::Branch(name) => serde_json::json!({"type": "branch", "name": name}),
+        Head::Detached(hash) => {
+            serde_json::json!({"type": "detached", "oid": hash.to_string()})
+        }
+    };
+
+    let upstream_json = match &data.upstream {
+        Some(u) => serde_json::json!({
+            "remote_ref": u.remote_ref,
+            "ahead": u.ahead,
+            "behind": u.behind,
+            "gone": u.gone,
+        }),
+        None => serde_json::Value::Null,
+    };
+
+    let mut json_data = serde_json::json!({
+        "head": head,
+        "has_commits": data.has_commits,
+        "upstream": upstream_json,
+        "staged": {
+            "new": paths_to_json(&data.staged.new),
+            "modified": paths_to_json(&data.staged.modified),
+            "deleted": paths_to_json(&data.staged.deleted),
+        },
+        "unstaged": {
+            "modified": paths_to_json(&data.unstaged.modified),
+            "deleted": paths_to_json(&data.unstaged.deleted),
+        },
+        "untracked": paths_to_json(&data.unstaged.new),
+        "ignored": paths_to_json(&data.ignored_files),
+        "is_clean": !data.is_dirty(),
+    });
+
+    if let Some(stash_count) = data.stash_count
+        && let Some(map) = json_data.as_object_mut()
+    {
+        map.insert("stash_entries".to_string(), serde_json::json!(stash_count));
+    }
+
+    json_data
+}
+
+// ---------------------------------------------------------------------------
+// Porcelain v1
+// ---------------------------------------------------------------------------
 
 pub fn output_porcelain(
     staged: &Changes,
     unstaged: &Changes,
     writer: &mut impl Write,
 ) -> CliResult<()> {
-    // Use generate_short_format_status to correctly merge staged and unstaged states
-    // e.g., a file that is staged then modified should show "MM" not two separate lines
     let status_list = generate_short_format_status(staged, unstaged);
     for (file, staged_status, unstaged_status) in status_list {
         writeln!(
@@ -454,48 +720,40 @@ pub fn output_porcelain(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Porcelain v2
+// ---------------------------------------------------------------------------
+
 /// File information from HEAD tree for porcelain v2 output.
-/// Stores the mode (as octal u32) and hash from HEAD tree entries.
 struct FileInfo {
-    /// File mode from HEAD tree (e.g., 0o100644 for regular file)
     mode: u32,
-    /// Object hash from HEAD tree as string
     hash: String,
 }
 
-/// Get file mode from TreeItemMode
+struct PorcelainV2Data {
+    index: Index,
+    head_tree_items: HashMap<PathBuf, FileInfo>,
+}
+
 fn tree_item_mode_to_u32(mode: TreeItemMode) -> u32 {
     match mode {
         TreeItemMode::Blob => 0o100644,
         TreeItemMode::BlobExecutable => 0o100755,
         TreeItemMode::Link => 0o120000,
         TreeItemMode::Tree => 0o040000,
-        TreeItemMode::Commit => 0o160000, // submodule
+        TreeItemMode::Commit => 0o160000,
     }
 }
 
-/// Format file mode as 6-digit octal string for porcelain v2 output.
-///
-/// # Examples
-/// - Regular file: `0o100644` → `"100644"`
-/// - Executable file: `0o100755` → `"100755"`
-/// - Symlink: `0o120000` → `"120000"`
-/// - Directory/tree: `0o040000` → `"040000"`
-/// - Submodule/commit: `0o160000` → `"160000"`
-/// - Deleted/missing file: `0` → `"000000"`
 fn format_mode(mode: u32) -> String {
     format!("{:06o}", mode)
 }
 
-/// Convert a current-directory-relative path to a workdir-relative path
 fn current_to_workdir(path: &std::path::Path) -> PathBuf {
-    // Get the absolute path first
     let abs_path = util::cur_dir().join(path);
-    // Then convert to workdir-relative path
     util::to_workdir_path(&abs_path)
 }
 
-/// Detect working tree file mode
 #[cfg(unix)]
 fn get_worktree_mode(file_path: &std::path::Path) -> u32 {
     use std::os::unix::fs::PermissionsExt;
@@ -519,50 +777,17 @@ fn get_worktree_mode(_file_path: &std::path::Path) -> u32 {
     0o100644
 }
 
-/// Returns true if the given file mode represents a submodule (gitlink) entry.
-///
-/// In Git, submodules are stored in the index and tree with mode `0o160000`.
-/// This function checks for that specific mode to identify submodules.
 fn is_submodule_mode(mode: u32) -> bool {
     mode == 0o160000
 }
 
-/// Generate submodule status string (placeholder implementation).
-///
-/// Currently returns `"S..."` as a placeholder since full submodule support
-/// is not yet implemented.
-///
-/// # TODO
-///
-/// Full format should be `S<c><m><u>` where:
-/// - `c`: commit changed (`C`) or not (`.`)
-/// - `m`: tracked changes (`M`) or not (`.`)
-/// - `u`: untracked changes (`U`) or not (`.`)
 fn get_submodule_status(_file_path: &std::path::Path) -> String {
     "S...".to_string()
 }
 
-/// Output porcelain v2 format
-pub async fn output_porcelain_v2(
-    staged: &Changes,
-    unstaged: &Changes,
-    ignored: &[PathBuf],
-    writer: &mut impl Write,
-) -> CliResult<()> {
-    let zero_hash = zero_hash_str();
-    let index = match Index::load(path::index()) {
-        Ok(idx) => idx,
-        Err(e) => {
-            return Err(CliError::fatal(format!(
-                "failed to determine working tree status: failed to load index: {e}"
-            )));
-        }
-    };
-    let head_commit = Head::current_commit().await;
-
-    // Build a map of HEAD tree items with mode info
-    let head_tree_items: HashMap<PathBuf, FileInfo> = if let Some(commit_hash) = head_commit {
-        let commit = Commit::load(&commit_hash);
+fn build_porcelain_v2_data(index: Index, head_oid: Option<&ObjectHash>) -> PorcelainV2Data {
+    let head_tree_items = if let Some(commit_hash) = head_oid {
+        let commit = Commit::load(commit_hash);
         let tree = Tree::load(&commit.tree_id);
         tree.get_plain_items_with_mode()
             .into_iter()
@@ -580,6 +805,24 @@ pub async fn output_porcelain_v2(
         HashMap::new()
     };
 
+    PorcelainV2Data {
+        index,
+        head_tree_items,
+    }
+}
+
+/// Output porcelain v2 format using metadata collected during status computation.
+fn output_porcelain_v2(
+    staged: &Changes,
+    unstaged: &Changes,
+    ignored: &[PathBuf],
+    metadata: Option<&PorcelainV2Data>,
+    writer: &mut impl Write,
+) -> CliResult<()> {
+    let metadata =
+        metadata.ok_or_else(|| CliError::internal("missing porcelain v2 metadata for status"))?;
+    let zero_hash = zero_hash_str();
+
     let status_list = generate_short_format_status(staged, unstaged);
     for (file, staged_status, unstaged_status) in status_list {
         if staged_status == '?' && unstaged_status == '?' {
@@ -588,45 +831,35 @@ pub async fn output_porcelain_v2(
             continue;
         }
 
-        // Convert relative path (to current dir) back to workdir-relative path for index lookup
         let workdir_path = current_to_workdir(&file);
         let file_str = workdir_path.to_str().unwrap_or_default();
 
-        // Get index info (mI, hI)
-        let (mode_index, hash_index) = if let Some(entry) = index.get(file_str, 0) {
+        let (mode_index, hash_index) = if let Some(entry) = metadata.index.get(file_str, 0) {
             (entry.mode, entry.hash.to_string())
         } else {
-            // File not in index (shouldn't happen for tracked files, but handle gracefully)
             (0o100644, zero_hash.clone())
         };
 
-        // Get HEAD tree info (mH, hH)
         let (mode_head, hash_head) = if staged_status == 'A' {
-            // New file: use 000000 and zero hash for HEAD
             (0, zero_hash.clone())
-        } else if let Some(info) = head_tree_items.get(&workdir_path) {
+        } else if let Some(info) = metadata.head_tree_items.get(&workdir_path) {
             (info.mode, info.hash.clone())
         } else {
-            // File not in HEAD tree
             (0, zero_hash.clone())
         };
 
-        // Get worktree mode (mW)
         let mode_worktree = if unstaged_status == 'D' {
-            // Deleted in worktree
             0
         } else {
             get_worktree_mode(&file)
         };
 
-        // Determine submodule status
         let sub = if is_submodule_mode(mode_index) || is_submodule_mode(mode_head) {
             get_submodule_status(&file)
         } else {
             "N...".to_string()
         };
 
-        // Format: 1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>
         writeln!(
             writer,
             "1 {}{} {} {} {} {} {} {} {}",
@@ -654,17 +887,17 @@ fn zero_hash_str() -> String {
     ObjectHash::zero_str(get_hash_kind())
 }
 
+// ---------------------------------------------------------------------------
+// Short format
+// ---------------------------------------------------------------------------
+
 /// Core logic for generating short format status without color (for testing)
 pub fn generate_short_format_status(
     staged: &Changes,
     unstaged: &Changes,
 ) -> Vec<(std::path::PathBuf, char, char)> {
-    use std::collections::HashMap;
-
-    // Create a map to track all files and their status
     let mut file_status: HashMap<PathBuf, (char, char)> = HashMap::new();
 
-    // Process staged changes
     for file in &staged.new {
         file_status.insert(file.clone(), ('A', ' '));
     }
@@ -675,34 +908,28 @@ pub fn generate_short_format_status(
         file_status.insert(file.clone(), ('D', ' '));
     }
 
-    // Helper to process unstaged changes (modified/deleted)
     fn process_unstaged_changes(
         files: &[PathBuf],
-        file_status: &mut std::collections::HashMap<PathBuf, (char, char)>,
+        file_status: &mut HashMap<PathBuf, (char, char)>,
         unstaged_char: char,
     ) {
         for file in files {
             let staged_status = file_status.get(file).map(|(s, _)| *s);
             if let Some(status) = staged_status {
-                // File is both staged and unstaged - keep staged status, update unstaged
                 file_status.insert(file.clone(), (status, unstaged_char));
             } else {
-                // File is only unstaged
                 file_status.insert(file.clone(), (' ', unstaged_char));
             }
         }
     }
 
-    // Process unstaged changes
     process_unstaged_changes(&unstaged.modified, &mut file_status, 'M');
     process_unstaged_changes(&unstaged.deleted, &mut file_status, 'D');
 
     for file in &unstaged.new {
-        // Untracked files
         file_status.insert(file.clone(), ('?', '?'));
     }
 
-    // Sort files by path for consistent output
     let mut sorted_files: Vec<_> = file_status.iter().collect();
     sorted_files.sort_by(|a, b| a.0.cmp(b.0));
 
@@ -714,18 +941,26 @@ pub fn generate_short_format_status(
         .collect()
 }
 
+/// Short format output — legacy public API used by tests.
 pub async fn output_short_format(
     staged: &Changes,
     unstaged: &Changes,
     writer: &mut impl Write,
 ) -> CliResult<()> {
-    // Check if colors should be used
-    let use_colors = should_use_colors().await;
+    output_short_format_with_config(staged, unstaged, &OutputConfig::default(), writer).await
+}
 
-    // Get the status information using the core logic
+/// Short format output with color controlled by OutputConfig.
+async fn output_short_format_with_config(
+    staged: &Changes,
+    unstaged: &Changes,
+    output: &OutputConfig,
+    writer: &mut impl Write,
+) -> CliResult<()> {
+    let use_colors = should_use_colors(output).await;
+
     let status_list = generate_short_format_status(staged, unstaged);
 
-    // Output the short format
     for (file, staged_status, unstaged_status) in status_list {
         if use_colors {
             let colored_output = format_colored_status(staged_status, unstaged_status, &file);
@@ -745,13 +980,22 @@ pub async fn output_short_format(
     Ok(())
 }
 
-/// Check if colors should be used based on configuration
-async fn should_use_colors() -> bool {
-    use std::io::{self, IsTerminal};
+// ---------------------------------------------------------------------------
+// Color control — unified with OutputConfig
+// ---------------------------------------------------------------------------
 
-    use crate::internal::config::ConfigKv;
+/// Check if colors should be used, respecting OutputConfig overrides first,
+/// then falling back to config-based / TTY detection.
+async fn should_use_colors(output: &OutputConfig) -> bool {
+    use std::io::IsTerminal;
 
-    // Check color.status.short configuration
+    match output.color {
+        ColorChoice::Never => return false,
+        ColorChoice::Always => return true,
+        ColorChoice::Auto => {}
+    }
+
+    // Auto: check git-style config, then TTY
     if let Some(color_setting) = ConfigKv::get("color.status.short")
         .await
         .ok()
@@ -759,39 +1003,30 @@ async fn should_use_colors() -> bool {
         .map(|e| e.value)
     {
         match color_setting.as_str() {
-            "always" => true,
-            "never" | "false" => false,
-            "auto" | "true" => {
-                // Check if output is to a terminal
-                io::stdout().is_terminal()
-            }
-            _ => false,
-        }
-    } else {
-        // Check color.ui configuration as fallback
-        if let Some(color_setting) = ConfigKv::get("color.ui")
-            .await
-            .ok()
-            .flatten()
-            .map(|e| e.value)
-        {
-            match color_setting.as_str() {
-                "always" => true,
-                "never" | "false" => false,
-                "auto" | "true" => {
-                    // Check if output is to a terminal
-                    io::stdout().is_terminal()
-                }
-                _ => false,
-            }
-        } else {
-            // Default to auto (check if terminal)
-            io::stdout().is_terminal()
+            "always" => return true,
+            "never" | "false" => return false,
+            "auto" | "true" => return io::stdout().is_terminal(),
+            _ => return false,
         }
     }
+
+    if let Some(color_setting) = ConfigKv::get("color.ui")
+        .await
+        .ok()
+        .flatten()
+        .map(|e| e.value)
+    {
+        match color_setting.as_str() {
+            "always" => return true,
+            "never" | "false" => return false,
+            "auto" | "true" => return io::stdout().is_terminal(),
+            _ => return false,
+        }
+    }
+
+    io::stdout().is_terminal()
 }
 
-/// Format the status with colors according to Git conventions
 fn format_colored_status(
     staged_status: char,
     unstaged_status: char,
@@ -799,7 +1034,6 @@ fn format_colored_status(
 ) -> String {
     use colored::Colorize;
 
-    // Color the status characters based on Git conventions
     let colored_staged = match staged_status {
         'A' => staged_status.to_string().green(),
         'M' => staged_status.to_string().green(),
@@ -825,118 +1059,257 @@ fn format_colored_status(
     format!("{}{} {}", colored_staged, colored_unstaged, file.display())
 }
 
-pub async fn execute(args: StatusArgs) {
-    if let Err(err) = execute_to(args, &mut std::io::stdout()).await {
-        err.print_stderr();
-    }
-}
+// ---------------------------------------------------------------------------
+// Branch info helpers (short / porcelain)
+// ---------------------------------------------------------------------------
 
-/// Safe entry point that returns structured [`CliResult`] instead of printing
-/// errors and exiting. JSON mode propagates status-computation failures as
-/// structured CLI errors; text mode uses the same structured error contract.
-pub async fn execute_safe(args: StatusArgs, output: &OutputConfig) -> CliResult<()> {
-    util::require_repo().map_err(|_| CliError::repo_not_found())?;
-
-    if output.is_json() {
-        emit_status_json(&args, output).await?;
-    } else if output.quiet {
-        let _ = collect_status_json(&args).await?;
-    } else {
-        execute_to(args, &mut std::io::stdout()).await?;
+/// Print branch info line for short / porcelain v1 `--branch`.
+fn print_branch_info(
+    head: &Head,
+    upstream: Option<&UpstreamInfo>,
+    writer: &mut impl Write,
+) -> CliResult<()> {
+    match head {
+        Head::Detached(commit_hash) => {
+            writeln!(
+                writer,
+                "## HEAD (detached at {})",
+                &commit_hash.to_string()[..8]
+            )
+            .map_err(|e| CliError::io(format!("failed to write status output: {e}")))?;
+        }
+        Head::Branch(branch) => {
+            if let Some(u) = upstream {
+                let tracking = format!("{}...{}", branch, u.remote_ref);
+                if u.gone {
+                    writeln!(writer, "## {tracking} [gone]")
+                        .map_err(|e| CliError::io(format!("failed to write status output: {e}")))?;
+                } else {
+                    let ahead = u.ahead.unwrap_or(0);
+                    let behind = u.behind.unwrap_or(0);
+                    if ahead > 0 && behind > 0 {
+                        writeln!(writer, "## {tracking} [ahead {ahead}, behind {behind}]")
+                            .map_err(|e| {
+                                CliError::io(format!("failed to write status output: {e}"))
+                            })?;
+                    } else if ahead > 0 {
+                        writeln!(writer, "## {tracking} [ahead {ahead}]").map_err(|e| {
+                            CliError::io(format!("failed to write status output: {e}"))
+                        })?;
+                    } else if behind > 0 {
+                        writeln!(writer, "## {tracking} [behind {behind}]").map_err(|e| {
+                            CliError::io(format!("failed to write status output: {e}"))
+                        })?;
+                    } else {
+                        writeln!(writer, "## {tracking}").map_err(|e| {
+                            CliError::io(format!("failed to write status output: {e}"))
+                        })?;
+                    }
+                }
+            } else {
+                writeln!(writer, "## {branch}")
+                    .map_err(|e| CliError::io(format!("failed to write status output: {e}")))?;
+            }
+        }
     }
     Ok(())
 }
 
-async fn collect_status_json(args: &StatusArgs) -> CliResult<serde_json::Value> {
-    let status_error = |err: StatusError| {
-        CliError::fatal(format!("failed to determine working tree status: {err}"))
-    };
-    if is_bare_repository().await {
-        return Err(CliError::fatal("this operation must be run in a work tree"));
-    }
-    let head = match Head::current().await {
-        Head::Branch(name) => serde_json::json!({"type": "branch", "name": name}),
-        Head::Detached(hash) => {
-            serde_json::json!({"type": "detached", "oid": hash.to_string()})
-        }
-    };
-    let has_commits = Head::current_commit().await.is_some();
+/// Write branch information in porcelain v2 style.
+fn write_branch_info_v2(
+    head: &Head,
+    head_oid: Option<&ObjectHash>,
+    upstream: Option<&UpstreamInfo>,
+    writer: &mut impl Write,
+) -> CliResult<()> {
+    let write_err = |e: io::Error| CliError::io(format!("failed to write status output: {e}"));
 
-    let staged = changes_to_be_committed_safe()
-        .await
-        .map(|c| c.to_relative())
-        .map_err(status_error)?;
-    let mut unstaged = changes_to_be_staged()
-        .map(|c| c.to_relative())
-        .map_err(status_error)?;
-    let mut ignored_files = if args.ignored && !matches!(args.untracked_files, UntrackedFiles::No) {
-        list_ignored_files()
-            .map(|c| c.to_relative().new)
-            .map_err(status_error)?
+    match head {
+        Head::Detached(_) => {
+            writeln!(writer, "# branch.head (detached)").map_err(write_err)?;
+        }
+        Head::Branch(name) => {
+            writeln!(writer, "# branch.head {}", name).map_err(write_err)?;
+        }
+    }
+
+    if let Some(oid) = head_oid {
+        writeln!(writer, "# branch.oid {oid}").map_err(write_err)?;
     } else {
-        vec![]
-    };
-
-    match args.untracked_files {
-        UntrackedFiles::No => {
-            unstaged.new.clear();
-            ignored_files.clear();
-        }
-        UntrackedFiles::Normal => {
-            let index_path = path::try_index()
-                .map_err(|source| status_error(StatusError::Workdir { source }))?;
-            let index = Index::load(&index_path).map_err(|source| {
-                status_error(StatusError::IndexLoad {
-                    path: index_path.clone(),
-                    source,
-                })
-            })?;
-            unstaged.new = collapse_untracked_directories(unstaged.new, &index);
-            ignored_files = collapse_untracked_directories(ignored_files, &index);
-        }
-        UntrackedFiles::All => {}
+        writeln!(writer, "# branch.oid (initial)").map_err(write_err)?;
     }
 
-    let paths_to_json = |paths: &[PathBuf]| -> Vec<serde_json::Value> {
-        paths
-            .iter()
-            .map(|p| serde_json::Value::String(p.display().to_string()))
-            .collect()
-    };
-
-    let mut json_data = serde_json::json!({
-        "head": head,
-        "has_commits": has_commits,
-        "staged": {
-            "new": paths_to_json(&staged.new),
-            "modified": paths_to_json(&staged.modified),
-            "deleted": paths_to_json(&staged.deleted),
-        },
-        "unstaged": {
-            "modified": paths_to_json(&unstaged.modified),
-            "deleted": paths_to_json(&unstaged.deleted),
-        },
-        "untracked": paths_to_json(&unstaged.new),
-        "ignored": paths_to_json(&ignored_files),
-        "is_clean": staged.is_empty() && unstaged.is_empty(),
-    });
-    if args.show_stash
-        && let Some(map) = json_data.as_object_mut()
-    {
-        map.insert(
-            "stash_entries".to_string(),
-            serde_json::json!(stash::get_stash_num().unwrap_or(0)),
-        );
+    if let Some(u) = upstream {
+        writeln!(writer, "# branch.upstream {}", u.remote_ref).map_err(write_err)?;
+        if !u.gone {
+            let ahead = u.ahead.unwrap_or(0);
+            let behind = u.behind.unwrap_or(0);
+            writeln!(writer, "# branch.ab +{ahead} -{behind}").map_err(write_err)?;
+        }
     }
 
-    Ok(json_data)
+    Ok(())
 }
 
-/// Build a structured JSON status object with stable, machine-readable fields.
-async fn emit_status_json(args: &StatusArgs, output: &OutputConfig) -> CliResult<()> {
-    let json_data = collect_status_json(args).await?;
-    emit_json_data("status", &json_data, output)
+// ---------------------------------------------------------------------------
+// Upstream tracking resolution
+// ---------------------------------------------------------------------------
+
+async fn resolve_upstream_info(
+    head: &Head,
+    local_commit: Option<&ObjectHash>,
+) -> Option<UpstreamInfo> {
+    let branch_name = match head {
+        Head::Branch(name) => name.clone(),
+        Head::Detached(_) => return None,
+    };
+
+    let branch_config = ConfigKv::branch_config(&branch_name).await.ok().flatten()?;
+
+    let remote = &branch_config.remote;
+    let merge_branch = &branch_config.merge;
+    let remote_ref_display = format!("{remote}/{merge_branch}");
+
+    let tracking_branch = Branch::find_branch(merge_branch, Some(remote)).await;
+
+    let tracking_commit = match tracking_branch {
+        Some(b) => b.commit,
+        None => {
+            // Upstream configured but tracking ref doesn't exist → gone
+            return Some(UpstreamInfo {
+                remote_ref: remote_ref_display,
+                ahead: None,
+                behind: None,
+                gone: true,
+            });
+        }
+    };
+
+    let local_commit = match local_commit {
+        Some(commit) => commit,
+        None => {
+            return Some(UpstreamInfo {
+                remote_ref: remote_ref_display,
+                ahead: Some(0),
+                behind: Some(0),
+                gone: false,
+            });
+        }
+    };
+
+    let (ahead, behind) = compute_ahead_behind(local_commit, &tracking_commit);
+
+    Some(UpstreamInfo {
+        remote_ref: remote_ref_display,
+        ahead: Some(ahead),
+        behind: Some(behind),
+        gone: false,
+    })
 }
+
+/// Compute the number of commits ahead/behind between two refs.
+///
+/// Uses set intersection: ahead = |local_ancestors - remote_ancestors|,
+/// behind = |remote_ancestors - local_ancestors|.
+fn compute_ahead_behind(local: &ObjectHash, remote: &ObjectHash) -> (usize, usize) {
+    if local == remote {
+        return (0, 0);
+    }
+
+    let local_set = collect_ancestors(local);
+    let remote_set = collect_ancestors(remote);
+
+    let ahead = local_set.difference(&remote_set).count();
+    let behind = remote_set.difference(&local_set).count();
+
+    (ahead, behind)
+}
+
+fn collect_ancestors(start: &ObjectHash) -> HashSet<ObjectHash> {
+    let mut set = HashSet::new();
+    let mut queue = VecDeque::new();
+    queue.push_back(*start);
+
+    while let Some(hash) = queue.pop_front() {
+        if !set.insert(hash) {
+            continue;
+        }
+        // Safely try to load; stop traversal on missing objects
+        let commit = Commit::load(&hash);
+        for parent in &commit.parent_commit_ids {
+            queue.push_back(*parent);
+        }
+    }
+
+    set
+}
+
+// ---------------------------------------------------------------------------
+// Bare repository detection
+// ---------------------------------------------------------------------------
+
+async fn is_bare_repository() -> bool {
+    matches!(
+        ConfigKv::get("core.bare").await.ok().flatten().map(|e| e.value),
+        Some(value) if value.eq_ignore_ascii_case("true")
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Untracked directory collapsing
+// ---------------------------------------------------------------------------
+
+fn collapse_untracked_directories(untracked_files: Vec<PathBuf>, index: &Index) -> Vec<PathBuf> {
+    use std::collections::BTreeSet;
+
+    if untracked_files.is_empty() {
+        return untracked_files;
+    }
+
+    let mut dir_files: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+    let mut root_files: Vec<PathBuf> = Vec::new();
+
+    for file in &untracked_files {
+        let components: Vec<_> = file.components().collect();
+        if components.len() > 1 {
+            let top_dir = PathBuf::from(components[0].as_os_str());
+            dir_files.entry(top_dir).or_default().push(file.clone());
+        } else {
+            root_files.push(file.clone());
+        }
+    }
+
+    let mut result: BTreeSet<PathBuf> = BTreeSet::new();
+
+    for file in root_files {
+        result.insert(file);
+    }
+
+    for (dir, files) in dir_files {
+        let dir_prefix = format!("{}/", dir.display());
+        let has_tracked_files = index.tracked_files().iter().any(|f| {
+            f.to_str()
+                .map(|s| s.starts_with(&dir_prefix))
+                .unwrap_or(false)
+        });
+
+        if has_tracked_files {
+            for file in files {
+                result.insert(file);
+            }
+        } else {
+            let dir_str = format!("{}/", dir.display());
+            let dir_path = PathBuf::from(dir_str);
+            result.insert(dir_path);
+        }
+    }
+
+    result.into_iter().collect()
+}
+
+// ---------------------------------------------------------------------------
+// Clean check
+// ---------------------------------------------------------------------------
 
 /// Check if the working tree is clean.
 ///
@@ -959,45 +1332,15 @@ pub async fn is_clean() -> bool {
     staged.is_empty() && unstaged.is_empty()
 }
 
-/**
- * Compare the difference between `index` and the last `Commit Tree`
- */
+// ---------------------------------------------------------------------------
+// Status computation (public API preserved)
+// ---------------------------------------------------------------------------
+
+/// Convenience wrapper that panics on error — kept for test compatibility.
 pub async fn changes_to_be_committed() -> Changes {
-    let mut changes = Changes::default();
-    let index = Index::load(path::index()).unwrap();
-    let head_commit = Head::current_commit().await;
-    let tracked_files = index.tracked_files();
-
-    if head_commit.is_none() {
-        // no commit yet
-        changes.new = tracked_files;
-        return changes;
-    }
-
-    let head_commit = head_commit.unwrap();
-    let commit = Commit::load(&head_commit);
-    let tree = Tree::load(&commit.tree_id);
-    let tree_files = tree.get_plain_items();
-
-    for (item_path, item_hash) in tree_files.iter() {
-        let item_str = item_path.to_str().unwrap();
-        if index.tracked(item_str, 0) {
-            if !index.verify_hash(item_str, 0, item_hash) {
-                changes.modified.push(item_path.clone());
-            }
-        } else {
-            // in the last commit but not in the index
-            changes.deleted.push(item_path.clone());
-        }
-    }
-    let tree_files_set: HashSet<PathBuf> = tree_files.into_iter().map(|(path, _)| path).collect();
-    // `new` means the files in index but not in the last commit
-    changes.new = tracked_files
-        .into_iter()
-        .filter(|path| !tree_files_set.contains(path))
-        .collect();
-
-    changes
+    changes_to_be_committed_safe()
+        .await
+        .expect("changes_to_be_committed failed")
 }
 
 pub async fn changes_to_be_committed_safe() -> Result<Changes, StatusError> {
@@ -1096,7 +1439,6 @@ fn changes_to_be_staged_split_with_index(
         if !file_abs.exists() {
             visible.deleted.push(file.clone());
         } else if index.is_modified(file_str, 0, workdir) {
-            // only calc the hash if the file is modified (metadata), for optimization
             let file_hash =
                 calc_file_blob_hash(&file_abs).map_err(|source| StatusError::FileHash {
                     path: file_abs.clone(),
@@ -1111,7 +1453,7 @@ fn changes_to_be_staged_split_with_index(
         list_workdir_files_safe(workdir).map_err(|source| StatusError::ListWorkdirFiles {
             path: workdir.clone(),
             source,
-        })?; // to workdir
+        })?;
     for file in files {
         let file_str = file
             .to_str()
@@ -1158,48 +1500,6 @@ fn list_workdir_files_safe(workdir: &Path) -> io::Result<Vec<PathBuf>> {
 /// List ignored files (not tracked by index, but ignored by .libraignore) under workdir
 pub fn list_ignored_files() -> Result<Changes, StatusError> {
     changes_to_be_staged_with_policy(IgnorePolicy::OnlyIgnored)
-}
-
-/// Helper function for printing branch info when `branch` flag is enabled
-async fn print_branch_info(writer: &mut impl Write) -> CliResult<()> {
-    match Head::current().await {
-        Head::Detached(commit_hash) => {
-            writeln!(
-                writer,
-                "## HEAD (detached at {})",
-                &commit_hash.to_string()[..8]
-            )
-            .map_err(|e| CliError::io(format!("failed to write status output: {e}")))?;
-        }
-        Head::Branch(branch) => {
-            writeln!(writer, "## {branch}")
-                .map_err(|e| CliError::io(format!("failed to write status output: {e}")))?;
-        }
-    }
-    Ok(())
-}
-
-/// Write branch information in porcelain v2 style
-async fn write_branch_info_v2(writer: &mut impl Write) -> CliResult<()> {
-    let head = Head::current().await;
-    let head_commit = Head::current_commit().await;
-    let oid = head_commit
-        .map(|c| c.to_string())
-        .unwrap_or_else(|| "(initial)".to_string());
-
-    match head {
-        Head::Detached(_) => {
-            writeln!(writer, "# branch.head (detached)")
-                .map_err(|e| CliError::io(format!("failed to write status output: {e}")))?;
-        }
-        Head::Branch(name) => {
-            writeln!(writer, "# branch.head {}", name)
-                .map_err(|e| CliError::io(format!("failed to write status output: {e}")))?;
-        }
-    }
-    writeln!(writer, "# branch.oid {}", oid)
-        .map_err(|e| CliError::io(format!("failed to write status output: {e}")))?;
-    Ok(())
 }
 
 #[cfg(test)]

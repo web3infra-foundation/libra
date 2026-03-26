@@ -141,7 +141,6 @@ async fn setup_repo_with_commit_with(
 }
 
 #[test]
-#[serial]
 fn test_tag_cli_duplicate_tag_returns_conflict_exit_code_without_stdout() {
     let repo = create_committed_repo_via_cli();
 

@@ -10,7 +10,6 @@ use libra::utils::{output::OutputConfig, path};
 use super::*;
 
 #[test]
-#[serial]
 fn test_mv_cli_outside_repository_returns_fatal_128() {
     let temp = tempdir().unwrap();
     let output = run_libra_command(&["mv", "a.txt", "b.txt"], temp.path());

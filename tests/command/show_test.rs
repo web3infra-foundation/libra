@@ -127,7 +127,6 @@ fn create_annotated_tag(temp_path: &std::path::Path, tag_name: &str, message: &s
 }
 
 #[test]
-#[serial]
 fn test_show_cli_badref_returns_cli_exit_code() {
     let repo = create_committed_repo_via_cli();
 

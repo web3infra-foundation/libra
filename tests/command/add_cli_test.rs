@@ -49,7 +49,7 @@ fn missing_pathspec_is_fatal_and_atomic() {
 }
 
 #[test]
-fn ignored_path_returns_conflict_exit_code_and_valid_paths_still_stage() {
+fn partial_ignore_stages_good_files_and_warns() {
     let temp = tempdir().unwrap();
     let repo = temp.path().join("repo");
     init_repo(&repo);
@@ -58,11 +58,14 @@ fn ignored_path_returns_conflict_exit_code_and_valid_paths_still_stage() {
     fs::write(repo.join("ignored.txt"), "ignored").unwrap();
 
     let output = run_libra(&["add", "good.txt", "ignored.txt"], &repo);
-    assert_eq!(output.status.code(), Some(128));
+    // Partial ignore: good.txt staged successfully → exit 0 (warning on stderr)
+    assert_eq!(output.status.code(), Some(0));
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("ignored.txt"));
-    assert!(stderr.contains("Hint: use -f if you really want to add them."));
+    assert!(
+        stderr.contains("ignored.txt"),
+        "stderr should warn about ignored file: {stderr}"
+    );
 
     let status = run_libra(&["status", "--short"], &repo);
     let stdout = String::from_utf8_lossy(&status.stdout);
@@ -109,7 +112,7 @@ fn corrupt_index_reports_fatal_without_panic() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("fatal: unable to read index"));
-    assert!(stderr.contains("Error-Code: LBR-IO-001"));
+    assert!(stderr.contains("Error-Code: LBR-REPO-002"));
     assert!(!stderr.contains("thread 'main' panicked"));
     assert!(!stderr.contains("stack backtrace"));
 }

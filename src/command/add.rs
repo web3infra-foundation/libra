@@ -2,7 +2,8 @@
 //! policy, refreshing index entries, and writing blob objects.
 
 use std::{
-    env, io,
+    env,
+    io::{self, Write},
     path::{Path, PathBuf},
 };
 
@@ -14,18 +15,30 @@ use git_internal::{
         object::blob::Blob,
     },
 };
+use serde::Serialize;
 
 use crate::{
     command::status::{self, Changes},
     utils::{
-        error::{CliError, CliResult},
+        error::{CliError, CliResult, StableErrorCode},
         lfs,
         object_ext::BlobExt,
-        output::OutputConfig,
+        output::{self, OutputConfig},
         path, util,
     },
 };
 
+/// Stage file contents for the next commit.
+///
+/// EXAMPLES:
+///     libra add .                        Stage all changes in current directory
+///     libra add src/main.rs              Stage a specific file
+///     libra add src/ tests/              Stage multiple paths
+///     libra add -A                       Stage all changes (adds, modifies, removes)
+///     libra add -u                       Update tracked files only (no new files)
+///     libra add --dry-run .              Preview what would be staged
+///     libra add -f ignored_file.log      Force-add an ignored file
+///     libra add --refresh                Refresh index metadata without staging
 #[derive(Parser, Debug)]
 pub struct AddArgs {
     /// pathspec... files & dir to add content from.
@@ -95,19 +108,122 @@ pub enum AddError {
 impl From<AddError> for CliError {
     fn from(error: AddError) -> Self {
         match &error {
+            AddError::NotInRepo => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::RepoNotFound)
+                .with_hint("run 'libra init' to create a repository"),
             AddError::PathspecNotMatched { .. } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
                 .with_hint("check the path and try again.")
                 .with_hint("use 'libra status' to inspect tracked and untracked files."),
-            _ => CliError::fatal(error.to_string()),
+            AddError::PathOutsideRepo { .. } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_hint("all paths must be within the repository working tree"),
+            AddError::IndexLoad { .. } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::RepoCorrupt)
+                .with_hint("the index file may be corrupted; try 'libra status' to verify"),
+            AddError::IndexSave { .. } => {
+                CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
+            }
+            AddError::RefreshFailed { .. } => {
+                CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
+            }
+            AddError::CreateIndexEntry { .. } => {
+                CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoWriteFailed)
+            }
+            AddError::InvalidPathEncoding { .. } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::CliInvalidTarget)
+                .with_hint("path contains non-UTF-8 characters"),
+            AddError::Workdir { source } => {
+                if source.kind() == io::ErrorKind::NotFound {
+                    CliError::fatal(error.to_string())
+                        .with_stable_code(StableErrorCode::RepoNotFound)
+                } else {
+                    CliError::fatal(error.to_string())
+                        .with_stable_code(StableErrorCode::IoReadFailed)
+                }
+            }
+            AddError::Status { .. } => CliError::fatal(error.to_string())
+                .with_stable_code(StableErrorCode::RepoCorrupt)
+                .with_hint("failed to compute working tree status"),
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Structured output types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AddFailure {
+    pub path: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AddOutput {
+    /// New files staged
+    pub added: Vec<String>,
+    /// Modified files staged
+    pub modified: Vec<String>,
+    /// Deleted files staged (tracked file no longer in worktree)
+    pub removed: Vec<String>,
+    /// Files whose metadata was refreshed (--refresh mode)
+    pub refreshed: Vec<String>,
+    /// Paths ignored by .libraignore (only when pathspec matches ignored files)
+    pub ignored: Vec<String>,
+    /// Paths that failed under --ignore-errors
+    pub failed: Vec<AddFailure>,
+    /// Whether this was a dry-run (no actual changes made)
+    pub dry_run: bool,
+}
+
+impl AddOutput {
+    fn empty(dry_run: bool) -> Self {
+        Self {
+            added: Vec::new(),
+            modified: Vec::new(),
+            removed: Vec::new(),
+            refreshed: Vec::new(),
+            ignored: Vec::new(),
+            failed: Vec::new(),
+            dry_run,
+        }
+    }
+
+    fn total_staged(&self) -> usize {
+        self.added.len() + self.modified.len() + self.removed.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.total_staged() == 0 && self.refreshed.is_empty()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Action tracking for add_a_file
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StagedAction {
+    Added,
+    Modified,
+    Removed,
+    Unchanged,
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 struct ValidatedPathspecs {
     files: Vec<PathBuf>,
     ignored: Vec<String>,
 }
+
+// ---------------------------------------------------------------------------
+// Public entry points
+// ---------------------------------------------------------------------------
 
 pub async fn execute(args: AddArgs) {
     if let Err(err) = execute_safe(args, &OutputConfig::default()).await {
@@ -118,7 +234,25 @@ pub async fn execute(args: AddArgs) {
 /// Safe entry point that returns structured [`CliResult`] instead of printing
 /// errors and exiting. Stages changes by resolving pathspecs, respecting
 /// ignore policy, and writing blob objects to storage.
-pub async fn execute_safe(args: AddArgs, _output: &OutputConfig) -> CliResult<()> {
+pub async fn execute_safe(args: AddArgs, output: &OutputConfig) -> CliResult<()> {
+    let verbose = args.verbose;
+    let dry_run = args.dry_run;
+    let result = run_add(&args).await?;
+
+    // --- Render output ---
+    render_add_output(&result, output, verbose, dry_run)?;
+
+    // --- Warning tracking for ignored / partial failures ---
+    if !result.ignored.is_empty() || !result.failed.is_empty() {
+        output::record_warning();
+    }
+
+    Ok(())
+}
+
+/// Pure execution entry point. Performs all staging logic and returns a
+/// structured [`AddOutput`] without printing anything.
+pub async fn run_add(args: &AddArgs) -> CliResult<AddOutput> {
     let workdir = util::try_working_dir().map_err(|source| {
         if source.kind() == io::ErrorKind::NotFound {
             AddError::NotInRepo
@@ -141,12 +275,12 @@ pub async fn execute_safe(args: AddArgs, _output: &OutputConfig) -> CliResult<()
         }
     })?;
 
-    // `String` to `PathBuf`
+    // Resolve pathspecs
     let requested_paths: Vec<PathBuf> = if args.pathspec.is_empty() {
         if !args.all && !args.update && !args.refresh {
-            eprintln!("Nothing specified, nothing added.");
-            eprintln!("hint: maybe you wanted to say 'libra add .'?");
-            return Ok(());
+            return Err(CliError::command_usage("nothing specified, nothing added")
+                .with_stable_code(StableErrorCode::CliInvalidArguments)
+                .with_hint("maybe you wanted to say 'libra add .'?"));
         }
         vec![workdir.clone()]
     } else {
@@ -180,6 +314,17 @@ pub async fn execute_safe(args: AddArgs, _output: &OutputConfig) -> CliResult<()
         &index,
     )?;
 
+    let mut add_output = AddOutput::empty(args.dry_run);
+
+    // Collect ignored paths into output
+    if !validated.ignored.is_empty() {
+        let mut sorted_ignored = validated.ignored.clone();
+        sorted_ignored.sort();
+        sorted_ignored.dedup();
+        add_output.ignored = sorted_ignored;
+    }
+
+    // --- Refresh mode ---
     if args.refresh {
         let tracked_modified = filter_refresh_candidates(
             &visible_changes.modified,
@@ -188,11 +333,13 @@ pub async fn execute_safe(args: AddArgs, _output: &OutputConfig) -> CliResult<()
             &current_dir,
         );
         if args.dry_run {
-            for file in &tracked_modified {
-                println!("refresh: {}", file.display());
-            }
+            add_output.refreshed = tracked_modified
+                .iter()
+                .map(|f| f.display().to_string())
+                .collect();
         } else {
-            refresh_files(&mut index, &tracked_modified, &workdir, args.verbose)?;
+            let refreshed = do_refresh_files(&mut index, &tracked_modified, &workdir)?;
+            add_output.refreshed = refreshed.iter().map(|f| f.display().to_string()).collect();
             index
                 .save(&index_path)
                 .map_err(|source| AddError::IndexSave {
@@ -201,9 +348,10 @@ pub async fn execute_safe(args: AddArgs, _output: &OutputConfig) -> CliResult<()
                 })?;
         }
 
-        return finish_ignored(validated.ignored);
+        return check_ignored_only_error(add_output);
     }
 
+    // --- Normal add mode ---
     let mut files = visible_changes.modified;
     files.extend(visible_changes.deleted);
     if !args.update {
@@ -215,20 +363,41 @@ pub async fn execute_safe(args: AddArgs, _output: &OutputConfig) -> CliResult<()
     files.dedup();
 
     if args.dry_run {
+        // Classify files for dry-run preview
         for file in &files {
-            println!("add: {}", file.display());
+            let status = check_file_status(file, &index, &workdir)?;
+            let path_str = file.display().to_string();
+            match status {
+                FileStatus::New => add_output.added.push(path_str),
+                FileStatus::Modified => add_output.modified.push(path_str),
+                FileStatus::Deleted => add_output.removed.push(path_str),
+                FileStatus::Unchanged | FileStatus::NotFound => {}
+            }
         }
-        return finish_ignored(validated.ignored);
+        return check_ignored_only_error(add_output);
     }
 
-    let mut per_file_failures = Vec::new();
+    // Stage each file
     for file in &files {
-        if let Err(err) = add_a_file(file, &mut index, &workdir, &storage_path, args.verbose).await
-        {
-            if !args.ignore_errors {
-                return Err(CliError::from(err));
+        match stage_a_file(file, &mut index, &workdir, &storage_path).await {
+            Ok(action) => {
+                let path_str = file.display().to_string();
+                match action {
+                    StagedAction::Added => add_output.added.push(path_str),
+                    StagedAction::Modified => add_output.modified.push(path_str),
+                    StagedAction::Removed => add_output.removed.push(path_str),
+                    StagedAction::Unchanged => {}
+                }
             }
-            per_file_failures.push(err.to_string());
+            Err(err) => {
+                if !args.ignore_errors {
+                    return Err(CliError::from(err));
+                }
+                add_output.failed.push(AddFailure {
+                    path: file.display().to_string(),
+                    message: err.to_string(),
+                });
+            }
         }
     }
 
@@ -239,30 +408,175 @@ pub async fn execute_safe(args: AddArgs, _output: &OutputConfig) -> CliResult<()
             source,
         })?;
 
-    if !per_file_failures.is_empty() {
-        return Err(CliError::failure(per_file_failures.join("\n")));
-    }
-
-    finish_ignored(validated.ignored)
+    check_ignored_only_error(add_output)
 }
 
-fn finish_ignored(ignored: Vec<String>) -> CliResult<()> {
-    if ignored.is_empty() {
+/// If the output has ignored files but nothing was staged, return an error.
+fn check_ignored_only_error(output: AddOutput) -> CliResult<AddOutput> {
+    if !output.ignored.is_empty() && output.is_empty() {
+        let mut message =
+            String::from("the following paths are ignored by one of your .libraignore files:");
+        for path in &output.ignored {
+            message.push('\n');
+            message.push_str(path);
+        }
+        return Err(CliError::fatal(message)
+            .with_stable_code(StableErrorCode::AddNothingStaged)
+            .with_hint("use -f if you really want to add them."));
+    }
+    Ok(output)
+}
+
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
+
+fn render_add_output(
+    result: &AddOutput,
+    output: &OutputConfig,
+    verbose: bool,
+    dry_run: bool,
+) -> CliResult<()> {
+    // JSON / machine mode
+    if output.is_json() {
+        return output::emit_json_data("add", result, output);
+    }
+
+    // Quiet mode: suppress stdout, but still emit warnings to stderr
+    if output.quiet {
+        render_warnings_stderr(result);
         return Ok(());
     }
 
-    let mut sorted = ignored;
-    sorted.sort();
-    sorted.dedup();
-    let mut message =
-        String::from("the following paths are ignored by one of your .libraignore files:");
-    for path in sorted {
-        message.push('\n');
-        message.push_str(&path);
+    let stdout = io::stdout();
+    let mut w = stdout.lock();
+
+    if dry_run {
+        render_dry_run(&mut w, result)?;
+    } else if !result.refreshed.is_empty() {
+        render_refresh(&mut w, result, verbose)?;
+    } else {
+        render_normal(&mut w, result, verbose)?;
     }
 
-    Err(CliError::failure(message).with_hint("use -f if you really want to add them."))
+    // Warnings to stderr
+    render_warnings_stderr(result);
+
+    Ok(())
 }
+
+fn render_dry_run(w: &mut impl Write, result: &AddOutput) -> CliResult<()> {
+    for f in &result.added {
+        writeln!(w, "add: {f}").map_err(write_err)?;
+    }
+    for f in &result.modified {
+        writeln!(w, "add: {f}").map_err(write_err)?;
+    }
+    for f in &result.removed {
+        writeln!(w, "remove: {f}").map_err(write_err)?;
+    }
+    for f in &result.refreshed {
+        writeln!(w, "refresh: {f}").map_err(write_err)?;
+    }
+    writeln!(w, "(dry run, no files were staged)").map_err(write_err)?;
+    Ok(())
+}
+
+fn render_refresh(w: &mut impl Write, result: &AddOutput, verbose: bool) -> CliResult<()> {
+    if verbose {
+        for f in &result.refreshed {
+            writeln!(w, "refreshed: {f}").map_err(write_err)?;
+        }
+    }
+    if result.refreshed.is_empty() {
+        writeln!(w, "nothing to refresh").map_err(write_err)?;
+    } else {
+        let n = result.refreshed.len();
+        let word = if n == 1 { "file" } else { "files" };
+        writeln!(w, "refreshed {n} {word}").map_err(write_err)?;
+    }
+    Ok(())
+}
+
+fn render_normal(w: &mut impl Write, result: &AddOutput, verbose: bool) -> CliResult<()> {
+    let total = result.total_staged();
+
+    if total == 0 {
+        writeln!(w, "nothing to add").map_err(write_err)?;
+        return Ok(());
+    }
+
+    // Verbose: per-file listing
+    if verbose {
+        for f in &result.added {
+            writeln!(w, "add(new): {f}").map_err(write_err)?;
+        }
+        for f in &result.modified {
+            writeln!(w, "add(modified): {f}").map_err(write_err)?;
+        }
+        for f in &result.removed {
+            writeln!(w, "removed: {f}").map_err(write_err)?;
+        }
+    }
+
+    // Summary line
+    if total == 1 {
+        let (path, kind) = if let Some(f) = result.added.first() {
+            (f.as_str(), "new file")
+        } else if let Some(f) = result.modified.first() {
+            (f.as_str(), "modified")
+        } else if let Some(f) = result.removed.first() {
+            (f.as_str(), "removed")
+        } else {
+            return Err(CliError::internal(
+                "single-file add summary is missing a staged path",
+            ));
+        };
+        writeln!(w, "add '{path}' ({kind})").map_err(write_err)?;
+    } else {
+        let mut parts = Vec::new();
+        if !result.added.is_empty() {
+            parts.push(format!("{} new", result.added.len()));
+        }
+        if !result.modified.is_empty() {
+            parts.push(format!("{} modified", result.modified.len()));
+        }
+        if !result.removed.is_empty() {
+            parts.push(format!("{} removed", result.removed.len()));
+        }
+        writeln!(w, "add {total} files ({})", parts.join(", ")).map_err(write_err)?;
+    }
+
+    Ok(())
+}
+
+fn render_warnings_stderr(result: &AddOutput) {
+    if !result.ignored.is_empty() {
+        eprintln!("warning: the following paths are ignored by one of your .libraignore files:");
+        for path in &result.ignored {
+            eprintln!("{path}");
+        }
+        eprintln!("hint: use -f if you really want to add them.");
+        eprintln!("hint: use 'libra restore --staged <file>' to unstage if needed");
+    }
+    if !result.failed.is_empty() {
+        eprintln!(
+            "warning: {} path(s) failed and were skipped (--ignore-errors):",
+            result.failed.len()
+        );
+        for failure in &result.failed {
+            eprintln!("  {}: {}", failure.path, failure.message);
+        }
+    }
+}
+
+fn write_err(e: io::Error) -> CliError {
+    CliError::io(format!("failed to write add output: {e}"))
+}
+
+// ---------------------------------------------------------------------------
+// Core staging logic
+// ---------------------------------------------------------------------------
 
 fn validate_pathspecs(
     raw_pathspecs: &[String],
@@ -381,12 +695,13 @@ fn filter_out_current_executable(files: &mut Vec<PathBuf>) {
     }
 }
 
-fn refresh_files(
+/// Refresh files and return the list of files actually refreshed.
+fn do_refresh_files(
     index: &mut Index,
     files: &[PathBuf],
     workdir: &Path,
-    verbose: bool,
-) -> Result<(), AddError> {
+) -> Result<Vec<PathBuf>, AddError> {
+    let mut refreshed = Vec::new();
     for file in files {
         if index
             .refresh(file, workdir)
@@ -394,22 +709,22 @@ fn refresh_files(
                 path: file.clone(),
                 source,
             })?
-            && verbose
         {
-            println!("refreshed: {}", file.display());
+            refreshed.push(file.clone());
         }
     }
-    Ok(())
+    Ok(refreshed)
 }
 
-/// `file` path must relative to the working directory
-async fn add_a_file(
+/// Stage a single file and return the action taken.
+///
+/// `file` path must be relative to the working directory.
+async fn stage_a_file(
     file: &Path,
     index: &mut Index,
     workdir: &Path,
     storage_path: &Path,
-    verbose: bool,
-) -> Result<(), AddError> {
+) -> Result<StagedAction, AddError> {
     let file_abs = workdir.join(file);
     if !util::is_sub_path(&file_abs, workdir) {
         return Err(AddError::PathOutsideRepo {
@@ -418,7 +733,7 @@ async fn add_a_file(
         });
     }
     if util::is_sub_path(&file_abs, storage_path) {
-        return Ok(());
+        return Ok(StagedAction::Unchanged);
     }
 
     let file_str = file.to_str().ok_or_else(|| AddError::InvalidPathEncoding {
@@ -437,9 +752,7 @@ async fn add_a_file(
                     }
                 })?,
             );
-            if verbose {
-                println!("add(new): {}", file.display());
-            }
+            Ok(StagedAction::Added)
         }
         FileStatus::Modified => {
             if index.is_modified(file_str, 0, workdir) {
@@ -452,26 +765,20 @@ async fn add_a_file(
                             source,
                         },
                     )?);
-                    if verbose {
-                        println!("add(modified): {}", file.display());
-                    }
+                    return Ok(StagedAction::Modified);
                 }
             }
+            Ok(StagedAction::Unchanged)
         }
         FileStatus::Deleted => {
             index.remove(file_str, 0);
-            if verbose {
-                println!("removed: {file_str}");
-            }
+            Ok(StagedAction::Removed)
         }
-        FileStatus::Unchanged => {}
-        FileStatus::NotFound => {
-            return Err(AddError::PathspecNotMatched {
-                pathspec: file.display().to_string(),
-            });
-        }
+        FileStatus::Unchanged => Ok(StagedAction::Unchanged),
+        FileStatus::NotFound => Err(AddError::PathspecNotMatched {
+            pathspec: file.display().to_string(),
+        }),
     }
-    Ok(())
 }
 
 enum FileStatus {
@@ -530,12 +837,13 @@ mod test {
     }
 
     #[test]
-    fn ignored_rendered_as_failure_with_hint() {
-        let err = finish_ignored(vec!["ignored.txt".to_string()]).unwrap_err();
-        assert!(err.render().contains("ignored.txt"));
-        assert!(
-            err.render()
-                .contains("Hint: use -f if you really want to add them.")
-        );
+    fn add_output_total_and_empty() {
+        let mut out = AddOutput::empty(false);
+        assert!(out.is_empty());
+        assert_eq!(out.total_staged(), 0);
+
+        out.added.push("a.rs".to_string());
+        assert_eq!(out.total_staged(), 1);
+        assert!(!out.is_empty());
     }
 }

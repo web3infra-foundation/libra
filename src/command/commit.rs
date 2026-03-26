@@ -354,7 +354,9 @@ async fn execute_impl(args: CommitArgs, output: &OutputConfig) -> Result<(), Com
 
     // Additional check: verify if there are any staged changes relative to HEAD
     // Skip this check for --amend operations
-    let staged_changes = status::changes_to_be_committed().await;
+    let staged_changes = status::changes_to_be_committed_safe()
+        .await
+        .map_err(|e| format!("failed to calculate staged changes: {}", e))?;
     if staged_changes.is_empty() && !args.allow_empty && !args.amend {
         return Err("nothing to commit, working tree clean".to_string().into());
     }

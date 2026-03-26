@@ -13,7 +13,6 @@ use super::{
 };
 
 #[test]
-#[serial]
 fn test_merge_cli_missing_branch_returns_error_1() {
     let repo = create_committed_repo_via_cli();
 
@@ -113,7 +112,6 @@ async fn test_merge_remote_branch() {
 }
 
 #[test]
-#[serial]
 /// Test merging diverged branches without fast-forward support.
 fn test_merge_diverged_branch_returns_fatal_128() {
     let temp_repo = create_committed_repo_via_cli();

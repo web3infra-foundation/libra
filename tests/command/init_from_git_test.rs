@@ -4,11 +4,6 @@
 
 use std::{fs, path::Path, process::Command};
 
-use libra::{
-    internal::{branch::Branch, config::ConfigKv, head::Head},
-    utils::test::ChangeDirGuard,
-};
-use serial_test::serial;
 use tempfile::tempdir;
 
 use super::parse_cli_error_stderr;
@@ -83,9 +78,8 @@ fn libra_command(cwd: &Path) -> Command {
     cmd
 }
 
-#[tokio::test]
-#[serial]
-async fn test_init_from_git_repository_converts_repo() {
+#[test]
+fn test_init_from_git_repository_converts_repo() {
     let (temp_root, git_dir) = create_simple_git_repo();
     let libra_dir = temp_root.path().join("libra-repo");
     fs::create_dir_all(&libra_dir).unwrap();
@@ -96,29 +90,45 @@ async fn test_init_from_git_repository_converts_repo() {
         .expect("failed to execute libra init");
     assert!(status.success(), "libra init should succeed");
 
-    let _guard = ChangeDirGuard::new(&libra_dir);
-
-    let remote = ConfigKv::remote_config("origin").await.ok().flatten();
-    assert!(remote.is_some(), "origin remote should be configured");
-    let remote = remote.unwrap();
+    // Verify origin remote is configured and points at the source .git directory
+    let remote_out = libra_command(&libra_dir)
+        .args(["remote", "-v"])
+        .output()
+        .expect("failed to run remote -v");
+    let remote_stdout = String::from_utf8_lossy(&remote_out.stdout);
     let expected_remote = git_dir.join(".git").canonicalize().unwrap();
-    let actual_remote = Path::new(&remote.url).canonicalize().unwrap();
-    assert_eq!(actual_remote, expected_remote);
-
-    let head = Head::current().await;
-    let branch_name = match head {
-        Head::Branch(name) => name,
-        _ => panic!("HEAD should point to a branch after conversion"),
-    };
-    let local_branches = Branch::list_branches(None).await;
     assert!(
-        local_branches.iter().any(|b| b.name == branch_name),
-        "local branch created from source Git repository should exist"
+        remote_stdout.contains(expected_remote.to_str().unwrap()),
+        "origin should point at {}, got: {remote_stdout}",
+        expected_remote.display()
+    );
+
+    // Verify HEAD points to a branch
+    let branch_out = libra_command(&libra_dir)
+        .args(["branch", "--show-current"])
+        .output()
+        .expect("failed to run branch --show-current");
+    let branch_name = String::from_utf8_lossy(&branch_out.stdout)
+        .trim()
+        .to_string();
+    assert!(
+        !branch_name.is_empty(),
+        "HEAD should point to a branch after conversion"
+    );
+
+    // Verify that branch exists in the local branch list
+    let list_out = libra_command(&libra_dir)
+        .args(["branch"])
+        .output()
+        .expect("failed to run branch");
+    let branches = String::from_utf8_lossy(&list_out.stdout);
+    assert!(
+        branches.contains(&branch_name),
+        "local branch '{branch_name}' should exist in branch list: {branches}"
     );
 }
 
 #[tokio::test]
-#[serial]
 async fn test_init_from_git_repository_missing_source_fails() {
     let temp_root = tempdir().unwrap();
     let libra_dir = temp_root.path().join("libra-repo");
@@ -145,7 +155,6 @@ async fn test_init_from_git_repository_missing_source_fails() {
 }
 
 #[tokio::test]
-#[serial]
 async fn test_init_from_git_repository_non_git_path_fails() {
     let temp_root = tempdir().unwrap();
     let non_git_dir = temp_root.path().join("not-a-git");
@@ -181,7 +190,6 @@ async fn test_init_from_git_repository_non_git_path_fails() {
 }
 
 #[tokio::test]
-#[serial]
 async fn test_init_from_git_repository_empty_git_repo_fails() {
     let temp_root = tempdir().unwrap();
     let git_dir = temp_root.path().join("empty-git");
@@ -217,7 +225,6 @@ async fn test_init_from_git_repository_empty_git_repo_fails() {
 }
 
 #[tokio::test]
-#[serial]
 async fn test_init_from_git_repository_multiple_branches() {
     let temp_root = tempdir().unwrap();
     let git_dir = temp_root.path().join("git-src");
@@ -355,7 +362,6 @@ async fn test_init_from_git_repository_multiple_branches() {
 }
 
 #[tokio::test]
-#[serial]
 async fn test_init_from_git_repository_with_gitlink_entry_succeeds() {
     let temp_root = tempdir().unwrap();
     let git_dir = temp_root.path().join("git-src");
@@ -509,9 +515,8 @@ async fn test_init_from_git_repository_with_gitlink_entry_succeeds() {
     );
 }
 
-#[tokio::test]
-#[serial]
-async fn test_init_from_git_repository_bare_source_repo() {
+#[test]
+fn test_init_from_git_repository_bare_source_repo() {
     let (temp_root, git_workdir) = create_simple_git_repo();
     let git_dir = temp_root.path().join("git-src-bare");
     assert!(
@@ -536,15 +541,19 @@ async fn test_init_from_git_repository_bare_source_repo() {
         .expect("failed to execute libra init");
     assert!(status.success(), "libra init should succeed for bare repo");
 
-    let _guard = ChangeDirGuard::new(&libra_dir);
-
-    let remote = ConfigKv::remote_config("origin").await.ok().flatten();
-    assert!(remote.is_some(), "origin remote should be configured");
+    let remote_out = libra_command(&libra_dir)
+        .args(["remote", "-v"])
+        .output()
+        .expect("failed to run remote -v");
+    let remote_stdout = String::from_utf8_lossy(&remote_out.stdout);
+    assert!(
+        remote_stdout.contains("origin"),
+        "origin remote should be configured, got: {remote_stdout}"
+    );
 }
 
-#[tokio::test]
-#[serial]
-async fn test_init_from_git_repository_bare_target_repo() {
+#[test]
+fn test_init_from_git_repository_bare_target_repo() {
     let (temp_root, git_dir) = create_simple_git_repo();
     let libra_dir = temp_root.path().join("libra-repo-bare");
     fs::create_dir_all(&libra_dir).unwrap();
@@ -560,17 +569,18 @@ async fn test_init_from_git_repository_bare_target_repo() {
         .expect("failed to execute libra init");
     assert!(status.success(), "bare libra init should succeed");
 
-    let _guard = ChangeDirGuard::new(&libra_dir);
-
-    let remote = ConfigKv::remote_config("origin").await.ok().flatten();
+    let remote_out = libra_command(&libra_dir)
+        .args(["remote", "-v"])
+        .output()
+        .expect("failed to run remote -v");
+    let remote_stdout = String::from_utf8_lossy(&remote_out.stdout);
     assert!(
-        remote.is_some(),
-        "origin remote should be configured for bare init"
+        remote_stdout.contains("origin"),
+        "origin remote should be configured for bare init, got: {remote_stdout}"
     );
 }
 
 #[test]
-#[serial]
 fn test_init_from_git_repository_json_reports_converted_from_without_stderr_noise() {
     let (temp_root, git_dir) = create_simple_git_repo();
     let libra_dir = temp_root.path().join("libra-repo-json");
@@ -612,7 +622,6 @@ fn test_init_from_git_repository_json_reports_converted_from_without_stderr_nois
 }
 
 #[test]
-#[serial]
 fn test_init_from_git_repository_human_progress_is_only_init_stage_text() {
     let (temp_root, git_dir) = create_simple_git_repo();
     let libra_dir = temp_root.path().join("libra-repo-human");

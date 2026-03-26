@@ -128,6 +128,7 @@ fn create_committed_repo_via_cli() -> tempfile::TempDir {
 }
 
 mod add_cli_test;
+mod add_json_test;
 mod add_test;
 mod blame_test;
 mod branch_test;
@@ -168,6 +169,8 @@ mod revert_test;
 mod shortlog_test;
 mod show_ref_test;
 mod show_test;
+mod status_error_test;
+mod status_json_test;
 mod status_test;
 mod switch_test;
 mod tag_test;

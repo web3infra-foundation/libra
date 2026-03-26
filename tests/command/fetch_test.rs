@@ -4,7 +4,11 @@
 
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
-use std::{fs, process::Command, time::Duration};
+use std::{
+    fs,
+    process::{Command, Stdio},
+    time::Duration,
+};
 
 use libra::{
     command::fetch,
@@ -28,9 +32,11 @@ fn libra_command(cwd: &Path) -> Command {
 
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_libra"));
     cmd.current_dir(cwd)
+        .stdin(Stdio::null())
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", &config_home)
-        .env("USERPROFILE", &home);
+        .env("USERPROFILE", &home)
+        .env("LIBRA_TEST", "1");
     cmd
 }
 
@@ -41,9 +47,11 @@ fn libra_tokio_command(cwd: &Path) -> TokioCommand {
 
     let mut cmd = TokioCommand::new(env!("CARGO_BIN_EXE_libra"));
     cmd.current_dir(cwd)
+        .stdin(Stdio::null())
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", &config_home)
-        .env("USERPROFILE", &home);
+        .env("USERPROFILE", &home)
+        .env("LIBRA_TEST", "1");
     cmd
 }
 
@@ -75,7 +83,6 @@ fn init_temp_repo() -> TempDir {
 }
 
 #[test]
-#[serial]
 fn test_fetch_cli_without_remote_is_noop_like_git() {
     let repo = create_committed_repo_via_cli();
 

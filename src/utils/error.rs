@@ -124,6 +124,8 @@ pub enum StableErrorCode {
     InternalInvariant,
     /// Command succeeded but emitted warnings (`--exit-code-on-warning`).
     WarningEmitted,
+    /// All pathspecs matched ignored files; nothing was staged.
+    AddNothingStaged,
 }
 
 impl Serialize for StableErrorCode {
@@ -154,6 +156,7 @@ impl StableErrorCode {
             Self::IoWriteFailed => "LBR-IO-002",
             Self::InternalInvariant => "LBR-INTERNAL-001",
             Self::WarningEmitted => "LBR-WARN-001",
+            Self::AddNothingStaged => "LBR-ADD-001",
         }
     }
 
@@ -171,14 +174,18 @@ impl StableErrorCode {
             Self::IoReadFailed | Self::IoWriteFailed => CliErrorCategory::Io,
             Self::InternalInvariant => CliErrorCategory::Internal,
             Self::WarningEmitted => CliErrorCategory::Warning,
+            Self::AddNothingStaged => CliErrorCategory::Cli,
         }
     }
 
     pub const fn exit_code(self) -> CliExitCode {
-        match self.category() {
-            CliErrorCategory::Cli => CliExitCode::Usage,
-            CliErrorCategory::Warning => CliExitCode::Warning,
-            _ => CliExitCode::Fatal,
+        match self {
+            Self::AddNothingStaged => CliExitCode::Fatal,
+            _ => match self.category() {
+                CliErrorCategory::Cli => CliExitCode::Usage,
+                CliErrorCategory::Warning => CliExitCode::Warning,
+                _ => CliExitCode::Fatal,
+            },
         }
     }
 
@@ -232,6 +239,7 @@ impl StableErrorCode {
             Self::WarningEmitted => {
                 "Command completed successfully but emitted warnings (--exit-code-on-warning)."
             }
+            Self::AddNothingStaged => "All specified paths are ignored; nothing was staged.",
         }
     }
 }
