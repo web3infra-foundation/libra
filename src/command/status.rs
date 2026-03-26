@@ -584,8 +584,14 @@ fn render_upstream_human(upstream: &UpstreamInfo, buffer: &mut Vec<u8>) -> CliRe
         return Ok(());
     }
 
-    let ahead = upstream.ahead.unwrap_or(0);
-    let behind = upstream.behind.unwrap_or(0);
+    // ahead/behind are None on an unborn branch (no local commit to compare).
+    let (ahead, behind) = match (upstream.ahead, upstream.behind) {
+        (Some(a), Some(b)) => (a, b),
+        _ => {
+            // Unborn branch: upstream exists but no local commits yet.
+            return Ok(());
+        }
+    };
 
     if ahead == 0 && behind == 0 {
         writeln!(
@@ -1188,13 +1194,13 @@ async fn resolve_upstream_info(
     let local_commit = match local_commit {
         Some(commit) => commit,
         None => {
-            // Unborn branch: no local commits, so ahead is always 0.
-            // Count how many commits the tracking ref has for `behind`.
-            let behind = count_ancestors(&tracking_commit);
+            // Unborn branch: no local commit to compare against.
+            // Return None for ahead/behind — numeric counts would imply
+            // a comparison that never happened.
             return Some(UpstreamInfo {
                 remote_ref: remote_ref_display,
-                ahead: Some(0),
-                behind: Some(behind),
+                ahead: None,
+                behind: None,
                 gone: false,
             });
         }
@@ -1278,25 +1284,6 @@ fn compute_ahead_behind(local: &ObjectHash, remote: &ObjectHash) -> (usize, usiz
     (local_only.len(), remote_only.len())
 }
 
-/// Count the number of commits reachable from `start` (inclusive).
-/// Used for unborn-branch behind calculation where one side has no commits.
-fn count_ancestors(start: &ObjectHash) -> usize {
-    let mut visited = HashSet::new();
-    let mut queue = VecDeque::new();
-    queue.push_back(*start);
-
-    while let Some(hash) = queue.pop_front() {
-        if visited.insert(hash)
-            && let Some(commit) = Commit::try_load(&hash)
-        {
-            for parent in &commit.parent_commit_ids {
-                queue.push_back(*parent);
-            }
-        }
-    }
-
-    visited.len()
-}
 
 // ---------------------------------------------------------------------------
 // Bare repository detection

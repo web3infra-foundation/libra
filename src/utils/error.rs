@@ -180,6 +180,10 @@ impl StableErrorCode {
 
     pub const fn exit_code(self) -> CliExitCode {
         match self {
+            // AddNothingStaged falls in the Cli category (which normally
+            // maps to Usage/129), but "nothing to add" is a runtime
+            // condition, not a CLI usage error — exit 128 matches Git's
+            // behavior for `git add` with only ignored paths.
             Self::AddNothingStaged => CliExitCode::Fatal,
             _ => match self.category() {
                 CliErrorCategory::Cli => CliExitCode::Usage,
