@@ -1284,7 +1284,6 @@ fn compute_ahead_behind(local: &ObjectHash, remote: &ObjectHash) -> (usize, usiz
     (local_only.len(), remote_only.len())
 }
 
-
 // ---------------------------------------------------------------------------
 // Bare repository detection
 // ---------------------------------------------------------------------------
