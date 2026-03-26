@@ -143,7 +143,6 @@ fn test_show_cli_badref_returns_cli_exit_code() {
 
 /// Test that show can display a lightweight tag.
 #[tokio::test]
-#[serial]
 async fn test_show_lightweight_tag() {
     let temp_dir = init_temp_repo();
     let temp_path = temp_dir.path();
@@ -182,7 +181,6 @@ async fn test_show_lightweight_tag() {
 
 /// Test that show displays an annotated tag with its metadata.
 #[tokio::test]
-#[serial]
 async fn test_show_annotated_tag() {
     let temp_dir = init_temp_repo();
     let temp_path = temp_dir.path();
@@ -233,7 +231,6 @@ async fn test_show_annotated_tag() {
 
 /// Test that show can handle multiple commits with different tags.
 #[tokio::test]
-#[serial]
 async fn test_show_multiple_tags() {
     let temp_dir = init_temp_repo();
     let temp_path = temp_dir.path();
@@ -293,7 +290,6 @@ async fn test_show_multiple_tags() {
 
 /// Test that show handles non-existent tags gracefully.
 #[tokio::test]
-#[serial]
 async fn test_show_nonexistent_tag() {
     let temp_dir = init_temp_repo();
     let temp_path = temp_dir.path();
