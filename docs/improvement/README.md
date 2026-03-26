@@ -49,7 +49,7 @@
 | **2** | `init` | ✅ 已落地 | 作为 `clone` / 转发路径的已交付基线；后续仅维护回归测试与文档同步 |
 | **3** | `clone` | ✅ 已落地 | 结构化成功输出（`--json`/`--machine`）；显式 `StableErrorCode`；network/auth hint；checkout 失败传播；cleanup warning 可见性；阶段性 human 进度（详见 [commands/clone.md](commands/clone.md)） |
 | **4** | `add` | 无 JSON / 成功沉默 / warning 退出码不统一 | JSON 输出（结构化变更 + ignored/failed warning 字段）；成功摘要；`--dry-run` / `--ignore-errors` 输出纳入统一渲染；显式错误码 |
-| **5** | `status` | 有 JSON + porcelain + human hint，缺 upstream / StableErrorCode / quiet exit `1` | 补齐 upstream tracking（human / JSON / porcelain）；显式 `StableErrorCode`；`--quiet` dirty → exit `1`；消除重复状态计算 |
+| **5** | `status` | 有 JSON + porcelain + human hint，缺 upstream / StableErrorCode / dirty 退出码 | 补齐 upstream tracking（human / JSON / porcelain）；显式 `StableErrorCode`；新增 `--exit-code` dirty → exit `1`；消除重复状态计算 |
 | **6** | `commit` | ✅ 已完成（金标准） | 作为参考模板，无需改动 |
 | **7** | `push` | 功能失败/60s 超时/无 JSON | 修复 refspec 语法；10s 超时；进度输出；JSON 输出；错误码 |
 | **8** | `pull` | 级联失败/无 JSON | 修复 upstream tracking；JSON 输出；错误码 |

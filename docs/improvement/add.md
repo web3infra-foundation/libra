@@ -142,7 +142,8 @@ nothing to add
 
 **warning-only 场景：**
 
-- 当所有请求路径都被忽略，或 `--ignore-errors` 下所有候选文件都失败时，human 模式**不额外输出成功摘要**，只在 stderr 输出 warning block；JSON / machine 仍返回 `ok: true` 的结构化结果，便于 Agent 判断“命令完成，但没有任何路径成功加入索引”
+- 当 `--ignore-errors` 下部分文件失败但仍有文件成功暂存时，human 模式输出成功摘要 + stderr warning block；JSON / machine 返回 `ok: true` + `failed` 列表
+- 当所有请求路径都被忽略（且无 `--force`）时，返回非零退出码（`StableErrorCode::AddNothingStaged`）；human 模式在 stderr 输出 error + hint；JSON / machine 返回 `ok: false` + `ignored` 列表。这确保自动化脚本不会在零暂存时继续执行
 
 ### 特性 2：JSON 输出设计
 
@@ -241,7 +242,7 @@ nothing to add
 }
 ```
 
-> **注**：`ignored` 或 `failed` 非空时 JSON `ok` 仍为 `true`。这两类都是 warning 而非 fatal。human 模式下 warning 只写 stderr；JSON / machine 模式不额外输出 human warning 文本，但必须记录 warning 状态，以便顶层 CLI 在 `--exit-code-on-warning` 下返回 exit `9`。
+> **注**：`failed` 非空但有文件成功暂存时 JSON `ok` 为 `true`（部分成功是 warning，不是 fatal）。`ignored` 非空的处理取决于场景：如果有文件成功暂存则 `ok: true`；如果零暂存（全部被忽略）则 `ok: false`（见错误处理章节）。human 模式下 warning 只写 stderr；JSON / machine 模式不额外输出 human warning 文本，但必须记录 warning 状态，以便顶层 CLI 在 `--exit-code-on-warning` 下返回 exit `9`。
 
 **无变更场景：**
 
@@ -286,11 +287,11 @@ nothing to add
 
 **被忽略文件的 warning 处理：**
 
-当前 `finish_ignored()` 返回 `CliError::failure()`，退出码为 `1`。改为：
+当前 `finish_ignored()` 返回 `CliError::failure()`，退出码为 `1`（实际映射为 128/Fatal）。改为按场景区分：
 
-- 如果有文件被成功暂存 + 部分 pathspec 命中忽略文件：**不**返回错误，将忽略信息放入 `AddOutput.ignored`，human 模式在 stderr 输出 warning
-- 如果所有 pathspec 都命中忽略文件且无文件被暂存：仍返回 `Ok(AddOutput)`，仅包含 `ignored`；human 模式只输出 warning block；JSON / machine 返回 `ok: true`
-- warning 不直接通过 `CliError::WarningEmitted` 返回。统一由渲染层在存在 `ignored` / `failed` 时调用共享 warning 记录逻辑，让顶层 CLI 按 `--exit-code-on-warning` 决定是否转成 exit `9`
+- **部分成功 + 部分忽略**（有文件被成功暂存，同时部分 pathspec 命中忽略文件）：**不**返回错误，将忽略信息放入 `AddOutput.ignored`，human 模式在 stderr 输出 warning。这与 Git 行为一致——Git 在此场景下暂存成功的文件并在 stderr 输出 warning，exit `0`
+- **全部忽略，零暂存**（所有 pathspec 都命中忽略文件且无文件被暂存）：返回 `CliError` + `StableErrorCode::AddNothingStaged`，退出码 `128`。JSON 模式返回 `ok: false` + `ignored` 列表。**理由**：Git 在此场景下返回非零退出码（exit `1`），将其降为 success 会造成自动化脚本的静默失败——脚本会以为文件已暂存而继续执行，可能产生空提交或错误提交
+- **warning 记录**：部分忽略场景由渲染层在存在 `ignored` / `failed` 时调用共享 warning 记录逻辑，让顶层 CLI 按 `--exit-code-on-warning` 决定是否转成 exit `9`
 
 **`--ignore-errors` 的 warning 处理：**
 
@@ -480,7 +481,7 @@ EXAMPLES:
 
 - **（已有）** 基础暂存：单文件、多文件、`-A`、`-u`、`--dry-run`、`--force`、空文件、子目录
 - **（新增）`run_add()` 分类结果**：验证 `added` / `modified` / `removed` / `refreshed` / `ignored` / `failed` 分类准确，不依赖 stdout/stderr 文本
-- **（新增）warning-only 执行路径**：全部 pathspec 被忽略时返回 `Ok(AddOutput)`，且 staged 列表为空、`ignored` 非空
+- **（新增）ignored-only 执行路径**：全部 pathspec 被忽略时返回 `AddError`，staged 列表为空、`ignored` 非空；退出码非零
 - **（新增）`--ignore-errors` 部分成功**：部分文件失败时 `failed` 非空，但成功文件仍被写入索引
 - **（新增）无变更**：所有匹配文件均未修改时返回空结果，不写索引脏状态
 
@@ -489,7 +490,7 @@ EXAMPLES:
 - **（已有）** pathspec 不匹配、忽略文件、损坏索引等 CLI 级回归
 - **（新增）成功摘要输出**：`libra add src/main.rs` 后 stdout 包含 `add` 和文件名
 - **（新增）stdout/stderr 分离**：部分忽略场景下摘要只出现在 stdout，warning 只出现在 stderr
-- **（新增）warning-only human 输出**：ignored-only 场景下 stdout 为空，stderr 仅包含 warning / hint
+- **（新增）ignored-only human 输出**：ignored-only 场景下 stdout 为空，stderr 包含 error + hint，退出码非零
 - **（新增）`--quiet` 静默**：无 warning 的成功路径下 stdout 和 stderr 均为空；有 warning 时仅 stderr 保留 warning
 - **（新增）`--verbose` 受控输出**：human 模式下 `--verbose` 输出逐文件列表 + 摘要；`--json` + `--verbose` 不产生 human 格式输出
 - **（新增）"Nothing specified" 退出码**：无 pathspec 且无 mode flag 时退出码为 `129`
@@ -508,7 +509,8 @@ EXAMPLES:
 - **`-u --json`**：新文件不出现在任何数组中（仅更新已跟踪文件）
 - **`--force --json`**：被忽略的文件出现在 `added` 中，`ignored` 为空
 - **`--force --dry-run --json`**：被忽略的文件出现在 `added` 中，`ignored` 为空，且索引未被修改
-- **warning-only JSON**：ignored-only 场景返回 `ok == true`，stdout 只有 envelope，stderr 无额外 human warning 文本
+- **ignored-only JSON**：所有 pathspec 命中忽略文件且零暂存时返回 `ok == false` + `ignored` 列表 + 错误码 `LBR-ADD-001`
+- **部分忽略 JSON**：有文件成功暂存 + 部分被忽略时返回 `ok == true` + `ignored` 列表，stderr 无额外 human warning 文本
 - **`--ignore-errors --json`**：`failed` 非空，且成功暂存的文件仍出现在对应数组中
 - **子目录调用路径基准**：在仓库子目录执行 `libra add --json ../path`，返回路径相对于当前子目录，而不是仓库根
 - **`--machine add`**：stdout 按 `\n` 分割后恰好 1 行非空行，可被 `serde_json::from_str()` 解析为与 `--json` 相同的 schema
@@ -519,7 +521,7 @@ EXAMPLES:
 - `PathOutsideRepo` 返回 `LBR-CLI-003`
 - 仓库外执行返回 `LBR-REPO-001`
 - "Nothing specified" 返回 `LBR-CLI-002`
-- ignored-only / partial-warning 场景默认不返回 fatal 错误码；仅 `--exit-code-on-warning` 时 exit `9`
+- ignored-only 场景返回 `AddNothingStaged` 错误码（非零退出）；部分忽略场景默认 exit `0`，仅 `--exit-code-on-warning` 时 exit `9`
 
 ### 质量验收
 

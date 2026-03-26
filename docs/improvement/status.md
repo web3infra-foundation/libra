@@ -36,7 +36,7 @@
 - **共享数据层设计尚未覆盖 porcelain v2 元数据**：`output_porcelain_v2()` 目前仍会自己读取 index / HEAD tree 并拼装 mode/hash；如果 `StatusData` 只承载基础 `Changes`，那只是把重复从 human/JSON 移走，仍没解决 v2 的分叉逻辑
 - **各种 `unwrap()` 残留**（如 `status.rs:967`、`977`、`983` 等）：`Index::load(path::index()).unwrap()` 在索引损坏时会 panic；`head_commit.unwrap()` 以及 `item_path.to_str().unwrap()` 也有 panic 风险。必须改成带错误处理的安全版本（已有的 `_safe` 变体中）。
 - **颜色控制未统一**：`should_use_colors()` 函数独立读取 `color.status.short` / `color.ui` 配置，未与全局 `--color` / `--no-color` / `NO_COLOR` 标志协调
-- **`--quiet` 模式语义不完整**：当前 `--quiet` 调用 `collect_status_json()` 后丢弃结果（`let _ = ...`），但不设置退出码——clean 和 dirty 都返回 exit `0`。Git 的 `git status --quiet` 在工作树 dirty 时返回 exit `1`
+- **缺少 dirty 检测退出码**：当前 `--quiet` 调用 `collect_status_json()` 后丢弃结果（`let _ = ...`），clean 和 dirty 都返回 exit `0`。脚本和 CI/CD 需要一种类似 `git diff --quiet` 的方式来通过退出码检测工作树状态（注：`git status` 本身没有 `--quiet` 选项）
 
 ### 目标与非目标
 
@@ -44,7 +44,7 @@
 - 为所有 `StatusError` 补齐显式 `StableErrorCode` 映射
 - 补齐 upstream tracking 信息（human / JSON / porcelain v2）：ahead/behind 计数
 - 消除 `execute_to()` 与 `collect_status_json()` 的逻辑重复
-- 修复 `--quiet` 模式的退出码语义（dirty → exit `1`）
+- 新增 `--exit-code` 专用标志（dirty → exit `1`），不复用全局 `--quiet` 语义
 - 统一颜色控制与全局 `--color` / `NO_COLOR` 标志
 
 **本批非目标：**
@@ -57,8 +57,8 @@
 
 1. **共享核心数据层必须覆盖所有渲染器**：`StatusData` 不仅服务 human / JSON，也要覆盖 short / porcelain v1 / porcelain v2；渲染层应只负责格式化，不再自行读取 index / HEAD tree
 2. **JSON 向后兼容**：新增字段（`upstream`）是增量扩展，不改变现有字段名称、类型和既有路径语义；现有 path 数组继续保持“相对于当前工作目录”的显示形式
-3. **`--quiet` 的 exit `1` 是 Git 兼容特例，不是 warning 机制**：dirty 判定独立于 `--exit-code-on-warning`，且必须保持 stderr 静默
-   > **注意**：`--exit-code-on-warning` 标志**不适用**于 `status` 命令。`status --quiet` 使用 exit `1` 表示 dirty，这是 Git 兼容行为；`--exit-code-on-warning`（exit `9`）是 Libra 全局语义，用于 `add` / `clone` 等命令的 warning 场景。
+3. **dirty 退出码通过专用 `--exit-code` 标志实现，不复用全局 `--quiet`**：`--quiet` 是全局 flag（`src/cli.rs`），契约是"抑制 stdout 输出"，不应在单个命令上附加控制流语义。dirty → exit `1` 由 status 命令自己的 `--exit-code` 标志控制，与 `--quiet` 正交——可组合使用但各自独立
+   > **注意**：`git status` 本身没有 `--quiet` 选项。真正提供 "dirty → exit 1" 语义的是 `git diff --quiet`。Libra 选择通过 `--exit-code` 提供等价能力，而不是错误地声称与 Git `status --quiet` 兼容。
 4. **错误码显式映射**：每个 `StatusError` 变体都有确定的 `StableErrorCode`
 5. **upstream 信息可选但不能丢失“gone”语义**：未配置 upstream 时 `upstream = null`；已配置但 tracking ref 不存在时，必须显式表达 `gone`
 6. **本批只承诺精确 ahead/behind 计数**：不在本批引入 `truncated` / 近似计数契约，避免 human 与 JSON 出现含义不一致的“半精确”状态
@@ -259,32 +259,61 @@ Your branch is based on 'origin/main', but the upstream is gone.
 - `output_porcelain_v2()` 当前单独 `Index::load()` / 读取 HEAD tree 的失败路径，也必须回收到 `collect_status_data()` 阶段，通过 `StatusError` 统一映射
 - 改造后渲染层只允许产生“写 stdout/stderr 失败”的 `CliError::io(...)`；不再临时拼装 `"failed to determine working tree status: ..."` 的字符串错误
 
-### 特性 4：`--quiet` 退出码修复
+### 特性 4：`--exit-code` 专用标志——dirty 工作树的机器可检测信号
 
-**当前问题：** `--quiet` 模式下，无论工作树是否 dirty 都返回 exit `0`。Git 的 `git status --quiet` 在 dirty 时返回 exit `1`，这被 CI/CD 和脚本广泛依赖。
+**当前问题：** 脚本和 CI/CD 需要一种方式来检测工作树是否 dirty 并获得非零退出码。当前 `--quiet` 模式（全局 flag）无论工作树状态都返回 exit `0`。
 
-**修正后的方案：**
+**设计决策：为什么不复用 `--quiet`？**
+
+- `--quiet` 是全局 flag（`src/cli.rs:118-122`），文档契约是 *”Suppress standard stdout output; keep warnings/errors on stderr”*——它是输出抑制，不携带控制流语义
+- `git status` 本身没有 `--quiet` 选项。`git diff --quiet` 才是 Git 中提供 “dirty → exit 1” 的机制
+- 在全局 `--quiet` 上为单个命令附加 exit code 语义会违反最小惊讶原则——用户在其他命令上使用 `--quiet` 时不会期待退出码变化
+
+**修正后的方案：新增 `--exit-code` 标志（status 专用）**
 
 ```rust
-// execute_safe() 中 --quiet 分支
-if output.quiet {
-    let data = collect_status_data(&args).await?;
-    if data.is_dirty_for_requested_view() {
-        // dirty working tree → exit 1
-        return Err(status_quiet_exit(1));
-    }
-    return Ok(()); // clean → exit 0
+/// Exit with code 1 if the working tree has changes (analogous to `git diff --quiet`).
+/// Can be combined with --quiet for silent dirty checking.
+#[arg(long)]
+exit_code: bool,
+```
+
+```rust
+// execute_safe() 中处理 --exit-code
+let data = collect_status_data(&args).await?;
+
+if output.quiet && !args.exit_code {
+    // 纯 --quiet：抑制输出，始终 exit 0
+    return Ok(());
+}
+
+// 正常渲染（human / JSON / porcelain）
+render_status(&data, &args, output)?;
+
+if args.exit_code && data.is_dirty_for_requested_view() {
+    // --exit-code：dirty → exit 1
+    return Err(status_dirty_exit());
 }
 ```
 
-`status_quiet_exit(1)` 表示一个**仅供 status 使用**的 silent-exit 通道（可实现为局部 helper，或在 `CliError` 上做最小扩展），要求：
+**`status_dirty_exit()` 要求：**
 
 - 退出码为 `1`
-- stdout / stderr 都不输出任何内容
+- 渲染层已在此之前完成输出（`--exit-code` 不抑制输出，只改变退出码）
+- `--quiet --exit-code` 组合使用时：无输出 + dirty → exit `1`，clean → exit `0`
 - **不**复用 `WarningEmitted` 或 `--exit-code-on-warning` 机制；dirty 工作树不是 warning
-- dirty 判定基于 `collect_status_data()` 已处理后的视图，因此 `--untracked-files=no` 下“只有 untracked 文件”的仓库应视为 clean 并返回 exit `0`
+- dirty 判定基于 `collect_status_data()` 已处理后的视图，因此 `--untracked-files=no` 下”只有 untracked 文件”的仓库应视为 clean 并返回 exit `0`
 
-**JSON 模式不受影响**：`--json` 始终返回完整 status 信息到 stdout，退出码始终 `0`（error 场景除外）。Agent 通过 `is_clean` 字段判断状态。
+**各模式下 `--exit-code` 的行为：**
+
+| 组合 | stdout | exit code |
+|------|--------|-----------|
+| `--exit-code`（human） | 正常 human 输出 | dirty → `1`，clean → `0` |
+| `--exit-code --quiet` | 无输出 | dirty → `1`，clean → `0` |
+| `--exit-code --json` | 正常 JSON 输出 | dirty → `1`，clean → `0` |
+| 无 `--exit-code` | 按各模式正常输出 | 始终 `0`（error 除外） |
+
+**JSON 模式不依赖退出码**：`--json` 始终返回完整 status 信息到 stdout，Agent 通过 `is_clean` 字段判断状态。`--exit-code --json` 提供退出码作为额外信号，但 JSON 内容不变。
 
 ### 特性 5：颜色控制统一
 
@@ -304,7 +333,7 @@ if output.quiet {
 
 | ID | 改进 | status 中的具体落地 |
 |----|------|-----------------|
-| **A** | 退出码 `0/128/129` | 运行时错误（索引损坏、I/O 失败）→ exit `128`；`--quiet` dirty → exit `1`（Git 兼容特例）；成功 → exit `0` |
+| **A** | 退出码 `0/128/129` | 运行时错误（索引损坏、I/O 失败）→ exit `128`；`--exit-code` dirty → exit `1`；成功 → exit `0` |
 | **B** | `--help` EXAMPLES | 见下方 EXAMPLES 段 |
 | **F** | 拼写纠错 | `--untracked-files` 的值是 clap `ValueEnum`（`normal`/`all`/`no`），clap 已提供候选列表；`--porcelain` 同理（`v1`/`v2`）。无额外 fuzzy match 需求 |
 | **G** | Issues URL | 仅在 `IndexLoad` 内部原因为非预期的 GitError 时输出 Issues URL。路径编码错误等用户可修复问题不输出 |
@@ -322,6 +351,8 @@ EXAMPLES:
     libra status --ignored             Include ignored files
     libra status --untracked-files=no  Hide untracked files
     libra status --json                Structured JSON output for agents
+    libra status --exit-code           Exit 1 if working tree is dirty
+    libra status --quiet --exit-code   Silent dirty check for scripts
 ```
 
 ### 全部场景结构化 Output 设计（`--json` / `--machine`）
@@ -508,7 +539,7 @@ Stash entries: 3
 | `--untracked-files` | `normal/all/no` | ✅ `normal/all/no` | 保持 |
 | `--json` | ❌ | ✅ | **补齐 upstream 字段** |
 | Upstream ahead/behind | ✅ | ❌ | **新增** |
-| `--quiet` exit code | dirty → `1` | dirty → `0` ❌ | **修复为 `1`** |
+| `--exit-code` dirty check | ❌（`git diff --quiet` 提供） | ❌ | **新增 `--exit-code` 标志** |
 | 稳定错误码 | ❌ | ❌ | **新增 `StableErrorCode`** |
 | hint 建议 | 有 | 有 | 保持 |
 
@@ -518,8 +549,10 @@ Stash entries: 3
 
 - **（已有）** 基础测试：outside repository、ignored outputs、bare repository、porcelain v1/v2、short format、untracked files
 - **（新增）`StableErrorCode` 验证**：bare repository 错误返回 `LBR-REPO-003`
-- **（新增）`--quiet` 退出码与静默性**：dirty 工作树 → exit `1` 且 stdout/stderr 均为空；clean 工作树 → exit `0`
-- **（新增）`--quiet` 与过滤参数联动**：仅有 untracked 文件时，`--untracked-files=no --quiet` 返回 exit `0`
+- **（新增）`--exit-code` 退出码**：dirty 工作树 → exit `1`；clean 工作树 → exit `0`
+- **（新增）`--exit-code --quiet` 组合**：dirty → exit `1` 且 stdout/stderr 均为空；clean → exit `0` 且 stdout/stderr 均为空
+- **（新增）`--exit-code` 与过滤参数联动**：仅有 untracked 文件时，`--untracked-files=no --exit-code` 返回 exit `0`
+- **（新增）纯 `--quiet` 不改变退出码**：dirty 工作树 + `--quiet`（无 `--exit-code`）仍返回 exit `0`
 - **（新增）颜色控制验证**：`--color=always` 强制着色，`--color=never` 禁用着色，`NO_COLOR=1` 环境变量禁用着色
 - **（新增）upstream tracking human 输出**：覆盖 up-to-date / ahead / behind / diverged / gone 五种文案
 - **（新增）short / porcelain v1 `--branch` upstream**：输出包含 `[ahead N]` / `[behind N]` / `[gone]`
@@ -571,11 +604,11 @@ Stash entries: 3
 
 | 文件 | 改动类型 | 说明 |
 |------|---------|------|
-| `src/command/status.rs` | **重构** | 新增 `StatusData` / `StatusEntry` / `UpstreamInfo` 共享数据层；`collect_status_data()` 统一 human / JSON / short / porcelain v1/v2 所需计算；`StatusError → CliError` 显式 `StableErrorCode` 映射；upstream tracking（含 gone 语义）；`--quiet` 退出码修复；颜色控制统一到 `OutputConfig`；清理遗留的 `unwrap()` 方法换用 `Result` |
+| `src/command/status.rs` | **重构** | 新增 `StatusData` / `StatusEntry` / `UpstreamInfo` 共享数据层；`collect_status_data()` 统一 human / JSON / short / porcelain v1/v2 所需计算；`StatusError → CliError` 显式 `StableErrorCode` 映射；upstream tracking（含 gone 语义）；新增 `--exit-code` 标志；颜色控制统一到 `OutputConfig`；清理遗留的 `unwrap()` 方法换用 `Result` |
 | `src/command/{commit,remove,rebase}.rs`、`src/utils/ignore.rs` | **小改** | 迁移生产代码对 `changes_to_be_committed()` 的依赖，改用 `_safe` 变体或等价的不 panic helper，消除 `unwrap()` 风险。**这些修改是接口兼容的，只改变内部错误处理方式，不改变 API 签名** |
 | `src/internal/head.rs` | **小改** | 视需要新增 `resolve_upstream_ref()` helper，读取 `branch.<name>.remote` + `branch.<name>.merge` 配置并解析为 tracking ref |
 | `src/utils/error.rs` | **可选小改** | 仅当现有执行链无法承载 status 的 silent exit 时，才新增最小 helper；不要把 dirty→exit `1` 误建模为 `WarningEmitted` |
-| `tests/command/status_test.rs` | **扩展** | 新增 `StableErrorCode`、`--quiet` 退出码、upstream tracking 场景 |
+| `tests/command/status_test.rs` | **扩展** | 新增 `StableErrorCode`、`--exit-code` 退出码、upstream tracking 场景 |
 | `tests/command/status_json_test.rs` | **新增** | JSON schema 完整性、upstream 场景覆盖、向后兼容验证 |
 | `tests/command/status_error_test.rs` | **新增** | 错误码对齐验证 |
 | `tests/command/mod.rs` | **修改** | 注册新增的测试文件 |
