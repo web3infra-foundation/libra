@@ -415,10 +415,8 @@ fn json_partial_ignore_returns_ok_with_ignored_list() {
     fs::write(repo.path().join("ignored.txt"), "ignored").unwrap();
 
     let output = run_libra_command(&["--json", "add", "good.txt", "ignored.txt"], repo.path());
-    // Partial ignore: good.txt is staged, ignored.txt triggers warning
-    // The current behavior returns an error because ignored-only pathspec triggers AddNothingStaged
-    // But when mixed with good files, good.txt gets staged first and then ignored.txt
-    // gets added to the ignored list
+    assert_cli_success(&output, "partial ignore should succeed");
+
     let parsed = parse_json_stdout(&output);
     assert_eq!(parsed["ok"], true);
 

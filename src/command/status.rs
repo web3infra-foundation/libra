@@ -354,9 +354,9 @@ pub async fn execute_safe(args: StatusArgs, output: &OutputConfig) -> CliResult<
         render_status_to_writer(&data, &args, output, &mut stdout).await?;
     }
 
-    // --exit-code: dirty → exit 1
+    // --exit-code: dirty → exit 1 (silent; do not emit an error line)
     if args.exit_code && data.is_dirty() {
-        return Err(CliError::failure("").with_exit_code(1));
+        return Err(CliError::silent_exit(1));
     }
 
     Ok(())
@@ -1336,11 +1336,18 @@ pub async fn is_clean() -> bool {
 // Status computation (public API preserved)
 // ---------------------------------------------------------------------------
 
-/// Convenience wrapper that panics on error — kept for test compatibility.
+/// Convenience wrapper around [`changes_to_be_committed_safe`].
+///
+/// On error (e.g. corrupt index), logs the failure and returns an empty
+/// [`Changes`] set instead of panicking.
 pub async fn changes_to_be_committed() -> Changes {
-    changes_to_be_committed_safe()
-        .await
-        .expect("changes_to_be_committed failed")
+    match changes_to_be_committed_safe().await {
+        Ok(changes) => changes,
+        Err(err) => {
+            tracing::error!("changes_to_be_committed failed: {err}");
+            Changes::default()
+        }
+    }
 }
 
 pub async fn changes_to_be_committed_safe() -> Result<Changes, StatusError> {

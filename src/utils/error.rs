@@ -282,6 +282,9 @@ pub struct CliError {
     /// Optional override for the process exit code. When set, this takes
     /// precedence over the code derived from [`StableErrorCode`].
     exit_code_override: Option<i32>,
+    /// When true, `print_for_output` / `print_stderr` emit nothing.
+    /// Used for exit-code-only signalling (e.g. `status --exit-code`).
+    silent: bool,
 }
 
 impl CliError {
@@ -296,6 +299,23 @@ impl CliError {
             usage: None,
             details: BTreeMap::new(),
             exit_code_override: None,
+            silent: false,
+        }
+    }
+
+    /// Create a silent exit error that only sets the process exit code
+    /// without printing anything to stderr. Used for `--exit-code` style
+    /// flags where a non-zero exit is a signal, not an error.
+    pub fn silent_exit(code: i32) -> Self {
+        Self {
+            kind: CliErrorKind::Failure,
+            stable_code: StableErrorCode::InternalInvariant,
+            message: String::new(),
+            hints: Vec::new(),
+            usage: None,
+            details: BTreeMap::new(),
+            exit_code_override: Some(code),
+            silent: true,
         }
     }
 
@@ -508,6 +528,9 @@ impl CliError {
     }
 
     pub fn print_stderr(&self) {
+        if self.silent {
+            return;
+        }
         eprintln!("{}", self.render_for_stderr());
     }
 
@@ -516,6 +539,9 @@ impl CliError {
     /// When JSON output is active, the error is rendered as a JSON envelope to
     /// **stderr** so stdout remains reserved for successful command data.
     pub fn print_for_output(&self, config: &crate::utils::output::OutputConfig) {
+        if self.silent {
+            return;
+        }
         use crate::utils::output::JsonFormat;
 
         if let Some(fmt) = config.json_format {

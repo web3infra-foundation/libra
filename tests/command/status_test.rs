@@ -678,17 +678,21 @@ async fn test_status_porcelain_v2_branch_metadata_includes_upstream_counts() {
     let _guard = test::ChangeDirGuard::new(test_dir.path());
 
     fs::write("tracked.txt", "tracked\n").unwrap();
-    add::execute(AddArgs {
-        pathspec: vec![String::from("tracked.txt")],
-        all: false,
-        update: false,
-        verbose: false,
-        dry_run: false,
-        ignore_errors: false,
-        refresh: false,
-        force: false,
-    })
-    .await;
+    add::execute_safe(
+        AddArgs {
+            pathspec: vec![String::from("tracked.txt")],
+            all: false,
+            update: false,
+            verbose: false,
+            dry_run: false,
+            ignore_errors: false,
+            refresh: false,
+            force: false,
+        },
+        &libra::utils::output::OutputConfig::default(),
+    )
+    .await
+    .expect("add tracked.txt should succeed");
     execute_safe(
         create_commit_args("initial"),
         &libra::utils::output::OutputConfig::default(),
