@@ -1209,18 +1209,21 @@ async fn resolve_upstream_info(
 
 /// Compute the number of commits ahead/behind between two refs.
 ///
-/// Walks both branches back to their merge-base rather than materializing
-/// full ancestor sets, keeping the traversal proportional to the divergence
-/// depth instead of the entire repository history.  Falls back gracefully
-/// when a commit object is missing or corrupt (e.g. shallow clone).
+/// Performs a bidirectional BFS from both tips, classifying each commit as
+/// local-only, remote-only, or common (reachable from both sides).  Once a
+/// commit is found from the opposite side it is reclassified as common and
+/// its ancestors are no longer expanded, which in typical diverge-then-merge
+/// topologies limits the walk to the diverged portion of the graph.
+///
+/// In the worst case (completely disjoint histories) this still visits all
+/// reachable commits from both sides.  Falls back gracefully when a commit
+/// object is missing or corrupt (e.g. shallow clone) by stopping traversal
+/// on that branch.
 fn compute_ahead_behind(local: &ObjectHash, remote: &ObjectHash) -> (usize, usize) {
     if local == remote {
         return (0, 0);
     }
 
-    // Collect ancestors reachable from `local` until we find `remote`'s
-    // ancestors (merge-base), and vice-versa.  We walk both sides in
-    // lockstep so the traversal stops as soon as the merge-base is found.
     let mut local_only: HashSet<ObjectHash> = HashSet::new();
     let mut remote_only: HashSet<ObjectHash> = HashSet::new();
     let mut common: HashSet<ObjectHash> = HashSet::new();
@@ -1231,49 +1234,44 @@ fn compute_ahead_behind(local: &ObjectHash, remote: &ObjectHash) -> (usize, usiz
     remote_queue.push_back(*remote);
 
     while !local_queue.is_empty() || !remote_queue.is_empty() {
-        // Expand one level of local ancestors.
+        // Expand one commit from the local side.
         if let Some(hash) = local_queue.pop_front() {
-            if common.contains(&hash) || remote_only.contains(&hash) {
-                // Reached a commit already seen from the remote side → merge-base.
-                // Move it (and anything reachable from it) to common.
-                mark_common(&hash, &mut local_only, &mut remote_only, &mut common);
+            if common.contains(&hash) {
+                // Already common — skip without expanding parents.
+                continue;
+            } else if remote_only.remove(&hash) {
+                // Discovered from the remote side too → merge-base.
+                common.insert(hash);
             } else if local_only.insert(hash)
                 && let Some(commit) = Commit::try_load(&hash)
             {
                 for parent in &commit.parent_commit_ids {
-                    local_queue.push_back(*parent);
+                    if !common.contains(parent) {
+                        local_queue.push_back(*parent);
+                    }
                 }
             }
         }
 
-        // Expand one level of remote ancestors.
+        // Expand one commit from the remote side.
         if let Some(hash) = remote_queue.pop_front() {
-            if common.contains(&hash) || local_only.contains(&hash) {
-                mark_common(&hash, &mut local_only, &mut remote_only, &mut common);
+            if common.contains(&hash) {
+                continue;
+            } else if local_only.remove(&hash) {
+                common.insert(hash);
             } else if remote_only.insert(hash)
                 && let Some(commit) = Commit::try_load(&hash)
             {
                 for parent in &commit.parent_commit_ids {
-                    remote_queue.push_back(*parent);
+                    if !common.contains(parent) {
+                        remote_queue.push_back(*parent);
+                    }
                 }
             }
         }
     }
 
     (local_only.len(), remote_only.len())
-}
-
-/// Move `hash` from the local-only / remote-only sets into the common set.
-/// This is called when a commit is discovered from both sides.
-fn mark_common(
-    hash: &ObjectHash,
-    local_only: &mut HashSet<ObjectHash>,
-    remote_only: &mut HashSet<ObjectHash>,
-    common: &mut HashSet<ObjectHash>,
-) {
-    local_only.remove(hash);
-    remote_only.remove(hash);
-    common.insert(*hash);
 }
 
 // ---------------------------------------------------------------------------

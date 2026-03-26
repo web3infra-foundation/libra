@@ -201,9 +201,10 @@ fn json_status_no_stash_entries_field_by_default() {
     let parsed = parse_json_stdout(&output);
     let data = &parsed["data"];
     // stash_entries should not be present without --show-stash
+    let data_obj = data.as_object().expect("data should be a JSON object");
     assert!(
-        data["stash_entries"].is_null(),
-        "stash_entries should not be present by default"
+        !data_obj.contains_key("stash_entries"),
+        "stash_entries key should be absent by default, got: {data}"
     );
 }
 

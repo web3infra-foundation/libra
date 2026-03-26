@@ -197,13 +197,13 @@ pub async fn execute_safe(args: RemoveArgs, _output: &OutputConfig) -> CliResult
         let changes_staged = match changes_to_be_staged() {
             Ok(c) => c.polymerization(),
             Err(err) => {
-                return Err(CliError::fatal(err.to_string()));
+                return Err(CliError::from(err));
             }
         };
         let changes_committed = match changes_to_be_committed_safe().await {
             Ok(c) => c.polymerization(),
             Err(err) => {
-                return Err(CliError::fatal(err.to_string()));
+                return Err(CliError::from(err));
             }
         };
         // Check for both
