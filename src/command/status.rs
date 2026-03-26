@@ -1209,39 +1209,71 @@ async fn resolve_upstream_info(
 
 /// Compute the number of commits ahead/behind between two refs.
 ///
-/// Uses set intersection: ahead = |local_ancestors - remote_ancestors|,
-/// behind = |remote_ancestors - local_ancestors|.
+/// Walks both branches back to their merge-base rather than materializing
+/// full ancestor sets, keeping the traversal proportional to the divergence
+/// depth instead of the entire repository history.  Falls back gracefully
+/// when a commit object is missing or corrupt (e.g. shallow clone).
 fn compute_ahead_behind(local: &ObjectHash, remote: &ObjectHash) -> (usize, usize) {
     if local == remote {
         return (0, 0);
     }
 
-    let local_set = collect_ancestors(local);
-    let remote_set = collect_ancestors(remote);
+    // Collect ancestors reachable from `local` until we find `remote`'s
+    // ancestors (merge-base), and vice-versa.  We walk both sides in
+    // lockstep so the traversal stops as soon as the merge-base is found.
+    let mut local_only: HashSet<ObjectHash> = HashSet::new();
+    let mut remote_only: HashSet<ObjectHash> = HashSet::new();
+    let mut common: HashSet<ObjectHash> = HashSet::new();
+    let mut local_queue: VecDeque<ObjectHash> = VecDeque::new();
+    let mut remote_queue: VecDeque<ObjectHash> = VecDeque::new();
 
-    let ahead = local_set.difference(&remote_set).count();
-    let behind = remote_set.difference(&local_set).count();
+    local_queue.push_back(*local);
+    remote_queue.push_back(*remote);
 
-    (ahead, behind)
-}
-
-fn collect_ancestors(start: &ObjectHash) -> HashSet<ObjectHash> {
-    let mut set = HashSet::new();
-    let mut queue = VecDeque::new();
-    queue.push_back(*start);
-
-    while let Some(hash) = queue.pop_front() {
-        if !set.insert(hash) {
-            continue;
+    while !local_queue.is_empty() || !remote_queue.is_empty() {
+        // Expand one level of local ancestors.
+        if let Some(hash) = local_queue.pop_front() {
+            if common.contains(&hash) || remote_only.contains(&hash) {
+                // Reached a commit already seen from the remote side → merge-base.
+                // Move it (and anything reachable from it) to common.
+                mark_common(&hash, &mut local_only, &mut remote_only, &mut common);
+            } else if local_only.insert(hash)
+                && let Some(commit) = Commit::try_load(&hash)
+            {
+                for parent in &commit.parent_commit_ids {
+                    local_queue.push_back(*parent);
+                }
+            }
         }
-        // Safely try to load; stop traversal on missing objects
-        let commit = Commit::load(&hash);
-        for parent in &commit.parent_commit_ids {
-            queue.push_back(*parent);
+
+        // Expand one level of remote ancestors.
+        if let Some(hash) = remote_queue.pop_front() {
+            if common.contains(&hash) || local_only.contains(&hash) {
+                mark_common(&hash, &mut local_only, &mut remote_only, &mut common);
+            } else if remote_only.insert(hash)
+                && let Some(commit) = Commit::try_load(&hash)
+            {
+                for parent in &commit.parent_commit_ids {
+                    remote_queue.push_back(*parent);
+                }
+            }
         }
     }
 
-    set
+    (local_only.len(), remote_only.len())
+}
+
+/// Move `hash` from the local-only / remote-only sets into the common set.
+/// This is called when a commit is discovered from both sides.
+fn mark_common(
+    hash: &ObjectHash,
+    local_only: &mut HashSet<ObjectHash>,
+    remote_only: &mut HashSet<ObjectHash>,
+    common: &mut HashSet<ObjectHash>,
+) {
+    local_only.remove(hash);
+    remote_only.remove(hash);
+    common.insert(*hash);
 }
 
 // ---------------------------------------------------------------------------
