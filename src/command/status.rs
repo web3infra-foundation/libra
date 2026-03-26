@@ -1188,10 +1188,13 @@ async fn resolve_upstream_info(
     let local_commit = match local_commit {
         Some(commit) => commit,
         None => {
+            // Unborn branch: no local commits, so ahead is always 0.
+            // Count how many commits the tracking ref has for `behind`.
+            let behind = count_ancestors(&tracking_commit);
             return Some(UpstreamInfo {
                 remote_ref: remote_ref_display,
                 ahead: Some(0),
-                behind: Some(0),
+                behind: Some(behind),
                 gone: false,
             });
         }
@@ -1212,13 +1215,14 @@ async fn resolve_upstream_info(
 /// Performs a bidirectional BFS from both tips, classifying each commit as
 /// local-only, remote-only, or common (reachable from both sides).  Once a
 /// commit is found from the opposite side it is reclassified as common and
-/// its ancestors are no longer expanded, which in typical diverge-then-merge
-/// topologies limits the walk to the diverged portion of the graph.
+/// its ancestors are not enqueued again, which reduces redundant work when
+/// the histories share a recent merge-base.
 ///
-/// In the worst case (completely disjoint histories) this still visits all
-/// reachable commits from both sides.  Falls back gracefully when a commit
-/// object is missing or corrupt (e.g. shallow clone) by stopping traversal
-/// on that branch.
+/// **Complexity**: proportional to the number of commits reachable from
+/// both tips until the queues are drained.  For disjoint histories (no
+/// common ancestor) this visits all reachable commits from both sides.
+/// Falls back gracefully when a commit object is missing or corrupt
+/// (e.g. shallow clone) by stopping traversal on that branch.
 fn compute_ahead_behind(local: &ObjectHash, remote: &ObjectHash) -> (usize, usize) {
     if local == remote {
         return (0, 0);
@@ -1272,6 +1276,26 @@ fn compute_ahead_behind(local: &ObjectHash, remote: &ObjectHash) -> (usize, usiz
     }
 
     (local_only.len(), remote_only.len())
+}
+
+/// Count the number of commits reachable from `start` (inclusive).
+/// Used for unborn-branch behind calculation where one side has no commits.
+fn count_ancestors(start: &ObjectHash) -> usize {
+    let mut visited = HashSet::new();
+    let mut queue = VecDeque::new();
+    queue.push_back(*start);
+
+    while let Some(hash) = queue.pop_front() {
+        if visited.insert(hash)
+            && let Some(commit) = Commit::try_load(&hash)
+        {
+            for parent in &commit.parent_commit_ids {
+                queue.push_back(*parent);
+            }
+        }
+    }
+
+    visited.len()
 }
 
 // ---------------------------------------------------------------------------
