@@ -202,10 +202,99 @@ fn json_commit_returns_structured_summary() {
         .unwrap_or_else(|e| panic!("expected JSON on stdout, got: {stdout}\nerror: {e}"));
     assert_eq!(parsed["ok"], true);
     assert_eq!(parsed["command"], "commit");
+    assert_eq!(parsed["data"]["head"], "main");
+    assert_eq!(parsed["data"]["branch"], "main");
     assert_eq!(parsed["data"]["subject"], "initial");
     assert!(parsed["data"]["commit"].is_string());
+    assert_eq!(parsed["data"]["amend"], false);
+    assert_eq!(parsed["data"]["signoff"], false);
+    assert!(parsed["data"]["conventional"].is_null());
+    assert!(
+        parsed["data"]["signed"].is_boolean(),
+        "signed should be a boolean"
+    );
     assert_eq!(parsed["data"]["files_changed"]["total"], 1);
     assert_eq!(parsed["data"]["files_changed"]["new"], 1);
+    assert_eq!(parsed["data"]["files_changed"]["modified"], 0);
+    assert_eq!(parsed["data"]["files_changed"]["deleted"], 0);
+    assert!(
+        output.stderr.is_empty(),
+        "json commit success should keep stderr clean, got: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn json_commit_suppresses_successful_hook_output() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo_via_cli(&repo);
+    configure_identity_via_cli(&repo);
+
+    let hooks_dir = repo.join(".libra").join("hooks");
+    fs::create_dir_all(&hooks_dir).unwrap();
+
+    #[cfg(unix)]
+    fs::write(
+        hooks_dir.join("pre-commit.sh"),
+        "#!/bin/sh\necho hook-stdout\necho hook-stderr >&2\nexit 0\n",
+    )
+    .unwrap();
+
+    #[cfg(windows)]
+    fs::write(
+        hooks_dir.join("pre-commit.ps1"),
+        "[Console]::Out.WriteLine('hook-stdout')\n[Console]::Error.WriteLine('hook-stderr')\nexit 0\n",
+    )
+    .unwrap();
+
+    fs::write(repo.join("f.txt"), "hello").unwrap();
+    let add = run(&["add", "f.txt"], &repo);
+    assert_cli_success(&add, "add");
+
+    let output = run(&["--json", "commit", "-m", "initial"], &repo);
+    assert_cli_success(&output, "json commit with hook");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("expected JSON on stdout, got: {stdout}\nerror: {e}"));
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["command"], "commit");
+    assert!(
+        output.stderr.is_empty(),
+        "successful hook output must not leak into structured stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn json_commit_conventional_check_does_not_pollute_stdout() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo_via_cli(&repo);
+    configure_identity_via_cli(&repo);
+
+    fs::write(repo.join("f.txt"), "hello").unwrap();
+    let add = run(&["add", "f.txt"], &repo);
+    assert_cli_success(&add, "add");
+
+    let output = run(
+        &["--json", "commit", "-m", "test: initial", "--conventional"],
+        &repo,
+    );
+    assert_cli_success(&output, "json conventional commit");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("expected JSON on stdout, got: {stdout}\nerror: {e}"));
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["command"], "commit");
+    assert_eq!(parsed["data"]["conventional"], true);
+    assert!(
+        output.stderr.is_empty(),
+        "json commit success should keep stderr clean, got: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

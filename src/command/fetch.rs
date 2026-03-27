@@ -456,6 +456,21 @@ pub struct FetchArgs {
     pub all: bool,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct FetchRefUpdate {
+    pub remote_ref: String,
+    pub old_oid: Option<String>,
+    pub new_oid: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FetchRepositoryResult {
+    pub remote: String,
+    pub url: String,
+    pub refs_updated: Vec<FetchRefUpdate>,
+    pub objects_fetched: usize,
+}
+
 /// Typed classification for [`FetchError::InvalidRemoteSpec`] so that callers
 /// can map each sub-category to a distinct stable error code without parsing
 /// the `reason` string.
@@ -681,8 +696,21 @@ pub async fn fetch_repository_safe(
     depth: Option<usize>,
     output: &OutputConfig,
 ) -> Result<(), FetchError> {
+    fetch_repository_with_result(remote_config, branch, single_branch, depth, output)
+        .await
+        .map(|_| ())
+}
+
+pub(crate) async fn fetch_repository_with_result(
+    remote_config: RemoteConfig,
+    branch: Option<String>,
+    single_branch: bool,
+    depth: Option<usize>,
+    output: &OutputConfig,
+) -> Result<FetchRepositoryResult, FetchError> {
     let (remote_client, discovery) =
         discover_remote_with_name(&remote_config.url, Some(&remote_config.name)).await?;
+    let normalized_url = normalize_remote_url(&remote_config.url, &remote_client);
     let local_kind = get_hash_kind();
     if discovery.hash_kind != local_kind {
         return Err(FetchError::ObjectFormatMismatch {
@@ -704,7 +732,12 @@ pub async fn fetch_repository_safe(
     let mut refs = discovery.refs.clone();
     if refs.is_empty() {
         tracing::debug!("fetch skipped because remote has no refs");
-        return Ok(());
+        return Ok(FetchRepositoryResult {
+            remote: remote_config.name,
+            url: normalized_url,
+            refs_updated: Vec::new(),
+            objects_fetched: 0,
+        });
     }
 
     let remote_head = refs
@@ -738,6 +771,7 @@ pub async fn fetch_repository_safe(
         })?;
 
     let pack_data = read_fetch_stream(&mut result_stream, output).await?;
+    let objects_fetched = pack_object_count(&pack_data);
     let pack_file = write_pack_and_index(&pack_data)?;
     if let Some(pack_file) = pack_file {
         let index_version = match get_hash_kind() {
@@ -758,7 +792,14 @@ pub async fn fetch_repository_safe(
         }
     }
 
-    update_references(&remote_config, &refs, &ref_heads, remote_head, branch).await
+    let refs_updated =
+        update_references(&remote_config, &refs, &ref_heads, remote_head, branch).await?;
+    Ok(FetchRepositoryResult {
+        remote: remote_config.name,
+        url: normalized_url,
+        refs_updated,
+        objects_fetched,
+    })
 }
 
 async fn read_fetch_stream(
@@ -848,6 +889,15 @@ fn print_remote_progress(payload: &[u8], render_progress: bool) {
     }
 }
 
+fn pack_object_count(pack_data: &[u8]) -> usize {
+    if pack_data.len() < 12 || &pack_data[..4] != b"PACK" {
+        return 0;
+    }
+    let mut count = [0u8; 4];
+    count.copy_from_slice(&pack_data[8..12]);
+    u32::from_be_bytes(count) as usize
+}
+
 fn write_pack_and_index(pack_data: &[u8]) -> Result<Option<String>, FetchError> {
     let hash_len = get_hash_kind().size();
     if pack_data.len() < hash_len {
@@ -897,13 +947,14 @@ async fn update_references(
     ref_heads: &[DiscRef],
     remote_head: Option<DiscRef>,
     branch: Option<String>,
-) -> Result<(), FetchError> {
+) -> Result<Vec<FetchRefUpdate>, FetchError> {
     let db = get_db_conn_instance().await;
     let remote_config = remote_config.clone();
     let refs = refs.to_vec();
     let ref_heads = ref_heads.to_vec();
     db.transaction(|txn| {
         Box::pin(async move {
+            let mut updates = Vec::new();
             for reference in &refs {
                 let full_ref_name: String;
                 if let Some(branch_name) = reference._ref.strip_prefix("refs/heads/") {
@@ -921,9 +972,11 @@ async fn update_references(
                 let old_oid =
                     Branch::find_branch_with_conn(txn, &full_ref_name, Some(&remote_config.name))
                         .await
-                        .map_or(ObjectHash::zero_str(get_hash_kind()), |branch| {
-                            branch.commit.to_string()
-                        });
+                        .map(|branch| branch.commit.to_string());
+
+                if old_oid.as_deref() == Some(reference._hash.as_str()) {
+                    continue;
+                }
 
                 Branch::update_branch_with_conn(
                     txn,
@@ -935,11 +988,18 @@ async fn update_references(
                 .map_err(ReflogError::from)?;
 
                 let context = ReflogContext {
-                    old_oid: old_oid.to_string(),
+                    old_oid: old_oid
+                        .clone()
+                        .unwrap_or_else(|| ObjectHash::zero_str(get_hash_kind()).to_string()),
                     new_oid: reference._hash.clone(),
                     action: ReflogAction::Fetch,
                 };
                 Reflog::insert_single_entry(txn, &context, &full_ref_name).await?;
+                updates.push(FetchRefUpdate {
+                    remote_ref: full_ref_name,
+                    old_oid,
+                    new_oid: reference._hash.clone(),
+                });
             }
 
             // Determine the remote default branch.
@@ -976,7 +1036,7 @@ async fn update_references(
                 tracing::debug!("remote HEAD does not point to a branch ref");
             }
 
-            Ok::<_, ReflogError>(())
+            Ok::<_, ReflogError>(updates)
         })
     })
     .await

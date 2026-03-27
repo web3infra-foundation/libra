@@ -1,9 +1,14 @@
 //! Merge command orchestration that resolves base/target commits, performs recursive merge, stages results, and updates refs or surfaces conflicts.
 
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
+
 use clap::Parser;
 use git_internal::{
     hash::{ObjectHash, get_hash_kind},
-    internal::object::commit::Commit,
+    internal::object::{commit::Commit, tree::Tree},
 };
 
 use super::{
@@ -19,6 +24,7 @@ use crate::{
     },
     utils::{
         error::{CliError, CliResult},
+        object_ext::TreeExt,
         output::OutputConfig,
         util,
     },
@@ -28,6 +34,58 @@ use crate::{
 pub struct MergeArgs {
     /// The branch to merge into the current branch, could be remote branch
     pub branch: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PullMergeSummary {
+    pub strategy: String,
+    pub commit: Option<String>,
+    pub files_changed: usize,
+    pub up_to_date: bool,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum PullMergeError {
+    #[error("{0} - not something we can merge")]
+    InvalidTarget(String),
+    #[error("failed to load merge target '{commit_id}': {detail}")]
+    TargetLoad { commit_id: String, detail: String },
+    #[error("failed to load current commit '{commit_id}': {detail}")]
+    CurrentLoad { commit_id: String, detail: String },
+    #[error("failed to inspect merge history: {0}")]
+    History(String),
+    #[error("refusing to merge unrelated histories")]
+    UnrelatedHistories,
+    #[error("non-fast-forward merge from '{upstream}' requires manual merge")]
+    ManualMergeRequired { upstream: String },
+    #[error("failed to load tree '{tree_id}': {detail}")]
+    TreeLoad { tree_id: String, detail: String },
+    #[error("failed to update HEAD during merge: {0}")]
+    HeadUpdate(String),
+    #[error("failed to restore working tree after merge: {0}")]
+    Restore(String),
+}
+
+impl From<PullMergeError> for CliError {
+    fn from(error: PullMergeError) -> Self {
+        match &error {
+            PullMergeError::InvalidTarget(..) => CliError::command_usage(error.to_string())
+                .with_stable_code(crate::utils::error::StableErrorCode::CliInvalidTarget),
+            PullMergeError::TargetLoad { .. }
+            | PullMergeError::CurrentLoad { .. }
+            | PullMergeError::History(..)
+            | PullMergeError::TreeLoad { .. } => CliError::fatal(error.to_string())
+                .with_stable_code(crate::utils::error::StableErrorCode::RepoCorrupt),
+            PullMergeError::UnrelatedHistories => CliError::failure(error.to_string())
+                .with_stable_code(crate::utils::error::StableErrorCode::RepoStateInvalid),
+            PullMergeError::ManualMergeRequired { .. } => CliError::failure(error.to_string())
+                .with_stable_code(crate::utils::error::StableErrorCode::ConflictOperationBlocked),
+            PullMergeError::HeadUpdate(..) | PullMergeError::Restore(..) => {
+                CliError::fatal(error.to_string())
+                    .with_stable_code(crate::utils::error::StableErrorCode::IoWriteFailed)
+            }
+        }
+    }
 }
 
 pub async fn execute(args: MergeArgs) {
@@ -40,48 +98,101 @@ pub async fn execute(args: MergeArgs) {
 /// errors and exiting. Resolves the merge target, performs fast-forward or
 /// recursive merge, stages results, and updates refs.
 pub async fn execute_safe(args: MergeArgs, output: &OutputConfig) -> CliResult<()> {
-    let commit_hash = get_target_commit(&args.branch)
-        .await
-        .map_err(|_| CliError::failure(format!("{} - not something we can merge", args.branch)))?;
-    let target_commit: Commit = load_object(&commit_hash)
-        .map_err(|_| CliError::fatal(format!("not a valid object name: '{}'", commit_hash)))?;
+    let result =
+        match run_merge_for_pull(&args.branch, &args.branch, output).await {
+            Ok(result) => result,
+            Err(PullMergeError::ManualMergeRequired { .. }) => {
+                return Err(CliError::fatal(
+                    "Not possible to fast-forward merge, try merge manually",
+                )
+                .with_stable_code(crate::utils::error::StableErrorCode::ConflictOperationBlocked));
+            }
+            Err(error) => return Err(CliError::from(error)),
+        };
+    if result.up_to_date {
+        crate::info_println!(output, "Already up to date.");
+    } else {
+        crate::info_println!(output, "Fast-forward");
+    }
+    Ok(())
+}
 
-    // Handle the case where merging into an empty branch or merging with remote when no local commits exist
-    // If the current HEAD doesn't point to any commit, perform a fast-forward merge directly
+pub(crate) async fn run_merge_for_pull(
+    target_ref: &str,
+    upstream: &str,
+    output: &OutputConfig,
+) -> Result<PullMergeSummary, PullMergeError> {
+    let commit_hash = resolve_merge_target(target_ref)
+        .await
+        .map_err(|_| PullMergeError::InvalidTarget(upstream.to_string()))?;
+    let target_commit: Commit =
+        load_object(&commit_hash).map_err(|error| PullMergeError::TargetLoad {
+            commit_id: commit_hash.to_string(),
+            detail: error.to_string(),
+        })?;
+
     let current_commit_id = Head::current_commit().await;
     if current_commit_id.is_none() {
-        return merge_ff(target_commit, &args.branch, output).await;
+        let files_changed = count_changed_files(None, &target_commit)?;
+        apply_fast_forward_merge(target_commit.clone(), upstream, output).await?;
+        return Ok(PullMergeSummary {
+            strategy: "fast-forward".to_string(),
+            commit: Some(target_commit.id.to_string()),
+            files_changed,
+            up_to_date: false,
+        });
     }
 
-    // INVARIANT: `current_commit_id` is `Some` — the `None` case returns above.
-    let current_commit_id = current_commit_id.unwrap();
-    let current_commit: Commit = load_object(&current_commit_id).map_err(|_| {
-        CliError::fatal(format!("not a valid object name: '{}'", current_commit_id))
-    })?;
+    let current_commit_id = match current_commit_id {
+        Some(commit_id) => commit_id,
+        None => unreachable!("checked above"),
+    };
+    let current_commit: Commit =
+        load_object(&current_commit_id).map_err(|error| PullMergeError::CurrentLoad {
+            commit_id: current_commit_id.to_string(),
+            detail: error.to_string(),
+        })?;
 
-    let lca = lca_commit(&current_commit, &target_commit).await?;
+    let lca = lca_commit(&current_commit, &target_commit)
+        .await
+        .map_err(|error| PullMergeError::History(error.to_string()))?;
 
-    let lca = lca.ok_or_else(|| CliError::fatal("refusing to merge unrelated histories"))?;
+    let lca = lca.ok_or(PullMergeError::UnrelatedHistories)?;
 
     if lca.id == target_commit.id {
-        // no need to merge
-        crate::info_println!(output, "Already up to date.");
-        Ok(())
-    } else if lca.id == current_commit.id {
-        crate::info_println!(
-            output,
-            "Updating {}..{}",
-            &current_commit.id.to_string()[..6],
-            &target_commit.id.to_string()[..6]
-        );
-        // fast-forward merge
-        merge_ff(target_commit, &args.branch, output).await
-    } else {
-        // didn't support yet
-        Err(CliError::fatal(
-            "Not possible to fast-forward merge, try merge manually",
-        ))
+        return Ok(PullMergeSummary {
+            strategy: "already-up-to-date".to_string(),
+            commit: None,
+            files_changed: 0,
+            up_to_date: true,
+        });
     }
+
+    if lca.id == current_commit.id {
+        let files_changed = count_changed_files(Some(&current_commit), &target_commit)?;
+        apply_fast_forward_merge(target_commit.clone(), upstream, output).await?;
+        return Ok(PullMergeSummary {
+            strategy: "fast-forward".to_string(),
+            commit: Some(target_commit.id.to_string()),
+            files_changed,
+            up_to_date: false,
+        });
+    }
+
+    Err(PullMergeError::ManualMergeRequired {
+        upstream: upstream.to_string(),
+    })
+}
+
+async fn resolve_merge_target(target_ref: &str) -> Result<ObjectHash, Box<dyn std::error::Error>> {
+    if let Some(remote) = target_ref.strip_prefix("refs/remotes/")
+        && let Some((remote_name, _)) = remote.split_once('/')
+        && let Some(branch) = Branch::find_branch(target_ref, Some(remote_name)).await
+    {
+        return Ok(branch.commit);
+    }
+
+    get_target_commit(target_ref).await
 }
 
 async fn lca_commit(lhs: &Commit, rhs: &Commit) -> Result<Option<Commit>, CliError> {
@@ -112,13 +223,11 @@ async fn lca_commit(lhs: &Commit, rhs: &Commit) -> Result<Option<Commit>, CliErr
     Ok(None)
 }
 
-/// try merge in fast-forward mode, if it's not possible, do nothing
-async fn merge_ff(
+async fn apply_fast_forward_merge(
     target_commit: Commit,
     target_branch_name: &str,
     output: &OutputConfig,
-) -> CliResult<()> {
-    crate::info_println!(output, "Fast-forward");
+) -> Result<(), PullMergeError> {
     let db = get_db_conn_instance().await;
 
     let old_oid_opt = Head::current_commit_with_conn(&db).await;
@@ -165,7 +274,7 @@ async fn merge_ff(
     )
     .await
     {
-        return Err(CliError::fatal(e.to_string()));
+        return Err(PullMergeError::HeadUpdate(e.to_string()));
     }
 
     // Only restore the working directory *after* the pointers have been updated.
@@ -178,6 +287,34 @@ async fn merge_ff(
         },
         output,
     )
-    .await?;
+    .await
+    .map_err(|error| PullMergeError::Restore(error.to_string()))?;
     Ok(())
+}
+
+fn count_changed_files(
+    current_commit: Option<&Commit>,
+    target_commit: &Commit,
+) -> Result<usize, PullMergeError> {
+    let target_items = commit_tree_items(target_commit)?;
+    let current_items = match current_commit {
+        Some(commit) => commit_tree_items(commit)?,
+        None => HashMap::new(),
+    };
+
+    let mut paths: HashSet<PathBuf> = current_items.keys().cloned().collect();
+    paths.extend(target_items.keys().cloned());
+
+    Ok(paths
+        .into_iter()
+        .filter(|path| current_items.get(path) != target_items.get(path))
+        .count())
+}
+
+fn commit_tree_items(commit: &Commit) -> Result<HashMap<PathBuf, ObjectHash>, PullMergeError> {
+    let tree: Tree = load_object(&commit.tree_id).map_err(|error| PullMergeError::TreeLoad {
+        tree_id: commit.tree_id.to_string(),
+        detail: error.to_string(),
+    })?;
+    Ok(tree.get_plain_items().into_iter().collect())
 }

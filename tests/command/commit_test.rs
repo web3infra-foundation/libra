@@ -801,6 +801,141 @@ async fn test_commit_amend_without_changes() {
     commit::execute(amend_args).await;
 }
 
+#[tokio::test]
+#[serial]
+async fn test_commit_signoff_persists_trailer() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    test::ensure_file("signed.txt", Some("signed content"));
+    add::execute(add::AddArgs {
+        pathspec: vec!["signed.txt".into()],
+        all: false,
+        update: false,
+        refresh: false,
+        verbose: false,
+        force: false,
+        dry_run: false,
+        ignore_errors: false,
+    })
+    .await;
+
+    commit::execute(CommitArgs {
+        message: Some("signed commit".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: true,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    })
+    .await;
+
+    let head_id = Head::current_commit().await.unwrap();
+    let commit: Commit = load_object(&head_id).unwrap();
+    assert!(commit.message.trim_start().starts_with("signed commit"));
+    assert!(
+        commit
+            .message
+            .contains("Signed-off-by: Libra Test User <libra-test@example.com>"),
+        "signoff trailer missing from commit message: {}",
+        commit.message
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_commit_amend_signoff_persists_trailer() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    commit::execute(CommitArgs {
+        message: Some("initial commit".to_string()),
+        file: None,
+        allow_empty: true,
+        conventional: false,
+        no_edit: false,
+        amend: false,
+        signoff: false,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    })
+    .await;
+
+    commit::execute(CommitArgs {
+        message: Some("amended signed commit".to_string()),
+        file: None,
+        allow_empty: false,
+        conventional: false,
+        no_edit: false,
+        amend: true,
+        signoff: true,
+        disable_pre: true,
+        all: false,
+        no_verify: false,
+        author: None,
+    })
+    .await;
+
+    let head_id = Head::current_commit().await.unwrap();
+    let commit: Commit = load_object(&head_id).unwrap();
+    assert!(
+        commit
+            .message
+            .trim_start()
+            .starts_with("amended signed commit")
+    );
+    assert!(
+        commit
+            .message
+            .contains("Signed-off-by: Libra Test User <libra-test@example.com>"),
+        "signoff trailer missing from amended commit message: {}",
+        commit.message
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_commit_amend_without_existing_commit_returns_repo_state_error() {
+    let temp_path = tempdir().unwrap();
+    test::setup_with_new_libra_in(temp_path.path()).await;
+    let _guard = ChangeDirGuard::new(temp_path.path());
+
+    let result = execute_safe(
+        CommitArgs {
+            message: Some("amend without head".to_string()),
+            file: None,
+            allow_empty: false,
+            conventional: false,
+            no_edit: false,
+            amend: true,
+            signoff: false,
+            disable_pre: true,
+            all: false,
+            no_verify: false,
+            author: None,
+        },
+        &OutputConfig::default(),
+    )
+    .await;
+
+    let err = result.expect_err("amending without an existing commit should fail");
+    assert_eq!(err.stable_code().as_str(), "LBR-REPO-003");
+    assert!(
+        err.message().contains("there is no commit to amend"),
+        "unexpected error message: {}",
+        err.message()
+    );
+}
+
 /// Without explicit identity (config/env), commit should fail with the same
 /// "author identity unknown" style error as Git.
 #[tokio::test]
