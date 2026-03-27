@@ -150,7 +150,7 @@ Authentication comes from environment variables:
 Example:
 
 ```bash
-export ANTHROPIC_BASE_URL=https://right.codes/o2a
+export ANTHROPIC_BASE_URL=https://your-gateway.example.com/anthropic
 export ANTHROPIC_AUTH_TOKEN=<token>
 unset ANTHROPIC_API_KEY
 ```
