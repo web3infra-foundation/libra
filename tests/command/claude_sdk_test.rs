@@ -6,28 +6,45 @@ use std::{
     collections::BTreeSet,
     fs,
     io::Write,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    process::{Output, Stdio},
+    process::{Command, Output, Stdio},
     sync::Arc,
 };
 
-use git_internal::internal::object::{
-    decision::Decision, evidence::Evidence, intent::Intent, run::Run, task::Task,
+use git_internal::{
+    hash::ObjectHash,
+    internal::object::{
+        decision::Decision, evidence::Evidence, intent::Intent, patchset::PatchSet, plan::Plan,
+        provenance::Provenance, run::Run, run_usage::RunUsage, task::Task,
+    },
 };
 use libra::{
     internal::{
-        ai::history::{AI_REF, HistoryManager},
-        model::reference::{self, ConfigKind},
+        ai::{
+            history::{AI_REF, HistoryManager},
+            projection::{ProjectionRebuilder, ThreadProjection},
+        },
+        model::{
+            ai_index_run_event, ai_index_run_patchset, ai_index_task_run, ai_live_context_window,
+            ai_scheduler_plan_head, ai_scheduler_state,
+            reference::{self, ConfigKind},
+        },
     },
-    utils::{storage::local::LocalStorage, storage_ext::StorageExt, test},
+    utils::{
+        storage::{Storage, local::LocalStorage},
+        storage_ext::StorageExt,
+        test,
+    },
 };
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use serial_test::serial;
 use tempfile::tempdir;
+use uuid::Uuid;
 
-use super::{assert_cli_success, run_libra_command};
+use super::{assert_cli_success, run_libra_command, run_libra_command_raw};
 
 const PROBE_LIKE_ARTIFACT: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -53,11 +70,57 @@ fn parse_stdout_json(output: &Output, context: &str) -> Value {
         .unwrap_or_else(|err| panic!("{context}: failed to parse stdout JSON: {err}"))
 }
 
+fn parse_stdout_ndjson(output: &Output, context: &str) -> Vec<Value> {
+    String::from_utf8(output.stdout.clone())
+        .unwrap_or_else(|err| panic!("{context}: failed to decode stdout as UTF-8: {err}"))
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str::<Value>(line).unwrap_or_else(|err| {
+                panic!("{context}: failed to parse NDJSON line: {err}; line={line}")
+            })
+        })
+        .collect()
+}
+
+fn find_ndjson_event<'a>(events: &'a [Value], event_name: &str, context: &str) -> &'a Value {
+    events
+        .iter()
+        .find(|event| event["event"] == json!(event_name))
+        .unwrap_or_else(|| panic!("{context}: missing NDJSON event '{event_name}'"))
+}
+
 fn read_json_file(path: &Path) -> Value {
     let body = fs::read_to_string(path)
         .unwrap_or_else(|err| panic!("failed to read JSON file '{}': {err}", path.display()));
     serde_json::from_str(&body)
         .unwrap_or_else(|err| panic!("failed to parse JSON file '{}': {err}", path.display()))
+}
+
+fn list_json_files(dir: &Path) -> Vec<PathBuf> {
+    let mut files = fs::read_dir(dir)
+        .unwrap_or_else(|err| panic!("failed to read directory '{}': {err}", dir.display()))
+        .filter_map(|entry| {
+            let entry = entry
+                .unwrap_or_else(|err| panic!("failed to read entry in '{}': {err}", dir.display()));
+            let path = entry.path();
+            (path.extension().and_then(|ext| ext.to_str()) == Some("json")).then_some(path)
+        })
+        .collect::<Vec<_>>();
+    files.sort();
+    files
+}
+
+fn only_json_file(dir: &Path, context: &str) -> PathBuf {
+    let files = list_json_files(dir);
+    assert_eq!(
+        files.len(),
+        1,
+        "{context}: expected exactly one JSON file in '{}', found {:?}",
+        dir.display(),
+        files
+    );
+    files[0].clone()
 }
 
 async fn read_history_head(repo: &Path, history: &HistoryManager) -> String {
@@ -83,6 +146,16 @@ fn write_shell_helper(path: &Path, artifact_path: &Path) {
     let script = format!("#!/bin/sh\ncat '{artifact_rendered}'\n");
     fs::write(path, script)
         .unwrap_or_else(|err| panic!("failed to write helper script '{}': {err}", path.display()));
+    let mut permissions = fs::metadata(path)
+        .unwrap_or_else(|err| panic!("failed to stat helper script '{}': {err}", path.display()))
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions).unwrap_or_else(|err| {
+        panic!(
+            "failed to set executable permissions on helper script '{}': {err}",
+            path.display()
+        )
+    });
 }
 
 fn write_request_capture_shell_helper(path: &Path, artifact_path: &Path, request_path: &Path) {
@@ -91,6 +164,16 @@ fn write_request_capture_shell_helper(path: &Path, artifact_path: &Path, request
     let script = format!("#!/bin/sh\ncat > '{request_rendered}'\ncat '{artifact_rendered}'\n");
     fs::write(path, script)
         .unwrap_or_else(|err| panic!("failed to write helper script '{}': {err}", path.display()));
+    let mut permissions = fs::metadata(path)
+        .unwrap_or_else(|err| panic!("failed to stat helper script '{}': {err}", path.display()))
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions).unwrap_or_else(|err| {
+        panic!(
+            "failed to set executable permissions on helper script '{}': {err}",
+            path.display()
+        )
+    });
 }
 
 fn write_json_response_capture_shell_helper(
@@ -103,6 +186,363 @@ fn write_json_response_capture_shell_helper(
     let script = format!("#!/bin/sh\ncat > '{request_rendered}'\ncat '{response_rendered}'\n");
     fs::write(path, script)
         .unwrap_or_else(|err| panic!("failed to write helper script '{}': {err}", path.display()));
+    let mut permissions = fs::metadata(path)
+        .unwrap_or_else(|err| panic!("failed to stat helper script '{}': {err}", path.display()))
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions).unwrap_or_else(|err| {
+        panic!(
+            "failed to set executable permissions on helper script '{}': {err}",
+            path.display()
+        )
+    });
+}
+
+fn write_json_response_capture_python_helper(
+    path: &Path,
+    response_path: &Path,
+    request_path: &Path,
+) {
+    let response_literal =
+        serde_json::to_string(&response_path.to_string_lossy().to_string()).expect("path json");
+    let request_literal =
+        serde_json::to_string(&request_path.to_string_lossy().to_string()).expect("path json");
+    let script = format!(
+        "#!/usr/bin/env python3\nimport json\nimport pathlib\nimport sys\n\nrequest = json.load(sys.stdin)\npathlib.Path({request_literal}).write_text(json.dumps(request), encoding='utf-8')\nsys.stdout.write(pathlib.Path({response_literal}).read_text(encoding='utf-8'))\n"
+    );
+    fs::write(path, script)
+        .unwrap_or_else(|err| panic!("failed to write helper script '{}': {err}", path.display()));
+    let mut permissions = fs::metadata(path)
+        .unwrap_or_else(|err| panic!("failed to stat helper script '{}': {err}", path.display()))
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions).unwrap_or_else(|err| {
+        panic!(
+            "failed to set executable permissions on helper script '{}': {err}",
+            path.display()
+        )
+    });
+}
+
+fn embedded_claude_sdk_helper_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("internal")
+        .join("ai")
+        .join("providers")
+        .join("claude_sdk")
+        .join("helper.cjs")
+}
+
+fn write_fake_claude_agent_sdk_module(path: &Path) {
+    let module = r#"
+const fs = require('fs');
+
+function loadScenario() {
+  const scenarioPath = process.env.LIBRA_FAKE_CLAUDE_SDK_SCENARIO_PATH;
+  if (!scenarioPath) {
+    throw new Error('LIBRA_FAKE_CLAUDE_SDK_SCENARIO_PATH is not set');
+  }
+  return JSON.parse(fs.readFileSync(scenarioPath, 'utf8'));
+}
+
+function defaultStructuredOutput() {
+  return {
+    summary: 'Fake Claude managed run',
+    problemStatement: 'Exercise the managed Claude SDK helper flow.',
+    changeType: 'refactor',
+    objectives: ['Exercise managed Claude SDK helper flow'],
+    successCriteria: ['Managed helper returns a structured result'],
+    riskRationale: 'Fake SDK test fixture',
+  };
+}
+
+async function runHookGroup(registry, hookName, payload) {
+  if (!registry) return;
+  const matchers = registry[hookName];
+  if (!Array.isArray(matchers)) return;
+  for (const matcher of matchers) {
+    if (!matcher || !Array.isArray(matcher.hooks)) continue;
+    for (const hook of matcher.hooks) {
+      await hook(payload);
+    }
+  }
+}
+
+exports.query = function query({ prompt, options }) {
+  const scenario = loadScenario();
+  const sessionId = scenario.sessionId || 'fake-sdk-session';
+  const transcriptPath = scenario.transcriptPath || `/tmp/${sessionId}.jsonl`;
+  const resultMessage = scenario.resultMessage || {
+    type: 'result',
+    subtype: 'success',
+    is_error: false,
+    session_id: sessionId,
+    stop_reason: 'end_turn',
+    result: 'ok',
+    structured_output: defaultStructuredOutput(),
+  };
+
+  return {
+    async *[Symbol.asyncIterator]() {
+      yield {
+        type: 'system',
+        subtype: 'init',
+        cwd: options.cwd,
+        session_id: sessionId,
+        tools: scenario.tools || ['Read', 'Edit', 'AskUserQuestion'],
+        model: options.model || 'claude-haiku-4-5-20251001',
+        permissionMode: options.permissionMode || 'default',
+      };
+
+      let interrupted = false;
+      if (Array.isArray(scenario.steps)) {
+        for (const step of scenario.steps) {
+          if (step.type !== 'tool') {
+            continue;
+          }
+          const permissionOptions = {
+            toolUseID: step.toolUseId || null,
+            agentID: step.agentId || null,
+            blockedPath: step.blockedPath || null,
+            decisionReason: step.decisionReason || null,
+            suggestions: Array.isArray(step.suggestions) ? step.suggestions : [],
+            title: step.title || null,
+            displayName: step.displayName || null,
+            description: step.description || null,
+          };
+          const hookPayload = {
+            session_id: sessionId,
+            cwd: options.cwd,
+            transcript_path: transcriptPath,
+            tool_name: step.toolName,
+            tool_input: step.input || {},
+            tool_use_id: step.toolUseId || null,
+          };
+          if (step.emitPermissionRequest !== false) {
+            await runHookGroup(options.hooks, 'PermissionRequest', {
+              ...hookPayload,
+              hook_event_name: 'PermissionRequest',
+              permission_suggestions: permissionOptions.suggestions,
+            });
+          }
+          await runHookGroup(options.hooks, 'PreToolUse', {
+            ...hookPayload,
+            hook_event_name: 'PreToolUse',
+          });
+          const decision = options.canUseTool
+            ? await options.canUseTool(step.toolName, step.input || {}, permissionOptions)
+            : { behavior: 'allow', updatedInput: step.input || {} };
+          if (step.emitPostHook !== false) {
+            const postHookName = step.postHook || 'PostToolUse';
+            await runHookGroup(options.hooks, postHookName, {
+              ...hookPayload,
+              hook_event_name: postHookName,
+              tool_response: step.toolResponse || { ok: true },
+            });
+          }
+          yield {
+            type: 'assistant',
+            session_id: sessionId,
+            message: {
+              content:
+                step.assistantContent || [
+                  {
+                    type: 'text',
+                    text:
+                      step.assistantText ||
+                      `${step.toolName} => ${decision.behavior}${decision.interrupt ? ' (interrupt)' : ''}`,
+                  },
+                ],
+            },
+          };
+          if (decision && decision.interrupt) {
+            interrupted = true;
+            break;
+          }
+        }
+      }
+
+      if (interrupted) {
+        yield {
+          type: 'result',
+          subtype: 'error',
+          is_error: true,
+          session_id: sessionId,
+          stop_reason: 'interrupted',
+          result: 'aborted',
+        };
+        return;
+      }
+
+      yield resultMessage;
+    },
+    async rewindFiles() {
+      return undefined;
+    },
+    async supportedModels() {
+      return ['haiku'];
+    },
+  };
+};
+"#;
+    fs::write(path, module).unwrap_or_else(|err| {
+        panic!(
+            "failed to write fake sdk module '{}': {err}",
+            path.display()
+        )
+    });
+}
+
+fn write_real_helper_wrapper(
+    path: &Path,
+    sdk_module_path: &Path,
+    scenario_path: &Path,
+    scripted_responses: Option<&str>,
+) {
+    let helper_rendered = embedded_claude_sdk_helper_path()
+        .to_string_lossy()
+        .replace('\'', r#"'\''"#);
+    let sdk_rendered = sdk_module_path.to_string_lossy().replace('\'', r#"'\''"#);
+    let scenario_rendered = scenario_path.to_string_lossy().replace('\'', r#"'\''"#);
+    let scripted_export = scripted_responses.map_or_else(String::new, |responses| {
+        format!(
+            "export LIBRA_CLAUDE_HELPER_SCRIPTED_RESPONSES='{}'\n",
+            responses.replace('\'', r#"'\''"#)
+        )
+    });
+    let script = format!(
+        "#!/bin/sh\nexport LIBRA_CLAUDE_AGENT_SDK_MODULE='{sdk_rendered}'\nexport LIBRA_FAKE_CLAUDE_SDK_SCENARIO_PATH='{scenario_rendered}'\n{scripted_export}exec '/opt/homebrew/bin/node' '{helper_rendered}'\n"
+    );
+    fs::write(path, script)
+        .unwrap_or_else(|err| panic!("failed to write helper wrapper '{}': {err}", path.display()));
+    let mut permissions = fs::metadata(path)
+        .unwrap_or_else(|err| panic!("failed to stat helper wrapper '{}': {err}", path.display()))
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions).unwrap_or_else(|err| {
+        panic!(
+            "failed to set executable permissions on helper wrapper '{}': {err}",
+            path.display()
+        )
+    });
+}
+
+fn write_fake_interactive_helper(
+    repo: &Path,
+    scenario: &Value,
+    scripted_responses: Option<&Value>,
+) -> PathBuf {
+    let sdk_module_path = repo.join("fake-claude-agent-sdk.js");
+    write_fake_claude_agent_sdk_module(&sdk_module_path);
+
+    let scenario_path = repo.join("fake-claude-scenario.json");
+    fs::write(
+        &scenario_path,
+        serde_json::to_vec_pretty(scenario).expect("serialize fake sdk scenario"),
+    )
+    .expect("write fake sdk scenario");
+
+    let helper_path = repo.join("real-helper-wrapper.sh");
+    let scripted_responses = scripted_responses
+        .map(|value| serde_json::to_string(value).expect("serialize scripted helper responses"));
+    write_real_helper_wrapper(
+        &helper_path,
+        &sdk_module_path,
+        &scenario_path,
+        scripted_responses.as_deref(),
+    );
+    helper_path
+}
+
+fn shell_double_quote(value: &str) -> String {
+    format!(
+        "\"{}\"",
+        value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('$', "\\$")
+    )
+}
+
+fn build_live_claude_sdk_command(
+    repo: &Path,
+    prompt_path: &Path,
+    permission_mode: &str,
+    timeout_seconds: &str,
+    tools: &[&str],
+    scripted_responses: Option<&str>,
+) -> Command {
+    let libra_bin = env!("CARGO_BIN_EXE_libra");
+    let shell_override = std::env::var("LIBRA_TEST_CLAUDE_LIVE_SHELL")
+        .ok()
+        .filter(|value| !value.is_empty());
+    let sdk_module_override = std::env::var("LIBRA_CLAUDE_AGENT_SDK_MODULE")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            let default_path = "/tmp/claude-sdk-probe/node_modules/@anthropic-ai/claude-agent-sdk";
+            Path::new(default_path)
+                .exists()
+                .then(|| default_path.to_string())
+        });
+
+    let mut command = if let Some(shell) = shell_override.as_deref() {
+        let tool_flags = tools
+            .iter()
+            .map(|tool| format!(" --tool {}", shell_double_quote(tool)))
+            .collect::<String>();
+        let shell_command = format!(
+            "cd {}; {} --json=ndjson claude-sdk run --prompt-file {} --model haiku --permission-mode {} --timeout-seconds {}{} --enable-file-checkpointing true",
+            shell_double_quote(repo.to_str().expect("repo path should be valid UTF-8")),
+            shell_double_quote(libra_bin),
+            shell_double_quote(
+                prompt_path
+                    .to_str()
+                    .expect("prompt path should be valid UTF-8")
+            ),
+            shell_double_quote(permission_mode),
+            shell_double_quote(timeout_seconds),
+            tool_flags,
+        );
+        let mut command = Command::new(shell);
+        command.arg("-lc").arg(shell_command);
+        command
+    } else {
+        let mut command = Command::new(libra_bin);
+        let mut args = vec![
+            "--json=ndjson".to_string(),
+            "claude-sdk".to_string(),
+            "run".to_string(),
+            "--prompt-file".to_string(),
+            prompt_path
+                .to_str()
+                .expect("prompt path should be valid UTF-8")
+                .to_string(),
+            "--model".to_string(),
+            "haiku".to_string(),
+            "--permission-mode".to_string(),
+            permission_mode.to_string(),
+            "--timeout-seconds".to_string(),
+            timeout_seconds.to_string(),
+        ];
+        for tool in tools {
+            args.push("--tool".to_string());
+            args.push((*tool).to_string());
+        }
+        args.push("--enable-file-checkpointing".to_string());
+        args.push("true".to_string());
+        command.current_dir(repo).args(args);
+        command
+    };
+
+    if let Some(module_path) = sdk_module_override.as_deref() {
+        command.env("LIBRA_CLAUDE_AGENT_SDK_MODULE", module_path);
+    }
+    if let Some(scripted) = scripted_responses {
+        command.env("LIBRA_CLAUDE_HELPER_SCRIPTED_RESPONSES", scripted);
+    }
+    command
 }
 
 fn replace_template_slots(node: &mut Value, replacements: &[(&str, Value)]) {
@@ -159,6 +599,55 @@ fn plan_task_only_artifact(repo: &Path, touched_file: &Path) -> Value {
     managed_artifact_from_template(PLAN_TASK_ONLY_TEMPLATE, repo, touched_file, PLAN_PROMPT)
 }
 
+fn semantic_edit_artifact(
+    repo: &Path,
+    touched_file: &Path,
+    old_text: &str,
+    new_text: &str,
+) -> Value {
+    let mut artifact = semantic_full_artifact(repo, touched_file);
+    let hook_events = artifact["hookEvents"]
+        .as_array_mut()
+        .expect("semantic full artifact should contain hook events");
+    for event in hook_events {
+        let is_post_tool_use = event.get("hook") == Some(&json!("PostToolUse"));
+        let Some(input) = event.get_mut("input").and_then(Value::as_object_mut) else {
+            continue;
+        };
+        if input.get("tool_name") != Some(&json!("Read")) {
+            continue;
+        }
+        input.insert("tool_name".to_string(), json!("Edit"));
+        input.insert(
+            "tool_input".to_string(),
+            json!({
+                "file_path": touched_file.to_string_lossy().to_string(),
+                "old_string": old_text,
+                "new_string": new_text
+            }),
+        );
+        if is_post_tool_use {
+            input.insert(
+                "tool_response".to_string(),
+                json!({
+                    "file": {
+                        "filePath": touched_file.to_string_lossy().to_string()
+                    }
+                }),
+            );
+        }
+    }
+    artifact
+}
+
+fn real_plan_step_descriptions() -> Vec<String> {
+    vec![
+        "**Inspect Bridge Architecture** -> Identify initialization sequence, provider contracts, and task event flow between Claude SDK and Libra components".to_string(),
+        "**Audit Runtime Behavior** -> Trace provider-native facts (actual type signatures, event payloads, transformation logic) vs semantic candidate interpretations".to_string(),
+        "**Extract Structured Intent** -> Map observed runtime evidence to semantic intent model with grounded validation".to_string(),
+    ]
+}
+
 fn test_change_type_artifact(repo: &Path, touched_file: &Path) -> Value {
     let mut artifact = semantic_full_artifact(repo, touched_file);
     let structured_output = artifact["resultMessage"]["structured_output"]
@@ -202,6 +691,18 @@ fn timed_out_partial_artifact(repo: &Path, touched_file: &Path) -> Value {
     artifact
 }
 
+fn errored_result_artifact(repo: &Path, touched_file: &Path, detail: &str) -> Value {
+    let mut artifact = semantic_full_artifact(repo, touched_file);
+    let result = artifact["resultMessage"]
+        .as_object_mut()
+        .expect("semantic full artifact should contain resultMessage");
+    result.insert("subtype".to_string(), json!("error"));
+    result.insert("is_error".to_string(), json!(true));
+    result.insert("stop_reason".to_string(), json!("error"));
+    result.insert("result".to_string(), json!(detail));
+    artifact
+}
+
 async fn load_intent_history(repo: &Path) -> (Arc<LocalStorage>, HistoryManager) {
     let libra_dir = repo.join(".libra");
     let storage = Arc::new(LocalStorage::new(libra_dir.join("objects")));
@@ -233,6 +734,27 @@ where
         .get_json::<T>(&hash)
         .await
         .unwrap_or_else(|err| panic!("failed to load {object_type} '{object_id}': {err}"))
+}
+
+async fn list_history_object_ids(repo: &Path, object_type: &str) -> Vec<String> {
+    let (_, history) = load_intent_history(repo).await;
+    history
+        .list_objects(object_type)
+        .await
+        .unwrap_or_else(|err| panic!("failed to list {object_type} objects: {err}"))
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect()
+}
+
+fn assert_ai_type_matches(repo: &Path, object_id: &str, expected_type: &str) {
+    let selector = format!("{expected_type}:{object_id}");
+    let output = run_libra_command(&["cat-file", "--ai-type", &selector], repo);
+    assert_cli_success(&output, "cat-file --ai-type should succeed");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        expected_type
+    );
 }
 
 fn session_messages_fixture(session_id: &str) -> Value {
@@ -346,8 +868,6 @@ fn stage_provider_session_evidence_artifacts(repo: &Path, provider_session_id: &
             catalog_helper_path
                 .to_str()
                 .expect("catalog helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo,
     );
@@ -381,8 +901,6 @@ fn stage_provider_session_evidence_artifacts(repo: &Path, provider_session_id: &
             messages_helper_path
                 .to_str()
                 .expect("messages helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo,
     );
@@ -538,12 +1056,11 @@ async fn test_claude_sdk_run_with_custom_helper_persists_intent_extraction() {
         &[
             "claude-sdk",
             "run",
+            "--batch",
             "--prompt",
             DEFAULT_MANAGED_PROMPT,
             "--helper-path",
             helper_path.to_str().expect("helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );
@@ -589,12 +1106,21 @@ async fn test_claude_sdk_run_with_custom_helper_persists_intent_extraction() {
     let intent_extraction = read_json_file(&intent_extraction_path);
     assert_eq!(
         intent_extraction["schema"],
-        json!("libra.intent_extraction.v1")
+        json!("libra.intent_extraction.v2")
     );
     assert_eq!(
         intent_extraction["extraction"]["intent"]["summary"],
         json!("Persist the Claude SDK managed bridge")
     );
+    assert_eq!(
+        intent_extraction["extraction"]["intent"]["inScope"],
+        json!(["src/lib.rs"])
+    );
+    assert_eq!(
+        intent_extraction["extraction"]["acceptance"]["fastChecks"],
+        json!([])
+    );
+    assert!(intent_extraction.get("planningSummary").is_none());
 
     let audit_bundle = read_json_file(&audit_bundle_path);
     assert_eq!(
@@ -603,7 +1129,7 @@ async fn test_claude_sdk_run_with_custom_helper_persists_intent_extraction() {
     );
     assert_eq!(
         audit_bundle["bridge"]["intentExtractionArtifact"]["schema"],
-        json!("libra.intent_extraction.v1")
+        json!("libra.intent_extraction.v2")
     );
     assert_eq!(
         audit_bundle["bridge"]["objectCandidates"]["runSnapshot"]["id"],
@@ -691,6 +1217,186 @@ async fn test_claude_sdk_run_can_disable_auto_tool_approval() {
     fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
     fs::write(&touched_file, "pub fn managed_bridge() {}\n").expect("write source file");
 
+    let mut artifact = semantic_full_artifact(repo.path(), &touched_file);
+    artifact["requestContext"] = json!({
+        "enableFileCheckpointing": true
+    });
+    let artifact_path = repo.path().join("managed-run-artifact.json");
+    fs::write(
+        &artifact_path,
+        serde_json::to_vec_pretty(&artifact).expect("serialize test artifact"),
+    )
+    .expect("write test artifact");
+
+    let request_path = repo.path().join("helper-request.json");
+    let helper_path = repo.path().join("capture-managed-helper.sh");
+    write_request_capture_shell_helper(&helper_path, &artifact_path, &request_path);
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--batch",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--tool",
+            "Read",
+            "--auto-approve-tools",
+            "false",
+            "--include-partial-messages",
+            "true",
+            "--prompt-suggestions",
+            "true",
+            "--agent-progress-summaries",
+            "true",
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &run,
+        "claude-sdk run should succeed when auto tool approval is disabled",
+    );
+
+    let helper_request = read_json_file(&request_path);
+    assert_eq!(helper_request["tools"], json!(["Read"]));
+    assert_eq!(helper_request["allowedTools"], json!(["Read"]));
+    assert_eq!(helper_request["autoApproveTools"], json!(false));
+    assert_eq!(helper_request["includePartialMessages"], json!(true));
+    assert_eq!(helper_request["promptSuggestions"], json!(true));
+    assert_eq!(helper_request["agentProgressSummaries"], json!(true));
+    assert_eq!(helper_request["systemPrompt"]["type"], json!("preset"));
+    assert_eq!(
+        helper_request["systemPrompt"]["preset"],
+        json!("claude_code")
+    );
+    assert!(
+        helper_request["systemPrompt"]["append"]
+            .as_str()
+            .is_some_and(|text| text.contains("concise numbered 3-step plan")),
+        "run helper request should carry the built-in Claude system prompt extension"
+    );
+    assert!(
+        helper_request["outputSchema"]["properties"]
+            .get("planningSummary")
+            .is_some()
+    );
+    assert!(
+        helper_request["outputSchema"]["properties"]
+            .get("inScope")
+            .is_none()
+    );
+    assert!(
+        helper_request["outputSchema"]["properties"]
+            .get("fastChecks")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_run_python_backend_uses_python_binary_and_preserves_request_shape() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn python_backend_request() {}\n").expect("write source file");
+
+    let artifact_path = repo.path().join("managed-run-artifact.json");
+    fs::write(
+        &artifact_path,
+        serde_json::to_vec_pretty(&semantic_full_artifact(repo.path(), &touched_file))
+            .expect("serialize test artifact"),
+    )
+    .expect("write test artifact");
+
+    let request_path = repo.path().join("python-helper-request.json");
+    let helper_path = repo.path().join("capture-managed-python-helper.py");
+    write_json_response_capture_python_helper(&helper_path, &artifact_path, &request_path);
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--batch",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--tool",
+            "Read",
+            "--auto-approve-tools",
+            "false",
+            "--include-partial-messages",
+            "true",
+            "--interactive-approvals",
+            "true",
+            "--enable-file-checkpointing",
+            "true",
+            "--continue",
+            "true",
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+            "--python-binary",
+            "python3",
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &run,
+        "claude-sdk run should use the explicit python backend helper path",
+    );
+
+    let helper_request = read_json_file(&request_path);
+    assert_eq!(helper_request["mode"], json!("query"));
+    let helper_cwd = PathBuf::from(
+        helper_request["cwd"]
+            .as_str()
+            .expect("helper request cwd should be present"),
+    );
+    assert_eq!(
+        helper_cwd.canonicalize().expect("canonicalize helper cwd"),
+        repo.path().canonicalize().expect("canonicalize repo path")
+    );
+    assert_eq!(helper_request["tools"], json!(["Read"]));
+    assert_eq!(helper_request["allowedTools"], json!(["Read"]));
+    assert_eq!(helper_request["autoApproveTools"], json!(false));
+    assert_eq!(helper_request["includePartialMessages"], json!(true));
+    assert_eq!(helper_request["interactiveApprovals"], json!(true));
+    assert_eq!(helper_request["enableFileCheckpointing"], json!(true));
+    assert_eq!(helper_request["continue"], json!(true));
+    assert!(helper_request.get("resume").is_none());
+    assert!(helper_request.get("sessionId").is_none());
+    assert!(helper_request.get("resumeSessionAt").is_none());
+    assert_eq!(helper_request["systemPrompt"]["type"], json!("preset"));
+    assert_eq!(
+        helper_request["systemPrompt"]["preset"],
+        json!("claude_code")
+    );
+    assert!(
+        helper_request["systemPrompt"]["append"]
+            .as_str()
+            .is_some_and(|text| text.contains("concise numbered 3-step plan")),
+        "python backend should preserve the Claude system prompt extension"
+    );
+    assert!(
+        helper_request["outputSchema"]["properties"]
+            .get("summary")
+            .is_some(),
+        "python backend should keep the managed output schema"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_run_forwards_interactive_approvals_flag() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn interactive_approvals() {}\n").expect("write source file");
+
     let artifact_path = repo.path().join("managed-run-artifact.json");
     fs::write(
         &artifact_path,
@@ -707,37 +1413,1461 @@ async fn test_claude_sdk_run_can_disable_auto_tool_approval() {
         &[
             "claude-sdk",
             "run",
+            "--batch",
             "--prompt",
             DEFAULT_MANAGED_PROMPT,
             "--tool",
-            "Read",
-            "--auto-approve-tools",
-            "false",
-            "--include-partial-messages",
-            "true",
-            "--prompt-suggestions",
-            "true",
-            "--agent-progress-summaries",
+            "Bash",
+            "--interactive-approvals",
             "true",
             "--helper-path",
             helper_path.to_str().expect("helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );
     assert_cli_success(
         &run,
-        "claude-sdk run should succeed when auto tool approval is disabled",
+        "claude-sdk run should succeed when interactive approvals are enabled",
     );
 
     let helper_request = read_json_file(&request_path);
+    assert_eq!(helper_request["interactiveApprovals"], json!(true));
+    assert_eq!(
+        helper_request["autoApproveTools"],
+        json!(false),
+        "interactive approvals should override helper-side auto approval"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_run_streams_ndjson_by_default() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let helper_path = write_fake_interactive_helper(
+        repo.path(),
+        &json!({
+            "sessionId": "stream-default-session",
+            "resultMessage": {
+                "type": "result",
+                "subtype": "success",
+                "is_error": false,
+                "session_id": "stream-default-session",
+                "stop_reason": "end_turn",
+                "result": "ok",
+                "structured_output": {
+                    "summary": "Stream the helper output",
+                    "problemStatement": "Verify claude-sdk run defaults to NDJSON streaming when requested.",
+                    "changeType": "refactor",
+                    "objectives": ["Stream NDJSON events"],
+                    "successCriteria": ["NDJSON events are emitted"],
+                    "riskRationale": "Fake SDK streaming smoke test"
+                }
+            }
+        }),
+        None,
+    );
+
+    let run = run_libra_command_raw(
+        &[
+            "--json=ndjson",
+            "claude-sdk",
+            "run",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&run, "streaming claude-sdk run should succeed");
+
+    let events = parse_stdout_ndjson(&run, "streaming claude-sdk run output");
+    assert!(
+        events
+            .iter()
+            .any(|event| event["event"] == json!("session_init")),
+        "streaming run should emit session_init"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["event"] == json!("runtime_snapshot")),
+        "streaming run should emit runtime_snapshot"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["event"] == json!("final_artifact")),
+        "streaming run should emit final_artifact"
+    );
+    let result_event = find_ndjson_event(&events, "libra_result", "streaming run result");
+    let raw_artifact_path = PathBuf::from(
+        result_event["rawArtifactPath"]
+            .as_str()
+            .expect("rawArtifactPath should be present"),
+    );
+    assert!(
+        raw_artifact_path.exists(),
+        "streaming run should still persist the managed artifact"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_run_streaming_persists_managed_inputs_without_manual_subcommands() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "old\n").expect("write source file");
+
+    let helper_path = write_fake_interactive_helper(
+        repo.path(),
+        &json!({
+            "sessionId": "stream-managed-inputs-session",
+            "steps": [
+                {
+                    "type": "tool",
+                    "toolName": "Edit",
+                    "toolUseId": "tool-edit-stream-1",
+                    "input": {
+                        "file_path": touched_file.to_string_lossy().to_string(),
+                        "old_string": "old\n",
+                        "new_string": "new\n"
+                    }
+                }
+            ],
+            "resultMessage": {
+                "type": "result",
+                "subtype": "success",
+                "is_error": false,
+                "session_id": "stream-managed-inputs-session",
+                "stop_reason": "end_turn",
+                "usage": {
+                    "input_tokens": 32,
+                    "output_tokens": 24,
+                    "service_tier": "standard"
+                },
+                "structured_output": {
+                    "summary": "Persist managed inputs during streaming run",
+                    "problemStatement": "Verify streaming run writes provider-owned managed input layers automatically.",
+                    "changeType": "refactor",
+                    "objectives": ["Persist managed inputs automatically"],
+                    "successCriteria": ["Managed input history objects exist after run"],
+                    "riskRationale": "Fake SDK streaming persistence test"
+                }
+            }
+        }),
+        None,
+    );
+
+    let run = run_libra_command_raw(
+        &[
+            "--json=ndjson",
+            "claude-sdk",
+            "run",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--tool",
+            "Edit",
+            "--permission-mode",
+            "acceptEdits",
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&run, "streaming run should succeed");
+
+    let events = parse_stdout_ndjson(&run, "streaming managed inputs output");
+    let result_event = find_ndjson_event(&events, "libra_result", "streaming managed inputs");
+    let ai_session_id = result_event["aiSessionId"]
+        .as_str()
+        .expect("aiSessionId should be present")
+        .to_string();
+
+    let (_, history) = load_intent_history(repo.path()).await;
+    let managed_input_object_id = format!("claude_managed_evidence_input__{ai_session_id}");
+    let decision_input_object_id = format!("claude_decision_input__{ai_session_id}");
+    let run_binding_path = repo
+        .path()
+        .join(".libra")
+        .join("claude-run-bindings")
+        .join(format!("{ai_session_id}.json"));
+    let tool_invocation_binding_path = repo
+        .path()
+        .join(".libra")
+        .join("claude-tool-invocation-bindings")
+        .join(format!("{ai_session_id}.json"));
+
+    let managed_input_type = run_libra_command(
+        &["cat-file", "--ai-type", &managed_input_object_id],
+        repo.path(),
+    );
+    assert_cli_success(
+        &managed_input_type,
+        "streaming run should persist managed evidence input automatically",
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&managed_input_type.stdout).trim(),
+        "claude_managed_evidence_input"
+    );
+
+    let decision_input_type = run_libra_command(
+        &["cat-file", "--ai-type", &decision_input_object_id],
+        repo.path(),
+    );
+    assert_cli_success(
+        &decision_input_type,
+        "streaming run should persist decision input automatically",
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&decision_input_type.stdout).trim(),
+        "claude_decision_input"
+    );
+
+    let managed_inputs = history
+        .list_objects("claude_managed_evidence_input")
+        .await
+        .expect("list managed evidence inputs");
+    assert_eq!(managed_inputs.len(), 1);
+    let decision_inputs = history
+        .list_objects("claude_decision_input")
+        .await
+        .expect("list decision inputs");
+    assert_eq!(decision_inputs.len(), 1);
+
+    assert!(
+        run_binding_path.exists(),
+        "streaming run should materialize a formal run binding without manual bridge commands"
+    );
+    let run_binding = read_json_file(&run_binding_path);
+    let task_id = run_binding["taskId"]
+        .as_str()
+        .expect("taskId should be present in run binding")
+        .to_string();
+    let run_id = run_binding["runId"]
+        .as_str()
+        .expect("runId should be present in run binding")
+        .to_string();
+
+    let tasks = history
+        .list_objects("task")
+        .await
+        .expect("list formal tasks");
+    assert_eq!(tasks.len(), 1);
+    let runs = history.list_objects("run").await.expect("list formal runs");
+    assert_eq!(runs.len(), 1);
+    let provenances = history
+        .list_objects("provenance")
+        .await
+        .expect("list formal provenances");
+    assert_eq!(provenances.len(), 1);
+    let run_usages = history
+        .list_objects("run_usage")
+        .await
+        .expect("list formal run usage objects");
+    assert_eq!(run_usages.len(), 1);
+    let snapshots = history
+        .list_objects("snapshot")
+        .await
+        .expect("list formal context snapshots");
+    assert_eq!(snapshots.len(), 1);
+    let context_frames = history
+        .list_objects("context_frame")
+        .await
+        .expect("list formal context frames");
+    assert!(
+        !context_frames.is_empty(),
+        "streaming run should materialize at least one context frame"
+    );
+    assert_eq!(tasks[0].0, task_id);
+    assert_eq!(runs[0].0, run_id);
+
+    let _: Task = read_tracked_object(repo.path(), "task", &task_id).await;
+    let formal_run: Run = read_tracked_object(repo.path(), "run", &run_id).await;
+    assert_eq!(formal_run.task().to_string(), task_id);
+    let provenance: Provenance =
+        read_tracked_object(repo.path(), "provenance", &provenances[0].0).await;
+    assert_eq!(provenance.run_id().to_string(), run_id);
+    assert_eq!(provenance.provider(), "claude");
+    let run_usage: RunUsage = read_tracked_object(repo.path(), "run_usage", &run_usages[0].0).await;
+    assert_eq!(run_usage.run_id().to_string(), run_id);
+    assert!(run_usage.input_tokens() > 0);
+    assert!(run_usage.output_tokens() > 0);
+
+    assert!(
+        tool_invocation_binding_path.exists(),
+        "streaming run should materialize a shared tool invocation binding"
+    );
+    let tool_invocation_binding = read_json_file(&tool_invocation_binding_path);
+    let invocation_entries = tool_invocation_binding["invocations"]
+        .as_array()
+        .expect("tool invocation binding should contain invocations");
+    assert_eq!(invocation_entries.len(), 1);
+    let tool_invocation_id = invocation_entries[0]["toolInvocationId"]
+        .as_str()
+        .expect("toolInvocationId should be present");
+
+    let invocations = history
+        .list_objects("invocation")
+        .await
+        .expect("list shared invocations");
+    assert_eq!(invocations.len(), 1);
+    assert_eq!(invocations[0].0, tool_invocation_id);
+
+    let tool_invocation_type =
+        run_libra_command(&["cat-file", "--ai-type", tool_invocation_id], repo.path());
+    assert_cli_success(
+        &tool_invocation_type,
+        "streaming run should expose shared invocation through cat-file",
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&tool_invocation_type.stdout).trim(),
+        "invocation"
+    );
+
+    let provenance_type =
+        run_libra_command(&["cat-file", "--ai-type", &provenances[0].0], repo.path());
+    assert_cli_success(
+        &provenance_type,
+        "streaming run should expose provenance through cat-file",
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&provenance_type.stdout).trim(),
+        "provenance"
+    );
+
+    let run_usage_type =
+        run_libra_command(&["cat-file", "--ai-type", &run_usages[0].0], repo.path());
+    assert_cli_success(
+        &run_usage_type,
+        "streaming run should expose run usage through cat-file",
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run_usage_type.stdout).trim(),
+        "run_usage"
+    );
+
+    let snapshot_type = run_libra_command(&["cat-file", "--ai-type", &snapshots[0].0], repo.path());
+    assert_cli_success(
+        &snapshot_type,
+        "streaming run should expose context snapshot through cat-file",
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&snapshot_type.stdout).trim(),
+        "snapshot"
+    );
+
+    let context_frame_type = run_libra_command(
+        &["cat-file", "--ai-type", &context_frames[0].0],
+        repo.path(),
+    );
+    assert_cli_success(
+        &context_frame_type,
+        "streaming run should expose context frame through cat-file",
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&context_frame_type.stdout).trim(),
+        "context_frame"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_run_streaming_persists_derived_audit_objects() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "old\n").expect("write source file");
+
+    let helper_path = write_fake_interactive_helper(
+        repo.path(),
+        &json!({
+            "sessionId": "stream-audit-objects-session",
+            "steps": [
+                {
+                    "type": "tool",
+                    "toolName": "Edit",
+                    "toolUseId": "tool-edit-audit-1",
+                    "title": "Claude wants to edit src/lib.rs",
+                    "displayName": "Edit file",
+                    "description": "Claude needs write access to update the target file.",
+                    "suggestions": [
+                        {
+                            "type": "setMode",
+                            "destination": "session",
+                            "mode": "acceptEdits"
+                        }
+                    ],
+                    "input": {
+                        "file_path": touched_file.to_string_lossy().to_string(),
+                        "old_string": "old\n",
+                        "new_string": "new\n"
+                    },
+                    "assistantContent": [
+                        {
+                            "type": "thinking",
+                            "thinking": "I need approval before editing the file.",
+                            "signature": "sig_audit_reasoning"
+                        },
+                        {
+                            "type": "text",
+                            "text": "I'll edit src/lib.rs once approved."
+                        }
+                    ]
+                }
+            ],
+            "resultMessage": {
+                "type": "result",
+                "subtype": "success",
+                "is_error": false,
+                "session_id": "stream-audit-objects-session",
+                "stop_reason": "end_turn",
+                "usage": {
+                    "input_tokens": 40,
+                    "output_tokens": 20,
+                    "service_tier": "standard"
+                },
+                "structured_output": {
+                    "summary": "Persist derived audit objects",
+                    "problemStatement": "Verify Claude-native permission and thinking signals are persisted as derived audit objects.",
+                    "changeType": "refactor",
+                    "objectives": ["Persist approval_request, reasoning, and tool_invocation_event"],
+                    "successCriteria": ["Derived audit objects exist after the run"],
+                    "riskRationale": "Fake SDK audit-object regression"
+                }
+            }
+        }),
+        Some(&json!([
+            {
+                "kind": "tool_approval",
+                "decision": "approve"
+            }
+        ])),
+    );
+
+    let run = run_libra_command_raw(
+        &[
+            "--json=ndjson",
+            "claude-sdk",
+            "run",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--tool",
+            "Edit",
+            "--interactive-approvals",
+            "true",
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&run, "streaming audit-object run should succeed");
+
+    let events = parse_stdout_ndjson(&run, "streaming audit objects output");
+    let result_event = find_ndjson_event(&events, "libra_result", "streaming audit objects");
+    let ai_session_id = result_event["aiSessionId"]
+        .as_str()
+        .expect("aiSessionId should be present")
+        .to_string();
+
+    let (_, history) = load_intent_history(repo.path()).await;
+    let approvals = history
+        .list_objects("approval_request")
+        .await
+        .expect("list approval_request objects");
+    assert_eq!(approvals.len(), 1);
+    let reasonings = history
+        .list_objects("reasoning")
+        .await
+        .expect("list reasoning objects");
+    assert_eq!(reasonings.len(), 1);
+    let tool_events = history
+        .list_objects("tool_invocation_event")
+        .await
+        .expect("list tool_invocation_event objects");
+    assert_eq!(tool_events.len(), 2);
+
+    let approval: Value =
+        read_tracked_object(repo.path(), "approval_request", &approvals[0].0).await;
+    assert_eq!(approval["object_type"], json!("approval_request"));
+    assert_eq!(
+        approval["sourceKind"],
+        json!("derived_from_claude_native_signal")
+    );
+    assert_eq!(approval["aiSessionId"], json!(ai_session_id.clone()));
+    assert_eq!(approval["toolUseId"], json!("tool-edit-audit-1"));
+    assert_eq!(approval["toolName"], json!("Edit"));
+    assert_eq!(approval["status"], json!("approved_once"));
+    assert_eq!(approval["decision"], json!(true));
+    assert_eq!(approval["title"], json!("Claude wants to edit src/lib.rs"));
+    assert_eq!(approval["displayName"], json!("Edit file"));
+
+    let reasoning: Value = read_tracked_object(repo.path(), "reasoning", &reasonings[0].0).await;
+    assert_eq!(reasoning["object_type"], json!("reasoning"));
+    assert_eq!(
+        reasoning["sourceKind"],
+        json!("derived_from_claude_native_signal")
+    );
+    assert_eq!(reasoning["signature"], json!("sig_audit_reasoning"));
+    assert_eq!(
+        reasoning["text"],
+        json!("I need approval before editing the file.")
+    );
+
+    let tool_event_values = futures::future::join_all(
+        tool_events
+            .iter()
+            .map(|(id, _)| read_tracked_object::<Value>(repo.path(), "tool_invocation_event", id)),
+    )
+    .await;
+    let statuses = tool_event_values
+        .iter()
+        .map(|value| {
+            value["status"]
+                .as_str()
+                .expect("tool event status should exist")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        statuses,
+        BTreeSet::from(["completed".to_string(), "in_progress".to_string()])
+    );
+
+    for (object_id, object_type) in [
+        (approvals[0].0.as_str(), "approval_request"),
+        (reasonings[0].0.as_str(), "reasoning"),
+        (tool_events[0].0.as_str(), "tool_invocation_event"),
+    ] {
+        let ai_type = run_libra_command(&["cat-file", "--ai-type", object_id], repo.path());
+        assert_cli_success(
+            &ai_type,
+            "cat-file --ai-type should succeed for derived audit objects",
+        );
+        assert_eq!(String::from_utf8_lossy(&ai_type.stdout).trim(), object_type);
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_run_forwards_enable_file_checkpointing_flag() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn checkpointing() {}\n").expect("write source file");
+
+    let mut artifact = semantic_full_artifact(repo.path(), &touched_file);
+    artifact["requestContext"] = json!({
+        "enableFileCheckpointing": true
+    });
+    let artifact_path = repo.path().join("managed-run-artifact.json");
+    fs::write(
+        &artifact_path,
+        serde_json::to_vec_pretty(&artifact).expect("serialize test artifact"),
+    )
+    .expect("write test artifact");
+
+    let request_path = repo.path().join("helper-request.json");
+    let helper_path = repo.path().join("capture-managed-helper.sh");
+    write_request_capture_shell_helper(&helper_path, &artifact_path, &request_path);
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--batch",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--enable-file-checkpointing",
+            "true",
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&run, "claude-sdk run should forward file checkpointing");
+
+    let helper_request = read_json_file(&request_path);
+    assert_eq!(helper_request["enableFileCheckpointing"], json!(true));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_run_forwards_continue_flag() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn continue_session() {}\n").expect("write source file");
+
+    let mut artifact = semantic_full_artifact(repo.path(), &touched_file);
+    artifact["requestContext"] = json!({
+        "enableFileCheckpointing": true
+    });
+    let artifact_path = repo.path().join("managed-run-artifact.json");
+    fs::write(
+        &artifact_path,
+        serde_json::to_vec_pretty(&artifact).expect("serialize test artifact"),
+    )
+    .expect("write test artifact");
+
+    let request_path = repo.path().join("helper-request.json");
+    let helper_path = repo.path().join("capture-managed-helper.sh");
+    write_request_capture_shell_helper(&helper_path, &artifact_path, &request_path);
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--batch",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--continue",
+            "true",
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&run, "claude-sdk run should forward --continue");
+
+    let helper_request = read_json_file(&request_path);
+    assert_eq!(helper_request["continue"], json!(true));
+    assert!(helper_request.get("resume").is_none());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_run_forwards_resume_session_controls() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn resume_session() {}\n").expect("write source file");
+
+    let mut artifact = semantic_full_artifact(repo.path(), &touched_file);
+    artifact["requestContext"] = json!({
+        "enableFileCheckpointing": true
+    });
+    let artifact_path = repo.path().join("managed-run-artifact.json");
+    fs::write(
+        &artifact_path,
+        serde_json::to_vec_pretty(&artifact).expect("serialize test artifact"),
+    )
+    .expect("write test artifact");
+
+    let request_path = repo.path().join("helper-request.json");
+    let helper_path = repo.path().join("capture-managed-helper.sh");
+    write_request_capture_shell_helper(&helper_path, &artifact_path, &request_path);
+
+    let resume_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    let forked_session_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    let resume_message_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--batch",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--resume",
+            resume_id,
+            "--fork-session",
+            "true",
+            "--session-id",
+            forked_session_id,
+            "--resume-session-at",
+            resume_message_id,
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &run,
+        "claude-sdk run should forward resume session controls",
+    );
+
+    let helper_request = read_json_file(&request_path);
+    assert_eq!(helper_request["resume"], json!(resume_id));
+    assert_eq!(helper_request["forkSession"], json!(true));
+    assert_eq!(helper_request["sessionId"], json!(forked_session_id));
+    assert_eq!(helper_request["resumeSessionAt"], json!(resume_message_id));
+    assert!(helper_request.get("continue").is_none());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_run_python_backend_uses_python_helper() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn python_backend() {}\n").expect("write source file");
+
+    let artifact = semantic_full_artifact(repo.path(), &touched_file);
+    let artifact_path = repo.path().join("python-managed-run-artifact.json");
+    fs::write(
+        &artifact_path,
+        serde_json::to_vec_pretty(&artifact).expect("serialize test artifact"),
+    )
+    .expect("write test artifact");
+
+    let request_path = repo.path().join("python-helper-request.json");
+    let helper_path = repo.path().join("capture-managed-helper.py");
+    write_json_response_capture_python_helper(&helper_path, &artifact_path, &request_path);
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--batch",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--tool",
+            "Read",
+            "--python-binary",
+            "python3",
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &run,
+        "claude-sdk run should support the opt-in python helper backend",
+    );
+
+    let helper_request = read_json_file(&request_path);
+    assert_eq!(helper_request["mode"], json!("query"));
+    assert_eq!(helper_request["prompt"], json!(DEFAULT_MANAGED_PROMPT));
     assert_eq!(helper_request["tools"], json!(["Read"]));
-    assert_eq!(helper_request["allowedTools"], json!(["Read"]));
-    assert_eq!(helper_request["autoApproveTools"], json!(false));
-    assert_eq!(helper_request["includePartialMessages"], json!(true));
-    assert_eq!(helper_request["promptSuggestions"], json!(true));
-    assert_eq!(helper_request["agentProgressSummaries"], json!(true));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_run_rejects_invalid_session_control_combinations() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let cases = [
+        (
+            vec![
+                "claude-sdk",
+                "run",
+                "--prompt",
+                DEFAULT_MANAGED_PROMPT,
+                "--continue",
+                "true",
+                "--resume",
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            ],
+            "--continue cannot be combined with --resume",
+        ),
+        (
+            vec![
+                "claude-sdk",
+                "run",
+                "--prompt",
+                DEFAULT_MANAGED_PROMPT,
+                "--resume-session-at",
+                "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            ],
+            "--resume-session-at requires --resume",
+        ),
+        (
+            vec![
+                "claude-sdk",
+                "run",
+                "--prompt",
+                DEFAULT_MANAGED_PROMPT,
+                "--fork-session",
+                "true",
+            ],
+            "--fork-session requires --resume",
+        ),
+        (
+            vec![
+                "claude-sdk",
+                "run",
+                "--prompt",
+                DEFAULT_MANAGED_PROMPT,
+                "--continue",
+                "true",
+                "--session-id",
+                "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            ],
+            "--session-id requires --fork-session",
+        ),
+    ];
+
+    for (args, expected_message) in cases {
+        let output = run_libra_command(&args, repo.path());
+        assert!(
+            !output.status.success(),
+            "expected session-control validation to fail for args: {:?}",
+            args
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(expected_message),
+            "stderr should mention '{expected_message}', got: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_run_interactive_tool_approval_uses_canonical_session_cache_key() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let helper_path = write_fake_interactive_helper(
+        repo.path(),
+        &json!({
+            "sessionId": "interactive-cache-session",
+            "steps": [
+                {
+                    "type": "tool",
+                    "toolName": "Bash",
+                    "toolUseId": "tool-bash-1",
+                    "input": {
+                        "command": "echo first",
+                        "description": "cache me",
+                        "env": {
+                            "A": "1",
+                            "B": "2"
+                        }
+                    }
+                },
+                {
+                    "type": "tool",
+                    "toolName": "Bash",
+                    "toolUseId": "tool-bash-2",
+                    "input": {
+                        "env": {
+                            "B": "2",
+                            "A": "1"
+                        },
+                        "description": "cache me",
+                        "command": "echo first"
+                    }
+                }
+            ]
+        }),
+        Some(&json!([
+            {
+                "kind": "tool_approval",
+                "decision": "approve_for_session"
+            }
+        ])),
+    );
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--batch",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--tool",
+            "Bash",
+            "--interactive-approvals",
+            "true",
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &run,
+        "interactive approval should succeed and reuse the session-scoped cache",
+    );
+
+    let run_json = parse_stdout_json(&run, "interactive approval cache output");
+    let raw_artifact_path = PathBuf::from(
+        run_json["rawArtifactPath"]
+            .as_str()
+            .expect("rawArtifactPath should be present"),
+    );
+    let raw_artifact = read_json_file(&raw_artifact_path);
+    let approvals = raw_artifact["hookEvents"]
+        .as_array()
+        .expect("hookEvents should be an array")
+        .iter()
+        .filter(|event| event["hook"] == json!("CanUseTool"))
+        .collect::<Vec<_>>();
+    assert_eq!(approvals.len(), 2);
+    assert_eq!(approvals[0]["input"]["approval_scope"], json!("session"));
+    assert_eq!(approvals[0]["input"]["prompt_source"], json!("scripted"));
+    assert_eq!(approvals[0]["input"]["cached"], json!(false));
+    assert_eq!(approvals[1]["input"]["approval_scope"], json!("session"));
+    assert_eq!(
+        approvals[1]["input"]["prompt_source"],
+        json!("session_cache")
+    );
+    assert_eq!(approvals[1]["input"]["cached"], json!(true));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_run_interactive_tool_approval_can_deny() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let helper_path = write_fake_interactive_helper(
+        repo.path(),
+        &json!({
+            "sessionId": "interactive-deny-session",
+            "steps": [
+                {
+                    "type": "tool",
+                    "toolName": "Bash",
+                    "toolUseId": "tool-bash-deny",
+                    "input": {
+                        "command": "echo deny"
+                    }
+                }
+            ]
+        }),
+        Some(&json!([
+            {
+                "kind": "tool_approval",
+                "decision": "deny"
+            }
+        ])),
+    );
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--batch",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--tool",
+            "Bash",
+            "--interactive-approvals",
+            "true",
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&run, "deny should still persist the managed artifact");
+
+    let run_json = parse_stdout_json(&run, "interactive approval deny output");
+    let raw_artifact_path = PathBuf::from(
+        run_json["rawArtifactPath"]
+            .as_str()
+            .expect("rawArtifactPath should be present"),
+    );
+    let raw_artifact = read_json_file(&raw_artifact_path);
+    let approval = raw_artifact["hookEvents"]
+        .as_array()
+        .expect("hookEvents should be an array")
+        .iter()
+        .find(|event| event["hook"] == json!("CanUseTool"))
+        .expect("CanUseTool event should exist");
+    assert_eq!(approval["input"]["approval_decision"], json!("deny"));
+    assert_eq!(
+        approval["input"]["interaction_kind"],
+        json!("tool_approval")
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_run_interactive_tool_approval_can_abort() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let helper_path = write_fake_interactive_helper(
+        repo.path(),
+        &json!({
+            "sessionId": "interactive-abort-session",
+            "steps": [
+                {
+                    "type": "tool",
+                    "toolName": "Bash",
+                    "toolUseId": "tool-bash-abort",
+                    "input": {
+                        "command": "echo abort"
+                    }
+                }
+            ]
+        }),
+        Some(&json!([
+            {
+                "kind": "tool_approval",
+                "decision": "abort"
+            }
+        ])),
+    );
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--batch",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--tool",
+            "Bash",
+            "--interactive-approvals",
+            "true",
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+        ],
+        repo.path(),
+    );
+    assert!(
+        !run.status.success(),
+        "abort should fail the batch command while still persisting the managed artifact"
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stderr).contains("aborted"),
+        "stderr should preserve the abort detail: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stdout).trim().is_empty(),
+        "aborted batch runs should not print a top-level success payload"
+    );
+
+    let raw_artifact_path = only_json_file(
+        &repo.path().join(".libra").join("managed-artifacts"),
+        "interactive approval abort raw artifact",
+    );
+    let raw_artifact = read_json_file(&raw_artifact_path);
+    let approval = raw_artifact["hookEvents"]
+        .as_array()
+        .expect("hookEvents should be an array")
+        .iter()
+        .find(|event| event["hook"] == json!("CanUseTool"))
+        .expect("CanUseTool event should exist");
+    assert_eq!(approval["input"]["approval_decision"], json!("abort"));
+    assert_eq!(
+        raw_artifact["resultMessage"]["stop_reason"],
+        json!("interrupted")
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_run_interactive_ask_user_question_collects_answers() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let helper_path = write_fake_interactive_helper(
+        repo.path(),
+        &json!({
+            "sessionId": "interactive-ask-user-session",
+            "steps": [
+                {
+                    "type": "tool",
+                    "toolName": "AskUserQuestion",
+                    "toolUseId": "tool-ask-user-1",
+                    "input": {
+                        "questions": [
+                            {
+                                "header": "Stack",
+                                "question": "Which stack should we use?",
+                                "options": [
+                                    {
+                                        "label": "Rust",
+                                        "description": "Use Rust"
+                                    },
+                                    {
+                                        "label": "TypeScript",
+                                        "description": "Use TypeScript"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        }),
+        Some(&json!([
+            {
+                "kind": "ask_user_question",
+                "answers": {
+                    "Which stack should we use?": "Rust"
+                }
+            }
+        ])),
+    );
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--batch",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--tool",
+            "AskUserQuestion",
+            "--interactive-approvals",
+            "true",
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&run, "AskUserQuestion should succeed in interactive mode");
+
+    let run_json = parse_stdout_json(&run, "interactive ask user question output");
+    let raw_artifact_path = PathBuf::from(
+        run_json["rawArtifactPath"]
+            .as_str()
+            .expect("rawArtifactPath should be present"),
+    );
+    let raw_artifact = read_json_file(&raw_artifact_path);
+    let approval = raw_artifact["hookEvents"]
+        .as_array()
+        .expect("hookEvents should be an array")
+        .iter()
+        .find(|event| event["hook"] == json!("CanUseTool"))
+        .expect("CanUseTool event should exist");
+    assert_eq!(
+        approval["input"]["interaction_kind"],
+        json!("ask_user_question")
+    );
+    assert_eq!(approval["input"]["tool_name"], json!("AskUserQuestion"));
+    assert_eq!(approval["input"]["answer_count"], json!(1));
+
+    let ai_session_id = run_json["aiSessionId"]
+        .as_str()
+        .expect("aiSessionId should be present");
+    let decision_input = run_libra_command(
+        &[
+            "claude-sdk",
+            "build-decision-input",
+            "--ai-session-id",
+            ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &decision_input,
+        "build-decision-input should absorb AskUserQuestion facts",
+    );
+    let decision_input_json = parse_stdout_json(&decision_input, "decision input output");
+    let decision_input_artifact = read_json_file(Path::new(
+        decision_input_json["artifactPath"]
+            .as_str()
+            .expect("artifactPath should be present"),
+    ));
+    let signal = decision_input_artifact["signals"]
+        .as_array()
+        .expect("signals should be an array")
+        .iter()
+        .find(|signal| signal["interactionKind"] == json!("ask_user_question"))
+        .expect("ask user question signal should be present");
+    assert_eq!(signal["toolName"], json!("AskUserQuestion"));
+    assert_eq!(signal["answerCount"], json!(1));
+    assert_eq!(signal["promptSource"], json!("scripted"));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_run_interactive_approvals_require_tty_or_scripted_responses() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let helper_path = write_fake_interactive_helper(
+        repo.path(),
+        &json!({
+            "sessionId": "interactive-no-tty-session",
+            "steps": [
+                {
+                    "type": "tool",
+                    "toolName": "Bash",
+                    "toolUseId": "tool-bash-no-tty",
+                    "input": {
+                        "command": "echo no tty"
+                    }
+                }
+            ]
+        }),
+        None,
+    );
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--batch",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--tool",
+            "Bash",
+            "--interactive-approvals",
+            "true",
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+        ],
+        repo.path(),
+    );
+    assert!(
+        !run.status.success(),
+        "interactive approvals should fail without a tty or scripted responses"
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stderr)
+            .contains("interactive approvals require an interactive terminal"),
+        "stderr should explain the missing tty requirement: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_build_managed_evidence_input_persists_history_object() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn managed_evidence_input() {}\n").expect("write source file");
+
+    let mut artifact = semantic_full_artifact(repo.path(), &touched_file);
+    artifact["requestContext"] = json!({
+        "enableFileCheckpointing": true
+    });
+    let artifact_path = repo.path().join("managed-run-artifact.json");
+    fs::write(
+        &artifact_path,
+        serde_json::to_vec_pretty(&artifact).expect("serialize test artifact"),
+    )
+    .expect("write test artifact");
+
+    let helper_path = repo.path().join("fake-managed-helper.sh");
+    write_shell_helper(&helper_path, &artifact_path);
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--enable-file-checkpointing",
+            "true",
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &run,
+        "claude-sdk run should succeed before managed evidence input",
+    );
+    let run_json = parse_stdout_json(&run, "claude-sdk run managed evidence input");
+    let ai_session_id = run_json["aiSessionId"]
+        .as_str()
+        .expect("aiSessionId should be present")
+        .to_string();
+    let provider_session_id = run_json["providerSessionId"]
+        .as_str()
+        .expect("providerSessionId should be present")
+        .to_string();
+    stage_provider_session_evidence_artifacts(repo.path(), &provider_session_id);
+
+    let build = run_libra_command(
+        &[
+            "claude-sdk",
+            "build-managed-evidence-input",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&build, "build-managed-evidence-input should succeed");
+    let build_json = parse_stdout_json(&build, "build-managed-evidence-input output");
+    let object_id = build_json["objectId"]
+        .as_str()
+        .expect("objectId should be present")
+        .to_string();
+    let artifact_path = PathBuf::from(
+        build_json["artifactPath"]
+            .as_str()
+            .expect("artifactPath should be present"),
+    );
+    assert!(
+        artifact_path.exists(),
+        "managed evidence input artifact should exist"
+    );
+
+    let artifact = read_json_file(&artifact_path);
+    assert_eq!(
+        artifact["schema"],
+        json!("libra.claude_managed_evidence_input.v1")
+    );
+    assert_eq!(
+        artifact["object_type"],
+        json!("claude_managed_evidence_input")
+    );
+    assert_eq!(artifact["aiSessionId"], json!(ai_session_id.clone()));
+    assert_eq!(artifact["providerSessionId"], json!(provider_session_id));
+    assert_eq!(
+        artifact["patchOverview"]["touchedFiles"],
+        json!(["src/lib.rs"])
+    );
+    assert_eq!(
+        artifact["patchOverview"]["checkpointingEnabled"],
+        json!(true)
+    );
+    assert_eq!(artifact["patchOverview"]["rewindSupported"], json!(true));
+    assert_eq!(
+        artifact["patchOverview"]["filesPersisted"][0]["filename"],
+        json!("src/lib.rs")
+    );
+    assert!(
+        !artifact["sourceArtifacts"]["providerEvidenceInputPath"].is_null(),
+        "managed evidence input should link the provider evidence_input artifact when present"
+    );
+    assert_eq!(
+        artifact["runtimeOverview"]["decisionRuntimeCount"],
+        json!(4)
+    );
+
+    let (storage, history) = load_intent_history(repo.path()).await;
+    let objects = history
+        .list_objects("claude_managed_evidence_input")
+        .await
+        .expect("should list managed evidence input objects");
+    assert_eq!(objects.len(), 1);
+    let ai_type = run_libra_command(&["cat-file", "--ai-type", &object_id], repo.path());
+    assert_cli_success(
+        &ai_type,
+        "cat-file --ai-type should succeed for managed evidence input",
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&ai_type.stdout).trim(),
+        "claude_managed_evidence_input"
+    );
+    let ai_pretty = run_libra_command(&["cat-file", "--ai", &object_id], repo.path());
+    assert_cli_success(
+        &ai_pretty,
+        "cat-file --ai should succeed for managed evidence input",
+    );
+    assert!(String::from_utf8_lossy(&ai_pretty.stdout).contains("claude_managed_evidence_input"));
+    drop(storage);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_build_decision_input_persists_history_object() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn decision_input() {}\n").expect("write source file");
+
+    let artifact_path = repo.path().join("managed-run-artifact.json");
+    fs::write(
+        &artifact_path,
+        serde_json::to_vec_pretty(&semantic_full_artifact(repo.path(), &touched_file))
+            .expect("serialize test artifact"),
+    )
+    .expect("write test artifact");
+
+    let helper_path = repo.path().join("fake-managed-helper.sh");
+    write_shell_helper(&helper_path, &artifact_path);
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--enable-file-checkpointing",
+            "true",
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&run, "claude-sdk run should succeed before decision input");
+    let run_json = parse_stdout_json(&run, "claude-sdk run decision input");
+    let ai_session_id = run_json["aiSessionId"]
+        .as_str()
+        .expect("aiSessionId should be present")
+        .to_string();
+
+    let build_evidence_input = run_libra_command(
+        &[
+            "claude-sdk",
+            "build-managed-evidence-input",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &build_evidence_input,
+        "build-managed-evidence-input should succeed before decision input",
+    );
+
+    let build = run_libra_command(
+        &[
+            "claude-sdk",
+            "build-decision-input",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&build, "build-decision-input should succeed");
+    let build_json = parse_stdout_json(&build, "build-decision-input output");
+    let object_id = build_json["objectId"]
+        .as_str()
+        .expect("objectId should be present")
+        .to_string();
+    let artifact_path = PathBuf::from(
+        build_json["artifactPath"]
+            .as_str()
+            .expect("artifactPath should be present"),
+    );
+    let artifact = read_json_file(&artifact_path);
+    assert_eq!(artifact["schema"], json!("libra.claude_decision_input.v1"));
+    assert_eq!(artifact["object_type"], json!("claude_decision_input"));
+    assert_eq!(
+        artifact["decisionOverview"]["permissionRequestCount"],
+        json!(1)
+    );
+    assert_eq!(artifact["decisionOverview"]["elicitationCount"], json!(1));
+    assert_eq!(
+        artifact["decisionOverview"]["elicitationResultCount"],
+        json!(1)
+    );
+    assert_eq!(
+        artifact["decisionOverview"]["permissionDenialCount"],
+        json!(1)
+    );
+    assert!(!artifact["sourceArtifacts"]["managedEvidenceInputPath"].is_null());
+
+    let ai_type = run_libra_command(&["cat-file", "--ai-type", &object_id], repo.path());
+    assert_cli_success(
+        &ai_type,
+        "cat-file --ai-type should succeed for decision input",
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&ai_type.stdout).trim(),
+        "claude_decision_input"
+    );
 }
 
 #[tokio::test]
@@ -789,8 +2919,6 @@ async fn test_claude_sdk_sync_sessions_persists_provider_session_snapshots() {
             "false",
             "--helper-path",
             helper_path.to_str().expect("helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );
@@ -886,8 +3014,6 @@ async fn test_claude_sdk_sync_sessions_preserves_existing_message_sync() {
             catalog_helper_path
                 .to_str()
                 .expect("catalog helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );
@@ -922,8 +3048,6 @@ async fn test_claude_sdk_sync_sessions_preserves_existing_message_sync() {
             messages_helper_path
                 .to_str()
                 .expect("messages helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );
@@ -937,8 +3061,6 @@ async fn test_claude_sdk_sync_sessions_preserves_existing_message_sync() {
             catalog_helper_path
                 .to_str()
                 .expect("catalog helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );
@@ -1000,8 +3122,6 @@ async fn test_claude_sdk_sync_sessions_skips_history_append_when_snapshot_is_unc
             "sync-sessions",
             "--helper-path",
             helper_path.to_str().expect("helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );
@@ -1016,8 +3136,6 @@ async fn test_claude_sdk_sync_sessions_skips_history_append_when_snapshot_is_unc
             "sync-sessions",
             "--helper-path",
             helper_path.to_str().expect("helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );
@@ -1067,8 +3185,6 @@ async fn test_claude_sdk_sync_sessions_keeps_history_in_current_repo_when_cwd_is
                 .expect("external cwd utf-8"),
             "--helper-path",
             helper_path.to_str().expect("helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );
@@ -1183,8 +3299,6 @@ async fn test_claude_sdk_hydrate_session_updates_provider_session_with_messages(
             catalog_helper_path
                 .to_str()
                 .expect("catalog helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );
@@ -1260,8 +3374,6 @@ async fn test_claude_sdk_hydrate_session_updates_provider_session_with_messages(
             messages_helper_path
                 .to_str()
                 .expect("messages helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );
@@ -1369,8 +3481,6 @@ async fn test_claude_sdk_build_evidence_input_from_provider_session_messages() {
             catalog_helper_path
                 .to_str()
                 .expect("catalog helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );
@@ -1480,8 +3590,6 @@ async fn test_claude_sdk_build_evidence_input_from_provider_session_messages() {
             messages_helper_path
                 .to_str()
                 .expect("messages helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );
@@ -1624,8 +3732,6 @@ async fn test_claude_sdk_build_evidence_input_skips_history_append_when_artifact
             catalog_helper_path
                 .to_str()
                 .expect("catalog helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );
@@ -1692,8 +3798,6 @@ async fn test_claude_sdk_build_evidence_input_skips_history_append_when_artifact
             messages_helper_path
                 .to_str()
                 .expect("messages helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );
@@ -1765,8 +3869,6 @@ async fn test_claude_sdk_sync_sessions_rejects_invalid_provider_session_id() {
             "sync-sessions",
             "--helper-path",
             helper_path.to_str().expect("helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );
@@ -1783,7 +3885,81 @@ async fn test_claude_sdk_sync_sessions_rejects_invalid_provider_session_id() {
 
 #[tokio::test]
 #[serial]
-async fn test_claude_sdk_run_persists_partial_artifact_when_helper_times_out() {
+async fn test_claude_sdk_run_batch_error_result_is_not_reported_as_success() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn auth_failure() {}\n").expect("write source file");
+
+    let artifact_path = repo.path().join("errored-artifact.json");
+    fs::write(
+        &artifact_path,
+        serde_json::to_vec_pretty(&errored_result_artifact(
+            repo.path(),
+            &touched_file,
+            "authentication_failed: 401 invalid token",
+        ))
+        .expect("serialize error artifact"),
+    )
+    .expect("write error artifact");
+
+    let helper_path = repo.path().join("fake-error-helper.sh");
+    write_shell_helper(&helper_path, &artifact_path);
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--batch",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+        ],
+        repo.path(),
+    );
+    assert!(
+        !run.status.success(),
+        "batch run should fail when the helper artifact reports an error result"
+    );
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        stderr.contains("Claude Code returned an error result"),
+        "stderr should report the helper result failure: {stderr}"
+    );
+    assert!(
+        stderr.contains("authentication_failed: 401 invalid token"),
+        "stderr should preserve the helper error detail: {stderr}"
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stdout).trim().is_empty(),
+        "failed batch runs should not print a top-level success payload"
+    );
+
+    let raw_artifact_path = only_json_file(
+        &repo.path().join(".libra").join("managed-artifacts"),
+        "errored batch run raw artifact",
+    );
+    let raw_artifact = read_json_file(&raw_artifact_path);
+    assert_eq!(raw_artifact["resultMessage"]["subtype"], json!("error"));
+    assert_eq!(raw_artifact["resultMessage"]["is_error"], json!(true));
+
+    let audit_bundle_path = only_json_file(
+        &repo.path().join(".libra").join("audit-bundles"),
+        "errored batch run audit bundle",
+    );
+    let audit_bundle = read_json_file(&audit_bundle_path);
+    assert_eq!(
+        audit_bundle["bridge"]["objectCandidates"]["runEvent"]["error"],
+        json!("authentication_failed: 401 invalid token")
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_run_batch_timeout_is_not_reported_as_success() {
     let repo = tempdir().expect("failed to create repo root");
     test::setup_with_new_libra_in(repo.path()).await;
 
@@ -1806,29 +3982,37 @@ async fn test_claude_sdk_run_persists_partial_artifact_when_helper_times_out() {
         &[
             "claude-sdk",
             "run",
+            "--batch",
             "--prompt",
             DEFAULT_MANAGED_PROMPT,
             "--helper-path",
             helper_path.to_str().expect("helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );
-    assert_cli_success(
-        &run,
-        "claude-sdk run should persist partial artifacts when the helper times out",
-    );
-    let run_json = parse_stdout_json(&run, "claude-sdk run timeout artifact");
     assert!(
-        run_json["intentExtractionPath"].is_null(),
-        "partial timeout artifact should not produce a formal intent extraction"
+        !run.status.success(),
+        "batch run should fail when the helper times out even if artifacts were persisted"
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stderr).contains("Claude SDK helper timed out"),
+        "timeout failure should mention the helper timeout"
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stdout).trim().is_empty(),
+        "timed out batch runs should not print a top-level success payload"
     );
 
-    let audit_bundle_path = PathBuf::from(
-        run_json["auditBundlePath"]
-            .as_str()
-            .expect("auditBundlePath should be present"),
+    let raw_artifact_path = only_json_file(
+        &repo.path().join(".libra").join("managed-artifacts"),
+        "timed out batch run raw artifact",
+    );
+    let raw_artifact = read_json_file(&raw_artifact_path);
+    assert_eq!(raw_artifact["helperTimedOut"], json!(true));
+
+    let audit_bundle_path = only_json_file(
+        &repo.path().join(".libra").join("audit-bundles"),
+        "timed out batch run audit bundle",
     );
     let audit_bundle = read_json_file(&audit_bundle_path);
     assert_eq!(
@@ -1853,7 +4037,7 @@ async fn test_claude_sdk_run_persists_partial_artifact_when_helper_times_out() {
 
 #[tokio::test]
 #[serial]
-async fn test_claude_sdk_run_plan_prompt_fixture_persists_task_runtime_scenario() {
+async fn test_claude_sdk_run_plan_prompt_fixture_preserves_real_plan_text_shape() {
     let repo = tempdir().expect("failed to create repo root");
     test::setup_with_new_libra_in(repo.path()).await;
 
@@ -1883,8 +4067,6 @@ async fn test_claude_sdk_run_plan_prompt_fixture_persists_task_runtime_scenario(
             prompt_path.to_str().expect("prompt path utf-8"),
             "--helper-path",
             helper_path.to_str().expect("helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );
@@ -1909,13 +4091,6 @@ async fn test_claude_sdk_run_plan_prompt_fixture_persists_task_runtime_scenario(
     let task_runtime_events = audit_bundle["bridge"]["objectCandidates"]["taskRuntimeEvents"]
         .as_array()
         .expect("taskRuntimeEvents should be an array");
-    let decision_runtime_events =
-        audit_bundle["bridge"]["objectCandidates"]["decisionRuntimeEvents"]
-            .as_array()
-            .expect("decisionRuntimeEvents should be an array");
-    let context_runtime_events = audit_bundle["bridge"]["objectCandidates"]["contextRuntimeEvents"]
-        .as_array()
-        .expect("contextRuntimeEvents should be an array");
 
     assert_eq!(
         audit_bundle["rawArtifact"]["prompt"],
@@ -1926,9 +4101,10 @@ async fn test_claude_sdk_run_plan_prompt_fixture_persists_task_runtime_scenario(
         audit_bundle["bridge"]["intentExtraction"]["status"],
         json!("accepted")
     );
-    assert_eq!(task_runtime_events.len(), 6);
-    assert!(decision_runtime_events.is_empty());
-    assert!(context_runtime_events.is_empty());
+    assert!(
+        task_runtime_events.is_empty(),
+        "real-artifact-shaped plan fixture should not invent task runtime events"
+    );
     assert_eq!(
         audit_bundle["bridge"]["objectCandidates"]["providerInitSnapshot"]["agents"],
         json!(["general-purpose", "statusline-setup", "Explore", "Plan"])
@@ -1943,39 +4119,27 @@ async fn test_claude_sdk_run_plan_prompt_fixture_persists_task_runtime_scenario(
                         items.iter().any(|item| {
                             item["text"]
                                 .as_str()
-                                .is_some_and(|text| text.contains("3-Step Plan"))
+                                .is_some_and(|text| text.contains("3-Step Audit Plan"))
                         })
                     })
             })),
         "plan scenario should preserve the assistant plan text in raw messages"
     );
-
-    let task_kinds = task_runtime_events
-        .iter()
-        .map(|event| event["kind"].as_str().expect("task runtime kind"))
-        .collect::<Vec<_>>();
     assert_eq!(
-        task_kinds,
-        vec![
-            "task_started",
-            "task_progress",
-            "task_progress",
-            "task_notification",
-            "SubagentStart",
-            "SubagentStop"
-        ]
+        audit_bundle["rawArtifact"]["resultMessage"]["structured_output"]["changeType"],
+        json!("refactor")
     );
 
     let intent_extraction = read_json_file(&intent_extraction_path);
     assert_eq!(
         intent_extraction["extraction"]["intent"]["summary"],
-        json!(
-            "Refactor Claude SDK bridge to separate provider-native runtime facts from semantic-layer candidates"
-        )
+        json!("Audit the Claude SDK to Libra bridge using real managed artifacts")
     );
     assert_eq!(
-        intent_extraction["extraction"]["risk"]["level"],
-        json!("medium")
+        intent_extraction["planningSummary"],
+        json!(
+            "Use the opening numbered plan as runtime guidance only; formal Plan objects still come from raw assistant plan text."
+        )
     );
 }
 
@@ -2008,8 +4172,6 @@ async fn test_claude_sdk_resolve_extraction_materializes_intentspec_preview() {
             DEFAULT_MANAGED_PROMPT,
             "--helper-path",
             helper_path.to_str().expect("helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );
@@ -2044,7 +4206,7 @@ async fn test_claude_sdk_resolve_extraction_materializes_intentspec_preview() {
         resolve_json["extractionPath"],
         json!(expected_extraction_path)
     );
-    assert_eq!(resolve_json["riskLevel"], json!("low"));
+    assert_eq!(resolve_json["riskLevel"], json!("medium"));
     assert!(
         resolve_json["summary"]
             .as_str()
@@ -2068,7 +4230,7 @@ async fn test_claude_sdk_resolve_extraction_materializes_intentspec_preview() {
         json!("libra.intent_resolution.v1")
     );
     assert_eq!(resolved_artifact["aiSessionId"], json!(ai_session_id));
-    assert_eq!(resolved_artifact["riskLevel"], json!("low"));
+    assert_eq!(resolved_artifact["riskLevel"], json!("medium"));
     assert_eq!(
         resolved_artifact["extractionSource"],
         json!("claude_agent_sdk_managed.structured_output")
@@ -2084,7 +4246,77 @@ async fn test_claude_sdk_resolve_extraction_materializes_intentspec_preview() {
     );
     assert_eq!(
         resolved_artifact["intentspec"]["risk"]["level"],
-        json!("low")
+        json!("medium")
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_resolve_extraction_accepts_v1_artifact_schema() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn legacy_extraction_schema() {}\n").expect("write source file");
+
+    let artifact_path = repo.path().join("managed-run-artifact.json");
+    fs::write(
+        &artifact_path,
+        serde_json::to_vec_pretty(&semantic_full_artifact(repo.path(), &touched_file))
+            .expect("serialize test artifact"),
+    )
+    .expect("write test artifact");
+
+    let helper_path = repo.path().join("fake-managed-helper.sh");
+    write_shell_helper(&helper_path, &artifact_path);
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &run,
+        "claude-sdk run should succeed before v1 compatibility check",
+    );
+    let run_json = parse_stdout_json(&run, "claude-sdk run before v1 compatibility check");
+    let extraction_path = PathBuf::from(
+        run_json["intentExtractionPath"]
+            .as_str()
+            .expect("intentExtractionPath should be present"),
+    );
+
+    let mut extraction = read_json_file(&extraction_path);
+    extraction["schema"] = json!("libra.intent_extraction.v1");
+    extraction
+        .as_object_mut()
+        .expect("extraction artifact should be an object")
+        .remove("planningSummary");
+    fs::write(
+        &extraction_path,
+        serde_json::to_vec_pretty(&extraction).expect("serialize compatibility artifact"),
+    )
+    .expect("write compatibility artifact");
+
+    let resolve = run_libra_command(
+        &[
+            "claude-sdk",
+            "resolve-extraction",
+            "--extraction",
+            extraction_path.to_str().expect("extraction path utf-8"),
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &resolve,
+        "resolve-extraction should accept legacy v1 extraction schema",
     );
 }
 
@@ -2117,8 +4349,6 @@ async fn test_claude_sdk_persist_intent_writes_formal_intent_and_binding_artifac
             DEFAULT_MANAGED_PROMPT,
             "--helper-path",
             helper_path.to_str().expect("helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );
@@ -2249,8 +4479,6 @@ async fn test_claude_sdk_persist_intent_accepts_test_change_type() {
             DEFAULT_MANAGED_PROMPT,
             "--helper-path",
             helper_path.to_str().expect("helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );
@@ -2351,8 +4579,6 @@ async fn test_claude_sdk_formal_bridge_persists_task_run_evidence_and_decision()
             DEFAULT_MANAGED_PROMPT,
             "--helper-path",
             helper_path.to_str().expect("helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );
@@ -2425,6 +4651,10 @@ async fn test_claude_sdk_formal_bridge_persists_task_run_evidence_and_decision()
         .expect("runId should be present")
         .to_string();
     assert_eq!(bridge_json["intentId"], json!(intent_id.clone()));
+    assert!(
+        bridge_json.get("planId").is_none(),
+        "bridge-run should not synthesize a formal plan when raw assistant messages contain no numbered plan"
+    );
     let bridge_binding_path = PathBuf::from(
         bridge_json["bindingPath"]
             .as_str()
@@ -2447,6 +4677,10 @@ async fn test_claude_sdk_formal_bridge_persists_task_run_evidence_and_decision()
     assert_eq!(bridge_binding["taskId"], json!(task_id.clone()));
     assert_eq!(bridge_binding["runId"], json!(run_id.clone()));
     assert_eq!(bridge_binding["intentId"], json!(intent_id.clone()));
+    assert!(
+        bridge_binding.get("planId").is_none(),
+        "formal run binding should omit planId when no numbered assistant plan exists"
+    );
     assert_eq!(
         bridge_binding["intentBindingPath"],
         json!(intent_binding_path.to_string_lossy().to_string())
@@ -2586,6 +4820,89 @@ async fn test_claude_sdk_formal_bridge_persists_task_run_evidence_and_decision()
         ]),
         "binding should preserve the expected evidence kinds"
     );
+    let evidence_binding_path = PathBuf::from(
+        evidence_json["bindingPath"]
+            .as_str()
+            .expect("persist-evidence bindingPath should be present"),
+    );
+    assert!(
+        evidence_binding_path.exists(),
+        "persist-evidence should materialize an evidence binding artifact"
+    );
+    let evidence_binding = read_json_file(&evidence_binding_path);
+    assert_eq!(
+        evidence_binding["schema"],
+        json!("libra.claude_evidence_binding.v1")
+    );
+    assert_eq!(
+        evidence_binding["aiSessionId"],
+        json!(ai_session_id.clone())
+    );
+    assert_eq!(
+        evidence_binding["providerSessionId"],
+        json!(provider_session_id.clone())
+    );
+    assert_eq!(evidence_binding["runId"], json!(run_id.clone()));
+    assert_eq!(
+        evidence_binding["runBindingPath"],
+        json!(bridge_binding_path.to_string_lossy().to_string())
+    );
+    assert_eq!(evidence_binding["evidenceIds"], json!(evidence_ids.clone()));
+    assert_eq!(
+        evidence_binding["evidences"]
+            .as_array()
+            .expect("evidences should be an array")
+            .len(),
+        evidence_ids.len(),
+        "binding should retain one entry per persisted Evidence object"
+    );
+    let evidence_entries = evidence_binding["evidences"]
+        .as_array()
+        .expect("evidences should be an array");
+    let bound_evidence_ids = evidence_entries
+        .iter()
+        .map(|entry| {
+            entry["evidenceId"]
+                .as_str()
+                .expect("evidence entry should include evidenceId")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    let bound_evidence_kinds = evidence_entries
+        .iter()
+        .map(|entry| {
+            assert!(
+                entry["sourcePath"]
+                    .as_str()
+                    .is_some_and(|path| !path.is_empty()),
+                "evidence entry should include a non-empty sourcePath"
+            );
+            entry["kind"]
+                .as_str()
+                .expect("evidence entry should include kind")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        bound_evidence_ids,
+        evidence_ids.iter().cloned().collect::<BTreeSet<_>>(),
+        "binding entries should reference exactly the persisted Evidence ids"
+    );
+    assert_eq!(
+        bound_evidence_kinds,
+        BTreeSet::from([
+            "evidence_input_summary".to_string(),
+            "intent_extraction_result".to_string(),
+            "managed_context_runtime_summary".to_string(),
+            "managed_decision_runtime_summary".to_string(),
+            "managed_provenance_summary".to_string(),
+            "managed_task_runtime_summary".to_string(),
+            "managed_tool_runtime_summary".to_string(),
+            "managed_usage_summary".to_string(),
+            "provider_session_snapshot".to_string(),
+        ]),
+        "binding should preserve the expected evidence kinds"
+    );
 
     let evidence_repeat = run_libra_command(
         &[
@@ -2620,40 +4937,6 @@ async fn test_claude_sdk_formal_bridge_persists_task_run_evidence_and_decision()
         .expect("decisionId should be present")
         .to_string();
     assert_eq!(decision_json["decisionType"], json!("checkpoint"));
-    let decision_binding_path = PathBuf::from(
-        decision_json["bindingPath"]
-            .as_str()
-            .expect("persist-decision bindingPath should be present"),
-    );
-    assert!(
-        decision_binding_path.exists(),
-        "persist-decision should materialize a decision binding artifact"
-    );
-    let decision_binding = read_json_file(&decision_binding_path);
-    assert_eq!(
-        decision_binding["schema"],
-        json!("libra.claude_decision_binding.v1")
-    );
-    assert_eq!(
-        decision_binding["aiSessionId"],
-        json!(ai_session_id.clone())
-    );
-    assert_eq!(
-        decision_binding["providerSessionId"],
-        json!(provider_session_id.clone())
-    );
-    assert_eq!(decision_binding["runId"], json!(run_id.clone()));
-    assert_eq!(decision_binding["decisionId"], json!(decision_id.clone()));
-    assert_eq!(decision_binding["decisionType"], json!("checkpoint"));
-    assert_eq!(
-        decision_binding["runBindingPath"],
-        json!(bridge_binding_path.to_string_lossy().to_string())
-    );
-    assert_eq!(
-        decision_binding["evidenceBindingPath"],
-        json!(evidence_binding_path.to_string_lossy().to_string())
-    );
-    assert_eq!(decision_binding["evidenceIds"], json!(evidence_ids.clone()));
 
     let decision_repeat = run_libra_command(
         &[
@@ -2677,6 +4960,10 @@ async fn test_claude_sdk_formal_bridge_persists_task_run_evidence_and_decision()
 
     let formal_run: Run = read_tracked_object(repo.path(), "run", &run_id).await;
     assert_eq!(formal_run.task().to_string(), task_id);
+    assert!(
+        formal_run.plan().is_none(),
+        "formal run should remain unplanned when the managed artifact lacks numbered assistant plan text"
+    );
 
     let evidence_objects = futures::future::join_all(
         evidence_ids
@@ -2712,6 +4999,2081 @@ async fn test_claude_sdk_formal_bridge_persists_task_run_evidence_and_decision()
 
 #[tokio::test]
 #[serial]
+async fn test_claude_sdk_formal_bridge_links_patchset_into_evidence_and_decision() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn patchset_bridge() {}\n").expect("write source file");
+
+    let artifact_path = repo.path().join("managed-run-artifact.json");
+    fs::write(
+        &artifact_path,
+        serde_json::to_vec_pretty(&semantic_full_artifact(repo.path(), &touched_file))
+            .expect("serialize test artifact"),
+    )
+    .expect("write test artifact");
+    let request_path = repo.path().join("helper-request.json");
+    let helper_path = repo.path().join("capture-managed-helper.sh");
+    write_request_capture_shell_helper(&helper_path, &artifact_path, &request_path);
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&run, "claude-sdk run should succeed");
+    let run_json = parse_stdout_json(&run, "claude-sdk run patchset bridge");
+    let ai_session_id = run_json["aiSessionId"]
+        .as_str()
+        .expect("aiSessionId should be present")
+        .to_string();
+    let provider_session_id = run_json["providerSessionId"]
+        .as_str()
+        .expect("providerSessionId should be present")
+        .to_string();
+    stage_provider_session_evidence_artifacts(repo.path(), &provider_session_id);
+
+    let bridge = run_libra_command(
+        &[
+            "claude-sdk",
+            "bridge-run",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&bridge, "bridge-run should succeed");
+    let bridge_json = parse_stdout_json(&bridge, "bridge-run output");
+    let run_id = bridge_json["runId"]
+        .as_str()
+        .expect("runId should be present")
+        .to_string();
+
+    let managed_evidence_input = run_libra_command(
+        &[
+            "claude-sdk",
+            "build-managed-evidence-input",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &managed_evidence_input,
+        "build-managed-evidence-input should succeed",
+    );
+    let managed_evidence_input_json = parse_stdout_json(
+        &managed_evidence_input,
+        "build-managed-evidence-input output",
+    );
+    let managed_evidence_input_path = managed_evidence_input_json["artifactPath"]
+        .as_str()
+        .expect("artifactPath should be present")
+        .to_string();
+
+    let patchset = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-patchset",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&patchset, "persist-patchset should succeed");
+    let patchset_json = parse_stdout_json(&patchset, "persist-patchset output");
+    let patchset_id = patchset_json["patchsetId"]
+        .as_str()
+        .expect("patchsetId should be present")
+        .to_string();
+    let patchset_binding_path = PathBuf::from(
+        patchset_json["bindingPath"]
+            .as_str()
+            .expect("bindingPath should be present"),
+    );
+    let patchset_binding = read_json_file(&patchset_binding_path);
+    assert_eq!(
+        patchset_binding["schema"],
+        json!("libra.claude_patchset_binding.v1")
+    );
+    assert_eq!(
+        patchset_binding["aiSessionId"],
+        json!(ai_session_id.clone())
+    );
+    assert_eq!(patchset_binding["runId"], json!(run_id.clone()));
+    assert_eq!(patchset_binding["patchsetId"], json!(patchset_id.clone()));
+    assert_eq!(
+        patchset_binding["managedEvidenceInputPath"],
+        json!(managed_evidence_input_path)
+    );
+
+    let patchset_repeat = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-patchset",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&patchset_repeat, "persist-patchset should be idempotent");
+    let patchset_repeat_json =
+        parse_stdout_json(&patchset_repeat, "persist-patchset repeat output");
+    assert_eq!(
+        patchset_repeat_json["patchsetId"],
+        json!(patchset_id.clone())
+    );
+
+    let patchset_ai = run_libra_command(
+        &["cat-file", "--ai", &format!("patchset:{patchset_id}")],
+        repo.path(),
+    );
+    assert_cli_success(&patchset_ai, "cat-file --ai should succeed for patchset");
+    let patchset_stdout = String::from_utf8_lossy(&patchset_ai.stdout);
+    assert!(
+        patchset_stdout.contains("src/lib.rs"),
+        "cat-file should surface touched patch paths for the formal patchset"
+    );
+
+    let stored_patchset: PatchSet =
+        read_tracked_object(repo.path(), "patchset", &patchset_id).await;
+    assert_eq!(stored_patchset.run().to_string(), run_id);
+    assert_eq!(stored_patchset.touched().len(), 1);
+    assert_eq!(stored_patchset.touched()[0].path, "src/lib.rs");
+
+    let evidence = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-evidence",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&evidence, "persist-evidence should succeed");
+    let evidence_json = parse_stdout_json(&evidence, "persist-evidence output");
+    let evidence_ids = evidence_json["evidenceIds"]
+        .as_array()
+        .expect("evidenceIds should be an array")
+        .iter()
+        .map(|value| value.as_str().expect("evidence id").to_string())
+        .collect::<Vec<_>>();
+    let evidence_binding_path = PathBuf::from(
+        evidence_json["bindingPath"]
+            .as_str()
+            .expect("bindingPath should be present"),
+    );
+    let evidence_binding = read_json_file(&evidence_binding_path);
+    assert_eq!(
+        evidence_binding["patchsetBindingPath"],
+        json!(patchset_binding_path.to_string_lossy().to_string())
+    );
+    assert_eq!(evidence_binding["patchsetId"], json!(patchset_id.clone()));
+
+    let patchset_uuid = Uuid::parse_str(&patchset_id).expect("patchsetId should be a UUID");
+    let evidence_objects = futures::future::join_all(
+        evidence_ids
+            .iter()
+            .map(|id| read_tracked_object::<Evidence>(repo.path(), "evidence", id)),
+    )
+    .await;
+    assert!(
+        evidence_objects
+            .iter()
+            .all(|evidence| evidence.patchset_id() == Some(patchset_uuid)),
+        "all Claude evidence objects should point at the persisted formal patchset"
+    );
+
+    let decision_input = run_libra_command(
+        &[
+            "claude-sdk",
+            "build-decision-input",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&decision_input, "build-decision-input should succeed");
+
+    let decision = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-decision",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&decision, "persist-decision should succeed");
+    let decision_json = parse_stdout_json(&decision, "persist-decision output");
+    let decision_id = decision_json["decisionId"]
+        .as_str()
+        .expect("decisionId should be present")
+        .to_string();
+    let decision_binding_path = PathBuf::from(
+        decision_json["bindingPath"]
+            .as_str()
+            .expect("bindingPath should be present"),
+    );
+    let decision_binding = read_json_file(&decision_binding_path);
+    assert_eq!(
+        decision_binding["patchsetBindingPath"],
+        json!(patchset_binding_path.to_string_lossy().to_string())
+    );
+    assert_eq!(decision_binding["patchsetId"], json!(patchset_id.clone()));
+
+    let stored_decision: Decision =
+        read_tracked_object(repo.path(), "decision", &decision_id).await;
+    assert_eq!(
+        stored_decision.chosen_patchset_id(),
+        Some(patchset_uuid),
+        "the formal decision should retain the chosen patchset link"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_persist_patchset_stores_diff_artifact_for_edit_payloads() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    let old_text = "pub fn patchset_diff() {}\n";
+    let new_text = "pub fn patchset_diff() {}\n// diff artifact\n";
+    fs::write(&touched_file, old_text).expect("write source file");
+
+    let artifact_path = repo.path().join("managed-run-artifact.json");
+    fs::write(
+        &artifact_path,
+        serde_json::to_vec_pretty(&semantic_edit_artifact(
+            repo.path(),
+            &touched_file,
+            old_text,
+            new_text,
+        ))
+        .expect("serialize edit artifact"),
+    )
+    .expect("write test artifact");
+    let request_path = repo.path().join("helper-request.json");
+    let helper_path = repo.path().join("capture-managed-helper.sh");
+    write_request_capture_shell_helper(&helper_path, &artifact_path, &request_path);
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&run, "claude-sdk run should succeed");
+    let run_json = parse_stdout_json(&run, "claude-sdk run output");
+    let ai_session_id = run_json["aiSessionId"]
+        .as_str()
+        .expect("aiSessionId should be present")
+        .to_string();
+    let provider_session_id = run_json["providerSessionId"]
+        .as_str()
+        .expect("providerSessionId should be present")
+        .to_string();
+    stage_provider_session_evidence_artifacts(repo.path(), &provider_session_id);
+
+    let bridge = run_libra_command(
+        &[
+            "claude-sdk",
+            "bridge-run",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&bridge, "bridge-run should succeed");
+
+    let managed_evidence_input = run_libra_command(
+        &[
+            "claude-sdk",
+            "build-managed-evidence-input",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &managed_evidence_input,
+        "build-managed-evidence-input should succeed",
+    );
+
+    let patchset = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-patchset",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&patchset, "persist-patchset should succeed");
+    let patchset_json = parse_stdout_json(&patchset, "persist-patchset output");
+    let patchset_id = patchset_json["patchsetId"]
+        .as_str()
+        .expect("patchsetId should be present")
+        .to_string();
+    let patchset_binding_path = PathBuf::from(
+        patchset_json["bindingPath"]
+            .as_str()
+            .expect("bindingPath should be present"),
+    );
+    let patchset_binding = read_json_file(&patchset_binding_path);
+    assert_eq!(patchset_binding["diffArtifactStore"], json!("libra"));
+    let diff_artifact_key = patchset_binding["diffArtifactKey"]
+        .as_str()
+        .expect("diffArtifactKey should be present");
+
+    let stored_patchset: PatchSet =
+        read_tracked_object(repo.path(), "patchset", &patchset_id).await;
+    let artifact_ref = stored_patchset
+        .artifact()
+        .expect("patchset should include a diff artifact ref");
+    assert_eq!(artifact_ref.store(), "libra");
+    assert_eq!(artifact_ref.key(), diff_artifact_key);
+    assert_eq!(stored_patchset.touched().len(), 1);
+    assert_eq!(stored_patchset.touched()[0].lines_added, 2);
+    assert_eq!(stored_patchset.touched()[0].lines_deleted, 1);
+
+    let storage = LocalStorage::new(repo.path().join(".libra").join("objects"));
+    let diff_hash: ObjectHash = artifact_ref
+        .key()
+        .parse()
+        .expect("diff artifact key should parse as object hash");
+    let (bytes, _) = storage
+        .get(&diff_hash)
+        .await
+        .expect("diff artifact should exist in object storage");
+    let diff_text = String::from_utf8(bytes).expect("diff artifact should be UTF-8");
+    assert!(diff_text.contains("diff --git a/src/lib.rs b/src/lib.rs"));
+    assert!(diff_text.contains("-pub fn patchset_diff() {}"));
+    assert!(diff_text.contains("+// diff artifact"));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_live_e2e_persists_full_object_flow() {
+    if std::env::var("LIBRA_TEST_CLAUDE_SDK_LIVE").map_or(true, |value| value.is_empty()) {
+        eprintln!("skipped (LIBRA_TEST_CLAUDE_SDK_LIVE not set)");
+        return;
+    }
+
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn live_claude_sdk_e2e() {}\n").expect("write source file");
+
+    let prompt_path = repo.path().join("live-claude-sdk-prompt.txt");
+    fs::write(
+        &prompt_path,
+        "Use the Edit or Write tool to modify only src/lib.rs. Append exactly one new line at the end of the file: // live claude sdk e2e . Do not only describe the change. Actually write the file change, do not modify any other file, and stop immediately after the edit.",
+    )
+    .expect("write live prompt");
+
+    let mut command = build_live_claude_sdk_command(
+        repo.path(),
+        &prompt_path,
+        "acceptEdits",
+        "60",
+        &["Read", "Edit", "Write", "Glob", "Grep"],
+        None,
+    );
+    let output = command
+        .output()
+        .expect("failed to execute live Claude SDK command");
+    assert!(
+        output.status.success(),
+        "live claude-sdk run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let run_events = parse_stdout_ndjson(&output, "live claude-sdk run output");
+    let run_json = find_ndjson_event(&run_events, "libra_result", "live claude-sdk run output");
+    let auto_finalize = run_json
+        .get("autoFinalize")
+        .expect("libra_result should include autoFinalize summary");
+    assert!(
+        auto_finalize
+            .get("warnings")
+            .is_none_or(|warnings| warnings.as_array().is_some_and(|items| items.is_empty())),
+        "live auto-finalize should complete without warnings: {auto_finalize}"
+    );
+    let patchset_id = auto_finalize["patchsetId"]
+        .as_str()
+        .expect("autoFinalize.patchsetId should be present")
+        .to_string();
+    let decision_id = auto_finalize["decisionId"]
+        .as_str()
+        .expect("autoFinalize.decisionId should be present")
+        .to_string();
+
+    let (_, history) = load_intent_history(repo.path()).await;
+    let evidence_objects = history
+        .list_objects("evidence")
+        .await
+        .expect("list live evidence objects");
+    let first_evidence_id = evidence_objects
+        .first()
+        .map(|(id, _)| id.clone())
+        .expect("auto-finalize should persist at least one evidence object");
+    let provenance_objects = history
+        .list_objects("provenance")
+        .await
+        .expect("list live provenance objects");
+    let run_snapshot_objects = history
+        .list_objects("run_snapshot")
+        .await
+        .expect("list live run snapshot objects");
+    let patchset_snapshot_objects = history
+        .list_objects("patchset_snapshot")
+        .await
+        .expect("list live patchset snapshot objects");
+    let provenance_snapshot_objects = history
+        .list_objects("provenance_snapshot")
+        .await
+        .expect("list live provenance snapshot objects");
+    let run_usage_objects = history
+        .list_objects("run_usage")
+        .await
+        .expect("list live run usage objects");
+    let snapshot_objects = history
+        .list_objects("snapshot")
+        .await
+        .expect("list live context snapshots");
+    let context_frame_objects = history
+        .list_objects("context_frame")
+        .await
+        .expect("list live context frames");
+    assert_eq!(provenance_objects.len(), 1);
+    assert_eq!(run_snapshot_objects.len(), 1);
+    assert_eq!(patchset_snapshot_objects.len(), 1);
+    assert_eq!(provenance_snapshot_objects.len(), 1);
+    assert_eq!(run_usage_objects.len(), 1);
+    assert_eq!(snapshot_objects.len(), 1);
+    assert!(
+        !context_frame_objects.is_empty(),
+        "live auto-finalize should persist at least one context frame"
+    );
+
+    for (object_id, object_type) in [
+        (patchset_id.as_str(), "patchset"),
+        (first_evidence_id.as_str(), "evidence"),
+        (decision_id.as_str(), "decision"),
+        (provenance_objects[0].0.as_str(), "provenance"),
+        (run_snapshot_objects[0].0.as_str(), "run_snapshot"),
+        (patchset_snapshot_objects[0].0.as_str(), "patchset_snapshot"),
+        (
+            provenance_snapshot_objects[0].0.as_str(),
+            "provenance_snapshot",
+        ),
+        (run_usage_objects[0].0.as_str(), "run_usage"),
+        (snapshot_objects[0].0.as_str(), "snapshot"),
+        (context_frame_objects[0].0.as_str(), "context_frame"),
+    ] {
+        let selector = format!("{object_type}:{object_id}");
+        let ai_type = run_libra_command(&["cat-file", "--ai-type", &selector], repo.path());
+        assert_cli_success(
+            &ai_type,
+            "cat-file --ai-type should succeed for live objects",
+        );
+        assert_eq!(String::from_utf8_lossy(&ai_type.stdout).trim(), object_type);
+    }
+    assert!(
+        fs::read_to_string(&touched_file)
+            .expect("read live-edited file")
+            .contains("// live claude sdk e2e"),
+        "live Claude SDK test should verify the requested file edit actually landed"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_live_e2e_persists_plan_family_snapshot_events() {
+    if std::env::var("LIBRA_TEST_CLAUDE_SDK_LIVE").map_or(true, |value| value.is_empty()) {
+        eprintln!("skipped (LIBRA_TEST_CLAUDE_SDK_LIVE not set)");
+        return;
+    }
+
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn live_claude_sdk_plan_family() {}\n")
+        .expect("write source file");
+
+    let prompt_path = repo.path().join("live-claude-sdk-plan-prompt.txt");
+    fs::write(
+        &prompt_path,
+        "Before using tools, output exactly one concise numbered 3-step plan in assistant text. The plan must use lines starting with 1., 2., and 3. Then inspect src/lib.rs with read-only tools if needed, produce the required structured output, and stop without editing files.",
+    )
+    .expect("write live plan prompt");
+
+    let libra_bin = env!("CARGO_BIN_EXE_libra");
+    let shell_override = std::env::var("LIBRA_TEST_CLAUDE_LIVE_SHELL")
+        .ok()
+        .filter(|value| !value.is_empty());
+    let sdk_module_override = std::env::var("LIBRA_CLAUDE_AGENT_SDK_MODULE")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            let default_path = "/tmp/claude-sdk-probe/node_modules/@anthropic-ai/claude-agent-sdk";
+            Path::new(default_path)
+                .exists()
+                .then(|| default_path.to_string())
+        });
+
+    let mut command = if let Some(shell) = shell_override.as_deref() {
+        let shell_command = format!(
+            "cd {}; {} --json=ndjson claude-sdk run --prompt-file {} --model haiku --permission-mode acceptEdits --timeout-seconds 60 --tool Read --tool Glob --tool Grep",
+            shell_double_quote(
+                repo.path()
+                    .to_str()
+                    .expect("repo path should be valid UTF-8")
+            ),
+            shell_double_quote(libra_bin),
+            shell_double_quote(
+                prompt_path
+                    .to_str()
+                    .expect("prompt path should be valid UTF-8")
+            ),
+        );
+        let mut command = std::process::Command::new(shell);
+        command.arg("-lc").arg(shell_command);
+        command
+    } else {
+        let mut command = std::process::Command::new(libra_bin);
+        command.current_dir(repo.path()).args([
+            "--json=ndjson",
+            "claude-sdk",
+            "run",
+            "--prompt-file",
+            prompt_path
+                .to_str()
+                .expect("prompt path should be valid UTF-8"),
+            "--model",
+            "haiku",
+            "--permission-mode",
+            "acceptEdits",
+            "--timeout-seconds",
+            "60",
+            "--tool",
+            "Read",
+            "--tool",
+            "Glob",
+            "--tool",
+            "Grep",
+        ]);
+        command
+    };
+    if let Some(module_path) = sdk_module_override.as_deref() {
+        command.env("LIBRA_CLAUDE_AGENT_SDK_MODULE", module_path);
+    }
+
+    let output = command
+        .output()
+        .expect("failed to execute live Claude SDK plan command");
+    assert!(
+        output.status.success(),
+        "live claude-sdk plan run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout_events = parse_stdout_ndjson(&output, "live claude-sdk plan output");
+    let run_json = find_ndjson_event(
+        &stdout_events,
+        "libra_result",
+        "live claude-sdk plan output",
+    );
+    let raw_artifact_path = PathBuf::from(
+        run_json["rawArtifactPath"]
+            .as_str()
+            .expect("rawArtifactPath should be present"),
+    );
+    let raw_artifact = read_json_file(&raw_artifact_path);
+
+    let intent_snapshots = list_history_object_ids(repo.path(), "intent_snapshot").await;
+    let intent_event_ids = list_history_object_ids(repo.path(), "intent_event").await;
+    let plan_snapshots = list_history_object_ids(repo.path(), "plan_snapshot").await;
+    let plan_step_snapshots = list_history_object_ids(repo.path(), "plan_step_snapshot").await;
+    let task_snapshots = list_history_object_ids(repo.path(), "task_snapshot").await;
+    let plan_step_event_ids = list_history_object_ids(repo.path(), "plan_step_event").await;
+    let run_snapshots = list_history_object_ids(repo.path(), "run_snapshot").await;
+    let run_event_ids = list_history_object_ids(repo.path(), "run_event").await;
+    let provenance_snapshots = list_history_object_ids(repo.path(), "provenance_snapshot").await;
+
+    if plan_snapshots.is_empty() {
+        panic!(
+            "prompt-contract broken: no plan_snapshot objects were produced. raw_artifact_path={} raw_stdout={}",
+            raw_artifact_path.display(),
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
+    assert_eq!(intent_snapshots.len(), 1);
+    assert!(
+        !intent_event_ids.is_empty(),
+        "live plan path should emit formal intent lifecycle events"
+    );
+    assert_eq!(plan_snapshots.len(), 1);
+    assert_eq!(plan_step_snapshots.len(), 3);
+    assert_eq!(task_snapshots.len(), 3);
+    assert_eq!(plan_step_event_ids.len(), 3);
+    assert_eq!(run_snapshots.len(), 1);
+    assert!(
+        !run_event_ids.is_empty(),
+        "live plan path should emit formal run lifecycle events"
+    );
+    assert_eq!(provenance_snapshots.len(), 1);
+
+    let intent_event_values = futures::future::join_all(
+        intent_event_ids
+            .iter()
+            .map(|id| read_tracked_object::<Value>(repo.path(), "intent_event", id)),
+    )
+    .await;
+    let intent_statuses = intent_event_values
+        .iter()
+        .filter_map(|value| value["status"].as_str().or_else(|| value["kind"].as_str()))
+        .collect::<BTreeSet<_>>();
+    assert!(
+        intent_statuses.contains("created")
+            || intent_statuses.contains("analyzed")
+            || intent_statuses.contains("completed"),
+        "live plan path should expose meaningful intent lifecycle semantics"
+    );
+
+    let run_event_values = futures::future::join_all(
+        run_event_ids
+            .iter()
+            .map(|id| read_tracked_object::<Value>(repo.path(), "run_event", id)),
+    )
+    .await;
+    let run_statuses = run_event_values
+        .iter()
+        .filter_map(|value| value["status"].as_str().or_else(|| value["kind"].as_str()))
+        .collect::<BTreeSet<_>>();
+    assert!(
+        run_statuses.contains("created")
+            || run_statuses.contains("completed")
+            || run_statuses.contains("failed"),
+        "live plan path should expose meaningful run lifecycle semantics"
+    );
+
+    let plan_snapshot: Value =
+        read_tracked_object(repo.path(), "plan_snapshot", &plan_snapshots[0]).await;
+    assert!(
+        plan_snapshot["step_text"]
+            .as_str()
+            .is_some_and(|text| text.contains("1.") && text.contains("2.") && text.contains("3.")),
+        "live plan snapshot should preserve numbered plan text: {plan_snapshot}"
+    );
+    assert!(
+        raw_artifact["messages"]
+            .as_array()
+            .is_some_and(|messages| messages.iter().any(|message| {
+                message.get("type").and_then(Value::as_str) == Some("assistant")
+                    && message
+                        .get("message")
+                        .and_then(|inner| inner.get("content"))
+                        .and_then(Value::as_array)
+                        .is_some_and(|blocks| {
+                            blocks.iter().any(|block| {
+                                block.get("type").and_then(Value::as_str) == Some("text")
+                                    && block.get("text").and_then(Value::as_str).is_some_and(
+                                        |text| {
+                                            text.contains("1.")
+                                                && text.contains("2.")
+                                                && text.contains("3.")
+                                        },
+                                    )
+                            })
+                        })
+            })),
+        "raw managed artifact should retain numbered assistant plan text"
+    );
+
+    let plan_step_snapshot_ids = plan_step_snapshots.iter().cloned().collect::<BTreeSet<_>>();
+    let live_plan_thread_id = plan_snapshot["thread_id"].clone();
+    let live_plan_id = Value::String(plan_snapshots[0].clone());
+    let task_snapshot_values = futures::future::join_all(
+        task_snapshots
+            .iter()
+            .map(|id| read_tracked_object::<Value>(repo.path(), "task_snapshot", id)),
+    )
+    .await;
+    assert!(
+        task_snapshot_values.iter().all(|value| {
+            value["origin_step_id"]
+                .as_str()
+                .is_some_and(|id| plan_step_snapshot_ids.contains(id))
+                && value["thread_id"] == live_plan_thread_id
+                && value["plan_id"] == live_plan_id
+                && value["intent_id"].is_string()
+        }),
+        "live task snapshots should stay projection-only views over the derived plan-step ids"
+    );
+
+    let plan_step_event_values = futures::future::join_all(
+        plan_step_event_ids
+            .iter()
+            .map(|id| read_tracked_object::<Value>(repo.path(), "plan_step_event", id)),
+    )
+    .await;
+    assert!(
+        plan_step_event_values.iter().all(|value| {
+            value["status"] == json!("pending")
+                && value["step_id"]
+                    .as_str()
+                    .is_some_and(|id| plan_step_snapshot_ids.contains(id))
+                && value["run_id"].is_string()
+        }),
+        "live plan path should use formal pending plan_step_event semantics for derived steps"
+    );
+
+    for (object_id, object_type) in [
+        (intent_snapshots[0].as_str(), "intent_snapshot"),
+        (plan_snapshots[0].as_str(), "plan_snapshot"),
+        (plan_step_snapshots[0].as_str(), "plan_step_snapshot"),
+        (task_snapshots[0].as_str(), "task_snapshot"),
+        (plan_step_event_ids[0].as_str(), "plan_step_event"),
+        (run_snapshots[0].as_str(), "run_snapshot"),
+        (provenance_snapshots[0].as_str(), "provenance_snapshot"),
+    ] {
+        assert_ai_type_matches(repo.path(), object_id, object_type);
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_live_e2e_persists_derived_audit_objects() {
+    if std::env::var("LIBRA_TEST_CLAUDE_SDK_LIVE").map_or(true, |value| value.is_empty()) {
+        eprintln!("skipped (LIBRA_TEST_CLAUDE_SDK_LIVE not set)");
+        return;
+    }
+
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn live_claude_sdk_audit_objects() {}\n")
+        .expect("write source file");
+
+    let prompt_path = repo.path().join("live-claude-sdk-audit-prompt.txt");
+    fs::write(
+        &prompt_path,
+        "Inspect src/lib.rs, then use Edit or Write to append exactly one new line at the end of src/lib.rs: // live claude sdk audit objects . Do not modify any other file, and stop immediately after the edit.",
+    )
+    .expect("write live prompt");
+
+    let scripted_responses = serde_json::to_string(&json!([
+        { "kind": "tool_approval", "decision": "approve" },
+        { "kind": "tool_approval", "decision": "approve" },
+        { "kind": "tool_approval", "decision": "approve" }
+    ]))
+    .expect("serialize scripted responses");
+
+    let mut command = build_live_claude_sdk_command(
+        repo.path(),
+        &prompt_path,
+        "default",
+        "60",
+        &["Read", "Edit", "Write", "Glob", "Grep"],
+        Some(&scripted_responses),
+    );
+
+    let output = command
+        .output()
+        .expect("failed to execute live Claude SDK command");
+    assert!(
+        output.status.success(),
+        "live claude-sdk run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let run_events = parse_stdout_ndjson(&output, "live claude-sdk audit output");
+    let run_json = find_ndjson_event(&run_events, "libra_result", "live claude-sdk audit output");
+    let raw_artifact_path = PathBuf::from(
+        run_json["rawArtifactPath"]
+            .as_str()
+            .expect("rawArtifactPath should be present"),
+    );
+    let raw_artifact = read_json_file(&raw_artifact_path);
+
+    let (_, history) = load_intent_history(repo.path()).await;
+    let approval_requests = history
+        .list_objects("approval_request")
+        .await
+        .expect("list live approval_request objects");
+    assert!(
+        !approval_requests.is_empty(),
+        "live run should persist at least one approval_request"
+    );
+    let tool_invocation_events = history
+        .list_objects("tool_invocation_event")
+        .await
+        .expect("list live tool_invocation_event objects");
+    assert!(
+        !tool_invocation_events.is_empty(),
+        "live run should persist tool_invocation_event objects"
+    );
+    let reasoning_objects = history
+        .list_objects("reasoning")
+        .await
+        .expect("list live reasoning objects");
+    let has_thinking = raw_artifact["messages"].as_array().is_some_and(|messages| {
+        messages.iter().any(|message| {
+            message.get("type").and_then(Value::as_str) == Some("assistant")
+                && message
+                    .get("message")
+                    .and_then(|inner| inner.get("content"))
+                    .and_then(Value::as_array)
+                    .is_some_and(|blocks| {
+                        blocks.iter().any(|block| {
+                            block.get("type").and_then(Value::as_str) == Some("thinking")
+                        })
+                    })
+        })
+    });
+    if has_thinking {
+        assert!(
+            !reasoning_objects.is_empty(),
+            "live run exposed thinking blocks, so reasoning objects should exist"
+        );
+    } else {
+        assert!(
+            reasoning_objects.is_empty(),
+            "without live thinking blocks, no reasoning objects should be derived"
+        );
+    }
+
+    for (object_id, object_type) in [
+        (approval_requests[0].0.as_str(), "approval_request"),
+        (
+            tool_invocation_events[0].0.as_str(),
+            "tool_invocation_event",
+        ),
+    ] {
+        let ai_type = run_libra_command(&["cat-file", "--ai-type", object_id], repo.path());
+        assert_cli_success(
+            &ai_type,
+            "cat-file --ai-type should succeed for live derived audit objects",
+        );
+        assert_eq!(String::from_utf8_lossy(&ai_type.stdout).trim(), object_type);
+    }
+    if has_thinking {
+        let ai_type = run_libra_command(
+            &["cat-file", "--ai-type", &reasoning_objects[0].0],
+            repo.path(),
+        );
+        assert_cli_success(
+            &ai_type,
+            "cat-file --ai-type should succeed for live reasoning objects",
+        );
+        assert_eq!(String::from_utf8_lossy(&ai_type.stdout).trim(), "reasoning");
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_formal_bridge_recognizes_managed_input_layers() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn managed_input_layers() {}\n").expect("write source file");
+
+    let artifact_path = repo.path().join("managed-run-artifact.json");
+    fs::write(
+        &artifact_path,
+        serde_json::to_vec_pretty(&semantic_full_artifact(repo.path(), &touched_file))
+            .expect("serialize test artifact"),
+    )
+    .expect("write test artifact");
+    let helper_path = repo.path().join("fake-managed-helper.sh");
+    write_shell_helper(&helper_path, &artifact_path);
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--enable-file-checkpointing",
+            "true",
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&run, "claude-sdk run should succeed");
+    let run_json = parse_stdout_json(&run, "claude-sdk run output");
+    let ai_session_id = run_json["aiSessionId"]
+        .as_str()
+        .expect("aiSessionId should be present")
+        .to_string();
+    let provider_session_id = run_json["providerSessionId"]
+        .as_str()
+        .expect("providerSessionId should be present")
+        .to_string();
+    stage_provider_session_evidence_artifacts(repo.path(), &provider_session_id);
+
+    let resolve = run_libra_command(
+        &[
+            "claude-sdk",
+            "resolve-extraction",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&resolve, "resolve-extraction should succeed");
+
+    let persist_intent = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-intent",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&persist_intent, "persist-intent should succeed");
+
+    let bridge = run_libra_command(
+        &[
+            "claude-sdk",
+            "bridge-run",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&bridge, "bridge-run should succeed");
+
+    let managed_evidence_input = run_libra_command(
+        &[
+            "claude-sdk",
+            "build-managed-evidence-input",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &managed_evidence_input,
+        "build-managed-evidence-input should succeed",
+    );
+    let managed_evidence_input_json = parse_stdout_json(
+        &managed_evidence_input,
+        "build-managed-evidence-input output",
+    );
+    let managed_evidence_input_path = managed_evidence_input_json["artifactPath"]
+        .as_str()
+        .expect("artifactPath should be present")
+        .to_string();
+
+    let evidence = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-evidence",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&evidence, "persist-evidence should succeed");
+    let evidence_json = parse_stdout_json(&evidence, "persist-evidence output");
+    let evidence_binding_path = PathBuf::from(
+        evidence_json["bindingPath"]
+            .as_str()
+            .expect("bindingPath should be present"),
+    );
+    let evidence_binding = read_json_file(&evidence_binding_path);
+    assert_eq!(
+        evidence_binding["managedEvidenceInputPath"],
+        json!(managed_evidence_input_path)
+    );
+    let bound_evidence_kinds = evidence_binding["evidences"]
+        .as_array()
+        .expect("evidences should be an array")
+        .iter()
+        .map(|entry| {
+            entry["kind"]
+                .as_str()
+                .expect("kind should be a string")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    assert!(
+        bound_evidence_kinds.contains("managed_evidence_input_summary"),
+        "persist-evidence should recognize the managed evidence input layer"
+    );
+
+    let decision_input = run_libra_command(
+        &[
+            "claude-sdk",
+            "build-decision-input",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&decision_input, "build-decision-input should succeed");
+    let decision_input_json = parse_stdout_json(&decision_input, "build-decision-input output");
+    let decision_input_path = decision_input_json["artifactPath"]
+        .as_str()
+        .expect("artifactPath should be present")
+        .to_string();
+
+    let decision = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-decision",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&decision, "persist-decision should succeed");
+    let decision_json = parse_stdout_json(&decision, "persist-decision output");
+    let decision_binding_path = PathBuf::from(
+        decision_json["bindingPath"]
+            .as_str()
+            .expect("bindingPath should be present"),
+    );
+    let decision_binding = read_json_file(&decision_binding_path);
+    assert_eq!(
+        decision_binding["decisionInputPath"],
+        json!(decision_input_path)
+    );
+    assert!(
+        decision_binding["rationale"]
+            .as_str()
+            .is_some_and(|rationale| rationale.contains("decision_input_runtime_events=4")),
+        "persist-decision should recognize the decision input layer"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_persist_patchset_links_formal_evidence_and_decision_objects() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn patchset_chain() {}\n").expect("write source file");
+
+    let artifact_path = repo.path().join("managed-run-artifact.json");
+    fs::write(
+        &artifact_path,
+        serde_json::to_vec_pretty(&semantic_full_artifact(repo.path(), &touched_file))
+            .expect("serialize test artifact"),
+    )
+    .expect("write test artifact");
+    let request_path = repo.path().join("helper-request.json");
+    let helper_path = repo.path().join("capture-managed-helper.sh");
+    write_request_capture_shell_helper(&helper_path, &artifact_path, &request_path);
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--enable-file-checkpointing",
+            "true",
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&run, "claude-sdk run should succeed");
+    let run_json = parse_stdout_json(&run, "claude-sdk run output");
+    let ai_session_id = run_json["aiSessionId"]
+        .as_str()
+        .expect("aiSessionId should be present")
+        .to_string();
+    let provider_session_id = run_json["providerSessionId"]
+        .as_str()
+        .expect("providerSessionId should be present")
+        .to_string();
+    stage_provider_session_evidence_artifacts(repo.path(), &provider_session_id);
+
+    let bridge = run_libra_command(
+        &[
+            "claude-sdk",
+            "bridge-run",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&bridge, "bridge-run should succeed");
+
+    let managed_evidence_input = run_libra_command(
+        &[
+            "claude-sdk",
+            "build-managed-evidence-input",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &managed_evidence_input,
+        "build-managed-evidence-input should succeed",
+    );
+
+    let patchset = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-patchset",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&patchset, "persist-patchset should succeed");
+    let patchset_json = parse_stdout_json(&patchset, "persist-patchset output");
+    let patchset_id = patchset_json["patchsetId"]
+        .as_str()
+        .expect("patchsetId should be present")
+        .to_string();
+    let patchset_binding_path = PathBuf::from(
+        patchset_json["bindingPath"]
+            .as_str()
+            .expect("bindingPath should be present"),
+    );
+
+    let evidence = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-evidence",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&evidence, "persist-evidence should succeed");
+    let evidence_json = parse_stdout_json(&evidence, "persist-evidence output");
+    let evidence_ids = evidence_json["evidenceIds"]
+        .as_array()
+        .expect("evidenceIds should be an array")
+        .iter()
+        .map(|value| value.as_str().expect("evidence id").to_string())
+        .collect::<Vec<_>>();
+    let evidence_binding_path = PathBuf::from(
+        evidence_json["bindingPath"]
+            .as_str()
+            .expect("bindingPath should be present"),
+    );
+    let evidence_binding = read_json_file(&evidence_binding_path);
+    assert_eq!(evidence_binding["patchsetId"], json!(patchset_id));
+    assert_eq!(
+        evidence_binding["patchsetBindingPath"],
+        json!(patchset_binding_path.to_string_lossy().to_string())
+    );
+
+    let decision_input = run_libra_command(
+        &[
+            "claude-sdk",
+            "build-decision-input",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&decision_input, "build-decision-input should succeed");
+
+    let decision = run_libra_command(
+        &[
+            "claude-sdk",
+            "persist-decision",
+            "--ai-session-id",
+            &ai_session_id,
+        ],
+        repo.path(),
+    );
+    assert_cli_success(&decision, "persist-decision should succeed");
+    let decision_json = parse_stdout_json(&decision, "persist-decision output");
+    let decision_id = decision_json["decisionId"]
+        .as_str()
+        .expect("decisionId should be present")
+        .to_string();
+    let decision_binding_path = PathBuf::from(
+        decision_json["bindingPath"]
+            .as_str()
+            .expect("bindingPath should be present"),
+    );
+    let decision_binding = read_json_file(&decision_binding_path);
+    assert_eq!(decision_binding["patchsetId"], json!(patchset_id));
+    assert_eq!(
+        decision_binding["patchsetBindingPath"],
+        json!(patchset_binding_path.to_string_lossy().to_string())
+    );
+    assert!(
+        decision_binding["rationale"]
+            .as_str()
+            .is_some_and(|rationale| rationale.contains(&format!("patchset_id={patchset_id}"))),
+        "persist-decision should fold the formal patchset id into its rationale"
+    );
+
+    for (object_id, object_type) in [
+        (patchset_id.as_str(), "patchset"),
+        (evidence_ids[0].as_str(), "evidence"),
+        (decision_id.as_str(), "decision"),
+    ] {
+        let selector = format!("{object_type}:{object_id}");
+        let ai_type = run_libra_command(&["cat-file", "--ai-type", &selector], repo.path());
+        assert_cli_success(&ai_type, "cat-file --ai-type should succeed");
+        assert_eq!(String::from_utf8_lossy(&ai_type.stdout).trim(), object_type);
+
+        let ai_pretty = run_libra_command(&["cat-file", "--ai", &selector], repo.path());
+        assert_cli_success(&ai_pretty, "cat-file --ai should succeed");
+        let pretty_stdout = String::from_utf8_lossy(&ai_pretty.stdout);
+        assert!(
+            pretty_stdout.contains(&format!("type: {object_type}")),
+            "cat-file should pretty-print the {object_type} object"
+        );
+    }
+
+    let patchset_pretty = run_libra_command(
+        &["cat-file", "--ai", &format!("patchset:{patchset_id}")],
+        repo.path(),
+    );
+    assert_cli_success(&patchset_pretty, "cat-file --ai patchset should succeed");
+    assert!(
+        String::from_utf8_lossy(&patchset_pretty.stdout).contains("src/lib.rs"),
+        "cat-file patchset output should expose the touched file list"
+    );
+
+    let evidence_pretty = run_libra_command(
+        &["cat-file", "--ai", &format!("evidence:{}", evidence_ids[0])],
+        repo.path(),
+    );
+    assert_cli_success(&evidence_pretty, "cat-file --ai evidence should succeed");
+    assert!(
+        String::from_utf8_lossy(&evidence_pretty.stdout).contains(&patchset_id),
+        "cat-file evidence output should expose the linked patchset id"
+    );
+
+    let decision_pretty = run_libra_command(
+        &["cat-file", "--ai", &format!("decision:{decision_id}")],
+        repo.path(),
+    );
+    assert_cli_success(&decision_pretty, "cat-file --ai decision should succeed");
+    assert!(
+        String::from_utf8_lossy(&decision_pretty.stdout).contains(&patchset_id),
+        "cat-file decision output should expose the chosen patchset id"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_formal_bridge_materializes_thread_scheduler_views() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn materialize_views() {}\n").expect("write source file");
+
+    let artifact_path = repo.path().join("managed-run-artifact.json");
+    fs::write(
+        &artifact_path,
+        serde_json::to_vec_pretty(&semantic_full_artifact(repo.path(), &touched_file))
+            .expect("serialize test artifact"),
+    )
+    .expect("write test artifact");
+    let request_path = repo.path().join("helper-request.json");
+    let helper_path = repo.path().join("capture-managed-helper.sh");
+    write_request_capture_shell_helper(&helper_path, &artifact_path, &request_path);
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &run,
+        "claude-sdk run should succeed for projection rebuild test",
+    );
+    let run_json = parse_stdout_json(&run, "claude-sdk run projection rebuild");
+    let ai_session_id = run_json["aiSessionId"]
+        .as_str()
+        .expect("aiSessionId should be present")
+        .to_string();
+    let provider_session_id = run_json["providerSessionId"]
+        .as_str()
+        .expect("providerSessionId should be present")
+        .to_string();
+
+    stage_provider_session_evidence_artifacts(repo.path(), &provider_session_id);
+
+    for args in [
+        vec![
+            "claude-sdk".to_string(),
+            "resolve-extraction".to_string(),
+            "--ai-session-id".to_string(),
+            ai_session_id.clone(),
+        ],
+        vec![
+            "claude-sdk".to_string(),
+            "persist-intent".to_string(),
+            "--ai-session-id".to_string(),
+            ai_session_id.clone(),
+        ],
+        vec![
+            "claude-sdk".to_string(),
+            "bridge-run".to_string(),
+            "--ai-session-id".to_string(),
+            ai_session_id.clone(),
+        ],
+        vec![
+            "claude-sdk".to_string(),
+            "build-managed-evidence-input".to_string(),
+            "--ai-session-id".to_string(),
+            ai_session_id.clone(),
+        ],
+        vec![
+            "claude-sdk".to_string(),
+            "persist-patchset".to_string(),
+            "--ai-session-id".to_string(),
+            ai_session_id.clone(),
+        ],
+        vec![
+            "claude-sdk".to_string(),
+            "persist-evidence".to_string(),
+            "--ai-session-id".to_string(),
+            ai_session_id.clone(),
+        ],
+        vec![
+            "claude-sdk".to_string(),
+            "persist-decision".to_string(),
+            "--ai-session-id".to_string(),
+            ai_session_id.clone(),
+        ],
+    ] {
+        let argv = args.iter().map(String::as_str).collect::<Vec<_>>();
+        let output = run_libra_command(&argv, repo.path());
+        assert_cli_success(&output, "formal bridge command should succeed");
+    }
+
+    let (storage, history) = load_intent_history(repo.path()).await;
+    let db_conn = libra::internal::db::establish_connection(
+        repo.path()
+            .join(".libra/libra.db")
+            .to_str()
+            .expect("db path should be valid UTF-8"),
+    )
+    .await
+    .expect("failed to connect test database");
+    let rebuilder = ProjectionRebuilder::new(storage.as_ref(), &history);
+    let rebuild = rebuilder
+        .materialize_latest_thread(&db_conn)
+        .await
+        .expect("materialize latest thread")
+        .expect("projection rebuild should produce a thread");
+
+    let intent_id = rebuild
+        .thread
+        .current_intent_id
+        .expect("projection should select current intent");
+    let stored_thread = ThreadProjection::find_by_intent_id(&db_conn, intent_id)
+        .await
+        .expect("load stored thread by intent")
+        .expect("thread row should exist");
+    assert_eq!(stored_thread.thread_id, rebuild.thread.thread_id);
+    assert_eq!(
+        stored_thread.current_intent_id,
+        rebuild.thread.current_intent_id
+    );
+
+    let scheduler_row =
+        ai_scheduler_state::Entity::find_by_id(rebuild.thread.thread_id.to_string())
+            .one(&db_conn)
+            .await
+            .expect("query scheduler row")
+            .expect("scheduler row should exist");
+    assert_eq!(
+        scheduler_row.active_task_id.as_deref(),
+        rebuild
+            .scheduler
+            .active_task_id
+            .as_ref()
+            .map(Uuid::to_string)
+            .as_deref()
+    );
+    assert_eq!(
+        scheduler_row.active_run_id.as_deref(),
+        rebuild
+            .scheduler
+            .active_run_id
+            .as_ref()
+            .map(Uuid::to_string)
+            .as_deref()
+    );
+
+    let scheduler_metadata: Value = serde_json::from_str(
+        scheduler_row
+            .metadata_json
+            .as_deref()
+            .expect("scheduler metadata should exist"),
+    )
+    .expect("scheduler metadata should be JSON");
+    assert_eq!(
+        scheduler_metadata["projection_source"],
+        json!("formal_history_rebuild_v1")
+    );
+
+    let task_run_rows = ai_index_task_run::Entity::find()
+        .all(&db_conn)
+        .await
+        .expect("query task-run rows");
+    assert_eq!(
+        task_run_rows.len(),
+        1,
+        "bridge-run should produce one task->run row"
+    );
+    assert!(
+        task_run_rows[0].is_latest,
+        "the single task->run row should be marked latest"
+    );
+
+    let run_event_rows = ai_index_run_event::Entity::find()
+        .all(&db_conn)
+        .await
+        .expect("query run-event rows");
+    assert_eq!(
+        run_event_rows.len(),
+        1,
+        "bridge-run should produce one run-event row"
+    );
+    assert!(
+        run_event_rows[0].is_latest,
+        "the single run-event row should be marked latest"
+    );
+
+    let run_patchset_rows = ai_index_run_patchset::Entity::find()
+        .all(&db_conn)
+        .await
+        .expect("query run-patchset rows");
+    assert_eq!(
+        run_patchset_rows.len(),
+        1,
+        "persist-patchset should produce one run->patchset row"
+    );
+    assert!(
+        run_patchset_rows[0].is_latest,
+        "the single run->patchset row should be marked latest"
+    );
+
+    let plan_head_rows = ai_scheduler_plan_head::Entity::find()
+        .all(&db_conn)
+        .await
+        .expect("query scheduler plan heads");
+    assert!(
+        plan_head_rows.is_empty(),
+        "current Claude bridge should not synthesize plan heads yet"
+    );
+
+    let live_context_rows = ai_live_context_window::Entity::find()
+        .all(&db_conn)
+        .await
+        .expect("query live context rows");
+    assert!(
+        !live_context_rows.is_empty(),
+        "current Claude bridge should materialize live context frames from formal context objects"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_full_family_no_plan_snapshot_event_framework() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn full_family_no_plan() {}\n").expect("write source file");
+
+    let artifact_path = repo.path().join("managed-run-artifact.json");
+    fs::write(
+        &artifact_path,
+        serde_json::to_vec_pretty(&semantic_full_artifact(repo.path(), &touched_file))
+            .expect("serialize test artifact"),
+    )
+    .expect("write test artifact");
+    let request_path = repo.path().join("helper-request.json");
+    let helper_path = repo.path().join("capture-managed-helper.sh");
+    write_request_capture_shell_helper(&helper_path, &artifact_path, &request_path);
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &run,
+        "claude-sdk run should succeed for no-plan snapshot framework",
+    );
+    let run_json = parse_stdout_json(&run, "claude-sdk run no-plan snapshot framework");
+    let ai_session_id = run_json["aiSessionId"]
+        .as_str()
+        .expect("aiSessionId should be present")
+        .to_string();
+    let provider_session_id = run_json["providerSessionId"]
+        .as_str()
+        .expect("providerSessionId should be present")
+        .to_string();
+    stage_provider_session_evidence_artifacts(repo.path(), &provider_session_id);
+
+    for args in [
+        vec![
+            "claude-sdk".to_string(),
+            "resolve-extraction".to_string(),
+            "--ai-session-id".to_string(),
+            ai_session_id.clone(),
+        ],
+        vec![
+            "claude-sdk".to_string(),
+            "persist-intent".to_string(),
+            "--ai-session-id".to_string(),
+            ai_session_id.clone(),
+        ],
+        vec![
+            "claude-sdk".to_string(),
+            "bridge-run".to_string(),
+            "--ai-session-id".to_string(),
+            ai_session_id.clone(),
+        ],
+        vec![
+            "claude-sdk".to_string(),
+            "build-managed-evidence-input".to_string(),
+            "--ai-session-id".to_string(),
+            ai_session_id.clone(),
+        ],
+        vec![
+            "claude-sdk".to_string(),
+            "persist-patchset".to_string(),
+            "--ai-session-id".to_string(),
+            ai_session_id.clone(),
+        ],
+        vec![
+            "claude-sdk".to_string(),
+            "persist-evidence".to_string(),
+            "--ai-session-id".to_string(),
+            ai_session_id.clone(),
+        ],
+        vec![
+            "claude-sdk".to_string(),
+            "persist-decision".to_string(),
+            "--ai-session-id".to_string(),
+            ai_session_id.clone(),
+        ],
+    ] {
+        let argv = args.iter().map(String::as_str).collect::<Vec<_>>();
+        let output = run_libra_command(&argv, repo.path());
+        assert_cli_success(&output, "full-family no-plan command should succeed");
+    }
+
+    let intent_snapshots = list_history_object_ids(repo.path(), "intent_snapshot").await;
+    let intent_events = list_history_object_ids(repo.path(), "intent_event").await;
+    let run_snapshots = list_history_object_ids(repo.path(), "run_snapshot").await;
+    let run_events = list_history_object_ids(repo.path(), "run_event").await;
+    let patchset_snapshots = list_history_object_ids(repo.path(), "patchset_snapshot").await;
+    let provenance_snapshots = list_history_object_ids(repo.path(), "provenance_snapshot").await;
+    let plan_snapshots = list_history_object_ids(repo.path(), "plan_snapshot").await;
+    let plan_step_snapshots = list_history_object_ids(repo.path(), "plan_step_snapshot").await;
+    let task_snapshots = list_history_object_ids(repo.path(), "task_snapshot").await;
+    let plan_step_events = list_history_object_ids(repo.path(), "plan_step_event").await;
+
+    assert_eq!(intent_snapshots.len(), 1);
+    assert!(
+        intent_events.len() >= 2,
+        "no-plan path should at least emit analyzed/created + completed intent events"
+    );
+    assert_eq!(run_snapshots.len(), 1);
+    assert!(
+        !run_events.is_empty(),
+        "no-plan path should emit run_event records"
+    );
+    assert_eq!(patchset_snapshots.len(), 1);
+    assert_eq!(provenance_snapshots.len(), 1);
+
+    assert!(
+        plan_snapshots.is_empty(),
+        "no-plan path should not fabricate plan snapshots"
+    );
+    assert!(
+        plan_step_snapshots.is_empty(),
+        "no-plan path should not fabricate plan-step snapshots"
+    );
+    assert!(
+        task_snapshots.is_empty(),
+        "no-plan path should not fabricate per-step task snapshots"
+    );
+    assert!(
+        plan_step_events.is_empty(),
+        "no-plan path should not fabricate plan-step events"
+    );
+
+    let intent_snapshot: Value =
+        read_tracked_object(repo.path(), "intent_snapshot", &intent_snapshots[0]).await;
+    let formal_intent: Intent =
+        read_tracked_object(repo.path(), "intent", &intent_snapshots[0]).await;
+    assert_eq!(intent_snapshot["thread_id"], json!(ai_session_id));
+    assert!(
+        intent_snapshot["content"]
+            .as_str()
+            .is_some_and(|text| text == formal_intent.prompt()),
+        "intent snapshot should mirror the persisted formal intent prompt"
+    );
+
+    let intent_event_values = futures::future::join_all(
+        intent_events
+            .iter()
+            .map(|id| read_tracked_object::<Value>(repo.path(), "intent_event", id)),
+    )
+    .await;
+    let intent_statuses = intent_event_values
+        .iter()
+        .filter_map(|value| value["status"].as_str().or_else(|| value["kind"].as_str()))
+        .collect::<BTreeSet<_>>();
+    assert!(
+        intent_statuses.contains("created") || intent_statuses.contains("analyzed"),
+        "no-plan path should emit an initial intent lifecycle event"
+    );
+    assert!(intent_statuses.contains("completed"));
+
+    let run_snapshot: Value =
+        read_tracked_object(repo.path(), "run_snapshot", &run_snapshots[0]).await;
+    assert_eq!(run_snapshot["thread_id"], json!(ai_session_id));
+    assert!(run_snapshot["task_id"].is_string());
+    assert!(run_snapshot["started_at"].is_string());
+
+    let run_event_values = futures::future::join_all(
+        run_events
+            .iter()
+            .map(|id| read_tracked_object::<Value>(repo.path(), "run_event", id)),
+    )
+    .await;
+    let run_statuses = run_event_values
+        .iter()
+        .filter_map(|value| value["status"].as_str().or_else(|| value["kind"].as_str()))
+        .collect::<BTreeSet<_>>();
+    assert!(
+        run_statuses.contains("created")
+            || run_statuses.contains("completed")
+            || run_statuses.contains("failed")
+            || run_statuses.contains("timed_out"),
+        "no-plan path should emit at least one meaningful run lifecycle status"
+    );
+
+    let patchset_snapshot: Value =
+        read_tracked_object(repo.path(), "patchset_snapshot", &patchset_snapshots[0]).await;
+    assert_eq!(patchset_snapshot["status"], json!("completed"));
+    assert!(patchset_snapshot["run_id"].is_string());
+
+    let provenance_snapshot: Value =
+        read_tracked_object(repo.path(), "provenance_snapshot", &provenance_snapshots[0]).await;
+    assert_eq!(provenance_snapshot["provider"], json!("claude"));
+    assert!(provenance_snapshot["run_id"].is_string());
+    assert!(provenance_snapshot["parameters"].is_object());
+
+    assert_ai_type_matches(repo.path(), &intent_snapshots[0], "intent_snapshot");
+    assert_ai_type_matches(repo.path(), &run_snapshots[0], "run_snapshot");
+    assert_ai_type_matches(repo.path(), &patchset_snapshots[0], "patchset_snapshot");
+    assert_ai_type_matches(repo.path(), &provenance_snapshots[0], "provenance_snapshot");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_full_family_plan_aware_snapshot_event_framework() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn full_family_plan_aware() {}\n").expect("write source file");
+
+    let artifact_path = repo.path().join("managed-run-artifact.json");
+    fs::write(
+        &artifact_path,
+        serde_json::to_vec_pretty(&plan_task_only_artifact(repo.path(), &touched_file))
+            .expect("serialize test artifact"),
+    )
+    .expect("write test artifact");
+    let request_path = repo.path().join("helper-request.json");
+    let helper_path = repo.path().join("capture-managed-helper.sh");
+    write_request_capture_shell_helper(&helper_path, &artifact_path, &request_path);
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--prompt",
+            PLAN_PROMPT,
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &run,
+        "claude-sdk run should succeed for plan-aware snapshot framework",
+    );
+    let run_json = parse_stdout_json(&run, "claude-sdk run plan-aware snapshot framework");
+    let ai_session_id = run_json["aiSessionId"]
+        .as_str()
+        .expect("aiSessionId should be present")
+        .to_string();
+    let mut bridged_plan_id: Option<String> = None;
+
+    for args in [
+        vec![
+            "claude-sdk".to_string(),
+            "resolve-extraction".to_string(),
+            "--ai-session-id".to_string(),
+            ai_session_id.clone(),
+        ],
+        vec![
+            "claude-sdk".to_string(),
+            "persist-intent".to_string(),
+            "--ai-session-id".to_string(),
+            ai_session_id.clone(),
+        ],
+        vec![
+            "claude-sdk".to_string(),
+            "bridge-run".to_string(),
+            "--ai-session-id".to_string(),
+            ai_session_id.clone(),
+        ],
+    ] {
+        let argv = args.iter().map(String::as_str).collect::<Vec<_>>();
+        let output = run_libra_command(&argv, repo.path());
+        assert_cli_success(&output, "plan-aware full-family command should succeed");
+        if args[1] == "bridge-run" {
+            let bridge_json = parse_stdout_json(&output, "plan-aware bridge-run output");
+            bridged_plan_id = Some(
+                bridge_json["planId"]
+                    .as_str()
+                    .expect("plan-aware bridge-run should emit planId")
+                    .to_string(),
+            );
+        }
+    }
+    let plan_id = bridged_plan_id.expect("plan-aware full-family path should capture a plan id");
+
+    let intent_snapshots = list_history_object_ids(repo.path(), "intent_snapshot").await;
+    let intent_events = list_history_object_ids(repo.path(), "intent_event").await;
+    let plan_snapshots = list_history_object_ids(repo.path(), "plan_snapshot").await;
+    let plan_step_snapshots = list_history_object_ids(repo.path(), "plan_step_snapshot").await;
+    let task_snapshots = list_history_object_ids(repo.path(), "task_snapshot").await;
+    let plan_step_events = list_history_object_ids(repo.path(), "plan_step_event").await;
+    let run_snapshots = list_history_object_ids(repo.path(), "run_snapshot").await;
+    let provenance_snapshots = list_history_object_ids(repo.path(), "provenance_snapshot").await;
+
+    assert_eq!(intent_snapshots.len(), 1);
+    assert_eq!(plan_snapshots.len(), 1);
+    assert_eq!(
+        plan_step_snapshots.len(),
+        real_plan_step_descriptions().len()
+    );
+    assert_eq!(task_snapshots.len(), real_plan_step_descriptions().len());
+    assert_eq!(plan_step_events.len(), real_plan_step_descriptions().len());
+    assert_eq!(run_snapshots.len(), 1);
+    assert_eq!(provenance_snapshots.len(), 1);
+
+    let intent_event_values = futures::future::join_all(
+        intent_events
+            .iter()
+            .map(|id| read_tracked_object::<Value>(repo.path(), "intent_event", id)),
+    )
+    .await;
+    let intent_statuses = intent_event_values
+        .iter()
+        .filter_map(|value| value["status"].as_str().or_else(|| value["kind"].as_str()))
+        .collect::<BTreeSet<_>>();
+    assert!(
+        intent_statuses.contains("created") || intent_statuses.contains("analyzed"),
+        "plan-aware path should still emit an initial intent lifecycle event"
+    );
+    assert!(
+        !intent_statuses.contains("completed"),
+        "without terminal decision, plan-aware path should not yet mark the intent completed"
+    );
+
+    let plan_snapshot: Value =
+        read_tracked_object(repo.path(), "plan_snapshot", &plan_snapshots[0]).await;
+    assert!(
+        plan_snapshot["step_text"]
+            .as_str()
+            .is_some_and(|text| text.contains(&real_plan_step_descriptions()[0])),
+        "plan snapshot should retain the numbered plan content"
+    );
+    assert_eq!(plan_snapshot["thread_id"], json!(ai_session_id));
+    assert!(plan_snapshot["intent_id"].is_string());
+
+    let plan_step_snapshot_values = futures::future::join_all(
+        plan_step_snapshots
+            .iter()
+            .map(|id| read_tracked_object::<Value>(repo.path(), "plan_step_snapshot", id)),
+    )
+    .await;
+    let mut plan_step_ordinals = plan_step_snapshot_values
+        .iter()
+        .map(|value| {
+            value["ordinal"]
+                .as_i64()
+                .expect("plan-step snapshot should contain ordinal")
+        })
+        .collect::<Vec<_>>();
+    plan_step_ordinals.sort_unstable();
+    assert_eq!(
+        plan_step_ordinals,
+        (0..real_plan_step_descriptions().len() as i64).collect::<Vec<_>>(),
+        "plan-step snapshots should preserve step ordering"
+    );
+
+    let task_snapshot_values = futures::future::join_all(
+        task_snapshots
+            .iter()
+            .map(|id| read_tracked_object::<Value>(repo.path(), "task_snapshot", id)),
+    )
+    .await;
+    let plan_step_snapshot_ids = plan_step_snapshots.iter().cloned().collect::<BTreeSet<_>>();
+    assert!(
+        task_snapshot_values.iter().all(|value| {
+            value["origin_step_id"]
+                .as_str()
+                .is_some_and(|id| plan_step_snapshot_ids.contains(id))
+                && value["thread_id"] == json!(ai_session_id)
+                && value["plan_id"] == json!(plan_id.clone())
+                && value["intent_id"].is_string()
+        }),
+        "each derived task snapshot should remain a projection linked to the formal plan"
+    );
+
+    let plan_step_event_values = futures::future::join_all(
+        plan_step_events
+            .iter()
+            .map(|id| read_tracked_object::<Value>(repo.path(), "plan_step_event", id)),
+    )
+    .await;
+    assert!(
+        plan_step_event_values.iter().all(|value| {
+            value["status"] == json!("pending")
+                && value["step_id"]
+                    .as_str()
+                    .is_some_and(|id| plan_step_snapshot_ids.contains(id))
+                && value["run_id"].is_string()
+        }),
+        "initial plan-step events should be emitted in pending state"
+    );
+
+    let run_snapshot: Value =
+        read_tracked_object(repo.path(), "run_snapshot", &run_snapshots[0]).await;
+    assert_eq!(run_snapshot["thread_id"], json!(ai_session_id));
+    assert_eq!(run_snapshot["plan_id"], json!(plan_id.clone()));
+    assert!(run_snapshot["task_id"].is_string());
+
+    let provenance_snapshot: Value =
+        read_tracked_object(repo.path(), "provenance_snapshot", &provenance_snapshots[0]).await;
+    assert_eq!(provenance_snapshot["provider"], json!("claude"));
+    assert!(provenance_snapshot["run_id"].is_string());
+    assert!(provenance_snapshot["parameters"].is_object());
+
+    assert_ai_type_matches(repo.path(), &intent_snapshots[0], "intent_snapshot");
+    assert_ai_type_matches(repo.path(), &plan_snapshots[0], "plan_snapshot");
+    assert_ai_type_matches(repo.path(), &plan_step_snapshots[0], "plan_step_snapshot");
+    assert_ai_type_matches(repo.path(), &task_snapshots[0], "task_snapshot");
+    assert_ai_type_matches(repo.path(), &plan_step_events[0], "plan_step_event");
+    assert_ai_type_matches(repo.path(), &run_snapshots[0], "run_snapshot");
+    assert_ai_type_matches(repo.path(), &provenance_snapshots[0], "provenance_snapshot");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_formal_bridge_materializes_plan_heads_when_plan_text_is_present() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let touched_file = repo.path().join("src").join("lib.rs");
+    fs::create_dir_all(touched_file.parent().expect("source file parent")).expect("mkdir src");
+    fs::write(&touched_file, "pub fn materialize_plan_heads() {}\n").expect("write source file");
+
+    let artifact_path = repo.path().join("managed-run-artifact.json");
+    fs::write(
+        &artifact_path,
+        serde_json::to_vec_pretty(&plan_task_only_artifact(repo.path(), &touched_file))
+            .expect("serialize test artifact"),
+    )
+    .expect("write test artifact");
+    let request_path = repo.path().join("helper-request.json");
+    let helper_path = repo.path().join("capture-managed-helper.sh");
+    write_request_capture_shell_helper(&helper_path, &artifact_path, &request_path);
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--prompt",
+            PLAN_PROMPT,
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &run,
+        "claude-sdk run should succeed for plan-head rebuild test",
+    );
+    let run_json = parse_stdout_json(&run, "claude-sdk run plan-head rebuild");
+    let ai_session_id = run_json["aiSessionId"]
+        .as_str()
+        .expect("aiSessionId should be present")
+        .to_string();
+
+    let mut bridged_plan_id = None;
+
+    for args in [
+        vec![
+            "claude-sdk".to_string(),
+            "resolve-extraction".to_string(),
+            "--ai-session-id".to_string(),
+            ai_session_id.clone(),
+        ],
+        vec![
+            "claude-sdk".to_string(),
+            "persist-intent".to_string(),
+            "--ai-session-id".to_string(),
+            ai_session_id.clone(),
+        ],
+        vec![
+            "claude-sdk".to_string(),
+            "bridge-run".to_string(),
+            "--ai-session-id".to_string(),
+            ai_session_id.clone(),
+        ],
+    ] {
+        let argv = args.iter().map(String::as_str).collect::<Vec<_>>();
+        let output = run_libra_command(&argv, repo.path());
+        assert_cli_success(&output, "plan-aware formal bridge command should succeed");
+        if args[1] == "bridge-run" {
+            let bridge_json = parse_stdout_json(&output, "plan-aware bridge-run output");
+            bridged_plan_id = Some(
+                bridge_json["planId"]
+                    .as_str()
+                    .expect("plan-aware bridge-run should emit planId")
+                    .to_string(),
+            );
+        }
+    }
+    let plan_id = bridged_plan_id.expect("plan-aware bridge-run should capture a plan id");
+
+    let (storage, history) = load_intent_history(repo.path()).await;
+    let db_conn = libra::internal::db::establish_connection(
+        repo.path()
+            .join(".libra/libra.db")
+            .to_str()
+            .expect("db path should be valid UTF-8"),
+    )
+    .await
+    .expect("failed to connect test database");
+
+    let formal_plan: Plan = read_tracked_object(repo.path(), "plan", &plan_id).await;
+    let formal_plan_steps = formal_plan
+        .steps()
+        .iter()
+        .map(|step| step.description().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        formal_plan_steps,
+        real_plan_step_descriptions(),
+        "formal plan should preserve the numbered Claude plan steps from the real-artifact-shaped fixture"
+    );
+
+    let rebuilder = ProjectionRebuilder::new(storage.as_ref(), &history);
+    let rebuild = rebuilder
+        .materialize_latest_thread(&db_conn)
+        .await
+        .expect("materialize latest thread")
+        .expect("projection rebuild should produce a thread");
+
+    assert!(
+        rebuild.scheduler.selected_plan_id.is_some(),
+        "plan-aware bridge should surface a selected plan"
+    );
+    assert_eq!(
+        rebuild.scheduler.current_plan_heads.len(),
+        1,
+        "plan-aware bridge should materialize one plan head"
+    );
+
+    let scheduler_row =
+        ai_scheduler_state::Entity::find_by_id(rebuild.thread.thread_id.to_string())
+            .one(&db_conn)
+            .await
+            .expect("query scheduler row")
+            .expect("scheduler row should exist");
+    assert_eq!(
+        scheduler_row.selected_plan_id.as_deref(),
+        rebuild
+            .scheduler
+            .selected_plan_id
+            .as_ref()
+            .map(Uuid::to_string)
+            .as_deref()
+    );
+
+    let plan_head_rows = ai_scheduler_plan_head::Entity::find()
+        .all(&db_conn)
+        .await
+        .expect("query scheduler plan heads");
+    assert_eq!(
+        plan_head_rows.len(),
+        1,
+        "plan-aware bridge should persist one scheduler plan head"
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_claude_sdk_bridge_run_without_intent_binding_creates_standalone_task() {
     let repo = tempdir().expect("failed to create repo root");
     test::setup_with_new_libra_in(repo.path()).await;
@@ -2739,8 +7101,6 @@ async fn test_claude_sdk_bridge_run_without_intent_binding_creates_standalone_ta
             DEFAULT_MANAGED_PROMPT,
             "--helper-path",
             helper_path.to_str().expect("helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );
@@ -2800,8 +7160,6 @@ async fn test_claude_sdk_bridge_run_rejects_missing_explicit_intent_binding() {
             DEFAULT_MANAGED_PROMPT,
             "--helper-path",
             helper_path.to_str().expect("helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );
@@ -2862,8 +7220,6 @@ async fn test_claude_sdk_bridge_run_rejects_mismatched_existing_intent_link() {
             DEFAULT_MANAGED_PROMPT,
             "--helper-path",
             helper_path.to_str().expect("helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );
@@ -2965,8 +7321,6 @@ async fn test_claude_sdk_bridge_run_rejects_invalid_binding_schema_on_reuse() {
             DEFAULT_MANAGED_PROMPT,
             "--helper-path",
             helper_path.to_str().expect("helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );
@@ -3053,8 +7407,6 @@ async fn test_claude_sdk_bridge_run_reuses_binding_when_stored_audit_bundle_path
             DEFAULT_MANAGED_PROMPT,
             "--helper-path",
             helper_path.to_str().expect("helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );
@@ -3154,8 +7506,6 @@ async fn test_claude_sdk_formal_bridge_rebuilds_stale_evidence_and_decision_bind
             DEFAULT_MANAGED_PROMPT,
             "--helper-path",
             helper_path.to_str().expect("helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );
@@ -3336,8 +7686,6 @@ async fn test_claude_sdk_persist_evidence_rebuilds_when_evidence_ids_are_stale()
             DEFAULT_MANAGED_PROMPT,
             "--helper-path",
             helper_path.to_str().expect("helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );
@@ -3457,8 +7805,6 @@ async fn test_claude_sdk_formal_bridge_requires_prior_bindings() {
             DEFAULT_MANAGED_PROMPT,
             "--helper-path",
             helper_path.to_str().expect("helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );
@@ -3541,8 +7887,6 @@ async fn test_claude_sdk_persist_decision_rejects_mismatched_evidence_binding() 
             DEFAULT_MANAGED_PROMPT,
             "--helper-path",
             helper_path.to_str().expect("helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );
@@ -3650,8 +7994,6 @@ async fn test_claude_sdk_persist_decision_rejects_missing_evidence_objects() {
             DEFAULT_MANAGED_PROMPT,
             "--helper-path",
             helper_path.to_str().expect("helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );
@@ -3753,8 +8095,6 @@ async fn test_claude_sdk_persist_evidence_redacts_repo_external_touch_hints() {
             DEFAULT_MANAGED_PROMPT,
             "--helper-path",
             helper_path.to_str().expect("helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );
@@ -3848,8 +8188,6 @@ async fn test_claude_sdk_persist_evidence_redacts_repo_external_relative_touch_h
             DEFAULT_MANAGED_PROMPT,
             "--helper-path",
             helper_path.to_str().expect("helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );
@@ -3943,8 +8281,6 @@ async fn test_claude_sdk_persist_evidence_redacts_windows_style_absolute_touch_h
             DEFAULT_MANAGED_PROMPT,
             "--helper-path",
             helper_path.to_str().expect("helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );
@@ -4041,8 +8377,6 @@ async fn test_claude_sdk_persist_evidence_preserves_relative_touch_hints_for_win
             DEFAULT_MANAGED_PROMPT,
             "--helper-path",
             helper_path.to_str().expect("helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );
@@ -4136,8 +8470,6 @@ async fn test_claude_sdk_persist_evidence_preserves_relative_touch_hints_for_win
             DEFAULT_MANAGED_PROMPT,
             "--helper-path",
             helper_path.to_str().expect("helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );
@@ -4236,8 +8568,6 @@ async fn test_claude_sdk_persist_evidence_preserves_mixed_case_windows_absolute_
             DEFAULT_MANAGED_PROMPT,
             "--helper-path",
             helper_path.to_str().expect("helper path utf-8"),
-            "--node-binary",
-            "/bin/sh",
         ],
         repo.path(),
     );

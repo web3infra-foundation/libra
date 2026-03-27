@@ -156,7 +156,7 @@ enum Commands {
     Clone(command::clone::CloneArgs),
     #[command(
         name = "claude-sdk",
-        about = "Run or import Claude Agent SDK managed sessions"
+        about = "Chat with, run, or import Claude Agent SDK managed sessions"
     )]
     ClaudeSdk(command::claude_sdk::ClaudeSdkArgs),
     #[command(about = "Start Libra Code interactive TUI (with background web server)")]
@@ -591,7 +591,7 @@ pub async fn parse_async(args: Option<&[&str]>) -> CliResult<()> {
             })?;
         }
         Commands::Clone(cmd_args) => command::clone::execute_safe(cmd_args, &output).await?,
-        Commands::ClaudeSdk(cmd_args) => command::claude_sdk::execute(cmd_args)
+        Commands::ClaudeSdk(cmd_args) => command::claude_sdk::execute_safe(cmd_args, &output)
             .await
             .map_err(|e| CliError::fatal(e.to_string()))?,
         Commands::Code(cmd_args) => command::code::execute(cmd_args).await?,

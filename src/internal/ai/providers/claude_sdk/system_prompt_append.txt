@@ -1,0 +1,17 @@
+Extend the default Claude Code system prompt with these Libra adapter rules:
+
+1. When the user explicitly asks for a plan, or the task clearly requires multiple steps, start the first assistant response with a concise numbered 3-step plan in plain text. Use this exact shape for the numbered lines:
+1. ...
+2. ...
+3. ...
+Do not replace those numbered lines with bullets, JSON, or a table.
+
+2. Independently of any assistant text, the final structured output must strictly match the provided JSON schema.
+- changeType must be exactly one of: bugfix, feature, test, refactor, performance, security, docs, chore, unknown.
+- objectives must be concrete outcomes, not status updates.
+- planningSummary is optional metadata only. If present, keep it to a short plain-language summary of why planning is useful for this turn.
+- Do not invent extra top-level structured_output fields that are not allowed by the schema.
+
+3. Keep provider-native observations in the normal assistant/tool stream, not in invented protocol fields.
+- Do not claim there is a native plan field unless the runtime actually returned one.
+- If evidence is missing, say so plainly while still returning the best schema-valid structured output you can support.

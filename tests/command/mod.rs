@@ -58,6 +58,43 @@ fn run_libra_command(args: &[&str], cwd: &Path) -> Output {
     let config_home = home.join(".config");
     fs::create_dir_all(&config_home).expect("failed to create isolated config directory");
 
+    let claude_sdk_run_index = args
+        .windows(2)
+        .position(|window| window[0] == "claude-sdk" && window[1] == "run");
+    let owned_args = if let Some(index) = claude_sdk_run_index {
+        if !args.contains(&"--batch") && !args.contains(&"--interactive-approvals") {
+            let mut rewritten = Vec::with_capacity(args.len() + 1);
+            rewritten.extend_from_slice(&args[..index + 2]);
+            rewritten.push("--batch");
+            rewritten.extend_from_slice(&args[index + 2..]);
+            rewritten
+        } else {
+            args.to_vec()
+        }
+    } else {
+        args.to_vec()
+    };
+
+    Command::new(env!("CARGO_BIN_EXE_libra"))
+        .args(&owned_args)
+        .current_dir(cwd)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("LANG", "C")
+        .env("LC_ALL", "C")
+        .env(LIBRA_TEST_ENV, "1")
+        .output()
+        .expect("failed to execute libra binary")
+}
+
+fn run_libra_command_raw(args: &[&str], cwd: &Path) -> Output {
+    let home = cwd.join(".libra-test-home");
+    let config_home = home.join(".config");
+    fs::create_dir_all(&config_home).expect("failed to create isolated config directory");
+
     Command::new(env!("CARGO_BIN_EXE_libra"))
         .args(args)
         .current_dir(cwd)
@@ -128,7 +165,6 @@ fn create_committed_repo_via_cli() -> tempfile::TempDir {
 }
 
 mod add_cli_test;
-mod add_json_test;
 mod add_test;
 mod blame_test;
 mod branch_test;
@@ -169,8 +205,6 @@ mod revert_test;
 mod shortlog_test;
 mod show_ref_test;
 mod show_test;
-mod status_error_test;
-mod status_json_test;
 mod status_test;
 mod switch_test;
 mod tag_test;

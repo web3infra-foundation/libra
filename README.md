@@ -129,28 +129,69 @@ Update your `claude_desktop_config.json` as follows:
 Libra can import Claude Agent SDK managed sessions and provider-side replay
 artifacts through the `claude-sdk` command group.
 
-Run a managed session through the bundled helper:
+`libra claude-sdk` uses the Python Claude Agent SDK path. Pick a Python
+interpreter that already has `claude-agent-sdk` installed, then pass it with
+`--python-binary`.
+
+Recommended setup with `uv`:
 
 ```bash
-libra claude-sdk run --prompt "Inspect src/lib.rs and summarize the bridge state"
+uv venv .venv --python 3.11
+uv pip install --python .venv/bin/python -U claude-agent-sdk
 ```
 
-Sync Claude provider session metadata into Libra snapshots:
+Authentication comes from environment variables:
+
+- Official Anthropic path: `ANTHROPIC_API_KEY`
+- Custom gateway path: `ANTHROPIC_BASE_URL`
+- For gateways that expect bearer auth for Claude Code / Python SDK traffic,
+  use `ANTHROPIC_AUTH_TOKEN`
+
+Example:
 
 ```bash
-libra claude-sdk sync-sessions
-libra claude-sdk hydrate-session --provider-session-id session-a
+export ANTHROPIC_BASE_URL=https://right.codes/o2a
+export ANTHROPIC_AUTH_TOKEN=<token>
+unset ANTHROPIC_API_KEY
+```
+
+Run a single managed turn:
+
+```bash
+libra claude-sdk run \
+  --python-binary /path/to/python \
+  --prompt "Inspect src/lib.rs and summarize the bridge state"
+```
+
+Start a multi-turn REPL:
+
+```bash
+libra claude-sdk chat \
+  --python-binary /path/to/python \
+  --permission-mode acceptEdits
+```
+
+Sync provider-session metadata and hydrate replay artifacts:
+
+```bash
+libra claude-sdk sync-sessions --python-binary /path/to/python
+libra claude-sdk hydrate-session --python-binary /path/to/python --provider-session-id session-a
 libra claude-sdk build-evidence-input --provider-session-id session-a
 ```
 
-The `--cwd` flag controls which project directory Claude SDK queries, but all
-artifacts and history are persisted into the current Libra repository.
+The `--cwd` flag controls which project directory Claude SDK reads and writes,
+but all managed artifacts and AI history are persisted into the current Libra
+repository.
 
-Persisted provider session and evidence artifacts are inspectable with:
+Useful inspection commands:
 
 ```bash
 libra cat-file --ai-list ai_session
-libra cat-file --ai <ai_session_id>
+libra cat-file --ai-list run
+libra cat-file --ai-list task
+libra cat-file --ai-list tool_invocation_event
+libra cat-file --ai-list patchset_snapshot
+libra --json=pretty cat-file --ai ai_session:<ai_session_id>
 ```
 
 ### AI Provider Selection
