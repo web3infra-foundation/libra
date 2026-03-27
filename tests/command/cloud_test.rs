@@ -2,13 +2,10 @@
 //!
 //! **Layer:** L1 — deterministic, no external dependencies.
 
-use serial_test::serial;
-
 use super::*;
 
 /// Running `cloud sync` outside a repository should return exit code 128.
 #[test]
-#[serial]
 fn test_cloud_cli_outside_repository_returns_fatal_128() {
     let temp = tempdir().unwrap();
 

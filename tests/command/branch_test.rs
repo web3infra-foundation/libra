@@ -13,7 +13,6 @@ use tempfile::tempdir;
 use super::*;
 
 #[test]
-#[serial]
 fn test_branch_cli_invalid_start_point_returns_cli_exit_code() {
     let repo = create_committed_repo_via_cli();
 

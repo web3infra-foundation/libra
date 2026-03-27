@@ -87,7 +87,7 @@ mod tests {
     use crate::{
         command::{
             add::{self, AddArgs},
-            status::{changes_to_be_committed, changes_to_be_staged},
+            status::{changes_to_be_committed_safe, changes_to_be_staged},
         },
         utils::test,
     };
@@ -198,7 +198,7 @@ mod tests {
             filter_workdir_paths(workdir_files.into_iter(), IgnorePolicy::OnlyIgnored, &index);
         assert_eq!(filtered, vec![PathBuf::from("ignored.txt")]);
 
-        let staged = changes_to_be_committed().await;
+        let staged = changes_to_be_committed_safe().await.unwrap();
         assert!(staged.new.iter().any(|p| p == Path::new("tracked.txt")));
 
         let unstaged = changes_to_be_staged().unwrap();

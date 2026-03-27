@@ -15,7 +15,6 @@ use tempfile::tempdir;
 use super::*;
 
 #[test]
-#[serial]
 fn test_rebase_cli_outside_repository_returns_fatal_128() {
     let temp = tempdir().unwrap();
     let output = run_libra_command(&["rebase", "main"], temp.path());
@@ -28,7 +27,6 @@ fn test_rebase_cli_outside_repository_returns_fatal_128() {
 }
 
 #[test]
-#[serial]
 fn test_rebase_cli_missing_upstream_returns_usage_129() {
     let repo = create_committed_repo_via_cli();
     let output = run_libra_command(&["rebase"], repo.path());
@@ -39,7 +37,6 @@ fn test_rebase_cli_missing_upstream_returns_usage_129() {
 }
 
 #[test]
-#[serial]
 fn test_rebase_cli_invalid_upstream_returns_fatal_128() {
     let repo = create_committed_repo_via_cli();
     let output = run_libra_command(&["rebase", "nonexistent-upstream"], repo.path());

@@ -85,7 +85,8 @@ fn version_output_is_not_treated_as_an_error() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(stdout, "libra 0.1.6\n");
+    let expected = format!("libra {}\n", env!("CARGO_PKG_VERSION"));
+    assert_eq!(stdout, expected);
     assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
 }
 

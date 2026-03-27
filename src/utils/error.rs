@@ -124,6 +124,8 @@ pub enum StableErrorCode {
     InternalInvariant,
     /// Command succeeded but emitted warnings (`--exit-code-on-warning`).
     WarningEmitted,
+    /// All pathspecs matched ignored files; nothing was staged.
+    AddNothingStaged,
 }
 
 impl Serialize for StableErrorCode {
@@ -154,6 +156,7 @@ impl StableErrorCode {
             Self::IoWriteFailed => "LBR-IO-002",
             Self::InternalInvariant => "LBR-INTERNAL-001",
             Self::WarningEmitted => "LBR-WARN-001",
+            Self::AddNothingStaged => "LBR-ADD-001",
         }
     }
 
@@ -171,14 +174,22 @@ impl StableErrorCode {
             Self::IoReadFailed | Self::IoWriteFailed => CliErrorCategory::Io,
             Self::InternalInvariant => CliErrorCategory::Internal,
             Self::WarningEmitted => CliErrorCategory::Warning,
+            Self::AddNothingStaged => CliErrorCategory::Cli,
         }
     }
 
     pub const fn exit_code(self) -> CliExitCode {
-        match self.category() {
-            CliErrorCategory::Cli => CliExitCode::Usage,
-            CliErrorCategory::Warning => CliExitCode::Warning,
-            _ => CliExitCode::Fatal,
+        match self {
+            // AddNothingStaged falls in the Cli category (which normally
+            // maps to Usage/129), but "nothing to add" is a runtime
+            // condition, not a CLI usage error — exit 128 matches Git's
+            // behavior for `git add` with only ignored paths.
+            Self::AddNothingStaged => CliExitCode::Fatal,
+            _ => match self.category() {
+                CliErrorCategory::Cli => CliExitCode::Usage,
+                CliErrorCategory::Warning => CliExitCode::Warning,
+                _ => CliExitCode::Fatal,
+            },
         }
     }
 
@@ -232,6 +243,7 @@ impl StableErrorCode {
             Self::WarningEmitted => {
                 "Command completed successfully but emitted warnings (--exit-code-on-warning)."
             }
+            Self::AddNothingStaged => "All specified paths are ignored; nothing was staged.",
         }
     }
 }
@@ -274,6 +286,9 @@ pub struct CliError {
     /// Optional override for the process exit code. When set, this takes
     /// precedence over the code derived from [`StableErrorCode`].
     exit_code_override: Option<i32>,
+    /// When true, `print_for_output` / `print_stderr` emit nothing.
+    /// Used for exit-code-only signalling (e.g. `status --exit-code`).
+    silent: bool,
 }
 
 impl CliError {
@@ -288,6 +303,23 @@ impl CliError {
             usage: None,
             details: BTreeMap::new(),
             exit_code_override: None,
+            silent: false,
+        }
+    }
+
+    /// Create a silent exit error that only sets the process exit code
+    /// without printing anything to stderr. Used for `--exit-code` style
+    /// flags where a non-zero exit is a signal, not an error.
+    pub fn silent_exit(code: i32) -> Self {
+        Self {
+            kind: CliErrorKind::Failure,
+            stable_code: StableErrorCode::InternalInvariant,
+            message: String::new(),
+            hints: Vec::new(),
+            usage: None,
+            details: BTreeMap::new(),
+            exit_code_override: Some(code),
+            silent: true,
         }
     }
 
@@ -500,6 +532,9 @@ impl CliError {
     }
 
     pub fn print_stderr(&self) {
+        if self.silent {
+            return;
+        }
         eprintln!("{}", self.render_for_stderr());
     }
 
@@ -508,6 +543,9 @@ impl CliError {
     /// When JSON output is active, the error is rendered as a JSON envelope to
     /// **stderr** so stdout remains reserved for successful command data.
     pub fn print_for_output(&self, config: &crate::utils::output::OutputConfig) {
+        if self.silent {
+            return;
+        }
         use crate::utils::output::JsonFormat;
 
         if let Some(fmt) = config.json_format {

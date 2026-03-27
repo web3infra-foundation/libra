@@ -8,7 +8,7 @@ use git_internal::{errors::GitError, internal::index::Index};
 use tokio::fs;
 
 use crate::{
-    command::status::{changes_to_be_committed, changes_to_be_staged},
+    command::status::{changes_to_be_committed_safe, changes_to_be_staged},
     utils::{
         error::{CliError, CliResult},
         output::OutputConfig,
@@ -197,10 +197,15 @@ pub async fn execute_safe(args: RemoveArgs, _output: &OutputConfig) -> CliResult
         let changes_staged = match changes_to_be_staged() {
             Ok(c) => c.polymerization(),
             Err(err) => {
-                return Err(CliError::fatal(err.to_string()));
+                return Err(CliError::from(err));
             }
         };
-        let changes_committed = changes_to_be_committed().await.polymerization();
+        let changes_committed = match changes_to_be_committed_safe().await {
+            Ok(c) => c.polymerization(),
+            Err(err) => {
+                return Err(CliError::from(err));
+            }
+        };
         // Check for both
         let mut buf = Vec::new();
         for path_str in remove_list.iter() {

@@ -10,7 +10,6 @@ use libra::command::diff::{self, DiffArgs};
 use super::*;
 
 #[test]
-#[serial]
 fn test_diff_cli_outside_repository_returns_fatal_128() {
     let temp = tempdir().unwrap();
     let output = run_libra_command(&["diff"], temp.path());

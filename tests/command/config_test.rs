@@ -574,6 +574,8 @@ async fn test_config_set_read_failure_does_not_silently_skip_existing_state_chec
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
     let _guard = test::ChangeDirGuard::new(temp_path.path());
+    // Prevent any interactive prompts from blocking the test.
+    let _test_env = EnvVarGuard::set("LIBRA_TEST", std::ffi::OsStr::new("1"));
 
     let bad_global_dir = tempdir().unwrap();
     let bad_global_db = bad_global_dir.path().join("bad-global.db");
@@ -618,6 +620,8 @@ async fn test_config_set_missing_value_uses_protected_input_when_existing_key_is
     let temp_path = tempdir().unwrap();
     test::setup_with_new_libra_in(temp_path.path()).await;
     let _guard = test::ChangeDirGuard::new(temp_path.path());
+    // Prevent rpassword::read_password() from blocking on stdin.
+    let _test_env = EnvVarGuard::set("LIBRA_TEST", std::ffi::OsStr::new("1"));
 
     let result = exec_async(vec![
         "config",

@@ -1564,7 +1564,13 @@ async fn rebase_worktree_guard(
         return false;
     }
 
-    let staged = status::changes_to_be_committed().await;
+    let staged = match status::changes_to_be_committed_safe().await {
+        Ok(c) => c,
+        Err(err) => {
+            eprintln!("fatal: failed to determine working tree status: {err}");
+            return false;
+        }
+    };
     if !staged.new.is_empty() || !staged.modified.is_empty() || !staged.deleted.is_empty() {
         status::execute(status::StatusArgs::default()).await;
         eprintln!("fatal: uncommitted changes, can't {action}");

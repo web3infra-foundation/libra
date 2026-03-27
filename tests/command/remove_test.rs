@@ -22,7 +22,6 @@ fn create_file(path: &str, content: &str) -> PathBuf {
 }
 
 #[test]
-#[serial]
 fn test_remove_cli_missing_pathspec_returns_cli_exit_code() {
     let repo = create_committed_repo_via_cli();
 

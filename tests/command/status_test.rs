@@ -671,6 +671,76 @@ async fn test_status_porcelain_v2_basic() {
 
 #[tokio::test]
 #[serial]
+/// Tests porcelain v2 branch metadata uses the real HEAD oid and upstream counts.
+async fn test_status_porcelain_v2_branch_metadata_includes_upstream_counts() {
+    let test_dir = tempdir().unwrap();
+    test::setup_with_new_libra_in(test_dir.path()).await;
+    let _guard = test::ChangeDirGuard::new(test_dir.path());
+
+    fs::write("tracked.txt", "tracked\n").unwrap();
+    add::execute_safe(
+        AddArgs {
+            pathspec: vec![String::from("tracked.txt")],
+            all: false,
+            update: false,
+            verbose: false,
+            dry_run: false,
+            ignore_errors: false,
+            refresh: false,
+            force: false,
+        },
+        &libra::utils::output::OutputConfig::default(),
+    )
+    .await
+    .expect("add tracked.txt should succeed");
+    execute_safe(
+        create_commit_args("initial"),
+        &libra::utils::output::OutputConfig::default(),
+    )
+    .await
+    .expect("initial commit should succeed");
+
+    let output = run_libra_command(&["config", "branch.main.remote", "origin"], test_dir.path());
+    assert_cli_success(&output, "configure branch.main.remote");
+    let output = run_libra_command(
+        &["config", "branch.main.merge", "refs/heads/main"],
+        test_dir.path(),
+    );
+    assert_cli_success(&output, "configure branch.main.merge");
+
+    let head = Head::current_commit().await.expect("head commit");
+    Branch::update_branch("main", &head.to_string(), Some("origin"))
+        .await
+        .expect("remote-tracking branch should be created");
+
+    let mut output = Vec::new();
+    status_execute(
+        StatusArgs {
+            porcelain: Some(PorcelainVersion::V2),
+            branch: true,
+            ..Default::default()
+        },
+        &mut output,
+    )
+    .await;
+
+    let output_str = String::from_utf8(output).unwrap();
+    assert!(
+        output_str.contains(&format!("# branch.oid {head}")),
+        "porcelain v2 should emit the actual HEAD oid: {output_str}"
+    );
+    assert!(
+        output_str.contains("# branch.upstream origin/main"),
+        "porcelain v2 should emit upstream metadata: {output_str}"
+    );
+    assert!(
+        output_str.contains("# branch.ab +0 -0"),
+        "porcelain v2 should emit ahead/behind counts: {output_str}"
+    );
+}
+
+#[tokio::test]
+#[serial]
 /// Tests porcelain v2 with --untracked-files=no hides untracked and ignored entries.
 async fn test_status_porcelain_v2_untracked_files_no() {
     let test_dir = tempdir().unwrap();
@@ -1226,6 +1296,7 @@ async fn test_status_short_format_with_branch() {
             show_stash: false,
             ignored: false,
             untracked_files: UntrackedFiles::Normal,
+            exit_code: false,
         },
         &mut output,
     )
@@ -1287,6 +1358,7 @@ async fn test_status_porcelain_format_with_branch() {
             show_stash: false,
             ignored: false,
             untracked_files: UntrackedFiles::Normal,
+            exit_code: false,
         },
         &mut output,
     )
@@ -1365,6 +1437,7 @@ async fn test_status_show_stash_with_existing_stash() {
             show_stash: true,
             ignored: false,
             untracked_files: UntrackedFiles::Normal,
+            exit_code: false,
         },
         &mut output,
     )
@@ -1391,6 +1464,7 @@ async fn test_status_show_stash_with_existing_stash() {
             show_stash: true,
             ignored: false,
             untracked_files: UntrackedFiles::Normal,
+            exit_code: false,
         },
         &mut output,
     )
@@ -1417,6 +1491,7 @@ async fn test_status_show_stash_with_existing_stash() {
             show_stash: true,
             ignored: false,
             untracked_files: UntrackedFiles::Normal,
+            exit_code: false,
         },
         &mut output,
     )
@@ -1470,6 +1545,7 @@ async fn test_status_show_stash_without_stash() {
             show_stash: true,
             ignored: false,
             untracked_files: UntrackedFiles::Normal,
+            exit_code: false,
         },
         &mut output,
     )
@@ -1552,6 +1628,7 @@ async fn test_status_branch_detached_head() {
             show_stash: false,
             ignored: false,
             untracked_files: UntrackedFiles::Normal,
+            exit_code: false,
         },
         &mut output,
     )
@@ -1938,5 +2015,121 @@ async fn test_status_after_add() {
     assert!(
         changes.new.iter().any(|x| x.to_str().unwrap() == file_path),
         "Added file should appear in changes_to_be_committed"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Success summary output for add
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn test_add_success_summary_output() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let output = run_libra_command(&["init"], &repo);
+    assert!(output.status.success());
+
+    std::fs::write(repo.join("new.txt"), "hello").unwrap();
+
+    let output = run_libra_command(&["add", "new.txt"], &repo);
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("add") && stdout.contains("new.txt"),
+        "add should print success summary, got: {stdout}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_add_quiet_suppresses_output() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let output = run_libra_command(&["init"], &repo);
+    assert!(output.status.success());
+
+    std::fs::write(repo.join("new.txt"), "hello").unwrap();
+
+    let output = run_libra_command(&["--quiet", "add", "new.txt"], &repo);
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.trim().is_empty(),
+        "quiet mode should suppress stdout, got: {stdout}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_add_verbose_shows_per_file_listing() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let output = run_libra_command(&["init"], &repo);
+    assert!(output.status.success());
+
+    std::fs::write(repo.join("a.txt"), "a").unwrap();
+    std::fs::write(repo.join("b.txt"), "b").unwrap();
+
+    let output = run_libra_command(&["add", "--verbose", "a.txt", "b.txt"], &repo);
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("add(new)"),
+        "verbose mode should show per-file details, got: {stdout}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_add_nothing_specified_exit_129() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let output = run_libra_command(&["init"], &repo);
+    assert!(output.status.success());
+
+    let output = run_libra_command(&["add"], &repo);
+    assert_eq!(output.status.code(), Some(129));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("nothing specified"),
+        "should show nothing specified hint: {stderr}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_add_dry_run_output() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let output = run_libra_command(&["init"], &repo);
+    assert!(output.status.success());
+
+    std::fs::write(repo.join("file.txt"), "content").unwrap();
+
+    let output = run_libra_command(&["add", "--dry-run", "file.txt"], &repo);
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("dry run"),
+        "dry run should indicate no files staged, got: {stdout}"
+    );
+
+    // Verify file was NOT actually staged
+    let status = run_libra_command(&["status", "--short"], &repo);
+    let status_stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        !status_stdout.contains("A  file.txt"),
+        "dry run should not stage: {status_stdout}"
     );
 }

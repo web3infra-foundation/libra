@@ -11,7 +11,6 @@ use std::{
 use libra::internal::{config::ConfigKv, db::get_db_conn_instance_for_path, model::config};
 use pgp::composed::{Deserializable, SignedPublicKey};
 use sea_orm::EntityTrait;
-use serial_test::serial;
 use tempfile::tempdir;
 
 use super::{assert_cli_success, run_libra_command};
@@ -78,7 +77,6 @@ fn run_libra_command_with_env(args: &[&str], cwd: &Path, envs: &[(&str, &str)]) 
 }
 
 #[tokio::test]
-#[serial]
 async fn init_vault_false_writes_seed_keys_and_human_summary() {
     let temp = tempdir().unwrap();
     let repo = temp.path().join("repo");
@@ -152,7 +150,6 @@ async fn init_vault_false_writes_seed_keys_and_human_summary() {
 }
 
 #[tokio::test]
-#[serial]
 async fn init_vault_true_records_signing_state_and_uses_global_identity_fallback() {
     let temp = tempdir().unwrap();
     let repo = temp.path().join("repo");
@@ -188,7 +185,6 @@ async fn init_vault_true_records_signing_state_and_uses_global_identity_fallback
 }
 
 #[tokio::test]
-#[serial]
 async fn init_vault_true_uses_env_identity_fallback_when_config_is_missing() {
     let temp = tempdir().unwrap();
     let repo = temp.path().join("repo");
@@ -218,7 +214,6 @@ async fn init_vault_true_uses_env_identity_fallback_when_config_is_missing() {
 }
 
 #[tokio::test]
-#[serial]
 async fn init_target_repo_does_not_inherit_local_identity_from_current_repo() {
     let temp = tempdir().unwrap();
     let repo_a = temp.path().join("repo-a");
@@ -263,7 +258,6 @@ async fn init_target_repo_does_not_inherit_local_identity_from_current_repo() {
 }
 
 #[test]
-#[serial]
 fn init_bare_reinit_returns_repo_state_invalid() {
     let temp = tempdir().unwrap();
 
@@ -289,7 +283,6 @@ fn init_bare_reinit_returns_repo_state_invalid() {
 }
 
 #[test]
-#[serial]
 fn init_worktree_reinit_returns_repo_state_invalid() {
     let temp = tempdir().unwrap();
     let repo = temp.path().join("repo");
@@ -317,7 +310,6 @@ fn init_worktree_reinit_returns_repo_state_invalid() {
 }
 
 #[test]
-#[serial]
 fn init_invalid_object_format_suggests_sha256() {
     let temp = tempdir().unwrap();
     let repo = temp.path().join("repo");
@@ -342,7 +334,6 @@ fn init_invalid_object_format_suggests_sha256() {
 }
 
 #[test]
-#[serial]
 fn init_vault_true_ignores_commit_use_config_only_strictness() {
     let temp = tempdir().unwrap();
     let repo = temp.path().join("repo");

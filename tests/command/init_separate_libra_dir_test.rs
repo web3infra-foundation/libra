@@ -4,13 +4,11 @@
 
 use std::fs;
 
-use serial_test::serial;
 use tempfile::tempdir;
 
 use super::{assert_cli_success, init_repo_via_cli, run_libra_command};
 
 #[test]
-#[serial]
 fn init_rejects_separate_libra_dir_flag() {
     let temp_root = tempdir().unwrap();
     let repo = temp_root.path().join("repo");
@@ -35,7 +33,6 @@ fn init_rejects_separate_libra_dir_flag() {
 }
 
 #[test]
-#[serial]
 fn init_rejects_separate_git_dir_alias() {
     let temp_root = tempdir().unwrap();
     let repo = temp_root.path().join("repo");
@@ -60,7 +57,6 @@ fn init_rejects_separate_git_dir_alias() {
 }
 
 #[test]
-#[serial]
 fn legacy_separate_layout_repo_is_no_longer_detected() {
     let temp_root = tempdir().unwrap();
     let storage_holder = temp_root.path().join("storage-holder");

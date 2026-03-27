@@ -5,8 +5,6 @@
 
 use std::process::Command;
 
-use serial_test::serial;
-
 use super::parse_cli_error_stderr;
 
 /// Initialize a temporary repository using CLI.
@@ -76,7 +74,6 @@ fn create_commit(temp_path: &std::path::Path, filename: &str, content: &str, mes
 
 /// Test `cat-file -t` prints the object type for a commit.
 #[tokio::test]
-#[serial]
 async fn test_cat_file_type_commit() {
     let temp_dir = init_temp_repo();
     let temp_path = temp_dir.path();
@@ -106,7 +103,6 @@ async fn test_cat_file_type_commit() {
 
 /// Test `cat-file -s` prints the object size for a commit.
 #[tokio::test]
-#[serial]
 async fn test_cat_file_size_commit() {
     let temp_dir = init_temp_repo();
     let temp_path = temp_dir.path();
@@ -132,7 +128,6 @@ async fn test_cat_file_size_commit() {
 
 /// Test `cat-file -p` pretty-prints a commit object.
 #[tokio::test]
-#[serial]
 async fn test_cat_file_pretty_commit() {
     let temp_dir = init_temp_repo();
     let temp_path = temp_dir.path();
@@ -177,7 +172,6 @@ async fn test_cat_file_pretty_commit() {
 
 /// Test `cat-file -p` pretty-prints a tree object given a commit's tree hash.
 #[tokio::test]
-#[serial]
 async fn test_cat_file_pretty_tree() {
     let temp_dir = init_temp_repo();
     let temp_path = temp_dir.path();
@@ -238,7 +232,6 @@ async fn test_cat_file_pretty_tree() {
 
 /// Test `cat-file -p` pretty-prints a blob object.
 #[tokio::test]
-#[serial]
 async fn test_cat_file_pretty_blob() {
     let temp_dir = init_temp_repo();
     let temp_path = temp_dir.path();
@@ -316,7 +309,6 @@ async fn test_cat_file_pretty_blob() {
 
 /// Test `cat-file` panic handling for corrupted/invalid objects.
 #[tokio::test]
-#[serial]
 async fn test_cat_file_panic_handling() {
     let temp_dir = init_temp_repo();
     let temp_path = temp_dir.path();
@@ -338,7 +330,6 @@ async fn test_cat_file_panic_handling() {
 
 /// Test `cat-file -e` preserves Git-compatible silent status-only semantics.
 #[tokio::test]
-#[serial]
 async fn test_cat_file_exist_check() {
     let temp_dir = init_temp_repo();
     let temp_path = temp_dir.path();
@@ -378,7 +369,6 @@ async fn test_cat_file_exist_check() {
 
 /// Test that mutually exclusive flags are enforced.
 #[tokio::test]
-#[serial]
 async fn test_cat_file_mutual_exclusion() {
     let temp_dir = init_temp_repo();
     let temp_path = temp_dir.path();
@@ -397,7 +387,6 @@ async fn test_cat_file_mutual_exclusion() {
 
 /// Test `cat-file -p` with multiple files in a tree.
 #[tokio::test]
-#[serial]
 async fn test_cat_file_tree_multiple_files() {
     let temp_dir = init_temp_repo();
     let temp_path = temp_dir.path();
@@ -452,7 +441,6 @@ async fn test_cat_file_tree_multiple_files() {
 
 /// Test `cat-file` with a non-existent reference.
 #[tokio::test]
-#[serial]
 async fn test_cat_file_nonexistent_ref() {
     let temp_dir = init_temp_repo();
     let temp_path = temp_dir.path();
@@ -478,7 +466,6 @@ async fn test_cat_file_nonexistent_ref() {
 
 /// Test `cat-file --ai-list-types` on a fresh repo (no AI objects yet).
 #[tokio::test]
-#[serial]
 async fn test_cat_file_ai_list_types_empty() {
     let temp_dir = init_temp_repo();
     let temp_path = temp_dir.path();
@@ -505,7 +492,6 @@ async fn test_cat_file_ai_list_types_empty() {
 
 /// Test `cat-file --ai-list <type>` on a fresh repo.
 #[tokio::test]
-#[serial]
 async fn test_cat_file_ai_list_empty_type() {
     let temp_dir = init_temp_repo();
     let temp_path = temp_dir.path();
@@ -531,7 +517,6 @@ async fn test_cat_file_ai_list_empty_type() {
 
 /// Test `cat-file --ai-list <invalid_type>` fails.
 #[tokio::test]
-#[serial]
 async fn test_cat_file_ai_list_invalid_type() {
     let temp_dir = init_temp_repo();
     let temp_path = temp_dir.path();
@@ -556,7 +541,6 @@ async fn test_cat_file_ai_list_invalid_type() {
 
 /// Test `cat-file --ai <uuid>` with a non-existent UUID.
 #[tokio::test]
-#[serial]
 async fn test_cat_file_ai_nonexistent_uuid() {
     let temp_dir = init_temp_repo();
     let temp_path = temp_dir.path();
@@ -581,7 +565,6 @@ async fn test_cat_file_ai_nonexistent_uuid() {
 
 /// Test `cat-file --ai-type <uuid>` with a non-existent UUID.
 #[tokio::test]
-#[serial]
 async fn test_cat_file_ai_type_nonexistent() {
     let temp_dir = init_temp_repo();
     let temp_path = temp_dir.path();
@@ -604,7 +587,6 @@ async fn test_cat_file_ai_type_nonexistent() {
 
 /// Test that AI flags and Git flags are mutually exclusive.
 #[tokio::test]
-#[serial]
 async fn test_cat_file_ai_git_mutual_exclusion() {
     let temp_dir = init_temp_repo();
     let temp_path = temp_dir.path();
@@ -623,7 +605,6 @@ async fn test_cat_file_ai_git_mutual_exclusion() {
 
 /// Running `cat-file` outside a repository should return exit code 128.
 #[test]
-#[serial]
 fn test_cat_file_cli_outside_repository_returns_fatal_128() {
     let temp = tempfile::tempdir().unwrap();
 

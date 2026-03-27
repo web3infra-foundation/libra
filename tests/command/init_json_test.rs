@@ -4,13 +4,11 @@
 
 use std::{fs, path::Path};
 
-use serial_test::serial;
 use tempfile::tempdir;
 
 use super::{assert_cli_success, run_libra_command};
 
 #[test]
-#[serial]
 fn json_init_returns_structured_schema() {
     let temp = tempdir().unwrap();
     let repo = temp.path().join("repo");
@@ -57,7 +55,6 @@ fn json_init_returns_structured_schema() {
 }
 
 #[test]
-#[serial]
 fn machine_init_is_single_line_json() {
     let temp = tempdir().unwrap();
     let repo = temp.path().join("repo");
@@ -92,7 +89,6 @@ fn machine_init_is_single_line_json() {
 }
 
 #[test]
-#[serial]
 fn bare_json_init_reports_repo_root_path() {
     let temp = tempdir().unwrap();
 

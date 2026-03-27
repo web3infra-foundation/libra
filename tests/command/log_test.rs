@@ -15,7 +15,6 @@ use libra::utils::{object_ext::TreeExt, pager::LIBRA_PAGER_ENV, util};
 use super::*;
 
 #[test]
-#[serial]
 fn test_log_cli_outside_repository_returns_fatal_128() {
     let temp = tempdir().unwrap();
 
@@ -29,7 +28,6 @@ fn test_log_cli_outside_repository_returns_fatal_128() {
 }
 
 #[test]
-#[serial]
 fn test_log_cli_empty_repository_returns_fatal_128() {
     let repo = tempdir().unwrap();
     init_repo_via_cli(repo.path());

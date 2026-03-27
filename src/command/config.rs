@@ -846,8 +846,11 @@ async fn handle_set(
             !plaintext && (encrypt || is_sensitive_key(key) || has_encrypted);
 
         if needs_protected_input {
-            // Check if interactive mode is available
-            if output.is_json() || !std::io::stdin().is_terminal() {
+            // Check if interactive mode is available.
+            // Also treat the test harness (`LIBRA_TEST=1`) as non-interactive
+            // so that `rpassword::read_password()` never blocks a test run.
+            let in_test = std::env::var_os(crate::utils::pager::LIBRA_TEST_ENV).is_some();
+            if output.is_json() || in_test || !std::io::stdin().is_terminal() {
                 return Err(CliError::from_legacy_string(format!(
                     "error: missing value for protected key '{key}' (non-interactive environment)"
                 ))

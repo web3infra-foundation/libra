@@ -96,7 +96,6 @@ fn configure_local_identity(repo: &Path) {
 }
 
 #[test]
-#[serial]
 fn test_push_cli_without_remote_returns_fatal_128() {
     let repo = create_committed_repo_via_cli();
 
@@ -345,7 +344,6 @@ async fn test_push_invalid_remote() {
 
 #[cfg(unix)]
 #[tokio::test]
-#[serial]
 async fn test_push_force_with_local_changes() {
     let temp_root = tempfile::tempdir().expect("failed to create temp root");
     let remote_dir = temp_root.path().join("remote.git");
@@ -482,7 +480,6 @@ async fn test_push_force_with_local_changes() {
 
 #[cfg(unix)]
 #[tokio::test]
-#[serial]
 async fn test_push_ssh_remote_via_fake_ssh() {
     let temp_root = tempfile::tempdir().expect("failed to create temp root");
     let remote_dir = temp_root.path().join("remote.git");
@@ -600,7 +597,6 @@ async fn test_push_ssh_remote_via_fake_ssh() {
 
 #[cfg(unix)]
 #[tokio::test]
-#[serial]
 async fn test_push_ssh_host_key_failure_is_reported() {
     let temp_root = tempfile::tempdir().expect("failed to create temp root");
     let remote_dir = temp_root.path().join("remote.git");
