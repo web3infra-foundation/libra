@@ -61,11 +61,7 @@ pub fn check_conventional_commits_message(msg: &str) -> bool {
         }
 
         let commit_type = commit_type.unwrap();
-        if !RECOMMENDED_TYPES.contains(&commit_type.to_lowercase().as_str()) {
-            println!(
-                "`{commit_type}` is not a recommended commit type, refer to https://www.conventionalcommits.org/en/v1.0.0/ for more information"
-            );
-        }
+        let _is_recommended = RECOMMENDED_TYPES.contains(&commit_type.to_lowercase().as_str());
 
         // println!("{}({}): {}\n{}", commit_type, scope.unwrap_or("None".to_string()), description.unwrap(), body_footer);
 

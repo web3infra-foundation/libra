@@ -142,6 +142,8 @@ mod cli_error_test;
 mod clone_cli_test;
 mod clone_test;
 mod cloud_test;
+mod commit_error_test;
+mod commit_json_test;
 mod commit_test;
 mod config_test;
 mod diff_test;
