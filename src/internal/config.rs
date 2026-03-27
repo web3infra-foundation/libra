@@ -935,7 +935,7 @@ impl DatabaseConnectionRef for &DatabaseConnection {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct RemoteConfig {
     pub name: String,
     pub url: String,

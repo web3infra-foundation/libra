@@ -132,6 +132,8 @@ pub struct PullFetchResult {
     pub url: String,
     /// 更新的远端 tracking ref
     pub refs_updated: Vec<PullRefUpdate>,
+    /// 拉取的对象数量（从 pack header 提取，确定性值）
+    pub objects_fetched: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -147,6 +149,8 @@ pub struct PullMergeResult {
     pub strategy: String,
     /// merge commit hash（fast-forward 时为目标 commit）
     pub commit: Option<String>,
+    /// 变更的文件数量（通过对比 source/target tree 计算，确定性值）
+    pub files_changed: usize,
     /// 是否 already up to date
     pub up_to_date: bool,
 }
@@ -219,11 +223,13 @@ Already up to date.
           "old_oid": "abc1234...",
           "new_oid": "def5678..."
         }
-      ]
+      ],
+      "objects_fetched": 128
     },
     "merge": {
       "strategy": "fast-forward",
       "commit": "def5678...",
+      "files_changed": 3,
       "up_to_date": false
     }
   }
@@ -242,11 +248,13 @@ Already up to date.
     "fetch": {
       "remote": "origin",
       "url": "git@github.com:user/repo.git",
-      "refs_updated": []
+      "refs_updated": [],
+      "objects_fetched": 0
     },
     "merge": {
       "strategy": "already-up-to-date",
       "commit": null,
+      "files_changed": 0,
       "up_to_date": true
     }
   }

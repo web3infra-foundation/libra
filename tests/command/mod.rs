@@ -159,6 +159,7 @@ mod merge_test;
 mod mv_test;
 mod open_test;
 mod output_flags_test;
+mod pull_json_test;
 mod pull_test;
 mod push_test;
 mod rebase_test;
