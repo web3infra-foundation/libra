@@ -626,12 +626,9 @@ fn contains_implementation_tasks(tasks: &[TaskSpec]) -> bool {
 fn should_force_serial(
     _plan_config: &PlanGenerationConfig,
     max_parallel: u8,
-    has_implementation_tasks: bool,
+    _has_implementation_tasks: bool,
 ) -> bool {
-    // TODO(worktree): docs/agent/agent-workflow.md requires task-specific sandbox/worktree
-    // state for concurrent code-changing tasks. Until that execution model exists, keep
-    // implementation work serial even if max_parallel > 1.
-    max_parallel <= 1 || has_implementation_tasks
+    max_parallel <= 1
 }
 
 fn owner_role_for_kind(kind: &TaskKind) -> &'static str {
@@ -914,7 +911,9 @@ mod tests {
     fn test_compile_execution_plan_builds_gate_tasks() {
         let plan = compile_execution_plan_spec(&minimal_spec()).unwrap();
         assert_eq!(plan.tasks.len(), 7);
-        assert_eq!(plan.parallel_groups().len(), 7);
+        let groups = plan.parallel_groups();
+        assert_eq!(groups.len(), 6);
+        assert!(groups.iter().any(|group| group.len() == 2), "{groups:?}");
         assert!(
             plan.tasks
                 .iter()
@@ -933,7 +932,9 @@ mod tests {
                 .iter()
                 .any(|task| task.gate_stage == Some(GateStage::Fast))
         );
-        assert_eq!(plan_spec.parallel_groups().len(), 7);
+        let groups = plan_spec.parallel_groups();
+        assert_eq!(groups.len(), 6);
+        assert!(groups.iter().any(|group| group.len() == 2), "{groups:?}");
     }
 
     #[test]

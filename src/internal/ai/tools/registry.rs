@@ -80,6 +80,14 @@ impl ToolRegistry {
         }
     }
 
+    /// Clone this registry while rebasing all tool dispatch onto a new working directory.
+    pub fn clone_with_working_dir(&self, working_dir: std::path::PathBuf) -> Self {
+        Self {
+            handlers: self.handlers.clone(),
+            working_dir,
+        }
+    }
+
     /// Register a tool handler with the given name.
     pub fn register(&mut self, name: impl Into<String>, handler: Arc<dyn ToolHandler>) {
         let name = name.into();
@@ -346,6 +354,18 @@ mod tests {
 
         assert!(registry.contains_tool("mock"));
         assert_eq!(registry.working_dir(), std::path::Path::new("/tmp"));
+    }
+
+    #[test]
+    fn test_clone_with_working_dir_preserves_handlers() {
+        let mut registry =
+            ToolRegistry::with_working_dir(std::path::PathBuf::from("/tmp/original"));
+        registry.register("mock", Arc::new(MockHandler));
+
+        let cloned = registry.clone_with_working_dir(std::path::PathBuf::from("/tmp/cloned"));
+
+        assert!(cloned.contains_tool("mock"));
+        assert_eq!(cloned.working_dir(), std::path::Path::new("/tmp/cloned"));
     }
 
     #[tokio::test]

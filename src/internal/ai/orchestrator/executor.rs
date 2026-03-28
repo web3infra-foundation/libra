@@ -1,5 +1,6 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    fs, io,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -10,6 +11,7 @@ use dagrs::{
     Action, CheckpointConfig, DefaultNode, EnvVar, FileCheckpointStore, Graph, InChannels, Node,
     NodeTable, OutChannels, Output, event::GraphEvent,
 };
+use git_internal::hash::ObjectHash;
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::Semaphore;
@@ -25,12 +27,17 @@ use super::{
         TaskKind, TaskNodeStatus, TaskResult, TaskSpec, ToolCallRecord,
     },
 };
-use crate::internal::ai::{
-    agent::{ToolLoopConfig, ToolLoopObserver, run_tool_loop_with_history_and_observer},
-    completion::{CompletionError, CompletionModel},
-    intentspec::types::{IntentSpec, NetworkPolicy},
-    sandbox::{SandboxPermissions, SandboxPolicy, ToolRuntimeContext, ToolSandboxContext},
-    tools::{ToolOutput, registry::ToolRegistry},
+use crate::{
+    command::calc_file_blob_hash,
+    internal::ai::{
+        agent::{ToolLoopConfig, ToolLoopObserver, run_tool_loop_with_history_and_observer},
+        completion::{CompletionError, CompletionModel},
+        hooks::HookRunner,
+        intentspec::types::{IntentSpec, NetworkPolicy},
+        sandbox::{SandboxPermissions, SandboxPolicy, ToolRuntimeContext, ToolSandboxContext},
+        tools::{ToolOutput, registry::ToolRegistry},
+    },
+    utils::util,
 };
 
 /// Configuration for task execution.
@@ -150,6 +157,16 @@ struct ReviewerDecision {
     summary: String,
     #[serde(default)]
     issues: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct WorkspaceSnapshot {
+    files: BTreeMap<PathBuf, ObjectHash>,
+}
+
+struct TaskWorktree {
+    root: PathBuf,
+    baseline: WorkspaceSnapshot,
 }
 
 /// Execute a single task with retry logic.
@@ -442,6 +459,289 @@ async fn run_reviewer_pass<M: CompletionModel>(
     Ok(Some(outcome))
 }
 
+fn clone_tool_loop_config_for_workdir(
+    config: &ToolLoopConfig,
+    working_dir: &Path,
+) -> ToolLoopConfig {
+    let mut cloned = config.clone();
+    if cloned.hook_runner.is_some() {
+        cloned.hook_runner = Some(Arc::new(HookRunner::load(working_dir)));
+    }
+    cloned
+}
+
+fn should_use_task_worktree(task: &TaskSpec, worktree_parallelism: bool) -> bool {
+    worktree_parallelism && task.kind == TaskKind::Implementation
+}
+
+async fn execute_task_in_task_worktree<M: CompletionModel>(
+    task: &TaskSpec,
+    model: &M,
+    registry: &Arc<ToolRegistry>,
+    config: &ExecutorConfig,
+    workspace_sync: &Arc<tokio::sync::Mutex<()>>,
+) -> TaskResult {
+    let prepared = match tokio::task::spawn_blocking({
+        let working_dir = config.working_dir.clone();
+        let task_id = task.id();
+        move || prepare_task_worktree(&working_dir, task_id)
+    })
+    .await
+    {
+        Ok(Ok(worktree)) => worktree,
+        Ok(Err(err)) => return task_workspace_failure(task, err),
+        Err(err) => {
+            return task_workspace_failure(
+                task,
+                io::Error::other(format!("failed to prepare task worktree: {err}")),
+            );
+        }
+    };
+
+    let task_registry = Arc::new(registry.clone_with_working_dir(prepared.root.clone()));
+    let mut task_config = config.clone();
+    task_config.working_dir = prepared.root.clone();
+    task_config.tool_loop_config =
+        clone_tool_loop_config_for_workdir(&config.tool_loop_config, &prepared.root);
+
+    let mut result = execute_task(task, model, &task_registry, &task_config).await;
+
+    if result.status == TaskNodeStatus::Completed {
+        let sync_result = {
+            let _guard = workspace_sync.lock().await;
+            tokio::task::spawn_blocking({
+                let main_working_dir = config.working_dir.clone();
+                let task_worktree_dir = prepared.root.clone();
+                let baseline = prepared.baseline.clone();
+                move || sync_task_worktree_back(&main_working_dir, &task_worktree_dir, &baseline)
+            })
+            .await
+        };
+
+        match sync_result {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                result.status = TaskNodeStatus::Failed;
+                result.agent_output = Some(format!(
+                    "task completed in isolated worktree but failed to sync changes back: {err}"
+                ));
+            }
+            Err(err) => {
+                result.status = TaskNodeStatus::Failed;
+                result.agent_output = Some(format!(
+                    "task completed in isolated worktree but sync worker failed: {err}"
+                ));
+            }
+        }
+    }
+
+    let cleanup_result = tokio::task::spawn_blocking({
+        let task_worktree_dir = prepared.root.clone();
+        move || cleanup_task_worktree(&task_worktree_dir)
+    })
+    .await;
+    match cleanup_result {
+        Err(err) => tracing::warn!("task worktree cleanup worker failed: {}", err),
+        Ok(Err(err)) => tracing::warn!(
+            path = %prepared.root.display(),
+            "failed to clean up task worktree: {}",
+            err
+        ),
+        Ok(Ok(())) => {}
+    }
+
+    result
+}
+
+fn task_workspace_failure(task: &TaskSpec, err: io::Error) -> TaskResult {
+    TaskResult {
+        task_id: task.id(),
+        status: TaskNodeStatus::Failed,
+        gate_report: None,
+        agent_output: Some(format!("failed to prepare isolated worktree: {err}")),
+        retry_count: 0,
+        tool_calls: Vec::new(),
+        policy_violations: Vec::new(),
+        review: None,
+    }
+}
+
+fn prepare_task_worktree(main_working_dir: &Path, task_id: Uuid) -> io::Result<TaskWorktree> {
+    let storage = util::try_get_storage_path(Some(main_working_dir.to_path_buf()))?;
+    let root = std::env::temp_dir().join(format!(
+        "libra-task-worktree-{}-{}",
+        std::process::id(),
+        task_id
+    ));
+
+    if root.exists() {
+        fs::remove_dir_all(&root)?;
+    }
+    fs::create_dir_all(&root)?;
+    create_storage_link(&storage, &root.join(util::ROOT_DIR))?;
+
+    let baseline = snapshot_workspace(main_working_dir)?;
+    materialize_workspace(main_working_dir, &root, &baseline)?;
+
+    Ok(TaskWorktree { root, baseline })
+}
+
+fn cleanup_task_worktree(root: &Path) -> io::Result<()> {
+    if root.exists() {
+        fs::remove_dir_all(root)?;
+    }
+    Ok(())
+}
+
+fn snapshot_workspace(root: &Path) -> io::Result<WorkspaceSnapshot> {
+    fn visit_dir(
+        root: &Path,
+        dir: &Path,
+        files: &mut BTreeMap<PathBuf, ObjectHash>,
+    ) -> io::Result<()> {
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            if entry.file_name() == util::ROOT_DIR {
+                continue;
+            }
+
+            let path = entry.path();
+            let metadata = fs::metadata(&path)?;
+            if metadata.is_dir() {
+                visit_dir(root, &path, files)?;
+                continue;
+            }
+
+            let rel = path
+                .strip_prefix(root)
+                .map_err(|err| io::Error::other(err.to_string()))?
+                .to_path_buf();
+            files.insert(rel, calc_file_blob_hash(&path)?);
+        }
+        Ok(())
+    }
+
+    let mut files = BTreeMap::new();
+    visit_dir(root, root, &mut files)?;
+    Ok(WorkspaceSnapshot { files })
+}
+
+fn materialize_workspace(
+    source_root: &Path,
+    target_root: &Path,
+    snapshot: &WorkspaceSnapshot,
+) -> io::Result<()> {
+    for rel_path in snapshot.files.keys() {
+        copy_workspace_file(source_root, target_root, rel_path)?;
+    }
+    Ok(())
+}
+
+fn sync_task_worktree_back(
+    main_working_dir: &Path,
+    task_worktree_dir: &Path,
+    baseline: &WorkspaceSnapshot,
+) -> io::Result<()> {
+    let task_snapshot = snapshot_workspace(task_worktree_dir)?;
+    let changed_paths = changed_paths_since_baseline(baseline, &task_snapshot);
+
+    for rel_path in &changed_paths {
+        let expected = baseline.files.get(rel_path).copied();
+        let actual = file_hash_if_exists(&main_working_dir.join(rel_path))?;
+        if actual != expected {
+            return Err(io::Error::other(format!(
+                "main workspace changed concurrently at '{}'",
+                rel_path.display()
+            )));
+        }
+    }
+
+    for rel_path in changed_paths {
+        if task_snapshot.files.contains_key(&rel_path) {
+            copy_workspace_file(task_worktree_dir, main_working_dir, &rel_path)?;
+        } else {
+            remove_workspace_file(main_working_dir, &rel_path)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn changed_paths_since_baseline(
+    baseline: &WorkspaceSnapshot,
+    current: &WorkspaceSnapshot,
+) -> Vec<PathBuf> {
+    let paths = baseline
+        .files
+        .keys()
+        .chain(current.files.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+
+    paths
+        .into_iter()
+        .filter(|path| baseline.files.get(path) != current.files.get(path))
+        .collect()
+}
+
+fn file_hash_if_exists(path: &Path) -> io::Result<Option<ObjectHash>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    Ok(Some(calc_file_blob_hash(path)?))
+}
+
+fn copy_workspace_file(source_root: &Path, target_root: &Path, rel_path: &Path) -> io::Result<()> {
+    let source = source_root.join(rel_path);
+    let target = target_root.join(rel_path);
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(&source, &target)?;
+    let permissions = fs::metadata(&source)?.permissions();
+    fs::set_permissions(&target, permissions)?;
+    Ok(())
+}
+
+fn remove_workspace_file(root: &Path, rel_path: &Path) -> io::Result<()> {
+    let target = root.join(rel_path);
+    if target.exists() {
+        fs::remove_file(&target)?;
+        remove_empty_parents(root, target.parent());
+    }
+    Ok(())
+}
+
+fn remove_empty_parents(root: &Path, mut current: Option<&Path>) {
+    while let Some(dir) = current {
+        if dir == root {
+            break;
+        }
+
+        let is_empty = match fs::read_dir(dir) {
+            Ok(mut entries) => entries.next().is_none(),
+            Err(_) => false,
+        };
+        if !is_empty {
+            break;
+        }
+        if fs::remove_dir(dir).is_err() {
+            break;
+        }
+        current = dir.parent();
+    }
+}
+
+#[cfg(unix)]
+fn create_storage_link(storage: &Path, link_path: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(storage, link_path)
+}
+
+#[cfg(windows)]
+fn create_storage_link(storage: &Path, link_path: &Path) -> io::Result<()> {
+    std::os::windows::fs::symlink_dir(storage, link_path)
+}
+
 struct TaskDagrsAction<M: CompletionModel + 'static> {
     task: TaskSpec,
     model: M,
@@ -451,6 +751,8 @@ struct TaskDagrsAction<M: CompletionModel + 'static> {
     metered_task_ids: Arc<HashSet<Uuid>>,
     parallelism: Arc<Semaphore>,
     cost_budget_serial: Arc<tokio::sync::Mutex<()>>,
+    workspace_sync_serial: Arc<tokio::sync::Mutex<()>>,
+    worktree_parallelism: bool,
 }
 
 #[derive(Clone)]
@@ -459,6 +761,8 @@ struct DagrsBuildContext {
     metered_task_ids: Arc<HashSet<Uuid>>,
     parallelism: Arc<Semaphore>,
     cost_budget_serial: Arc<tokio::sync::Mutex<()>>,
+    workspace_sync_serial: Arc<tokio::sync::Mutex<()>>,
+    worktree_parallelism: bool,
 }
 
 #[derive(Clone)]
@@ -552,7 +856,18 @@ impl<M: CompletionModel + 'static> Action for TaskDagrsAction<M> {
             observer.on_task_started(&self.task);
         }
 
-        let result = execute_task(&self.task, &self.model, &self.registry, &self.config).await;
+        let result = if should_use_task_worktree(&self.task, self.worktree_parallelism) {
+            execute_task_in_task_worktree(
+                &self.task,
+                &self.model,
+                &self.registry,
+                &self.config,
+                &self.workspace_sync_serial,
+            )
+            .await
+        } else {
+            execute_task(&self.task, &self.model, &self.registry, &self.config).await
+        };
 
         if let Some(observer) = &self.config.observer {
             observer.on_task_completed(&self.task, &result);
@@ -612,6 +927,8 @@ fn build_dagrs_graph<M: CompletionModel + 'static>(
             metered_task_ids: Arc::clone(&context.metered_task_ids),
             parallelism: Arc::clone(&context.parallelism),
             cost_budget_serial: Arc::clone(&context.cost_budget_serial),
+            workspace_sync_serial: Arc::clone(&context.workspace_sync_serial),
+            worktree_parallelism: context.worktree_parallelism,
         };
         let dagrs_node =
             DefaultNode::with_action(task_spec.id().to_string(), action, &mut node_table);
@@ -759,11 +1076,16 @@ pub async fn execute_dag<M: CompletionModel + 'static>(
     };
     let parallelism = Arc::new(Semaphore::new(initial_parallel));
     let cost_budget_serial = Arc::new(tokio::sync::Mutex::new(()));
+    let workspace_sync_serial = Arc::new(tokio::sync::Mutex::new(()));
+    let worktree_parallelism = plan_spec.max_parallel > 1
+        && util::try_get_storage_path(Some(config.working_dir.clone())).is_ok();
     let graph_context = DagrsBuildContext {
         run_state: run_state_snapshot,
         metered_task_ids,
         parallelism,
         cost_budget_serial,
+        workspace_sync_serial,
+        worktree_parallelism,
     };
     let mut graph = tokio::task::spawn_blocking(move || {
         build_dagrs_graph(
@@ -1193,14 +1515,19 @@ mod tests {
     use git_internal::internal::object::{task::Task as GitTask, types::ActorRef};
 
     use super::*;
-    use crate::internal::ai::{
-        completion::{
-            CompletionError, CompletionRequest, CompletionResponse,
-            message::{AssistantContent, Message, Text, UserContent},
+    use crate::{
+        internal::ai::{
+            completion::{
+                CompletionError, CompletionRequest, CompletionResponse,
+                message::{AssistantContent, Function, Message, Text, ToolCall, UserContent},
+            },
+            intentspec::{profiles, types::*},
+            orchestrator::types::{
+                ExecutionPlanSpec, GateResult, TaskContract, TaskKind, TaskSpec,
+            },
+            tools::{handlers::ApplyPatchHandler, registry::ToolRegistry},
         },
-        intentspec::{profiles, types::*},
-        orchestrator::types::{ExecutionPlanSpec, GateResult, TaskContract, TaskKind, TaskSpec},
-        tools::registry::ToolRegistry,
+        utils::test,
     };
 
     #[derive(Clone)]
@@ -1264,6 +1591,70 @@ mod tests {
                     raw_response: (),
                 })
             }
+        }
+    }
+
+    #[derive(Clone)]
+    struct PatchApplyingModel;
+
+    impl CompletionModel for PatchApplyingModel {
+        type Response = ();
+
+        async fn completion(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+            let has_tool_result = request.chat_history.iter().any(|message| match message {
+                Message::User { content } => content
+                    .iter()
+                    .any(|item| matches!(item, UserContent::ToolResult(_))),
+                _ => false,
+            });
+            if has_tool_result {
+                return Ok(CompletionResponse {
+                    content: vec![AssistantContent::Text(Text {
+                        text: "done".to_string(),
+                    })],
+                    raw_response: (),
+                });
+            }
+
+            let prompt = request
+                .chat_history
+                .iter()
+                .rev()
+                .find_map(|message| match message {
+                    Message::User { content } => content.iter().find_map(|item| match item {
+                        UserContent::Text(text) => Some(text.text.clone()),
+                        _ => None,
+                    }),
+                    _ => None,
+                })
+                .unwrap_or_default();
+
+            let (call_id, patch) = if prompt.contains("## Task\nTask A") {
+                (
+                    "call_a",
+                    "*** Begin Patch\n*** Update File: task_a.txt\n@@\n-base\n+task-a\n*** End Patch",
+                )
+            } else {
+                (
+                    "call_b",
+                    "*** Begin Patch\n*** Update File: task_b.txt\n@@\n-base\n+task-b\n*** End Patch",
+                )
+            };
+
+            Ok(CompletionResponse {
+                content: vec![AssistantContent::ToolCall(ToolCall {
+                    id: call_id.to_string(),
+                    name: "apply_patch".to_string(),
+                    function: Function {
+                        name: "apply_patch".to_string(),
+                        arguments: serde_json::json!({ "input": patch }),
+                    },
+                })],
+                raw_response: (),
+            })
         }
     }
 
@@ -1481,6 +1872,33 @@ mod tests {
         }
     }
 
+    fn scoped_implementation_task(title: &str, file: &str) -> TaskSpec {
+        let actor = ActorRef::agent("test-executor").unwrap();
+        let mut task = GitTask::new(actor, title, None).unwrap();
+        task.set_description(Some(format!("Modify {file}")));
+        task.add_constraint("network:allow");
+        task.add_acceptance_criterion("tests pass");
+        TaskSpec {
+            step: git_internal::internal::object::plan::PlanStep::new(title),
+            task,
+            objective: title.into(),
+            kind: TaskKind::Implementation,
+            gate_stage: None,
+            owner_role: Some("coder".into()),
+            scope_in: vec![file.into()],
+            scope_out: vec![],
+            checks: vec![],
+            contract: TaskContract {
+                write_scope: vec![file.into()],
+                forbidden_scope: vec![],
+                touch_files: vec![file.into()],
+                touch_symbols: vec![],
+                touch_apis: vec![],
+                expected_outputs: vec![format!("update {file}")],
+            },
+        }
+    }
+
     fn plan_for_tasks(tasks: Vec<TaskSpec>, max_parallel: u8) -> ExecutionPlanSpec {
         ExecutionPlanSpec {
             intent_spec_id: "test".into(),
@@ -1566,6 +1984,56 @@ mod tests {
         let result = execute_task(&task, &model, &registry, &config).await;
         assert_eq!(result.status, TaskNodeStatus::Completed);
         assert_eq!(result.retry_count, 0);
+    }
+
+    #[tokio::test]
+    async fn execute_dag_replays_parallel_task_worktrees_back_to_main_workspace() {
+        let repo = tempfile::tempdir().unwrap();
+        test::setup_with_new_libra_in(repo.path()).await;
+        std::fs::write(repo.path().join("task_a.txt"), "base\n").unwrap();
+        std::fs::write(repo.path().join("task_b.txt"), "base\n").unwrap();
+
+        let mut registry = ToolRegistry::with_working_dir(repo.path().to_path_buf());
+        registry.register("apply_patch", Arc::new(ApplyPatchHandler));
+        let registry = Arc::new(registry);
+
+        let config = ExecutorConfig {
+            tool_loop_config: ToolLoopConfig::default(),
+            max_retries: 0,
+            backoff_seconds: 0,
+            working_dir: repo.path().to_path_buf(),
+            spec: spec(),
+            reviewer_preamble: None,
+            dagrs_resume_checkpoint_id: None,
+            observer: None,
+        };
+
+        let plan = plan_for_tasks(
+            vec![
+                scoped_implementation_task("Task A", "task_a.txt"),
+                scoped_implementation_task("Task B", "task_b.txt"),
+            ],
+            2,
+        );
+
+        let run_state = execute_dag(&plan, &PatchApplyingModel, &registry, &config)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("task_a.txt")).unwrap(),
+            "task-a\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("task_b.txt")).unwrap(),
+            "task-b\n"
+        );
+        assert!(
+            run_state
+                .ordered_task_results()
+                .iter()
+                .all(|result| result.status == TaskNodeStatus::Completed)
+        );
     }
 
     #[test]
