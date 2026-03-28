@@ -90,10 +90,9 @@ fn find_ndjson_event<'a>(events: &'a [Value], event_name: &str, context: &str) -
 }
 
 fn read_json_file(path: &Path) -> Value {
-    let body = fs::read_to_string(path)
-        .unwrap_or_else(|err| panic!("failed to read JSON file '{}': {err}", path.display()));
-    serde_json::from_str(&body)
-        .unwrap_or_else(|err| panic!("failed to parse JSON file '{}': {err}", path.display()))
+    let body =
+        fs::read_to_string(path).unwrap_or_else(|err| panic!("failed to read JSON file: {err}"));
+    serde_json::from_str(&body).unwrap_or_else(|err| panic!("failed to parse JSON file: {err}"))
 }
 
 fn list_json_files(dir: &Path) -> Vec<PathBuf> {
@@ -1002,6 +1001,17 @@ async fn list_history_object_ids(repo: &Path, object_type: &str) -> Vec<String> 
         .collect()
 }
 
+async fn only_history_object_id(repo: &Path, object_type: &str, context: &str) -> String {
+    let ids = list_history_object_ids(repo, object_type).await;
+    assert_eq!(
+        ids.len(),
+        1,
+        "{context}: expected exactly one {object_type} object, found {:?}",
+        ids
+    );
+    ids[0].clone()
+}
+
 fn assert_ai_type_matches(repo: &Path, object_id: &str, expected_type: &str) {
     let selector = format!("{expected_type}:{object_id}");
     let output = run_libra_command(&["cat-file", "--ai-type", &selector], repo);
@@ -1837,11 +1847,13 @@ async fn test_claude_sdk_run_streaming_persists_managed_inputs_without_manual_su
     assert_cli_success(&run, "streaming run should succeed");
 
     let events = parse_stdout_ndjson(&run, "streaming managed inputs output");
-    let result_event = find_ndjson_event(&events, "libra_result", "streaming managed inputs");
-    let ai_session_id = result_event["aiSessionId"]
-        .as_str()
-        .expect("aiSessionId should be present")
-        .to_string();
+    let _result_event = find_ndjson_event(&events, "libra_result", "streaming managed inputs");
+    let ai_session_id = only_history_object_id(
+        repo.path(),
+        "ai_session",
+        "streaming managed inputs should persist a single ai_session",
+    )
+    .await;
 
     let (_, history) = load_intent_history(repo.path()).await;
     let managed_input_object_id = format!("claude_managed_evidence_input__{ai_session_id}");
@@ -2124,11 +2136,13 @@ async fn test_claude_sdk_run_streaming_persists_derived_audit_objects() {
     assert_cli_success(&run, "streaming audit-object run should succeed");
 
     let events = parse_stdout_ndjson(&run, "streaming audit objects output");
-    let result_event = find_ndjson_event(&events, "libra_result", "streaming audit objects");
-    let ai_session_id = result_event["aiSessionId"]
-        .as_str()
-        .expect("aiSessionId should be present")
-        .to_string();
+    let _result_event = find_ndjson_event(&events, "libra_result", "streaming audit objects");
+    let ai_session_id = only_history_object_id(
+        repo.path(),
+        "ai_session",
+        "streaming audit objects should persist a single ai_session",
+    )
+    .await;
 
     let (_, history) = load_intent_history(repo.path()).await;
     let approvals = history
@@ -2572,6 +2586,92 @@ async fn test_claude_sdk_run_interactive_tool_approval_uses_canonical_session_ca
         json!("session_cache")
     );
     assert_eq!(approvals[1]["input"]["cached"], json!(true));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_claude_sdk_run_interactive_tool_approval_cache_is_blocked_path_sensitive() {
+    let repo = tempdir().expect("failed to create repo root");
+    test::setup_with_new_libra_in(repo.path()).await;
+
+    let helper_path = write_fake_interactive_helper(
+        repo.path(),
+        &json!({
+            "sessionId": "interactive-blocked-path-session",
+            "steps": [
+                {
+                    "type": "tool",
+                    "toolName": "Bash",
+                    "toolUseId": "tool-bash-path-1",
+                    "blockedPath": "/repo/first",
+                    "input": {
+                        "command": "echo first"
+                    }
+                },
+                {
+                    "type": "tool",
+                    "toolName": "Bash",
+                    "toolUseId": "tool-bash-path-2",
+                    "blockedPath": "/repo/second",
+                    "input": {
+                        "command": "echo first"
+                    }
+                }
+            ]
+        }),
+        Some(&json!([
+            {
+                "kind": "tool_approval",
+                "decision": "approve_for_session"
+            },
+            {
+                "kind": "tool_approval",
+                "decision": "approve"
+            }
+        ])),
+    );
+
+    let run = run_libra_command(
+        &[
+            "claude-sdk",
+            "run",
+            "--batch",
+            "--prompt",
+            DEFAULT_MANAGED_PROMPT,
+            "--tool",
+            "Bash",
+            "--interactive-approvals",
+            "true",
+            "--helper-path",
+            helper_path.to_str().expect("helper path utf-8"),
+        ],
+        repo.path(),
+    );
+    assert_cli_success(
+        &run,
+        "interactive approval cache should not reuse session approval across blocked paths",
+    );
+
+    let run_json = parse_stdout_json(&run, "interactive approval blocked-path output");
+    let raw_artifact_path = PathBuf::from(
+        run_json["rawArtifactPath"]
+            .as_str()
+            .expect("rawArtifactPath should be present"),
+    );
+    let raw_artifact = read_json_file(&raw_artifact_path);
+    let approvals = raw_artifact["hookEvents"]
+        .as_array()
+        .expect("hookEvents should be an array")
+        .iter()
+        .filter(|event| event["hook"] == json!("CanUseTool"))
+        .collect::<Vec<_>>();
+    assert_eq!(approvals.len(), 2);
+    assert_eq!(approvals[0]["input"]["approval_scope"], json!("session"));
+    assert_eq!(approvals[0]["input"]["prompt_source"], json!("scripted"));
+    assert_eq!(approvals[0]["input"]["cached"], json!(false));
+    assert_eq!(approvals[1]["input"]["approval_scope"], json!("request"));
+    assert_eq!(approvals[1]["input"]["prompt_source"], json!("scripted"));
+    assert_eq!(approvals[1]["input"]["cached"], json!(false));
 }
 
 #[tokio::test]

@@ -311,8 +311,14 @@ def parse_question_response(response: str, options: list[dict[str, Any]], multi_
     return normalized
 
 
-def build_approval_cache_key(tool_name: str, tool_input: dict[str, Any]) -> str:
-    return stable_stringify({"toolName": tool_name, "toolInput": tool_input})
+def build_approval_cache_key(tool_name: str, tool_input: dict[str, Any], context: Any) -> str:
+    return stable_stringify(
+        {
+            "toolName": tool_name,
+            "toolInput": tool_input,
+            "blockedPath": getattr(context, "blockedPath", None),
+        }
+    )
 
 
 def build_hook_input(
@@ -773,7 +779,7 @@ async def execute_query(request: dict[str, Any]) -> None:
                     updated_input={**tool_input, "answers": response["answers"]}
                 )
 
-            cache_key = build_approval_cache_key(tool_name, tool_input)
+            cache_key = build_approval_cache_key(tool_name, tool_input, context)
             if cache_key in state["approved_tool_cache_keys"]:
                 hook_events.append(
                     {

@@ -349,10 +349,6 @@ struct StreamingFinalizeSummary {
 struct StreamingRunResult {
     ok: bool,
     event: &'static str,
-    #[serde(rename = "providerSessionId")]
-    provider_session_id: String,
-    #[serde(rename = "aiSessionId")]
-    ai_session_id: String,
     #[serde(rename = "rawArtifactPath")]
     raw_artifact_path: String,
     #[serde(rename = "auditBundlePath")]
@@ -2026,10 +2022,10 @@ async fn execute_managed_streaming_turn(
         }
         outcome
     };
+    ensure_managed_artifact_succeeded(&artifact)?;
     let mut auto_finalize =
         auto_finalize_streaming_turn(storage_path, &outcome.ai_session_id, turn_kind).await;
     auto_finalize.warnings.extend(persistence_warnings);
-    ensure_managed_artifact_succeeded(&artifact)?;
     let assistant_text = if streamed_assistant_text.trim().is_empty() {
         extract_latest_assistant_text(&artifact)
     } else {
@@ -2048,8 +2044,6 @@ async fn execute_managed_streaming_turn(
                 serde_json::to_string(&StreamingRunResult {
                     ok: true,
                     event: "libra_result",
-                    provider_session_id: result.outcome.provider_session_id.clone(),
-                    ai_session_id: result.outcome.ai_session_id.clone(),
                     raw_artifact_path: result.outcome.raw_artifact_path.clone(),
                     audit_bundle_path: result.outcome.audit_bundle_path.clone(),
                     already_persisted: result.outcome.already_persisted,
@@ -2069,10 +2063,7 @@ async fn execute_managed_streaming_turn(
 
 fn print_streaming_turn_human_result(result: &ManagedStreamingTurnOutcome, print_completion: bool) {
     if print_completion {
-        println!(
-            "Claude SDK session persisted: ai_session_id={} provider_session_id={}",
-            result.outcome.ai_session_id, result.outcome.provider_session_id
-        );
+        println!("Claude SDK session persisted.");
         println!("Managed artifact: {}", result.outcome.raw_artifact_path);
         println!("Audit bundle: {}", result.outcome.audit_bundle_path);
     }
@@ -2450,8 +2441,10 @@ async fn auto_finalize_streaming_turn(
                 summary.run_id = Some(result.binding.run_id);
             }
         }
-        Err(error) => {
-            summary.warnings.push(format!("persist-decision: {error}"));
+        Err(_error) => {
+            summary
+                .warnings
+                .push("persist-decision failed; rerun persist-decision for details".to_string());
         }
     }
 
